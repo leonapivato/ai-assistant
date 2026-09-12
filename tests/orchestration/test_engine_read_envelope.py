@@ -657,24 +657,24 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # because no `STRUCTURED_READ` ask was emitted, and the outcome is the
         # `not_asked` member, which is what a completed servicing carrying no such ask
         # reports. The pin stays closed over both because neither can carry a value.
-        # ADR-0238 §11's three added fields and ADR-0245 §7's fourth, each an ``int``.
-        # How many records were supplied to the composer, how many §3's filter withheld
-        # from that supply — zero on every path since ADR-0246 §1, and **kept** as a
-        # field rather than deleted because §7 forbids removing one of the four — how
-        # many of the supplied ones carry a reach that is not ``ANYONE``, and this
-        # conversation's ``calls`` as ``admit_search`` left them.
+        # ADR-0238 §11's counts as ADR-0247 §6 leaves them, each an ``int``. How many
+        # records were supplied to the composer, how many §3's filter withheld from that
+        # supply — zero on every path since ADR-0246 §1, and **kept** as a field rather
+        # than deleted because §7 forbids removing one it keeps — and how many of the
+        # supplied ones carry a reach that is not ``ANYONE``. **`calls` is not here**
+        # (ADR-0247 §6): the per-conversation draw it reported is removed with the
+        # budget, which is a different act from a lane dropping a field §7 keeps.
         # **Counts only** (§11): no record id, no conversation id, no destination, no
         # query text, no fragment or length of one, no title, no snippet and no provider
         # message — and, by §11's own last clause, **not the destination's recorded
         # trust either**, which is a durable fact about a configured account and not
-        # something a per-turn log reports. The pin stays closed over all four because
+        # something a per-turn log reports. The pin stays closed over all three because
         # none of them can carry a value that is not a number. ``supplied_narrowed`` is
         # pinned **here** as well as in its own arm because ADR-0245 §11's Arm F is
         # explicit that the arm "cannot be satisfied by dropping the field §7 keeps".
         "supplied",
         "withheld",
         "supplied_narrowed",
-        "calls",
         "structured_axes",
         "structured",
         "truncated_kinds",

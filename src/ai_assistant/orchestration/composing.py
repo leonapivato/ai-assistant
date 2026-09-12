@@ -1218,22 +1218,6 @@ achieve, do not say that nothing else stands in the way, and do not tell them wh
 answer: you have not been told any of that."""
 
 
-_SEARCH_DISABLED_PROMPT: Final = """\
-While answering this you would have looked something up outside this system, and no \
-such lookup was made — this installation does not make them at all. Say so plainly, in \
-one short clause, and answer as well as what you have allows. Do not say whose \
-decision that is, do not offer to try again, and do not say what you would have looked \
-for or where: you have not been told any of that."""
-
-
-_NOT_ADMITTED_PROMPT: Final = """\
-While answering this you would have looked something up outside this system, and no \
-such lookup was made on this occasion. Say so plainly, in one short clause, and answer \
-as well as what you have allows. Do not say why, do not say how many times you have \
-looked or how many remain, do not say that anything has been used up, and do not \
-promise that trying again will work: you have not been told any of that."""
-
-
 _SPEND_EXHAUSTED_PROMPT: Final = """\
 While answering this you would have looked something up outside this system, and no \
 such lookup was made because a limit this installation is run under stood in the way. \
@@ -1286,20 +1270,24 @@ at a reason, do not name anything or anyone, and do not tell the person to do \
 something about it: there may be nothing for them to do."""
 
 
-#: The nine, keyed by member, so that :func:`_system_prompt` picks one **literal**
+#: The seven, keyed by member, so that :func:`_system_prompt` picks one **literal**
 #: rather than assembling text.
 #:
-#: **A mapping over nine written fragments is not a template over the enumeration**
-#: (ADR-0242 §13): every value here is a literal above, a tenth member joins nothing
+#: **A mapping over seven written fragments is not a template over the enumeration**
+#: (ADR-0242 §13): every value here is a literal above, an eighth member joins nothing
 #: silently, and ``tests/orchestration/test_engine_search_not_serviced.py`` fails if the
 #: vocabulary and this table come apart — that module holds the arm, under the name
 #: ``test_the_quoted_fragments_are_the_eight_the_composing_stage_holds``. The file this
 #: comment named before #2213 has never existed.
+#:
+#: **Two fragments went with their members** (ADR-0247 §6). ``SEARCH_DISABLED`` and
+#: ``NOT_ADMITTED`` were each defined over ``admit_search``'s refusal and over
+#: ``Settings.search_calls_per_conversation``'s value, and ADR-0247 §5 removes the
+#: per-conversation call budget entire — so neither member has a producer and neither
+#: has a statement to render. The remaining seven are unchanged, byte for byte.
 _SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingProxyType(
     {
         SearchNotServiced.ANSWER_AWAITED: _ANSWER_AWAITED_PROMPT,
-        SearchNotServiced.SEARCH_DISABLED: _SEARCH_DISABLED_PROMPT,
-        SearchNotServiced.NOT_ADMITTED: _NOT_ADMITTED_PROMPT,
         SearchNotServiced.SPEND_EXHAUSTED: _SPEND_EXHAUSTED_PROMPT,
         SearchNotServiced.DECLINED: _DECLINED_PROMPT,
         SearchNotServiced.TRUST_MISSING: _TRUST_MISSING_PROMPT,
@@ -2263,11 +2251,12 @@ def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901,
 #: no request was made, does not say a lookup would have succeeded, and promises
 #: nothing about what any act would change (ADR-0242 §9, ADR-0235 §8).
 #:
-#: **It does not contradict any of the eight fragments.** It forbids reading the
+#: **It does not contradict any of the seven fragments.** It forbids reading the
 #: *plan block* as a statement about what this assistant can look up; it does not
-#: forbid the model saying what its instruction told it — which matters for
-#: ``SEARCH_DISABLED``, whose fragment does say this installation makes no such
-#: lookups at all.
+#: forbid the model saying what its instruction told it. The fragment that made that
+#: distinction sharpest — ``SEARCH_DISABLED``'s, which did say this installation makes
+#: no such lookups at all — is gone with its member (ADR-0247 §6), and the clause is
+#: kept because it is stated about the plan block rather than about any one fragment.
 _PLAN_IS_ABOUT_ACTING: Final = (
     "  All of that is about acting, and about the capabilities this assistant was "
     "offered for this turn. Looking something up outside this system is on no such "

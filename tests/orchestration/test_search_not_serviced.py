@@ -42,12 +42,12 @@ from test_loop_search import (
     _RESULT,
     _REVISING,
     ActionPlanFor,
-    _admitted,
     _belief,
     _binder,
     _bounded,
     _clock,
     _CostedSearcher,
+    _footing,
     _loop,
     _search,
     _serviced,
@@ -112,53 +112,67 @@ _TABLE: Final[dict[SearchDisposition, SearchNotServiced]] = {
 }
 
 
-def test_the_mapping_is_total_over_all_eighteen_dispositions() -> None:
-    """§15: "the mapping table in §8 is **total over all eighteen**".
+def test_the_mapping_is_total_over_all_seventeen_dispositions() -> None:
+    """§15: "the mapping table in §8 is **total**" over the enumeration as it stands.
 
     Failing if a member is added without a mapping — which is what makes forgetting one a
     test failure rather than a silent ``UNAVAILABLE``. The enumeration is asserted at
-    eighteen first, because ADR-0241 §8 closes it there and a nineteenth is an ADR's to
-    add: without that half, a member added with no entry here would be admitted by the
-    ``case _`` default and this arm would pass.
+    **seventeen** first, because ADR-0247 §6 removes ``NOT_ADMITTED`` "in that count
+    alone" and an eighteenth is an ADR's to add: without that half, a member added with
+    no entry here would be admitted by the ``case _`` default and this arm would pass.
+
+    And the two members that row rendered — ``SEARCH_DISABLED`` and ``NOT_ADMITTED`` —
+    are gone with it (ADR-0247 §6), which is why the discriminated set below is one row
+    rather than two.
     """
-    assert len(SearchDisposition) == 18, (
-        "ADR-0241 §8 closes the enumeration at eighteen — ADR-0231 §13's fifteen, "
-        "ADR-0238 §11's sixteenth and ADR-0241's two — and ADR-0242 §8 maps every one"
+    assert len(SearchDisposition) == 17, (
+        "ADR-0231 §13's fifteen and ADR-0241's two, less ADR-0238 §11's sixteenth, "
+        "which ADR-0247 §6 removes with the budget — and ADR-0242 §8 maps every one"
     )
-    discriminated = {SearchDisposition.NOT_ADMITTED, SearchDisposition.RULING_CONFIRM}
+    discriminated = {SearchDisposition.RULING_CONFIRM}
 
     assert set(_TABLE) | discriminated == set(SearchDisposition)
     for stage, member in _TABLE.items():
-        assert not_serviced(stage, max_calls=8) is member, stage
+        assert not_serviced(stage) is member, stage
 
 
-def test_the_two_discriminated_rows_are_the_two_the_disposition_cannot_decide() -> None:
-    """§8's two configuration- and value-discriminated rows, each way.
+def test_the_removed_members_are_absent_from_both_vocabularies() -> None:
+    """ADR-0247 §6, asserted by name so a reintroduction is a test failure.
 
-    ``admit_search``'s refusal is two members "because the single statement §9 fixes per
-    member cannot be true of both configurations", and ``RULING_CONFIRM`` is three
-    because it "is recorded both where **no grant covers the recipients at all** and
-    where **a grant stands but the closed loop is not closed**".
+    ``SearchDisposition.NOT_ADMITTED``, ``SearchNotServiced.SEARCH_DISABLED`` and
+    ``SearchNotServiced.NOT_ADMITTED`` were each defined over ``admit_search``'s refusal
+    and over ``Settings.search_calls_per_conversation``'s value, and neither vocabulary
+    holds them once §5 removes the budget. **The two that are *not* removed are asserted
+    beside them**: ``TRUST_MISSING`` and ``AUTHORISATION_AWAITED`` become unreachable on
+    a configured deployment and stay, because removing them is outside the owner's own
+    ruling (§6, #2252).
+    """
+    assert "NOT_ADMITTED" not in SearchDisposition.__members__
+    assert "SEARCH_DISABLED" not in SearchNotServiced.__members__
+    assert "NOT_ADMITTED" not in SearchNotServiced.__members__
+    assert len(SearchNotServiced) == 7, "ADR-0247 §6 closes the vocabulary at seven"
+    assert {"TRUST_MISSING", "AUTHORISATION_AWAITED"} <= set(SearchNotServiced.__members__), (
+        "and the two ADR-0247 §6 names as *not* removed are still here (#2252)"
+    )
+
+
+def test_the_one_discriminated_row_is_the_one_the_disposition_cannot_decide() -> None:
+    """§8's value-discriminated row, each way.
+
+    ``RULING_CONFIRM`` is three members because it "is recorded both where **no grant
+    covers the recipients at all** and where **a grant stands but the closed loop is not
+    closed**". It is now the **only** such row: ADR-0247 §6 removes the
+    configuration-discriminated one with the ``Settings`` value that discriminated it.
     """
     from ai_assistant.core.types import DestinationTrust  # noqa: PLC0415 — one arm's input
 
     assert (
-        not_serviced(SearchDisposition.NOT_ADMITTED, max_calls=0)
-        is SearchNotServiced.SEARCH_DISABLED
-    )
-    assert (
-        not_serviced(SearchDisposition.NOT_ADMITTED, max_calls=1) is SearchNotServiced.NOT_ADMITTED
-    )
-    assert (
-        not_serviced(
-            SearchDisposition.RULING_CONFIRM, max_calls=8, planned_with_external_content=False
-        )
+        not_serviced(SearchDisposition.RULING_CONFIRM, planned_with_external_content=False)
         is SearchNotServiced.AUTHORISATION_AWAITED
     )
     assert (
         not_serviced(
             SearchDisposition.RULING_CONFIRM,
-            max_calls=8,
             planned_with_external_content=True,
             trust=DestinationTrust.UNCHOSEN,
         )
@@ -167,7 +181,6 @@ def test_the_two_discriminated_rows_are_the_two_the_disposition_cannot_decide() 
     assert (
         not_serviced(
             SearchDisposition.RULING_CONFIRM,
-            max_calls=8,
             planned_with_external_content=True,
             trust=DestinationTrust.USER_CHOSEN,
         )
@@ -177,7 +190,7 @@ def test_the_two_discriminated_rows_are_the_two_the_disposition_cannot_decide() 
 
 def test_a_servicing_that_yielded_carries_no_member() -> None:
     """§6: "the eligibility condition is the disposition's presence and nothing else"."""
-    assert not_serviced(None, max_calls=8) is None
+    assert not_serviced(None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +273,11 @@ async def test_every_member_puts_a_fragment_of_its_own_into_the_prompt(
     )
 
 
-async def test_the_eight_fragments_are_eight_distinct_texts() -> None:
+async def test_the_fragments_are_one_distinct_text_per_member() -> None:
     """§13: written out one per member, and never assembled from a name or a mapping.
 
     Two members sharing a text would be two members with one rendering, which is the
-    collapse §8's eight-way split exists to prevent — a user sent to the wrong command.
+    collapse §8's split exists to prevent — a user sent to the wrong command.
     """
     responded = await _loop(planner=FakePlanner(now=_clock)).respond(_ASK, narrow=_bounded())
     bare = await _system_prompt(responded)
@@ -343,7 +356,7 @@ async def test_a_turn_whose_search_was_serviced_carries_no_member() -> None:
     §6's byte-identity guarantee made checkable: a turn that searched and got records
     says nothing about a lookup that did not happen, because there was none.
     """
-    footing = await _chosen_footing()
+    footing = _chosen_footing()
     searcher = FakeWebSearcher(results=(_RESULT,))
 
     with structlog.testing.capture_logs() as captured:
@@ -372,7 +385,7 @@ async def test_a_search_that_found_nothing_carries_no_member() -> None:
             ),
             granted=True,
         ),
-        footing=await _chosen_footing(),
+        footing=_chosen_footing(),
     ).respond(_ASK, narrow=_bounded())
 
     assert responded.search_not_serviced is None
@@ -391,7 +404,7 @@ async def test_a_response_refused_after_it_arrived_carries_unavailable() -> None
         responded = await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
-            footing=await _chosen_footing(),
+            footing=_chosen_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] == SearchDisposition.UNATTESTED.value
@@ -415,7 +428,7 @@ async def test_a_first_refused_search_carries_authorisation_awaited() -> None:
         responded = await _loop(
             planner=FakePlanner(now=_clock, read_request=_search()),
             search=_servicer(granted=False),
-            footing=await _admitted(),
+            footing=_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
@@ -444,7 +457,7 @@ async def test_a_standing_grant_and_an_unknown_cost_still_carry_authorisation_aw
             search=_servicer(
                 searcher=FakeWebSearcher(), binder=_binder(definition=FAKE_WEB_SEARCH), granted=True
             ),
-            footing=await _admitted(),
+            footing=_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] == SearchDisposition.RULING_CONFIRM.value
@@ -490,7 +503,7 @@ async def test_a_follow_up_at_the_configured_provider_is_serviced_and_carries_no
             planner=FakePlanner(now=_clock, read_request=_search()),
             memory=await _followed_up(),
             search=_servicer(granted=True),
-            footing=await _admitted(),
+            footing=_footing(),
         ).respond(_ASK, narrow=_bounded())
 
     assert _serviced(captured)["disposition"] is None, (
@@ -631,7 +644,7 @@ async def test_the_earliest_member_in_the_declared_order_is_the_one_carried(
             planner=_revising_planner(),
             search=_servicer(searcher=searcher, composer=composer, granted=True),
             memory=await _separated(),
-            footing=await _chosen_footing(),
+            footing=_chosen_footing(),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
     recorded = [servicing["disposition"] for servicing in _serviced_all(captured)]
@@ -662,7 +675,7 @@ async def test_a_second_servicing_that_succeeds_does_not_clear_the_first_members
             planner=_revising_planner(),
             search=_servicer(searcher=searcher, granted=True),
             memory=await _separated(),
-            footing=await _chosen_footing(),
+            footing=_chosen_footing(),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
     dispositions = [servicing["disposition"] for servicing in _serviced_all(captured)]
@@ -671,69 +684,56 @@ async def test_a_second_servicing_that_succeeds_does_not_clear_the_first_members
 
 
 # --------------------------------------------------------------------------- #
-# §15 Arm 4 — exhausted allowance, and spend kept distinct                      #
+# ADR-0247 §12 Arm H — nothing bounds a conversation's search count             #
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_zero_bound_carries_search_disabled_and_a_positive_one_not_admitted() -> None:
-    """§15 Arm 4: the two ``admit_search`` members, told apart by the configuration.
+async def test_a_conversation_searches_past_the_former_default_without_a_refusal() -> None:
+    """ADR-0247 §12's **Arm H**, which replaces ADR-0238 §15's Arms 3, 6 and 6b entire.
 
-    ADR-0238 §8 makes ``0`` mean "no search is serviced in any conversation", so a
-    statement pointing a user at a new conversation would be false there — and a
-    statement that named neither would leave #2168's exhausted-allowance case with
-    nothing to say. The discriminator is "the deployment's **own configuration** … and
-    never a per-turn record" (ADR-0236 §4).
+    "A conversation makes more searches than ``search_calls_per_conversation``'s former
+    default without a refusal, no disposition naming an allowance is reachable, and the
+    turn-level bound still holds." The former default was **eight**, so nine turns of one
+    conversation is the shape that would have been refused on the ninth — and each turn
+    here declares no planning budget, so it starts one planner call and therefore one
+    search (ADR-0228 §4), which is the bound §5 names as what remains.
     """
-    disabled = await _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(granted=True),
-        footing=await _admitted(max_calls=0),
-    ).respond(_ASK, narrow=_bounded())
-
+    searcher = FakeWebSearcher(results=(_RESULT,))
     turns = _loop(
         planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(
-            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
-        ),
-        footing=await _chosen_footing(max_calls=1),
+        search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
+        footing=_chosen_footing(),
     )
-    await turns.respond(_ASK, narrow=_bounded())
-    spent = await turns.respond(_ASK, narrow=_bounded())
 
-    assert disabled.search_not_serviced is SearchNotServiced.SEARCH_DISABLED
-    assert spent.search_not_serviced is SearchNotServiced.NOT_ADMITTED
+    outcomes = [await turns.respond(_ASK, narrow=_bounded()) for _ in range(9)]
+
+    assert len(searcher.searched) == 9, (
+        "every turn of the conversation reached the provider — nothing per-conversation "
+        "counted, compared or refused (ADR-0247 §5)"
+    )
+    assert [one.search_not_serviced for one in outcomes] == [None] * 9, (
+        "and no turn carried a member at all, least of all one naming an allowance"
+    )
 
 
-async def test_a_conversation_stamped_deleted_carries_not_admitted_too() -> None:
-    """§15 Arm 4: the case that falsifies the easier wording of §9's statement.
+async def test_no_member_of_either_vocabulary_names_an_allowance() -> None:
+    """ADR-0247 §12 Arm H's second half, asserted over the vocabularies themselves.
 
-    ADR-0238 §14 makes ``admit_search`` answer ``None`` on a conversation stamped deleted
-    as well as on a bound that is reached, and the site cannot tell those apart — so
-    ``NOT_ADMITTED`` "asserts that the servicing was not admitted and **does not assert
-    that this conversation's allowance was consumed**".
+    "No disposition naming an allowance is reachable" — which after §6 is true by
+    construction rather than by exhaustion, because the members that named one are
+    removed. Asserted by name so that a lane reintroducing either fails here as well as
+    at the mapping table.
     """
-    footing = await _admitted(max_calls=8)
-    turns = _loop(
-        planner=FakePlanner(now=_clock, read_request=_search()),
-        search=_servicer(granted=True),
-        footing=footing,
-    )
-    # Begun and *then* stamped, and the wrapper told so — it begins a conversation whose
-    # ``get`` answers ``None``, and after ADR-0074's stamp that is exactly what this one
-    # answers. The stamp is the state the arm is about, not a conversation that never was.
-    turns.started = True
-    await footing.conversations.stamp_deleted(footing.conversation_id)
-
-    responded = await turns.respond(_ASK, narrow=_bounded())
-
-    assert responded.search_not_serviced is SearchNotServiced.NOT_ADMITTED
+    assert "NOT_ADMITTED" not in SearchDisposition.__members__
+    assert not {"SEARCH_DISABLED", "NOT_ADMITTED"} & set(SearchNotServiced.__members__)
 
 
-async def test_a_spend_refusal_is_a_distinct_member_from_an_exhausted_allowance() -> None:
-    """§15 Arm 4: "The arm asserts the four are not collapsed."
+async def test_a_spend_refusal_carries_its_own_member() -> None:
+    """§15 Arm 4's residue, over the members ADR-0247 §6 leaves.
 
-    An allowance of calls and a ceiling of money are two facts with two different owners,
-    and §9 fixes a distinct statement for each.
+    Arm 4 is **retired** by ADR-0247 §12 — the allowance it was stated over is gone —
+    and what survives of it is that a monetary ceiling is not collapsed into any other
+    outcome: §9 fixes a distinct statement per member, and a spend refusal has one.
     """
     responded = await _loop(
         planner=FakePlanner(now=_clock, read_request=_search()),
@@ -743,20 +743,12 @@ async def test_a_spend_refusal_is_a_distinct_member_from_an_exhausted_allowance(
             ),
             granted=True,
         ),
-        footing=await _chosen_footing(),
+        footing=_chosen_footing(),
     ).respond(_ASK, narrow=_bounded())
 
     assert responded.search_not_serviced is SearchNotServiced.SPEND_EXHAUSTED
-    assert (
-        len(
-            {
-                SearchNotServiced.SEARCH_DISABLED,
-                SearchNotServiced.NOT_ADMITTED,
-                SearchNotServiced.SPEND_EXHAUSTED,
-                SearchNotServiced.DECLINED,
-            }
-        )
-        == 4
+    assert len({SearchNotServiced.SPEND_EXHAUSTED, SearchNotServiced.DECLINED}) == 2, (
+        "a ceiling of money and a ruling are two facts with two different owners"
     )
 
 

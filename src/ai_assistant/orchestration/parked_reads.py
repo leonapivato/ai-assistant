@@ -202,7 +202,6 @@ class ParkedReadOperations:
         store: ParkedReads | None,
         conversations: ConversationStore,
         search: SearchServicer | None,
-        max_calls: int,
         clock: Callable[[], datetime],
     ) -> None:
         """Wire the operations from the store, the conversation index and the servicer.
@@ -212,20 +211,15 @@ class ParkedReadOperations:
                 none. **Passed rather than defaulted**, so a composition root states the
                 absence instead of inheriting it.
             conversations: The durable conversation index — the **same instance** the
-                capture stage and the footing hold, which is the composition-root
-                single-instance obligation ADR-0238 §8 already states: the counter and
-                the flag are that store's own row state, and a second store over the
-                same rows would answer about a draw this one never took.
+                capture stage and the footing hold. ADR-0244 §6's clause 2 is read
+                through it: :meth:`~ai_assistant.core.protocols.ConversationStore.get`
+                answers whether the conversation exists and is not stamped deleted
+                (ADR-0247 §6), which is the fact that clause was establishing.
             search: The one object in this process that can send a search, or ``None``
                 where this deployment connected no search account. An answer that
                 reached the dispatch with none is ``UNAVAILABLE_NOW``: nothing was ruled
                 and nothing was dispatched, which is true of what this deployment can
                 do.
-            max_calls: ``Settings.search_calls_per_conversation``, passed rather than
-                read, because ADR-0238 §8 puts "every judgement about what a bound is"
-                in ``orchestration``. A bound of ``0`` is that section's "no search is
-                serviced in any conversation", which ADR-0244 §6's clause 2 reads as a
-                refusal of the answer.
             clock: Reads the instant every comparison and settlement here carries.
                 **Guarded at the moment it is stored** (ADR-0026 §2), so every reading
                 below is aware, UTC and localizable.
@@ -233,7 +227,6 @@ class ParkedReadOperations:
         self._store = store
         self._conversations = conversations
         self._search = search
-        self._max_calls = max_calls
         self._clock = checked_clock(clock, owner="ParkedReadOperations")
         self._dispatches = _Dispatches()
 
@@ -385,10 +378,10 @@ class ParkedReadOperations:
         was taken: the policy was never asked. A bounded loss of one answer, preferred
         to the unbounded hazard the other order carries.
 
-        **``admit_search`` is not called and no second call is drawn** (clause 2). The
-        conversation's call was admitted before the ruling and is consumed whatever the
-        outcome, and parking does not refund it (ADR-0238 §8); what clause 2 takes is a
-        *read* of the draw.
+        **``admit_search`` is not called and no second call is drawn** (clause 2), and
+        after ADR-0247 §5 that sentence is vacuous rather than false: there is no
+        per-conversation allowance left, so there is no call to draw. What clause 2
+        takes is a read of the conversation itself (ADR-0247 §6).
 
         **Nothing else is consulted for authority** (ADR-0244 §6, §16). No standing
         recipient grant is read, established, extended or implied; ``trust_of`` is not
@@ -478,14 +471,25 @@ class ParkedReadOperations:
         if search is None:
             # No account can answer one. §9 names two grounds for this member and this
             # is a third of the same shape — nothing was ruled, nothing was dispatched,
-            # and it is true of what this deployment can do — where the two it names
-            # are per-conversation and per-`Settings`.
+            # and it is true of what this deployment can do. ADR-0247 §6 retires §9's
+            # `Settings` ground with the budget and leaves the other two, so what stands
+            # here now is this limb and the conversation's own existence below.
             return AnsweredRead(ReadAnswerOutcome.UNAVAILABLE_NOW, park)
-        draw = await self._conversations.search_draw(park.conversation_id)
-        if draw is None or self._max_calls == 0:
-            # `search_draw` answers `None` for an id that names nothing and for a
-            # conversation stamped deleted (ADR-0238 §14), and a bound of `0` is that
-            # decision's "no search is serviced in any conversation".
+        if await self._conversations.get(park.conversation_id) is None:
+            # **Clause 2 read through ``get``** (ADR-0247 §6). It used to be a
+            # ``search_draw`` answering a draw *and* a non-zero
+            # ``Settings.search_calls_per_conversation``; ADR-0247 §5 removes both, and
+            # the fact the clause was establishing — that the conversation exists and is
+            # not stamped deleted — is what ``get`` answers by the same rule: "``None``
+            # when the id names nothing **or** names a conversation stamped deleted".
+            # No Protocol member is added and none is widened, and clause 2's remaining
+            # sentence — ``admit_search`` is not called and no second call is drawn —
+            # is vacuous rather than false, because there is no call to draw.
+            #
+            # **The no-searcher limb above is untouched** and still precedes this one
+            # (ADR-0247 §12 Arm G): a deployment that unconfigured its search account
+            # answers ``UNAVAILABLE_NOW`` with the park left ``OPEN``, which is the arm
+            # this removal must not disturb.
             return AnsweredRead(ReadAnswerOutcome.UNAVAILABLE_NOW, park)
         # **Clause 3 — the decision.**
         confirmed = await search.recorded(park.decision_id)
@@ -655,7 +659,6 @@ class ParkedReadOperations:
             return outcome.records, None
         return (), not_serviced(
             SEARCH_DISPOSITIONS.get(refusal),
-            max_calls=self._max_calls,
             # The binding and the destination's trust are the **servicing** site's two
             # discriminators for a `RULING_CONFIRM` row, and this branch is not one: a
             # refusal after a recorded `ALLOW` maps by its own disposition alone, so

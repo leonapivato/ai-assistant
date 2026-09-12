@@ -1042,13 +1042,6 @@ def test_every_integer_setting_is_discovered() -> None:
         # keeps §11's precedence true in every configuration.
         "search_max_results",
         "search_max_result_chars",
-        # ADR-0238 §8's per-conversation call bound, acknowledged here with the
-        # same `bool` argument the caps above carry — and with one of its own:
-        # **zero is a legal value whose stated meaning is that no search is
-        # serviced in any conversation**, so `search_calls_per_conversation=True`
-        # is a bound of one rather than a disabled mechanism, and a `float` would
-        # disable the comparison outright.
-        "search_calls_per_conversation",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
@@ -2747,40 +2740,22 @@ class TestTheSearchBudgetSettings:
         fields.update(overrides)
         return Settings(**fields)
 
-    # --- §8: the bound ships with a value -----------------------------------
+    # --- ADR-0247 §5: the field is gone and nothing replaces it -------------
 
-    def test_the_bound_ships_with_a_value_rather_than_meaning_unbounded_when_unset(
-        self,
-    ) -> None:
-        """§8: "a bound the milestone's exit is stated over may not be absent by omission".
+    def test_the_per_conversation_call_bound_is_not_a_settings_field(self) -> None:
+        """ADR-0247 §5: ``Settings.search_calls_per_conversation`` is **removed**.
 
-        ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling an operator
-        chooses; this is a call bound milestone 31's exit is stated over, so a
-        deployment that configures nothing still searches under it.
+        "No field replaces it, no default replaces it, and no per-conversation quantity
+        is substituted" — so this is asserted over the model's own field set rather
+        than over an attribute access, which a later lane could satisfy by renaming.
+        What bounds a conversation's searching instead is named elsewhere and is not a
+        ``Settings`` value of this shape: ADR-0228 §4's planning budget per turn,
+        ADR-0241 §1's deadline per search, ADR-0194's ceiling per money.
         """
-        assert Settings().search_calls_per_conversation == 8
-
-    @pytest.mark.parametrize("value", [0, 1, 8, 63, 64])
-    def test_every_value_in_the_domain_loads(self, value: int) -> None:
-        """§8: the integers from **0** through **64** inclusive, both ends admitted.
-
-        Zero is in the domain and its meaning is stated: **no search is serviced in
-        any conversation**. It is a legal setting rather than a disabled mechanism,
-        which is why ADR-0238 §15's Arm 6g2 exists at the store.
-        """
-        assert Settings(search_calls_per_conversation=value).search_calls_per_conversation == value
-
-    @pytest.mark.parametrize("value", [-1, 65, 1000])
-    def test_a_value_outside_the_domain_is_refused_at_load_naming_the_field(
-        self, value: int
-    ) -> None:
-        """§8: refused with the ``ConfigurationError`` ADR-0194 §1's clause requires.
-
-        Naming the field, because an operator meeting a refusal that does not say
-        which setting is wrong has to bisect their own configuration.
-        """
-        with pytest.raises(ValidationError, match="search_calls_per_conversation"):
-            Settings(search_calls_per_conversation=value)
+        assert "search_calls_per_conversation" not in Settings.model_fields
+        assert not any("calls_per_conversation" in name for name in Settings.model_fields), (
+            "no field replaces it under another name"
+        )
 
     # --- §10: the interaction that is fatal to the milestone ----------------
 

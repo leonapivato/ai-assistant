@@ -129,7 +129,6 @@ from ai_assistant.planning.composer import ModelBackedQueryComposer
 from ai_assistant.testing import (
     FakeAuditTrail,
     FakeContextProvider,
-    FakeConversationStore,
     FakeDeferralStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
@@ -466,12 +465,10 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
 
 def _footing(
     *,
-    conversations: FakeConversationStore | None = None,
     conversation_id: str = "c-1",
-    max_calls: int = 8,
     registered: bool = True,
 ) -> SearchFooting:
-    """This conversation's ADR-0238 footing, on a deployment that configured a search.
+    """This conversation's footing, on a deployment that configured a search.
 
     ``registered`` is ADR-0247 §1's fact in place of ADR-0238 §1's ``trust_of`` reads:
     whether this deployment holds a search registration at all. It **defaults true**
@@ -480,31 +477,13 @@ def _footing(
     both from the same pair of ``Settings`` fields, so the two cannot disagree. A footing
     for a loop wired ``search=None`` may leave it either way: the value is read inside
     ``SearchServicer.service`` and nowhere else.
+
+    **It holds no conversation store and no bound** (ADR-0247 §5): the per-conversation
+    call budget, its stored flag and the three ``ConversationStore`` members that
+    maintained them are removed, so a footing takes no store call and a case no longer
+    has to begin a conversation before the servicing site will admit anything.
     """
-    return SearchFooting(
-        conversation_id=conversation_id,
-        conversations=(
-            FakeConversationStore(now=_clock, new_id=lambda: conversation_id)
-            if conversations is None
-            else conversations
-        ),
-        registered=registered,
-        max_calls=max_calls,
-    )
-
-
-async def _admitted(**knobs: Any) -> SearchFooting:
-    """A footing over a conversation that has been **begun** (ADR-0074 §2).
-
-    ``admit_search`` creates nothing (ADR-0238 §8), so a footing whose conversation was
-    never started refuses every servicing — correctly, and uselessly for a case about a
-    later stage. Every case that drives ``service_read_request`` directly takes its
-    footing from here, which is the state ``Engine._pass`` has already established by
-    the time the loop is entered.
-    """
-    footing = _footing(**knobs)
-    await footing.conversations.start()
-    return footing
+    return SearchFooting(conversation_id=conversation_id, registered=registered)
 
 
 @dataclass
@@ -512,30 +491,18 @@ class _Turns:
     """A loop beside the conversation its turns run under.
 
     ``Engine._pass`` calls ``ConversationLifecycle.begin`` before the turn's work "so
-    the id exists whatever the turn does", and ADR-0238 §8 rests the whole budget on
-    that ordering: ``admit_search`` **creates nothing**, so a turn whose conversation was
-    never started is refused at admission exactly as one whose conversation was deleted
-    is. This wrapper is that ordering, so every case below drives the servicing site the
-    way a production turn reaches it rather than against a conversation that does not
-    exist.
+    the id exists whatever the turn does", and this wrapper carries that id to every
+    ``respond`` so each case drives the servicing site the way a production turn reaches
+    it. **No conversation is begun in a store** (ADR-0247 §5): with the per-conversation
+    budget removed nothing the servicing site reads is keyed on the conversation record,
+    so there is no ordering left for a case to get wrong.
     """
 
     loop: LearningLoop
     footing: SearchFooting
-    started: bool = False
 
     async def respond(self, utterance: str, **kwargs: Any) -> RespondedTurn:
-        """Begin the conversation once, then run one turn of it.
-
-        Begun **here** only where a case has not begun it already: ``_admitted`` exists
-        for the cases that drive the servicing site directly, and a store whose id
-        factory is fixed refuses a second ``start`` rather than minting a twin
-        (ADR-0074 §1's collision budget), which is the store being right.
-        """
-        if not self.started:
-            self.started = True
-            if await self.footing.conversations.get(self.footing.conversation_id) is None:
-                await self.footing.conversations.start()
+        """Run one turn under this footing's conversation."""
         return await self.loop.respond(
             utterance, conversation_id=self.footing.conversation_id, **kwargs
         )
@@ -862,7 +829,7 @@ async def test_the_composers_model_is_shown_the_utterance_and_no_supply_span() -
         search=_servicer(composer=ModelBackedQueryComposer(model), granted=True),
         utterance=_ASK,
         audit=audit,
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -901,7 +868,7 @@ async def test_the_searcher_receives_the_composers_output_byte_for_byte() -> Non
         search=_servicer(composer=composer, searcher=_CostedSearcher(inner), granted=True),
         utterance=_ASK,
         audit=TurnReadAudit(),
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -939,7 +906,7 @@ async def test_a_refused_composition_reaches_the_searcher_not_at_all() -> None:
         ),
         utterance=_ASK,
         audit=audit,
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -970,7 +937,7 @@ async def test_no_span_of_the_supply_reaches_any_value_the_searcher_received() -
         search=_servicer(searcher=_CostedSearcher(inner), granted=True),
         utterance=_ASK,
         audit=TurnReadAudit(),
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -1054,7 +1021,7 @@ async def test_with_no_slot_remaining_nothing_is_composed_and_nothing_is_ruled_o
         _ASK,
         remaining=0,
         external=False,
-        footing=await _admitted(),
+        footing=_footing(),
         in_view=(),
         counts=_SearchCounts(),
         goal=_PARK_GOAL,
@@ -1094,7 +1061,7 @@ async def test_the_budget_admits_the_records_that_fit_and_no_more() -> None:
         supply=(),
         reads=_Reads(),
         truncated=truncated,
-        footing=await _admitted(),
+        footing=_footing(),
         counts=_SearchCounts(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
@@ -1130,12 +1097,18 @@ def test_the_three_vocabularies_are_closed_at_the_sizes_adr_0231_fixes() -> None
     added-to-and-never-renamed rule and the raises-for-no-source-reason posture all
     stand entire — and adds ``DEADLINE_EXPIRED``. §8 moves ADR-0238 §11's sixteen in
     the same narrow way and adds ``DEADLINE_EXPIRED`` and ``SEARCH_FAILED``, closing
-    the disposition vocabulary at eighteen with "no lane reads this as licence to add
-    a nineteenth".
+    the disposition vocabulary at eighteen.
+
+    **Seventeen, since ADR-0247 §6**, which moves that closure in the same narrow
+    direction and for the first time *downwards*: ADR-0238 §11's sixteenth member had
+    ``admit_search``'s refusal as its only producer, and §5 removes the per-conversation
+    call budget entire. The remaining members, their values, the injectivity of every
+    mapping into it, its no-message rule and its exclusion of ``NO_RESULT`` stand
+    entire, and "no lane reads this as licence to remove an eighteenth".
     """
     assert len(QueryRefusal) == 4
     assert len(SearchRefusal) == 7
-    assert len(SearchDisposition) == 18
+    assert len(SearchDisposition) == 17
     assert all(member.value == member.name.lower() for member in SearchDisposition), (
         "each valued by its lower-cased name, as every closed vocabulary here is"
     )
@@ -1166,10 +1139,6 @@ def test_every_refusal_maps_to_a_distinct_disposition_and_no_result_maps_to_none
         SearchDisposition.RULING_CONFIRM,
         SearchDisposition.RULING_DENY,
         SearchDisposition.RULING_UNAVAILABLE,
-        # ADR-0238 §11's sixteenth, and it is the servicer's own stage exactly as the
-        # six above are: no refusal vocabulary supplies it, because the stage it names
-        # runs **before** a composer or a searcher is reached at all.
-        SearchDisposition.NOT_ADMITTED,
         # ADR-0241 §8's eighteenth, likewise the servicer's own: `SearchRefusal`
         # crosses the seam and every member of it is a value `search` **returns**,
         # where a fault at the send is a **raise** — "converting them into returns
@@ -1177,7 +1146,7 @@ def test_every_refusal_maps_to_a_distinct_disposition_and_no_result_maps_to_none
         # exceptions". `DEADLINE_EXPIRED` is *not* here, because §4 carries it across
         # one for one like the rest.
         SearchDisposition.SEARCH_FAILED,
-    }, "and the eight members no refusal vocabulary supplies are the servicer's own stages"
+    }, "and the members no refusal vocabulary supplies are the servicer's own stages"
 
 
 # --------------------------------------------------------------------------- #
@@ -1546,7 +1515,7 @@ async def test_the_coverage_is_read_off_what_reached_the_composer(
         planner=FakePlanner(now=_clock, read_request=_search()),
         memory=memory,
         search=_servicer(trail=trail, granted=True),
-        footing=await _admitted(registered=registered),
+        footing=_footing(registered=registered),
     ).respond(_ASK, narrow=_bounded())
 
     [decision] = await trail.recent()
@@ -1630,7 +1599,7 @@ async def test_the_disposition_rides_on_a_failing_record_too() -> None:
         search=_servicer(granted=False),
         utterance=_ASK,
         audit=audit,
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -2025,7 +1994,7 @@ async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
         ),
         utterance=utterance,
         audit=TurnReadAudit(),
-        footing=await _admitted(),
+        footing=_footing(),
         goal=_PARK_GOAL,
         plan=ActionPlanFor(),
     )
@@ -2209,47 +2178,21 @@ async def test_a_stalled_search_records_its_own_disposition_and_still_answers() 
     )
 
 
-async def test_the_admitted_call_of_an_expired_search_is_never_refunded() -> None:
-    """ADR-0241 §6, and ADR-0238 §15's Arm 6d binding one more outcome.
-
-    "An interrupted search spends the call ``admit_search`` admitted, and no path lowers
-    ``calls``." The reason is stronger than symmetry: a refund would be the one route
-    by which a **stalling** provider could reach the budget, handing it the ability to
-    make its own stalls free — which is precisely what ADR-0238 §12 rules out when it
-    says "a provider that stalls therefore cannot reach the budget at all".
-    """
-    footing = await _admitted(max_calls=8)
-    searcher = _StallingSearcher(_CostedSearcher(FakeWebSearcher()))
-
-    with structlog.testing.capture_logs() as captured:
-        await _loop(
-            planner=FakePlanner(now=_clock, read_request=_search()),
-            search=_servicer(searcher=searcher, granted=True, deadline=_EXPIRING),
-            footing=footing,
-        ).respond(_ASK, narrow=_bounded())
-
-    assert _serviced(captured)["calls"] == 1, "the admission counted the call it admitted"
-    draw = await footing.conversations.search_draw(footing.conversation_id)
-    assert draw is not None
-    assert draw.calls == 1, "and no path lowered it on account of the expiry"
-
-
-async def test_three_bounds_produce_three_dispositions_with_no_cross_talk() -> None:
-    """ADR-0241 §12's **Arm 5**, and §9's whole point.
+async def test_two_bounds_produce_two_dispositions_with_no_cross_talk() -> None:
+    """ADR-0241 §12's **Arm 5**, restated over the bounds ADR-0247 §5 leaves.
 
     "This system bounds three different quantities on a search, and they are distinct
-    in name, in mechanism and in the value an audit records" — the call allowance
-    (ADR-0238 §8's counter), the monetary ceiling (ADR-0194's, reported
-    ``spend_refused``) and the elapsed-time bound (§1's, reported
-    ``deadline_expired``). The tree's one live confusion was (c) wearing (a)'s and
-    (b)'s clothes in the audit while a broken channel wore (c)'s; this asserts the
-    three are told apart, which is what #2167 asks for in terms.
+    in name, in mechanism and in the value an audit records". **One of the three is
+    gone**: ADR-0238 §8's per-conversation call allowance is removed entire, so what
+    remains is the monetary ceiling (ADR-0194's, reported ``spend_refused``) and the
+    elapsed-time bound (ADR-0241 §1's, reported ``deadline_expired``). The arm's own
+    subject — that no implementation reports one bound under another's member — binds
+    unchanged on the pair, and the tree's one live confusion it was written against was
+    (c) wearing (a)'s and (b)'s clothes in the audit (#2167).
 
-    **And no cross-talk**: the exhausted conversation opens no channel at all, the
-    spend-refused call reaches the searcher and stops there, and the expired one
-    reaches neither the counter nor a ceiling for a second time.
+    **And no cross-talk**: the spend-refused call reaches the searcher and stops there,
+    and the expired one reaches no ceiling for a second time.
     """
-    exhausted = _CostedSearcher(FakeWebSearcher())
     refused = _CostedSearcher(
         FakeWebSearcher(refusals={DEFAULT_COMPOSED_QUERY: SearchRefusal.SPEND_REFUSED})
     )
@@ -2257,9 +2200,8 @@ async def test_three_bounds_produce_three_dispositions_with_no_cross_talk() -> N
     dispositions = []
 
     for wired, footing in (
-        (exhausted, await _admitted(max_calls=0)),
-        (refused, await _admitted(conversation_id="c-2")),
-        (expired, await _admitted(conversation_id="c-3")),
+        (refused, _footing(conversation_id="c-2")),
+        (expired, _footing(conversation_id="c-3")),
     ):
         with structlog.testing.capture_logs() as captured:
             await _loop(
@@ -2270,15 +2212,10 @@ async def test_three_bounds_produce_three_dispositions_with_no_cross_talk() -> N
         dispositions.append(_serviced(captured)["disposition"])
 
     assert dispositions == [
-        SearchDisposition.NOT_ADMITTED.value,
         SearchDisposition.SPEND_REFUSED.value,
         SearchDisposition.DEADLINE_EXPIRED.value,
     ], "one bound, one member, and no implementation reports one under another's"
-    assert len(set(dispositions)) == 3, "distinct in the value an audit records (§9)"
-    assert exhausted.inner.searched == [], (
-        "the exhausted conversation opened no channel — `admit_search` refuses before a "
-        "supply is constructed, a query composed or a ruling sought (ADR-0238 §8)"
-    )
+    assert len(set(dispositions)) == 2, "distinct in the value an audit records (§9)"
     assert len(refused.inner.searched) == 1, "the spend-refused call reached the seam"
     assert len(expired.searched) == 1, "and so did the expired one, which is what timed out"
 

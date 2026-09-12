@@ -1381,7 +1381,49 @@ from ai_assistant.wire.errors import (
 #: **This move covers the shape going forward and repairs nothing already released**,
 #: on the chain every entry above it is on: #1956's window stays open, and this entry
 #: neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 35
+#:
+#: **36 since ADR-0247 §10**, and the ground is a **narrowed** vocabulary rather than a
+#: widened one. :class:`~ai_assistant.core.types.SearchNotServiced` loses
+#: ``SEARCH_DISABLED`` and ``NOT_ADMITTED`` (ADR-0247 §6), and that enumeration is
+#: carried on ``TurnOutcome.search_not_serviced``, which crosses on every turn call's
+#: result payload — so this is ADR-0178 §6's shape change: a peer at 36 handed
+#: ``"search_disabled"`` or ``"not_admitted"`` by a peer at 35 fails to decode it.
+#: ``project`` renders every ``Enum`` as its ``value``, and a value the receiving
+#: vocabulary no longer holds is not something a default can cover.
+#:
+#: **The three ``ConversationStore`` members are not a second ground.** ADR-0247 §5
+#: removes ``search_draw``, ``admit_search`` and ``observe_search``; they are in-process
+#: reads and writes no peer emits, **exactly as the entry at 33 records of their
+#: addition**, and removing them emits nothing either. ``Settings`` losing
+#: ``search_calls_per_conversation`` is not a ground for the same reason: no ``Settings``
+#: field crosses this wire. ``SearchDisposition`` losing ``NOT_ADMITTED`` is not one
+#: either — it lives in ``orchestration`` and reaches only the audit event.
+#:
+#: **The promoted method set does not move and stands at fifty-eight**, and ADR-0177
+#: §1's browser enumeration does not move and stands at thirty-one: ADR-0247 removes no
+#: method from the promoted ``AssistantEngine`` surface, adds none, and adds no gateway
+#: route.
+#:
+#: **No stored-record version moves** (ADR-0247 §10). ``ConversationExport.schema_version``
+#: stays at **2** and ADR-0212 §8 and ADR-0014 §5 are untouched: the two columns the
+#: budget wrote stay on disk, are read by nothing and appear on no presented model.
+#: ``EgressBinding``, ``CarriedProvenance``, ``PermissionDecision``, ``ParkedRead``,
+#: ``ReadAnswerOutcome``, ``Conversation``, ``ConversationTurn`` and ``ActionRequest``
+#: are each untouched, and **no row is minted in ADR-0087 §2c's scalar table**: nothing
+#: is added, and a removed ``StrEnum`` member takes no row with it.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and ``METHODS``, ``STREAMING_METHODS``, both adapters and the error
+#: mapping are derived from the Protocol. ADR-0247 mints **no** error class and removes
+#: none, so ``wire/errors.py`` needs no edit.
+#:
+#: **The move covers the shape going forward and repairs nothing already released.** A
+#: hub at 36 never emits the two removed members, so a client at 35 decodes everything
+#: it is sent; a client at 36 handed an older hub's value fails, which is what the
+#: version exists to make legible rather than silent. #1956's window stays open, and
+#: this entry neither repairs it nor inherits it.
+PROTOCOL_VERSION: Final[int] = 36
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

@@ -875,15 +875,16 @@ class LearningLoop:
                 on: a producer's stage holding the writer directly would get the
                 ratified policy and applier and silently lose the queue, which is
                 exactly the drop ADR-0078 ends.
-            footing: Builds this turn's ADR-0238 footing from the conversation it
-                runs under — the destination's recorded trust, the conversation's
-                stored footing flag and its call allowance. **A factory rather than a
-                store**, because the footing is a per-turn value: it also carries which
-                of *this turn's* records were minted at a destination the user chose,
-                and ADR-0231 §16 makes that set die with the turn. ``None`` folds
-                nothing and services no search, which is fail-closed and is a state no
-                production composition reaches (``app/composition.py`` wires it
-                unconditionally).
+            footing: Builds this turn's footing from the conversation it runs under —
+                whether this deployment holds a search registration (ADR-0247 §1),
+                beside the two record-id sets ADR-0238 §2's supply is built from. **A
+                factory rather than a store**, because the footing is a per-turn value:
+                one of those sets is which of *this turn's* records were minted at the
+                destination the owner chose, and ADR-0231 §16 makes it die with the
+                turn. It carries no store, no bound and no flag — ADR-0247 §5 removes
+                the per-conversation budget entire. ``None`` services no search, which
+                is fail-closed and is a state no production composition reaches
+                (``app/composition.py`` wires it unconditionally).
             planner: Turns the turn's goal into an ``ActionPlan``.
             registry: The tool registry this turn's capability vocabulary is read
                 from, once, immediately before the planner call (ADR-0211 §3).
@@ -1050,11 +1051,11 @@ class LearningLoop:
             ContextError: As :meth:`_turn` raises it.
         """
         audit = TurnReadAudit()
-        # **One footing per turn**, built here and threaded down, because the set of
-        # records this turn minted at a chosen destination is a per-turn fact and
-        # because ADR-0238 §14 wires the trust store into the one servicing path and
-        # into nothing else. Built before the turn's work, so a turn that raises has
-        # already had its dirty admissions folded by the early fold below.
+        # **One footing per turn**, built here and threaded down, because the sets of
+        # records ADR-0238 §2's populations are made of are per-turn facts. It carries
+        # no store and takes no store call (ADR-0247 §5): the per-conversation budget
+        # and the two folds that maintained its flag are gone, so nothing here is
+        # spent, folded or settled.
         footing = (
             None
             if self._footing is None or conversation_id is None
@@ -1072,19 +1073,14 @@ class LearningLoop:
             )
         finally:
             audit.emit()
-        if footing is not None:
-            # ADR-0238 §8's capture fold, over the turn's **final** supply — the same
-            # sequence the episode's own ADR-0223 §1 mark is computed from, at the same
-            # instant and by the same component. **Capture's fold remains and is
-            # unchanged**; §8's early fold is earlier, not instead, and the two agree
-            # because ``observe_search`` folds by **and**. Folding a *clean* turn is
-            # what only this fold may do, because only the end of the turn sees the
-            # final supply — an early ``True`` would report a turn clean before it had
-            # finished carrying things.
-            await footing.observe(responded.turn.memories)
+        # **No capture fold** (ADR-0247 §5). ADR-0238 §8's ``observe_search`` over the
+        # turn's final supply stood here; the flag it folded into is removed with the
+        # budget, the column it lived in is read by nothing, and nothing replaces it.
+        # ADR-0223 §1's own mark over the same final supply is untouched and is computed
+        # where it always was.
         return responded
 
-    async def _turn(  # noqa: C901, PLR0913, PLR0915 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
+    async def _turn(  # noqa: PLR0913, PLR0915 — the utterance, the tail, whether reading it degraded, the supply filter, the operation's planning budget, this turn's audit record and its ADR-0238 footing; every one is a distinct fact about the turn, and collapsing any pair would put a flag where a value belongs
         self,
         utterance: str,
         *,
@@ -1294,13 +1290,13 @@ class LearningLoop:
                 everything: this method is the seam, not the policy.
             audit: ADR-0226 §9's record for this turn, filled in as the stages
                 run and emitted by :meth:`respond` on every exit.
-            footing: This turn's ADR-0238 footing, or ``None``. Everything this method
-                does with it is a fold or a hand-off: it folds ``False`` onto the
-                conversation record the moment a disqualifying external span is
-                admitted to the turn (§8's early fold), and it hands the value to
-                :func:`~ai_assistant.orchestration.reads.service_read_request`, which
-                is the one place the trust store, the budget and the closed-loop
-                condition are read.
+            footing: This turn's footing, or ``None``. Everything this method does with
+                it is a record or a hand-off: it records which records ADR-0238 §2's
+                first two populations contributed to this turn, and it hands the value
+                to :func:`~ai_assistant.orchestration.reads.service_read_request`, which
+                is the one place the registration and the closed-loop condition are
+                read. **It folds nothing** (ADR-0247 §5): there is no stored flag left
+                to fold and no allowance left to spend.
 
         **And which records the hop reached rides out beside the turn** (ADR-0227
         §3). The servicer is the one component that can distinguish a
@@ -1411,54 +1407,6 @@ class LearningLoop:
             # an `UNCHOSEN` destination each reach the turn through a servicing, and §2
             # excludes every one of them by name.
             footing.selected.update(record.id for record in memories)
-            # ADR-0238 §2's **first** population on its own, because §5's third
-            # condition tells it apart from the second and `_search_supply` does not:
-            # an episode of *this* conversation is a record whose externality this
-            # conversation's own stored flag has already answered (§8's capture fold),
-            # so §5's **recorded** half is what vouches for it, and the current-turn
-            # half is left for the case §5's closing paragraph reserves it for — "a turn
-            # may read a file and *then* reach the search". A `MemoryRecord` retrieval
-            # selected carries no such vouching and is not in here.
-            #
-            # **Membership is the conversation index's fact** (ADR-0074 §10), and it is
-            # taken in two steps only because the first is free. The tail needs no read:
-            # `ConversationLifecycle.history` built it by walking *this* conversation's
-            # index rows, so asking `turn_of_episode` about each would re-read rows this
-            # turn already walked. It is read from `recent` rather than from the narrowed
-            # supply because a record ADR-0203 §1's filter removed reaches no `clean`
-            # call anyway, so the two spellings cannot differ in effect. Narrowed to
-            # episodes because §2's population is "episodes of this conversation".
-            footing.conversation_episodes.update(
-                record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
-            )
-            # The rest of the supply the tail cannot answer for — ADR-0158 §3's episodic
-            # supplement selects episodes on relevance, including this conversation's
-            # own, and the ones that have fallen out of ADR-0074 §9's replay window are
-            # exactly what a long conversation reaches back for — is placed **inside**
-            # the fold below rather than before it. §8 bounds its window at "one store
-            # write, with none of A's composition, transport or capture inside it", so an
-            # index lookup awaited between the admission and the fold would widen it; the
-            # fold interleaves the two so that no await ever separates a disqualifying
-            # fact from the write recording it.
-            #
-            # ADR-0238 §8's **early** fold, on the turn's pre-servicing supply and
-            # before the first planner call. "The moment ``orchestration`` admits to a
-            # turn a recorded external span that was **not** minted by a ``WEB_SEARCH``
-            # servicing at a destination of recorded trust ``USER_CHOSEN``, it calls
-            # ``observe_search`` with ``False``" — and it fires **whether or not that
-            # turn ever builds a ``WEB_SEARCH`` request**, which is why it is here and
-            # not at the servicing site. Its ordinary subject is a record of some other
-            # external origin the turn's retrieval selected — a reader's, a fetch's, an
-            # ingested message's — which closes the conversation from this turn onward.
-            # A stamped episode of an **earlier turn of this conversation** is not: the
-            # span it carries is one §8's own capture fold already reported on, and the
-            # report is the stored flag, so folding on it here would lower a flag for a
-            # fact already counted and make §15 Arm 1b unreachable (#2205).
-            #
-            # **Over the same population the capture fold sees**, which is the supply
-            # after ADR-0203 §1's narrowing rather than before it, so the two folds
-            # cannot disagree about what the turn carried.
-            await footing.admitted(memories)
         # ADR-0230 §3: **once per turn, before the first planner call**, and the same
         # sequence to both calls of a turn that revises. §3's restraint is explicit —
         # "no lane adds a second listing read, and no lane re-reads it between a turn's
@@ -1576,9 +1524,10 @@ class LearningLoop:
                 # continuation rather than a re-plan.
                 goal=goal,
                 plan=plan,
-                # ADR-0238: the one servicing site, handed the one footing. Everything
-                # this decision reads — the destination's trust, the conversation's
-                # call allowance and its stored flag — is read there and nowhere else.
+                # ADR-0238: the one servicing site, handed the one footing. What that
+                # site reads off it — the registration ADR-0247 §1 decides the
+                # destination from, and §2's two population sets — is read there and
+                # nowhere else.
                 footing=footing,
             )
             serviced = audit.servicings[-1]
@@ -1587,15 +1536,6 @@ class LearningLoop:
             # their meanings, and every servicing of the turn fills **one** fourth
             # group in servicing order (ADR-0228 §7) — there is no fifth.
             memories += serviced.records
-            if footing is not None:
-                # ADR-0238 §8's early fold again, on this servicing's own admissions:
-                # a fetched file, a hop record or a search result minted at an
-                # ``UNCHOSEN`` destination each close the conversation the moment they
-                # are admitted, and each fails §5's current-turn half "**at once** —
-                # before the next request of that same turn is built, not only at
-                # capture" (§12). Idempotent, so a turn whose supply was already dirty
-                # writes nothing further.
-                await footing.admitted(serviced.records)
             # ADR-0228 §13 item 14: the hop set accumulates rather than the later
             # servicing replacing the earlier, so a record the first hop reached
             # still renders its reply in the prompt the turn finally assembles.
@@ -1837,7 +1777,7 @@ class LearningLoop:
         """
         # **One footing per pass**, built here and for this conversation, exactly as
         # :meth:`respond` builds one per turn — because what it carries is per-pass
-        # state and because ADR-0238 §14 wires the trust store into one path.
+        # state. It holds no store and takes no store call (ADR-0247 §5).
         footing = None if self._footing is None else self._footing(conversation_id)
         recent = tuple(history)
         context = await self._context.assemble()
@@ -1847,18 +1787,12 @@ class LearningLoop:
         memories = preceding + supplement
         retrieved_ids = frozenset(record.id for record in retrieved) | supplement_read
         if footing is not None:
-            # ADR-0238 §2's first population, taken from the tail without a read for
-            # :meth:`_turn`'s own reason: ``ConversationLifecycle.history`` built it by
-            # walking this conversation's index rows, so asking ``turn_of_episode``
-            # about each would re-read rows this pass already walked. What the tail
-            # cannot answer for, :meth:`SearchFooting.admitted` places itself.
-            footing.conversation_episodes.update(
-                record.id for record in recent if MemoryKind(record.kind) is MemoryKind.EPISODIC
-            )
-            # §8's **early** fold, over the supply as it stands before the fourth group:
-            # the trigger is the admission, and folding here puts the ``False`` on the
-            # record as early as the fact exists.
-            await footing.admitted(memories)
+            # ADR-0238 §2's first two populations, recorded exactly as :meth:`_turn`
+            # records them: the supply this pass assembled, and nothing a servicing
+            # appends. **No fold** (ADR-0247 §5): the conversation's stored flag and
+            # the three store members that maintained it are removed, so this pass
+            # writes nothing to the conversation record.
+            footing.selected.update(record.id for record in memories)
         # ADR-0226 §6's budget and §7's deduplication, through the **one** function
         # that states them — so a resumed turn's fourth group is bounded and
         # deduplicated exactly as a servicing's is, and a second statement of the two
@@ -1876,16 +1810,6 @@ class LearningLoop:
         # operation, so the filter subtracts nothing and the records reach the
         # composing stage exactly as the other three groups do.
         context, memories = _narrowed(narrow, context, memories + fourth, retrieved_ids)
-        if footing is not None:
-            # §8's early fold again, on this pass's own fourth group — the same clause
-            # ``service_read_request`` applies after every admission, at the one place
-            # this pass admits anything.
-            await footing.admitted(fourth)
-            # §8's capture fold, over the **final** supply — the same sequence the
-            # episode's own ADR-0223 §1 mark is computed from, at the same instant and
-            # by the same component. It is the only fold that may report a pass *clean*,
-            # and the two agree because ``observe_search`` folds by **and**.
-            await footing.observe(memories)
         return TurnResult(
             goal=goal,
             context=context,
