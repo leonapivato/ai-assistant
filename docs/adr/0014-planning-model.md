@@ -266,8 +266,13 @@
   row (`SkipReason` gains **no** member), its retry ceiling and its `INDETERMINATE` treatment,
   which ADR-0253 §2 quotes to stop a branch rather than skip it; and §5's compare-and-swap
   discipline. §7's remaining deferrals are untouched: idempotency and `INDETERMINATE` resolution
-  are A8's, execution leases stand, and retention deadlines stand. Nothing decided here changes
-  and no Status edit is owed (ADR-0082 §1). Refs #2255, ADR-0253 §13.
+  are A8's, execution leases stand, and retention deadlines stand. **§5's export closure rule is
+  extended rather than changed** on the terms ADR-0249 §12 used for `attempt_id`: *"every
+  `goal_id`/`plan_id` referenced by an included record resolves within the same export"* reaches
+  the `execution_id` an evidence row's `interpreted_output` carries (ADR-0253 §8), and
+  `PlanExport` — which already carries `tuple[ExecutionState, ...]` — gains no member, so §5's
+  shape is untouched. Nothing decided here changes and no Status edit is owed (ADR-0082 §1). Refs
+  #2255, ADR-0253 §13.
 
 
 ## Context

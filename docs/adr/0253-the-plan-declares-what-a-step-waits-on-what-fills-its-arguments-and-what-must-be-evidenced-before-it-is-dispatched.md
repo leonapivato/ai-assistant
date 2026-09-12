@@ -789,27 +789,65 @@ step 2's condition is then evaluated by ADR-0252 §6's four tests over that row.
 > **Normative — how a row records a step-output input, and this is ADR-0252 §1's open question
 > answered for the second shape.** `core/types.py`'s **`GoalEvidence` gains `interpreted_output`,
 > an `InterpretedOutput | None`**, and `core/types.py` gains **`InterpretedOutput`**, a frozen
-> model with `extra="forbid"` carrying exactly `plan_id` (an `Identifier`), `step_id` (an
+> model with `extra="forbid"` carrying exactly `execution_id` (an `Identifier`), `step_id` (an
 > `Identifier`) and `field` (an `EncodableText | None`). ADR-0252 §1's by-basis validator gains a
 > **second `INTERPRETATION` shape**: such a row carries **exactly one** of one member of `records`
 > and an `interpreted_output`; in the second shape `records` is **empty**, and `returned` and
 > `admitted` are `0` in both. Every other clause of §1's validator binds entire.
 
+> **Normative — the reference names the *execution* and not the plan, because one plan has many.**
+> ADR-0014 §5's `start_execution` mints a **new** `ExecutionState` per run, and two executions of
+> one plan can carry two different `StepExecution.output` values for one step — so
+> `(plan_id, step_id)` names a *decision* and not a *value*, and a row built on it could not say
+> which output it read. `execution_id` names the value: `PlanStore.get_execution(execution_id)`
+> returns the state, its `steps` carry the `step_id`, and that step's `output` is the input the
+> verdict was formed over. **The plan is derived and never copied** — `ExecutionState.plan_id`
+> already names it — because a second carrier for the same fact is what ADR-0251 §3 calls the
+> defect whose first disagreement is right in one of them.
+
+> **Normative — ADR-0014 §5's export closure rule extends to `execution_id` rather than
+> changing.** Its clause — *"every `goal_id`/`plan_id` referenced by an included record resolves
+> within the same export"* — reaches this reference on the same terms, exactly as ADR-0249 §12
+> extended it to `attempt_id` and ADR-0250 to `question_id`: an export carrying a row whose
+> `interpreted_output` names an execution it does not carry does not validate. `PlanExport`
+> already carries `tuple[ExecutionState, ...]`.
+
 **A durable row must be able to name its own input, and a step output has a name where a minted
 record does not.** ADR-0252 §1 keeps a search-minted or fetch-minted record out of `records`
 because such a record *"resolves in no store"* — a row naming one *"would state a warrant it cannot
 show"*. A step's output does not have that defect: it is in `StepExecution.output` of a named step
-of a named plan, both of which the plan store holds and `delete_goal` cascades over, so
-`InterpretedOutput` is a reference that resolves for exactly as long as the row does. The plan id
-travels with it because a step id is minted per plan, and an attempt may hold several
-(ADR-0249 §12's `add_plan_id`).
+of a named execution, which the plan store holds and `delete_goal` cascades over, so
+`InterpretedOutput` is a reference that resolves for exactly as long as the row does.
 
 > **Normative — the plan carries `StepOutputRef` and the row carries `InterpretedOutput`, and the
-> loop composes the second from the first.** `orchestration` writes `plan_id` from the plan the
-> interpretation belongs to and `step_id`/`field` from the `StepOutputRef`; **no model supplies
-> any of the three**, and the projection is the same shape ADR-0249 §9 uses for `GoalBrief` —
-> a value complete for its own context, composed by the loop from the value complete for the
-> other.
+> loop composes the second from the first.** `orchestration` writes `execution_id` from the
+> execution it read the output from and `step_id`/`field` from the `StepOutputRef`; **no model
+> supplies any of the three**, and the projection is the same shape ADR-0249 §9 uses for
+> `GoalBrief` — a value complete for its own context, composed by the loop from the value complete
+> for the other.
+
+> **Normative — the two instants of an output-backed row, stated here because ADR-0252 §4 could
+> not.** Its `**read_at**` is the **producing step's `finished_at`** — the instant this system
+> performed the read the row was composed from, which for this shape is the call that produced the
+> output and never the interpretation call that read it. Its **`as_of` is absent**: `as_of` is
+> *"the instant the source itself declares"* (ADR-0252 §4), and a `StepExecution` carries no
+> declared source instant, so there is none to carry.
+
+> **Normative — no lane recovers an instant from an output's content.** Not from a field of the
+> output, not from a string in it, not from a model's sentence about it, and not by any inspection
+> of what it says. ADR-0252 §3's prohibition list binds this composition entire — a value
+> *"**never** from a model's sentence about what a response covered; and **never** from a
+> detector, a classifier or any inspection of a record's text"* — and ADR-0098 §6 is its ground.
+
+**Taking the interpretation call's own clock would let a delayed reading rejuvenate a stale one,
+which is the failure ADR-0252 §8 limb 6 exists to prevent.** A forecast step that finished at 08:00
+and an interpretation performed at 10:00 — after a pause, a resume or a restart — would otherwise
+produce a row whose effective instant is 10:00: it would pass a fifteen-minute recency requirement
+it should fail (ADR-0252 §6 test 4), and it could **supersede** a genuinely newer reading under
+ADR-0252 §8 limb 6, whose whole point is that *"A supersession may never regress the effective
+recency instant"*. Keying on the producing step's own completion makes the instant a fact about
+**when the world was read** rather than about when we got round to thinking about it, which is
+ADR-0252 §4's distinction applied to the one shape it had no producer for.
 
 > **Normative — an interpretation is not a `PlanStep`, and ADR-0226 §4's reasoning is adopted
 > whole rather than re-derived.** That section rules of a `ReadAsk`: *"A `ReadAsk` is not a
@@ -858,11 +896,14 @@ names durably — so the material a minted record would have carried is interpre
 route above, and refusing the label costs no plan anything it needs. **Whether a minted record of
 the supply may itself ever be an interpretation's input is not decided here** and is named in §11.
 
-> **Normative — `orchestration` checks the `record` and refuses the plan, before it is saved.**
-> The loop verifies that each interpretation's `record` is the `id` of a record of the `memories`
-> sequence **it** passed on that call. A plan failing that check is **refused before it is
-> saved**, on §9's terms and with §9's error class — not persisted, not driven, and not
-> interpreted.
+> **Normative — `orchestration` checks a `record` and refuses the plan, before it is saved, and
+> the check reaches the `record` shape alone.** For each interpretation **that carries a
+> `record`**, the loop verifies it is the `id` of a record of the `memories` sequence **it** passed
+> on that call. An interpretation carrying a **`reads`** is **not** subject to that check and is
+> not refused by it: its input is validated at construction, by the rules above — its
+> `reads.step` is a step of this plan, and every step whose `when` reads its verdict sits after
+> that step. A plan failing the `record` check is **refused before it is saved**, on §9's terms
+> and with §9's error class — not persisted, not driven, and not interpreted.
 
 > **Normative — an interpretation whose element carries no `applicability` is not performed**, it
 > records no row, and every `StepCondition` naming that element on the `INTERPRETATION` basis is
@@ -1156,8 +1197,10 @@ ordinal and indexes a sequence it holds.
 
 > **Normative — what `orchestration` refuses, gathered in one place.** A plan is **refused before
 > it is saved** — neither persisted, nor driven, nor interpreted — where a condition label
-> resolves to nothing (above), or where an interpretation's `record` is not the id of a record the
-> loop passed on that call. A plan **already saved** is **not driven** where ADR-0249 §8's
+> resolves to nothing (above), or where an interpretation **that carries a `record`** names one
+> that is not the id of a record the loop passed on that call. **An interpretation carrying a
+> `reads` is checked by neither** — its input is a value this plan will itself produce, and §8's
+> construction rules are the whole of what it owes. A plan **already saved** is **not driven** where ADR-0249 §8's
 > existing rule refuses it, because `targets_revision` is not the goal's current revision. A plan
 > is **not constructible** where §1's, §4's, §5's, §6's or §8's shape rules are breached. The
 > first set is checked by the loop because it needs the goal and the call's own supply; the second
@@ -1380,6 +1423,12 @@ and **partial** in ADR-0070 §3's sense. **ADR-0249 §13's A5 entry is discharge
 record and not a supersession: that section names what this ADR settles, and settling it is the
 entry being spent rather than replaced.
 
+**ADR-0014 §5's export closure rule is extended rather than changed**, on the terms ADR-0249 §12
+used for `attempt_id` and ADR-0250 for `question_id`: *"every `goal_id`/`plan_id` referenced by an
+included record resolves within the same export"* reaches an `interpreted_output`'s `execution_id`
+(§8), and `PlanExport` already carries the executions. `PlanExport` gains **no member** and §5's
+shape is untouched, so no supersession of §5 is owed and none is taken.
+
 **ADR-0014 — §7's two deferrals are fired, and that is a record and not a supersession.** *"Output
 references between steps"* and the dependency half of *"Step dependencies / parallel execution"*
 are each taken by §§1, 2 and 6. A deferral states that a decision was **not** taken, so firing one
@@ -1499,32 +1548,43 @@ The two lanes ship these, and #2255's acceptance rows are named where an arm car
 8. **`GoalEvidence` admits both `INTERPRETATION` shapes and no third**: one member of `records`
    and no `interpreted_output`; an `interpreted_output` and empty `records`; and neither, and
    both, are each refused. `returned` and `admitted` are `0` on both shapes (§8).
-9. `InterpretationVerdict`'s three values are **disjoint** from `ReadOutcomeKind`'s seven — a
+9. **Two executions of one plan produce two distinguishable rows.** `start_execution` twice over
+   one plan, step `S` returning a different `output` in each; the two interpretation rows carry
+   **different** `interpreted_output.execution_id` values, and each resolves through
+   `PlanStore.get_execution` to the output its verdict was formed over (§8). The arm is what
+   `(plan_id, step_id)` alone could not satisfy.
+10. **An output-backed row's `read_at` is the producing step's `finished_at` and its `as_of` is
+   absent** — asserted with the interpretation performed well after that instant, so the row's
+   effective instant is the step's and not the interpretation's. A paired arm asserts the
+   consequence: such a row **fails** a fifteen-minute recency requirement measured from the later
+   moment, and does **not** supersede a row whose effective instant is later (ADR-0252 §6 test 4,
+   §8 limb 6).
+11. `InterpretationVerdict`'s three values are **disjoint** from `ReadOutcomeKind`'s seven — a
    parameterized arm over both vocabularies, so a later member of either cannot silently collide
    (ADR-0252 §5).
-10. A `GoalElement` round-trips its `id` and its `applicability`; a **retained** element copied by
+12. A `GoalElement` round-trips its `id` and its `applicability`; a **retained** element copied by
    ADR-0249 §7's retention carries the **same** `id`, and a **restated** one carries a different
    one (§7).
-11. **A stored plan written before this decision decodes**, with all six new fields at their
+13. **A stored plan written before this decision decodes**, with all six new fields at their
    defaults, and is byte-identical on re-dump but for them; a stored `GoalElement` decodes with
    `id` and `applicability` absent (§10).
-12. `PROTOCOL_VERSION` and `PlanExport.schema_version` each moved by exactly one in L1, asserted
+14. `PROTOCOL_VERSION` and `PlanExport.schema_version` each moved by exactly one in L1, asserted
    against the log entry that names this ADR.
 
 **The seam (L2).**
 
-13. **A model-supplied step id is refused.** An envelope whose step object carries an `id` key is
+15. **A model-supplied step id is refused.** An envelope whose step object carries an `id` key is
     an extraction failure, and the arm asserts the plan's ids are the factory's (§1, §9).
-14. A **step ordinal** that is zero, negative, non-integer or out of range is an extraction
+16. A **step ordinal** that is zero, negative, non-integer or out of range is an extraction
     failure wherever it appears — in `after`, in a `resolves` entry, or in an interpretation's
     `reads` — and one that is **not strictly less than** the declaring step's own ordinal, or
     repeated within one `after`, is likewise refused. Each reaches the repair prompt; none is a
     dropped edge (§1, §6, §8, §9).
-15. A `when` `basis`, a `requires`, a `verifies` kind and a `read_kind` outside their vocabularies
+17. A `when` `basis`, a `requires`, a `verifies` kind and a `read_kind` outside their vocabularies
     are each extraction failures, parameterized over `1`, `"true"`, a case-variant and a near-miss
     spelling, on ADR-0176 §1's own arm shape (§9). An `evidence_recency` that is not an ISO-8601
     duration, is zero, or is negative is an extraction failure and is never clamped (§9).
-16. A `ProposedElement` proposing **no axis at all** records an element with `applicability`
+18. A `ProposedElement` proposing **no axis at all** records an element with `applicability`
     **absent**; one proposing axes that **do not compose** an `EvidenceApplicability` — an empty
     sequence axis, a window with both ends unset, a window whose `end` is not after its `start` —
     is an **extraction failure**, and neither case silently records a malformed requirement as no
@@ -1532,33 +1592,35 @@ The two lanes ship these, and #2255's acceptance rows are named where an arm car
     element with a **Sunday** applicability is **not** satisfied by an answering Saturday row,
     where the same condition over an element with **absent** applicability is — which is ADR-0252
     §6 test 1 as ratified and is why the malformed case may not reach it.
-17. An interpretation naming an `M` label **out of range**, or a label naming a **search-minted**
+19. An interpretation naming an `M` label **out of range**, or a label naming a **search-minted**
     or **fetch-minted** record, is an extraction failure (§8).
-18. A plan whose interpretation's `record` is not a record the loop passed on that call is
-    **refused before it is saved** — `save_plan` is not reached, no step is dispatched and no
-    interpretation is performed (§9).
-19. **The condition label resolves against the brief where no understanding is returned**: a brief
+20. A plan whose interpretation **carrying a `record`** names one the loop did not pass on that
+    call is **refused before it is saved** — `save_plan` is not reached, no step is dispatched and
+    no interpretation is performed. **The paired arm is the one that matters**: a plan whose
+    interpretation carries a **`reads`** and **no `record`** passes that check and **is saved**,
+    through the real orchestration save path (§8, §9).
+21. **The condition label resolves against the brief where no understanding is returned**: a brief
     carrying two conditions renders `D1` and `D2`; an envelope naming `D2` produces a plan whose
     `about` is the **second element's `id`**; `D3` resolves to nothing.
-20. **The condition label resolves against the understanding where one is returned**, which is the
+22. **The condition label resolves against the understanding where one is returned**, which is the
     first-turn case: a goal at revision 1 with **no** elements, an envelope proposing one
     condition and a step naming `D1`, produces a plan whose `about` is the `id` `orchestration`
     minted for that element **a moment earlier** — and the ordering is asserted, not inferred
     (§9).
-21. **The correspondence is to the proposal's own positions and never to the compacted recorded
+23. **The correspondence is to the proposal's own positions and never to the compacted recorded
     tuple**: an envelope proposing two conditions `[A, B]` of which **`A` is dropped** for an
     unresolvable ground. A step naming **`D1`** — the dropped element — **refuses the plan**; a
     step naming **`D2`** resolves to **`B`'s** `id` and the plan is saved. The arm asserts both
     halves, because indexing the recorded tuple instead would silently point `D2` at nothing and
     `D1` at `B`.
-22. `PlanStore.save_plan` **refuses** a plan carrying an unsubstituted label, or an `about` naming
+24. `PlanStore.save_plan` **refuses** a plan carrying an unsubstituted label, or an `about` naming
     an element of a revision the plan does not target, with the error class ADR-0249 §8 gives an
     unstamped `targets_revision` (§9) — a conformance-suite arm over both stores and the canonical
     fake.
 
 **The predicates, asserted as predicates because no lane drives them (L1).**
 
-23. **The dynamic plan, walked end to end — the arm #2255's *"Conditional plan spans multiple
+25. **The dynamic plan, walked end to end — the arm #2255's *"Conditional plan spans multiple
     decisions"* is owed in its own shape.** One goal carrying one condition element *the weather
     over the trip permits it* with a Sunday `applicability`; one plan targeting that revision with
     step 1 (`refresh_forecast`), interpretation 1 (`reads` step 1's output at `"summary"`,
@@ -1573,37 +1635,37 @@ The two lanes ship these, and #2255's acceptance rows are named where an arm car
     with `INCONCLUSIVE` it does **not**, and **the plan is intact and unreplanned in every case**.
     A second pass asserts that a step 1 which is `FAILED` leaves the interpretation unperformed
     and step 2 `UNMET_DEPENDENCY`, and that an `INDETERMINATE` step 1 leaves both **`PENDING`**.
-24. **"Booking depends on the weather condition being satisfied"** — a step whose `when` names a
+26. **"Booking depends on the weather condition being satisfied"** — a step whose `when` names a
     condition for which **no** row of the goal satisfies ADR-0252 §6's four tests is **not
     eligible**, asserted as the predicate over a constructed goal, a constructed evidence row set
     and a constructed plan.
-25. **"Conditional plan spans multiple decisions"** — two steps naming one element and requiring
+27. **"Conditional plan spans multiple decisions"** — two steps naming one element and requiring
     `QUALIFIES` and `DOES_NOT_QUALIFY`, over a goal holding **no** other row for that
     declaration: with a `QUALIFIES` row exactly one is eligible; with a `DOES_NOT_QUALIFY` row
     exactly the other; with an `INCONCLUSIVE` row **neither**; and the plan is intact in every
     case (§9).
-26. **An interpretation's verdict is about the proposition it was shown**: two elements carrying
+28. **An interpretation's verdict is about the proposition it was shown**: two elements carrying
     **identical `text`** and different Saturday and Sunday applicabilities produce two
     interpretation calls whose inputs **differ**, because the rendered applicability is part of
     the proposition (§8). The arm asserts the two rendered propositions are not equal.
-27. **An `INCONCLUSIVE` row disables nothing**: over a goal already holding a `STANDING`
+29. **An `INCONCLUSIVE` row disables nothing**: over a goal already holding a `STANDING`
     `QUALIFIES` row that passes all four tests, adding an `INCONCLUSIVE` row of the same
     declaration leaves the qualifying branch **eligible** — the row neither satisfies, nor
     refreshes, nor blocks (ADR-0252 §5, §7, §8 limb 5).
-28. **Two `STANDING` settling rows carrying different members over overlapping applicabilities
+30. **Two `STANDING` settling rows carrying different members over overlapping applicabilities
     satisfy neither branch**, and no rule of this decision picks a winner (ADR-0252 §7, §9).
-29. **Two steps about two different elements are both eligible where both are evidenced** — the
+31. **Two steps about two different elements are both eligible where both are evidenced** — the
     arm that records that §9's exclusivity does not generalise to disjunction and that nothing
     here makes an act at-most-once (§5).
-30. An **unresolvable reference** is `UNMET_DEPENDENCY`, over each of §6's six unresolvable cases,
+32. An **unresolvable reference** is `UNMET_DEPENDENCY`, over each of §6's six unresolvable cases,
     and **never** a default, a blank, an omitted parameter or a `null`.
-31. A **resolved reference is in the `ActionRequest` before `ActionPolicy.decide` is reached** —
+33. A **resolved reference is in the `ActionRequest` before `ActionPolicy.decide` is reached** —
     asserted at the seam, against ADR-0148 §1's completeness clause, with the resolved value
     present in the request's `parameters` and in the digest.
-32. A dependency on a `SUCCEEDED` producer whose `verifies` **fails** is unsatisfied; on a `FAILED`
+34. A dependency on a `SUCCEEDED` producer whose `verifies` **fails** is unsatisfied; on a `FAILED`
     or `SKIPPED` producer it is unsatisfied; on an **`INDETERMINATE`** producer the dependent step
     is **neither dispatched nor skipped** (§2).
-33. A step declaring **no** `verifies` is satisfied by `SUCCEEDED` alone, and a step declaring
+35. A step declaring **no** `verifies` is satisfied by `SUCCEEDED` alone, and a step declaring
     **no** `evidence_recency` is satisfied by a row of any age that passes the other three tests
     (§4, §5).
 
