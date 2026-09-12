@@ -8108,16 +8108,23 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
-    async def _resume_attempt(
-        self, step: StepOutcome, composed: ComposedReply | None, *, since: datetime
-    ) -> None:
-        """Move the attempt this resumed execution belongs to (ADR-0249 §12).
+    async def _resumed_attempt(self, step: StepOutcome) -> OpenedAttempt | None:
+        """Move the resumed execution's attempt out of waiting (ADR-0249 §12).
 
         **After the first write, every change goes through ``commit_attempt``, in this
         turn as in any later one** — and a resumption is the "any later one" that clause
         names. The attempt already exists and already references this execution, so what
         is owed here is bookkeeping and not an association: nothing opens an attempt, and
         §13's deferral of **which user acts open** one is untouched.
+
+        **It is committed the moment the fact becomes true**, which is when the step is
+        resolved and **before** the answer is composed. §12 states the timing in terms —
+        "each reaches the store through a ``commit_attempt`` … at the moment the fact
+        becomes true" — and the reason is what a later commit costs: composing is an
+        arbitrarily slow model call outside the resolution's lock, so a cancellation
+        landing in it would leave an attempt whose step has *already run* still recorded
+        as awaiting the user's approval, and the token now restates rather than resolving,
+        so nothing would ever repair it.
 
         **The attempt is found through the reference it already carries**, not guessed at:
         the execution names its plan, the plan names its goal, and exactly one of that
@@ -8127,27 +8134,19 @@ class Engine:
         migrated from before this decision — moves nothing, exactly as ADR-0244 §11's park
         whose goal the store never got is answered on what the park itself carries.
 
-        **The phases it passes are the ones it had not reached.** A parked attempt stands
-        at ``AUTHORIZE``; the approval drives the step, so ``EXECUTE`` is stamped, and the
-        answer then composed puts it at ``VERIFY``. It ends ``ANSWERED`` only where §5's
-        three conjuncts hold (:meth:`_answered`) — a refused confirmation is a condition
-        that blocked, and **which ``AttemptOutcome`` it earns is A10's** (§13).
-
-        **The ledger counts this pass and not the wait** (§5): ``working`` "excludes every
-        interval spent waiting for the user", and the park *is* that wait — so the
-        interval measured here starts when this resumption began and never at the park.
-
         Args:
             step: The step this resumption drove.
-            composed: What the composing stage produced, or ``None``.
-            since: When this resumption's own work began.
+
+        Returns:
+            The attempt as the store now holds it, or ``None`` where none references this
+            execution.
 
         Raises:
             PlanningError: As the store raises it.
         """
         plan = await self._plans.get_plan(step.state.plan_id)
         if plan is None:  # pragma: no cover — the execution's plan was persisted with it
-            return
+            return None
         found = [
             one
             for one in await self._plans.attempts_of(plan.goal_id)
@@ -8156,17 +8155,54 @@ class Engine:
         if not found:
             # No attempt references this execution: the park outlived a turn that never
             # reached §11's site, or the store predates this decision. Nothing to move.
+            return None
+        # §5, §6: the user has answered, so the attempt is no longer waiting on them —
+        # whichever way they answered. `EXECUTE` is the phase whose work the resolution
+        # just did, vacuously where the answer was a refusal, which is §6's own rule.
+        return await self._move_attempt(
+            OpenedAttempt(attempt=found[0]),
+            to_phase=AttemptPhase.EXECUTE,
+            to_state=AttemptState.RUNNING,
+        )
+
+    async def _finished_attempt(
+        self,
+        held: OpenedAttempt | None,
+        step: StepOutcome,
+        composed: ComposedReply | None,
+        *,
+        since: datetime,
+    ) -> None:
+        """Stamp ``VERIFY`` and end the resumed attempt where §5 admits it (§12).
+
+        The second half of a resumption's bookkeeping, committed once the answer exists:
+        ``VERIFY`` is where the attempt now stands, and it ends ``ANSWERED`` only where
+        §5's three conjuncts hold (:meth:`_answered`). A refused confirmation is a
+        condition that blocked, and **which ``AttemptOutcome`` it earns is A10's** (§13).
+
+        **The ledger counts this pass and not the wait** (§5): ``working`` "excludes every
+        interval spent waiting for the user", and the park *is* that wait — so the
+        interval measured here starts when this resumption began and never at the park.
+
+        Args:
+            held: The attempt as :meth:`_resumed_attempt` left it, or ``None``.
+            step: The step this resumption drove.
+            composed: What the composing stage produced, or ``None``.
+            since: When this resumption's own work began.
+
+        Raises:
+            PlanningError: As the store raises it.
+        """
+        if held is None:
             return
-        held = OpenedAttempt(attempt=found[0])
         answered = self._answered(composed, step)
-        moved = await self._move_attempt(held, to_phase=AttemptPhase.EXECUTE)
         await self._move_attempt(
-            moved,
+            held,
             to_phase=AttemptPhase.VERIFY,
-            to_state=AttemptState.ENDED if answered else AttemptState.RUNNING,
+            to_state=AttemptState.ENDED if answered else None,
             outcome=AttemptOutcome.ANSWERED if answered else None,
             ended_at=self._clock() if answered else None,
-            working=self._worked(moved, since),
+            working=self._worked(held, since),
         )
 
     def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
@@ -9787,12 +9823,15 @@ class Engine:
         recipient_grant = await self._establish_recipients(
             establishing, approved=approved, remember_recipients_until=remember_recipients_until
         )
+        # ADR-0249 §12: the attempt this execution belongs to, moved out of waiting at
+        # the moment that fact becomes true — **before** composing, which is an
+        # arbitrarily slow model call a cancellation can land in. Composing then runs,
+        # and only the half that depends on the answer waits for it.
+        held = await self._resumed_attempt(step)
         composed = await self._compose(parked.turn, step, deliveries={})
-        # ADR-0249 §12: the attempt this execution belongs to, moved on at the moment the
-        # facts become true — "in this turn as in any later one". `resumed_from` is read
-        # above the resolution so the ledger counts this pass's own work and not the
-        # interval the park spent waiting for the user (§5).
-        await self._resume_attempt(step, composed, since=resumed_from)
+        # `resumed_from` is read above the resolution, so the ledger counts this pass's
+        # own work and not the interval the park spent waiting for the user (§5).
+        await self._finished_attempt(held, step, composed, since=resumed_from)
         return await self._capture_resumption(
             parked, step, composed, recipient_grant=recipient_grant
         )
