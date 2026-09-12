@@ -1,7 +1,35 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched) and ADR-0242 (§10's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which at least one search servicing did not reach a result, which §6 of the superseding ADR gives the composing stage a second carrier for; §10's first sentence binds entire, so a turn that stopped at the bound or the budget with a read_request standing is still given that fact and still composes an answer that says so, and §10's remaining four clauses bind entire and are the pattern §7 of the superseding ADR follows — the carrier travels inside ai_assistant.orchestration as data, adds no member to a Protocol, is never inferred at the render site, and reaches no step account; §§1-9 and §§11-15 are untouched)
+- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched) and ADR-0242 (§10's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which at least one search servicing did not reach a result, which §6 of the superseding ADR gives the composing stage a second carrier for; §10's first sentence binds entire, so a turn that stopped at the bound or the budget with a read_request standing is still given that fact and still composes an answer that says so, and §10's remaining four clauses bind entire and are the pattern §7 of the superseding ADR follows — the carrier travels inside ai_assistant.orchestration as data, adds no member to a Protocol, is never inferred at the render site, and reaches no step account; §§1-9 and §§11-15 are untouched) and ADR-0249 (§1's third clause in its second sentence alone: "The goal is minted once per turn from the user's unrewritten words and nothing about it changed" is false of a goal that carries an interpretation and false of a turn that associates to a goal an earlier turn opened. That one sentence, and nothing else in this ADR: §1's subject-stability rule, "The revision carries the same `goal_id` as the plan it replaces", binds verbatim and is strengthened, since a turn's two calls now also receive the same `GoalBrief`; its reason, that "a second goal would make one turn look like two in every store that holds goals", binds entire; and §1's authored-at-the-seam clause, its context-assembled-once clause, its nothing-else-is-re-run clause and its capability-re-read clause are relied on unchanged, with §§2-15 untouched)
 - Date: 2026-09-03
+- **Partially superseded: 2026-09-12 by ADR-0249 — §1's third clause in its second
+  sentence alone. Nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that
+  `Goal` gets the meaning ADR-0014 §1 always gave it, and ADR-0248 landed first to make the
+  user's own words a value of their own. ADR-0249 is the decision that changes what a goal is.
+
+  **The sentence that moves.** §1's third clause reads *"The revision carries the **same
+  `goal_id`** as the plan it replaces. The goal is minted once per turn from the user's
+  unrewritten words and nothing about it changed; a second goal would make one turn look like
+  two in every store that holds goals."* Its second sentence states two things that stop being
+  true: under ADR-0249 a goal is **not** minted per turn — a turn may associate to a goal an
+  earlier turn opened, and a reopened goal starts a new attempt rather than a new goal — and a
+  goal's statement is **not** the user's unrewritten words but the current interpretation
+  revision's outcome statement. A reader holding only this ADR would mint a goal on every turn
+  and read the utterance off it, which is ADR-0070 §1's test coming out on the supersession
+  side.
+
+  **What §1 was actually deciding is kept verbatim, and is strengthened.** The subject-stability
+  rule — *"The revision carries the **same `goal_id`** as the plan it replaces"* — binds word
+  for word, and its reason binds entire: ADR-0249 adds no second goal within a turn and takes
+  nothing from that argument. What it adds is that a turn's two calls also receive the **same
+  `GoalBrief`**, so the subject is stable in its content as well as in its id.
+
+  **Nothing else in this ADR moves.** §1's remaining four clauses — a plan's decision content
+  authored at the `Planner.plan` seam, the context assembled once per turn, nothing else about
+  the turn re-run, and the capability vocabulary re-read immediately before each call — are
+  relied on by ADR-0249 exactly as written; §5's `supersedes` discipline is the model ADR-0249
+  copies for two more fields and is not moved; §8's namer rule binds ADR-0249's whole envelope;
+  and §§2-15 stand entire.
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
   working for every one. The first five:

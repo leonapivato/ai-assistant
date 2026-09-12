@@ -1,7 +1,50 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched)
+- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration and its `save_goal` upsert contract: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, and `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from; §1 is fulfilled and superseded in none; and §§2, 3, 4 and 7 are untouched)
 - Date: 2026-07-19
+- **Partially superseded: 2026-09-12 by ADR-0249 — §5's `PlanStore` member enumeration
+  and its `save_goal` upsert contract, §5's `PlanExport` shape in `attempts` alone, and §6's
+  `Planner.plan` input roster and return type. Nothing else in this ADR.** The owner ruled on
+  2026-09-12 (#2255) that `Goal` gets the meaning §1 always gave it; ADR-0248 landed first so
+  that the user's own words became a value of their own, and ADR-0249 is the decision that
+  changes what a goal is.
+
+  **§5's member enumeration and `save_goal`.** §5's code block lists eleven `PlanStore` members.
+  ADR-0249 adds `record_interpretation`, which appends one interpretation revision under
+  compare-and-swap; `open_attempt`, `get_attempt` and `attempts_of`; and `commit_attempt`, the
+  attempt's only mutation route. It also narrows `save_goal` from an upsert to the opening write
+  alone, because an upsert that replaced a whole goal would overwrite an append-only
+  interpretation chain in one call and defeat the compare-and-swap beside it. A reader holding
+  only this ADR would implement eleven members with an upserting `save_goal` and would not
+  conform, which is ADR-0070 §1's test coming out on the supersession side.
+
+  **§5's `PlanExport` shape, in `attempts` alone.** The document gains
+  `attempts: tuple[GoalAttempt, ...]` and its `schema_version` moves, exactly as ADR-0226 §4
+  moved it. §5's closure rule — *"every `goal_id`/`plan_id` referenced by an included record
+  resolves within the same export"* — is **extended rather than changed**: it reaches
+  `attempt_id` on the same terms.
+
+  **§6's roster and return.** §6's block declares `plan(self, goal: Goal, *, context, memories)
+  -> ActionPlan`. ADR-0041 and ADR-0211 have already partially superseded the roster; ADR-0249
+  changes the first positional's type to `GoalBrief`, adds `utterance` and `evidence`, and moves
+  the return to `PlannerOutput`, which carries the plan and the interpretation revision the
+  planner proposes. The return type moves here for the first time. §6's reason for parameters
+  rather than fetching — quoted in ADR-0211 §2 and relied on there — binds entire.
+
+  **§1 is fulfilled, not superseded, and the showing is here.** Its sentence *"A `Goal` is
+  deliberately **not** the same thing as a user utterance"* becomes true of the implementation
+  for the first time; its *"`Goal` is a `core` type rather than a memory kind"* is the ground
+  ADR-0249 gives for not making this a `MemoryKind`; and its *"a goal … **outlives any one
+  conversation**"* binds entire, which is why ADR-0249 makes `Goal.conversation_id` provenance
+  rather than a fence. §1's code block gains fields, which is the additive kind of change
+  ADR-0226 §4 made to §2's block without a record being owed: a reader holding only §1 builds a
+  conforming `Goal` and reads a conforming `statement`. Under ADR-0082 §1's test the answer is
+  no, so no record is owed against §1 and none is written.
+
+  **Nothing else moves.** §2's frozen plan, its new-plan-new-id rule, its capability
+  abstraction and its `JsonValue` reasoning; §3's `ExecutionState`; §4's transition graph, its
+  retry ceiling and its `INDETERMINATE` treatment; and §7's deferrals — of which ADR-0249 fires
+  none and names which later lane of #2255 takes each — all stand as ratified.
 - Note (2026-07-21): §4's RUNNING → INDETERMINATE transition has a second
   trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline, or is
   cancelled, while side_effecting and not NATURAL. §4's rule is unchanged and is

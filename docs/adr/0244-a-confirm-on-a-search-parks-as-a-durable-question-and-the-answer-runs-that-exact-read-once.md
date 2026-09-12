@@ -1,6 +1,6 @@
 # 244. A `CONFIRM` on a search parks as a durable question, and the answer runs that exact read once
 
-- Status: Partially superseded by ADR-0247 (§6's clause 2 entire — `search_draw` and `Settings.search_calls_per_conversation` both being removed, the fact that clause establishes, that the conversation exists and is not stamped deleted, passes to a read of `ConversationStore.get`, which answers `None` on the same two grounds, and the clause's remaining sentence that `admit_search` is not called becomes vacuous rather than false; §9's definition of `UNAVAILABLE_NOW` in its `search_calls_per_conversation` limb alone, the member keeping its name, its value, its position in §9's precedence order and its other two grounds; and §12's re-closure of `SearchNotServiced` at nine members in that count alone, the enumeration becoming seven as the two members defined over `admit_search`'s refusal are removed. Those three scopes, and nothing else in this ADR: §§1-5, §6's other five clauses, its ordering, its gate and its route-(a) authority clause, §7, §8, §9's other six members and its precedence and no-reason rules, §§10-11, §12's remaining clauses and §§13-23 stand entire, and §6's rule that `trust_of` is not asked again at the answer is relied upon and strengthened) and ADR-0248 (§2's field enumeration and its three-content-fields clause, and §3's `settle` clearing clause, each in the count alone: `ParkedRead` gains a fourth content field, `utterance`, carrying the parked turn's request, and settlement clears four fields rather than three. Those two scopes, and nothing else in this ADR: the nine fields already enumerated keep their names, types, meanings and defaults; §2's model validator keeps both halves it already refuses and is not extended to the new field; §2's never-carries clause, its `parameters` clause and its `APPROVED` clause bind entire; §3's indivisibility, its content-lives-as-long-as-the-question rule, its one-open-park-per-conversation rule, its one-park-per-decision rule and its other six members are untouched; and §§1, 4-23 stand entire)
+- Status: Partially superseded by ADR-0247 (§6's clause 2 entire — `search_draw` and `Settings.search_calls_per_conversation` both being removed, the fact that clause establishes, that the conversation exists and is not stamped deleted, passes to a read of `ConversationStore.get`, which answers `None` on the same two grounds, and the clause's remaining sentence that `admit_search` is not called becomes vacuous rather than false; §9's definition of `UNAVAILABLE_NOW` in its `search_calls_per_conversation` limb alone, the member keeping its name, its value, its position in §9's precedence order and its other two grounds; and §12's re-closure of `SearchNotServiced` at nine members in that count alone, the enumeration becoming seven as the two members defined over `admit_search`'s refusal are removed. Those three scopes, and nothing else in this ADR: §§1-5, §6's other five clauses, its ordering, its gate and its route-(a) authority clause, §7, §8, §9's other six members and its precedence and no-reason rules, §§10-11, §12's remaining clauses and §§13-23 stand entire, and §6's rule that `trust_of` is not asked again at the answer is relied upon and strengthened) and ADR-0248 (§2's field enumeration and its three-content-fields clause, and §3's `settle` clearing clause, each in the count alone: `ParkedRead` gains a fourth content field, `utterance`, carrying the parked turn's request, and settlement clears four fields rather than three. Those two scopes, and nothing else in this ADR: the nine fields already enumerated keep their names, types, meanings and defaults; §2's model validator keeps both halves it already refuses and is not extended to the new field; §2's never-carries clause, its `parameters` clause and its `APPROVED` clause bind entire; §3's indivisibility, its content-lives-as-long-as-the-question rule, its one-open-park-per-conversation rule, its one-park-per-decision rule and its other six members are untouched; and §§1, 4-23 stand entire) and ADR-0249 (§2's field enumeration, in the count and in one field's type, layering on ADR-0248's record: `ParkedRead.goal` becomes a `GoalBrief`, the planner-facing projection of the goal the parked turn was planned against, and the record gains a non-content field `goal_id` that settlement does not clear. That one scope, and nothing else in this ADR: §2's three-content-fields clause as ADR-0248 widened it — four content fields — is not widened again, because `goal_id` is an identifier and joins the facts that survive settlement; §2's model validator keeps both halves it refuses; §2's never-carries clause, its `parameters` clause and its `APPROVED` clause bind entire; §3's indivisibility, its content-lives-as-long-as-the-question rule, its one-open-park-per-conversation rule, its one-park-per-decision rule, its `settle` clearing clause and its other six members are untouched; and §§1, 4-23 stand entire)
 - Date: 2026-09-10
 - **Partially superseded: 2026-09-12 by ADR-0248 — §2's field enumeration and its
   three-content-fields clause, and §3's `settle` clearing clause, each in the count alone.
@@ -40,6 +40,37 @@
   facts at settlement, `drop_for_conversation`, the resolve-once gate, the expiry and
   cancellation rules and the whole `ParkedReads` Protocol are untouched — ADR-0248 changes
   no Protocol at all.
+
+- **Partially superseded: 2026-09-12 by ADR-0249 — §2's field enumeration, in the count and
+  in one field's type, layering on ADR-0248's record. Nothing else in this ADR.** ADR-0249 is
+  the decision the owner ruled on 2026-09-12 (#2255): `Goal` gets the meaning ADR-0014 §1 always
+  gave it, carrying an append-only sequence of interpretation revisions whose elements reference
+  the records that ground them.
+
+  **`ParkedRead.goal` becomes a `GoalBrief`.** §2 persists the goal *"because §8 composes over
+  them and would otherwise fabricate them"*, and §8 composes a **resumed turn** — for which the
+  brief is exactly the value the parked turn planned against. Storing the projection rather than
+  the record **strengthens** §3's rule that *"The content lives exactly as long as the question
+  does"*, by holding strictly less Tier 1 content for the same duration: a `GoalBrief` carries no
+  ground reference, no record identifier and no interpretation history. A reader holding only
+  this ADR would expect a whole `Goal`, which is ADR-0070 §1's test coming out on the
+  supersession side.
+
+  **The record gains `goal_id`, and settlement does not clear it.** It joins `id`,
+  `conversation_id`, `decision_id`, `parked_at`, `expires_at` and `disposition` among the facts
+  that survive settlement, because it is an identifier rather than content and it is what
+  associates a later answer back to the right goal. §2's three-content-fields clause, which
+  ADR-0248 widened to four, is therefore **not widened again**, and §3's `settle` clearing clause
+  stands exactly as ADR-0248 left it.
+
+  **§2's validator is not extended.** Both halves it refuses stand — an `OPEN` park missing any
+  content field, and a terminal park carrying any of them — and `goal_id` sits outside that set
+  in both directions.
+
+  **Nothing else in this ADR moves.** §1's park-on-`CONFIRM` rule, §§4-23, `drop_for_conversation`,
+  the resolve-once gate, the expiry and cancellation rules and the whole `ParkedReads` Protocol
+  are untouched: ADR-0249 changes the type of one field and adds one, and adds no member to that
+  Protocol.
 
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's second clause in three of its limbs, §9's fifth clause in its one-route limb,
