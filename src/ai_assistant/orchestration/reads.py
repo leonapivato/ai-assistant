@@ -1768,9 +1768,9 @@ class SearchServicer:
             #
             # **Nothing is sent, opened, claimed or spent here** (§1). No channel, no
             # credential, no `ToolCall`, no ledger claim, no minted record, and
-            # ADR-0194's spend admission is not reached — and the conversation's
-            # `admit_search` call, spent before the ruling, is **not refunded**
-            # (ADR-0238 §8).
+            # ADR-0194's spend admission is not reached. There is no per-conversation
+            # allowance left for a park to spend or a refund to restore either
+            # (ADR-0247 §5).
             park = await self._park(request, recorded, footing=footing, goal=goal, plan=plan)
             return self._not_serviced(
                 SearchDisposition.RULING_CONFIRM,
@@ -2121,8 +2121,8 @@ class SearchServicer:
         # the clock's reading is settled `EXPIRED` at the first operation that reads it
         # — an answer, an enumeration, **or the conversation's own next servicing**."
         # This is that servicing, and without it a park nobody enumerated and nobody
-        # answered would hold the conversation's one open slot past its own deadline —
-        # spending an `admit_search` call per turn and offering no question for it.
+        # answered would hold the conversation's one open slot past its own deadline,
+        # refusing every later question for it and offering no answer to any.
         #
         # **It settles nothing else** (§6's one-gate clause): an open park that has not
         # expired is left exactly where it is, and the servicing's own `park` below is
@@ -2899,12 +2899,13 @@ def _search_supply(
     conversation that ``orchestration`` selected into the turn's supply; the
     ``MemoryRecord`` values the turn's retrieval and episodic supplement selected; and
     records **this turn's own** ``WEB_SEARCH`` servicings minted at a destination of
-    recorded trust ``USER_CHOSEN``. The first two are :attr:`SearchFooting.selected`,
-    written by the loop from the supply it assembled — the first of them recorded a
-    second time, on its own, as :attr:`SearchFooting.conversation_episodes`, because
-    :meth:`SearchFooting.clean` tells the two apart and this function does not; the
-    third is :attr:`SearchFooting.minted_user_chosen`. **Nothing of any other origin
-    enters** —
+    recorded trust ``USER_CHOSEN`` — which ADR-0247 §1 decides from the registration.
+    The first two are :attr:`SearchFooting.selected`, written by the loop from the
+    supply it assembled; the third is :attr:`SearchFooting.minted_user_chosen`. The two
+    sets are the whole of the membership test below, which is why ADR-0247 §3 keeps them
+    (*"``SearchSupply``, its populations and its construction site are untouched"*) while
+    §11's lane-4 enumeration removes every other member of that object. **Nothing of any
+    other origin enters** —
     "no record minted at an ``UNCHOSEN`` destination, by a fetch, by a file read, by a
     reader or by any tool" — and each of those reaches the turn through a *servicing*
     rather than through the supply the planner was assembled over, so none of them is in
@@ -2913,12 +2914,12 @@ def _search_supply(
     **Membership of the enumerated populations, and never cleanliness.** A stamped
     episode carries a recorded external span and is admitted here whichever conversation
     it belongs to, because §2 names it and §2's own closing paragraph makes it the thing
-    that "resolves *find more about that* across turns". Whether it also costs the
-    *closed-loop* condition (§5) is a separate question answered by
-    :meth:`SearchFooting.clean` at the moment the turn is captured. **It no longer
-    decides what is sent** (ADR-0247 §4): §5's current-turn and recorded halves are
-    retired, so a record of any other external origin is composed over *and* sent, and
-    what bounds the disclosure is the destination rather than the lineage.
+    that "resolves *find more about that* across turns". **Whether it costs the
+    *closed-loop* condition is no longer a question at all** (ADR-0247 §4): §5's
+    current-turn and recorded halves are retired and the predicate that answered them is
+    removed with the budget (ADR-0247 §5), so a record of any other external origin is
+    composed over *and* sent, and what bounds the disclosure is the destination rather
+    than the lineage.
 
     **§3's filter reads no placement at all, on a chosen destination** (ADR-0246 §1).
     Reach is audience control — ADR-0217 §1's denotation of a set of **people** — and

@@ -1724,27 +1724,19 @@ class LearningLoop:
         servicing, of which there is none, records its own disposition in its own
         turn's event.
 
-        **ADR-0238 §8's two folds are owed here and are taken here**, which is what
-        ADR-0244 §8's "the exchange is captured as a turn's exchange is captured" costs
-        on this axis. A resumed turn admits records to a conversation exactly as any
-        other does — its retrieval, its episodic supplement and the approved read's own
-        mint — and §8's trigger is *the admission*, "whether or not that turn ever
-        builds a ``WEB_SEARCH`` request". A pass that folded neither would leave the
-        conversation's ``all_external_user_chosen`` flag standing at ``True`` over a
-        supply that had just carried external content, and §5's **recorded** half would
-        then hand a later search a ``closed_loop`` it has not earned. The early fold
-        narrows §8's window to one store write; the capture fold is the one that may
-        report a turn *clean*, because only the end of the pass sees the final supply.
+        **No fold is owed here and none is taken** (ADR-0247 §5). ADR-0238 §8's two
+        folds stood here, and the conversation's ``all_external_user_chosen`` flag they
+        maintained is removed with the per-conversation call budget, along with the
+        three ``ConversationStore`` members that wrote it. So this pass writes nothing to
+        the conversation record, and the reason a fold was owed at all — §5's **recorded**
+        half handing a later search a ``closed_loop`` it had not earned — is gone with
+        that condition (ADR-0247 §4). ADR-0244 §6's "``trust_of`` is not asked again and
+        no destination's recorded trust is written" binds entire and is strengthened by
+        ADR-0247 §1: the trust store is not read at the park either.
 
-        **The approved read's own records are folded as any other external span is**,
-        and that is the fail-closed direction rather than an omission. §8's predicate
-        asks whether a span was minted "at a destination of recorded trust
-        ``USER_CHOSEN``", and ADR-0244 §6 rules that at the answer "``trust_of`` is not
-        asked again and no destination's recorded trust is written" — so this pass holds
-        no answer to that question and may not invent one. The fold therefore treats
-        them as it treats every record no set vouches for, which lowers the flag and can
-        only *reduce* what a later search is authorised to compose over. ADR-0238 §8
-        makes the flag monotone, so nothing is reopened by it.
+        **What this pass does record is ADR-0238 §2's first two populations**, from the
+        supply it assembles before the approved read's records are appended — the same
+        value :meth:`_turn` records, for the same reason and at the same position.
 
         Args:
             goal: The parked turn's goal, read from the park.
@@ -1755,7 +1747,7 @@ class LearningLoop:
                 composes, and what tells the user why is ADR-0242 §6's carrier the
                 caller passes to the composing stage (ADR-0244 §8).
             conversation_id: The conversation the parked turn ran under, read from the
-                park. **This pass's ADR-0238 footing is built from it**, and it is taken
+                park. **This pass's search footing is built from it**, and it is taken
                 as an argument rather than inferred for :meth:`respond`'s own reason:
                 the footing is a per-turn value over a conversation the caller names.
             history: The conversation's replay tail, as every turn is handed one.
