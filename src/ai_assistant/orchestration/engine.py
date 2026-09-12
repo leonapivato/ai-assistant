@@ -83,7 +83,7 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -110,6 +110,10 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    AttemptOutcome,
+    AttemptPhase,
+    AttemptState,
+    AttemptTransition,
     Belief,
     BeliefSummary,
     Confirmation,
@@ -121,6 +125,7 @@ from ai_assistant.core.types import (
     Disposition,
     Evidence,
     ExchangeDisposition,
+    GoalRevision,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -246,7 +251,6 @@ if TYPE_CHECKING:
         EncodableText,
         FeedbackEvent,
         FrozenJsonMapping,
-        Goal,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -285,7 +289,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
-    from ai_assistant.orchestration.loop import LearningLoop
+    from ai_assistant.orchestration.loop import LearningLoop, OpenedAttempt, RecordedGoal
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
@@ -8026,8 +8030,8 @@ class Engine:
         for plan in plans:
             await self._plans.save_plan(plan)
 
-    async def _save_goal(self, goal: Goal | None) -> None:
-        """Persist the goal record the loop built for this turn (ADR-0249 §11).
+    async def _save_goal(self, record: RecordedGoal | None) -> None:
+        """Persist the goal record the loop built for this turn (ADR-0249 §11, §12).
 
         **The loop builds the goal record and its revisions; this component persists
         them**, at the one site that persists a plan today. The record travels on
@@ -8039,22 +8043,135 @@ class Engine:
         carrier shape ADR-0242 §7 already uses, and it is what keeps ADR-0228 §5's
         prohibition intact — **no lane gives** ``LearningLoop`` **a** ``PlanStore``.
 
+        **Two routes, and the carrier says which** (§12). ``save_goal`` is "the opening
+        write alone" and refuses a goal whose id the store already holds, so a goal this
+        turn **opened** goes through it carrying its whole interpretation chain, while a
+        goal the store already holds takes one ``record_interpretation`` per revision —
+        each under §12's compare-and-swap, against the ``version`` the write before it
+        returned. Trying one and catching the other's refusal would turn a genuine
+        duplicate-id fault into a silent append.
+
         ``None`` is unreachable from any path this component drives — every
         ``RespondedTurn`` the loop returns carries a record — and is accepted rather
         than asserted away so that a caller's double cannot turn a missing carrier
         into a crash at the persistence site.
 
         Args:
-            goal: The goal record the loop opened for this turn, or ``None``.
+            record: What the loop decided about this turn's goal, or ``None``.
 
         Raises:
-            PlanningError: As ``save_goal`` raises it — including where the store
-                already holds a goal under that id, which ADR-0249 §12 makes a refusal
-                rather than an upsert.
+            PlanningError: As ``save_goal`` and ``record_interpretation`` raise it —
+                including where the store already holds a goal under that id, which
+                ADR-0249 §12 makes a refusal rather than an upsert.
+            StaleExecutionError: As ``record_interpretation`` raises it, where the
+                stored ``Goal.version`` has moved on since the loop read it (§12).
         """
-        if goal is None:  # pragma: no cover — every RespondedTurn carries a record
+        if record is None:  # pragma: no cover — every RespondedTurn carries a record
             return
-        await self._plans.save_goal(goal)
+        if record.opened:
+            await self._plans.save_goal(record.goal)
+            return
+        # §12: the version the loop computed against, then the version each write
+        # returns — read from the store's own answer rather than incremented here, so
+        # the token stays the store's and a second authority cannot drift from it.
+        expected = record.goal.version
+        for interpretation in record.revisions:
+            stored = await self._plans.record_interpretation(
+                GoalRevision(
+                    goal_id=record.goal.id,
+                    interpretation=interpretation,
+                    expected_version=expected,
+                )
+            )
+            expected = stored.version
+
+    async def _open_attempt(self, opened: OpenedAttempt | None) -> None:
+        """Write the attempt the loop opened, at §11's site (ADR-0249 §11, §12).
+
+        **Opening an attempt and persisting one are two acts, and this is the second.**
+        The loop opened it in memory at the user act; it is written here "carrying the
+        phase and state it stands at and the references it has accumulated by that
+        moment", which is why this call follows :meth:`_save_goal` and
+        :meth:`_persist_plans` — ``open_attempt`` refuses an attempt whose ``goal_id``
+        names no stored goal or whose ``plan_ids`` its goal does not hold.
+
+        A turn that ends before this site writes no attempt row, exactly as it writes no
+        goal row and no plan row (§12).
+
+        Args:
+            opened: The attempt the loop opened, or ``None``.
+
+        Raises:
+            PlanningError: As ``open_attempt`` raises it.
+        """
+        if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
+            return
+        await self._plans.open_attempt(opened.attempt)
+
+    async def _move_attempt(  # noqa: PLR0913 — one parameter per member of the frozen command a move may set; a bundle here would be a second spelling of `AttemptTransition`
+        self,
+        opened: OpenedAttempt | None,
+        *,
+        to_phase: AttemptPhase | None = None,
+        to_state: AttemptState | None = None,
+        outcome: AttemptOutcome | None = None,
+        ended_at: datetime | None = None,
+        add_execution_id: str | None = None,
+    ) -> OpenedAttempt | None:
+        """Commit one attempt transition and carry the moved attempt forward (§12).
+
+        **After the first write, every change goes through ``commit_attempt``, in this
+        turn as in any later one.** The site §11 names precedes ``start_execution`` and
+        precedes composition, so an execution id, the phase reaching ``VERIFY``, the
+        terminal ``state`` and the ``outcome`` a turn earns are all facts that do not
+        exist yet when the row is first written; each reaches the store **at the moment
+        the fact becomes true**. Nothing buffers a transition and nothing replays one.
+
+        The returned attempt is the store's own answer, which is what carries the
+        advanced ``version`` the next transition is computed against — read rather than
+        incremented here, so the compare-and-swap token has one authority.
+
+        Args:
+            opened: The attempt as this pass last held it, or ``None``.
+            to_phase: The phase to stamp; never earlier than the one held (§6).
+            to_state: The state to move to; never out of a terminal member (§5).
+            outcome: What the attempt produced, set as it reaches a terminal state.
+            ended_at: When it reached one.
+            add_execution_id: An execution this attempt opened, appended to
+                :attr:`~ai_assistant.core.types.GoalAttempt.execution_ids`.
+
+        Returns:
+            The attempt as the store now holds it, beside the phases stamped so far, or
+            ``None`` where there was none to move.
+
+        Raises:
+            PlanningError: As ``commit_attempt`` raises it.
+            IllegalTransitionError: If the move is not legal from where the attempt
+                stands — a phase earlier than the one held, or any move out of a
+                terminal state.
+            StaleExecutionError: If the stored version has moved on (§12).
+        """
+        if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
+            return None
+        if not any((to_phase, to_state, outcome, ended_at, add_execution_id)):
+            # Every absent member leaves its field unchanged (§12), so a transition that
+            # sets none of them would advance the compare-and-swap token and change
+            # nothing else — a write whose only effect is to invalidate a version
+            # another writer is holding.
+            return opened
+        moved = await self._plans.commit_attempt(
+            AttemptTransition(
+                attempt_id=opened.attempt.id,
+                expected_version=opened.attempt.version,
+                to_phase=to_phase,
+                to_state=to_state,
+                outcome=outcome,
+                ended_at=ended_at,
+                add_execution_id=add_execution_id,
+            )
+        )
+        stamped = opened.phases + (() if to_phase is None else (to_phase,))
+        return replace(opened, attempt=moved, phases=stamped)
 
     async def _run_turn(  # noqa: PLR0913 — the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs
         self,
@@ -8244,12 +8361,24 @@ class Engine:
         # to save. It travels inside `ai_assistant.orchestration` as data, adding no
         # member to any Protocol, which is the carrier shape ADR-0242 §7 already uses.
         goal_record = responded.goal
+        # ADR-0249 §11, §12: the attempt the loop opened, on the same carrier and for
+        # the same reason. It is written **after** the goal and the plans it references,
+        # and every later change goes through `commit_attempt` at the moment the fact
+        # becomes true.
+        attempt = responded.attempt
         if not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
             # could park — so it needs no capacity slot, and its goal and plan are
             # persisted as an auditable record (ADR-0014 §2).
             await self._save_goal(goal_record)
             await self._persist_plans(plans)
+            await self._open_attempt(attempt)
+            # ADR-0249 §6: "a phase whose work is vacuous is stamped and left in the
+            # same instant". A no-action turn authorises nothing and executes nothing,
+            # so both phases are stamped and left — six responsibilities and six
+            # observable transitions, on the turn §6 names as passing through all six.
+            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
+            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
             composed = await compose(
                 turn,
                 None,
@@ -8259,6 +8388,18 @@ class Engine:
                 stopped_while_asking,
                 structured,
                 search_not_serviced,
+            )
+            # §5, §6: written **after the answer exists**, which is the whole of what
+            # `ANSWERED` asserts — "a reply exists, no step failed and no condition
+            # blocked". Nothing here claims a result before it happened, and nothing
+            # moves `GoalStatus`: §4 gives `ACHIEVED` no producer, and "producing a
+            # reply never by itself establishes that a goal was achieved".
+            attempt = await self._move_attempt(
+                attempt,
+                to_phase=AttemptPhase.VERIFY,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=self._clock(),
             )
             return await self._capture(
                 conversation.id,
@@ -8304,7 +8445,17 @@ class Engine:
             # decided and recorded nothing, not one that acted and then lost the
             # record of why.
             await self._persist_plans(plans)
+            await self._open_attempt(attempt)
+            # ADR-0249 §6: `AUTHORIZE` is stamped before the step is driven, because the
+            # permission decision the runner takes is that phase's work — and it is
+            # stamped whether or not a decision is reached, since §6 makes the six
+            # phases six responsibilities rather than six conditions.
+            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
             state = await self._plans.start_execution(turn.plan.id)
+            # §5: **referenced by id and never inlined**, appended at the moment the
+            # execution exists rather than claimed in advance. No phase moves with it:
+            # what the drive reaches decides that, below.
+            attempt = await self._move_attempt(attempt, add_execution_id=state.id)
             # ADR-0181 §2, §4: the origin the authoriser evaluates — the value
             # hoisted above, handed on rather than recomputed here. Until ADR-0223 §2
             # it was computed at this line, inside the branch that has a step to
@@ -8335,6 +8486,17 @@ class Engine:
             if step.confirmation is not None
             else None
         )
+        # ADR-0249 §5, §6: where the drive **parked**, the attempt is waiting for the
+        # user and stands where it stood — `AWAITING_AUTHORIZATION` is one of the three
+        # states §5 calls a paused goal, it is not terminal, and the phase does not move
+        # because the authorisation has not been given. Where it did not park, the
+        # attempt has left `AUTHORIZE` whatever the step earned, so `EXECUTE` is stamped
+        # — vacuously on a step nothing ran, which is §6's own rule.
+        attempt = await self._move_attempt(
+            attempt,
+            to_state=AttemptState.AWAITING_AUTHORIZATION if parked is not None else None,
+            to_phase=None if parked is not None else AttemptPhase.EXECUTE,
+        )
         # The terminal composing stage, after execution and before the exchange is
         # recorded (ADR-0170 §1). Ordering against capture is free — ADR-0170 §9
         # leaves whether the answer joins the captured episode to `track:memory`
@@ -8350,6 +8512,21 @@ class Engine:
             stopped_while_asking,
             structured,
             search_not_serviced,
+        )
+        # §5, §6: `VERIFY` is stamped once the answer exists, and the attempt **ends**
+        # only where §5's own definition of `ANSWERED` is literally satisfied — "a reply
+        # exists, no step failed and no condition blocked". A parked turn is still
+        # waiting; a step that was denied, found no capable tool or carried invalid
+        # parameters is a turn whose attempt this decision disposes of not at all, and
+        # **which `AttemptOutcome` it earns is A10's** (§13). That gap is §4's stated
+        # cost taken deliberately: an outcome nothing established would be worse.
+        answered = parked is None and step.disposition is Disposition.EXECUTED
+        attempt = await self._move_attempt(
+            attempt,
+            to_phase=None if parked is not None else AttemptPhase.VERIFY,
+            to_state=AttemptState.ENDED if answered else None,
+            outcome=AttemptOutcome.ANSWERED if answered else None,
+            ended_at=self._clock() if answered else None,
         )
         return await self._capture(
             conversation.id,

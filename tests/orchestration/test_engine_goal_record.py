@@ -17,7 +17,13 @@ import pytest
 from test_engine import PATIENT, Harness, NoStepPlanner
 
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import Ground
+from ai_assistant.core.types import (
+    AttemptOutcome,
+    AttemptPhase,
+    AttemptState,
+    GoalStatus,
+    Ground,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -164,27 +170,34 @@ async def test_a_turn_that_ends_before_the_site_writes_no_goal_row() -> None:
     export = await harness.plans.export()
     assert export.goals == (), "no goal row"
     assert export.plans == (), "no plan row"
-    assert export.attempts == (), "and no attempt row — none is opened in this lane at all"
+    assert export.attempts == (), "and no attempt row — the attempt was opened in memory only"
 
 
-async def test_no_attempt_is_opened_and_no_phase_is_stamped() -> None:
-    """ADR-0249 §15: "no behaviour changes in L1".
+async def test_a_plain_question_records_one_interpretation_and_one_attempt() -> None:
+    """ADR-0249 §16 item 1 (S1), the halves an engine-level case reaches.
 
-    Asserted over a turn that ran end to end rather than over the source: an attempt
-    opened but never written would be invisible to a grep and visible here.
+    A planner that proposes no understanding leaves the goal at revision 1 and its
+    ``version`` unmoved — §6: "recording an interpretation revision does not move the
+    phase", and a turn that records none moves nothing at all — while the attempt is
+    still opened, stamped through all six phases and ended ``ANSWERED``. The phase
+    sequence itself is asserted in ``test_engine_attempts.py``; what this case holds is
+    that the goal side of S1 is unchanged by the attempt side.
     """
     harness = Harness(planner=NoStepPlanner())
 
     outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
     assert outcome.turn is not None
-    export = await harness.plans.export()
-    assert export.attempts == ()
-    assert await harness.plans.attempts_of(outcome.turn.goal.goal_id) == ()
     stored = await harness.plans.get_goal(outcome.turn.goal.goal_id)
     assert stored is not None
     assert len(stored.interpretation) == 1, "no understanding is proposed and none recorded"
     assert stored.version == 0, "and the goal's compare-and-swap token has not moved"
+    assert stored.status is GoalStatus.ACTIVE, "§4: producing a reply establishes nothing"
+    (attempt,) = await harness.plans.attempts_of(outcome.turn.goal.goal_id)
+    assert attempt.goal_id == stored.id
+    assert attempt.phase is AttemptPhase.VERIFY
+    assert attempt.state is AttemptState.ENDED
+    assert attempt.outcome is AttemptOutcome.ANSWERED
 
 
 def test_the_loop_holds_no_plan_store(monkeypatch: pytest.MonkeyPatch) -> None:

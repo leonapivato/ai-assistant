@@ -1270,6 +1270,25 @@ class ServicedCarriers:
     is the same all-or-nothing posture ADR-0226 §5 gives the supply.
 
     Attributes:
+        minted: ADR-0249 §7's carrier — the ids of the records this servicing's
+            ``WEB_SEARCH`` ask **minted**, in the order §10 minted them. Empty on every
+            servicing that carried no such ask and on every one whose search did not
+            yield.
+
+            **It exists because a minted id resolves in no store** (ADR-0231 §16), so a
+            ``FROM_EVIDENCE`` interpretation element naming one is dropped exactly as an
+            out-of-range label is: "a durable record grounded on an identifier nothing
+            can retrieve states a warrant it cannot show". Nothing else can tell the
+            population apart at the loop — a minted record sits in ``memories`` beside
+            every other, which is the whole point of ADR-0226 §7's fourth group — so the
+            fact is **supplied by the servicing that knows it** and never inferred at
+            the resolution site, exactly as :attr:`hop_reached` is.
+
+            It is **not** :attr:`SearchFooting.minted_user_chosen`, which is a different
+            population for a different question: that set is ADR-0238 §2's third
+            admissible **composer** population and is filled only where the destination
+            is registered, while this one is every record the search minted into this
+            turn's supply, whatever ADR-0238 §2 then admits to a composition.
         hop_reached: ADR-0227 §3's carrier — the **distinct** ids of the records this
             servicing's citation hop reached that the supply holds after it, in
             ADR-0229 §3's order.
@@ -1327,6 +1346,7 @@ class ServicedCarriers:
     """
 
     hop_reached: tuple[str, ...] = ()
+    minted: tuple[str, ...] = ()
     empty_read: ReadAsk | None = None
     structured_ran: bool = False
     label_filtered: bool = False
@@ -2901,6 +2921,11 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     # recomputed here.
     return replace(
         carried,
+        # ADR-0249 §7's carrier, folded on **every** path out of the body above for the
+        # same reason the three below it are: `searched` is assigned on each of them and
+        # `carried` is rebuilt only on the success path. Empty on every servicing that
+        # minted nothing, which is every one that carried no `WEB_SEARCH` ask.
+        minted=tuple(record.id for record in searched.records),
         not_serviced=searched.not_serviced,
         parked_read=searched.parked_read,
         parked_decision=searched.parked_decision,

@@ -50,10 +50,13 @@ import structlog
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
+    AttemptEffort,
+    AttemptPhase,
     BeliefBand,
     CurrentContext,
     FeedbackKind,
     Goal,
+    GoalAttempt,
     GoalBrief,
     GoalInterpretation,
     Ground,
@@ -68,6 +71,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.interpretation import recorded_revision
 from ai_assistant.orchestration.reads import (
     SearchFooting,
     SearchServicer,
@@ -84,7 +88,7 @@ from ai_assistant.orchestration.reads import (
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -100,12 +104,83 @@ if TYPE_CHECKING:
         FeedbackEvent,
         ParkedRead,
         PermissionDecision,
+        ProposedUnderstanding,
         ReadAsk,
         SourceListing,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedGoal:
+    """The goal this turn worked on, and what the turn decided about it (ADR-0249 §11).
+
+    **The loop builds the goal record and its revisions; ``Engine`` persists them**, at
+    the one site that persists a plan today. This carrier is how they travel: **inside**
+    ``ai_assistant.orchestration`` as data, adding no member to any Protocol and riding
+    on no wire-carried type, which is the shape ADR-0242 §7 already uses and what keeps
+    ADR-0228 §5's prohibition intact — **no lane gives** ``LearningLoop`` **a**
+    ``PlanStore``.
+
+    **Two persistence routes, and this value says which** (§12). A goal this turn
+    **opened** reaches the store through ``save_goal``, carrying every revision this
+    turn recorded, because ``save_goal`` is "the opening write alone" and the store
+    holds no row to append to. A goal the store **already holds** reaches it through
+    ``record_interpretation``, one call per revision under §12's compare-and-swap. An
+    implementation that guessed between them by trying one and catching the other's
+    refusal would turn a genuine duplicate-id fault into a silent append.
+
+    Attributes:
+        goal: The goal as the loop now holds it, with this turn's revisions already
+            appended in memory. :attr:`~ai_assistant.core.types.Goal.version` is the
+            version the loop **received**, which is therefore the
+            ``expected_version`` the first of :attr:`revisions` was computed against
+            (§12); nothing here advances it, because ``version`` is the store's.
+        opened: Whether this turn opened the goal. ``True`` on every turn of this lane's
+            production path: association is A2's (§13), so no turn yet continues a goal
+            an earlier one opened.
+        revisions: The revisions this turn recorded, oldest first — **empty where
+            :attr:`opened` is true**, because those already ride on :attr:`goal` and a
+            second copy would be two records of one fact. At most one per planner call,
+            so at most two on a turn that revised (ADR-0228 §3).
+    """
+
+    goal: Goal
+    opened: bool = True
+    revisions: tuple[GoalInterpretation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OpenedAttempt:
+    """The attempt this turn opened, and the phases this loop stamped (ADR-0249 §5, §6).
+
+    **Opening an attempt and persisting one are two acts** (§12). An attempt is opened
+    **in memory** when the user act that opens it occurs — before the turn's first
+    planner call — and is **first written** at the one site §11 names, "carrying the
+    phase and state it stands at and the references it has accumulated by that moment".
+    A turn that ends before that site writes no attempt row, exactly as it writes no
+    goal row and no plan row.
+
+    **``orchestration`` stamps the phase and no model output writes one** (§6's writer
+    clause). A planner envelope carries no field a phase could arrive on, so this is
+    structural rather than a rule someone remembered.
+
+    Attributes:
+        attempt: The attempt as the loop leaves it — at the phase its work reached,
+            with the plans this turn produced already referenced. ``Engine`` writes it
+            and every later change goes through ``commit_attempt`` (§12).
+        phases: Every phase this loop stamped, oldest first. §6 makes the six phases
+            "six responsibilities and **six observable transitions**", and a turn's
+            first three happen before any row exists to observe them on — so the record
+            of them travels here. It is **not** the per-phase event log §12 defers: it
+            carries no instant, it never reaches a store, and no lane infers one from a
+            :class:`~ai_assistant.core.types.GoalAttempt`.
+    """
+
+    attempt: GoalAttempt
+    phases: tuple[AttemptPhase, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +210,9 @@ class RespondedTurn:
             and whether memory degraded. Its ``plan`` is the **last** plan the turn
             produced: on a turn that revised, the revision, which is the only plan
             anything drives (ADR-0228 §5).
-        goal: The goal **record** this turn opened, carried beside the turn rather
-            than on it (ADR-0249 §11). ``TurnResult.goal`` is the planner-facing
+        goal: The goal **record** this turn worked on and what it decided about it,
+            carried beside the turn rather than on it (ADR-0249 §11) — see
+            :class:`RecordedGoal`. ``TurnResult.goal`` is the planner-facing
             projection — a widened ``Goal`` on ``TurnOutcome.turn`` would put the
             interpretation chain and its ground references on the wire — so the
             record travels **inside** ``ai_assistant.orchestration`` as data, adding
@@ -146,6 +222,14 @@ class RespondedTurn:
 
             ``None`` only on a value no turn built, which the default exists for;
             every ``RespondedTurn`` this loop returns carries one.
+        attempt: The attempt this turn opened and the phases this loop stamped
+            (:class:`OpenedAttempt`, ADR-0249 §5, §6). It rides here for
+            :attr:`goal`'s own reason and is persisted at the same site, **after** the
+            goal and the plans it references — ``open_attempt`` refuses an attempt
+            whose ``plan_ids`` its goal does not hold (§12).
+
+            ``None`` only on a value no turn built; every ``RespondedTurn`` this loop
+            returns carries one.
         plans: **Every** plan the turn produced, oldest first, each already carrying
             the ``supersedes`` this loop stamped (ADR-0228 §5). One member on every
             turn that did not revise, two on one that did, and the last is
@@ -224,7 +308,8 @@ class RespondedTurn:
     """
 
     turn: TurnResult
-    goal: Goal | None = None
+    goal: RecordedGoal | None = None
+    attempt: OpenedAttempt | None = None
     hop_reached: tuple[str, ...] = ()
     plans: tuple[ActionPlan, ...] = ()
     stopped_while_asking: bool = False
@@ -1046,6 +1131,7 @@ class LearningLoop:
         narrow: SupplyFilter | None = None,
         operation: ConversationalOperation | None = None,
         conversation_id: str | None = None,
+        continuing: Goal | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
@@ -1081,6 +1167,16 @@ class LearningLoop:
                 from, and it is the **only** thing this loop does with it: no store is
                 keyed on it here, no record carries it, and it reaches no prompt, no
                 audit event and no model.
+            continuing: The goal this turn continues, or ``None`` where it opens one
+                (ADR-0249 §3, §13). **Which goal a turn continues is A2's**: association
+                over candidates, focus and what moves ``last_engaged_at`` are all
+                deferred by name, and no caller of this lane supplies one — so every
+                production turn opens a goal, exactly as it does today. The parameter is
+                the seam that decision fills, and it is here rather than in A2 because
+                what a *continued* goal costs this loop — a revision recorded against a
+                goal the store already holds, under §12's compare-and-swap, and a **new
+                attempt on the same goal** (§5) — is this lane's to build and §16's arm 2
+                to assert.
 
         Returns:
             The turn — its goal, context, assembled memories and last plan — beside
@@ -1113,6 +1209,7 @@ class LearningLoop:
                 audit=audit,
                 footing=footing,
                 conversation_id=conversation_id,
+                continuing=continuing,
             )
         finally:
             audit.emit()
@@ -1134,6 +1231,7 @@ class LearningLoop:
         audit: TurnReadAudit,
         footing: SearchFooting | None,
         conversation_id: str | None,
+        continuing: Goal | None = None,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
 
@@ -1349,6 +1447,10 @@ class LearningLoop:
                 read off ``footing``, because a deployment with no search wired has no
                 footing and its goals are provenanced exactly as any other's;
                 ``Goal.conversation_id`` is provenance and **not a fence** (§1).
+            continuing: The goal this turn continues, or ``None`` where it opens one
+                (ADR-0249 §3, §13). **Which goal a turn continues is A2's** and no
+                caller of this lane supplies one, so every production turn opens a goal
+                — see :meth:`respond`, which states what the seam is for.
 
         **And which records the hop reached rides out beside the turn** (ADR-0227
         §3). The servicer is the one component that can distinguish a
@@ -1395,12 +1497,45 @@ class LearningLoop:
         # value of the user's words leaves this method, and every site downstream that
         # is handed them (the query composer, the park, the turn) is handed that one.
         utterance = self._request_of(utterance)
-        goal = self._goal_from(utterance, conversation_id=conversation_id)
-        # ADR-0249 §9's projection, taken **once** from the goal's current
-        # interpretation and handed to both of a turn's calls and to the turn itself.
-        # The record stays here, inside `orchestration`, and travels to the engine on
-        # `RespondedTurn` as data (§11); what crosses the planning seam and the wire
-        # is this value, which carries no ground reference at all.
+        # ADR-0249 §3: a goal is **opened** carrying revision 1, minted from the turn's
+        # request — which is every turn of this lane, because association is A2's (§13)
+        # and no caller supplies a goal to continue. Where one is supplied, the turn
+        # works on it instead and records its revisions against the version the store
+        # already holds (§12).
+        opened = continuing is None
+        goal = (
+            self._goal_from(utterance, conversation_id=conversation_id)
+            if continuing is None
+            else continuing
+        )
+        # **One instant for everything this turn stamps.** On an opened goal it is the
+        # instant §3 already put on revision 1 — "its `recorded_at` is that turn's
+        # instant" — so a second revision this same turn cannot be stamped *earlier*
+        # than the first, which two independent clock reads would permit. On a continued
+        # goal there is no such instant on the record to reuse, so one is read.
+        turn_at = goal.created_at if opened else self._now_utc()
+        # ADR-0249 §5, §12: **opened in memory when the user act that opens it occurs**,
+        # which is before the turn's first planner call, and first *written* at §11's
+        # site. A turn that ends before that site writes no attempt row, exactly as it
+        # writes no goal row and no plan row. **A reopened goal starts a new attempt**,
+        # so a turn continuing a goal opens one on that same goal rather than reaching
+        # for the earlier attempt.
+        attempt = GoalAttempt(id=self._id_factory(), goal_id=goal.id, opened_at=turn_at)
+        # §6: a new attempt opens at `UNDERSTAND`, and this is the first of the six
+        # observable transitions the phase vocabulary is.
+        phases: tuple[AttemptPhase, ...] = (AttemptPhase.UNDERSTAND,)
+        recorded: tuple[GoalInterpretation, ...] = ()
+        # ADR-0231 §16: the ids of the records this turn's searches minted, which
+        # "resolve in no store" — so a `FROM_EVIDENCE` ground naming one is dropped
+        # (§7). Accumulated across the turn's servicings and empty on every turn that
+        # searched nothing, which is every turn on a deployment with no search wired.
+        minted: frozenset[str] = frozenset()
+        # ADR-0249 §9's projection, taken from the goal's **current** interpretation and
+        # handed to the turn's calls and to the turn itself — and retaken wherever a
+        # revision is recorded, because §7 has the planner's next call receive the brief
+        # of the new revision. The record stays here, inside `orchestration`, and travels
+        # to the engine on `RespondedTurn` as data (§11); what crosses the planning seam
+        # and the wire is this value, which carries no ground reference at all.
         brief = GoalBrief.of(goal)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
@@ -1509,13 +1644,34 @@ class LearningLoop:
             empty_reads=(),
             audit=audit,
         )
+        # ADR-0249 §7: the understanding this call proposed, resolved against the
+        # brief and the supply **this call** was handed, and recorded before the plan
+        # is stamped. `None` means the planner proposed no change, which is the
+        # semantically correct answer for a planner that knows nothing of this
+        # envelope, and no path here reads it as an error or a reason to re-plan.
+        goal, recorded, brief = self._recorded(
+            goal,
+            produced.understanding,
+            recorded=recorded,
+            opened=opened,
+            utterance=utterance,
+            supply=memories,
+            minted=minted,
+            at=turn_at,
+            brief=brief,
+        )
         # ADR-0249 §8: the stamp is the goal's revision **after this call's
-        # understanding, if any, has been recorded**. No understanding is recorded in
-        # this lane (§15) — `produced.understanding` is `None` on every path and no
-        # ground is resolved — so the value is the revision the call received, which
-        # is 1 on every goal this loop opens (§3).
+        # understanding, if any, has been recorded**. Stamping the *input* revision
+        # would leave every turn on which the planner revised its understanding holding
+        # a plan §8 forbids driving, with no serviced read to license a second call.
         plan = _stamped(produced.plan, targets_revision=goal.revision)
         plans += (plan,)
+        # §6: `INVESTIGATE` is stamped as the turn enters the servicing loop, whose work
+        # it is. **Vacuous where the plan asked for no read** — "a phase whose work is
+        # vacuous is stamped and left in the same instant" — and stamped once, because
+        # the phase advances in §6's order and never moves backwards however many
+        # servicings the turn performs.
+        phases += (AttemptPhase.INVESTIGATE,)
         while True:
             request = plan.read_request
             # ADR-0226 §8: the trigger *is* the emission, and ADR-0228 §9 makes it a
@@ -1622,6 +1778,11 @@ class LearningLoop:
             # reads and a sequence that quietly dropped one would be a different
             # promise from the one the contract makes.
             empty_reads += () if carried.empty_read is None else (carried.empty_read,)
+            # ADR-0249 §7, ADR-0231 §16: accumulated across the turn's servicings for
+            # the same reason `memories` is — the supply grows and a later call's
+            # `FROM_EVIDENCE` ground may name a record an *earlier* servicing minted,
+            # which resolves in no store either.
+            minted |= frozenset(carried.minted)
             # ADR-0242 §7's precedence fold. **By §8's declared order and not by
             # encounter order**, so a turn recording `SPEND_REFUSED` and then
             # `COMPOSER_DECLINED` and one recording them the other way round both carry
@@ -1695,12 +1856,46 @@ class LearningLoop:
                 empty_reads=empty_reads,
                 audit=audit,
             )
+            # §7, §8: the second call's understanding is recorded on the same terms as
+            # the first's, and against the supply **this** call was handed — ADR-0228 §8
+            # binds ADR-0226 §3's label space per call, so the same `M` label may name
+            # different records on a turn's two calls.
+            goal, recorded, brief = self._recorded(
+                goal,
+                revised.understanding,
+                recorded=recorded,
+                opened=opened,
+                utterance=utterance,
+                supply=memories,
+                minted=minted,
+                at=turn_at,
+                brief=brief,
+            )
             plan = _stamped(
                 revised.plan,
                 targets_revision=goal.revision,
                 supersedes=plan.id,
             )
             plans += (plan,)
+        # §6: `PLAN` is stamped where the turn takes its final plan — after the
+        # revision loop, so a turn that revised is stamped once rather than moved
+        # backwards and forwards across its two calls.
+        phases += (AttemptPhase.PLAN,)
+        attempt = attempt.model_copy(
+            update={
+                "phase": AttemptPhase.PLAN,
+                # ADR-0249 §5: **referenced by id and never inlined**, and the whole
+                # sequence, because ADR-0228 §5 persists every plan a turn produced.
+                "plan_ids": tuple(one.id for one in plans),
+                # §5's ledger. `planner_calls` is the count this turn's audit already
+                # keeps — one value, not two that agree — and `working` is this turn's
+                # own working interval, which excludes no user wait because nothing in
+                # this method waits for the user.
+                "effort": AttemptEffort(
+                    planner_calls=audit.planner_calls, working=self._now_utc() - started
+                ),
+            }
+        )
         if bounded_audience:
             # ADR-0226 §7, superseding ADR-0204 §2's timing clause and nothing
             # else of §2: one evaluation, over the turn's **final** supply — which
@@ -1718,7 +1913,12 @@ class LearningLoop:
             # site that persists a plan today. That is the shape ADR-0242 §7 already
             # uses, and it is what keeps ADR-0228 §5's prohibition intact: no lane
             # gives `LearningLoop` a `PlanStore`.
-            goal=goal,
+            goal=RecordedGoal(goal=goal, opened=opened, revisions=recorded),
+            # ADR-0249 §5, §6: the attempt as this loop leaves it, and the phases it
+            # stamped on the way — persisted at the same site as the goal and the
+            # plans, and **after** them, because `open_attempt` refuses an attempt whose
+            # `plan_ids` its goal does not hold (§12).
+            attempt=OpenedAttempt(attempt=attempt, phases=phases),
             turn=TurnResult(
                 # ADR-0248 §1: the request this pass received, which is the same
                 # string `_request_of` stripped once above and `goal` was minted from.
@@ -2232,6 +2432,87 @@ class LearningLoop:
             msg = "a turn needs a non-empty utterance"
             raise PlanningError(msg)
         return request
+
+    def _recorded(  # noqa: PLR0913 — the goal, what the planner proposed, what has been recorded so far, and one parameter per thing a ground is resolved against; every one is a distinct fact and a bundle would mint a type for an argument list
+        self,
+        goal: Goal,
+        understanding: ProposedUnderstanding | None,
+        *,
+        recorded: tuple[GoalInterpretation, ...],
+        opened: bool,
+        utterance: str,
+        supply: Sequence[MemoryRecord],
+        minted: Collection[str],
+        at: datetime,
+        brief: GoalBrief,
+    ) -> tuple[Goal, tuple[GoalInterpretation, ...], GoalBrief]:
+        """Record one planner call's understanding onto the goal, if it proposed one.
+
+        **The revision is appended in memory here and persisted at §11's site.** This
+        loop holds no ``PlanStore`` and gains none (ADR-0228 §5): a goal this turn opened
+        reaches the store carrying its whole chain through ``save_goal``, and a goal the
+        store already holds takes one ``record_interpretation`` per revision under §12's
+        compare-and-swap — which is what :attr:`RecordedGoal.revisions` carries and why
+        it is empty on an opened goal.
+
+        **The provenance is this loop's, and the planner supplies none of it** (§6's
+        writer clause). ``revision``, ``recorded_at`` and ``raised_by`` are stamped from
+        values held here;
+        :class:`~ai_assistant.core.types.ProposedUnderstanding` carries no field any of
+        them could arrive on, so a phase, a revision number, a ``raised_by`` or a
+        ``recorded_at`` a model wrote is discarded **structurally** rather than by a rule
+        someone remembered.
+
+        **``raised_by`` is a minted identifier naming this turn**, on
+        :meth:`_goal_from`'s own ground: §1 forbids writing ``None`` into it on a value
+        ``orchestration`` authors, and a conversation turn's durable identity is
+        allocated by the capture stage *after* this loop returns, so there is no stored
+        id to read here.
+
+        **Recording a revision does not move the attempt's phase** (§6). It advances the
+        goal's understanding, which is what §8's stale-target rule keys on through the
+        stamp taken immediately after this call.
+
+        Args:
+            goal: The goal as this turn now holds it.
+            understanding: What the planner proposed, or ``None`` where it proposed no
+                change — the semantically correct answer for a planner that knows
+                nothing of this envelope, and never an error, a degradation or an
+                instruction to re-plan.
+            recorded: The revisions this turn has recorded so far.
+            opened: Whether this turn opened the goal.
+            utterance: This turn's own request, against which a ``USER_STATED`` span is
+                checked (ADR-0248 §1).
+            supply: The ``memories`` sequence this call was handed, which is ADR-0226
+                §3's label space for this call and no other.
+            minted: The ids of the records this turn's searches minted (ADR-0231 §16).
+            at: This turn's own instant.
+            brief: The brief this call received, returned unchanged where nothing was
+                recorded so that the value is taken once per revision rather than once
+                per call.
+
+        Returns:
+            The goal, the revisions this turn has recorded, and the brief a next call
+            would receive — the brief of the **new** revision where one was recorded
+            (§7), and the one passed in where none was.
+        """
+        if understanding is None:
+            return goal, recorded, brief
+        revision = recorded_revision(
+            goal,
+            understanding,
+            utterance=utterance,
+            supply=supply,
+            minted=minted,
+            recorded_at=at,
+            raised_by=self._id_factory(),
+        )
+        # §1: append-only. Nothing edits an element in place, reorders the tuple or
+        # removes one — §2's elision is the store's, taken on the write.
+        moved = goal.model_copy(update={"interpretation": (*goal.interpretation, revision)})
+        # An opened goal carries its revisions to the store on `save_goal` itself, so a
+        # second copy here would be two records of one fact.
+        return moved, recorded if opened else (*recorded, revision), GoalBrief.of(moved)
 
     def _goal_from(self, request: str, *, conversation_id: str | None) -> Goal:
         """Open the turn's goal, carrying revision 1, from what the user said.
