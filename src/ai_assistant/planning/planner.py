@@ -1633,7 +1633,7 @@ def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstandin
         "retains_outcome": raw.get("retains_outcome", False),
         "questions": raw.get("questions", ()),
     } | {
-        member: _proposed_elements(raw.get(member), member)
+        member: _proposed_elements(raw, member)
         for member in ("constraints", "criteria", "conditions")
     }
     try:
@@ -1643,7 +1643,7 @@ def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstandin
         raise _ExtractionError(msg, understanding=True) from exc
 
 
-def _proposed_elements(raw: object, member: str) -> list[dict[str, object]]:
+def _proposed_elements(understanding: dict[str, object], member: str) -> list[dict[str, object]]:
     """One of ADR-0249 §7's three element tuples, read into validatable payloads.
 
     Each entry becomes an explicit **five**-key mapping — ``text``, ``ground``,
@@ -1654,24 +1654,32 @@ def _proposed_elements(raw: object, member: str) -> list[dict[str, object]]:
     :class:`~ai_assistant.core.types.ProposedElement`'s to decide and is not
     anticipated here.
 
-    An absent member is an empty tuple — §7's "a revision states its elements in full,
-    and omission is removal" means a reply naming no constraints proposes none, which
-    is a statement rather than a gap.
+    **An absent member and an explicit ``null`` are different replies, and this reads
+    the mapping rather than the value in order to tell them apart.** An absent member
+    is an empty tuple: §7's "a revision states its elements in full, and omission is
+    removal" makes a reply naming no constraints a reply proposing none, which is a
+    statement rather than a gap. A member written as ``null`` is not that statement —
+    it is a value of a type the member does not take — and coercing it to the empty
+    tuple would turn a malformed reply into a **removal** of every constraint the goal
+    holds, silently and durably, which is exactly the outcome this module refuses a
+    malformed ``understanding`` to avoid. So it is refused, with the rest of them.
 
     Args:
-        raw: The envelope member's value, or ``None`` where it carried none.
+        understanding: The envelope's ``understanding`` object, read for the member
+            rather than handed its value, so that absent and ``null`` stay distinct.
         member: Which member this is, for the refusal message.
 
     Returns:
         One payload mapping per entry, in the order the model wrote them.
 
     Raises:
-        _ExtractionError: If the member is not a list of JSON objects.
+        _ExtractionError: If the member is present and is not a list of JSON objects.
     """
-    if raw is None:
+    if member not in understanding:
         return []
+    raw = understanding[member]
     if not isinstance(raw, list):
-        msg = f"'understanding.{member}' is not a list"
+        msg = f"'understanding.{member}' is present but is not a list"
         raise _ExtractionError(msg, understanding=True)
     payloads: list[dict[str, object]] = []
     for index, entry in enumerate(raw):
