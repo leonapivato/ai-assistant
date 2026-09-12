@@ -1042,9 +1042,12 @@ makes it and the branch not taken is visible in it as a step that was skipped.
 > figure rounded, clamped or defaulted into range.
 
 > **Normative — every value a model writes in any of them is an ordinal or a label of something
-> rendered or returned on that call**: a step's position in the envelope's own list (§1), an `M`
-> label of the supply (§8), and a **condition label** for a `when` condition's `about` and an
-> interpretation's `settles`. **No identifier of any kind is rendered to the model and none is
+> rendered or returned on that call**, and there are exactly three spaces: the **step ordinal** —
+> a step's 1-based position in the envelope's own `steps` list — which `after` (§1), each
+> `resolves` entry's producing step (§6) and an interpretation's `reads` (§8) each use, with §1's
+> refusals binding all three; the **`M` label** of the supply, which an interpretation's `record`
+> uses (§8); and the **condition label**, which a `when` condition's `about` and an
+> interpretation's `settles` use. **No identifier of any kind is rendered to the model and none is
 > accepted from it** (ADR-0228 §8). A step's ordinal and an `M` label are resolved by the
 > implementation that rendered them, against the very sequence it was passed on that call; the
 > condition label is resolved by the loop, below.
@@ -1230,8 +1233,10 @@ the precedent for closing that kind of window at the store.
 > **Normative — `PlanExport.schema_version` moves by exactly one**, on ADR-0039 §10's own
 > mechanism as ADR-0249 §12 applies it: *"`StepExecution` is inside the export, so its shape
 > changing is exactly what the version exists to announce."* The document carries
-> `tuple[ActionPlan, ...]` and `tuple[Goal, ...]`; `PlanStep` and `ActionPlan` change shape and
-> `GoalElement` changes shape inside a `Goal`, and each is an independent ground. It is a
+> `tuple[ActionPlan, ...]` and `tuple[Goal, ...]`, and gains `GoalEvidence` rows in ADR-0252
+> §13's own change; `PlanStep` and `ActionPlan` change shape, `GoalElement` changes shape inside a
+> `Goal`, and `GoalEvidence` gains `interpreted_output` (§8) — four independent grounds, each
+> sufficient on its own. It is a
 > **stored-record version and not a second wire ground** — `PlanExport` crosses no frame and is
 > emitted by no peer — and the log records that separation as it already does. As a dated
 > observation, it reads `Literal[8]` at `f0b8132d`.
@@ -1510,9 +1515,11 @@ The two lanes ship these, and #2255's acceptance rows are named where an arm car
 
 13. **A model-supplied step id is refused.** An envelope whose step object carries an `id` key is
     an extraction failure, and the arm asserts the plan's ids are the factory's (§1, §9).
-14. An `after` ordinal that is zero, negative, non-integer, out of range, **not strictly less
-    than** the declaring step's own ordinal, or repeated, is an extraction failure and reaches the
-    repair prompt — not a dropped edge (§1).
+14. A **step ordinal** that is zero, negative, non-integer or out of range is an extraction
+    failure wherever it appears — in `after`, in a `resolves` entry, or in an interpretation's
+    `reads` — and one that is **not strictly less than** the declaring step's own ordinal, or
+    repeated within one `after`, is likewise refused. Each reaches the repair prompt; none is a
+    dropped edge (§1, §6, §8, §9).
 15. A `when` `basis`, a `requires`, a `verifies` kind and a `read_kind` outside their vocabularies
     are each extraction failures, parameterized over `1`, `"true"`, a case-variant and a near-miss
     spelling, on ADR-0176 §1's own arm shape (§9). An `evidence_recency` that is not an ISO-8601
@@ -1610,7 +1617,8 @@ missing. That is ADR-0070 §1's test met, and a new ADR is the instrument.
 
 **It is a partial supersession of exactly two documents** (ADR-0070 §3) — **ADR-0249** in three
 scopes (§1's `GoalElement` enumeration, §7's `ProposedElement` enumeration, §8's field count) and
-**ADR-0252** in one term of one clause (§14's `applicability`, on the `INTERPRETATION` basis) —
+**ADR-0252** in two (§1's `GoalEvidence` enumeration and the `INTERPRETATION` limb of its
+by-basis validator, and §14's `applicability` term on that same basis) —
 and the `Status` line names each without an `ADR-NNNN` token inside the parentheses, so ADR-0070
 §4's extraction invariant holds. Every other ADR it touches is **relied on**, and §13 shows the
 working for each rather than leaving a reader to check.
