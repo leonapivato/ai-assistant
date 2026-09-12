@@ -646,11 +646,15 @@ class FakeEgressBinder:
             # ADR-0233 §4's sixth clause, one field over from the clause above and
             # for its reason: transcribed from ``approved``, never re-derived.
             was.coverage,
-            # ADR-0238 §5: **not** transcribed, and the default is the correct value for
-            # every request that can resume — a ``CONFIRM`` on a ``WEB_SEARCH`` decision
-            # "resolves in no turn" (ADR-0231 §9), so no closed-loop request is ever
-            # resumed. This keeps ADR-0152 §7's transcription count at the three above.
-            False,
+            # ADR-0247 §7's first clause: transcribed too, "exactly as it takes
+            # ``provenance``, ``planned_with_external_content`` and ``coverage``", which
+            # makes ADR-0152 §7's count **four** and stops there. ADR-0238 §5's
+            # non-transcription clause is superseded with its premise: ADR-0244 made a
+            # ``CONFIRM`` on a ``WEB_SEARCH`` decision a durable park that can be
+            # answered, and the ``False`` this line used to pass refused every park whose
+            # recorded binding carried ``True`` at every answer (#2232). The field's
+            # ``False`` default is untouched.
+            was.closed_loop,
         )
         if binding != was:
             msg = (
@@ -870,7 +874,9 @@ class FakeEgressBinder:
         ``planned_with_external_content`` (ADR-0181 §3, §4), its ``coverage``
         (ADR-0233 §4, §5) and its ``closed_loop`` (ADR-0238 §5 — "the seam writes the
         binding's value from the carrier's unchanged", and this seam holds none of the
-        four conditions behind it). Nothing here computes, infers or defaults any of them,
+        inputs the fact is stated over; on the resuming path it arrives **transcribed**
+        from the approved binding, ADR-0247 §7, the fourth of ADR-0152 §7's count).
+        Nothing here computes, infers or defaults any of them,
         and a ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below
         rather than by a check of this fake's own (ADR-0233 §6).
         """

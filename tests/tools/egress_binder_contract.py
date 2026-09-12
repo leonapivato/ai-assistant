@@ -328,6 +328,12 @@ def _https_tool() -> ToolDefinition:
     )
 
 
+#: The origin :func:`_https_tool` is supplied unless a case varies it — the shape a
+#: deployment's configured search provider takes as it reaches this seam, which is a
+#: destination-bearing **argument** and not a value the seam holds (ADR-0231 §5, §8).
+SEARCH_ORIGIN: Final = "https://search.example.com"
+
+
 def _no_provenance() -> CarriedProvenance:
     """A carrier over an empty mapping, passed deliberately (ADR-0152 §1)."""
     return CarriedProvenance(
@@ -2086,12 +2092,11 @@ class EgressBinderContract(ABC):
     ) -> None:
         """ADR-0238 §5: "the seam writes the binding's value from the carrier's unchanged".
 
-        The seam holds none of the four conditions behind the fact — a conversation's
-        recorded turns, the current turn's supply, a trust store and a budget fold are
-        every one of them ``orchestration``'s — so it can neither derive it nor check it,
-        and §5's last clause says a lane that finds itself computing it here has breached
-        the section. Both states are driven, so a seam that hard-coded either passes
-        neither.
+        The seam holds none of the inputs the fact's conditions are stated over — every
+        one of them is ``orchestration``'s — so it can neither derive it nor check it,
+        and §5's last clause, which ADR-0247 §4 leaves binding entire, says a lane that
+        finds itself computing it here has breached the section. Both states are driven,
+        so a seam that hard-coded either passes neither.
         """
         self.register_egress(binder, SEND_EMAIL)
         parameters: dict[str, FrozenJson] = {
@@ -2113,22 +2118,65 @@ class EgressBinderContract(ABC):
             assert bound is not None
             assert bound.binding.closed_loop is carried
 
-    async def test_rebind_answers_false_for_closed_loop_and_transcribes_nothing(
+    async def test_rebind_transcribes_closed_loop_so_a_true_park_is_answerable(
         self, binder: EgressBinder
     ) -> None:
-        """ADR-0238 §15's Arm 8b, and the reason §5 gave the field a default at all.
+        """ADR-0247 §12's **Arm E**, at the seam §11 gives lane 2: the park is answerable.
 
-        "A parked ``send_email`` confirmation resumes through ``rebind`` unchanged: the
-        re-derived binding carries ``closed_loop`` false by default, transcribes nothing
-        new from ``approved``, and equals the parked binding — so ADR-0152 §7's
-        comparison passes exactly as it does today."
+        ADR-0247 §7: ``rebind`` "takes ``closed_loop`` from ``approved``, matched to the
+        binding it re-derived, exactly as it takes ``provenance``,
+        ``planned_with_external_content`` and ``coverage``" — ADR-0152 §7's transcription
+        count becoming **four**.
 
-        That is what keeps ADR-0152 §7's transcription count at the three it already
-        admits rather than a fourth: ``False`` is the **correct** value for every request
-        that can resume, because a ``CONFIRM`` on a ``WEB_SEARCH`` decision "resolves in
-        no turn" (ADR-0231 §9) and no closed-loop request is ever resumed. The arm is
-        driven from an approved binding carrying ``True`` — a state no production path
-        parks, and exactly the one that tells a transcribing seam from a defaulting one.
+        The input is the one #2232 names: a search at the configured provider whose
+        binding carries ``closed_loop`` ``True`` and whose declaration costs
+        ``CostBasis.UNKNOWN``, which is the independent ground §7 gives for the
+        ``CONFIRM`` that parks it. Arm E says the read then **dispatches**; §11 fences
+        this lane to ``tools/``, so what is asserted here is the equality that dispatch
+        rests on — the derived binding equalling the recorded one, instead of the
+        ``OPERATION_CHANGED`` ADR-0244 §6's clause 4 returns when it does not. The
+        park-level dispatch is the engine's arm, not this suite's.
+
+        **This case asserts the opposite of the one it replaces.** The superseded case
+        drove exactly this input and asserted ``EgressBindingError``, because the seam
+        passed a ``False`` literal here; that is Arm E's "asserted to fail before the
+        transcription lands", recorded rather than re-run.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+        parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
+
+        parked = await binder.bind(
+            searcher,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+        assert parked is not None
+        assert parked.binding.closed_loop is True
+
+        again = await binder.rebind(searcher, parameters=parameters, approved=parked.binding)
+
+        assert again is not None
+        assert again.binding.closed_loop is True, "transcribed from ``approved``, not defaulted"
+        assert again.binding == parked.binding, (
+            "ADR-0152 §7's equality holds, so the answer is not OPERATION_CHANGED (#2232)"
+        )
+
+    async def test_rebind_leaves_a_false_park_byte_identical(self, binder: EgressBinder) -> None:
+        """ADR-0247 §12's **Arm E'**: a park written under the old binder is unmoved.
+
+        ADR-0247 §7: "A park whose recorded binding carries ``closed_loop`` ``False``
+        answers exactly as it does today, ``False`` being the literal the old code
+        passed, so the transcription changes no byte of its outcome" — and that is every
+        park a deployment with no recorded trust act can hold, which is every production
+        deployment. The arm is the half that keeps the change from being a constant
+        ``True``: a seam hard-coding either value passes one of these two cases and
+        fails the other.
         """
         self.register_egress(binder, SEND_EMAIL)
         parameters: dict[str, FrozenJson] = {
@@ -2149,15 +2197,130 @@ class EgressBinderContract(ABC):
         again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=ordinary.binding)
 
         assert again is not None
+        assert again.binding.closed_loop is False
         assert again.binding == ordinary.binding, "ADR-0152 §7's comparison passes as today"
 
-        # An approval carrying ``True`` is the state that tells a defaulting seam from a
-        # transcribing one: a seam that transcribed would re-derive ``True``, compare
-        # equal and resume; this one derives ``False``, compares unequal, and refuses —
-        # which is ADR-0152 §7's equality refusal doing exactly what §5 relies on it for.
-        forged = ordinary.binding.model_copy(update={"closed_loop": True})
+    async def test_rebind_answers_a_pre_existing_true_park_without_rewriting_it(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0247 §12's **Arm E''**: the park recorded *before* this change.
+
+        ADR-0247 §7: "No park is migrated, re-derived, rewritten or repaired." A park
+        recorded before lane 2 is read back out of a store, so this case rebuilds the
+        approved binding from its own serialised form rather than reusing the object
+        ``bind`` returned — which is also what a resume across a restart does. The two
+        assertions are §7's: the derived binding **equals** it, where the old seam
+        refused; and the recorded row is **byte-identical** before and after, because
+        ``rebind`` reads it and writes nothing back to it.
+
+        The returned binding is the one this seam **derived** and never the one it was
+        given (ADR-0152 §7), asserted by identity so that a seam handing back
+        ``approved`` cannot pass by value.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+        parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
+        first = await binder.bind(
+            searcher,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+        assert first is not None
+        recorded = EgressBinding.model_validate_json(first.binding.model_dump_json())
+        stored = recorded.model_dump_json()
+
+        again = await binder.rebind(searcher, parameters=parameters, approved=recorded)
+
+        assert again is not None
+        assert again.binding == recorded
+        assert again.binding is not recorded, "the derived binding, never the one it was given"
+        assert recorded.model_dump_json() == stored, "no stored byte is rewritten (ADR-0247 §7)"
+
+    async def test_rebind_refuses_a_true_park_when_the_configured_origin_changed(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0247 §12's **Arm F**, binder half: a configuration change refuses.
+
+        "With a park open and the deployment's ``web_search_origin`` then changed, the
+        answer derives an unequal binding, dispatches nothing, leaves the park ``OPEN``
+        and returns ``OPERATION_CHANGED``." The origin reaches this seam as the
+        destination-bearing argument the answer rebuilds the request from, so a changed
+        configuration is a changed supplied form — and the equality refusal fires on it
+        exactly as it did before the transcription. The transcription repairs the park
+        nobody could answer; it does not weaken what an approval covers.
+
+        The park's staying ``OPEN`` and the ``OPERATION_CHANGED`` are the engine's half
+        of this arm (§11 fences lane 2 to ``tools/``); what is owed here is the refusal
+        they follow from, and that the recorded binding is untouched by it.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+        parked = await binder.bind(
+            searcher,
+            parameters={"origin": SEARCH_ORIGIN, "query": "weather"},
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+        assert parked is not None
+        stored = parked.binding.model_dump_json()
+
         with pytest.raises(EgressBindingError):
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=forged)
+            await binder.rebind(
+                searcher,
+                parameters={"origin": "https://elsewhere.example.com", "query": "weather"},
+                approved=parked.binding,
+            )
+
+        assert parked.binding.model_dump_json() == stored, "the recorded binding is unmoved"
+
+    async def test_rebind_answers_a_true_park_across_a_credential_rotation(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0247 §12's **Arm F'**, binder half: a rotated credential does not refuse.
+
+        "With the connection reference and origin unchanged and the stored secret
+        replaced, the same park answers and the read dispatches." ADR-0148 §6 binds the
+        account by two **non-secret** facts — its identity and its connection reference —
+        and a re-provisioning act rewrites the record, increments its revision and writes
+        **its own** credential slot while leaving both of those alone. Nothing a rotation
+        moves is a member of the binding, so the derived binding equals the recorded one
+        and the transcribed ``closed_loop`` rides through with it.
+
+        The rotation is driven as the provisioning act this seam can see: the record
+        ``REFERENCE`` names is rewritten with the identity it already carried. A seam
+        that had folded a credential, a slot or a revision into the binding would refuse
+        here, which is what the arm exists to catch.
+        """
+        searcher = _https_tool()
+        self.register_egress(binder, searcher)
+        parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
+        parked = await binder.bind(
+            searcher,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=False,
+                coverage=SpanCoverage.NOT_COVERED,
+                closed_loop=True,
+            ),
+        )
+        assert parked is not None
+
+        self.set_connection(binder, REFERENCE, identity=IDENTITY)
+        again = await binder.rebind(searcher, parameters=parameters, approved=parked.binding)
+
+        assert again is not None
+        assert again.binding.closed_loop is True
+        assert again.binding == parked.binding
 
     async def test_rebind_answers_false_where_the_approved_binding_said_false(
         self, binder: EgressBinder
