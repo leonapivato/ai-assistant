@@ -49,17 +49,18 @@
   its own**: ADR-0173 defines it as *"taking exactly `converse`'s arguments in exactly its"*
   order, so it takes the new keyword by that clause rather than by an amendment to it.
 - **Partially supersedes** [ADR-0170](0170-a-reply-is-not-a-tool-the-turn-composes-its-answer-and-the-outcome-carries-it.md)
-  — **§4's two enumerations, in their counts alone.** `reply` is `None` on a **fourth**
-  shape and `turn` on a **second**: the turn whose association came back `UNDECIDED` (§3),
-  which engaged no goal, took no relevance read, no episodic supplement and no
-  `Planner.plan` call, and so has no `TurnResult` to carry and nothing composed to carry in
-  `reply`. It returns a `GoalDisambiguation` instead, and a reader holding only §4 would
-  refuse that outcome. **This is ADR-0197 §8's move exactly** — that decision admitted the
-  first such shape, *"a `None` `turn` beside a non-`None` `routed` may carry a `reply`"* —
-  and the scopes are the counts and nothing else: §4's both-directions rule binds entire and
-  the new shape is stated in both, `reply_degraded` stays `True` on the composition-failure
-  shape **and on no other**, §4's park clause, its recovered-park clause and its
-  composition-failure clause are untouched, and §§1-3 and §§5-9 stand entire.
+  — **§4's `turn`-`None` enumeration, in its count alone.** The turn whose association came
+  back `UNDECIDED` (§3) engaged no goal, took no relevance read, no episodic supplement and
+  no `Planner.plan` call, so it has **no `TurnResult`** — a second shape beyond the
+  recovered park on which `turn` is `None`, and a reader holding only §4 would refuse it.
+  **This is ADR-0197 §8's move exactly**, that decision having admitted the first such shape:
+  *"a `None` `turn` beside a non-`None` `routed` may carry a `reply`"*. **§4's `reply`
+  enumeration does not move at all**: the undecided turn carries a reply, composed by
+  `orchestration` from the typed value. §4's both-directions rule binds entire and the new
+  shape is stated in both, `reply_degraded` stays `True` on the composition-failure shape
+  **and on no other** and is never `True` where `turn` is `None`, §4's park clause, its
+  recovered-park clause and its composition-failure clause are untouched, and §§1-3 and
+  §§5-9 stand entire.
 - **Partially supersedes** [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md)
   — **§1's thirty-operation enumeration alone, which gains `goals`,
   `withdraw_clarification` and `abandon_goal`.** This is ADR-0200's precedent exactly: that
@@ -525,45 +526,77 @@ focused goal on the strength of nothing at all.
 > binding (ADR-0198 §1), and the `UNDECIDED` turn of §3, which engaged nothing by §1.
 
 > **Normative.** `core/types.py` gains **`GoalDisambiguation`**, a frozen model with
-> `extra="forbid"` carrying exactly `candidates`, a `tuple[NonBlankEncodableText, ...]` of
-> **at least two** elements holding the **outcome statements** of the goals the turn is
-> asking between, and `elided`, an `int` `ge=0` (§2). **It carries no identifier, no label,
-> no status and no instant**: a label is meaningless outside the call that rendered it (§3),
-> and the user answers in words on the next turn or by a reference (§11).
+> `extra="forbid"` carrying exactly `candidates`, a **non-empty**
+> `tuple[NonBlankEncodableText, ...]` holding the **outcome statements** of the goals the
+> turn is asking about, and `elided`, an `int` `ge=0` (§2). **It carries no identifier, no
+> label, no status and no instant**: a label is meaningless outside the call that rendered
+> it (§3), and the user answers in words on the next turn or by a reference (§11).
+
+> **Normative — which goals `candidates` holds, in both of `UNDECIDED`'s shapes.** Where the
+> associator named **two or more** labels that resolve, `candidates` holds exactly those
+> goals' outcome statements, in candidacy order. Where it named **fewer than two that
+> resolve** — a decline, an unparseable answer, or a single label outside the candidacy's
+> range (§4, §3) — the system has no subset to ask about, so `candidates` holds **every**
+> candidate of the candidacy, in candidacy order. The tuple is therefore non-empty on every
+> `UNDECIDED` turn, because §3 makes no `associate` call over an empty candidate set, and it
+> may hold exactly **one**, which is a well-formed question — *is this about that, or is it
+> something new?* — and not a degraded one.
 
 > **Normative — the one outcome shape this decision adds, and ADR-0170 §4 is superseded in
-> its count alone.** An `UNDECIDED` turn returns `turn` `None`, `reply` `None`,
-> `reply_degraded` `False` and `disambiguation` set. **`reply` is `None` on a fourth shape
-> and `turn` on a second**, and the validator ADR-0170 §4 obliges is stated over both
-> directions as it already is: a `None` `turn` beside a non-`None` `disambiguation` carries
-> no `reply`, and **no other outcome carries a `disambiguation` at all**.
+> one count.** An `UNDECIDED` turn returns `turn` `None`, a **non-`None` `reply`**,
+> `reply_degraded` `False` and `disambiguation` set. **`turn` is `None` on a second shape**;
+> `reply`'s three-shape enumeration is **untouched**, because this turn carries one. The
+> validator ADR-0170 §4 obliges is stated over both directions as it already is, and **no
+> other outcome carries a `disambiguation` at all**.
 
-**Why the question is structured data and not composed prose, which is ADR-0170 §4's own
-argument.** That section refuses a reply beside a parked confirmation because *"the
-confirmation content is already structured semantic data assembled by the engine for exactly
-this purpose (ADR-0042 §4), and a second, model-written account of the same pending action
-beside it is where the two can disagree."* A disambiguation is that value at a second seam:
-the candidates are outcome statements the loop already holds, the question is fixed, and the
-turn has made **no** model call it could compose from — it took no relevance read, no
-supplement and no planner call, because association precedes all three. So the shape is
-`turn` `None` and `reply` `None`, and ADR-0197 §8's precedent is that this is how a new
-`turn`-`None` shape is added: by naming it, admitting it in the validator, and recording the
-supersession.
+> **Normative.** **The reply is composed by `orchestration` from the typed value, and no
+> model writes it.** The turn made no model call it could compose from — it took no
+> relevance read, no episodic supplement and no `Planner.plan` call, because association
+> precedes all three — so the sentence is deterministic, is built from `candidates` and
+> `elided`, and **cannot disagree with the member beside it**. That is the distinction
+> ADR-0170 §4's own argument turns on: what it refuses beside structured data is *"a second,
+> **model-written** account of the same pending action"*, and a value rendered from the
+> structure is not a second account of it.
+
+**Carrying a reply rather than leaving it absent is what keeps every channel working, and
+the spoken one is why.** ADR-0200 §4 rules that *"`spoken` is the rendering of
+`outcome.reply` and of nothing else"* and that *"`spoken` is `None` wherever `outcome.reply`
+is `None`"*. An undecided turn with no reply would therefore answer a spoken request with
+**silence** while waiting for an answer it never asked for out loud — and fixing that at the
+speech seam would mean a second spoken-composition rule beside ADR-0207's, for a question
+`orchestration` can simply put in the one place every surface already reads. It also makes
+this decision's supersession narrower: `reply`'s enumeration does not move at all, and only
+ADR-0197 §8's `turn`-`None` count does, which is the precedent for adding exactly this kind
+of shape.
 
 > **Normative.** `core/types.py` gains **`GoalEngagement`**, a frozen model with
 > `extra="forbid"` whose fields are exactly: `disposition`, an `EngagementDisposition`;
 > `outcome`, a `NonBlankEncodableText` carrying the engaged goal's **current outcome
-> statement**; `revised`, a `bool`; and `changed`, a possibly-empty
-> `tuple[NonBlankEncodableText, ...]` carrying **the texts of the recorded revision's
-> elements that the previous revision did not carry**. It carries **no goal id, no attempt
-> id, no revision number, no label, no ground and no instant.**
+> statement**; `revised`, a `bool`; `added`, a possibly-empty
+> `tuple[NonBlankEncodableText, ...]`; and `removed`, a possibly-empty
+> `tuple[NonBlankEncodableText, ...]`. It carries **no goal id, no attempt id, no revision
+> number, no label, no ground and no instant.**
 
-> **Normative.** **`changed` is computed by comparing the two revisions and never by a
-> model.** An element of the new revision whose `text` is byte-equal to a `text` the previous
-> revision carried in the **same** tuple is unchanged and is absent from `changed`; every
-> other element of the new revision is present, in the tuple order
-> `constraints`, `criteria`, `conditions`. **`changed` is empty exactly where `revised` is
-> `False`, and where `revised` is `True` it is empty only where the outcome alone moved.**
+> **Normative.** **`added` and `removed` are computed by comparing the two revisions and
+> never by a model.** `added` carries the `text` of every element of the **new** revision
+> that the previous revision did not carry in the **same** tuple, byte for byte; `removed`
+> carries the `text` of every element the **previous** revision carried that the new one does
+> not, on the same comparison. Both are in the tuple order `constraints`, `criteria`,
+> `conditions`, and an element retained by label (ADR-0249 §7) appears in neither.
+
+> **Normative — the invariant, stated over every revision ADR-0249 §7 permits.** Where
+> `revised` is `False`, `added` and `removed` are both empty. Where `revised` is `True`, **at
+> least one** of three holds: `added` is non-empty, `removed` is non-empty, or the recorded
+> revision's `outcome` differs from the previous revision's. **Both tuples empty beside an
+> unchanged outcome is not a revision at all**, and an implementation that recorded one has
+> recorded a revision that changed nothing.
+
+> **Normative.** **Removal is disclosed and never inferred from silence.** ADR-0249 §7 makes
+> omission the whole of the removal mechanism — *"An element of the current interpretation
+> that the `ProposedUnderstanding` neither retains nor replaces is **not** in the new
+> revision"* — so a revision whose only effect is to drop the user's stated budget is a
+> revision whose only trace is an absence. `removed` is that trace, and a turn that dropped an
+> element and said nothing would be the silent rewrite §3 and §5 exist to forbid.
 
 > **Normative.** **`EngagementDisposition`** is a `StrEnum` valued by lower-cased member
 > name and **closed at exactly four members**: `OPENED` — a goal this turn opened;
@@ -580,10 +613,10 @@ supersession.
 
 > **Normative.** **A revision is never silent, and the sentence states what actually
 > moved.** Where `revised` is `True` the sentence states the goal's `outcome` as this turn
-> recorded it **and every text in `changed`** — never merely that something changed, and
-> never the outcome alone where `changed` is non-empty. That is the real safeguard against a wrong
-> association: the user sees what the assistant now thinks they asked for, on the turn it
-> changed.
+> recorded it, **every text in `added`**, and **every text in `removed`** as something no
+> longer held — never merely that something changed, and never the outcome alone where
+> either tuple is non-empty. That is the real safeguard against a wrong association: the user
+> sees what the assistant now thinks they asked for, on the turn it changed.
 
 > **Normative.** **Nothing is confirmed and nothing is asked.** The sentence is a
 > statement in a reply the turn was composing anyway. No lane turns it into a confirmation,
@@ -1089,9 +1122,16 @@ different reason.
 > disposition.** `goal_id` survives settlement (§8), so the reference resolves to a goal in
 > every case, and the turn **engages that goal** (§1). Then:
 >
-> - **`OPEN` and unexpired** → `settle_question` takes it `ANSWERED`; the attempt the
->   question names **resumes at the phase it stood** and its state moves from
->   `AWAITING_CLARIFICATION` to `RUNNING`. **No new attempt is opened** (§12).
+> - **`OPEN` and unexpired, on an attempt in a non-terminal `AttemptState`** →
+>   `settle_question` takes it `ANSWERED`; that attempt **resumes at the phase it stood** and
+>   its state moves to `RUNNING`. **No new attempt is opened** (§12).
+> - **`OPEN` and unexpired, on an attempt already in a terminal `AttemptState`** —
+>   `CANCELLED` or `ENDED` — → `settle_question` takes it `ANSWERED` and the turn **opens a
+>   new attempt** by §12's third act, at `UNDERSTAND`, on the same goal. **No transition out
+>   of a terminal state is attempted**, which ADR-0249 §5 forbids in terms: *"no transition
+>   leaves a terminal member"*. The answer is not lost — it revises the goal's
+>   **interpretation**, which is the goal's and not the attempt's (ADR-0249 §5) — and the new
+>   attempt plans against the revised understanding.
 > - **`OPEN` and past `expires_at`** → it is settled `EXPIRED` and **not** `ANSWERED`, by
 >   the clause below; the turn proceeds as an ordinary engagement of the goal.
 > - **terminal already** → nothing is settled and the turn proceeds as an ordinary
@@ -1493,6 +1533,13 @@ catches it, because what the turn did was `OPENED` whatever the model called it.
 > of what the user is told, which is ADR-0244 §13's placement posture unchanged;
 > `SpokenTurn` gains nothing.
 
+> **Normative.** **A spoken turn is answered on every path of this decision, including the
+> undecided one.** Its clarification and its disambiguation each reach the user through
+> `outcome.reply`, which ADR-0200 §4 synthesises — *"`spoken` is the rendering of
+> `outcome.reply` and of nothing else"* — so **no clause of this decision leaves a spoken
+> request silent**, no second spoken-composition rule is added beside ADR-0207's, and no
+> clause of ADR-0200 or ADR-0207 is amended.
+
 > **Normative.** **A surface that renders no statement for a `ReferenceOutcome`, an
 > `EngagementDisposition` or a `ClarificationWithdrawal` member it was given has not
 > implemented this section** — it is not permissibly degraded, which is ADR-0242 §9's last
@@ -1643,18 +1690,21 @@ obligation bind entire and are obeyed: `TurnReference`, `GoalSummary`, `Clarific
 no record**: ADR-0173 defines it as taking exactly `converse`'s arguments in exactly its
 order, so it inherits the keyword by that clause.
 
-**ADR-0170 §4 — partially superseded**, in its two enumerations' counts alone, and §5 states
-the showing. A reader holding only §4 refuses an outcome whose `turn` and `reply` are both
-`None` beside a `GoalDisambiguation`, which is the only shape an `UNDECIDED` turn can return:
-it engaged no goal, so there is no `TurnResult`, and it made no model call, so there is
-nothing composed. **ADR-0197 §8 is the precedent and is untouched** — it admitted the first
-such shape for a routed pass and this admits the second for an undecided association. §4's
-requirement that the invariants be stated *"in **both** directions"* as a
+**ADR-0170 §4 — partially superseded**, in its `turn`-`None` enumeration's count alone, and
+§5 states the showing. A reader holding only §4 refuses an outcome whose `turn` is `None`
+beside a `GoalDisambiguation`, which is the only shape an `UNDECIDED` turn can return: it
+engaged no goal, so there is no `TurnResult` to build. **ADR-0197 §8 is the precedent and is
+untouched** — it admitted the first such shape for a routed pass and this admits the second
+for an undecided association. **§4's `reply` enumeration is not reached**: the undecided turn
+carries a reply, so the three shapes on which `reply` is `None` are exactly the three §4
+names. §4's requirement that the invariants be stated *"in **both** directions"* as a
 `model_validator(mode="after")` binds entire and reaches the new shape; `reply_degraded`
-stays `True` on the composition-failure shape and on no other; and §4's park, recovered-park
-and composition-failure clauses are untouched. Its argument that *"a `reply` beside a parked
-confirmation is prose competing with a yes/no question the user must answer"* is the ground
-§5 gives for carrying the disambiguation as structured data rather than as composed prose.
+stays `True` on the composition-failure shape and on no other, and never `True` where `turn`
+is `None`; and §4's park, recovered-park and composition-failure clauses are untouched. Its
+refusal of *"a second, model-written account"* beside structured data is the ground §5 gives
+for composing the disambiguation's reply **deterministically from the typed value** rather
+than from a model, and ADR-0200 §4's *"`spoken` is `None` wherever `outcome.reply` is
+`None`"* is why it is carried in `reply` at all.
 
 **ADR-0177 §1 — partially superseded**, in its thirty-operation enumeration alone, which gains
 `goals`, `withdraw_clarification` and `abandon_goal`. This is ADR-0200's precedent exactly —
@@ -1816,38 +1866,53 @@ search, no provider, no draw and no admission.
     **B**, the goal is a candidate in **both**, and the **next** turn of B associates to it by
     the ordinary rule. The arm fails if `conversation_id` moved or if the goal appears in a
     third conversation's candidate set.
-11. **Never a silent rewrite, and the undecided outcome is well formed.** Two open goals; an
-    `associate` returning two labels: the turn asks, opens no goal, records no revision,
-    **engages neither goal**, drives nothing, and takes **no** relevance read, episodic
-    supplement or `Planner.plan` call. Its outcome carries `turn` `None`, `reply` `None`,
-    `reply_degraded` `False`, `goal_engagement` `None` and a `GoalDisambiguation` whose
+11. **Never a silent rewrite, and the undecided outcome is well formed in both its
+    shapes.** Two open goals; an `associate` returning two labels: the turn asks, opens no
+    goal, records no revision, **engages neither goal**, drives nothing, and takes **no**
+    relevance read, episodic supplement or `Planner.plan` call. Its outcome carries `turn`
+    `None`, a non-`None` `reply` composed by `orchestration` from the typed value,
+    `reply_degraded` `False`, `goal_engagement` `None`, and a `GoalDisambiguation` whose
     `candidates` are the two goals' outcome statements — **and the widened `TurnOutcome`
-    validator accepts it while refusing a `reply` beside it** (§5). And an `ASSOCIATES`
-    naming a label outside the candidacy's range produces the same outcome.
+    validator accepts it**. Then the **fewer-than-two** shape, three ways over a conversation
+    holding exactly **one** candidate: an unparseable model answer, an explicit decline with
+    no labels, and a single label outside the candidacy's range. Each returns `UNDECIDED`,
+    each constructs a `GoalDisambiguation` whose `candidates` hold that one goal's outcome
+    statement, and none fails the turn, invents a candidate or picks the one it has.
 12. **The announcement rule, over all four dispositions, and what it states.** `RESUMED`
     and `REOPENED` each produce the sentence; `CONTINUED` with `revised` `False` produces
     none; `OPENED` with `revised` `False` produces none; and **any** disposition with
-    `revised` `True` produces one stating the revised outcome **and every text in
-    `changed`**. The load-bearing case: after *"Book a campsite, under $100"* the planner
-    **retains** the outcome and revises the date element to Monday — `outcome` is unchanged,
-    `revised` is `True`, `changed` carries the Monday text, and the sentence states it. The
-    arm fails if a change confined to an element produces a sentence naming only the
-    unchanged outcome.
-13. **Focus, and the four acts that move it.** Each of §1's four acts advances
+    `revised` `True` produces one stating the revised outcome, every text in `added` and
+    every text in `removed`. Three load-bearing cases, each over a **retained** outcome:
+    an element **replaced** (the date becomes Monday) puts the new text in `added` and the
+    old in `removed`; an element **added** (a new budget) puts it in `added` with `removed`
+    empty; and an element **removed by omission** (ADR-0249 §7) puts it in `removed` with
+    `added` empty — and the sentence states the removal. The arm fails if any of the three
+    produces a sentence naming only the unchanged outcome, and the removal case fails if
+    `revised` reads `False` or both tuples come back empty.
+
+13. **A spoken turn is never left silent.** An undecided association driven through
+    `converse_spoken`: `outcome.reply` is non-`None`, `spoken` renders it, `spoken_degraded`
+    is `False`, and the user hears the question. The same over a turn that raised a
+    clarification. The arm fails if either path yields `spoken` `None`.
+
+14. **The revision invariant holds over every permitted revision.** `revised` `False` with
+    both tuples empty constructs; `revised` `True` with both tuples empty and an unchanged
+    outcome does **not**; `revised` `True` with both tuples empty and a moved outcome does.
+15. **Focus, and the four acts that move it.** Each of §1's four acts advances
     `last_engaged_at` and `last_engaged_in`; and a candidate-set read, an export, a
     retrieval, an expiry, a withdrawal, an attempt transition and an `UNDECIDED` turn each
     leave both untouched. Run against **both** conforming `PlanStore` implementations
     through the shared suite.
-14. **The one-open-question gate, and both compare-and-swap writes.** Two
+16. **The one-open-question gate, and both compare-and-swap writes.** Two
     `record_question` calls on one goal: one succeeds and one answers `False`, with no
     second row. Two `settle_question` calls on one question: one answers `True` and one
     `False`, with the content cleared exactly once. Two `engage_goal` calls computed against
     the same `expected_version`: one succeeds and one raises. All on **both**
     implementations through the shared suite.
-15. **A refused question is not reported.** `record_question` answering `False`: the
+17. **A refused question is not reported.** `record_question` answering `False`: the
     outcome's `clarification` is `None`, the attempt's state is **not** moved, and the turn
     still drives no side-effecting step.
-16. **The cap is bounded and disclosed, and the disclosure is keyed on the disposition.** A
+18. **The cap is bounded and disclosed, and the disclosure is keyed on the disposition.** A
     conversation with more than `MAX_ASSOCIATION_CANDIDATES` goals: the candidacy carries
     exactly the cap in §1's order, `elided` carries the true remainder, and no dropped goal
     is rendered. The disclosure appears on an `OPENED` turn and on a turn carrying a
@@ -1856,13 +1921,13 @@ search, no provider, no draw and no admission.
     engaged **closed** goals and whose only open goal was elided, on a `CONTINUES` verdict —
     the turn opens a goal, its disposition is `OPENED`, and the elision **is** disclosed.
     The arm fails if the disclosure is keyed on the verdict.
-17. **The namer rule, in two arms that assert only what is true.** **(a) Structural**:
+19. **The namer rule, in two arms that assert only what is true.** **(a) Structural**:
     `GoalCandidacy` and `CandidateGoal` carry **no field in which an identifier could
     sit**, asserted over the two types' declared field sets. **(b) Behavioural**: given a
     candidacy built from goals with distinctive ids and a turn carrying a `TurnReference`
     with a distinctive `goal_id`, the prompt the production associator builds contains
     neither string.
-18. **`set_goal_status` is the one status route, `ABANDONED` has exactly one caller of it,
+20. **`set_goal_status` is the one status route, `ABANDONED` has exactly one caller of it,
     and two statuses have none.** Over the
     shipped tree, the only assignment of `GoalStatus.ABANDONED` under `src/` is
     `abandon_goal`'s, the only `ACTIVE` one is the reopen path's, both go through
@@ -1871,11 +1936,11 @@ search, no provider, no draw and no admission.
     convention, so that a later lane cannot supply one without the ADR that decides it. And
     `set_goal_status` refuses a stale `expected_version` on **both** conforming
     implementations through the shared suite.
-19. **`SUPERSEDED` has exactly one producer.** Reopening a closed goal whose earlier
+21. **`SUPERSEDED` has exactly one producer.** Reopening a closed goal whose earlier
     attempt's question is still `OPEN` settles it `SUPERSEDED` and clears its content in the
     same sequence that opens the new attempt; a revision, an expiry, a withdrawal and a
     second question each settle nothing `SUPERSEDED`.
-20. **Which acts open an attempt, including the migrated goal.** Opening a goal, reopening
+22. **Which acts open an attempt, including the migrated goal.** Opening a goal, reopening
     one, associating to a goal whose current attempt is `ENDED`, and associating to an
     `ACTIVE` goal that has **no attempt at all** each open one at `UNDERSTAND` with empty id
     tuples; answering a clarification, resuming a park, resuming a step and associating to a
@@ -1884,27 +1949,27 @@ search, no provider, no draw and no admission.
     attempts table is upgraded, that goal is referenced by `goal_id`, and the turn opens its
     first attempt, pauses it on a clarification and answers it — end to end, from a **stored**
     row.
-21. **A migrated goal reads back and is a candidate.** A plan store at ADR-0249 §12's
+23. **A migrated goal reads back and is a candidate.** A plan store at ADR-0249 §12's
     version holding goals is opened and upgraded: each goal reads back with
     `last_engaged_in` **absent** and no questions; a conversation's candidate set orders
     such a goal **after** every goal carrying an engagement instant; and the goal is still
     associable, still reopenable and still referenceable.
-22. **The export closes, and a settled question exports empty.** A `PlanExport` naming a
+24. **The export closes, and a settled question exports empty.** A `PlanExport` naming a
     question whose `goal_id` the document does not hold does not validate; one whose
     references all resolve does; a settled question exports with its content absent;
     `schema_version` reads the new value and a document at the previous value does not
     validate at all.
-23. **`delete_goal` reaches questions**, open and terminal alike, and an open question does
+25. **`delete_goal` reaches questions**, open and terminal alike, and an open question does
     not block a deletion.
-24. **No notification is minted, on any path.** Raising a question, a question expiring, a
+26. **No notification is minted, on any path.** Raising a question, a question expiring, a
     question superseded and a goal paused each produce **no** `NotificationCandidate`, no
     `NotificationPolicy` call and no `NotificationStore` row — asserted over the shipped
     tree, so that the absence of a producer is a fact rather than a reading of this
     document.
-25. **The surfaces are separate.** `assistant questions` and `assistant answer` list and
+27. **The surfaces are separate.** `assistant questions` and `assistant answer` list and
     answer **memory** questions only, and neither lists nor accepts a `GoalQuestion`; the
     clarification acts neither list nor accept an ADR-0078 `Question`.
-26. **Both crash windows leave a legible state and nothing repairs it.** With failure
+28. **Both crash windows leave a legible state and nothing repairs it.** With failure
     injected between `settle_question` and `record_interpretation`, the restarted system
     reads a question `ANSWERED` with its content cleared, an attempt still
     `AWAITING_CLARIFICATION` and an unchanged interpretation; the goal is still open, still a
@@ -1914,19 +1979,19 @@ search, no provider, no draw and no admission.
     sweep, reconciliation or repair runs in either case**, and no implementation refuses a
     question whose attempt is not `AWAITING_CLARIFICATION`.
 
-27. **An `UNKNOWN` reference is reported even where nothing was engaged.** A turn carrying a
+29. **An `UNKNOWN` reference is reported even where nothing was engaged.** A turn carrying a
     `TurnReference` naming no question and no goal, whose association then comes back
     `UNDECIDED`: `reference` reads `UNKNOWN`, `goal_engagement` is `None`, and a
     `disambiguation` is carried. The arm fails if a `GoalEngagement` is constructed to hold
     the reference outcome, or if the `UNKNOWN` is dropped.
 
-28. **`GoalBrief.goal_id` still crosses the seam on a referenced turn.** A turn whose
+30. **`GoalBrief.goal_id` still crosses the seam on a referenced turn.** A turn whose
     `TurnReference` resolves: the brief handed to `Planner.plan` carries that goal's
     `goal_id`, `Engine._check_plan_is_for_goal` compares the plan's against it, and the
     prompt `_render_request` builds contains neither string — ADR-0249 §9 asserted unchanged
     across this decision.
 
-29. **A turn that ends early persists nothing new.** A turn whose planner raises, one
+31. **A turn that ends early persists nothing new.** A turn whose planner raises, one
     rejected for capacity and one that fails before the planner is reached each leave **no
     question row** and no engagement stamp — ADR-0228 §5's clause asserted over this
     decision's record kinds as well.
