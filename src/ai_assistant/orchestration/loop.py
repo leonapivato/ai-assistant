@@ -1257,10 +1257,13 @@ class LearningLoop:
         as a case to decide at run time.
 
         Args:
-            utterance: What the user said. It becomes the goal's statement
-                unrewritten — trimmed of surrounding whitespace, and otherwise
-                untouched. No intent inference happens here, because inferring
-                one needs a model and no contract offers that yet.
+            utterance: What the user said. **Stripped once, here** — trimmed of
+                surrounding whitespace and otherwise untouched — and that one string
+                is what this pass hands onward: to the goal it mints, to
+                :attr:`TurnResult.utterance`, and to everything downstream that is
+                given the user's words (ADR-0248 §1). No intent inference happens
+                here, because inferring one needs a model and no contract offers that
+                yet.
             history: The conversation's recent turns, oldest first, already
                 resolved to records. Empty for a fresh conversation.
             history_degraded: Whether reading that history failed. Folded into
@@ -1334,6 +1337,15 @@ class LearningLoop:
         # Observed before the first await, so a caller mutating the sequence it
         # passed cannot change what the planner is shown (ADR-0065).
         recent = tuple(history)
+        # **ADR-0248 §1: the pass strips the text it received *once*, here.** That one
+        # string is handed both to the goal this turn mints and to the turn itself, so
+        # the byte-equality §6 asserts is a property of there being one normalisation
+        # in one place rather than of two that happen to agree — and a second
+        # `.strip()` anywhere below this line would be the second authority §1 rules
+        # out. Rebound rather than kept beside the raw text for the same reason: one
+        # value of the user's words leaves this method, and every site downstream that
+        # is handed them (the query composer, the park, the turn) is handed that one.
+        utterance = self._request_of(utterance)
         goal = self._goal_from(utterance)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
@@ -1635,6 +1647,10 @@ class LearningLoop:
             context, memories = _narrowed(narrow, context, memories, retrieved_ids)
         return RespondedTurn(
             turn=TurnResult(
+                # ADR-0248 §1: the request this pass received, which is the same
+                # string `_request_of` stripped once above and `goal` was minted from.
+                # Not re-derived, not re-stripped, and never read back off the goal.
+                utterance=utterance,
                 goal=goal,
                 context=context,
                 memories=memories,
@@ -1672,11 +1688,12 @@ class LearningLoop:
             parked_decision=parked_decision,
         )
 
-    async def resumed_read(  # noqa: PLR0913 — the parked turn's two persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
+    async def resumed_read(  # noqa: PLR0913 — the parked turn's three persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
         self,
         goal: Goal,
         plan: ActionPlan,
         *,
+        utterance: str,
         records: Sequence[MemoryRecord],
         conversation_id: str,
         history: Sequence[MemoryRecord] = (),
@@ -1685,10 +1702,11 @@ class LearningLoop:
     ) -> TurnResult:
         """Assemble the supply an approved read's continuation composes over (ADR-0244 §8).
 
-        **Two members are the parked turn's and two are the resumed turn's, and the
-        result does not pretend otherwise.** :attr:`TurnResult.goal` and
-        :attr:`TurnResult.plan` are ``goal`` and ``plan`` — read from the park, which
-        persisted them precisely so that this method does not fabricate them —
+        **Three members are the parked turn's and two are the resumed turn's, and the
+        result does not pretend otherwise.** :attr:`TurnResult.utterance`,
+        :attr:`TurnResult.goal` and :attr:`TurnResult.plan` are ``utterance``, ``goal``
+        and ``plan`` — read from the park, which persisted them precisely so that this
+        method does not fabricate them (ADR-0248 §3 for the first of the three) —
         while :attr:`TurnResult.context` and :attr:`TurnResult.memories` are assembled
         **here, at the instant of the resume**, by the ordinary pipeline. That is
         ADR-0052 §3's own reason obeyed rather than overturned: it refuses to
@@ -1741,6 +1759,13 @@ class LearningLoop:
         Args:
             goal: The parked turn's goal, read from the park.
             plan: The parked turn's plan, read from the park.
+            utterance: The parked turn's own request, read from the park and threaded
+                here rather than taken off ``goal`` (ADR-0248 §1, §3). The value
+                belongs to **the pass that parked**, so this method neither mints one
+                nor derives one: a turn assembled from durable state carries the
+                request that pass received. Where the park predates ADR-0248 and
+                carries none, the caller has already applied §3's one fallback — this
+                method knows nothing of it and no second site may take it.
             records: The records the approved read minted, in the order it minted
                 them. Empty where the dispatched read yielded none — refused,
                 expired, interrupted or empty-handed — on which the turn still
@@ -1764,8 +1789,9 @@ class LearningLoop:
                 one that withheld nothing.
 
         Returns:
-            The resumed turn's result: the parked turn's goal and plan, this instant's
-            context and supply, and the approved read's records at the end of it.
+            The resumed turn's result: the parked turn's request, goal and plan, this
+            instant's context and supply, and the approved read's records at the end of
+            it.
         """
         # **One footing per pass**, built here and for this conversation, exactly as
         # :meth:`respond` builds one per turn — because what it carries is per-pass
@@ -1803,6 +1829,9 @@ class LearningLoop:
         # composing stage exactly as the other three groups do.
         context, memories = _narrowed(narrow, context, memories + fourth, retrieved_ids)
         return TurnResult(
+            # ADR-0248 §3: the **parked** pass's request, threaded from the park the
+            # caller read it out of — never this instant's, and never `goal.statement`.
+            utterance=utterance,
             goal=goal,
             context=context,
             memories=memories,
@@ -2084,33 +2113,60 @@ class LearningLoop:
         best = next(iter(found.records), None)
         return MemoryKind.SEMANTIC if best is None else MemoryKind(best.kind)
 
-    def _goal_from(self, utterance: str) -> Goal:
+    @staticmethod
+    def _request_of(utterance: str) -> str:
+        """The user's words as this pass received them, normalised **once** (ADR-0248 §1).
+
+        Surrounding whitespace is stripped and nothing else is touched: the value is
+        the request, *"unrewritten, unrendered and uninterpreted"*, and it is the one
+        string the pass hands both to :meth:`_goal_from` and to
+        :attr:`~ai_assistant.core.types.TurnResult.utterance`. ``Goal``'s own validator
+        would strip the statement anyway, so stripping here is what keeps the blank
+        check, the stored statement and the turn's own request in agreement rather than
+        merely in the habit of agreeing.
+
+        **The blank refusal is this one and there is no second.** It is the refusal
+        ``_goal_from`` raised before ADR-0248, at the same point of the same pass, with
+        the same class and the same message — the point being that
+        :data:`~ai_assistant.core.types.NonBlankEncodableText` tightens ``TurnResult``
+        by *"a rejection alone"* (ADR-0096 §2) and would otherwise surface the same
+        fault as a ``ValidationError`` this stage does not owe its caller.
+
+        Raises:
+            PlanningError: If the utterance is blank.
+        """
+        request = utterance.strip()
+        if not request:
+            msg = "a turn needs a non-empty utterance"
+            raise PlanningError(msg)
+        return request
+
+    def _goal_from(self, request: str) -> Goal:
         """Mint the turn's goal from what the user said.
 
         Unrewritten and ``USER_ASSERTED``: the statement is the user's own, so a
         goal built from it must not be indistinguishable from one the system
-        inferred (``Goal``, ADR-0014 §1). Surrounding whitespace is stripped —
-        ``Goal``'s own validator would strip it anyway, so doing it here keeps
-        the blank check and the stored statement in agreement.
+        inferred (``Goal``, ADR-0014 §1).
+
+        ``request`` is what :meth:`_request_of` already normalised, and this
+        method normalises nothing further: ADR-0248 §1 puts the strip in **one** place,
+        and a second one here would be the second authority for one fact that §1 rules
+        out — it is also what makes §6's byte-equality between the statement and
+        :attr:`~ai_assistant.core.types.TurnResult.utterance` a property of the
+        construction rather than a coincidence.
 
         Raises:
-            PlanningError: If the utterance is blank. Caught here rather than
-                left to ``Goal``'s validator so the failure arrives as an
-                ``AssistantError`` a caller can handle, not a ``ValidationError``.
-                Also if the injected clock's reading is not conforming — see
-                :meth:`_now_utc`.
+            PlanningError: If the injected clock's reading is not conforming — see
+                :meth:`_now_utc`. The blank refusal is :meth:`_request_of`'s and has
+                already been taken.
         """
-        statement = utterance.strip()
-        if not statement:
-            msg = "a turn needs a non-empty utterance"
-            raise PlanningError(msg)
         # `_now_utc` rather than `self._clock`: the guard raises `core`'s
         # owner-labelled `ValueError`, and this stage owes its caller an
-        # `AssistantError` (ADR-0026 §4), exactly as the blank check above does.
+        # `AssistantError` (ADR-0026 §4), exactly as `_request_of`'s blank check does.
         now = self._now_utc()
         return Goal(
             id=self._id_factory(),
-            statement=statement,
+            statement=request,
             provenance=Provenance(
                 source=MemorySource.USER_ASSERTED,
                 confidence=_FULL_CONFIDENCE,

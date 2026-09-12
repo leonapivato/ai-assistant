@@ -74,6 +74,7 @@ def _turn(utterance: str) -> TurnResult:
         created_at=_AT,
     )
     return TurnResult(
+        utterance=goal.statement,
         goal=goal,
         context=CurrentContext(
             now=_AT,

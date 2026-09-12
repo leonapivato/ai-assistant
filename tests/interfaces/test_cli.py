@@ -4903,6 +4903,7 @@ def _outcome_replying(
     """A turn-carrying outcome with ``reply``, which is the only shape that admits one."""
     return TurnOutcome(
         turn=TurnResult(
+            utterance="say something",
             goal=Goal(
                 id="g-1",
                 statement="say something",

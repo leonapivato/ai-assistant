@@ -235,6 +235,7 @@ def _park_turn() -> TurnResult:
         created_at=_PARK_AT,
     )
     return TurnResult(
+        utterance=goal.statement,
         goal=goal,
         context=CurrentContext(
             now=_PARK_AT,

@@ -1379,10 +1379,18 @@ def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: 
 
     ``turn`` is ``None`` only on a resumption recovered from durable state, where
     ``resumed`` is necessarily ``True``, so the rendering is never empty.
+
+    **The user's half is the turn's own request and not its goal statement** (ADR-0248
+    §4, partially superseding ADR-0225 §1's fourth clause in its first limb). ADR-0005
+    §1's ``content`` and ADR-0074 §4's *"what was asked, and how it turned out"* are
+    **fulfilled** by that rather than changed — neither text ever identified the goal
+    statement as the source — and at ADR-0248 the two are byte-equal (§6), so this
+    rendering does not move. What it buys is that the episode keeps quoting the user
+    once the goal comes to mean the assistant's reading of them.
     """
     lines: list[str] = []
     if turn is not None:
-        lines.append(f"The user asked: {turn.goal.statement}")
+        lines.append(f"The user asked: {turn.utterance}")
         if turn.plan.rationale:
             lines.append(f"The assistant's plan: {turn.plan.rationale}")
     if resumed:
@@ -8223,9 +8231,10 @@ class Engine:
                 resumed=False,
                 composed=composed,
                 # ADR-0225 §1's first case: the pass carried a turn, so the user's
-                # own words are that turn's goal statement — the value before
+                # own words are that turn's own `utterance` (ADR-0248 §4, superseding
+                # §1's fourth clause in its first limb alone) — the value before
                 # `_exchange_of` folds it into a rendering.
-                asked=turn.goal.statement,
+                asked=turn.utterance,
                 supplied_withheld=withheld,
                 modality=modality,
                 # ADR-0223 §3's first case on the branch §2 exists for: the pass
@@ -8313,8 +8322,9 @@ class Engine:
             resumed=False,
             parked=parked,
             composed=composed,
-            # ADR-0225 §1's first case, as on the branch above and for its reason.
-            asked=turn.goal.statement,
+            # ADR-0225 §1's first case as ADR-0248 §4 states it, as on the branch
+            # above and for its reason.
+            asked=turn.utterance,
             supplied_withheld=withheld,
             modality=modality,
             # ADR-0223 §3's first case: this pass's own value, carried unchanged from
@@ -9421,8 +9431,11 @@ class Engine:
 
         **On** ``DISPATCHED`` **the outcome is a resumed turn** (ADR-0244 §8): ``turn``
         is a **real** ``TurnResult``, ``step`` is ``None``, ``routed`` is ``None``,
-        ``conversation_id`` is the park's, and ``reply`` is composed. Its ``goal`` and
-        ``plan`` are the parked turn's, read from the park; its ``context`` and
+        ``conversation_id`` is the park's, and ``reply`` is composed. Its ``utterance``,
+        ``goal`` and
+        ``plan`` are the parked turn's, read from the park — the first of the three
+        through ADR-0248 §3's one fallback where the park predates that field; its
+        ``context`` and
         ``memories`` are assembled at this instant by the ordinary pipeline, with the
         approved read's minted records appended as ADR-0226 §7's fourth group. That is
         where ADR-0244 §8 **partially supersedes ADR-0052 §3**, scoped to exactly this
@@ -9544,6 +9557,23 @@ class Engine:
                 "own validator refuses on an open record (ADR-0244 §2)"
             )
             raise PlanningError(msg)
+        # **ADR-0248 §3's one fallback, and this is the only site in the system that
+        # may take it.** The parked turn's request is the park's own `utterance`; a
+        # park carries none only where it was written before that field existed, and
+        # every such park's `Goal.statement` was minted by `_goal_from` from the user's
+        # own stripped words. So the fallback reads the right bytes for every row it
+        # can ever see — including after the goal's meaning changes, because a park
+        # written under any later meaning always carries its own `utterance` — and it
+        # therefore needs no removal to stay correct.
+        #
+        # **No lane widens it**: not to a park that carries an `utterance`, not to a
+        # blank one, not to any other reader of §5's table, and not to any other site.
+        # It may be deleted only once `expires_at` has retired every park predating
+        # ADR-0248's deployment *and* something has decided what a resumed read
+        # composes when the pass has no request at all — `TurnResult.utterance` is
+        # required (§1), so deleting it before that leaves this path with no valid turn
+        # to build (§11).
+        utterance = goal.statement if park.utterance is None else park.utterance
         history = await self._conversations.history(park.conversation_id)
         # **ADR-0204 §2's evaluation, on this pass's own supply** (ADR-0244 §8's "the
         # exchange is captured as a turn's exchange is captured"). A resume is a
@@ -9564,6 +9594,10 @@ class Engine:
         turn = await self._loop.resumed_read(
             goal,
             plan,
+            # ADR-0248 §3: the **parked** pass's request, taken from the park above
+            # with its one fallback already applied. The loop is handed the value and
+            # takes no view of where it came from.
+            utterance=utterance,
             records=answered.records,
             # ADR-0238 §8's two folds are this pass's, over this conversation: a resumed
             # turn admits records to it exactly as any other does, and a pass that
@@ -9590,10 +9624,11 @@ class Engine:
             step=None,
             resumed=True,
             composed=composed,
-            # ADR-0225 §1's first case: the pass carried a turn, so the user's own
-            # words are that turn's goal statement — the **parked** turn's, which is
-            # whose question this answer continues.
-            asked=goal.statement,
+            # ADR-0225 §1's first case as ADR-0248 §4 states it: the pass carried a
+            # turn, so the user's own words are that turn's own `utterance` — the
+            # **parked** turn's, which is whose question this answer continues, read
+            # off the turn this pass just built rather than recomputed here.
+            asked=turn.utterance,
             # ADR-0204 §2's evaluation, read off the one applier this pass minted and
             # never recomputed: the value the capture records is the one the filter
             # returned over the supply the reply was composed from.
@@ -10029,8 +10064,12 @@ class Engine:
         if at all — only by parsing a prefix this system is free to change.
 
         Its three cases are ADR-0221 §5's three capture cases and no other partition
-        is introduced. :meth:`_run_turn` passes ``turn.goal.statement`` on both its
-        branches, because the pass carried a turn; :meth:`_finish_route` passes the
+        is introduced. :meth:`_run_turn` passes ``turn.utterance`` on both its
+        branches, because the pass carried a turn and ADR-0248 §4 supersedes ADR-0225
+        §1's fourth clause in that limb alone — the words are the turn's own request
+        rather than its goal statement, and at ADR-0248 the two are byte-equal (§6);
+        :meth:`_resume_read` passes the resumed turn's, which is the **parked** pass's
+        request (ADR-0248 §3); :meth:`_finish_route` passes the
         ``utterance`` it already threads, because a routed pass has user material and
         no turn to read it off; and :meth:`_capture_resumption` and
         :meth:`_compose_and_capture_routed` each pass ``None``. The resumption's

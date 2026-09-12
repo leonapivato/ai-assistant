@@ -1593,10 +1593,16 @@ def test_a_turn_result_carries_no_marker_of_where_the_fourth_group_begins() -> N
 
     A consumer of ``TurnResult.memories`` "may rely on the grouping and may not rely
     on a global relevance order" — and, as ADR-0210 §1 already found for the
-    supplement, no boundary index is offered either. The type is unchanged, which is
-    the assertion: this lane adds no field to it and none is owed.
+    supplement, no boundary index is offered either. No **marker** is owed and none is
+    offered, which is the assertion.
+
+    ``utterance`` is on the type since ADR-0248 §1 and is not one: it carries the
+    user's own words on the pass, says nothing about ``memories``, and is enumerated
+    here so that the set stays a statement about which fields exist rather than a
+    statement nobody re-reads.
     """
     assert set(TurnResult.model_fields) == {
+        "utterance",
         "goal",
         "context",
         "memories",

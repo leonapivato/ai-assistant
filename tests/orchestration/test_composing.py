@@ -100,6 +100,7 @@ def _turn(
     statement: str = "what do you know about me?",
 ) -> TurnResult:
     return TurnResult(
+        utterance=statement,
         goal=_goal(statement),
         context=context if context is not None else _context(),
         memories=tuple(memories),

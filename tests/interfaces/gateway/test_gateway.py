@@ -697,6 +697,7 @@ def _turn_that_ran() -> TurnResult:
         created_at=_AT,
     )
     return TurnResult(
+        utterance=goal.statement,
         goal=goal,
         context=CurrentContext(
             now=_AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True

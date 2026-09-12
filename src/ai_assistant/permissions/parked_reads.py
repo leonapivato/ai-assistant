@@ -2,9 +2,10 @@
 
 ADR-0244 §3's store, and ADR-0244 §18's Lane 2. It holds the questions a recorded
 ``CONFIRM`` on a read left standing: one row per park, carrying the search request's
-own ``parameters``, the ``Goal`` the parked turn was planned against and the
-``ActionPlan`` the planner returned on it, until the question is answered, denied,
-withdrawn or expires — at which point the three go and six scalar facts remain.
+own ``parameters``, the ``utterance`` the parked turn ran on, the ``Goal`` it was
+planned against and the ``ActionPlan`` the planner returned on it, until the question is
+answered, denied, withdrawn or expires — at which point the four go and six scalar facts
+remain (ADR-0248 §3 widens ADR-0244 §3's count, and nothing else of it).
 
 **Here in ``permissions/``, for the reason
 :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail` already is.** ADR-0004 §7
@@ -15,13 +16,13 @@ invariants are stated over ``tool``, ``parameters_digest``, ``step_id`` and
 ``execution_id``, and putting the query itself into it would breach ADR-0148 §6's "bound
 by digest, never stored" in the one store that clause is about.
 
-**Three of the nine fields are Tier 1 content, so ADR-0004 §2's residency clause governs
+**Four of the ten fields are Tier 1 content, so ADR-0004 §2's residency clause governs
 the file**: it is written locally only, under ``Settings.data_dir``, never to a remote
 service, and it is created owner-only (ADR-0004 §4, ADR-0084 §9) before the first
 statement, so a rollback journal SQLite opens for it inherits that mode rather than the
 process umask. ADR-0004 §5's "Tier 0/1 data must never be logged" binds without
-qualification: nothing here interpolates a park's ``parameters``, ``goal`` or ``plan``
-into a message, a log line or an exception.
+qualification: nothing here interpolates a park's ``parameters``, ``utterance``, ``goal``
+or ``plan`` into a message, a log line or an exception.
 
 **What the database enforces, rather than this module's care.** ADR-0244 §3 puts three
 invariants on the *store* and says so in terms — a conversation holds at most one ``OPEN``
@@ -90,9 +91,11 @@ _OWNER_ONLY = 0o600
 #: takes its copy rather than making a fresh choice.
 _SIDECARS = ("-journal", "-wal", "-shm")
 
-#: The three fields ADR-0244 §3's settlement clears, named once so the clause and every
-#: assertion about it cannot come apart.
-_CONTENT: Final = ("parameters", "goal", "plan")
+#: The four fields ADR-0244 §3's settlement clears, named once so the clause and every
+#: assertion about it cannot come apart. ``utterance`` is ADR-0248 §3's fourth content
+#: field and joins no other clause: it is cleared with the rest and is not a fact that
+#: survives settlement.
+_CONTENT: Final = ("parameters", "utterance", "goal", "plan")
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -148,10 +151,18 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-#: One shape only, so far, and there is no ``_migrate`` here because version 1 is the first
-#: shape this store has ever had: an unlabelled database is one this code is creating now,
-#: and it is stamped rather than migrated.
-_SCHEMA_VERSION = 1
+#: **2 since ADR-0248 §9**, whose fourth cleared field makes :data:`_SETTLE_ONLY` a
+#: different stored object — and a stored object definition is exactly what this store
+#: holds every file to (:data:`_OBJECTS`). Version 1 is the shape this store shipped
+#: before that decision, and a database labelled 1 is **upgraded rather than refused**:
+#: :meth:`SqliteParkedReads._upgrade_settle_trigger` drops the trigger it recognises as
+#: version 1's and lets the create below rebuild it. An unlabelled database is one this
+#: code is creating now, and it is stamped rather than migrated.
+_SCHEMA_VERSION = 2
+
+#: The version a database this code can upgrade carries. One member, because there is one
+#: earlier shape.
+_UPGRADABLE_FROM: Final = frozenset({1})
 
 #: Created first and on its own, so a database labelled with a schema this code cannot read
 #: is refused *before* the ``parked_reads`` table is created or read — creating a table is
@@ -161,6 +172,14 @@ _META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT
 _READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
 
 _WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+
+#: The upgraded marker, **updated rather than upserted**. ``meta``'s primary key makes an
+#: upsert equivalent for a table this code created, but ``CREATE TABLE IF NOT EXISTS``
+#: accepts a pre-existing ``meta`` declared without one — where an ``ON CONFLICT`` clause
+#: would silently insert a second row and leave the file holding two conflicting markers,
+#: which is the corruption :meth:`SqliteParkedReads._check_schema_version` refuses on the
+#: next open.
+_UPDATE_SCHEMA_VERSION = "UPDATE meta SET value = ? WHERE key = 'schema_version'"
 
 #: The epoch the sort keys count from. Any fixed instant would do; this one is conventional.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -223,11 +242,11 @@ _INDEXES = {
 
 #: **The one mutation this store admits, said to SQLite rather than only to the reader.**
 #: ADR-0244 §3 rules that ``settle`` moves an ``OPEN`` park to a terminal member and clears
-#: ``parameters``, ``goal`` and ``plan`` *in the same step*, that an already-terminal park
+#: the content *in the same step*, that an already-terminal park
 #: "answers ``False`` and changes nothing", and (§2) that **no transition leaves a terminal
 #: member**. This trigger is what makes all three claims the database keeps rather than ones
 #: this module remembers: an ``UPDATE`` is admitted only where the row was open, is not open
-#: afterwards, carries none of the three content fields, and leaves every terminal fact —
+#: afterwards, carries none of the content fields, and leaves every terminal fact —
 #: ``id``, ``conversation_id``, ``decision_id``, ``parked_at`` and ``expires_at``, and the
 #: ordering key derived from the first of those — byte for byte as it was.
 #:
@@ -236,8 +255,47 @@ _INDEXES = {
 #: already run arbitrary SQL against the file, who could drop it as easily as run the
 #: ``UPDATE``. ADR-0004 §4's owner-only mode is where that question is answered, and
 #: ADR-0099 §1's single-user model is what scopes it.
+#:
+#: **The fourth cleared field is ADR-0248 §3's** ``utterance``, and extending this trigger
+#: is a **stored-schema change rather than an edit to a string**: ``CREATE TRIGGER IF NOT
+#: EXISTS`` is a no-op against a trigger already in the file, so without an upgrade every
+#: existing parked-read database would fail :meth:`SqliteParkedReads._check_objects` and
+#: refuse to open — not merely the parks inside it. :data:`_SETTLE_ONLY_V1` and
+#: :meth:`SqliteParkedReads._upgrade_settle_trigger` are that upgrade. The alternative,
+#: letting ``settle``'s own code clear the fourth field and leaving this alone, is
+#: rejected in ADR-0248: this store deliberately pushed the retention guarantee below the
+#: application, and Tier 1 content is the wrong place to start making exceptions to it.
 _SETTLE_ONLY = (
     "CREATE TRIGGER IF NOT EXISTS parked_reads_settle_only "
+    "BEFORE UPDATE ON parked_reads "
+    "WHEN OLD.disposition IS NOT 'open' OR NEW.disposition IS 'open' "
+    "OR NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id "
+    "OR NEW.decision_id IS NOT OLD.decision_id "
+    "OR NEW.parked_at_us IS NOT OLD.parked_at_us "
+    "OR json_extract(NEW.data, '$.parked_at') IS NOT json_extract(OLD.data, '$.parked_at') "
+    "OR json_extract(NEW.data, '$.expires_at') IS NOT json_extract(OLD.data, '$.expires_at') "
+    "OR json_extract(NEW.data, '$.parameters') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.utterance') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.goal') IS NOT NULL "
+    "OR json_extract(NEW.data, '$.plan') IS NOT NULL "
+    "BEGIN SELECT RAISE(ABORT, 'a parked read is mutated only by settling an open park: "
+    "the disposition moves to a terminal member, the four content fields are cleared in "
+    "the same step, and every terminal fact stands (ADR-0244 §2, §3; ADR-0248 §3)'); END"
+)
+
+#: **Version 1's trigger, byte for byte as SQLite stored it**, and the one definition
+#: :meth:`SqliteParkedReads._upgrade_settle_trigger` will drop. It is written out here
+#: rather than derived from :data:`_SETTLE_ONLY` because it is a *record of what was
+#: shipped*: a derivation would follow the current definition wherever it goes, and an
+#: upgrade that recognised whatever this module happens to say today would drop a trigger
+#: it had not actually verified. Held **without** ``IF NOT EXISTS``, which is the form
+#: ``sqlite_master`` holds and :meth:`SqliteParkedReads._check_objects` compares against.
+#:
+#: **Anything else keeps the existing refusal, word for word and for its own reason**
+#: (ADR-0248 §9): a file whose settlement trigger is neither definition is not this
+#: store's, and its rows cannot be trusted to say what the user was asked.
+_SETTLE_ONLY_V1: Final = (
+    "CREATE TRIGGER parked_reads_settle_only "
     "BEFORE UPDATE ON parked_reads "
     "WHEN OLD.disposition IS NOT 'open' OR NEW.disposition IS 'open' "
     "OR NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id "
@@ -252,6 +310,10 @@ _SETTLE_ONLY = (
     "the disposition moves to a terminal member, the three content fields are cleared in "
     "the same step, and every terminal fact stands (ADR-0244 §2, §3)'); END"
 )
+
+#: Dropped and recreated rather than edited: SQLite has no ``ALTER TRIGGER``, and
+#: ``CREATE TRIGGER IF NOT EXISTS`` is a no-op against one already in the file.
+_DROP_SETTLE_ONLY = "DROP TRIGGER parked_reads_settle_only"
 
 #: **Every object this store defines, held to its own definition.** ``CREATE TABLE IF NOT
 #: EXISTS`` is a no-op against a table already there under that name *whatever shape it
@@ -399,7 +461,7 @@ class SqliteParkedReads:
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                labelled = self._check_schema_version(conn)
+                stored = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
                 # The table is held to its definition **before** the indexes and the trigger
                 # are created over it. A file arriving with a ``parked_reads`` table of
@@ -410,13 +472,26 @@ class SqliteParkedReads:
                 self._check_objects(conn, ("parked_reads",))
                 for statement in _INDEXES.values():
                     conn.execute(statement)
+                # **ADR-0248 §9's upgrade, in the same transaction the object check runs
+                # in** — so a failure leaves the file exactly as it arrived: unupgraded,
+                # unlabelled at the new version, and refusing to open rather than
+                # half-migrated. It runs *before* the create below, because
+                # ``CREATE TRIGGER IF NOT EXISTS`` is a no-op against a trigger already
+                # in the file.
+                if stored in _UPGRADABLE_FROM:
+                    self._upgrade_settle_trigger(conn)
                 conn.execute(_SETTLE_ONLY)
                 self._check_objects(conn, tuple(_OBJECTS))
-                if not labelled:
+                if stored != _SCHEMA_VERSION:
                     # Stamped *after* the creates above, and inside the same transaction, so
                     # a failure rolls the marker — and the ``meta`` table itself — back with
-                    # it rather than leaving a database falsely labelled current.
-                    conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
+                    # it rather than leaving a database falsely labelled current. An
+                    # unlabelled file is stamped; an upgraded one has its marker moved, and
+                    # the two statements differ because one row already exists in the
+                    # second case — see _UPDATE_SCHEMA_VERSION for why it is an UPDATE
+                    # rather than an upsert.
+                    statement = _WRITE_SCHEMA_VERSION if stored is None else _UPDATE_SCHEMA_VERSION
+                    conn.execute(statement, (str(_SCHEMA_VERSION),))
         except AssistantError:
             # A refused schema version or object is already this layer's error; it still
             # leaves a connection to close before it propagates.
@@ -460,6 +535,42 @@ class SqliteParkedReads:
                 )
                 raise AssistantError(msg)
 
+    def _upgrade_settle_trigger(self, conn: sqlite3.Connection) -> None:
+        """Replace version 1's settlement trigger with this version's (ADR-0248 §9).
+
+        **A real upgrade rather than an edit to a string.** ``CREATE TRIGGER IF NOT
+        EXISTS`` is a no-op against a trigger already in the file and
+        :meth:`_check_objects` then compares the *stored* SQL against this module's, so a
+        trigger naming a fourth cleared field would make every existing parked-read
+        database fail to open — not merely the parks inside it.
+
+        **It touches definitions and no content** (ADR-0248 §9). No park's ``data`` is
+        read, no row is rewritten, no column is back-filled, no stored model is
+        re-validated and nothing is settled: a park that was ``OPEN`` before this is
+        ``OPEN`` after, with the same ``expires_at`` and the same answer available.
+
+        **Where the stored trigger is anything but version 1's, this does nothing** and
+        the existing refusal stands, word for word and for its own reason: the create
+        that follows is a no-op against whatever is there, and :meth:`_check_objects`
+        reports that the file holds an object that is not the one this store defines. A
+        file labelled version 1 with no such trigger at all is likewise left to the
+        create, which builds this version's.
+
+        Runs inside the setup transaction, so a failure anywhere below leaves the file
+        exactly as it arrived — unupgraded, unlabelled at the new version, and refusing
+        to open rather than half-migrated.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+        """
+        held = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("parked_reads_settle_only",),
+        ).fetchone()
+        if held is None or held[0] != _SETTLE_ONLY_V1:
+            return
+        conn.execute(_DROP_SETTLE_ONLY)
+
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
 
@@ -482,18 +593,23 @@ class SqliteParkedReads:
             with contextlib.suppress(FileNotFoundError):
                 sidecar.chmod(_OWNER_ONLY)
 
-    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
-        """Refuse a labelled schema this code cannot read; say whether one is labelled.
+    def _check_schema_version(self, conn: sqlite3.Connection) -> int | None:
+        """Refuse a labelled schema this code cannot read; say which one is labelled.
 
         Runs inside the setup transaction, after ``meta`` exists and **before** the
         ``parked_reads`` table is created or read.
 
         **An unlabelled database is stamped rather than migrated**: this store ships *with*
-        its marker, so version 1 is the only shape it has ever written and an unlabelled
-        file is one this open is creating.
+        its marker, so an unlabelled file is one this open is creating.
+
+        **A database labelled** :data:`_UPGRADABLE_FROM` **is upgraded rather than
+        refused**, which is the one shape this check did not admit before ADR-0248 §9.
+        What the upgrade then does is :meth:`_upgrade_settle_trigger`'s; what this method
+        owes is the number, so the caller can tell the three cases apart without reading
+        the marker twice.
 
         Returns:
-            Whether the database already carries a ``schema_version``.
+            The version the database carries, or ``None`` where it carries none.
 
         Raises:
             AssistantError: If the stored version is not one this code understands, is not
@@ -501,7 +617,7 @@ class SqliteParkedReads:
         """
         rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
         if not rows:
-            return False
+            return None
         if len(rows) > 1:
             # ``meta``'s primary key makes this unreachable for a table *this* code created
             # — but ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing ``meta`` declared
@@ -528,14 +644,17 @@ class SqliteParkedReads:
             stored = int(raw)
         except ValueError as exc:
             raise AssistantError(msg) from exc
-        if stored != _SCHEMA_VERSION:
+        if stored != _SCHEMA_VERSION and stored not in _UPGRADABLE_FROM:
+            supported = ", ".join(
+                str(version) for version in sorted({*_UPGRADABLE_FROM, _SCHEMA_VERSION})
+            )
             msg = (
                 f"the parked-read store at {self._path!r} has schema_version={stored}, but "
-                f"this code supports only version {_SCHEMA_VERSION}; refusing to open it "
+                f"this code supports only version {supported}; refusing to open it "
                 f"rather than read it blindly"
             )
             raise AssistantError(msg)
-        return True
+        return stored
 
     def _transaction(self, what: str) -> AbstractContextManager[sqlite3.Connection]:
         """Run the block inside one transaction, translating backend failures.

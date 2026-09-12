@@ -133,6 +133,7 @@ def _scripted() -> TurnOutcome:
     )
     return TurnOutcome(
         turn=TurnResult(
+            utterance=goal.statement,
             goal=goal,
             context=CurrentContext(
                 now=_INSTANT,

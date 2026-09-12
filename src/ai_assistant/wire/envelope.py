@@ -1423,7 +1423,42 @@ from ai_assistant.wire.errors import (
 #: it is sent; a client at 36 handed an older hub's value fails, which is what the
 #: version exists to make legible rather than silent. #1956's window stays open, and
 #: this entry neither repairs it nor inherits it.
-PROTOCOL_VERSION: Final[int] = 36
+#:
+#: **37 since ADR-0248 §7**, and the ground is a **widened** value rather than a
+#: narrowed one. :class:`~ai_assistant.core.types.TurnResult` gains ``utterance``, the
+#: user's own words carried as a value of their own (ADR-0248 §1); ``TurnResult`` rides
+#: ``TurnOutcome.turn``, ``TurnOutcome`` is what the promoted surface returns, and
+#: ``TurnResult`` sets ``extra="forbid"``. ``wire/codec.py`` renders a model by
+#: ``model_dump()``, so a hub at 37 emits an ``"utterance"`` member on **every** turn
+#: and a client at 36 fails it with ``extra_forbidden``. That is ADR-0124 §9's second
+#: limb — "a change to a wire-carried ``core`` type that makes a value one peer emits
+#: invalid for the other, whether the change widens or narrows the type" — and ADR-0178
+#: §6 is the precedent for stating the bump in the deciding ADR rather than leaving the
+#: lane to discover it.
+#:
+#: **``ParkedRead`` gaining the same field is not a second ground.** It is an in-process
+#: store record reached through the ``ParkedReads`` Protocol, no peer emits it, and
+#: adding a field to it emits nothing — exactly as the entry at 36 records of that type
+#: standing untouched. **And no new class of content crosses**:
+#: ``TurnOutcome.turn.goal.statement`` already carries the identical bytes to the
+#: identical peers (ADR-0248 §6), and what moves is which field holds them.
+#:
+#: **The promoted method set does not move and stands at fifty-eight**, and ADR-0177
+#: §1's browser enumeration does not move and stands at thirty-one: ADR-0248 changes no
+#: Protocol at all (§7), so no conformance suite and no canonical fake is added and no
+#: gateway route appears.
+#:
+#: **One stored-record version moves, and it is not one of this wire's.** The
+#: parked-read store's own ``schema_version`` goes 1 → 2, because ADR-0248 §9's
+#: settlement trigger is a stored object definition; ``ConversationExport.schema_version``
+#: stays at **2**, ADR-0212 §8 and ADR-0014 §5 are untouched, and no row is minted in
+#: ADR-0087 §2c's scalar table.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0248 mints no error class and
+#: removes none.
+PROTOCOL_VERSION: Final[int] = 37
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
