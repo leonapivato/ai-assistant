@@ -1,6 +1,6 @@
 # 249. The goal carries its interpretation, the attempt carries the phase, and the planner receives a brief and returns its understanding
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
   — **§1's third clause in its second sentence alone: "The goal is minted once per turn from
