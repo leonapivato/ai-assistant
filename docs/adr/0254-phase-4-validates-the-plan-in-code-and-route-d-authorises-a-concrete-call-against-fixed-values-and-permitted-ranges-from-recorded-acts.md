@@ -147,12 +147,21 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > `extra="forbid"` whose fields are exactly: `id`, a `DurableIdentifier`; `goal`, an
 > `Identifier`; `tool`, a `ToolDefinition`; `account`, a `BoundAccount`; `destinations`, a
 > non-empty, duplicate-free `tuple[CanonicalDestination, ...]` in
-> `EgressBinding.canonical_destination_set`'s one canonical order; `coverage`, a possibly-empty
+> `EgressBinding.canonical_destination_set`'s one canonical order; `origin`, an
+> **`AuthorizationOrigin`**; `coverage`, a possibly-empty
 > `tuple[CoverageMember, ...]`; `proposed_at`, a `UtcInstant`; `expires_at`, a `UtcInstant`
 > **strictly after** it; `confirmation`, a `DurableIdentifier | None`; `supersedes`, a
 > `DurableIdentifier | None`; `disposition`, an **`AuthorizationDisposition`**; and
 > `settled_at`, a `UtcInstant | None`. The field list is **closed**, and a lane adding a member
 > is changing this decision rather than implementing it.
+
+> **Normative.** **`AuthorizationOrigin` is a `StrEnum` valued by lower-cased member name and
+> closed at exactly two members**: **`CONFIRMED`** — the authority was put to the user as a
+> question about a concrete call and answered (§1's path (i)) — and **`OPENING_ACT`** — the
+> authority was opened by a recorded instruction with no question put (path (iii)). **A
+> correction transcribes it unchanged** (path (ii)), so the fact survives any chain of
+> corrections, and **§6's recipient recheck is stated over it** rather than over a shape a
+> correction changes. The vocabulary is added to and never renamed.
 
 > **Normative.** **`AuthorizationDisposition` is a `StrEnum` valued by lower-cased member name
 > and closed at exactly six members**: `PROPOSED`, `ESTABLISHED`, `DECLINED`, `EXPIRED`,
@@ -249,7 +258,9 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >
 > - **(i) Proposed against a `CONFIRM`.** `confirmation` names the recorded `CONFIRM` the
 >   question rode, `disposition` is `PROPOSED`, `proposed_at` is that decision's `decided_at`,
->   and the row is settled by the answer. **This is the only path that may create a member,
+>   and the row is settled by the answer; `origin` is **`CONFIRMED`**, because the destination
+>   set is named in the question the user answers (ADR-0148 §8's fourth clause). **This is the
+>   only path that may create a member,
 >   widen a bound, set `destinations`, set `account`, set `tool` or set `expires_at`**, because
 >   it is the only one on which the user is shown what they are being asked (§11). It **may**
 >   carry `supersedes`, naming **any `ESTABLISHED` row of the same `goal` and the same
@@ -268,15 +279,19 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >   directly and `settled_at` equal to `proposed_at` — the recorded turn's instant — and
 >   settles the superseded row `SUPERSEDED` **in the same write**. **Every member of the
 >   superseded row that the correction does not replace is carried forward byte for byte, with
->   its own basis** (§8), and `goal`, `tool`, `account`, `destinations` and `expires_at` are
->   **transcribed unchanged**.
+>   its own basis** (§8), and `goal`, `tool`, `account`, `destinations`, `expires_at` **and
+>   `origin`** are **transcribed unchanged**. **Transcribing `origin` is what keeps §6's
+>   recipient recheck alive through a correction**: a correction supplies no recipient authority
+>   of its own — it may not touch `account` or `destinations` at all — so a chain of corrections
+>   over an opening act is still an authority resting on someone else's grant, and the row says
+>   so.
 >
 > - **(iii) An opening act.** A recorded turn of the goal whose span states a fixed value or a
 >   bound over an argument of the request being built, where **no** row of that goal and that
 >   declaration `id` stands `ESTABLISHED`. It writes a row with `confirmation` **unset**,
->   `supersedes` **unset**, `disposition` **`ESTABLISHED`** directly and `settled_at` equal to
->   `proposed_at` — the recorded turn's instant — and **retires nothing, there being nothing to
->   retire**. It **may** set `tool`, `account`, `destinations` and `expires_at`, because there
+>   `supersedes` **unset**, `origin` **`OPENING_ACT`**, `disposition` **`ESTABLISHED`** directly
+>   and `settled_at` equal to `proposed_at` — the recorded turn's instant — and **retires
+>   nothing, there being nothing to retire**. It **may** set `tool`, `account`, `destinations` and `expires_at`, because there
 >   is no earlier row to transcribe them from — **but only where the recipient is already
 >   authorised by a recorded act of the user** (the clause below), because copying an account
 >   and a destination set off the request would let the selection authorise the recipient. Every
@@ -328,9 +343,16 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > about the ruling and this read is before it.
 
 > **Normative — an opening-act row is told apart from the row alone, and it is the one row route
-> (d) will not carry by itself.** A row is an **opening-act row** where its `confirmation`
-> **and** its `supersedes` are both unset (§1's shapes). **No field is added and no store read
-> is needed to classify one**, which is §7's own discipline for a discriminator.
+> (d) will not carry by itself.** A row is an **opening-act row** where its `origin` is
+> **`OPENING_ACT`** — read off the row, with **no store read and no walk back through a chain**,
+> which is §7's own discipline for a discriminator. **The pointer shape is not the test and must
+> not be used as one**: a path-(ii) correction of an opening act carries `supersedes`, so a rule
+> stated over *"both pointers unset"* would lose the recipient dependency at the first
+> correction — an authority resting on someone else's grant would outlive its revocation
+> because the user said *"make it Sunday"*. `origin` is transcribed by every correction and is
+> changed by exactly one thing: **a path-(i) supersession**, where the user is asked again, is
+> shown the destination set, and answers — at which point the replacement is `CONFIRMED` and the
+> dependency is genuinely discharged.
 
 > **Normative — the recipient authority an opening act rested on must still stand at every
 > dispatch, and route (d) on such a row re-takes it.** On an opening-act row, route (d) covers a
@@ -346,12 +368,13 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > user's recipient act beyond what they recorded, which is what ADR-0148 §3's second clause
 > forbids.
 
-> **Normative — and the row's `expires_at` never outlives that grant either.** A path-(iii)
-> row's `expires_at` is **the earlier of §12's ladder and the grant's own `expires_at`**, so the
-> instant §11 shows is an instant the authority can actually reach. Where that earlier instant
-> is at or before `proposed_at`, **no row is written**, by §12's rung 3. The re-check above is
-> what enforces a **revocation**; this is what keeps the **displayed** instant honest, and
-> neither is a substitute for the other.
+> **Normative — and the grant's own instant is not copied onto the row.** A path-(iii) row's
+> `expires_at` is §12's ladder and nothing else. **The recheck above is what enforces the
+> grant's lifetime**, at every dispatch and over the live seam, so a second copy of the grant's
+> instant would buy nothing and would go stale the moment the user extends, replaces or widens
+> that grant — two shapes of one fact, which is what ADR-0150 is named after. **What the row
+> states is the horizon of the *user's own act*, and what the seam decides is whether the
+> recipient act still stands**; they are two facts and the row carries only its own.
 
 > **Normative — the grant is a condition on the route and never a second contributor to the
 > ruling.** `authorised_by` still names **one** row, `authorised_subject` is still that row's
@@ -376,10 +399,12 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >
 > - **What was recorded is restated to the user on the turn that recorded it.** The act is a
 >   revision of the goal's interpretation — the bound is an element of its `constraints` — and
->   **ADR-0250 §5's announcement rule already governs it**: a meaningful revision of ongoing
->   work is briefly announced, composed by `orchestration` from the typed value, and *"no model
->   writes it"*. **`TurnOutcome` gains no member and no second announcement is minted**: the
->   user reads what was recorded on the turn they said it, which is what makes an authority
+>   **§11 gives it a carrier of its own**, `TurnOutcome.authorization`, composed by
+>   `orchestration` from the typed value with no model writing it, carrying the bounds the act
+>   recorded and the instant they expire. **It does not ride ADR-0250 §5's announcement rule**,
+>   which is silent on a grounding-only revision and whose carrier holds neither a coverage nor
+>   an expiry — §11 states the whole of it and §18 records the one count that moves. The user
+>   reads what was recorded on the turn they said it, which is what makes an authority
 >   established without a question visible at the moment it comes into being.
 > - **A materially ambiguous bound is asked about and is never guessed.** Where the span admits
 >   more than one admissible value the resolution is not taken, **no member is minted and no row
@@ -1617,11 +1642,24 @@ all three would be one thing to be wrong about.
 > of forty-five pounds and nothing else cannot say whether answering fixes forty-five or permits
 > sixty.
 
-> **Normative — an opening act is announced, on a member of its own, and the announcement is
-> guaranteed rather than inherited.** `TurnOutcome` gains **one** `None`-defaulting member,
-> **`authorization: AuthorizationProjection | None`**, carrying the coverage the act established
-> and the instant it expires. It is set on **exactly** the turn that wrote a path-(iii) row
-> (§1), from that durable row by transcription, and is `None` on every other turn. `Confirmation`
+> **Normative — an opening act is announced, on a member of its own, and the announcement is of
+> the *act* rather than of a row.** `TurnOutcome` gains **one** `None`-defaulting member,
+> **`authorization: AuthorizationProjection | None`**, carrying the coverage the act recorded —
+> each member with the user's own span — and the instant §12's ladder yields for it. It is set
+> on **exactly** the turn whose recorded act opens an authority under §1's path (iii), and is
+> `None` on every other turn.
+>
+> **One projection is total because one turn records one act, and because the act's coverage and
+> its horizon are the same on every row it opens.** §1 permits a plan reaching two declarations
+> to need two rows, and one opening act may open both — at different moments, since a row is
+> written when the request that reaches its declaration is built, which may be a later turn
+> altogether. **So an announcement per row could not be delivered at all**: the later rows are
+> written during execution, on turns that may carry no reply. What the user is owed, and what the
+> owner's direction asks for, is that *"the reply restates what was recorded"* — the bound and
+> the horizon **they stated**, on the turn they stated it — and those are one value however many
+> declarations the plan later reaches, because §12's ladder reads the act and the goal and
+> nothing about a declaration. **The per-row detail is the listing's** (below): which
+> declaration, which expiry the row carries, and whether it still stands. `Confirmation`
 > and `TurnOutcome` carry **one** projection type between them, because the question and the
 > announcement state the same three facts about a member — the argument, the fixed value or the
 > bound, and the user's own words — and a second shape of one fact is what ADR-0150 is named
@@ -1660,6 +1698,15 @@ all three would be one thing to be wrong about.
 > `BoundAccount.reference` is *"never shown to the user"* (ADR-0148 §6, §8) and this decision
 > does not move that; ADR-0193 §11's bar on what an audit surface renders binds here entire;
 > and ADR-0228 §8's namer rule binds every prompt this decision builds.
+
+> **Normative — the listing's `live` reports the row's own liveness and never the standing of
+> another act.** A row whose `origin` is `OPENING_ACT` rests on a recipient grant §6 re-takes at
+> every dispatch, and that grant may have lapsed or been revoked since. **Such a row still
+> appears and still reads `live` where §1's predicate holds**, because it is still an
+> `ESTABLISHED` row the user may revoke and hiding it would hide an authority they hold. **The
+> listing is a record of what the user authorised and is not a promise that the next call will
+> be allowed** — no surface of this decision makes that promise, `decide` is the only thing that
+> answers it (§13), and the engine reads no grant seam to assemble a listing.
 
 > **Normative.** **The surfaces this decision owes are a listing and a revocation**, and they
 > render, per record: the goal's **statement** (never its id), the declaration's own
@@ -2060,8 +2107,8 @@ all three would be one thing to be wrong about.
 > **Normative — the `core` surface this decision adds, in full, with the lane that lands each
 > so that this roster and §20's cut cannot drift apart.** `core/types.py` gains **twelve**
 > types: **nine with Lane 1** — `Authorization`, `AuthorizationDisposition`,
-> `AuthorizationSettlement`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
-> `ValueResolution` and `ResolutionRule`, the settlement vocabulary landing there because
+> `AuthorizationSettlement`, `AuthorizationOrigin`, `CoverageMember`, `ValueBound`, `BoundKind`,
+> `AuthorizationBasis`, `ValueResolution` and `ResolutionRule`, the settlement vocabulary landing there because
 > `GoalAuthorizationStore.settle` is Lane 1's and answers with it — and **three with Lane 3**:
 > `CoverageView`, `AuthorizationProjection` and `AuthorizationView`. It gains **five**
 > fields: `PermissionRuling.authorised_goal`, `ActionRequest.goal` and
@@ -2601,7 +2648,7 @@ check are each consumed as written, and §13 and §14 state where.
 ### 20. The lane cut, and the arms this decision owes
 
 > **Normative — the cut, and it agrees with §16's roster member for member.** **Lane 1, the
-> contract triad and the policy.** `core/types.py`'s **nine** new types and **three** new
+> contract triad and the policy.** `core/types.py`'s **ten** new types and **three** new
 > fields — `PermissionRuling.authorised_goal`, `ActionRequest.goal` and
 > `ToolDefinition.system_supplied`, each of which the policy reads — `core/protocols.py`'s three
 > Protocols, `core/errors.py`'s two classes,
@@ -3025,10 +3072,19 @@ check are each consumed as written, and §13 and §14 state where.
 >     `RecipientGrant` covers the declaration, the account and the whole canonical destination
 >     set of the request being built**. The first egress request of that goal reaching that
 >     declaration → **a row is written `ESTABLISHED`** with
->     `confirmation` and `supersedes` both unset, `settled_at` equal to `proposed_at` equal to
->     the turn's instant, `expires_at` the goal's `deadline`, one member bounding the amount
->     with the turn's own span as its basis — and the request draws **`ALLOW` on route (d)**
->     with **no `CONFIRM` put at all** and `RecipientGrants.covering` called **zero** times.
+>     `confirmation` and `supersedes` both unset, `origin` **`OPENING_ACT`**, `settled_at` equal
+>     to `proposed_at` equal to the turn's instant, `expires_at` the goal's `deadline`, one
+>     member bounding the amount with the turn's own span as its basis — and the request draws
+>     **`ALLOW` on route (d)** with **no `CONFIRM` put at all**.
+>     **`TurnOutcome.authorization` on the turn that recorded the act is present**, carrying the
+>     bound the act recorded and that same instant, with the user's own span on the member and
+>     **no identifier of any kind**; it is `None` on every turn whose act opens no authority,
+>     **including a turn that only re-grounds an existing constraint** — the case ADR-0250 §5
+>     requires to stay unannounced, which is why this member exists. **And one act that later
+>     opens rows for two declarations is announced once**: those rows are written when their own
+>     requests are built, on turns that may carry no reply at all, and the announcement states
+>     the act's bound and horizon, which both rows carry; **the listing is where the two are
+>     told apart**, by declaration and by their own expiries.
 >     `standing(goal)` returns the row, §11's listing renders its coverage, its span and its
 >     expiry, and `revoke_authorization` on it → `REVOKED`, after which the next request of that
 >     goal draws `CONFIRM`. **And the safeguards**: where the span admits two admissible values
@@ -3037,7 +3093,7 @@ check are each consumed as written, and §13 and §14 state where.
 >     `ProposedQuestion`, where no question is put and no row is written either. **A row with
 >     `confirmation` and `supersedes` both unset and `coverage=()` is not constructible**, one
 >     test, **and one carrying a non-empty `coverage` round-trips through construction and
->     persistence in every disposition it can reach**. **And where a row of that pair already
+>     persistence in every disposition it can reach**, `origin` included. **And where a row of that pair already
 >     stands `ESTABLISHED`, no path-(iii) row is written** — the act is a correction and takes
 >     path (ii), or a widening and takes path (i).
 > 65. **An opening act supplies no recipient authority** (§1). The same act and the same goal,
