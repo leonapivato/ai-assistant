@@ -1,6 +1,6 @@
 # 251. An attempt investigates in bounded rounds over typed read outcomes, and keeps a reserve to answer with
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes four ADRs, in seven narrowly stated scopes** — three of
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md),
   two of
