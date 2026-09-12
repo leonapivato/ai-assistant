@@ -1,6 +1,6 @@
 # 246. Reach does not bind at all on a search bound to a destination the user chose, and the supply's type refuses no placement
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0247 (§11's Arm F′ in its `calls` count alone — the per-conversation call budget that count is taken from is removed, so the arm is restated over the three counts that remain: a turn carrying an admitted `DERIVED` narrowing and an admitted `OWNER_ACT` one records the supplied count, the withheld count at **zero** and the supplied-narrowed count at **two**, each at its true value, carrying the ambient correlation identifier and no other identifier and carrying no `calls` field at all. That scope, and nothing else in this ADR: Arm F′'s remaining limbs, §1's rule that `Placement.reach` does not bind at all on a `SearchSupply` built for a destination the user chose, §§2-10, §11's other arms, §12's deferrals and §§13-15 stand entire)
 - Date: 2026-09-11
 - **Partially supersedes** [ADR-0245](0245-reach-is-audience-control-so-a-derived-owner-reach-record-composes-a-search-bound-to-a-destination-the-user-chose.md)
   — **§1's third clause in the two-facts rule it states; §2's third, fourth and fifth
@@ -20,6 +20,29 @@
   §8 restated.** Those three scopes, and nothing else in that ADR beyond what ADR-0241,
   ADR-0242 and ADR-0245 already recorded there.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — §11's Arm F′ in its `calls` count
+  alone, and nothing else in this ADR.** Arm F′ requires the per-turn audit event to record
+  *"the supplied count, the withheld count at **zero**, this turn's `calls` and the
+  supplied-narrowed count at **two**"*, and closes *"restated here so the arm cannot be
+  satisfied by dropping a field §7 keeps"*. **The owner's security pass over the search path
+  removed `Settings.search_calls_per_conversation` and the whole per-conversation draw**, so
+  there is no `calls` quantity to record and no field to keep.
+
+  **The closing sentence is honoured rather than worked around.** It was written against a
+  *lane* dropping a field for convenience — which would satisfy the arm while losing a
+  number a deployment watches — and it names the instrument that may move it in the same
+  breath as ADR-0238 §11 does for its own enumeration: an ADR. ADR-0247 is that ADR, and it
+  removes the quantity rather than the field's appearance in a test.
+
+  **Everything else of Arm F′ binds entire** — the three surviving counts, the
+  each-at-its-true-value requirement, and ADR-0238 §11's one-identifier-and-no-other rule,
+  restated in Arm F′ precisely so the arm could not be satisfied by dropping it. **And
+  everything else of this ADR is untouched**: §1's rule that `Placement.reach` does not bind
+  at all on a `SearchSupply` built for a destination the user chose; §3's deleted validator;
+  §4's `core` surface; §7's supplied-narrowed count, which ADR-0247 keeps by name; §§5-6,
+  §§8-10; §11's Arms D, D′, B′, G and H; §12's deferrals, the first of which ADR-0247 §13
+  restates unchanged; and §§13-15. **This line takes the leading token and `Accepted` is
+  dropped, as `docs/adr/template.md` requires.**
 ## Context
 
 ### Where this comes from
