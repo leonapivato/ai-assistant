@@ -821,13 +821,21 @@ class PlanStoreContract:
     async def test_the_attempts_references_grow_by_append_and_ignore_a_repeat(
         self, store: PlanStore
     ) -> None:
-        """§16 arm 19: appended in order, and a repeated identifier is ignored."""
+        """§16 arm 19: appended in order, and a repeated identifier is ignored.
+
+        The identifiers are **real** rows of this goal, because ADR-0014 §5's closure
+        obliges the store to refuse any other — see
+        :meth:`test_an_attempt_cannot_take_a_reference_the_export_could_not_close_over`.
+        """
         await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        await store.save_plan(_plan(plan_id="p2"))
+        execution = await store.start_execution("p1")
         await store.open_attempt(_attempt())
 
         moves = (
             AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1"),
-            AttemptTransition(attempt_id="a1", expected_version=1, add_execution_id="e1"),
+            AttemptTransition(attempt_id="a1", expected_version=1, add_execution_id=execution.id),
             AttemptTransition(attempt_id="a1", expected_version=2, add_authorization_id="auth-1"),
             AttemptTransition(attempt_id="a1", expected_version=3, add_plan_id="p2"),
             AttemptTransition(attempt_id="a1", expected_version=4, add_plan_id="p1"),
@@ -836,12 +844,86 @@ class PlanStoreContract:
             attempt = await store.commit_attempt(move)
 
         assert attempt.plan_ids == ("p1", "p2"), "appended in order, the repeat ignored"
-        assert attempt.execution_ids == ("e1",)
+        assert attempt.execution_ids == (execution.id,)
         assert attempt.authorization_ids == ("auth-1",)
+
+    async def test_an_attempt_cannot_take_a_reference_the_export_could_not_close_over(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0014 §5's closure, kept at write time (ADR-0228 §5, ADR-0249 §11).
+
+        An attempt's ``plan_ids`` and ``execution_ids`` are ``plan_id`` values
+        referenced by an included record, so "every ``goal_id``/``plan_id`` referenced
+        by an included record resolves within the same export" reaches them. A store
+        that took one it does not hold would answer ``export`` with a document that
+        does not validate — the failure discovered by whoever reads it back, which is
+        exactly what ADR-0228 §5 moved the ``supersedes`` check to the write to
+        prevent.
+
+        **Under the attempt's own goal**, so the closure survives a deletion:
+        ``delete_goal`` cascades a goal's plans, executions and attempts together, and
+        a reference confined to one goal cannot outlive its target.
+        """
+        await store.save_goal(_goal())
+        await store.save_goal(_goal("g2"))
+        await store.save_plan(_plan(plan_id="p-other", goal_id="g2"))
+        await store.open_attempt(_attempt())
+
+        for dangling in (
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="missing"),
+            AttemptTransition(attempt_id="a1", expected_version=0, add_execution_id="missing"),
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p-other"),
+        ):
+            with pytest.raises(PlanningError):
+                await store.commit_attempt(dangling)
+
+        with pytest.raises(PlanningError):
+            await store.open_attempt(
+                GoalAttempt(id="a2", goal_id="g1", opened_at=_WHEN, plan_ids=("missing",))
+            )
+
+        assert (await store.export()).attempts == (_attempt(),), "and nothing was written"
+
+    async def test_save_goal_holds_an_oversized_history_to_the_bound(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0249 §2, over the write it is stated of rather than over one member.
+
+        "A goal whose sequence would exceed it drops its **oldest** element on the
+        write that would exceed it, and the **current** interpretation is never
+        dropped" — and ``save_goal`` is a write. A store that applied the bound only
+        through ``record_interpretation`` would take an oversized history at the door
+        and enforce the ceiling on nothing.
+
+        The elision is **disclosed** on this write exactly as it is on the other: a
+        history reporting fewer revisions than it held would answer §2's own question
+        falsely (ADR-0086 §4).
+        """
+        oversized = _goal().model_copy(
+            update={
+                "interpretation": tuple(
+                    _revision(number, outcome=f"understanding {number}")
+                    for number in range(1, MAX_GOAL_INTERPRETATIONS + 4)
+                )
+            }
+        )
+
+        await store.save_goal(oversized)
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert len(stored.interpretation) == MAX_GOAL_INTERPRETATIONS
+        assert stored.interpretation_elided == 3
+        assert stored.interpretation[0].revision == 4, "the oldest went"
+        assert stored.statement == f"understanding {MAX_GOAL_INTERPRETATIONS + 3}", (
+            "and the current interpretation is never dropped"
+        )
 
     async def test_commit_attempt_refuses_a_stale_version(self, store: PlanStore) -> None:
         """§16 arm 10, the attempt half."""
         await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        await store.save_plan(_plan(plan_id="p2"))
         await store.open_attempt(_attempt())
         await store.commit_attempt(
             AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")

@@ -641,14 +641,16 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
             closes="ROLLBACK",
         )
         await recorded("open_attempt", lambda: store.open_attempt(_attempt()))
+        await recorded("save_plan (insert)", lambda: store.save_plan(_plan()))
+        await recorded("save_plan (idempotent re-save)", lambda: store.save_plan(_plan()))
+        # After the plan exists, because ADR-0014 §5's closure is kept at the write:
+        # an attempt may not name a plan the store does not hold under its goal.
         await recorded(
             "commit_attempt",
             lambda: store.commit_attempt(
                 AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
             ),
         )
-        await recorded("save_plan (insert)", lambda: store.save_plan(_plan()))
-        await recorded("save_plan (idempotent re-save)", lambda: store.save_plan(_plan()))
         await recorded(
             "save_plan (refused: unknown goal)",
             lambda: store.save_plan(_plan(plan_id="orphan", goal_id="ghost")),
@@ -2202,3 +2204,41 @@ async def test_the_migration_leaves_the_file_alone_where_a_row_cannot_be_read(
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
             "1",
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("statement", "   ", id="blank-statement"),
+        pytest.param("created_at", "not an instant", id="unparseable-instant"),
+        pytest.param("created_at", "2026-01-01T00:00:00", id="naive-instant"),
+    ],
+)
+async def test_a_row_that_fails_a_model_invariant_is_this_layers_error(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """A migrated value the model refuses is a ``PlanningError``, not a raw one.
+
+    A missing key fails at the read; a **present but invalid** one fails at the
+    construction, and a ``ValidationError`` escaping the migration would reach
+    ``_setup``, whose cleanup catches ``PlanningError``, ``sqlite3.Error`` and
+    ``OSError`` — so it would leak the connection past this layer's own error boundary
+    (ADR-0049 §1). Driven over the three shapes a stored row can actually hold: a
+    statement blank once stripped, an instant that does not parse, and one that parses
+    but is naive (ADR-0023 §3).
+    """
+    path = tmp_path / "plans.db"
+    _version_1_database(path)
+    with sqlite3.connect(path) as conn:
+        (raw,) = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()
+        held = json.loads(raw)
+        held[field] = value
+        conn.execute("UPDATE goals SET data = ? WHERE id = 'g1'", (json.dumps(held),))
+
+    with pytest.raises(PlanningError, match="this migration cannot read"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "1",
+        ), "unupgraded rather than half-migrated"
