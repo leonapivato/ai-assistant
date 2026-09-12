@@ -31,7 +31,7 @@ from test_engine import (
 from test_engine_composing import _GatedProvider, _refusing
 from test_engine_read_envelope import _recorder
 
-from ai_assistant.core.errors import PlanningError, ToolError
+from ai_assistant.core.errors import PlanningError, ToolError, UngrantableActError
 from ai_assistant.core.types import (
     AttemptEffort,
     AttemptOutcome,
@@ -51,7 +51,13 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.loop import OpenedAttempt
-from ai_assistant.testing import FakeModelProvider, FakePlanStore, FakeStreamingCompleter
+from ai_assistant.orchestration.runner import StepDisposition
+from ai_assistant.testing import (
+    FakeModelProvider,
+    FakePlanStore,
+    FakeRecipientGrantStore,
+    FakeStreamingCompleter,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -341,6 +347,14 @@ async def test_a_cancellation_during_composition_leaves_the_attempt_out_of_waiti
 
     The half that does depend on the answer is not committed, which is correct: no answer
     exists, so ``ANSWERED`` is not true and ``VERIFY`` is not where the attempt stands.
+
+    **And the approval reference is already on the row, not waiting behind the
+    composition.** ``StepExecution.approval_ref`` is durable the moment the step is
+    claimed, so an attempt that collected it at the finishing commit alone would leave a
+    ``SUCCEEDED`` execution whose decision never reached
+    :attr:`~ai_assistant.core.types.GoalAttempt.authorization_ids`, and a replay restates
+    without repairing it. ADR-0014 §5's "a claimed step must be traceable to the decision
+    that allowed it" is what that loses.
     """
     plans = _Recording()
     provider = _GatedProvider()
@@ -364,6 +378,13 @@ async def test_a_cancellation_during_composition_leaves_the_attempt_out_of_waiti
     assert attempt.state is AttemptState.RUNNING, "the user answered, so it is not waiting"
     assert attempt.phase is AttemptPhase.EXECUTE, "and the step it stamps really did run"
     assert attempt.outcome is None, "no answer exists, so none is claimed"
+    executed = await harness.plans.get_execution(attempt.execution_ids[0])
+    assert executed is not None
+    claimed = executed.step("step-1")
+    assert claimed is not None
+    assert claimed.status is StepStatus.SUCCEEDED
+    assert claimed.approval_ref is not None
+    assert claimed.approval_ref in attempt.authorization_ids, "the approval survived"
 
 
 async def test_a_refused_confirmation_leaves_the_attempt_unended() -> None:
@@ -701,3 +722,228 @@ async def test_a_recorded_element_reaches_the_stored_goal(
     assert constraint.text == "two plus two"
     assert constraint.span == "two", "a span of this turn's own request"
     assert outcome.turn.goal.constraints[0].text == "two plus two", "and the brief shows it"
+
+
+# --------------------------------------------------------------------------- #
+# §12's authorization boundary — one placement, probed from every side          #
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_answer_the_runner_refuses_leaves_the_attempt_waiting() -> None:
+    """§12: a fact is committed when it becomes true, and a refused answer is not one.
+
+    ADR-0235 §2 leaves the confirmation **pending** where the establishing act may not
+    ride it: the runner raises before any ruling is sought, records no answer, and the
+    step stays parked and answerable without the argument. So there is no moment at
+    which the attempt left ``AWAITING_AUTHORIZATION``, and a commit taken on the *call*
+    rather than on the *answer* would record one — the attempt would say ``EXECUTE``
+    over a step still waiting for a user who has, as far as the durable record is
+    concerned, not answered at all.
+    """
+    plans = _Recording()
+    harness = Harness(
+        tools=(confirmable(),), plans=plans, recipient_grants=FakeRecipientGrantStore()
+    )
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    token = parked.step.confirmation.token
+
+    with pytest.raises(UngrantableActError, match="recipients could be made standing"):
+        await harness.engine.resume(
+            token, approved=True, timeout=PATIENT, remember_recipients_until=AT + timedelta(days=1)
+        )
+
+    (stored,) = plans.opened
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+    assert waiting.state is AttemptState.AWAITING_AUTHORIZATION, "nothing was answered"
+    assert waiting.phase is AttemptPhase.AUTHORIZE
+    assert waiting.authorization_ids == (), "and no decision allowed anything"
+
+    resumed = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    moved = await harness.plans.get_attempt(stored.id)
+    assert moved is not None
+    assert moved.phase is AttemptPhase.VERIFY, "the answer that was taken did move it"
+    assert len(moved.authorization_ids) == 1, "and one answer recorded one authorization"
+
+
+async def test_a_cancellation_inside_the_initial_tool_keeps_the_phase_it_reached() -> None:
+    """§12, on the first-turn path: the boundary is the ruling, not the runner's return.
+
+    The mirror of the resumed case. An ``ALLOW`` under a slow tool and a ``CONFIRM``
+    that parked are indistinguishable from outside ``StepRunner.run`` — which is why the
+    stamp cannot simply precede the call, and why rounds 2 and 3 of this PR's review were
+    right that it must not — so the runner is asked to say when the authorisation was
+    **answered** and the attempt is moved there. A cancellation inside the tool then
+    finds an attempt at ``EXECUTE`` naming the decision its step was claimed under,
+    rather than one still recorded at ``AUTHORIZE`` over a step that is ``RUNNING``.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _gated(parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        entered.set()
+        await release.wait()
+
+    plans = _Recording()
+    harness = Harness(tools=(tool(),), plans=plans, tool_handler=_gated)
+    driving = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    driving.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await driving
+    release.set()
+
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.EXECUTE, "the authorisation was answered"
+    assert attempt.state is AttemptState.RUNNING
+    assert attempt.outcome is None, "and nothing claims a result that did not happen"
+    assert len(attempt.authorization_ids) == 1, "the decision the step was claimed under"
+    assert await harness.trail.get(attempt.authorization_ids[0]) is not None, "and it resolves"
+
+
+async def test_a_step_that_reached_no_ruling_is_still_stamped_execute() -> None:
+    """§6: "a phase whose work is vacuous is stamped and left in the same instant".
+
+    A capability no tool advertises never reaches a ruling at all, so the authorization
+    boundary is never crossed and nothing stamps ``EXECUTE`` there. The turn still passes
+    through all six phases, because §6 makes them "six responsibilities rather than six
+    conditions" — which is what the post-drive stamp is for once the boundary has taken
+    over every step that *was* ruled on.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(), plans=plans)
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.NO_CAPABLE_TOOL
+    assert plans.phases == _STORED_PHASES, "six phases, and EXECUTE among them"
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.authorization_ids == (), "nothing allowed anything"
+    assert attempt.outcome is None, "and no step succeeded, so nothing is ANSWERED"
+
+
+async def test_a_replay_racing_a_resolution_does_not_move_the_attempt_twice() -> None:
+    """§12's compare-and-swap, over the window ``_resolve_park``'s lock is held across.
+
+    Two callers answering one token: the first wins the lock, records the answer, crosses
+    the boundary and moves the attempt; the second is queued on the same lock, finds the
+    park settled and **restates**, which moves nothing. A commit taken around the
+    resolution rather than inside it would let both advance the attempt's version, and
+    the caller that actually executed would then meet a stale write **after** its side
+    effect — a successful step whose attempt never records what became of it.
+
+    Built on ``test_engine``'s own gate for this window, which suspends the first
+    resolution after the runner has returned and before the park is replaced.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    token = parked.step.confirmation.token
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateAfterRecording:
+        """Suspends the first ``resume`` after it has returned, inside the lock."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def resume(self, *args: Any, **kwargs: Any) -> Any:
+            result = await self._inner.resume(*args, **kwargs)
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return result
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    harness.engine._runner = _GateAfterRecording(harness.engine._runner)  # type: ignore[assignment]  # test double
+
+    resolving = asyncio.ensure_future(harness.engine.resume(token, approved=True, timeout=PATIENT))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    replaying = asyncio.ensure_future(harness.engine.resume(token, approved=True, timeout=PATIENT))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    release.set()
+    resolved = await resolving
+    restated = await replaying
+
+    assert resolved.step is not None
+    assert resolved.step.disposition is Disposition.EXECUTED
+    assert restated.turn is None, "the loser restated rather than resolving"
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.VERIFY, "the winner finished its own bookkeeping"
+    assert len(attempt.authorization_ids) == 1, "one answer, one authorization appended"
+    to_execute = [
+        one
+        for one in plans.moves
+        if one.to_phase is AttemptPhase.EXECUTE or one.to_state is AttemptState.RUNNING
+    ]
+    assert len(to_execute) == 1, "and the boundary was crossed once, not twice"
+
+
+async def test_a_resolution_that_reached_no_ruling_still_leaves_the_attempt_waiting_behind() -> (
+    None
+):
+    """§6: the resumption's mirror of the vacuous stamp the first-turn path keeps.
+
+    ADR-0152 §7 refuses a resumed egress call whose binding has moved **before the
+    resolving ruling is sought**, so no answer is recorded and the authorization boundary
+    is never crossed. The token is settled all the same, so an attempt left at
+    ``AWAITING_AUTHORIZATION`` there would be waiting for an answer that can never arrive
+    and that nothing would repair — the failure the boundary's placement has to avoid on
+    *both* sides, not only on the side where a ruling exists.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    class _Unbindable:
+        """Wraps the runner, refusing every resume before any ruling is sought."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        async def resume(self, state: Any, step_id: str, **kwargs: Any) -> StepDisposition:
+            del step_id, kwargs
+            return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    harness.engine._runner = _Unbindable(harness.engine._runner)  # type: ignore[assignment]  # test double
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EGRESS_UNBINDABLE
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.state is AttemptState.RUNNING, "the user answered; the call could not run"
+    assert attempt.phase is AttemptPhase.VERIFY
+    assert attempt.authorization_ids == (), "and no ruling was recorded to name"
+    assert attempt.outcome is None, "nothing succeeded, so nothing is ANSWERED"
