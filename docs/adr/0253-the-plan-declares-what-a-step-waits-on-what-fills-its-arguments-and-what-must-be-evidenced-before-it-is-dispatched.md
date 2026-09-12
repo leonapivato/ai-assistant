@@ -599,6 +599,14 @@ declining a richer marker of its own.
 > because §1 already makes an element with no applicability a legal element that imposes no
 > coverage requirement.
 
+**The axes are the ones the planner already composes an ask from, so the seam gains no new
+vocabulary.** As a dated observation at `f0b8132d` rather than a rule, `planning/planner.py`
+already extracts a window and the three label axes out of a planner envelope for ADR-0240's
+`StructuredAsk` (`_structured_window`, `_structured_axis`, `_iso_instant`), and ADR-0252 §11
+already renders those same axes back to the planner on every evidence digest. An element's
+applicability is therefore a value the planner can both read and write today, spelled the one way
+this system spells it.
+
 **Silently absent rather than dropped, and the asymmetry with ADR-0249 §7's ground resolution is
 deliberate.** That section drops an element whose **ground** does not resolve, because a ground
 is a warrant and an element stating one it cannot show is a false record. An applicability is not
@@ -821,9 +829,12 @@ makes it and the branch not taken is visible in it as a step that was skipped.
 > answer to an unexpected verdict is a branch the plan already declared rather than a model asked
 > at dispatch what to do next.
 
-> **Normative — the planner's envelope, per field.** The plan envelope's step object gains four
-> optional keys and the envelope gains one: `after` (§1), `resolves` (§6), `when` (§5), `verifies`
-> (§4) on the step, and `interpretations` (§8) beside `steps`. **Every identifier a model writes
+> **Normative — the planner's envelope, per field.** The plan envelope's step object gains
+> **five** optional keys and the envelope gains one: `after` (§1), `resolves` (§6), `when` (§5),
+> `verifies` (§4) and `evidence_recency` (§5) on the step, and `interpretations` (§8) beside
+> `steps`. **`evidence_recency` crosses as an ISO-8601 duration string**, and a value that is not
+> one, or that is not strictly positive, is an extraction failure for that envelope rather than a
+> figure rounded, clamped or defaulted into range. **Every identifier a model writes
 > in any of them is an ordinal or a label of something the loop rendered on that call** — a step's
 > position in the envelope's own list, an `M` label of the supply, and a `D` label of the
 > `GoalBrief`'s `conditions` in ADR-0249 §9's scheme (*"of `conditions`, `D` followed by *n*"*).
@@ -927,6 +938,22 @@ makes it and the branch not taken is visible in it as a step that was skipped.
 > decision is configurable**: `MAX_INTERPRETATION_STEPS` is a `core` constant, and the recency
 > requirement is a value the **plan** declares rather than a value a deployment supplies
 > (ADR-0252 §6).
+
+> **Normative — retention, deletion and elision are untouched, and no new durable record is
+> minted.** Every value this decision adds rides an `ActionPlan` or a `GoalInterpretation` that
+> the plan store already holds, so ADR-0014 §5's deletion obligation and its live-step refusal,
+> ADR-0249 §12's `delete_goal` cascade, ADR-0249 §2's interpretation elision and its
+> `interpretation_elided` disclosure, and ADR-0252 §13's evidence retention all bind exactly as
+> they stand. **No lane adds a retention rule, a sweep, an expiry or a second store.**
+
+> **Normative — a `declaration` whose element is gone resolves to nothing and satisfies
+> nothing.** An element a later revision neither retains nor replaces is not in that revision
+> (ADR-0249 §7), and a revision ADR-0249 §2 elided is gone with the rest of its elements. A
+> `GoalEvidence` row whose `declaration` named one **keeps it** — ADR-0252 §9's rule that
+> invalidation is *"a marking and never a deletion"* binds, and nothing rewrites a row's
+> `declaration` — and no `StepCondition` can name it, because §5 requires `about` to name an
+> element of the revision the plan targets. So such a row is retained, exported and rendered in
+> the digest, and satisfies no condition. **No lane repairs, re-points or deletes one.**
 
 > **Normative — no new class of content crosses any seam.** A `StepCondition` carries a member of
 > a closed vocabulary and two identifiers; a `ResultReference` carries two names and an
@@ -1117,35 +1144,40 @@ The two lanes ship these, and #2255's acceptance rows are named where an arm car
     repair prompt — not a dropped edge (§1).
 12. A `when` `basis`, a `requires`, a `verifies` kind and a `read_kind` outside their vocabularies
     are each extraction failures, parameterized over `1`, `"true"`, a case-variant and a near-miss
-    spelling, on ADR-0176 §1's own arm shape (§9).
-13. An interpretation naming an `M` label **out of range**, or a label naming a **search-minted**
+    spelling, on ADR-0176 §1's own arm shape (§9). An `evidence_recency` that is not an ISO-8601
+    duration, is zero, or is negative is an extraction failure and is never clamped (§9).
+13. A `ProposedElement` whose proposed axes compose no applicability — none applied, an empty
+    sequence axis, a window with both ends unset, a window whose `end` is not after its `start` —
+    is recorded as an element with `applicability` **absent**, and the element itself is **not**
+    dropped (§7).
+14. An interpretation naming an `M` label **out of range**, or a label naming a **search-minted**
     or **fetch-minted** record, is an extraction failure (§8).
-14. `orchestration` **does not drive** a plan whose interpretation's `record` is not a record it
+15. `orchestration` **does not drive** a plan whose interpretation's `record` is not a record it
     passed on that call, or whose `settles`/`about` names no element carrying an `id` of the
     targeted revision — and **persists it anyway** (§8, §9).
-15. A round trip: a brief carrying two conditions renders `D1` and `D2`; an envelope naming `D2`
+16. A round trip: a brief carrying two conditions renders `D1` and `D2`; an envelope naming `D2`
     produces a plan whose condition's `about` is the second element's `id`, and naming `D3`
     produces an extraction failure.
 
 **The predicates, asserted as predicates because no lane drives them (L1).**
 
-16. **"Booking depends on the weather condition being satisfied"** — a step whose `when` names a
+17. **"Booking depends on the weather condition being satisfied"** — a step whose `when` names a
     condition for which **no** row of the goal satisfies ADR-0252 §6's four tests is **not
     eligible**, asserted as the predicate over a constructed goal, a constructed evidence row set
     and a constructed plan.
-17. **"Conditional plan spans multiple decisions"** — two steps naming one element and requiring
+18. **"Conditional plan spans multiple decisions"** — two steps naming one element and requiring
     `QUALIFIES` and `DOES_NOT_QUALIFY`: with a `QUALIFIES` row exactly one is eligible; with a
     `DOES_NOT_QUALIFY` row exactly the other; **with an `INCONCLUSIVE` row neither**, and the plan
     is intact in both cases (§9).
-18. An **unresolvable reference** is `UNMET_DEPENDENCY`, over each of §6's six unresolvable cases,
+19. An **unresolvable reference** is `UNMET_DEPENDENCY`, over each of §6's six unresolvable cases,
     and **never** a default, a blank, an omitted parameter or a `null`.
-19. A **resolved reference is in the `ActionRequest` before `ActionPolicy.decide` is reached** —
+20. A **resolved reference is in the `ActionRequest` before `ActionPolicy.decide` is reached** —
     asserted at the seam, against ADR-0148 §1's completeness clause, with the resolved value
     present in the request's `parameters` and in the digest.
-20. A dependency on a `SUCCEEDED` producer whose `verifies` **fails** is unsatisfied; on a `FAILED`
+21. A dependency on a `SUCCEEDED` producer whose `verifies` **fails** is unsatisfied; on a `FAILED`
     or `SKIPPED` producer it is unsatisfied; on an **`INDETERMINATE`** producer the dependent step
     is **neither dispatched nor skipped** (§2).
-21. A step declaring **no** `verifies` is satisfied by `SUCCEEDED` alone, and a step declaring
+22. A step declaring **no** `verifies` is satisfied by `SUCCEEDED` alone, and a step declaring
     **no** `evidence_recency` is satisfied by a row of any age that passes the other three tests
     (§4, §5).
 
