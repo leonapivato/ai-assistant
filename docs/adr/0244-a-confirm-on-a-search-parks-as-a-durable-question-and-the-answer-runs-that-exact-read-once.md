@@ -1,7 +1,46 @@
 # 244. A `CONFIRM` on a search parks as a durable question, and the answer runs that exact read once
 
-- Status: Partially superseded by ADR-0247 (§6's clause 2 entire — `search_draw` and `Settings.search_calls_per_conversation` both being removed, the fact that clause establishes, that the conversation exists and is not stamped deleted, passes to a read of `ConversationStore.get`, which answers `None` on the same two grounds, and the clause's remaining sentence that `admit_search` is not called becomes vacuous rather than false; §9's definition of `UNAVAILABLE_NOW` in its `search_calls_per_conversation` limb alone, the member keeping its name, its value, its position in §9's precedence order and its other two grounds; and §12's re-closure of `SearchNotServiced` at nine members in that count alone, the enumeration becoming seven as the two members defined over `admit_search`'s refusal are removed. Those three scopes, and nothing else in this ADR: §§1-5, §6's other five clauses, its ordering, its gate and its route-(a) authority clause, §7, §8, §9's other six members and its precedence and no-reason rules, §§10-11, §12's remaining clauses and §§13-23 stand entire, and §6's rule that `trust_of` is not asked again at the answer is relied upon and strengthened)
+- Status: Partially superseded by ADR-0247 (§6's clause 2 entire — `search_draw` and `Settings.search_calls_per_conversation` both being removed, the fact that clause establishes, that the conversation exists and is not stamped deleted, passes to a read of `ConversationStore.get`, which answers `None` on the same two grounds, and the clause's remaining sentence that `admit_search` is not called becomes vacuous rather than false; §9's definition of `UNAVAILABLE_NOW` in its `search_calls_per_conversation` limb alone, the member keeping its name, its value, its position in §9's precedence order and its other two grounds; and §12's re-closure of `SearchNotServiced` at nine members in that count alone, the enumeration becoming seven as the two members defined over `admit_search`'s refusal are removed. Those three scopes, and nothing else in this ADR: §§1-5, §6's other five clauses, its ordering, its gate and its route-(a) authority clause, §7, §8, §9's other six members and its precedence and no-reason rules, §§10-11, §12's remaining clauses and §§13-23 stand entire, and §6's rule that `trust_of` is not asked again at the answer is relied upon and strengthened) and ADR-0248 (§2's field enumeration and its three-content-fields clause, and §3's `settle` clearing clause, each in the count alone: `ParkedRead` gains a fourth content field, `utterance`, carrying the parked turn's request, and settlement clears four fields rather than three. Those two scopes, and nothing else in this ADR: the nine fields already enumerated keep their names, types, meanings and defaults; §2's model validator keeps both halves it already refuses and is not extended to the new field; §2's never-carries clause, its `parameters` clause and its `APPROVED` clause bind entire; §3's indivisibility, its content-lives-as-long-as-the-question rule, its one-open-park-per-conversation rule, its one-park-per-decision rule and its other six members are untouched; and §§1, 4-23 stand entire)
 - Date: 2026-09-10
+- **Partially superseded: 2026-09-12 by ADR-0248 — §2's field enumeration and its
+  three-content-fields clause, and §3's `settle` clearing clause, each in the count alone.
+  Nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that `Goal` gets the
+  meaning ADR-0014 §1 always gave it, and ADR-0248 is the decision that lands before that
+  one: it makes the user's own words a value of their own so that a goal statement about to
+  mean the assistant's interpretation stops standing in for them.
+
+  **§2's field enumeration and its three-content-fields clause.** §2 declares `ParkedRead`
+  *"a frozen model with `extra=\"forbid\"`, whose fields are exactly"* a list of nine, and
+  calls `parameters`, `goal` and `plan` *"**The three content fields**"*. ADR-0248 §3 adds
+  a fourth, `utterance`, typed `NonBlankEncodableText | None` and defaulting to `None`. It
+  is needed because `Engine._resume_read` builds a real `TurnResult` from `park.goal` and
+  `park.plan` — §2's own *"because §8 composes over them and would otherwise fabricate
+  them"* — so the request reaches that pass only if the park retained it, exactly as the
+  goal and the plan are retained. A reader holding only this ADR would refuse a tenth
+  field, which is ADR-0070 §1's test coming out on the supersession side.
+
+  **§3's `settle` clearing clause, in the count alone.** `settle` *"clears `parameters`,
+  `goal` and `plan` in the same step"*; it now clears four, because the request is Tier 1
+  content and §3's rule that *"The content lives exactly as long as the question does"* is
+  **extended rather than weakened** — it reaches one field further. Everything else about
+  `settle` stands: the read, the comparison and the write are still one indivisible step,
+  it still answers `True` to the caller that moved the park and `False` to every other, and
+  it still changes nothing on an already-terminal park.
+
+  **§2's validator is not extended, and that is deliberate.** Both halves it refuses stand
+  — an `OPEN` park missing any of `parameters`, `goal` or `plan`, and a terminal park
+  carrying any of them — and a terminal park carries no `utterance` either. An `OPEN` park
+  with `utterance` `None` is reachable by exactly one route: a park written before ADR-0248
+  landed. Requiring the field would make such a row fail to decode and the question
+  unanswerable, against §15's *"**A park survives a restart and is offered again**"*;
+  ADR-0248 §3 gives those rows one transitional fallback instead and names the change that
+  removes it.
+
+  **Nothing else in this ADR moves.** §1's park-on-`CONFIRM` rule, §§4-23, the surviving
+  facts at settlement, `drop_for_conversation`, the resolve-once gate, the expiry and
+  cancellation rules and the whole `ParkedReads` Protocol are untouched — ADR-0248 changes
+  no Protocol at all.
+
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's second clause in three of its limbs, §9's fifth clause in its one-route limb,
   and §16's first clause in its any-store limb. Nothing else in that ADR.** §9's second
