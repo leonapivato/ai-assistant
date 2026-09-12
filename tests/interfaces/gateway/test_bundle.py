@@ -6135,18 +6135,30 @@ def test_a_ruling_whose_pointers_disagree_is_refused_rather_than_read() -> None:
     fewer rows, not partial ones". So the row is dropped whole and the listing says
     it was — which is the one thing a dropped row must not be, silent.
 
-    The last assertion is what fails on the fourth state coming back:
-    ``authorisationWords`` must have exactly three returns, so there is no branch
-    left for a pair that never reaches it.
+    The last assertions are what fail on the fourth state coming back.
+    ``authorisationWords`` holds exactly **three** ``if``s — the two pointer tests
+    ADR-0193 §11's conditions are read off, and ADR-0247 §2's route-(c) split *inside*
+    the second of them — so a branch for a pair that never reaches this function would
+    be a fourth. The four returns are those three conditions' lines plus the unguarded
+    last one, and the route-(c) line is named rather than counted, because a count alone
+    would pass on a fourth state wearing the fourth return.
+
+    **Route (c) is a split and not a state** (ADR-0247 §2): §11's three conditions are
+    unchanged, and what the ADR adds is what a surface *renders* for a standing row whose
+    ``authorised_subject`` is unset and whose binding is closed-loop — the basis, naming
+    no connection reference. The pair this case is about is still none of them.
     """
     functions = _functions(_code("app.js"))
     listing, decision = functions["renderRoutedListing"], functions["renderDecisionFields"]
+    words = functions["authorisationWords"]
 
     assert "if (unreadableRecord(record)) {" in listing
     assert "dropped += 1" in listing
     assert "UNREADABLE_RULINGS" in listing
     assert "unreadable" not in decision, "the row is never reached, not branched inside"
-    assert len(re.findall(r"\breturn\b", functions["authorisationWords"])) == 3
+    assert len(re.findall(r"\bif\b", words)) == 3
+    assert len(re.findall(r"\breturn\b", words)) == 4
+    assert "if (restsOnTheConfiguration(decision)) {" in words, "the fourth is route (c)"
 
 
 def test_a_routed_total_is_never_presented_as_a_bill() -> None:

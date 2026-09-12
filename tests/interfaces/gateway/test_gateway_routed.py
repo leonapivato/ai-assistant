@@ -34,10 +34,17 @@ from test_gateway_streams import Harness, _harness
 from ai_assistant.core.types import (
     Belief,
     BeliefBand,
+    BoundAccount,
     CostBasis,
+    DestinationProtocol,
+    DiscloserProvenance,
+    EgressBinding,
+    EgressDestination,
+    EgressSpan,
     GrantScope,
     Idempotency,
     MemoryKind,
+    OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -52,6 +59,7 @@ from ai_assistant.core.types import (
     RouteOutcome,
     SourceGrant,
     SourceReadRecord,
+    SpanCoverage,
     SpendPeriod,
     SpendTotal,
     ToolCost,
@@ -127,14 +135,61 @@ def _read() -> SourceReadRecord:
     )
 
 
+#: The account a search at *the configured provider* is bound to (ADR-0247 §1). Its
+#: ``reference`` is the value a route-(c) ``ALLOW`` records as ``authorised_by`` and
+#: that ADR-0148 §6 keeps off every surface, so it is distinctive enough for a case
+#: to search a rendering for.
+_SEARCH_ACCOUNT = BoundAccount(identity="Example Search", reference="conn-search")
+
+
+def _search_binding(*, closed_loop: bool = True) -> EgressBinding:
+    """The binding a ``WEB_SEARCH`` servicing derives (ADR-0238 §5, ADR-0247 §1).
+
+    ``closed_loop`` is the argument because it is route (c)'s **eligibility** (ADR-0247
+    §2) — the conjunct that keeps the digest-free pointer ADR-0193 §11 reserves from
+    being read as a configuration authority — and a case wanting the other value is a
+    case about exactly that.
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="origin",
+                index=0,
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=len("https://search.example.com"),
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.HTTPS,
+                    supplied="https://search.example.com",
+                    canonical="https://search.example.com:443",
+                ),
+            ),
+        ),
+        account=_SEARCH_ACCOUNT,
+        transport_endpoint="https://search.example.com",
+        planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
+        closed_loop=closed_loop,
+    )
+
+
 def _decision(
-    *, authorised_by: str | None = "d-0", resolves: str | None = "d-0"
+    *,
+    authorised_by: str | None = "d-0",
+    resolves: str | None = "d-0",
+    authorised_subject: str | None = None,
+    binding: EgressBinding | OriginUnrecordedBinding | None = None,
 ) -> PermissionDecision:
     """One recorded ruling, an ``ALLOW`` resting on a decision about that call.
 
     The two pointers are arguments because ADR-0193 §11's three states are read off
     the pair, and because the fourth combination — both present and different — is
     the one no audit trail accepts and this surface must refuse to read.
+
+    ``authorised_subject`` and the binding are arguments for ADR-0247 §2's sake: they
+    are the two facts a **standing** row's route is read off — "route (b) where
+    ``authorised_subject`` is set and route (c) where it is not", and route (c) only
+    where the binding it carries is closed-loop — and neither crossed this edge before
+    this lane.
     """
     return PermissionDecision(
         id="d-1",
@@ -142,7 +197,9 @@ def _decision(
             outcome=PermissionOutcome.ALLOW,
             reason="you approved this call",
             authorised_by=authorised_by,
+            authorised_subject=authorised_subject,
         ),
+        egress_binding=binding,
         tool=ToolDefinition(
             id="smtp",
             capability="send_email",
@@ -390,9 +447,105 @@ async def test_a_routed_ruling_carries_no_tier_reach_and_no_authorises() -> None
             "parameters_digest",
             "resolves",
             "authorised_by",
+            "authorised_subject",
             "binding",
         }
         assert "authorises" not in str(row)
+
+
+async def test_a_routed_ruling_carries_the_two_facts_its_standing_route_is_read_off() -> None:
+    """ADR-0247 §2's discriminator and its eligibility conjunct, at this edge.
+
+    "A non-resolving egress ``ALLOW`` whose ``authorised_by`` is set is route (b) where
+    ``authorised_subject`` is set and route (c) where it is not", and a row is route (c)
+    only where its binding's ``closed_loop`` is ``True`` — ADR-0193 §11's reserved
+    digest-free pointer, which is neither route, carries it ``False``. The page renders
+    route (c) as its basis with **no identifier** (§2's last normative clause), so both
+    facts have to reach it; this case is that they do.
+
+    **And the pointer itself still crosses**, which is ADR-0247 §8(d) rather than an
+    oversight: the reference is recorded on the decision for an auditor, this view is the
+    **row** and not the rendering, and what ADR-0148 §6 bars is showing it to the user —
+    decided in ``authorisationWords``, where ``interfaces.cli`` decides it. A view that
+    withheld it on route (c) would hand the page an ``authorised_by`` of ``null``, which
+    is ADR-0193 §11's *third* state: a row saying the policy rested on no user decision
+    at all, which is a different claim and a false one.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(
+                    _decision(
+                        authorised_by="conn-search", resolves=None, binding=_search_binding()
+                    ),
+                ),
+            ),
+        )
+
+        row = view["listing"][0]
+        assert row["authorised_subject"] is None
+        assert row["binding"]["closed_loop"] is True
+        assert row["authorised_by"] == "conn-search"
+
+
+async def test_a_routed_ruling_that_names_a_grant_crosses_its_digest_and_its_eligibility() -> None:
+    """Route (b)'s half of the same pair, including the closed-loop shape ADR-0238 wrote.
+
+    ADR-0247 §2 is explicit that ``closed_loop`` is the **eligibility** and the digest is
+    the **discriminator**, and that "neither does the other's job": a grant-covered
+    ``ALLOW`` over a closed-loop binding is route (b), because it carries a digest. A page
+    branching on ``closed_loop`` alone would render that row as a configuration authority,
+    so the case that would catch it is this one and not a row with the fact unset.
+    """
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(
+                    _decision(
+                        authorised_by="g-1",
+                        resolves=None,
+                        authorised_subject="b" * 64,
+                        binding=_search_binding(),
+                    ),
+                ),
+            ),
+        )
+
+        row = view["listing"][0]
+        assert row["authorised_subject"] == "b" * 64
+        assert row["binding"]["closed_loop"] is True
+
+
+async def test_a_binding_whose_shape_holds_no_closed_loop_crosses_null_rather_than_false() -> None:
+    """ADR-0247 §2: a binding that records no origin carries no ``closed_loop`` either.
+
+    ADR-0238 §13 added the member to :class:`EgressBinding` alone, so a row of either
+    older epoch holds no such fact — and ``false`` would answer "this row is not
+    closed-loop" where the record answers nothing at all. That is ``origin_unrecorded``'s
+    own lesson one field over, and the two nulls travel together on the same row.
+    """
+    legacy = OriginUnrecordedBinding(
+        spans=(),
+        account=_SEARCH_ACCOUNT,
+        transport_endpoint="https://search.example.com",
+    )
+    async with _harness(FakeAssistantEngine()) as one:
+        view = await _view(
+            one,
+            _routed(
+                RoutableOperation.RECENT_DECISIONS,
+                RouteOutcome.PERFORMED,
+                listing=(_decision(authorised_by="g-1", resolves=None, binding=legacy),),
+            ),
+        )
+
+        assert view["listing"][0]["binding"]["closed_loop"] is None
 
 
 async def test_a_routed_total_crosses_its_amounts_as_text() -> None:
