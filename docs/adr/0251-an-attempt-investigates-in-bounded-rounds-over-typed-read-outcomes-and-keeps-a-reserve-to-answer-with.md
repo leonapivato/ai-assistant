@@ -17,10 +17,13 @@
   its closing clause, its prohibition on an implementation retrying, widening or
   substituting a read, and conditions (a), (b), (c), (d) and (g) all bind **verbatim**.
   §3's **count and its subject**, *"A turn makes **at most two** calls to
-  `Planner.plan`"* — the count becomes the **attempt's** declared planner-call allowance
-  and the subject becomes the attempt; §3's **non-configurability** binds entire and is
-  the clause this decision is built on, its servicing-the-last-request rule binds entire,
-  and its stopped-at-the-bound rule binds entire over the new figure. And §9's
+  `Planner.plan`"* — a per-turn **total** becomes a per-**attempt admission threshold on
+  iteration**: a further call within a turn is admitted only while the attempt's consumed
+  calls are fewer than its kind's declared allowance, every turn the owner starts makes its
+  first call whatever the ledger holds, and the attempt's total is therefore bounded by how
+  many times the owner asks rather than by a figure. §3's **non-configurability** binds
+  entire and is the clause this decision is built on, its servicing-the-last-request rule
+  binds entire, and its stopped-at-the-bound rule binds entire over the new figure. And §9's
   **five-member closure** of the stop vocabulary, in that **count alone** — the count
   becomes eight; every existing member keeps its name, its value and its meaning, and
   §9's one-record rule, its counts-and-no-copy rule, its per-turn fire rate and its
@@ -481,14 +484,33 @@ be kept ignorant of a refusal on a round that fires anyway.
 
 > **Normative.** **`AttemptEffort.planner_calls` counts every call the attempt makes, a turn's
 > first included**, so (f′) is a comparison against the whole ledger and not against a
-> per-turn subtotal. What the allowance bounds is the attempt's **iteration**; what bounds the
-> number of turns is the owner.
+> per-turn subtotal.
+
+> **Normative — the allowance is an admission threshold on iteration and never a total count,
+> and no clause of this decision claims otherwise.** An attempt whose ledger is at or past its
+> allowance makes one further call for each turn the owner starts, so its total is bounded by
+> **how many times the owner asks** and by no figure this ADR sets. The same holds of the
+> working allowance: (h) admits or refuses a round, and an attempt spanning many turns may
+> accumulate `working` well past PT3M one ungated first call at a time. **What the two figures
+> bound is how far one owner act may be carried**, which is what §11(b) claims and the whole of
+> what any clause here claims.
 
 > **Normative — (f′), which supersedes (f).** **The attempt has made fewer `Planner.plan`
 > calls than its kind's declared planner-call allowance (§5).** ADR-0228 §2(f) reads *"The
 > **turn** has made fewer planner calls than §3's bound"*; the counter becomes the
 > **attempt's** `AttemptEffort.planner_calls` and the bound becomes the attempt kind's
 > declaration. Nothing else about (f) moves.
+
+> **Normative — (j), new.** **The attempt's `phase` is `AttemptPhase.INVESTIGATE`.** An attempt
+> whose phase has advanced past it makes its turn's one planner call and **does not iterate**:
+> iterating there would either run the loop in a phase §1 does not place it in, or move the
+> phase backwards, which ADR-0249 §6 forbids. **How a later turn's planning relates to an
+> attempt that is authorizing, executing or verifying is A7's and A9's** (§14), and this
+> decision decides none of it beyond declining to investigate there. **A round refused by (j)
+> records `NOT_ITERATED` and sets no composing flag**, exactly as a round refused by (a) to (e)
+> does today: ADR-0228 §9 makes `NOT_ITERATED` the record's default for a turn on which no
+> revision was admissible, and ADR-0228 §10's carrier is reserved for a turn that stopped at a
+> **guard** while still asking.
 
 > **Normative — (h), new.** **The attempt's `AttemptEffort.working` is strictly less than its
 > kind's declared working allowance *less the reserve* (§5, §6).** Checked with the injected
@@ -733,10 +755,22 @@ itself, and ADR-0194's ceiling on what the world may cost.
 > resets the count to zero. **The run is counted within one turn and starts at zero on each
 > turn of the attempt**, and no implementation persists it.
 
-> **Normative — the duplicate-ask refusal, and the kinds it binds on.** An ask that is
-> **byte-identical** to an ask this **turn** has already serviced is **not serviced**: the loop
-> performs no store call, no provider call and no deduplication for it, and substitutes nothing
-> in its place. Where **every** ask of a request is refused this way the loop records
+> **Normative — the duplicate-ask refusal, and the three conditions it binds under.** An ask is
+> **not serviced** where all three hold: it is **byte-identical** to an ask this **turn** has
+> already serviced; its kind is one of the four whose ask determines what is read (below); and
+> **that earlier ask's outcome was not `TRUNCATED`**. Where it is refused the loop performs no
+> store call, no provider call and no deduplication for it, and substitutes nothing in its
+> place.
+
+> **Normative — the third condition is what makes the refusal a fact rather than a forecast.**
+> ADR-0226 §6 and ADR-0240 §5 give a servicing **ten slots across its kinds**, so the limit one
+> ask runs under depends on what the other asks of that request consumed: a structured ask that
+> received two slots behind two other kinds returned two records and was `TRUNCATED`, and the
+> **same** ask alone in a later round receives ten and can admit eight the supply does not hold.
+> Monotonicity establishes only that a read whose completeness **was certified** cannot add
+> anything; a truncated one certifies nothing (§2), so a repeat of it is a real read and is
+> serviced. Refusing it would suppress exactly the useful continuation this decision exists to
+> buy. Where **every** ask of a request is refused this way the loop records
 > `DUPLICATE_ASK`, makes no further planner call, and tells the composing stage the turn stopped
 > while still asking (below); where some asks remain, those are serviced and the round proceeds.
 > Equality is equality of the frozen `ReadAsk`, and the comparison is over this turn's own asks
@@ -887,7 +921,7 @@ audit; elapsed is `AttemptEffort.working`; the cost figures are ADR-0194 §5's `
 which already holds them per period and per invocation. §14 defers attributing that ledger to
 an attempt, with what fires it.
 
-### 9. `GoalStatus.BLOCKED`: a two-limb test, one reason that satisfies it, and what never does
+### 9. `GoalStatus.BLOCKED`: the act, the writer, a three-limb test, and no reason that passes it here
 
 > **Normative — the writer.** **`GoalStatus.BLOCKED` has exactly one producer:
 > `orchestration`, at the site that writes `AttemptState.BLOCKED` on an attempt, in the same
@@ -895,44 +929,42 @@ an attempt, with what fires it.
 > reclaim or background pass writes it, and no lane infers it at read time.
 
 > **Normative — the test.** That site writes the **goal's** status `BLOCKED` if and only if
-> **both** limbs hold of the blocker it is recording:
+> **all three** limbs hold of the blocker it is recording:
 >
 > 1. **It is not an exhaustion and not a progress stop.** No member of `AttemptEffort` running
 >    out, and no stop reason of §7, satisfies this limb.
 > 2. **Repeating the same request would meet the same blocker.** The blocker is a property of
 >    the deployment or of the world, not of how much this attempt spent.
+> 3. **What the blocker closed was *necessary* to the objective** — established against the
+>    goal's own conditions and criteria, and never inferred from a route having closed. One
+>    unavailable source establishes that one route is shut, not that it was the only one.
 >
-> Where either limb fails, **the attempt's state alone is written** and the goal stays
-> `ACTIVE`. ADR-0249 §4's rule binds entire: *"an attempt may be blocked while the goal is
-> `ACTIVE`"*.
+> Where any limb fails, **the attempt's state alone is written** and the goal stays `ACTIVE`.
+> ADR-0249 §4's rule binds entire: *"an attempt may be blocked while the goal is `ACTIVE`"*.
 
-> **Normative — the one reason that satisfies it here, stated over facts the writer holds.**
-> Under **this** decision exactly one blocker passes both limbs: **this turn's request asked for
-> a `WEB_SEARCH`, its servicing answered `SearchDisposition.NOT_CONFIGURED`, and no ask of this
-> turn admitted a record.** `NOT_CONFIGURED` is the tree's one such ground today — *"This
-> deployment has connected no search account… A provisioning fact"* — and ADR-0247 §1 makes the
-> configuration the authority it is decided against.
+> **Normative — and no reason available to this decision passes that test, so
+> `GoalStatus.BLOCKED` gains no producer here.** This is stated rather than left to inference,
+> exactly as ADR-0249 §4 states it for `ACHIEVED`. **Necessity is not a fact this decision
+> holds**: it is a property of the goal's `conditions` and `criteria` (ADR-0249 §1), whose
+> evaluation is A4's for sufficiency and A6's for prerequisites, and no clause of this ADR reads
+> either. The nearest candidate — a `WEB_SEARCH` answering `SearchDisposition.NOT_CONFIGURED`
+> on a turn whose reads admitted nothing — passes limbs 1 and 2 and **fails limb 3**: a request
+> to summarise a note already in the assembled supply meets exactly that shape, and answers
+> perfectly well. A predicate that wrote `BLOCKED` there would assert unreachability from the
+> fact that one unnecessary route was shut.
 
-> **Normative — the predicate ranges over this turn and never over the attempt's history.** §3
-> persists no read outcome, and ADR-0052 §3 leaves the supply each turn was assembled over
-> unreconstructable, so a predicate over *"every read the attempt ever made"* would be a test
-> nothing in the system can evaluate: two attempts with identical persisted asks and identical
-> ledgers can differ in whether an earlier read succeeded, and no durable value distinguishes
-> them. **A blocker is written from what the writing turn holds, or it is not written.** That
-> loses nothing the status was for: `NOT_CONFIGURED` is a **provisioning fact about the
-> deployment**, so a turn that meets it is not guessing about earlier turns — it is reading the
-> same configuration they read.
-
-> **Normative.** Later decisions may name further blockers under the same test; **none of them
-> is an exhaustion**, each owes its own showing against both limbs, and **each owes a showing
-> that its predicate is evaluable from facts its writer holds.**
+> **Normative.** Later decisions name the reasons, each owing its own showing against all three
+> limbs and a showing that its predicate is **evaluable from facts its writer holds** — §3
+> persists no read outcome and ADR-0052 §3 leaves each turn's supply unreconstructable, so a
+> predicate over an attempt's read history is a test nothing in the system can evaluate. **None
+> of them is an exhaustion.**
 
 > **Normative — exhaustion is never a blocker, and this is the clause the loop is written
 > around.** An attempt that spent its planner-call allowance, its investigation share or its
 > unproductive-run budget **stops investigating and leaves the goal `ACTIVE`**. It still plans
-> once per turn the owner starts (§4), and a further user act that finds it terminal opens a
-> further attempt with its own allowance (ADR-0250 §12) — so the objective is still achievable
-> and nothing in the system is entitled to say otherwise.
+> once per turn the owner starts (§4) — so the objective is still achievable and nothing in the
+> system is entitled to say otherwise. **This clause binds every later decision that names a
+> reason**, and it is the one limb of the test that is closed here rather than deferred.
 
 > **Normative — a superseded disagreement is never a blocker.** Where evidence rows disagree
 > and one carries `EvidenceStanding.SUPERSEDED` (ADR-0249 §10), **the superseded row blocks
@@ -958,22 +990,27 @@ evidence that nobody finished trying. That is the same circularity ADR-0249 §4 
 `ACHIEVED` — *"producing a reply never by itself establishes that a goal was achieved"* — read
 from the other end, and refusing both is what keeps the status vocabulary worth reading.
 
-**One named reason rather than a blocker vocabulary, because the vocabulary belongs to lanes
-that have not run.** Most blockers a real attempt meets arise in authorization (A6) and in
-execution (A8, A9): a permission nobody granted, an effect that cannot be resolved, a
-prerequisite absent. Minting a closed vocabulary here would be ratifying names for conditions
-this decision cannot produce, and the first lane that could would have to reopen it — the
-argument ADR-0249 §10 makes for not minting `GoalEvidence`: *"a `GoalEvidence` whose fields all
-said 'A4 decides' would be a type ratified with no content."* A **test** plus **one reachable
-reason** is the shape that leaves the later lanes free and still gives `BLOCKED` a producer
-today, which is what ADR-0249 §4 asked for by name.
+**What ADR-0249 §4 asked of A3 is the *act*, and the act is what this section fixes.** The
+clause reads *"which act writes each is A2's and A3's respectively"* — ADR-0250 §12 answered
+A2's by naming `abandon_goal`, and this section answers A3's by naming the site, the writer, the
+write path and the test any reason must pass, and by ruling that **no exhaustion ever passes
+it**. What it declines to do is invent a reason, and declining is the honest outcome rather
+than a gap left open: a producer that fired on a closed route would make `BLOCKED` mean
+*"something did not work"*, which is a state the attempt already records and which the goal's
+disposition is explicitly not (ADR-0249 §4).
 
-**And the named reason is a real one rather than a token.** A deployment with no search account
-connected cannot serve a request whose only route is the world. No repetition helps, no further
-attempt helps, and no allowance helps; what clears it is the owner connecting an account —
-which is precisely *"cannot **currently** be achieved"*, with the word "currently" doing its
-work. It is also the one blocker the loop can establish **from its own typed outcomes**, with
-no new field, no new vocabulary and no lane's cooperation.
+**A blocker vocabulary is also not minted here, and for ADR-0249 §10's reason.** Most blockers a
+real attempt meets arise in authorization (A6) and in execution (A8, A9): a permission nobody
+granted, an effect that cannot be resolved, a prerequisite absent. Each of those lanes holds the
+necessity limb 3 asks for, because each is about something the plan *required*. A vocabulary
+ratified here would be names for conditions this decision cannot produce — *"a `GoalEvidence`
+whose fields all said 'A4 decides' would be a type ratified with no content"* — and the first
+lane that could produce one would have to reopen it.
+
+**And this costs nothing, which is worth stating plainly.** `GoalStatus.BLOCKED` has never been
+written by anything in `src/`; declining to add a producer changes no behaviour at all. What it
+buys is that the one member whose meaning is *"this objective cannot currently be achieved"* is
+never written by something that only knows a read came back empty.
 
 **Correction 1 lands as a prohibition rather than as a rule, which is all this lane may
 take.** The owner's correction reads: *"Refreshed evidence needs supersession rules, so
@@ -1087,9 +1124,21 @@ wrong, to buy a guarantee §5's own ground already gives.
 > advances ADR-0228 §9's per-turn count on exactly that line, for exactly that reason — raised
 > here to the durable ledger.
 
-> **Normative.** **The increment is durable before the call, or the call is not made.** An
-> implementation that advanced an in-memory ledger and persisted it only on a successful return
-> would restore the same hole one layer down.
+> **Normative — the charge is in memory, and ADR-0249 §12 decides when it becomes durable.**
+> That section rules that *"An attempt is **opened in memory** when the user act that opens it
+> occurs, which is before the turn's first planner call; it is **first written** at the one site
+> §11 names… A turn that ends before that site writes no attempt row, exactly as it writes no
+> goal row and no plan row."* **This decision does not move that site and adds no second one.**
+> So the advance is on the in-memory attempt, where a replan, a branch or a recovery **within
+> the turn** sees it and is charged by it, and it reaches the store with everything else the
+> turn produced.
+
+> **Normative.** **A turn that dies before ADR-0249 §11's site charges nothing, and that is
+> stated rather than hidden.** Its calls are unrecorded exactly as its goal, its revisions and
+> its plans are, and no allowance is evaded by it: the next turn starts from the ledger as last
+> written, which is the honest state of what the store knows. A lane that wrote the ledger
+> earlier to close this would be adding the second persistence site ADR-0249 §12 forbids, and
+> would be doing it in a decision that supersedes no clause of §11 or §12.
 
 > **Normative.** `working` is accumulated by `orchestration` at each round boundary from the
 > injected clock (ADR-0026), excluding every interval spent waiting for the user. ADR-0249 §5's
@@ -1166,9 +1215,16 @@ ledger, so the prohibition acquires a consequence.
   source is a `DUPLICATE` rather than a fresh record (ADR-0226 §7); and a declared bound it
   runs under (ADR-0241 §1). Fired by that reader's own ADR. **Not fired** by this decision, and
   §11(a) binds any autonomous variant of it.
-- **A further blocker that moves the goal's status**, beyond §9's one. Fired by A6's, A8's or
-  A9's own ADR, each owing its showing against §9's two limbs. **Not fired** by a lane finding
-  a condition inconvenient, and never satisfied by an exhaustion.
+- **Every reason that writes `GoalStatus.BLOCKED`.** §9 fixes the act, the writer, the write
+  path and a three-limb test, and names **no** reason that passes it, because limb 3 —
+  necessity to the objective — is a property of the goal's `conditions` and `criteria` that no
+  clause here evaluates. Fired by A6's, A8's or A9's own ADR, each of which holds a prerequisite
+  the plan actually required, and each owing its showing against all three limbs and a showing
+  that its predicate is evaluable from facts its writer holds. **Not fired** by a lane finding a
+  source unavailable, and **never** satisfied by an exhaustion.
+- **How a later turn plans on an attempt that is authorizing, executing or verifying** (§4(j)).
+  This decision declines to investigate outside `INVESTIGATE` and decides nothing else about
+  such a turn. A7's and A9's, with the plan-driving stage ADR-0228 §14 already defers.
 - **What an attempt's `AttemptOutcome` is on exhaustion.** A10's (ADR-0249 §5, §13). §9 fixes
   only that the goal stays `ACTIVE`; which of `PARTIAL`, `UNCERTAIN` or another member the
   attempt earns is not settled here.
@@ -1205,8 +1261,12 @@ a judgement"* framing, and its closing clause and the prohibition inside it all 
 and are load-bearing here.
 
 **ADR-0228 §3's count and its subject — superseded.** *"A turn makes **at most two** calls to
-`Planner.plan`"* becomes the attempt's declared planner-call allowance. A reader holding only
-ADR-0228 would stop at two and would not conform. **§3's non-configurability clause is not
+`Planner.plan`"* becomes an **admission threshold on the attempt's iteration** rather than a
+total on the turn: a further call within a turn is admitted only while `AttemptEffort
+.planner_calls` is below the attempt kind's declared allowance, and a turn's own first call is
+made whatever the ledger holds (§4). A reader holding only ADR-0228 would stop at two and would
+not conform. **No clause of this decision replaces §3's total with another total**, and what
+bounds an attempt's lifetime count is stated in §4 in terms: the owner's turns. **§3's non-configurability clause is not
 superseded** — it is the clause this decision rests on, and §5 quotes it — and neither is its
 servicing-the-last-request rule nor its stopped-at-the-bound rule, both of which bind over the
 new figure. §3's *"the two figures differ by at most one"* is likewise unchanged in substance:
@@ -1324,7 +1384,9 @@ than changed.
 > - **L2 — the loop.** `orchestration/` alone: §4's conditions and its never-gated first call,
 >   §5's declaration mapping and the stamping site, §6's reserve, §7's progress fold, duplicate
 >   refusal, three stop reasons, audit extension and widened composing trigger, §9's `BLOCKED`
->   site and §12's writer clauses including the charge-before-the-call discipline.
+>   site, §9's three-limb test and its prohibition — which writes nothing, so the lane ships the
+>   negative arms rather than a `set_goal_status` call — and §12's writer clauses including the
+>   charge-before-the-call discipline.
 
 > **Normative.** **L1 is the one sanctioned cross-subsystem lane**, and it is sanctioned by
 > ADR-0137 §2 for the reason ADR-0249 §15 states one decision earlier: a `Planner.plan`
@@ -1373,6 +1435,11 @@ than changed.
    record leaves the supply across four rounds; a second turn of the same attempt assembles its
    own three groups, is asserted to be permitted to differ from the first turn's, and inherits no
    fourth group — including across a restart between the two turns.
+6a. **An attempt past `INVESTIGATE` does not iterate.** A later owner turn on a non-terminal
+   attempt paused in `AUTHORIZE` makes its one planner call, is asserted **not** to service a
+   further round however productive the first read was and however much allowance remains, the
+   attempt's phase is asserted unchanged — never moved back to `INVESTIGATE` — and the turn is
+   asserted to record `NOT_ITERATED` and to set **no** composing flag.
 7. **Sufficient-context restraint.** *"What is two plus two"* — a plan carrying no
    `read_request` — makes **exactly one** planner call, services nothing, runs no progress test
    and records `NOT_ITERATED`. #2170's *"A sufficient-context task takes no unnecessary read."*
@@ -1387,13 +1454,17 @@ than changed.
     admitting a record and one `EMPTY` — is **productive** and resets the run; a round whose every
     ask admitted nothing is **one** unproductive round and never two, however many asks it
     carried.
-11. **The duplicate ask is refused, not serviced.** A plan re-emitting a byte-identical
-    `SIGHTED_QUERY`, `CITATION_HOP`, `LOCAL_FILE` or `STRUCTURED_READ` ask this turn already
-    serviced performs **no** store or provider call; where every ask of the request is refused
-    that way the turn records `DUPLICATE_ASK` and sets the composing flag, and where one ask
-    remains it is serviced and the round proceeds. A second arm asserts that an ask that is
+11. **The duplicate ask is refused, not serviced — under all three conditions.** A plan
+    re-emitting a byte-identical `SIGHTED_QUERY`, `CITATION_HOP`, `LOCAL_FILE` or
+    `STRUCTURED_READ` ask this turn already serviced **and whose earlier outcome certified
+    completeness** performs **no** store or provider call; where every ask of the request is
+    refused that way the turn records `DUPLICATE_ASK` and sets the composing flag, and where one
+    ask remains it is serviced and the round proceeds. Three counter-arms: an ask whose earlier
+    identical servicing was **`TRUNCATED`** — driven through ADR-0226 §6's split budget, so the
+    first servicing gave it two slots behind two other kinds and the repeat alone receives ten —
+    **is** serviced and is asserted to admit records the first could not reach; an ask that is
     **not** byte-identical but whose every record deduplicates out **is** serviced and yields
-    `DUPLICATE`.
+    `DUPLICATE`; and the `WEB_SEARCH` arm below.
 12. **A repeated `WEB_SEARCH` is serviced.** Two `WEB_SEARCH` asks on one turn — necessarily
     byte-identical, since ADR-0231 §1 gives the ask no field — are **both** serviced, neither
     records `DUPLICATE_ASK`, and the composer is asserted to have been called twice.
@@ -1416,10 +1487,12 @@ than changed.
     drives a turn on an attempt whose allowance is **already spent**: it makes **exactly one**
     planner call, iterates no further, records the stop, and the ledger is asserted to advance by
     exactly one rather than to reset.
-17. **A call that raises is still charged.** A planner call that raises leaves `planner_calls`
-    advanced and durably so; a recovery that re-invokes the planner is asserted to find the
-    allowance already spent rather than to obtain a free call. A cancellation arm asserts the
-    same.
+17. **A call that raises is still charged, in memory.** A planner call that raises leaves the
+    in-memory `planner_calls` advanced, and a recovery **within that turn** is asserted to find
+    the allowance already spent rather than to obtain a free call. A second arm asserts ADR-0249
+    §12's rule is kept: a turn that dies before §11's persistence site writes **no** attempt row,
+    so nothing of its ledger is durable and no second persistence site exists. A cancellation arm
+    asserts the same as the first.
 18. **The system opens no attempt to buy budget.** An attempt that exhausts its allowance is
     asserted to leave `GoalAttempt` count unchanged and the goal `ACTIVE`, with no second attempt
     row written by anything but one of ADR-0250 §12's three acts.
@@ -1428,12 +1501,13 @@ than changed.
     and the one a member added tomorrow inherits.
 20. **The kind is stamped once.** An attempt opened under `CONVERSE` and engaged on a later turn
     under `CONVERSE_SPOKEN` keeps `CONVERSATIONAL`, and the reverse.
-21. **Exhaustion is not a blocker.** An attempt that exhausts every counter leaves the goal
-    `ACTIVE`; a turn whose `WEB_SEARCH` answered `NOT_CONFIGURED` and whose every ask admitted no
-    record writes the goal `BLOCKED` through `set_goal_status`; a turn on that same attempt whose
-    *earlier* turn had admitted records writes it just the same, because the predicate reads this
-    turn and not a history; and a superseded evidence row is asserted to block nothing and to
-    reset no run count.
+21. **Nothing writes `GoalStatus.BLOCKED`, and the near-misses are the arms.** An attempt that
+    exhausts every counter leaves the goal `ACTIVE`; a turn whose `WEB_SEARCH` answered
+    `NOT_CONFIGURED` and whose every ask admitted no record **also** leaves it `ACTIVE`, and the
+    arm drives the case that makes limb 3 necessary — a request to summarise a note already in
+    the assembled supply, which answers correctly on that same shape; `set_goal_status` is
+    asserted not to be called with `BLOCKED` anywhere in this decision's lanes; and a superseded
+    evidence row is asserted to block nothing and to reset no run count.
 22. **The writer clauses.** A planner envelope carrying a read outcome, a stop reason, an effort
     figure, an attempt kind or a status has each value discarded silently, with the turn
     otherwise byte-identical.
@@ -1506,10 +1580,13 @@ the fifth turn may find the allowance spent where the first did not. That is the
 and §7's composing flag is what makes it legible rather than silent. A further user act that
 opens a new attempt (ADR-0250 §12) gets a new allowance, and nothing the system does can.
 
-**`GoalStatus.BLOCKED` gets one producer and a narrow one**, so most attempts that stop will
-leave their goal `ACTIVE` with an attempt state that says what happened. That is a legible gap
-and an honest one: the alternative was a status that claimed unreachability from an exhausted
-budget.
+**`GoalStatus.BLOCKED` still has no producer after this decision**, so every attempt that stops
+leaves its goal `ACTIVE` with an attempt state that says what happened. That is a legible gap and
+an honest one, and it is the same shape ADR-0249 §4 left `ACHIEVED` in: the alternatives were a
+status claiming unreachability from an exhausted budget, or one claiming it from a source being
+unavailable on a turn that could answer anyway. What this decision does supply is the act, the
+writer, the write path, a three-limb test and the rule that no exhaustion ever passes it — so the
+next lane to name a reason finds the frame already built and the wrong answers already closed.
 
 **Two of `ReadOutcomeKind`'s seven members are unreachable on some deployments** —
 `EXPIRED` needs a source with a deadline and `TRUNCATED` needs one that caps — and a deployment
@@ -1576,6 +1653,14 @@ convenience alone.
 **Write `GoalStatus.BLOCKED` on exhaustion.** Rejected in §9: it asserts the objective
 unreachable on the evidence that the system stopped looking, which is ADR-0249 §4's own
 circularity read from the other end.
+
+**Write `GoalStatus.BLOCKED` where a source was unavailable and no read admitted a record.**
+Rejected in §9, and it is the producer an earlier draft of this decision carried. It fails the
+necessity limb: a request to summarise a note already in the assembled supply, accompanied by an
+unnecessary `WEB_SEARCH` on a deployment with no account, meets that predicate exactly and then
+answers correctly. One route being shut is not evidence the route was needed, and a status member
+meaning *"this objective cannot currently be achieved"* is not the place to record that a search
+did not run.
 
 **Name a closed blocker vocabulary here.** Rejected in §9: the conditions are A6's, A8's and
 A9's, and a vocabulary ratified with no producer is the empty box ADR-0249 §10 refuses to mint.
