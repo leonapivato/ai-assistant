@@ -127,7 +127,7 @@ from ai_assistant.orchestration.reads import (
     _Union,
     service_read_request,
 )
-from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.permissions.policy import ConfiguredSearchDestination, ThresholdActionPolicy
 from ai_assistant.planning.composer import ModelBackedQueryComposer
 from ai_assistant.testing import (
     FakeAuditTrail,
@@ -216,6 +216,29 @@ _SUPPLY_SPAN: Final = "the account number is 55-40-119"
 
 #: The connected account the fake searcher's origin is registered against.
 _ACCOUNT: Final = BoundAccount(identity="search@example.com", reference="search-account")
+
+#: What this deployment is **configured** with, as ADR-0247 §2 hands it to the policy:
+#: the connection reference the search is registered against and the canonical
+#: destination set its origin canonicalises to. Equal by construction to what
+#: :func:`_binder` registers and to what the binding therefore carries, which is what
+#: makes a search here *at the configured provider* (§1).
+#:
+#: **It is what a granted deployment now has instead of a grant**, and the two are not
+#: both routes to one ruling: ADR-0247 §3 restates ``_only_the_disclosure_floor``'s two
+#: limbs over the configuration rather than over ``closed_loop``, so a closed-loop
+#: search reaches route (b) **in no case at all** and the grant below covers nothing it
+#: used to. The grant fixture is left standing beside it because ADR-0247 §2's ordering
+#: clause is exactly that route (c) answers first and the seam is read zero times.
+_CONFIGURED_SEARCH: Final = ConfiguredSearchDestination(
+    reference=_ACCOUNT.reference,
+    destinations=frozenset(
+        {
+            CanonicalDestination(
+                protocol=DestinationProtocol.HTTPS, canonical=f"{DEFAULT_SEARCH_ORIGIN}:443"
+            )
+        }
+    ),
+)
 
 #: See this module's docstring and issue #2111: the declaration ADR-0231 §5 gives a
 #: deployment that knows its per-call figure. Nothing else about it moves, so every
@@ -403,10 +426,20 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
 ) -> SearchServicer:
     """A servicer over canonical fakes, granted or not.
 
-    ``granted`` is the one knob that decides the ruling: with it, a standing recipient
-    grant covers the origin and the production ``ThresholdActionPolicy`` reaches
-    ADR-0148 §3's route (b); without it the store is empty and every ruling is the
-    ``CONFIRM`` ADR-0231 §9 says every deployment reads today.
+    ``granted`` is the one knob that decides the ruling: with it the deployment is
+    **configured** with this searcher's destination and holds a standing grant covering
+    its origin, and the production ``ThresholdActionPolicy`` reaches an ``ALLOW``;
+    without it the policy has neither and every ruling is the ``CONFIRM`` ADR-0231 §9
+    says every deployment reads today.
+
+    **Which route that ``ALLOW`` is taken on moved with ADR-0247**, and the knob is one
+    fact rather than two because the decision made it one: §3 restates
+    ``_only_the_disclosure_floor``'s two limbs over *at the configured provider*, so a
+    closed-loop search reaches route (b) in no case — the grant would be consulted zero
+    times whatever it covers — and §2's route (c) answers it on the deployment's own
+    configuration instead. The grant stays in the store beside the configuration
+    because that is the case §2's ordering clause is about: (c) answers first, and no
+    ruling at the configured provider cites a grant again.
     """
     grant = _grant(at=at)
     ids = itertools.count(1)
@@ -416,7 +449,8 @@ def _servicer(  # noqa: PLR0913 — one knob per contract ADR-0231 §6 names plu
         binder=_binder() if binder is None else binder,
         policy=(
             ThresholdActionPolicy(
-                grants=FakeRecipientGrants([grant] if granted else [], now=lambda: at)
+                grants=FakeRecipientGrants([grant] if granted else [], now=lambda: at),
+                configured_search=_CONFIGURED_SEARCH if granted else None,
             )
             if policy is None
             else policy
