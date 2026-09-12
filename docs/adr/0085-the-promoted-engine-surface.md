@@ -1,6 +1,6 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because ADR-0173 defines it as taking exactly `converse`'s arguments in exactly its order)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-22 by ADR-0178 — **one row of one table, and
   §5's walk gains an edge without its conclusion moving.** ADR-0178 closes #1366:
@@ -160,6 +160,32 @@
   examined is a deferral whose deferring sentence stays true and now has an
   answer (ADR-0083 §15's carve-out), or a conditional whose consequent this ADR
   is. Ratifying a `Proposed` ADR is not itself an amendment event (ADR-0082 §1).
+
+- **Partially superseded: 2026-09-12 by ADR-0250 — §3's signature block, in `converse`'s
+  parameter list and in the roster's count. Nothing else in this ADR.** ADR-0250 is A2 of
+  #2255: a turn may now name the clarification it answers, or the goal it resumes, and a
+  user needs a way to see what is outstanding and to withdraw or abandon.
+
+  **`converse` gains one keyword**, `reference: TurnReference | None = None`, naming a
+  `GoalQuestion` this turn answers or a `Goal` it resumes — the two shapes a model validator
+  on that type admits, and no third. A reader holding only §3 writes a `converse` a client
+  cannot pass a reference to, so an answer has nowhere to say which question it answers and
+  a cross-conversation resumption has nowhere to point, which is ADR-0070 §1's test coming
+  out on the supersession side. **`converse_streaming` needs no record of its own**:
+  ADR-0173 defines it as *"taking exactly `converse`'s arguments in exactly its"* order, so
+  it takes the keyword by that clause rather than by an amendment to it.
+
+  **The roster gains three operations** — `goals`, `withdraw_clarification` and
+  `abandon_goal`. The first is the listing a user obtains a reference from and is paged on
+  §3's own `DEFAULT_PAGE_SIZE` convention; the second settles an open clarification
+  `WITHDRAWN`; the third is the **only** producer of `GoalStatus.ABANDONED` anywhere in the
+  system.
+
+  **§5's closed graph is obeyed and not relaxed.** Every type that decision adds to the
+  surface — `TurnReference`, `GoalSummary`, `Clarification`, `GoalEngagement`,
+  `EngagementDisposition`, `ReferenceOutcome`, `ClarificationWithdrawal` and
+  `GoalAbandonment` — is a `core` type reachable from it. §3's spelled-out-annotation rule
+  and its docstring obligations bind entire, and §§1-2 and §§4-8 are untouched.
 
 ## Context
 

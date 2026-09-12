@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration, its `save_goal` upsert contract and `commit_transition`'s claim conditions: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries, and `commit_transition` refuses a `→ RUNNING` claim whose plan does not target the goal's current interpretation revision. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from. And §1's `Goal` model declaration: `statement` ceases to be a constructor field and becomes a read-only projection absent from the dump, while `conversation_id`, `interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration, so a reader holding only §1 writes `Goal(statement=…)` and does not build a conforming `Goal`. §1's prose is fulfilled and superseded in none — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance` sentence each bind entire — and §§2, 3, 4 and 7 are untouched)
+- Status: Partially superseded by ADR-0041 and ADR-0211 (§6's Planner.plan input roster) and ADR-0228 (§2's parenthetical alone, that a re-planned plan's predecessor "stays referenced by the `ExecutionState` that ran it" — a plan superseded within a turn, before anything is driven, is referenced by no execution, so it carries the id of the plan it replaces on a new `supersedes` field and every plan a turn produced is persisted; §2's `frozen=True` rule, its "Re-planning produces a *new* `ActionPlan` with a new `id`", its capability abstraction, its `JsonValue` reasoning and its deep-freezing of `parameters` all stand, and §§1, 3-7 are untouched) and ADR-0249 (three scopes. §5's `PlanStore` member enumeration, its `save_goal` upsert contract and `commit_transition`'s claim conditions: the roster gains `record_interpretation`, `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`, `save_goal` becomes the opening write alone, refusing a goal whose id the store already holds, because an upsert replacing a whole goal would defeat the append-only interpretation sequence `Goal` now carries, and `commit_transition` refuses a `→ RUNNING` claim whose plan does not target the goal's current interpretation revision. §5's `PlanExport` shape, in `attempts` alone: the document gains that tuple and §5's closure rule extends to `attempt_id` rather than changing. §6's `Planner.plan` input roster and its `-> ActionPlan` return: the first positional becomes a `GoalBrief`, `utterance` and `evidence` join the keywords, and the return becomes a `PlannerOutput`. Those three scopes, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations, and §6's parameters-not-fetched argument bind entire and are the grounds ADR-0249 reasons from. And §1's `Goal` model declaration: `statement` ceases to be a constructor field and becomes a read-only projection absent from the dump, while `conversation_id`, `interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration, so a reader holding only §1 writes `Goal(statement=…)` and does not build a conforming `Goal`. §1's prose is fulfilled and superseded in none — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance` sentence each bind entire — and §§2, 3, 4 and 7 are untouched) and ADR-0250 (§5's `PlanStore` member enumeration and its `PlanExport` shape, layering on ADR-0249's record: the roster gains `engage_goal`, `set_goal_status`, `candidates_for`, `record_question`, `get_question`, `open_question`, `outstanding_questions` and `settle_question`, `delete_goal`'s cascade reaches a goal's questions, and `PlanExport` gains `questions` with §5's closure rule extending to `question_id` rather than changing. That one scope, and nothing else in this ADR: §5's compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency, export-completeness and deletion obligations bind entire and are the grounds ADR-0250 reasons from, §5's charter sentence is the ground it argues the store choice on, and §§1-4, §6 and §7 are untouched by that decision)
 - Date: 2026-07-19
 - **Partially superseded: 2026-09-12 by ADR-0249 — §5's `PlanStore` member enumeration
   and its `save_goal` upsert contract, §5's `PlanExport` shape in `attempts` alone, and §6's
@@ -216,6 +216,33 @@
   `Accepted` per ADR-0070 §4 and `docs/adr/template.md`. Appended note per ADR-0070
   §1; no text below is rewritten. This note lands in the same change as ADR-0228
   itself, which is the existence condition ADR-0082 §7 states. Refs #1908, #1952.
+
+- **Partially superseded: 2026-09-12 by ADR-0250 — §5's `PlanStore` member enumeration and
+  its `PlanExport` shape, layering on ADR-0249's record. Nothing else in this ADR.**
+  ADR-0250 is A2 of #2255 and lands the durable clarification question and the engagement
+  stamp that focus is derived from.
+
+  **The roster gains eight members** — `engage_goal`, `set_goal_status`,
+  `candidates_for`, `record_question`, `get_question`, `open_question`,
+  `outstanding_questions` and `settle_question` — and
+  `delete_goal`'s cascade reaches a goal's questions. A reader holding only this ADR, or
+  only ADR-0249's widening of it, implements a store with no durable clarification and no
+  engagement stamp, so a turn cannot say which goal it is about and a question the user was
+  asked survives nothing — ADR-0070 §1's test coming out on the supersession side.
+
+  **`PlanExport` gains `questions`**, and §5's closure rule — *"every `goal_id`/`plan_id`
+  referenced by an included record resolves within the same export"* — **extends** to
+  `question_id` rather than changing: an export naming a question it does not carry, or
+  carrying one whose `goal_id` or `attempt_id` it does not carry, does not validate. A
+  settled question exports with its content already absent, which is that decision's
+  retention rule and not an omission from the export.
+
+  **Everything else is relied on as written.** §5's compare-and-swap discipline is what
+  `engage_goal` takes its `expected_version` from and is quoted for it; its
+  transitions-not-snapshots rule, its local-residency, its export-completeness and its
+  deletion obligations bind entire; and its charter sentence — *"Durable planning state
+  belongs to `planning`, not to the wiring layer"* — is the ground ADR-0250 §8 argues the
+  question's home on, against a store of its own. §§1-4, §6 and §7 are untouched by that decision.
 
 ## Context
 

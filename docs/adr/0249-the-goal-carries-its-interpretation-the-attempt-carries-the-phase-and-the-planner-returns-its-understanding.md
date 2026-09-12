@@ -1,6 +1,6 @@
 # 249. The goal carries its interpretation, the attempt carries the phase, and the planner receives a brief and returns its understanding
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0250 (two scopes. §7's `ProposedUnderstanding` field enumeration, in one member's element type alone: `questions` becomes a `tuple[ProposedQuestion, ...]`, so that a raised question names what it is about and a materiality test has a subject to run over. And §1's `Goal` model declaration, in the field count alone: `Goal` gains `last_engaged_in`, an `Identifier | None` naming the conversation of the goal's most recent engagement, so a reader holding only §1 authors a goal that never carries one and does not conform. Those two scopes, and nothing else in this ADR: §7's `Planner.plan` roster, its `PlannerOutput` enumeration, its retained-or-restated validator, its retention-copies-forward clause, its `ProposedElement` shapes, its ground-resolution rules and their refusals, its minted-record clause and its interpretation-is-the-model's asymmetry all bind entire; §1's `conversation_id`-is-provenance-and-not-a-fence clause binds entire and is the ground the new field is added on, its four-absences clause is extended and not weakened, and its `statement`-as-projection rule, its append-only interpretation rule and its `version` clause are untouched; §1's clause that no lane in that decision reads `last_engaged_at` is fulfilled rather than superseded; and §§2-6 and §§8-17 stand entire)
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
   — **§1's third clause in its second sentence alone: "The goal is minted once per turn from
@@ -72,6 +72,42 @@
   and its `APPROVED` clause bind entire, §3's indivisibility, its retention rule, its
   one-open-park-per-conversation rule and its `settle` clearing clause bind entire, and
   §§1, 4–23 stand entire.
+
+- **Partially superseded: 2026-09-12 by ADR-0250 — §7's `ProposedUnderstanding` field
+  enumeration in one member's element type, and §1's `Goal` model declaration in the field
+  count. Nothing else in this ADR.** ADR-0250 is A2 of #2255, the decision §13 defers
+  association, focus, materiality, the `GoalQuestion` record and *"what becomes of a
+  `ProposedUnderstanding`'s `questions`"* to by name.
+
+  **§7's `questions`, in its element type alone.** §7 declares `questions` a
+  *"possibly-empty `tuple[NonBlankEncodableText, ...]`"* and says the field rides the
+  envelope *"so that A2 need not reopen a `core` type to carry a value the planner can
+  already produce"*. That reason is sound and the field is kept; what a bare text cannot do
+  is answer **which element** the question is about, and ADR-0250 §6 makes materiality a
+  **code** test over a subject. With no subject the test could only be a reviewer's
+  judgement, which is the shape #2255's addendum rules out in terms. So the element becomes
+  a `ProposedQuestion` carrying `text` and an `about` label of the proposal's own tuples,
+  and a reader holding only this ADR returns bare strings that no longer construct —
+  ADR-0070 §1's test coming out on the supersession side. **Everything else about the field
+  is fulfilled rather than moved**: it is still carried, still the planner's, still read by
+  no lane of this decision, and §7's own *"what a raised question becomes is A2's"* is what
+  ADR-0250 does.
+
+  **§1's `Goal` declaration, in the field count alone.** `Goal` gains `last_engaged_in`, an
+  `Identifier | None` naming the conversation of the most recent engagement, because
+  ADR-0250 §13 supports the owner's decision 5 — resumption from another conversation by
+  explicit reference — and a goal referenced from a second conversation must be a candidate
+  there on the turn after, or the resumption is a single borrowed turn. **`conversation_id`
+  is never rewritten**, so §1's *"provenance and **not a fence**"* clause binds entire and
+  is the ground the second field is added on, and §1's four-absences posture is **extended
+  and not weakened**: `None` is reachable by the same one route, a row written before that
+  decision, and no lane writes it.
+
+  **Nothing else in this ADR moves.** §1's `statement`-as-projection rule, its append-only
+  interpretation rule, its `version` clause and its elision reference; §§2-6; §7's every
+  other clause; and §§8-17 are untouched. §1's *"no lane in this decision reads
+  `last_engaged_at` for any purpose"* stays true of this decision's lanes and is
+  **fulfilled** by ADR-0250 §1 rather than contradicted.
 
 ## Context
 
