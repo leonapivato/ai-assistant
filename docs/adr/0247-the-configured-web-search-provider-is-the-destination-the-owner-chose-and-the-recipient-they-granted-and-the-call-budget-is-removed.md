@@ -396,16 +396,18 @@ discovering it is owed.
 > `authorised_by` is set is **route (b) where `authorised_subject` is set** and **route (c)
 > where it is not**.
 
-> **Normative.** **That discriminator is total over history and reads nothing but the
-> row.** ADR-0193 §6's pairing clause **already refuses** a standing-authorisation row that
-> *"names standing authorisation … and fingerprints none"*, so **every route-(b) row this
-> corpus has ever written carries a digest** — including the closed-loop grant-covered
-> `ALLOW` ADR-0238 permits and the tree drives. It therefore needs **no store read**, which
-> is what ADR-0193 §9 requires — a revoked or cleared grant leaves a recorded decision's
-> meaning intact — and **no assumption that grant ids and connection references are drawn
-> from disjoint namespaces**, which they are not: both are `DurableIdentifier`, and an
-> earlier revision of this section rested on a collision being unlikely. **A recorded
-> decision's authority is readable from the decision.**
+> **Normative.** **That discriminator reads nothing but the row, and it is total over every
+> row written after ADR-0193's implementation.** §6's pairing clause **refuses** a
+> standing-authorisation row that *"names standing authorisation … and fingerprints none"*,
+> so **every route-(b) row written since then carries a digest** — including the closed-loop
+> grant-covered `ALLOW` ADR-0238 permits and the tree drives. It therefore needs **no store
+> read**, which is what ADR-0193 §9 requires — a revoked or cleared grant leaves a recorded
+> decision's meaning intact — and **no assumption that grant ids and connection references
+> are drawn from disjoint namespaces**, which they are not: both are `DurableIdentifier`,
+> and an earlier revision of this section rested on a collision being unlikely. **A recorded
+> decision's authority is readable from the decision.** What ADR-0193 §11 reserves — a
+> digest-free pointer written before that implementation — is neither route, and the
+> eligibility conjunct below is what excludes it.
 
 > **Normative.** **The recipient-grant invariant is narrowed by that conjunct, and route
 > (c) gets an invariant of its own that needs no store.** `AuditTrail.record`'s route-(b)
@@ -415,24 +417,53 @@ discovering it is owed.
 > pairing clause and the scope of its eight-check invariant, in that limb alone**; the
 > eight checks themselves — the outstanding-grant read, both ends of liveness, tool
 > equality, account equality, destination-set containment, the origin arm and the
-> recomputed `subject_digest` — bind entire on every route-(b) row. **In its place, the
-> trail refuses a route-(c) `ALLOW` whose `authorised_by` is not equal to its own binding's
-> `account.reference`** — decidable from the decision alone, with no store read, no
-> `Settings` read and no clock — which is `_check_authorisation`'s own reason stated one
-> route over: *"Without this the pointer is a string a policy could invent."*
+> recomputed `subject_digest` — bind entire on every route-(b) row.
 
-> **Normative.** **`closed_loop` reaches the trail in no clause of this ADR.** The trail
-> holds no configuration, so it could not take §1's predicate, and it does not need to: the
-> route is read off the digest and the pointer is checked against the binding. **A lane that
-> gave the trail a `Settings` value, or narrowed its scope by `closed_loop`, has built the
-> discriminator the two reviews of this ADR's second round refused.**
+> **Normative.** **In its place the trail admits a digest-free standing row on two
+> conditions and refuses it otherwise, and the refusal is the one it makes today.** A
+> non-resolving `ALLOW` carrying an `egress_binding` and an `authorised_by` with **no**
+> `authorised_subject` is accepted **only** where its binding's `closed_loop` is `True`
+> **and** its `authorised_by` equals that binding's `account.reference`. Failing either, it
+> is refused exactly as `_check_standing_shape`'s pairing clause refuses it at
+> `origin/main`. Both facts are read from the decision — **no store read, no `Settings`
+> read and no clock** — and the pointer half is `_check_authorisation`'s own reason stated
+> one route over: *"Without this the pointer is a string a policy could invent."*
+
+> **Normative.** **`closed_loop` is route (c)'s *eligibility* and the digest is its
+> *discriminator*, and neither does the other's work.** The digest says which route a row
+> claims, over the whole history and from the row alone; `closed_loop` says whether the row
+> is of the one kind ADR-0148 §3's new route covers. **So an `ALLOW` on an email, a fetch or
+> any other kind — whose binding carries `closed_loop` `False` — is refused with no grant
+> exactly as it is today**, and a faulty policy cannot reach past the trail's independent
+> enforcement by omitting a digest. **A lane that discriminated by `closed_loop`, or gave
+> the trail a `Settings` value, has breached this clause**; so has one that admitted a
+> digest-free row on the pointer alone.
+
+> **Normative.** **The trail asserts what it can see, and the policy asserts the rest.**
+> The trail holds no configuration, so it can never take §1's account-and-origin predicate;
+> what it takes is the row's internal consistency and the kind. **Neither component is
+> offered the other's job**, and a lane that let the policy skip the comparison has breached
+> this clause as surely as one that gave the trail a `Settings` value.
+
+> **Normative.** **A stored digest-free standing row whose binding carries `closed_loop`
+> `False` is *neither* route, and ADR-0193 §11 governs it entire.** ADR-0193 §11
+> contemplates such a row in terms — *"a pointer written before this ADR's implementation
+> validated any"* — and rules that no surface distinguishes it from a grant the store still
+> holds, from one erased and from one expired. **This ADR does not give it a basis it never
+> had**, and no component reads it as a configuration authority. **The eligibility conjunct
+> is what makes that exclusion exact rather than hopeful**: `closed_loop` was added to
+> `EgressBinding` by ADR-0238, which lands after ADR-0193's implementation, so **no row
+> predating that implementation can carry `closed_loop` `True`** and none is ever
+> classified as route (c). ADR-0193 §11's three states, its non-distinguishing bar, its
+> opaque-digest rule and its no-liveness rule bind entire, and this ADR adds no surface
+> obligation to any of them.
 
 > **Normative.** **No stored row is revalidated, rewritten or re-derived.**
 > `AuditTrail.record`'s invariants are write-path checks; a decision ADR-0238 wrote keeps
 > its `authorised_by`, its digest and its recorded meaning, and no read path applies route
-> (c)'s pointer check to it. **No row of the route-(b)-with-`closed_loop` shape is written
-> after this decision**, the ordering clause above seeing to that, and every one already
-> written stays readable as what it was.
+> (c)'s pointer check or its eligibility conjunct to it. **No row of the
+> route-(b)-with-`closed_loop` shape is written after this decision**, the ordering clause
+> above seeing to that, and every one already written stays readable as what it was.
 
 > **Normative.** **`OriginUnrecordedBinding` and `CoverageUnrecordedBinding` stay refused
 > by name.** ADR-0184 §7's and ADR-0233 §14's ended-epoch refusals are untouched, and a
@@ -1089,6 +1120,14 @@ trigger.
 > route-(c) row are still told apart, because the digest and not the pointer decides. The
 > arm exists because both reviews of this ADR's second round found the pointer-based reading
 > unsound on exactly these two inputs.
+
+> **Normative.** **Arm D‴ — the row ADR-0193 §11 reserves is classified as neither route
+> (lane 1).** A stored non-resolving egress `ALLOW` with `authorised_by` set, no
+> `authorised_subject`, and a binding whose `closed_loop` is `False` — §11's pre-implementation
+> pointer — is read back unchanged, is not re-validated, and is reported by no component as
+> a configuration authority. The arm is asserted over the stored row rather than over
+> `record`, because `record` refuses that shape going forward and the question here is what
+> history reads as.
 
 > **Normative.** **Arm E — a park with `closed_loop` `True` is answerable (lane 2).** A
 > `WEB_SEARCH` at the configured provider that draws `CONFIRM` on an independent ground — an
