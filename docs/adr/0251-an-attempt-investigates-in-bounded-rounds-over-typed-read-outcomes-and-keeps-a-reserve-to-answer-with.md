@@ -104,7 +104,7 @@ And
 owner's own, quoted there: *"Revisit if planner passes, batching or unattended work
 expand."* Planner passes expand here, so the trigger fires and this ADR owes the answer.
 
-### What the tree does today, read rather than assumed, at `origin/main` `7f7e5fa1`
+### What the tree does today, read rather than assumed, at `origin/main` `5c3bdd52`
 
 - `orchestration/loop.py` declares `_PLANNER_CALL_BOUND: Final = 2` and
   `_PLANNING_BUDGET: Final = timedelta(seconds=20)`, and `_PLANNING_BUDGETS` maps
@@ -128,18 +128,29 @@ expand."* Planner passes expand here, so the trigger fires and this ADR owes the
 - `loop.py` computes `stopped_while_asking=(audit.stop in {StopReason.BOUND_REACHED,
   StopReason.BUDGET_REACHED})` and hands the bare boolean to `composing.py`, which takes it
   as a keyword at three sites. ADR-0228 §10's carrier exists and works.
-- **`core/types.py` declares none of ADR-0249's L1 types.** There is no `GoalAttempt`, no
-  `AttemptEffort`, no `AttemptPhase`, no `AttemptState`, no `GoalBrief`, no `PlannerOutput`
-  and no `EvidenceDigest`; `GoalStatus` and `Goal` are ADR-0014's, unchanged. ADR-0249 is
-  ratified and merged and its L1 lane is in flight elsewhere. **Every shape this decision
-  builds on is therefore read from ADR-0249's ratified text rather than from the tree, and
-  this ADR says so wherever it does it.** That is the ordinary state of an A-series lane
-  under ADR-0015 — a contract is ratified before anything implements it — and it is stated
-  here so no reader takes a clause of this ADR for a description of code.
+- **ADR-0249's L1 has landed and every shape this decision builds on is read from the tree.**
+  `core/types.py` declares `AttemptEffort`, frozen and `extra="forbid"`, with **exactly**
+  `planner_calls: int` (`default=0`, `ge=0`) and `working: timedelta` (`default=timedelta(0)`,
+  `ge=timedelta(0)`), and its docstring carries the licence this decision exercises: *"**A3
+  fixes the allowances, the reserve and any further member** (§13)."* `GoalAttempt` carries
+  exactly the twelve fields ADR-0249 §5 enumerates, with `effort` defaulting to a fresh
+  `AttemptEffort` and a `_terminal_states_carry_their_result` validator over
+  `TERMINAL_ATTEMPT_STATES`. `AttemptPhase` holds six members in ADR-0249 §6's order,
+  `AttemptState` seven, `AttemptOutcome` six, `GoalStatus` four, `EvidenceStanding` three; and
+  `GoalBrief`, `BriefElement`, `PlannerOutput`, `ProposedUnderstanding`, `EvidenceDigest`,
+  `GoalRevision` and `AttemptTransition` are all present, with `PlanStore` carrying
+  `open_attempt`, `get_attempt`, `attempts_of` and `commit_attempt`. `PROTOCOL_VERSION` is
+  **38** and `PlanExport.schema_version` is **8**.
+- **`AttemptKind` and `ReadOutcomeKind` are absent**, which is what this decision mints; and
+  **`PlanStore.set_goal_status` is absent**, because ADR-0250's implementation has not landed.
+  §9 names it as `BLOCKED`'s write path on ADR-0250 §9's ratified text, which is the ordinary
+  state under ADR-0015 — a contract is ratified before anything implements it — and this ADR
+  says so where it does it.
 
-### What this decision reads from ADR-0249 rather than from the tree
+### The four ADR-0249 clauses this decision is built on
 
-Four clauses, quoted once here and relied on throughout.
+Quoted once here and relied on throughout. The **shapes** they describe are in the tree above;
+what is quoted is the **rule**, which is the ADR's and not the code's.
 
 §5: *"`AttemptEffort` is a frozen model with `extra="forbid"` carrying at least
 `planner_calls`, an `int` `ge=0`, and `working`, a `timedelta` `ge=0` accumulating the
@@ -978,8 +989,9 @@ an attempt, with what fires it.
 > is fixed here is that a row A4 marks superseded cannot block.
 
 > **Normative — the write path and the rendering.** The status is written through
-> **`PlanStore.set_goal_status`** (ADR-0250 §9), the member that already exists for it, and no
-> second write path is added. **What a surface says about a blocked goal is not decided here**:
+> **`PlanStore.set_goal_status`** — the member ADR-0250 §9 ratifies for it, not yet in the tree
+> at `5c3bdd52` because that decision's implementation has not landed — and **no second write
+> path is added** by this decision, which mints no `PlanStore` member of its own. **What a surface says about a blocked goal is not decided here**:
 > ADR-0250 §15 owns what the surfaces owe and §14 owns how a pause is disclosed, and this
 > decision adds no line, no vocabulary and no member to either.
 
@@ -1416,12 +1428,14 @@ than changed.
 >   `Planner.plan` swaps `empty_reads` for `read_outcomes`; `planning/planner.py` renders the
 >   outcomes in place of the empty asks; the `Planner` conformance suite and the canonical fake
 >   in `ai_assistant.testing` take the new parameter; every call site moves mechanically so the
->   tree type-checks. **§2's classifier lands here**, because the carrier cannot be filled
+>   tree type-checks against the shapes ADR-0249's L1 landed. **§2's classifier lands here**,
+>   because the carrier cannot be filled
 >   without it: `orchestration/loop.py` passes the outcomes of the reads it already services,
->   which on this lane are at most the two ADR-0228 §3's bound admits. **L1 moves whatever
->   version ADR-0249's L1 moved for these stored shapes, under
->   ADR-0124 §9's rule that the bump rides the change that makes a peer's value invalid**, and
->   it is the only lane of this decision that moves any version. **No behaviour changes in L1**:
+>   which on this lane are at most the two ADR-0228 §3's bound admits. **`AttemptEffort` gains
+>   a field and it is reachable through `GoalAttempt` on the wire and in `PlanExport`, so L1
+>   moves `PROTOCOL_VERSION` from 38 and `PlanExport.schema_version` from 8**, under ADR-0124
+>   §9's rule that the bump rides the change that makes a peer's value invalid; it is the only
+>   lane of this decision that moves any version. **No behaviour changes in L1**:
 >   the bound is still two, no allowance is declared, no attempt kind is stamped, no progress
 >   test runs and no stop reason is added.
 > - **L2 — the loop.** `orchestration/` alone: §4's conditions and its never-gated first call,
@@ -1439,9 +1453,10 @@ than changed.
 > under `mypy --strict`. **L2 is one subsystem, and no other cross-subsystem pairing is
 > authorised by this decision.**
 
-> **Normative.** **Neither lane starts before ADR-0249's L1 has merged.** `AttemptEffort` does
-> not exist until it does, and a lane that minted a stand-in would be authoring a `core` type
-> ADR-0249 already decided.
+> **Normative.** **ADR-0249's L1 has merged** (`5c3bdd52`), so both lanes have the shapes they
+> extend. **Neither mints a stand-in for a type ADR-0249 already decided**, and neither reopens
+> `GoalAttempt`'s field enumeration: L1 adds one member to `AttemptEffort` under the licence
+> that type's own docstring carries, and nothing else of ADR-0249's surface moves.
 
 ### 17. The arms this decision owes
 
