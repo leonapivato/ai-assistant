@@ -359,6 +359,39 @@ async def test_a_guarded_feedback_event_reaches_the_hub_still_guarded(tmp_path: 
     assert arguments["event"].guarded is True, "and the owner's act with it"
 
 
+async def test_a_turns_request_reaches_the_client_on_the_turn_it_belongs_to(
+    tmp_path: Path,
+) -> None:
+    """ADR-0248 §7: the member the bump at 37 is spent on actually crosses.
+
+    The version pin says the constant moved and the log entry says why; the sibling arms
+    above say a bump nothing reaches through the handshake buys nothing. The same holds
+    for the member the bump is *for*. ``TurnResult`` rides ``TurnOutcome.turn``,
+    ``TurnOutcome`` is what the promoted surface returns, ``project`` renders a model by
+    ``model_dump()``, and ``utterance`` is **required with no default** (§1) — so a
+    projection that dropped it would fail the client's decode with ``missing`` rather than
+    silently, and a client at 36 handed it fails ``extra_forbidden``, which is what the
+    handshake refusal above makes legible.
+
+    Driven over a real socket against a real ``serve_connection``, and asserted on what the
+    **client** decoded rather than on what the hub built.
+    """
+    engine = FakeAssistantEngine()
+    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    async with _listening(tmp_path / "hub.sock", _hub) as client:
+        outcome = await client.converse("what did I say about the ledger", timeout=_PATIENT)
+
+    assert outcome.turn is not None
+    assert outcome.turn.utterance == "what did I say about the ledger"
+    assert outcome.turn.utterance == outcome.turn.goal.statement, (
+        "§6's byte-equality holds of what crossed the wire too"
+    )
+
+
 # --- authenticating the hub from the kernel (ADR-0084 §1) ------------------
 
 

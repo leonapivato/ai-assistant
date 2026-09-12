@@ -22,6 +22,13 @@ the three content fields in the same step that moves the disposition; and
 second time" — and that arm is one of the three ADR-0244 §19 names as the ones "this
 decision would be worthless without".
 
+**ADR-0248 §3 widens that clearing clause in the count alone**, so the settlement case
+below ranges over **four** content fields rather than three, and two cases join it: an
+``OPEN`` park round-trips its ``utterance``, and one written before that decision — the
+only route to ``utterance`` ``None`` on an open row — round-trips as absent and stays
+answerable. Nothing else of ADR-0244 moves: §2's validator is not extended, and every
+other clause of §2 and §3 binds entire.
+
 **What is deliberately not here, and ADR-0244 §18 says so in terms.** Four of this
 decision's rulings "are deliberately not suite clauses, and putting them there would be
 the error": that no model call precedes a dispatch, that the value sent is the park's
@@ -66,9 +73,22 @@ LATER: Final = AT + timedelta(hours=1)
 #: rather than a behaviour the suite drives.
 EXPIRES_AT: Final = AT + timedelta(hours=24)
 
-#: The three fields ADR-0244 §3's settlement clears. Named once, so the clause and the
-#: assertion about it cannot come apart.
-CONTENT: Final = ("parameters", "goal", "plan")
+#: The four fields ADR-0244 §3's settlement clears. Named once, so the clause and the
+#: assertion about it cannot come apart. ``utterance`` is ADR-0248 §3's fourth content
+#: field: it joins no other clause, and it survives settlement no more than the three do.
+CONTENT: Final = ("parameters", "utterance", "goal", "plan")
+
+#: The request a parked turn ran on — ADR-0248 §3's ``utterance``, distinctive so an
+#: assertion about it cannot pass on another field's value.
+UTTERANCE: Final = "what is that bell tower I can see from the flat"
+
+#: The three fields ADR-0244 §2's validator requires on an ``OPEN`` park. **Deliberately
+#: not** :data:`CONTENT`: ADR-0248 §3 adds a fourth content field and is explicit that the
+#: validator "is **not** extended to require ``utterance`` on an ``OPEN`` park", because a
+#: park written before that decision carries none and must stay answerable. The two lists
+#: are named separately so that difference is stated once rather than discovered by
+#: whoever next widens one of them.
+REQUIRED_ON_OPEN: Final = ("parameters", "goal", "plan")
 
 #: The four terminal members, so the settle cases range over every one of them rather
 #: than over the author's favourite.
@@ -107,10 +127,16 @@ def park(  # noqa: PLR0913 — one keyword per field a case varies, and each var
     conversation_id: str = "conv-1",
     decision_id: str = "decision-1",
     parameters: FrozenJsonMapping | None = None,
+    utterance: str | None = UTTERANCE,
     parked_at: datetime = AT,
     expires_at: datetime = EXPIRES_AT,
 ) -> ParkedRead:
-    """An ``OPEN`` park, with the three content fields present (ADR-0244 §2)."""
+    """An ``OPEN`` park, with its content fields present (ADR-0244 §2, ADR-0248 §3).
+
+    ``utterance`` is defaulted rather than required and may be passed ``None``, which is
+    the one shape ADR-0248 §3 admits on an ``OPEN`` park: a row written before that
+    decision landed, which is still answerable and must stay so.
+    """
     return ParkedRead(
         id=park_id,
         conversation_id=conversation_id,
@@ -120,6 +146,7 @@ def park(  # noqa: PLR0913 — one keyword per field a case varies, and each var
             if parameters is None
             else parameters
         ),
+        utterance=utterance,
         goal=goal(),
         plan=plan(),
         parked_at=parked_at,
@@ -146,8 +173,12 @@ class ParkedReadsContract:
 
         The type is what expresses the two shapes rather than a rule to remember, and a
         park with nothing to dispatch is not one a user can answer.
+
+        Over :data:`REQUIRED_ON_OPEN` rather than :data:`CONTENT`, which is ADR-0248 §3's
+        own clause: the fourth content field is **not** required on an open park, and the
+        case above pins the one route by which it is absent.
         """
-        for field in CONTENT:
+        for field in REQUIRED_ON_OPEN:
             with pytest.raises(ValueError, match="open park carries its question"):
                 park().model_copy(update={field: None}).model_validate(
                     {**park().model_dump(), field: None}
@@ -182,6 +213,41 @@ class ParkedReadsContract:
         assert held.goal is not None
         assert held.plan is not None
         assert held.parameters == {"origin": "search.example", "query": "bell tower porto"}
+
+    async def test_an_open_park_round_trips_its_utterance(self, store: ParkedReads) -> None:
+        """ADR-0248 §3: the park carries the parked turn's own request, and gives it back.
+
+        Byte for byte, which is what ``Engine._resume_read`` leans on: it takes the user's
+        words from this field, and a store that normalised, truncated or dropped it would
+        make the resolution archive something the user did not say. Stated over the
+        contract rather than over one implementation, because both the durable store and
+        the canonical fake are consumed as this Protocol.
+        """
+        assert await store.park(park()) is True
+
+        held = await store.get("park-1")
+
+        assert held is not None
+        assert held.utterance == UTTERANCE
+
+    async def test_a_park_written_before_the_field_existed_round_trips_as_absent(
+        self, store: ParkedReads
+    ) -> None:
+        """ADR-0248 §3's one reachable ``None`` on an ``OPEN`` park, and it stays answerable.
+
+        Such a row decodes, is enumerated, and is offered — ADR-0244 §15's "a park
+        survives a restart and is offered again" reaches it unchanged. Nothing back-fills
+        it, re-derives it or re-validates it; what its resolution renders is §3's single
+        fallback, taken in the engine and nowhere else.
+        """
+        assert await store.park(park(utterance=None)) is True
+
+        held = await store.get("park-1")
+
+        assert held is not None
+        assert held.utterance is None
+        assert held.disposition is ParkedReadDisposition.OPEN
+        assert [one.id for one in await store.outstanding()] == ["park-1"]
 
     async def test_an_unknown_id_reads_none(self, store: ParkedReads) -> None:
         """``get`` answers ``None`` rather than raising for an id nothing holds."""
@@ -382,7 +448,10 @@ class ParkedReadsContract:
         held = await store.get("park-1")
         assert held is not None
         assert held.disposition is disposition
-        assert all(getattr(held, field) is None for field in CONTENT)
+        assert all(getattr(held, field) is None for field in CONTENT), (
+            "all four, ADR-0248 §3's utterance included — read back as absent rather "
+            "than merely overwritten"
+        )
         assert held.id == original.id
         assert held.conversation_id == original.conversation_id
         assert held.decision_id == original.decision_id
