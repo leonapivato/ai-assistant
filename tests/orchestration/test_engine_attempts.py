@@ -18,9 +18,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from test_engine import AT, PATIENT, Harness, NoStepPlanner, OneStepPlanner, tool
+from test_engine_composing import _refusing
 from test_engine_read_envelope import _recorder
 
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import PlanningError, ToolError
 from ai_assistant.core.types import (
     AttemptOutcome,
     AttemptPhase,
@@ -34,8 +35,10 @@ from ai_assistant.core.types import (
     ProposedElement,
     ProposedUnderstanding,
     Provenance,
+    StepStatus,
 )
-from ai_assistant.testing import FakePlanStore
+from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.testing import FakeModelProvider, FakePlanStore, FakeStreamingCompleter
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import AttemptTransition, GoalAttempt, GoalRevision
@@ -209,6 +212,64 @@ async def test_a_revising_turn_drives_its_step(  # §16 item 20 at the engine
     stored = await plans.get_goal(outcome.turn.goal.goal_id)
     assert stored is not None
     assert stored.revision == 2
+
+
+async def test_a_failed_step_ends_no_attempt() -> None:
+    """§5: ``ANSWERED`` "asserts … that **no step failed**", read off the execution.
+
+    :attr:`~ai_assistant.core.types.Disposition.EXECUTED` says the tool was *reached*,
+    not that it succeeded — a tool that raises leaves that disposition beside a step
+    whose :class:`~ai_assistant.core.types.StepStatus` is ``FAILED``. **Which
+    ``AttemptOutcome`` such an attempt earns is A10's** (§13), so this lane writes none:
+    the attempt stands at ``VERIFY``, still ``RUNNING``, which is §4's stated cost taken
+    rather than an outcome nothing established.
+    """
+
+    async def _fails(parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        msg = "the mail server refused it"
+        raise ToolError(msg)
+
+    plans = _Recording()
+    harness = Harness(tools=(tool(),), plans=plans, tool_handler=_fails)
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.state.step("step-1") is not None
+    assert outcome.step.state.step("step-1").status is StepStatus.FAILED  # type: ignore[union-attr]
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.VERIFY, "the phase says where it stands"
+    assert attempt.state is AttemptState.RUNNING, "and it did not end"
+    assert attempt.outcome is None
+    assert attempt.ended_at is None
+
+
+async def test_a_turn_whose_composition_failed_ends_no_attempt() -> None:
+    """§5: ``ANSWERED`` "asserts that **a reply exists**".
+
+    ADR-0173 §8 degrades a classified composition failure rather than raising, so the
+    turn returns with ``reply`` absent and ``reply_degraded`` set — and an attempt
+    claiming it produced an answer would be a durable record of something that did not
+    happen, which is what §12's "no lane writes an attempt that claims a result before it
+    happened" rules out.
+    """
+    plans = _Recording()
+    stage = ComposingStage(model=FakeModelProvider(_refusing), streaming=FakeStreamingCompleter())
+    harness = Harness(planner=NoStepPlanner(), plans=plans, composing=stage)
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.reply is None
+    assert outcome.reply_degraded is True
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.VERIFY
+    assert attempt.state is AttemptState.RUNNING
+    assert attempt.outcome is None
 
 
 async def test_a_turn_that_ends_before_the_site_writes_no_attempt_row() -> None:
