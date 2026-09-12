@@ -1805,6 +1805,13 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
     function delegates each row to ``_render_decision`` rather than growing a second
     renderer. It is on the audit surface for exactly the reason the seven above are,
     and its presence here is what keeps the confirmation path holding no ruling.
+
+    ``_rests_on_the_configuration`` is the ninth, added by ADR-0247 §2 (#2256): a
+    standing ``ALLOW``'s route is read off the row — ``authorised_subject`` unset and
+    the binding's ``closed_loop`` — so that route (c) is rendered as its basis and the
+    connection reference ADR-0148 §6 bars from every surface is rendered to nobody. It
+    takes the decision for the same reason :func:`_authorisation_line` does, which is
+    its one caller, and it is on this surface for the same reason.
     """
     holders = {
         name
@@ -1825,6 +1832,7 @@ def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
         "_render_decisions",
         "_render_grantable_decisions",
         "_render_recorded_egress",
+        "_rests_on_the_configuration",
     }
 
 
