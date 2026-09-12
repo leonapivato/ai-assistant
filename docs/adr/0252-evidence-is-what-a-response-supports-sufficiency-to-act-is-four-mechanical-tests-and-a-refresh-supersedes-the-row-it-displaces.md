@@ -33,8 +33,8 @@
   and its error class, the commands-not-snapshots rule, the `delete_goal` cascade, the
   no-new-Protocol rule and the rule that `PlanExport` is not a second wire ground.
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
-  reader would expect to be — ADR-0096, ADR-0226, ADR-0228, ADR-0237, ADR-0240, ADR-0250 and
-  ADR-0251 among them. **ADR-0096 is relied on and not superseded**, which is the one a reader
+  reader would expect to be — ADR-0045, ADR-0096, ADR-0213, ADR-0226, ADR-0228, ADR-0230,
+  ADR-0237, ADR-0240, ADR-0250 and ADR-0251 among them. **ADR-0096 is relied on and not superseded**, which is the one a reader
   should check first: its two instants and its never-a-gate rule are what make sufficiency a
   separate question rather than a freshness verdict on the evidence.
 - Date: 2026-09-12
@@ -156,9 +156,15 @@ fires it.
 >   one** member of `records`, and `returned` and `admitted` both `0` — the interpretation
 >   call's whole input is one recorded record, it reads no source and admits nothing, and a
 >   verdict over two records is not one this decision admits.
-> - **By kind.** On a `WEB_SEARCH` row `records` is **empty**; on every other `READ_OUTCOME`
->   row `len(records)` **equals** `returned`.
-> - **By count.** `len(records) <= returned` and `admitted <= returned` on every row.
+> - **By kind — durable kinds name, ephemeral kinds count.** On a `READ_OUTCOME` row whose
+>   `read_kind` is `SIGHTED_QUERY`, `STRUCTURED_READ` or `CITATION_HOP`, `len(records)`
+>   **equals** `returned`, or equals `MAX_EVIDENCE_RECORDS` where `returned` exceeds it. On one
+>   whose `read_kind` is `WEB_SEARCH` or `LOCAL_FILE`, `records` is **empty** and the count
+>   stands alone.
+> - **By count.** `admitted <= returned` on every row. **No inequality is stated over
+>   `len(records)`**, because the two clauses above already fix it exactly: an inequality read
+>   over *every* row would demand `1 <= 0` of an `INTERPRETATION` row, whose basis rule gives it
+>   one member of `records` beside `returned == 0`, and would make that basis unconstructible.
 > - **By standing.** `STANDING` carries neither `inapplicable_at_revision` nor `superseded_by`;
 >   `INAPPLICABLE` carries `inapplicable_at_revision` and no `superseded_by`; `SUPERSEDED`
 >   carries `superseded_by` and no `inapplicable_at_revision`. Every other combination is
@@ -173,25 +179,76 @@ was left absent is exactly the half-state that rule exists to make unreachable. 
 makes correction 1 auditable: *"retained historical disagreements do not permanently block
 progress"* is only checkable if every retirement names what did it.
 
-> **Normative — `returned` and `admitted` are ADR-0226 §9's own counts made durable, and the
-> second is what §5's affirmative test reads.** `returned` is how many records the ask handed
+> **Normative — `returned` and `admitted` are ADR-0226 §9's own counts made durable, and
+> *no test of this decision reads either*.** `returned` is how many records the ask handed
 > back **before** ADR-0226 §7's deduplication; `admitted` is how many of those the supply did
 > **not** already hold, which is that section's `new`. **Both are persisted rather than
 > recomputed**, because the supply they were counted over is ephemeral — ADR-0052 §3's
 > *"context and retrieved memories are ephemeral and were never persisted"* — so a consumer on a
-> later turn cannot reconstruct either and a row that carried neither would leave `TRUNCATED`
-> unclassifiable after the turn that wrote it.
+> later turn cannot reconstruct either, and a row that carried neither would be a record of a
+> servicing that could not say how much came back or how much of it was new.
+
+> **Normative — sufficiency never reads a count, and this is stated as a prohibition so a
+> later lane cannot read one back in.** §6's four tests read the row's `supported`, its
+> `basis`, its `declaration`, its `verdict`, its `standing` and its two instants, and **read
+> neither `returned` nor `admitted`**; §8's refresh limbs read neither; §9's invalidation
+> predicate reads neither. **Whether a source answered in a way that supports a proposition is
+> not whether a turn learned something new.** The second question is ADR-0251 §7's progress
+> fold — *"a round is productive where *any* ask of it admitted at least one record the supply
+> did not already hold, counted after ADR-0226 §7's deduplication"* — which is that decision's,
+> is evaluated over the turn's own servicings, and stays there. The counts are on the row so
+> that the fold's inputs survive the turn for an audit and an export; **which consumer reads
+> them across turns is not settled here** (§15).
+
+**Round 2 found the collapse and the separation is the correction.** An earlier draft keyed
+the affirmative test on `admitted >= 1`, which made a read whose every record deduplicated out
+satisfy nothing — and a new goal whose one relevant record initial retrieval had already put in
+the supply could then never obtain sufficient evidence at all, because every servicing returning
+it is `DUPLICATE` with `admitted == 0` and retrieval mints no row to have been duplicated
+against. Keying on `returned >= 1` instead would have moved the same defect rather than removed
+it: a count of records is a fact about the **supply** and sufficiency is a question about the
+**response**. §5 therefore states the affirmative test over the closed vocabulary alone.
 
 > **Normative.** **`records` holds identifiers that resolve in the owner's `MemoryStore`, and
 > holds nothing else.** A record ADR-0231 §1's search minted is **never** named there: ADR-0231
 > §16 rules that such a record *"is not a citation target and not a durable reference … its `id`
-> is minted for one turn … and resolves in no store"*, and a durable row naming one would state
-> a warrant it cannot show — which is the refusal ADR-0249 §7 already takes against the same id
-> and ADR-0249 §12's migration takes against a `FROM_EVIDENCE` ground it cannot substantiate.
-> **What a `WEB_SEARCH` row carries instead is the arithmetic**: `records` is empty and
-> `returned` says how many came back, so the count stands where the references cannot. That is
-> ADR-0086 §4's shape for its own reason — *"It is a count and never an id"* — reached here
-> because the ids would not resolve rather than because they are the payload.
+> is minted for one turn … and resolves in no store"*. **A record ADR-0230 §5's fetch minted is
+> never named there either**, on that decision's own sentence about it: §10 rules that a fetched
+> record *"is not a citation target and not a durable reference. Its `id` is minted for one turn,
+> is rendered to no model, is accepted from none and resolves in no store"*. A durable row naming
+> either would state a warrant it cannot show — which is the refusal ADR-0249 §7 already takes
+> against the first and ADR-0249 §12's migration takes against a `FROM_EVIDENCE` ground it cannot
+> substantiate.
+
+> **Normative — so the two ephemeral kinds count and the three durable kinds name, and the
+> split is by where the record lives and not by which ADR minted it.** `WEB_SEARCH` and
+> `LOCAL_FILE` each mint a record for one turn that resolves in no store, so their rows carry
+> `records` **empty** and `returned` alone. `SIGHTED_QUERY`, `CITATION_HOP` and `STRUCTURED_READ`
+> each read the owner's own `MemoryStore` — the first as a relevance selection, the second as
+> ADR-0208 §1's *"records the turn already names, fetched by identifier"*, the third through
+> ADR-0240 §1's structured filter — so every record they return is store-resident and is named.
+> **Where the count stands, it stands as ADR-0086 §4's shape for its own reason** — *"It is a
+> count and never an id"* — reached here because the ids would not resolve rather than because
+> they are the payload.
+
+**Round 2 found this by the arithmetic and the correction is the kind rule rather than the
+contract.** A successful `LOCAL_FILE` fetch returns one record, so a rule demanding
+`len(records) == returned` on *"every other `READ_OUTCOME` row"* demanded one identifier that
+ADR-0230 §10 says resolves nowhere, while the same section's resolvability rule forbade carrying
+it — a shape no implementation could construct either way. Bending the resolvability rule was
+available and is refused: **where a read kind cannot satisfy the reference contract, the kind is
+excluded from it by a stated rule**, which leaves the contract saying exactly what it said and
+puts the exception where a reader will find it.
+
+> **Normative — `records` is bounded, and the disclosure is already on the row.**
+> `core/types.py` gains **`MAX_EVIDENCE_RECORDS`, a fixed constant valued 32**, on the same
+> footing as §2's two: not a `Settings` field, not a constructor knob and not a per-deployment
+> value. A row whose ask returned more keeps the **first 32** identifiers in the order the
+> servicing produced them, and **`returned` continues to carry the true count** — so the
+> truncation needs no second counter, because the figure that discloses it is the field beside
+> it. ADR-0226 §6's budget of ten is counted **after** ADR-0226 §7's deduplication, so it bounds
+> `admitted` and not `returned`, and a durable sequence in `core` left to be bounded by a
+> producer's arithmetic is exactly what ADR-0086 §1 refuses.
 
 > **Normative.** **`source` is the reading's own declared identity where the servicing has
 > one, and is absent on every row this decision's producers write.** No producer of this
@@ -261,12 +318,15 @@ same defect: an aggregate asserts the **conjunction** of what several records sa
 records only ever said their own parts. A region per record asserts exactly what one record
 carried.
 
-> **Normative — coverage, stated once and used by §6 and §8.** An applicability `A` **covers**
-> an applicability `B` when, **for every axis of `B` that `B` applies**, `A` applies that axis
-> and `A`'s value contains `B`'s: for `window`, by ADR-0117 §3's containment predicate read over
-> the two windows; for each label axis, `A`'s values are a superset of `B`'s under §6's
-> comparison. **An axis `A` does not apply covers no applied axis of `B`**, and an axis `B` does
-> not apply is covered by anything.
+> **Normative — coverage, stated once and used by §6, §8 and §9.** An applicability `A`
+> **covers** an applicability `B` when, **for every axis of `B` that `B` applies**, `A` applies
+> that axis and `A`'s value contains `B`'s: for `window`, by ADR-0117 §3's containment predicate
+> with **`B`'s window as that predicate's contained extent `E` and `A`'s as its containing
+> coverage `C`**; for each label axis, `A`'s values are a superset of `B`'s under §6's
+> **per-axis** comparison. **An axis `A` does not apply covers no applied axis of `B`**, and an
+> axis `B` does not apply is covered by anything. The direction is stated rather than left to a
+> reader, because the predicate is not symmetric and the two readings differ on every unbounded
+> end.
 >
 > A **tuple** `S` covers an applicability `B` when **some region of `S` covers `B`**. A tuple
 > `S` covers a tuple `T` when **every region of `T` is covered by some region of `S`**, and an
@@ -290,8 +350,8 @@ second statement of it is a second place for the unbounded case to be got wrong.
 > **Normative — overlap, stated once and used by §7 alone.** Two applicabilities **overlap**
 > when they apply **at least one axis in common** and, **for every axis both apply**, their
 > values intersect: windows that share at least one instant, and label sets with at least one
-> member in common under §6's comparison. An axis only one of them applies is ignored. Two
-> tuples overlap when **some region of one overlaps some region of the other**.
+> member in common under §6's **per-axis** comparison. An axis only one of them applies is
+> ignored. Two tuples overlap when **some region of one overlaps some region of the other**.
 
 **Overlap requires agreement on every shared axis, and that is what keeps a shared label from
 bypassing a disjoint period.** A row about *Saturday, weather* and a row about *Sunday, weather*
@@ -380,21 +440,51 @@ have a clause of the corpus behind them and none is an omission to repair later:
 > **A row whose response establishes no applicability carries `supported` empty**, and ADR-0249
 > §10's sentence binds entire: **an absent `supported` supports nothing.**
 
-> **Normative — the window axis is applied only where a source *declares an interval* and that
-> interval is a constructible `TimeWindow`.** In order:
->
-> - Where the record's `Provenance.attestation` carries a **`ReportedExtent`** (ADR-0117 §2),
->   that extent is the declared interval, because ADR-0117 §2 makes it *"the reporting source's
->   own statement about the thing it reported"* and this decision has no better authority for
->   what a source covered.
-> - Otherwise, where the record carries a **`Validity`** with `valid_from` or `valid_until` set,
->   that interval is the declared interval.
-> - Otherwise the axis is **not applied**.
+> **Normative — the window axis is applied where the record's `Provenance.attestation`
+> carries a **`ReportedExtent`** (ADR-0117 §2), and **nowhere else**.** That extent is the
+> declared interval, because ADR-0117 §2 makes it *"the reporting source's own statement about
+> the thing it reported"* and this decision has no better authority for what a source covered.
+> Where the record carries no attestation, or an attestation whose `extent` is `None`, the axis
+> is **not applied**.
 >
 > Where the declared interval **cannot be expressed as a `TimeWindow`** — both ends unset, or
 > ends that are not strictly ordered — the axis is **not applied** and the region's `elided`
 > advances by one. **No lane substitutes a bound the source did not state**, invents an end,
 > clamps one to a retention horizon, or widens a window to make one constructible.
+
+> **Normative — a record's `Validity` is never read as a declared interval, and this is stated
+> as a prohibition because it is the substitution a reader most wants to make.** Neither
+> `valid_from` nor `valid_until` contributes to any region's `window`, on any kind, under any
+> fallback, and **no lane reinstates one**.
+
+**A `Validity` is our window on a belief we hold; a `ReportedExtent` is the source's claim about
+what it reported. Reading the first as the second is the whole of the error.** ADR-0045 §2 puts
+the window on the envelope for exactly that reason and says so in terms: it *"is a lifecycle
+property of *the record's life in the store*, set operationally by the applier"*, sitting beside
+`expires_at` because both are *"read-time lifecycle filters the store enforces"*, and
+*"`Provenance` stays about *trust and source*"*. ADR-0117 §2 then refuses to name coverage with
+it for the same reason — *"the two say different things about different subjects"* — and spells
+out the three subjects that must not be conflated: *"a `Validity` is our window on a belief we
+hold, a `ReadCoverage` is a claim about the read we performed, and an extent is the source's
+claim about where the reported entry lies."*
+
+**What the fallback would have done is the failure stated concretely.** A weather record written
+on Saturday with `valid_from` set to that instant and no `ReportedExtent` declares an interval
+running from Saturday with no end — an operational statement that the belief is live until
+something retires it. Read as coverage, it would have supported **every later date**, Sunday
+included, off a persistence timestamp no source ever said anything with; an affirmative read
+would then have passed Sunday's coverage test on the strength of when we happened to store the
+record. That is the manufactured coverage §2's regions argument refuses, arriving through a field
+instead of through an aggregate.
+
+**And the honest consequence is stated rather than softened: almost no row this decision's
+producers write applies a window at all.** As a dated observation at `origin/main` `54c6b72e`,
+`readers/calendar.py` is the only site in the tree that constructs a `ReportedExtent`; every
+other producer passes `extent=None`, and both minting producers of §1's ephemeral kinds pass it
+explicitly. So the window axis is applied on rows over store-resident records that came from a
+calendar reading, and on nothing else until decision 8's reader lands (§15). A window nobody can
+apply is a narrower system than an implementer expects and is the true one: the alternative was a
+window everybody can apply, meaning nothing.
 
 **A record's `occurred_at` is not a declaration of coverage, and this is the clause a reader
 will most want the reason for.** An episode's `occurred_at` is an **instant**, `TimeWindow` is
@@ -434,11 +524,24 @@ and no implementation can fill the second from the first by accident — it woul
 for a value it is not holding. A single `applicability` field would have made the confusion a
 one-line mistake, which is revision 0 of the report's shape and is what the addendum corrects.
 
-> **Normative.** **A `WEB_SEARCH` row's `supported` is empty unless a minted record declares an
-> extent**, and no lane infers one from the query, from the response's ordering, from a result's
-> title or from the provider's identity. ADR-0231 §1 puts the namer with the user and leaves the
-> response carrying no structural axis at all; what such a response does carry is its declared
-> instant, which is `as_of` (§4) and not an applicability.
+> **Normative.** **A `WEB_SEARCH` row's and a `LOCAL_FILE` row's `supported` is composed from
+> the minted records' own values by the same rule as every other row's, and from nothing else** —
+> and no lane infers an axis from the query, from the response's ordering, from a result's title,
+> from a file's name or path, from its mtime, or from the provider's identity. ADR-0231 §1 puts
+> the namer with the user and leaves the response carrying no structural axis at all; what such a
+> response does carry is its declared instant, which is `as_of` (§4) and not an applicability.
+
+**As a dated observation at `54c6b72e`, that composition is empty on both kinds, and saying so
+is more useful than a hedge.** ADR-0231 §16's minted search record carries *"`topics` is empty,
+`about_person` is `None`"* and *"`extent` is `None`"*; ADR-0230 §5's minted fetch record carries
+the same three, word for word, and a `validity` that is *"fully open"* and which §3 above reads
+as nothing. A record carrying no applied axis contributes **no region**, so today **every
+`WEB_SEARCH` and every `LOCAL_FILE` row carries `supported` empty**, fails §6's first test, and
+satisfies no condition. Such a row is not useless: it records durably that the source was asked
+and what became of the ask, which is what §7's incompleteness clause and #2255's audit question
+need. What it is not is evidence that anything is so — and an earlier draft's *"unless a minted
+record declares an extent"* named a route neither minting clause can reach, which reads as a
+capability the corpus does not have. What would change it is decision 8's reader (§15).
 
 > **Normative.** **No `ContextFacet` produces an evidence row.** A facet is not a servicing, has
 > no `ReadKind` and no typed outcome of an ask; and ADR-0096 §3 rules that *"A facet is built
@@ -465,6 +568,18 @@ one-line mistake, which is revision 0 of the report's shape and is what the adde
 > attestation's `reported_at` (ADR-0092 §3), taken as the **earliest** where the row's records
 > carry several; and **absent everywhere else**, including on every row whose records are the
 > owner's own store-written beliefs and episodes, which declare no reading-level instant.
+
+> **Normative — a `LOCAL_FILE` row carries `as_of` absent, and that is an exception stated
+> rather than an oversight.** ADR-0230 §5 sets a fetched record's `Attestation.reported_at` to
+> *"the **instant the file was read**"*, so the generic rule above would fill `as_of` with the
+> value `read_at` already carries. The two are the same event on that producer's own argument —
+> *"a source this system interrogates **directly**, whose answer is produced at the instant of
+> the read rather than replayed"*, so *"'when the source said so' and 'when we read it' are one
+> event rather than two facts of which one stands in for the other"* — and a row carrying it
+> twice would be indistinguishable, on inspection, from one that filled `as_of` **from**
+> `read_at`, which ADR-0096 §2 forbids by name everywhere else. §6's fourth test reads `as_of`
+> where present and `read_at` otherwise, so nothing is lost by the absence: the instant the test
+> evaluates is the same instant either way.
 
 **The earliest and not the latest, because the row states one instant for a set.** A row
 composed from three records the source reported at three moments speaks for the picture as of
@@ -520,7 +635,10 @@ one of them. **No member is added here**, because none is missing: the seven are
 > the value of a member of a **closed** enumeration the row's `declaration` names, whose members
 > that step's own decision fixes, and which **always** carries a member meaning *the record does
 > not settle it*. **A row whose verdict is that member satisfies nothing** (§6). Which
-> enumeration it is, and what its affirmative member is called, is A5's and A7's (§15).
+> enumeration it is, what its members are called, and which of them a given condition requires
+> are each A5's and A7's (§15); what this decision fixes is that the enumeration is closed, that
+> it always carries a does-not-settle member, and that §6 test 2 reads the member the
+> **condition** declared rather than one this decision names.
 
 > **Normative — the two vocabularies are disjoint in their values, so a `verdict` identifies
 > itself.** No member of an interpretation enumeration takes a value equal to any of
@@ -530,33 +648,45 @@ one of them. **No member is added here**, because none is missing: the seven are
 > being told of what would be told nothing. The constraint is on the **later** vocabulary, which
 > is the one not yet minted.
 
-> **Normative — the affirmative test, which is §6's second, stated here once per basis.**
+> **Normative — the affirmative test, which §6's second builds on and §8's fifth limb uses,
+> stated here once per basis and over the closed vocabulary alone.**
 >
-> - A **`READ_OUTCOME`** row's verdict is **affirmative** where **`admitted` is at least 1** —
->   so `RETURNED_RECORDS` always, and `TRUNCATED` where the ask admitted a record. **`EMPTY`,
->   `DUPLICATE`, `REFUSED`, `FAILED`, `EXPIRED` and a `TRUNCATED` that admitted none are each
->   non-affirmative and each satisfy nothing.**
-> - An **`INTERPRETATION`** row's verdict is **affirmative** where it is the member its
->   `declaration`'s enumeration fixes as settling the proposition, and non-affirmative for every
->   other member of that enumeration.
+> - A **`READ_OUTCOME`** row's verdict is **answering** where it is one of `RETURNED_RECORDS`,
+>   `DUPLICATE` and `TRUNCATED` — the three members that state the source **answered with
+>   records** — and is **non-answering** where it is `EMPTY`, `REFUSED`, `FAILED` or `EXPIRED`,
+>   each of which states that no record came back at all. **A non-answering row satisfies
+>   nothing.**
+> - An **`INTERPRETATION`** row's verdict is **settling** where it is any member of its
+>   `declaration`'s enumeration **other than** the does-not-settle member that enumeration
+>   always carries, and **non-settling** where it is that member. **A non-settling row satisfies
+>   nothing and refreshes nothing.**
+> - **Affirmative** means answering on the first basis and settling on the second, and is the
+>   word §8 limb 5 uses for the two together.
 
-**The affirmative test is ADR-0251 §7's productivity fold, reused rather than re-derived, and
-`admitted` is what makes it survive the turn.** That section states the fold as *"a round is
-productive where *any* ask of it admitted at least one record the supply did not already hold,
-counted after ADR-0226 §7's deduplication"*, and adds the property that makes it usable here:
-*"The fold is over records admitted and never over the member, which is what keeps it total and
-free of the contradiction a member-based test carries … The test is a count and never a
-judgement about relevance, quality or usefulness."* Read per ask rather than per round, that is
-exactly the question *did this response put anything new in front of us* — and because the
-supply it was counted over is ephemeral (ADR-0052 §3), the count is **persisted on the row**
-(§1) rather than recomputed, so a row read on turn 7 classifies the same way it did on turn 1.
+> **Normative — the test is a partition of a closed vocabulary and reads no count.** It does
+> not read `returned`, does not read `admitted`, and is not a judgement about relevance, quality
+> or usefulness. **No lane restates it as a count, adds a count to it, or makes a member's
+> classification depend on one.**
 
-**`DUPLICATE` is the case that separates §6's first two tests, and it is why they are two.** A
-duplicated-out ask **returned** records, so §3 composes regions from them and the coverage test
-passes; what it did not do is put anything in front of the planner it did not already have,
-which ADR-0251 §7 counts as unproductive. Without the second test such a row would satisfy a
-condition on the strength of a read that told the turn nothing — and the earlier row those
-records already justified is still standing and still says so, so nothing is lost by refusing it.
+**A `TRUNCATED` that returned nothing is kept out by the *first* test and needs no count to do
+it.** ADR-0251 §2's precedence is explicit that the member *"displaces 5, 6 and 7 — and only
+those — where completeness was not certified"*, so a `TRUNCATED` may sit over an empty answer, a
+fully-deduplicated one or a productive one. Such a row has no record to compose a region from,
+carries `supported` empty, and fails §6's coverage test before its verdict is ever consulted. The
+partition therefore stays a statement about the **vocabulary**, and the arithmetic that used to
+be needed to make it safe is done by the test that was already there.
+
+**`DUPLICATE` is answering, and that is the correction round 2 forced.** A duplicated-out ask
+returned records; §3 composes regions from them; those regions support exactly what those records
+said. Whether the supply already held them is a fact about *this turn's supply* and not about the
+response, and an earlier draft that read it as non-affirmative left a new goal unable ever to
+obtain sufficient evidence: where initial retrieval has already put the one relevant record in
+front of the planner, every servicing returning it is `DUPLICATE`, and retrieval mints no
+evidence row, so there is no standing row those records were supposed to have already justified.
+**Sufficiency to act and investigation productivity are two questions**, and this decision answers
+only the first; ADR-0251 §7's fold answers the second, over the turn's own servicings, and is
+untouched here. `DUPLICATE` stays **unproductive for that fold** and **answering for this test**,
+which is the whole of the separation.
 
 > **Normative.** **`EMPTY` is the member that most invites a false reading, and it establishes
 > nothing about the world.** ADR-0237 §7 binds this decision entire and its clause is quoted
@@ -576,13 +706,45 @@ records already justified is still standing and still says so, so nothing is los
 >
 > 1. **Coverage.** The row's `supported` **covers** the applicability the step's condition
 >    declares, by §2's tuple-covers-applicability relation. An **empty `supported` covers
->    nothing**, so a row with none fails here first.
-> 2. **Affirmative verdict.** The row's `verdict` is affirmative in §5's sense.
+>    nothing**, so a row with none fails here first. **A condition that declares no
+>    applicability imposes no coverage requirement**, and this test is then satisfied by any row
+>    whose `supported` is **non-empty** — a condition about no axis this decision can compare is
+>    not thereby a condition any row satisfies for free.
+> 2. **The evidence the condition declared.** The condition declares the **`basis`** it
+>    requires, and the row's `basis` equals it. Where that basis is `INTERPRETATION`, the
+>    condition also declares the **`declaration`** whose proposition it is about and the
+>    **member** of that declaration's enumeration it requires: the row's `declaration` equals
+>    the declared one and its `verdict` **is** the declared member. Where that basis is
+>    `READ_OUTCOME`, the row's `verdict` is **answering** in §5's sense. **A condition may never
+>    declare the does-not-settle member as the member it requires**, and one that does is
+>    refused rather than satisfied.
 > 3. **Standing.** The row's `standing` is **`STANDING`**. An `INAPPLICABLE` row and a
 >    `SUPERSEDED` row each satisfy nothing.
 > 4. **Recency.** The row satisfies the **step's declared recency requirement**, evaluated at
 >    **the moment of dispatch** against `as_of` where the source declared one and against
 >    `read_at` otherwise.
+
+**Test 2 asks whether this is the evidence the condition wanted, and an earlier draft asked
+only whether some verdict was affirmative.** The two come apart in both directions and round 2
+found both. A condition requiring an interpretation that Sunday's forecast permits an activity
+shared its applicability with a plain successful read of Sunday's forecast, and that
+`READ_OUTCOME` row passed coverage, affirmativeness, standing and recency without any
+interpretation having happened — the step would have dispatched on *a record came back* where it
+had asked for *and it says the trip is safe*. And an affirmative interpretation of a **different**
+proposition passed the same four tests whenever its applicability matched, because `declaration`
+was compared for conflict (§7) and for refresh (§8) and nowhere for satisfaction. Matching the
+row to the declaration closes both.
+
+> **Normative — what this pushes onto A5, stated so that lane inherits it rather than
+> discovers it.** A step's condition declares **a required `basis`**, and on the `INTERPRETATION`
+> basis **a `declaration`** and **the member of its enumeration the condition requires** — three
+> declarations this decision does not land, on the lane ADR-0249 §13 gives the step's fields
+> (§15). A condition declaring **no** basis is a **missing declaration** and fails closed on
+> ADR-0228 §2(a)'s rule: *"no implementation reads an absent declaration as a default, as
+> unknown-and-therefore-permitted, or as a case to decide at run time from anything other than a
+> declaration."* **Whether a condition may further require a particular `read_kind` or `source`
+> is A5's and is neither required nor forbidden here**; what is fixed is that a row of the wrong
+> basis, the wrong proposition or the wrong member satisfies nothing.
 
 > **Normative — one row and never several.** The four tests are evaluated **over a single
 > row**, and **no lane satisfies a condition by combining two**. A condition covered by neither
@@ -597,10 +759,35 @@ records already justified is still standing and still says so, so nothing is los
 > protocol does not establish that two distinct supplied forms denote the same recipient, the
 > canonical form is the supplied form unchanged and comparison against it is byte-exact. No
 > canonicaliser folds case, strips, reorders or rewrites a form on any ground weaker than the
-> protocol saying those two forms are one recipient."* Label comparison is ADR-0101 §2's
-> canonical caseless fold where the axis's own type already fixes one — which `TopicLabel` does
-> (ADR-0213 §3, *"refused rather than normalised"*) and `participants` does (ADR-0237 §2) — and
-> is byte-exact everywhere else.
+> protocol saying those two forms are one recipient."*
+
+> **Normative — label comparison is stated per axis, because the corpus already states it per
+> axis and the three axes do not agree.** ADR-0237 §3 — *"Matching: three rules, every one of
+> them borrowed"* — is the clause, adopted whole and not re-derived:
+>
+> - **`about_person`** — *"matches by ADR-0101 §2's rule, unchanged and unextended: a value `q`
+>   matches a record `r` exactly when `r` states a subject and `NFD(toCasefold(NFD(q)))` equals
+>   `NFD(toCasefold(NFD(r.about_person)))`"*, and nothing else is compared.
+> - **`participants`** — *"matches by the **same** rule"*, applied across the tuple.
+> - **`topics`** — *"matches by **equality of the stored characters** and by nothing else, which
+>   is the only relation `TopicLabel` has (ADR-0213 §3). No fold is applied and none is needed:
+>   the type is already canonical."*
+>
+> **No lane applies one rule to all three**, and no lane applies a rule wider than the one its
+> axis names.
+
+**Folding a topic would be a wider matching rule, which ADR-0213 reserves to an ADR that is not
+this one.** That section gives a `TopicLabel` exactly one relation — *"equality of the stored
+characters"* — and closes the door in terms: *"Any wider matching rule — case-insensitivity
+beyond the canonical form, prefixes, hierarchy, synonymy, or a similarity measure — is reserved
+to a later ADR, which is the only instrument that may lift the clause above. No lane reaches that
+answer by implementing one."* ADR-0101 §2's fold is NFD-based, and precomposed `café` and
+decomposed `cafe\u0301` are both admissible `TopicLabel`s that the fold equates and the type does
+not — so applying it here would let evidence filed under one topic cover a condition naming the
+other, which is a matching rule this decision would have made by accident. An earlier draft said
+the fold applied *"where the axis's own type already fixes one — which `TopicLabel` does"*; the
+type fixes a **canonical form**, which is not a matching rule, and ADR-0237 §3 had already
+separated the two.
 
 > **Normative — recency is the plan's declaration and never the evidence's property.** The
 > figure lives on the step, A5 lands the field, and **a step that declares no recency
@@ -608,12 +795,14 @@ records already justified is still standing and still says so, so nothing is los
 > tests however old it is. **Evidence never expires by itself**, no sweep marks a row for age, and
 > no `Settings` figure, deployment flag or per-request parameter supplies a default.
 
-**The two absent declarations point in opposite directions, and that is deliberate rather than
-an inconsistency.** Test 2 has a closed vocabulary whose affirmative member §5 fixes, so a
-condition that named no member would be a **missing** declaration and fails closed on ADR-0228
-§2(a)'s rule — *"no implementation reads an absent declaration as a default, as
-unknown-and-therefore-permitted, or as a case to decide at run time from anything other than a
-declaration."* Test 4 has **no figure anywhere in this system** to be missing: ADR-0096 §3
+**The absent declarations point in opposite directions, and that is deliberate rather than an
+inconsistency.** Test 2's operands are members of closed vocabularies, so a condition that named
+none of them would be a **missing** declaration and fails closed, on the clause quoted above.
+Test 1's operand is an applicability, and a condition may legitimately be about no axis this
+decision compares — *the trip is bookable*, with the period and the people on the step's other
+fields — so an absent one imposes no coverage requirement rather than failing closed; what it may
+never do is let an **empty** `supported` through, and it does not. Test 4 has **no figure
+anywhere in this system** to be missing: ADR-0096 §3
 refuses to put one in `core` and explains why — *"nothing has measured how old a calendar
 reading may be before a plan built on it is wrong, and inventing a number to have one would be
 the padded-list failure"* — so a default here would not be a fail-closed reading of a
@@ -691,10 +880,16 @@ narrowed to the basis that **can** disagree, which is the one whose verdict is a
 a proposition: the interpretation verdict. That is also where #2255's *"conflicting evidence"*
 scenario actually lives — two readings of a source, not two readings of a store.
 
-> **Normative.** **An incomplete, empty, refused, failed or expired outcome satisfies nothing
-> and is not an obstacle either.** Each is recorded as its own row with its own verdict; each
-> fails §6's second test; and none of them is read as establishing that the thing asked about is
-> absent, unreachable or impossible. ADR-0251 §9's clause is what keeps that from escalating:
+> **Normative.** **An empty, refused, failed or expired outcome satisfies nothing and is not an
+> obstacle either.** Each is recorded as its own row with its own verdict; each is
+> **non-answering** and fails §6's second test; and none of them is read as establishing that the
+> thing asked about is absent, unreachable or impossible. **A `TRUNCATED` outcome is not in that
+> list and is not an obstacle either**: where it returned records it is answering and its regions
+> support what those records said, and where it returned none it carries `supported` empty and
+> fails §6's **first** test — in neither case does *completeness was not certified* become a
+> statement about the world. ADR-0251 §2's own sentence is the reason: the member *"says that
+> completeness was not certified and never that more records exist."* ADR-0251 §9's clause is
+> what keeps that from escalating:
 > *"a `WEB_SEARCH` answering `SearchDisposition.NOT_CONFIGURED` on a turn whose reads admitted
 > nothing … passes limbs 1 and 2 and **fails limb 3**"*, because *"One unavailable source
 > establishes that one route is shut, not that it was the only one."*
@@ -711,7 +906,7 @@ scenario actually lives — two readings of a source, not two readings of a stor
 This section is the owner's **correction 1** implemented: *"Refreshed evidence needs supersession
 rules, so retained historical disagreements do not permanently block progress."*
 
-> **Normative — the refresh test, and all six limbs must hold.** A row `L` **refreshes** an
+> **Normative — the refresh test, and all seven limbs must hold.** A row `L` **refreshes** an
 > earlier row `E` of the same goal where:
 >
 > 1. `E.standing` is `STANDING`;
@@ -721,8 +916,11 @@ rules, so retained historical disagreements do not permanently block progress."*
 >    a present value;
 > 4. both `supported` tuples are **non-empty** and **`L.supported` covers `E.supported`** in
 >    §2's tuple-covers-tuple sense;
-> 5. `L`'s verdict is **affirmative** in §5's sense; and
-> 6. `L.read_at` is **not earlier than** `E.read_at`.
+> 5. `L`'s verdict is **affirmative** in §5's sense — **answering** on the `READ_OUTCOME`
+>    basis, **settling** on the `INTERPRETATION` basis;
+> 6. `L`'s **effective instant** is **strictly later than** `E`'s, where a row's **effective
+>    instant** is its `as_of` where the source declared one and its `read_at` otherwise; and
+> 7. on the **`INTERPRETATION`** basis only, `L.attempt_id` does **not** equal `E.attempt_id`.
 >
 > **A row that refreshes an earlier row supersedes it**: the earlier row's `standing` becomes
 > `SUPERSEDED` and its `superseded_by` names `L`, in the same indivisible write that records `L`
@@ -732,8 +930,11 @@ rules, so retained historical disagreements do not permanently block progress."*
 > row of a **different basis**; a row of a **different `read_kind`**, **`source`** or
 > **`declaration`**; a row whose `supported` is **empty**, and a row whose earlier candidate's
 > `supported` is empty; a row whose `supported` **merely overlaps** the earlier row's without
-> covering it; a row whose verdict is **not affirmative**; a **model sentence**, which is never a
-> row at all (§14); and a row of a **different goal**, which the store refuses outright (§12).
+> covering it; a row whose verdict is **non-answering** or **non-settling**; a row whose
+> **effective instant is not strictly later** than the earlier row's, equal instants included; an
+> `INTERPRETATION` row **recorded by the same attempt** as the earlier one; a **model sentence**,
+> which is never a row at all (§14); and a row of a **different goal**, which the store refuses
+> outright (§12).
 
 **Limb 4 is coverage and not overlap, and the difference is a user's evidence quietly
 disappearing.** A fresh read of **Saturday** overlaps a standing row supporting **the whole
@@ -753,6 +954,17 @@ condition that was satisfied a moment earlier for no reason anyone recorded. The
 #2096 item 8's, one level down: **a later read may confirm and displace, and may never retire by
 failing.**
 
+**Limb 5 is stated per basis, and reading it as *the one affirmative member* would have made a
+stale row immortal.** On the `INTERPRETATION` basis §5 fixes exactly one non-settling member —
+the one meaning *the record does not settle it* — and every other member, however it answers, is
+a reading that **settled** the proposition. Had the limb demanded the member §6 test 2 calls
+affirmative, a fresh reading saying *no* could never retire a stale reading saying *yes*: the
+negative row would stand beside the affirmative one forever, §7 would report the disagreement
+forever, and correction 1 — *"retained historical disagreements do not permanently block
+progress"* — would hold only in the direction the system happened to prefer. What limb 5 refuses
+is a row that **established nothing**, on either basis, and a settling negative established
+something.
+
 **Limbs 2 and 3 are what "the same source" means in this system, and the honest answer is
 narrower than it looks.** Every kind names its own source — a `SIGHTED_QUERY`, a
 `STRUCTURED_READ` and a `CITATION_HOP` read the owner's own `MemoryStore`, a `LOCAL_FILE` reads
@@ -768,11 +980,46 @@ that needs it does not have to reopen a `core` type — and §15 names what fire
 affirmative verdict would retire another proposition's row and §7's disagreement would vanish
 into a coincidence of enumerations.
 
-**Limb 6 is the clause that keeps the mark meaning what it says.** *Superseded* asserts that
-something later displaced this; a row written from a read taken **earlier** cannot be that,
-whatever order the loop happened to record them in. Without it a late-arriving row from an
-earlier read would retire a fresher one, which is the retirement-by-accident limb 5 refuses in a
-different guise.
+**Limb 6 is the clause that keeps the mark meaning what it says, and it is stated over the
+instant §6 actually evaluates.** *Superseded* asserts that something later displaced this; a row
+written from a reading taken **earlier** cannot be that, whatever order the loop happened to
+record them in. Keying it on `read_at` alone was wrong in a way round 2 made concrete: `E` read
+at 10:00 declaring `as_of` 09:59, `L` read at 10:05 declaring `as_of` 08:00, otherwise matching
+and covering. On `read_at` alone `L` supersedes `E`, and a step requiring evidence read within
+fifteen minutes — which §6 test 4 evaluates against `as_of` where the source declares one — loses
+the row that satisfied it and is left with one that does not. **A supersession may never regress
+the effective recency instant**, so the limb is stated over that instant, and where one row
+declares an `as_of` and the other does not the comparison is still between the two effective
+instants, because that is the pair §6 test 4 compares a figure against.
+
+**Strictly later and not merely *not earlier*, because equal instants made the relation
+symmetric.** Two rows sharing an effective instant each satisfied *not earlier than* the other,
+so either could supersede either and which one did depended on the order a conforming
+implementation happened to evaluate them in. Strictness makes the relation a strict partial order
+and the outcome determinate; it costs only the case of two readings the clock cannot tell apart,
+where leaving both standing is the honest record.
+
+**Limb 7 is what keeps a second opinion from being mistaken for a refresh, and it is the
+`INTERPRETATION` basis alone that needs it.** Round 2's case is real: two interpretation rows
+about one `declaration`, over two **different** originating records, both carrying `read_kind` and
+`source` absent, differ in nothing limbs 2 and 3 compare — so an affirmative one recorded a
+moment later retires the opposing one, and §7's live disagreement vanishes into the order the loop
+wrote them in. **Requiring the two rows to interpret the *same* record is the fix that was
+available and it is refused**, because it defeats the correction this section exists to implement:
+a re-reading necessarily interprets a **new** record, so comparing `records` would mean that
+reading again never retires anything and a three-day-old disagreement blocks the goal forever.
+What separates a refresh from a second opinion is not the record, it is **when the work was
+done** — and the row already carries that, on `attempt_id`. Two interpretations of one attempt are
+a live disagreement, which §7 reports and no rule of this decision resolves; an interpretation of a
+**later** attempt is the re-reading correction 1 asks for, and it supersedes. *Retained
+historical* is the correction's own word for the rows an earlier attempt left behind.
+
+**What limb 7 costs is stated rather than hidden.** An attempt that reads twice and interprets
+twice cannot refresh its own earlier interpretation, so a disagreement it created stands for the
+rest of that attempt. That is §7's posture and not a defect of it: *"No rule picks a winner"*
+inside a live investigation, and the route out is the next attempt. **The limb does not reach the
+`READ_OUTCOME` basis**, where two rows never conflict (§7) and a broader read taken later in the
+same attempt should displace a narrower one it covers.
 
 > **Normative.** **Supersession never un-marks, exactly as invalidation does not (§9).** A row
 > that is `SUPERSEDED` is never returned to `STANDING`, by a later revision, by a later refresh,
@@ -922,8 +1169,9 @@ statement; a warrant that says *this rested on an id* when no id ever resolved i
 ### 11. The digest the planner sees, and what reads a row's standing
 
 > **Normative.** The `evidence` the loop passes to `Planner.plan` is **one `EvidenceDigest` per
-> row of that goal's history the store holds**, in `read_at` order oldest first, projected by
-> `orchestration` alone. Its six members are ADR-0249 §10's and this decision adds none:
+> row of that goal's history the store holds**, in §12's **total order** — `read_at` oldest
+> first, ties broken by `id` ascending — projected by `orchestration` alone. Its six members are
+> ADR-0249 §10's and this decision adds none:
 > `requested` and `supported` are the rendering below; `read_at`, `as_of` and `standing` are the
 > row's own; and `verdict` is the row's `verdict`.
 
@@ -999,8 +1247,9 @@ is exactly the reader that will reason from it.
 >   call where any named row is not this goal's, is not `STANDING`, or is the row being written.
 >   It performs §13's elision.
 > - **`get_evidence(evidence_id: str, /) -> GoalEvidence | None`** — the row, or `None`.
-> - **`evidence_of(goal_id: str, /) -> EvidenceHistory`** — that goal's history: its rows in
->   `read_at` order oldest first, and `elided` counting what §13's bound has dropped.
+> - **`evidence_of(goal_id: str, /) -> EvidenceHistory`** — that goal's history: its rows in a
+>   **total order** — `read_at` oldest first, **ties broken by `id` ascending** — and `elided`
+>   counting what §13's bound has dropped.
 > - **`record_interpretation` gains its invalidation set**, which is a strengthening of an
 >   existing member rather than a new one: `core/types.py`'s **`GoalRevision` gains
 >   `invalidates`, a possibly-empty `tuple[Identifier, ...]`**, and the member marks each named
@@ -1008,6 +1257,14 @@ is exactly the reader that will reason from it.
 >   the same indivisible step** as the append, the elision and the version advance. It refuses the
 >   whole call where any named row is not this goal's or is not `STANDING`, and it is otherwise
 >   ADR-0249 §12's member unchanged, including its compare-and-swap on `expected_version`.
+
+**The order is total rather than merely by instant, because a label is an ordinal into it.**
+§10's `E` label is *the row at 1-based index n of the `evidence` sequence*, and §13's elision
+drops the **oldest** row; both read the order this member returns. Two rows written from one
+servicing can share a `read_at` to the microsecond, so an order stated on that field alone leaves
+two conforming stores free to return them either way round — which makes the label space differ
+between implementations and makes the elision drop different rows. Breaking the tie on `id`
+costs nothing and makes both testable in the shared conformance suite.
 
 > **Normative.** `core/types.py` gains **`EvidenceHistory`**, a frozen model with
 > `extra="forbid"` carrying exactly `goal_id` (an `Identifier`), `rows` (a possibly-empty
@@ -1037,6 +1294,20 @@ is exactly the reader that will reason from it.
 > existing question and the write are **one indivisible step**"* — applied to a mark instead of a
 > disposition. A call naming a row another writer has already marked **refuses whole** rather than
 > partially applying, so a caller never has to ask which of its marks landed.
+
+> **Normative — within `record_evidence`'s one indivisible step the order is fixed: the
+> refusals, then the append, then the marks, then §13's elision.** A row named by `supersedes`
+> is checked against the history **as it stood before the call**, so a call can never be refused
+> because its own write displaced its operand, and the elision can never drop a row the same call
+> was marking. **A call that would elide the row it is writing is not reachable**, because the
+> elision drops the oldest and the appended row is the newest.
+
+> **Normative — a `superseded_by` never dangles in a history a reader holds.** A row marked
+> `SUPERSEDED` is older than the row that marked it, and §13's elision drops by age alone, so any
+> row the bound drops is dropped **before** the row that displaced it. A surviving row's
+> `superseded_by` therefore resolves in the same history, and the only reference §13's elision
+> can break is a `GoalElement.evidence_row_id`, which §10 answers and `EvidenceHistory.elided`
+> discloses.
 
 > **Normative — the predicate is `orchestration`'s and the atomicity is the store's, and the
 > split is deliberate.** The loop computes **which** rows a new row refreshes (§8) and **which** a
@@ -1146,6 +1417,14 @@ its sha, and binds nothing.
 > no row, no instant, no region and no verdict — which is ADR-0249 §12's own clause for its own
 > migration, and here it is satisfied trivially because there is nothing to convert.
 
+> **Normative — the stored `goals` blobs are not rewritten either, and that is a property of
+> how §10 widens rather than a step the migration skips.** `GoalElement.evidence_row_id`,
+> `GoalInterpretation.outcome_evidence_row_id` and `GoalRevision.invalidates` are each **optional
+> with an absent or empty default**, and §10's validator **adds** a fourth shape while leaving the
+> three ADR-0249 §1 admits untouched — so every goal blob an earlier version wrote decodes
+> unchanged, as the `FROM_EVIDENCE` element it was, under the widened model. **No lane back-fills
+> `evidence_row_id` from `evidence_id`**, which would assert a row that never existed.
+
 > **Normative — what the table must decide, and what it must not.** Exactly three of the row's
 > values are **columns** rather than blob members, because three contracted behaviours key on
 > them: `goal_id`, which `evidence_of` and `delete_goal`'s cascade select on and which carries
@@ -1173,6 +1452,26 @@ its sha, and binds nothing.
 > one sooner**.
 
 ### 14. The writer clauses
+
+> **Normative — the production rule, stated once here and cited everywhere else.** On a turn
+> working on a goal, a **completed** servicing produces **exactly one `READ_OUTCOME` row per ask
+> it reached that produced an outcome entry** — ADR-0251 §2's entries, whose clause binds
+> verbatim: *"Exactly one entry per ask the servicing reached, and every ask the servicing
+> reached has one."* **The member the entry carries decides the row's `verdict` and decides
+> nothing about whether the row is written**: `EMPTY`, `DUPLICATE`, `TRUNCATED`, `REFUSED`,
+> `FAILED` and `EXPIRED` are each recorded, with `supported` empty where no record came back.
+> **An ask in ADR-0251 §2's classifier case 1 produces no entry and therefore no row**, and a
+> servicing that did not complete produces none (§7). **A turn that is not working on a goal
+> produces no row at all**, because a row carries a `goal_id` and an `attempt_id` and there is
+> nothing to fill them from. **No lane writes a second row for one entry, suppresses a row for an
+> entry it judges uninteresting, or writes one from anything but an entry.**
+
+**The rule is stated once because an earlier draft paraphrased it twice and the two paraphrases
+disagreed.** §15's deferral bullet said a row *"is written only where there is something to
+support"*, which suppresses exactly the `EMPTY` row §§5 and 7 require to exist and which arm 5
+pins. Two implementers reading the two sentences would build two different durable histories for
+the same completed empty read, with no test in either package catching the difference. A
+production rule belongs in one place, and the place is the section that says who writes.
 
 > **Normative.** **`orchestration` writes every value this decision adds, and no model writes
 > any of them.** The row's `id`, `goal_id`, `attempt_id`, `basis`, `read_kind`, `source`,
@@ -1224,7 +1523,9 @@ why it cannot do the work.
 > **Normative.** **No `Settings` field, deployment flag, environment value or per-request
 > parameter is added by this decision**, and none of its figures, predicates or vocabularies is
 > made configurable. ADR-0228 §3's non-configurability argument binds one level over, and the
-> three fixed constants are fixed for ADR-0086 §1's stated reason.
+> four fixed constants — `MAX_GOAL_EVIDENCE`, `MAX_APPLICABILITY_VALUES`,
+> `MAX_SUPPORTED_REGIONS` and `MAX_EVIDENCE_RECORDS` — are fixed for ADR-0086 §1's stated
+> reason.
 
 ### 15. What this decision does not decide, by name, each with what fires it
 
@@ -1232,8 +1533,10 @@ why it cannot do the work.
 > any of them. Each is named so that a reader cannot mistake this ADR's silence for a ruling, and
 > each carries the condition that fires it.
 
-- **The step's declared condition, its declared applicability, its declared recency requirement
-  and its declared affirmative member.** **A5**, which ADR-0249 §13 already gives *"`ActionPlan`'s
+- **The step's declared condition, its declared applicability, its declared recency
+  requirement, its declared `basis`, and — on the `INTERPRETATION` basis — its declared
+  `declaration` and the member of that enumeration it requires.** **A5**, which ADR-0249 §13
+  already gives *"`ActionPlan`'s
   step fields — `depends_on`, engine-resolved result references, the `when` vocabulary and
   `verifies`"*. §6's four tests are stated over those declarations and this decision lands none of
   them. Fired by A5.
@@ -1270,9 +1573,16 @@ why it cannot do the work.
   section declines a durable home for a turn's typed outcomes and names this decision's rows as
   the reason to be careful — *"two widenings of one store inside one milestone, for two
   overlapping records of what a read returned, is the collision that decision warns about"*. **A
-  `GoalEvidence` row is not that carrier and no lane reads it as one**: it records what a response
-  **supported**, is written only where there is something to support, and is not one entry per ask
-  the servicing reached.
+  `GoalEvidence` row is not that carrier and no lane reads it as one**, and the three differences
+  are stated rather than paraphrased. It exists **only where a goal does**: §14's production rule
+  writes rows on a turn working on a goal and on no other, so the turns ADR-0251 §14 is about are
+  exactly the turns that produce none. It carries **what the response supported** and the
+  entry's member, and **not the typed outcome**: no `Servicing`, no `SearchDisposition`,
+  `SearchRefusal`, `FetchRefusal` or `StructuredOutcome` member, no per-ask audit field, and
+  nothing a later turn could re-derive the outcome object from. And it is **keyed on the goal and
+  read back per goal**, never per turn. **A lane that wants the turn's outcomes across turns still
+  owes the decision ADR-0251 §14 defers**, and reconstructing them out of these rows is the route
+  that clause forbids.
 - **A per-row retention rule of its own.** A row lives as long as its goal does (§13), and
   whether a goal's evidence should outlive or predecease the goal is a retention question ADR-0004
   §6 owns. Fired by a decision that gives goals a retention horizon.
@@ -1340,7 +1650,36 @@ scheme, which is untouched — `M` followed by *n*, resolved against the sequenc
 call. ADR-0249 §9 added `C`, `S` and `D` for three other sequences and recorded no supersession;
 §10 above adds `E` for a fourth on the same reading.
 
-**ADR-0237 §2 and §7 — not superseded.** §2's `TimeWindow` is inherited whole and its two
+**ADR-0045 §2 — not superseded, and this is the record a reader of §3 will look for.** Its
+`Validity` keeps every word of its meaning: the envelope window is *"a lifecycle property of *the
+record's life in the store*, set operationally by the applier"*, and §3 above reads it as
+**nothing** rather than reading it as something narrower. Declining to derive coverage from it is
+that section's own posture — ADR-0117 §2 records that §2 *"declined to name coverage with
+`Validity`"* because *"the two say different things about different subjects"* — so this decision
+inherits the distinction rather than moving it. Nothing here touches `live_at`, the read-time
+predicate, the open default, or `SemanticMemory.valid_until`.
+
+**ADR-0230 §5 and §10 — not superseded**, and two clauses of them are relied on. §10's ruling
+that a fetched record *"is not a citation target and not a durable reference"* whose id *"resolves
+in no store"* is why §1 gives `LOCAL_FILE` the count-only treatment rather than widening the
+reference contract; §5's scoped supersession of ADR-0092 §3 — that a locally interrogated root's
+report instant and the read instant *"are one event rather than two facts of which one stands in
+for the other"* — is why §4 leaves `as_of` absent on such a row rather than duplicating `read_at`
+into it. **Neither clause is narrowed**: the fetched record still reaches the supply, still
+carries its attestation, and is still never written to any store.
+
+**ADR-0213 §3 — not superseded, and §6 stopped trying to.** Its clause that the only relation two
+`TopicLabel`s have is *"equality of the stored characters"*, and its reservation of any wider rule
+to *"a later ADR, which is the only instrument that may lift the clause above"*, bind entire. An
+earlier draft of §6 applied ADR-0101 §2's caseless fold to the topics axis, which would have been
+that wider rule arrived at by implementation; §6 now states each axis's comparison at ADR-0237
+§3, which is where the corpus already states all three.
+
+**ADR-0101 §2 — not superseded.** Its D145 fold is used exactly where ADR-0237 §3 already applies
+it — `about_person` and `participants` — and nowhere else.
+
+**ADR-0237 §2, §3 and §7 — not superseded.** §3's three borrowed matching rules are adopted
+axis by axis in §6 and none is widened. §2's `TimeWindow` is inherited whole and its two
 refusals are honoured rather than worked around: §3 above declines the window axis wherever a
 source's declared interval is not a constructible window, which is the conservative direction and
 adds no second window type. §7's clause that *"No consumer composes an assertion of absence from
@@ -1350,8 +1689,13 @@ reaches a new kind of record here and §5 states that it does.
 **ADR-0251 §9 — not superseded; its deferral is answered.** That section rules that a superseded
 row blocks nothing and says *"Which rows are superseded is A4's"*; §8 above is that answer, and
 nothing in this decision touches §9's three limbs, its writer, its write path or its refusal to
-name a reason. **ADR-0251 §2's vocabulary is adopted and not re-minted** (§5), and §7's
-productivity fold is reused per ask rather than restated (§5).
+name a reason. **ADR-0251 §2's vocabulary is adopted and not re-minted** (§5). **§7's
+productivity fold is
+*not* reused**, and the change from an earlier draft is recorded here rather than left to a
+reader: §5's affirmative test is a partition of ADR-0251 §2's closed vocabulary and reads no
+count, so the fold stays where that decision put it, over the turn's own servicings, answering the
+question *did this round add anything*. Nothing in §7 moves; what moves is this decision's refusal
+to borrow it for a different question.
 
 **ADR-0250 §9 — not superseded; it is layered on.** It widens `PlanStore` and books the store's
 second migration; this decision adds three members and one migration beside it, changes no member
@@ -1370,7 +1714,8 @@ it anticipates, not a contradiction of it.
 
 - **I1 — the contract, the store and the migration.** `EvidenceBasis`,
   `EvidenceApplicability`, `GoalEvidence`, `EvidenceHistory`, `MAX_GOAL_EVIDENCE`,
-  `MAX_APPLICABILITY_VALUES`, `MAX_SUPPORTED_REGIONS`; §2's coverage and overlap relations, as
+  `MAX_APPLICABILITY_VALUES`, `MAX_SUPPORTED_REGIONS`, `MAX_EVIDENCE_RECORDS`; §2's coverage and
+  overlap relations, as
   functions of the types that carry them; `GoalElement.evidence_row_id`,
   `GoalInterpretation.outcome_evidence_row_id` and `GoalRevision.invalidates` with their
   validators; `GoalDeletion` and `PlanExport`; the three new `PlanStore` members and
@@ -1404,9 +1749,13 @@ it anticipates, not a contradiction of it.
 3. **Dates change and the evidence is rechecked before acting.** A step whose declared recency
    requirement the row no longer meets does not have its condition satisfied, while the row stays
    retained, exported and in the digest (§6).
-4. **A forecast read that fails or is inconclusive satisfies nothing.** Each of `EMPTY`,
-   `DUPLICATE`, `REFUSED`, `FAILED`, `EXPIRED` and a `TRUNCATED` whose `admitted` is 0 fails §6's
-   second test, and an `INTERPRETATION` row carrying the does-not-settle member fails it too.
+4. **A forecast read that fails or is inconclusive satisfies nothing, and each fails at the
+   test that actually catches it.** `EMPTY`, `REFUSED`, `FAILED` and `EXPIRED` are
+   **non-answering** and fail §6's second test; a `TRUNCATED` over an answer that returned no
+   record carries `supported` empty and fails the **first**; and an `INTERPRETATION` row carrying
+   the does-not-settle member is **non-settling** and fails the second. **A `DUPLICATE` row is
+   answering and fails neither on its verdict** — the arm asserts that too, so the separation
+   cannot regress.
 5. **An `EMPTY` read asserts no absence.** A row whose verdict is `EMPTY` carries `supported`
    empty and satisfies nothing, and nothing composes an assertion that the thing did not happen
    (ADR-0237 §7, §5 above).
@@ -1415,19 +1764,25 @@ it anticipates, not a contradiction of it.
    two such rows with **different** `declaration`s do not conflict; and two `READ_OUTCOME` rows
    over overlapping applicabilities **never** conflict (§7).
 7. **A refresh supersedes and progress resumes.** A later affirmative row of the same basis,
-   kind, source and declaration whose `supported` **covers** the earlier row's marks it
-   `SUPERSEDED` with `superseded_by` set, in one indivisible write; the remaining row stands alone
-   and the condition is satisfied again (§8, §12).
+   kind, source and declaration whose `supported` **covers** the earlier row's, whose effective
+   instant is strictly later, and — on the `INTERPRETATION` basis — whose `attempt_id` differs,
+   marks it `SUPERSEDED` with `superseded_by` set, in one indivisible write; the remaining row
+   stands alone and the condition is satisfied again (§8, §12).
 8. **A narrower refresh retires nothing.** A later affirmative row covering **Saturday** does
    **not** supersede a standing row covering **the whole week**, and the week row keeps its Sunday
    support; a later row covering the **week** does supersede a Saturday row (§8 limb 4).
 9. **A shared label does not bridge disjoint periods.** Rows covering *Saturday, weather* and
    *Sunday, weather* neither overlap nor cover one another, so neither conflicts with nor
    supersedes the other (§2, §7, §8).
-10. **A failed refresh retires nothing.** A later row of the same basis, kind, source and
-    declaration whose verdict is `FAILED`, `REFUSED`, `EXPIRED` or `EMPTY` supersedes no row, and
-    the earlier row is still `STANDING` (§8 limb 5). A row whose `read_at` is earlier than the
-    candidate's supersedes nothing either (limb 6).
+10. **A failed refresh retires nothing, and neither does one that does not move the clock.** A
+    later row of the same basis, kind, source and declaration whose verdict is `FAILED`,
+    `REFUSED`, `EXPIRED` or `EMPTY` supersedes no row, and the earlier row is still `STANDING`
+    (§8 limb 5); an `INTERPRETATION` row carrying the does-not-settle member supersedes nothing
+    either, while one carrying a **settling** member that disagrees with the earlier row **does**.
+    A row whose **effective instant** is earlier than or **equal to** the earlier row's supersedes
+    nothing (limb 6), including the round-2 case: `E` read at 10:00 with `as_of` 09:59 is not
+    superseded by `L` read at 10:05 with `as_of` 08:00, and the step's fifteen-minute recency
+    requirement is still satisfied by `E` at 10:06.
 11. **A query naming Sunday whose response supports no period.** A `STRUCTURED_READ` whose
     returned episodes declare no interval carries `requested` with its window and `supported`
     whose regions apply **no** window, and satisfies no condition that declares one (§3).
@@ -1435,9 +1790,12 @@ it anticipates, not a contradiction of it.
     record covering `[15:00, 16:00)` satisfies no condition declaring noon; a row composed from
     *Alice on Saturday* and *Bob on Sunday* satisfies no condition naming Alice on Sunday; and no
     condition is satisfied by two rows together (§2, §6).
-13. **An unrepresentable interval applies no window.** A record whose `ReportedExtent` has both
-    ends unset, and a record declaring only an `occurred_at`, each contribute a region with no
-    window and advance that region's `elided` where an extent was declared and declined (§3).
+13. **An unrepresentable interval applies no window, and neither does a `Validity`.** A record
+    whose `ReportedExtent` has both ends unset, and a record declaring only an `occurred_at`, each
+    contribute a region with no window, and the region's `elided` advances where an extent **was**
+    declared and declined. **A record carrying a `Validity` with `valid_from` set, `valid_until`
+    set, or both, and no `ReportedExtent`, contributes a region applying no window** and satisfies
+    no condition declaring one — the arm that pins the fallback out (§3).
 14. **A model sentence never becomes a row.** A planner output restating what an earlier read
     established mints no row, moves no `read_at` and supersedes nothing (§14).
 15. **A marking never un-marks.** A revision restoring an earlier requirement leaves an
@@ -1469,22 +1827,68 @@ it anticipates, not a contradiction of it.
     make the document invalid (§13).
 23. **`delete_goal` cascades**, `GoalDeletion.evidence_removed` counts the rows, the elision
     count goes with the goal, and a row of any standing blocks no deletion.
-24. **A `WEB_SEARCH` row names no record and counts them instead.** `records` is empty,
-    `returned` says how many came back, `admitted` how many were new, and no minted id reaches the
-    row (§1, ADR-0231 §16). An `INTERPRETATION` row carries exactly one member of `records`,
-    `returned` and `admitted` both 0, no `read_kind` and a required `declaration`; every other
-    `READ_OUTCOME` row has `len(records)` equal to `returned`.
-25. **`admitted` survives the turn.** A `TRUNCATED` row read back on a later turn classifies the
-    same way it did when written, with no reference to any supply (§1, §5).
+24. **The two ephemeral kinds count and the three durable kinds name.** A `WEB_SEARCH` row and
+    a **successful single-file `LOCAL_FILE`** row each carry `records` **empty** with `returned`
+    saying how many came back and `admitted` how many were new, and **no minted or fetched id
+    reaches either row** (§1, ADR-0231 §16, ADR-0230 §10). A `SIGHTED_QUERY`, `CITATION_HOP` or
+    `STRUCTURED_READ` row has `len(records)` equal to `returned`, or equal to
+    `MAX_EVIDENCE_RECORDS` where `returned` exceeds it, with `returned` still carrying the true
+    count. **An `INTERPRETATION` row constructs**: exactly one member of `records`, `returned` and
+    `admitted` both 0, no `read_kind`, a required `declaration` — and no count invariant refuses
+    it.
+25. **The counts survive the turn and no test reads them.** A row read back on a later turn
+    carries the `returned` and `admitted` it was written with, reconstructed from no supply (§1);
+    and §6's four tests, §8's seven limbs and §9's predicate each reach the same verdict on two
+    rows differing **only** in those two fields — the arm that pins sufficiency out of
+    productivity (§1, §5).
 26. **The row names the attempt that recorded it** on `attempt_id`, and is read back by
     `get_evidence` by `id` and in `evidence_of`'s `read_at` order (§1, §12).
 27. **`as_of` is the source's instant or nothing.** A row over records carrying attestations
     takes the **earliest** `reported_at`; a row over the owner's own store-written records carries
-    `as_of` absent; and no producer fills it from the clock, from `read_at` or from a filesystem
-    stamp (§4, ADR-0096 §2).
+    `as_of` absent; a **`LOCAL_FILE`** row carries `as_of` absent although its record's
+    attestation states an instant, because that instant is `read_at` (§4, ADR-0230 §5); and no
+    producer fills it from the clock, from `read_at` or from a filesystem stamp (§4,
+    ADR-0096 §2).
 28. **The digest discloses no identifier**, carries every row including marked ones, renders two
     regions distinguishably, renders an absent `requested` and an empty `supported` as absent
     members, and says nothing about sufficiency (§11).
+29. **Sufficiency matches the evidence the condition declared.** A condition declaring the
+    `INTERPRETATION` basis is **not** satisfied by a `READ_OUTCOME` row covering the same axes,
+    however recent and however affirmative; a condition declaring one `declaration` is not
+    satisfied by an affirmative row of **another** `declaration` with matching applicability; and
+    a condition declaring one member of an enumeration is not satisfied by a row carrying a
+    **different** settling member of it. A condition declaring **no** basis is refused rather than
+    satisfied (§6 test 2).
+30. **A condition declaring no applicability is still refused by an empty `supported`.** Such a
+    condition is satisfied by a standing, answering, recent row whose `supported` is non-empty,
+    and by no row whose `supported` is empty (§6 test 1).
+31. **A new goal whose only relevant record is already in its initial supply can proceed.** The
+    servicing that returns it classifies `DUPLICATE` with `admitted == 0`; the row's `supported`
+    is composed from the returned record; and the condition is **satisfied**. The same turn's
+    ADR-0251 §7 progress fold counts the round **unproductive** — the two answers are asserted
+    together, on one turn (§5, §6).
+32. **A shared source label does not fold a topic.** Two `TopicLabel`s that differ only by
+    Unicode normalisation — `caf` + U+00E9 and `caf` + `e` + U+0301 — are **two**
+    topics: a row supporting one satisfies no condition naming the other, and the two neither
+    overlap nor cover. Two `participants` values differing only by case **are** one participant,
+    and so are two `about_person` values (§6, ADR-0237 §3).
+33. **Two interpretations of one attempt are a disagreement, not a refresh.** Two
+    `INTERPRETATION` rows with equal `declaration`s, overlapping `supported`, different settling
+    verdicts and the **same** `attempt_id` supersede one another in neither direction and leave the
+    condition unsatisfied; a settling row of a **later** attempt whose support covers one of them
+    supersedes it, and the goal proceeds (§7, §8 limb 7).
+34. **Every entry gets a row and nothing else does.** A completed servicing on a goal turn writes
+    exactly one row per outcome entry — the `EMPTY`, `REFUSED`, `FAILED` and `EXPIRED` entries
+    included, each persisted with `supported` empty and read back on a later turn. An ask in
+    ADR-0251 §2's classifier case 1, a servicing that did not complete, and a turn working on no
+    goal each write **none** (§14).
+35. **A `WEB_SEARCH` row and a `LOCAL_FILE` row satisfy nothing today.** Composed from the
+    records ADR-0231 §16 and ADR-0230 §5 mint — `topics` empty, `about_person` absent, `extent`
+    `None`, `validity` open — each carries `supported` empty and fails §6's first test, while
+    still being written, exported and rendered in the digest (§3, §14).
+36. **The history's order is total and the bound reads it.** Two rows sharing a `read_at` to the
+    microsecond are returned by `evidence_of` in `id` order by both conforming implementations, the
+    `E` labels follow that order, and the elision drops the first of them (§12, §13).
 
 ### 19. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1527,7 +1931,8 @@ question a reviewer asked of an earlier draft, and §18's arms are what keep the
 **What would trigger revisiting this.** A measurement that `MAX_GOAL_EVIDENCE` elides on real
 goals, which the disclosed count makes visible. A reader whose typed outcome cannot fill
 `source`, `as_of` or `supported` as §15 specifies. A point-event type that would let an episodic
-read support a period. A verdict vocabulary that genuinely has no affirmative member. And a
+read support a period. An interpretation enumeration that genuinely has no member but the
+does-not-settle one. And a
 conflict between two `READ_OUTCOME` rows that a lane can show is real without inspecting a
 record's text — which §7 argues is unreachable, and which if reached would reopen it.
 
@@ -1557,9 +1962,10 @@ long ago*, and only the step knows.
 
 **A recency tie-break for conflicting evidence.** Rejected because it would let a later, weaker
 reading overturn an earlier, stronger one on no ground but its timestamp. §8's supersession is
-the narrow case where recency does decide, and it is bought by six limbs — same basis, same kind,
-same source, same declaration, covering support, affirmative verdict, and not earlier — every one
-of which the bare tie-break would skip.
+the narrow case where recency does decide, and it is bought by seven limbs — same basis, same
+kind, same source, same declaration, covering support, an affirmative verdict, a strictly later
+effective instant, and on the interpretation basis a different attempt — every one of which the
+bare tie-break would skip.
 
 **A confidence or source-preference ranking.** Rejected on ADR-0098 §6, which forbids stating a
 bound obtained from a detector, and on ADR-0146 §2's recorded-never-inferred rule. A ranking is a
@@ -1602,6 +2008,16 @@ history a curated selection rather than a record. Age is the only criterion a bo
 without editing the audit toward the answer.
 
 **Recomputing `admitted` at read time instead of persisting it.** Rejected: it cannot be done.
-The supply a deduplication was counted over is ephemeral (ADR-0052 §3), so a row read on a later
-turn would have no way to tell a `TRUNCATED` that admitted a record from one that admitted none,
-and sufficiency would depend on which turn asked the question.
+The supply a deduplication was counted over is ephemeral (ADR-0052 §3), so there is nothing on a
+later turn to recount against, and a row that dropped the figure would be a durable record of a
+servicing unable to say how much of what came back was new. **Sufficiency does not depend on it**
+(§1, §5) — that is exactly the separation this decision makes — which is why the field is
+justified by what it *records* rather than by what it gates.
+
+**Keying the affirmative test on `returned >= 1` instead of on the vocabulary.** The smaller fix
+available when round 2 found the `DUPLICATE` trap, and rejected: it keeps sufficiency reading a
+count of records, which is a fact about the ask and about the turn's supply, where the question is
+what the **response** supports. It also leaves the same defect one step away — a kind whose count
+is composed differently, or a later member returning records the classifier counts another way,
+would reopen it. A partition of a closed vocabulary has no such edge, and it needs no arithmetic
+at all, because §6's first test already refuses a row with nothing to support.
