@@ -23,15 +23,24 @@ import time
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from parked_reads_contract import AT, EXPIRES_AT, LATER, ParkedReadsContract, park
+from parked_reads_contract import AT, CONTENT, EXPIRES_AT, LATER, ParkedReadsContract, park
 
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import ParkedRead, ParkedReadDisposition
-from ai_assistant.permissions.parked_reads import SqliteParkedReads
+from ai_assistant.permissions.parked_reads import (
+    _CREATE_TABLE,
+    _INDEXES,
+    _META_SCHEMA,
+    _READ_SCHEMA_VERSION,
+    _SETTLE_ONLY_V1,
+    _WRITE_SCHEMA_VERSION,
+    SqliteParkedReads,
+    _sort_key,
+)
 from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
     from pathlib import Path
 
 
@@ -186,6 +195,140 @@ def test_a_file_whose_settle_trigger_is_not_this_stores_is_refused(path: Path) -
         SqliteParkedReads(path=path)
 
 
+# --- ADR-0248 §9's schema upgrade, 1 → 2 --------------------------------------
+
+
+def _version_1_database(path: Path, *, parks: Sequence[ParkedRead] = ()) -> None:
+    """Build the database this store shipped **before** ADR-0248, and seed it.
+
+    The whole point of §10's upgrade arm is that "a fresh database seeded with legacy JSON
+    cannot stand in for it, because it is the **stored trigger definition** and not the row
+    that the object check refuses" — so this writes version 1's own table, indexes,
+    settlement trigger and marker, and never opens the current store to make them.
+
+    A seeded park is written **without an** ``utterance`` **key at all**, which is what a
+    row written by that release holds: the field did not exist, so it is absent rather than
+    present-and-null, and a decode that leaned on an explicit ``null`` would pass here
+    while failing on a real file.
+    """
+    with sqlite3.connect(path) as conn:
+        conn.execute(_META_SCHEMA)
+        conn.execute(_WRITE_SCHEMA_VERSION, ("1",))
+        conn.execute(_CREATE_TABLE)
+        for statement in _INDEXES.values():
+            conn.execute(statement)
+        conn.execute(_SETTLE_ONLY_V1)
+        for record in parks:
+            legacy = json.loads(record.model_dump_json())
+            del legacy["utterance"]
+            conn.execute(
+                "INSERT INTO parked_reads(parked_at_us, data) VALUES (?, ?)",
+                (_sort_key(record.parked_at), json.dumps(legacy)),
+            )
+
+
+async def test_a_version_1_database_is_upgraded_and_its_legacy_park_stays_answerable(
+    path: Path,
+) -> None:
+    """ADR-0248 §9's upgrade, end to end, and §10's arm for it.
+
+    A database labelled 1 is **upgraded rather than refused**, which is the one shape this
+    store's version check did not admit before. Its legacy park decodes with ``utterance``
+    ``None`` (§7), is still enumerated and is still answerable (ADR-0244 §15) — and a park
+    written *after* the upgrade settles through the new trigger, clearing four fields.
+    """
+    _version_1_database(path, parks=[park(utterance=None)])
+
+    store = SqliteParkedReads(path=path)
+    try:
+        held = await store.get("park-1")
+        assert held is not None
+        assert held.utterance is None, "a park older than the field, decoded rather than repaired"
+        assert held.disposition is ParkedReadDisposition.OPEN
+        assert [one.id for one in await store.outstanding()] == ["park-1"]
+
+        assert await store.settle("park-1", disposition=ParkedReadDisposition.APPROVED, at=LATER), (
+            "the question the user was asked is still answerable"
+        )
+
+        after = park(park_id="park-2", conversation_id="conv-2", decision_id="decision-2")
+        assert await store.park(after) is True
+        assert await store.settle("park-2", disposition=ParkedReadDisposition.DENIED, at=LATER)
+        settled = await store.get("park-2")
+        assert settled is not None
+        assert all(getattr(settled, field) is None for field in CONTENT), (
+            "the upgraded trigger admits the settlement that clears all four"
+        )
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("2",)
+
+
+async def test_the_upgrade_rewrites_no_row_and_reads_no_park(path: Path) -> None:
+    """ADR-0248 §9: "the upgrade touches definitions and a marker, and no content".
+
+    The blob is compared byte for byte across the open, which is the assertion that no
+    back-fill, re-derivation, re-validation or re-serialisation happened to it — and the
+    park's own state is unmoved: ``OPEN`` before, ``OPEN`` after, same deadline.
+    """
+    _version_1_database(path, parks=[park(utterance=None)])
+    with sqlite3.connect(path) as conn:
+        (before,) = conn.execute("SELECT data FROM parked_reads").fetchone()
+
+    SqliteParkedReads(path=path).close()
+
+    with sqlite3.connect(path) as conn:
+        (after,) = conn.execute("SELECT data FROM parked_reads").fetchone()
+    assert after == before
+    assert "utterance" not in json.loads(after)
+
+
+def test_a_version_1_database_whose_trigger_is_neither_definition_is_still_refused(
+    path: Path,
+) -> None:
+    """ADR-0248 §9: "where it is anything else the existing refusal stands, word for word".
+
+    The marker says a shape this code can upgrade; the stored trigger says a file that is
+    not this store's. The upgrade recognises only version 1's own definition, so it drops
+    nothing, ``CREATE TRIGGER IF NOT EXISTS`` leaves what is there, and the object check
+    refuses with the message it refuses with today.
+    """
+    _version_1_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER parked_reads_settle_only")
+        conn.execute(
+            "CREATE TRIGGER parked_reads_settle_only BEFORE UPDATE ON parked_reads "
+            "WHEN 0 BEGIN SELECT RAISE(ABORT, 'never'); END"
+        )
+
+    with pytest.raises(AssistantError, match="is not the one this store defines"):
+        SqliteParkedReads(path=path)
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("1",), (
+            "a refused open leaves the marker where it was — the upgrade and the check "
+            "are one transaction, so the file is unupgraded rather than half-migrated"
+        )
+
+
+def test_a_current_database_is_opened_twice_without_a_second_upgrade(path: Path) -> None:
+    """The idempotence half: an upgrade that ran once does not run again.
+
+    Version 2's trigger is not version 1's, so :meth:`_upgrade_settle_trigger` is not even
+    reached — the marker already reads 2. Asserted because an upgrade keyed on the trigger
+    alone rather than on the marker would drop and recreate on every open, which is a write
+    to a file this decision promises to leave alone.
+    """
+    SqliteParkedReads(path=path).close()
+
+    SqliteParkedReads(path=path).close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("2",)
+
+
 # --- the three invariants, said to SQLite (ADR-0244 §3) ----------------------
 
 
@@ -262,21 +405,30 @@ async def test_a_settlement_that_kept_the_content_is_refused_by_the_database(pat
         conn.execute("UPDATE parked_reads SET data = json_set(data, '$.disposition', 'denied')")
 
 
-#: A well-formed settlement of the suite's park: the disposition moved to a terminal member
-#: and the three content fields cleared, which the trigger admits. Each case below rewrites
-#: exactly one further field on top of it, so what the trigger refuses is that field and
-#: never the settlement it rides on — a case built the other way round would pass against a
-#: trigger with no terminal-fact limb at all.
-_SETTLE_BY_HAND: Final = (
-    "UPDATE parked_reads SET data = json_set(json_set(json_set(json_set("
-    "data, '$.parameters', NULL), '$.goal', NULL), '$.plan', NULL), '$.disposition', 'denied')"
+#: The blob of a well-formed settlement: **every** content field cleared — ADR-0248 §3's
+#: ``utterance`` included, which is the fourth — and the disposition moved to a terminal
+#: member. Built from :data:`CONTENT` so the list the suite settles by hand and the list
+#: the store clears cannot come apart; a hand-typed copy is exactly the place a fifth
+#: field would be forgotten and the trigger's new limb would go untested.
+_SETTLED_BLOB: Final = (
+    "json_set("
+    + "json_set(" * len(CONTENT)
+    + "data"
+    + "".join(f", '$.{field}', NULL)" for field in CONTENT)
+    + ", '$.disposition', 'denied')"
 )
+
+#: A well-formed settlement of the suite's park, which the trigger admits. Each case below
+#: rewrites exactly one further field on top of it, so what the trigger refuses is that
+#: field and never the settlement it rides on — a case built the other way round would
+#: pass against a trigger with no terminal-fact limb at all.
+_SETTLE_BY_HAND: Final = f"UPDATE parked_reads SET data = {_SETTLED_BLOB}"  # noqa: S608 — the interpolated part is this module's own constant, built from CONTENT
 
 #: The same settlement with one further field forged on top of it, bound as a parameter.
 _FORGE_A_TERMINAL_FACT: Final = (
-    "UPDATE parked_reads SET data = json_set(json_set(json_set(json_set(json_set("
-    "data, '$.parameters', NULL), '$.goal', NULL), '$.plan', NULL), '$.disposition', 'denied'), "
-    "?, ?)"
+    # The interpolated part is this module's own constant; the forged field and its
+    # value are bound parameters.
+    f"UPDATE parked_reads SET data = json_set({_SETTLED_BLOB}, ?, ?)"  # noqa: S608
 )
 
 

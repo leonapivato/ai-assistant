@@ -123,6 +123,10 @@ class _Wired:
     #: act on it** between the park and the answer — which is what ADR-0247 §12's Arms F
     #: and F' are driven by, and the one thing a re-derived binding is compared against.
     binder: FakeEgressBinder
+    #: The transcript archive this engine writes through, kept so a case can read the
+    #: user's half of a parked read's resolution — ADR-0248 §6's fourth capture path,
+    #: which no other level of this tree can drive.
+    archive: Any
 
 
 class _Clock:
@@ -205,6 +209,7 @@ def _wired(
         memory=memory,
         clock=clock,
         binder=binder,
+        archive=harness.archive,
     )
 
 
