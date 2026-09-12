@@ -1118,3 +1118,68 @@ async def test_a_failed_boundary_write_is_recovered_by_the_finishing_commit() ->
     assert attempt.outcome is AttemptOutcome.ANSWERED
     assert attempt.authorization_ids == (claimed.approval_ref,), "and what allowed the step"
     assert attempt.effort.working > asked, "and the resumption's own interval"
+
+
+@pytest.mark.parametrize(
+    ("approved", "handler", "composing"),
+    [
+        pytest.param(False, None, None, id="the_user_declined"),
+        pytest.param(True, "raises", None, id="the_tool_failed"),
+        pytest.param(True, None, "refuses", id="the_composition_produced_nothing"),
+    ],
+)
+async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_nothing(
+    *, approved: bool, handler: str | None, composing: str | None
+) -> None:
+    """The recovery's other half: the three answers that earn no ``AttemptOutcome``.
+
+    ``ANSWERED`` asserts a reply exists, no step failed and no condition blocked (§5), and
+    each of these fails one of the three. **Which member such an attempt earns instead is
+    A10's** (§13), so none is written — but the attempt is not *waiting* either: the user
+    answered, and the token is settled. An implementation that only wrote the state
+    alongside a terminal outcome would leave a row saying ``AWAITING_AUTHORIZATION`` at
+    ``VERIFY`` wherever the boundary's write was refused, which is §5's paused state over
+    a question nobody can answer again.
+    """
+
+    async def _fails(parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        msg = "the mail server refused it"
+        raise ToolError(msg)
+
+    class _FailingOnTheBoundary(_Recording):
+        """Refuses exactly the resumption's ``EXECUTE`` write."""
+
+        async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+            """Raise on the transition the boundary makes, and serve every other."""
+            if transition.to_phase is AttemptPhase.EXECUTE:
+                msg = "the plan store is unavailable"
+                raise PlanningError(msg)
+            return await super().commit_attempt(transition)
+
+    plans = _FailingOnTheBoundary()
+    harness = Harness(
+        tools=(confirmable(),),
+        plans=plans,
+        tool_handler=_fails if handler is not None else None,
+        composing=(
+            None
+            if composing is None
+            else ComposingStage(
+                model=FakeModelProvider(_refusing), streaming=FakeStreamingCompleter()
+            )
+        ),
+    )
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    await harness.engine.resume(parked.step.confirmation.token, approved=approved, timeout=PATIENT)
+
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.VERIFY, "the phase says where it stands"
+    assert attempt.state is AttemptState.RUNNING, "and it is no longer waiting on the user"
+    assert attempt.outcome is None, "which member it earns is A10's, so none is written"
+    assert attempt.ended_at is None
