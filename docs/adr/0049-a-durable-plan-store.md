@@ -1,7 +1,32 @@
 # 49. A durable `PlanStore`: what a SQLite backend persists, and how it survives a restart
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0249 (§1's migration clause alone: "The migration is table creation only. There is no prior persistent `PlanStore` and therefore no on-disk schema to evolve" stops being true, because `Goal` and `ActionPlan` change stored shape and this store's `schema_version` moves 1 → 2 with a conversion rather than a refusal. That one clause, and nothing else in this ADR: §1's durable meta("schema_version") marker is relied on as the thing it was written for, its loud refusal of a database whose schema_version is newer than the code understands binds entire, and §1's schema, its foreign keys, its live-execution ordering and §§2-5 are untouched)
 - Date: 2026-07-23
+- **Partially superseded: 2026-09-12 by ADR-0249 — §1's migration clause alone.
+  Nothing else in this ADR.** ADR-0249 is the decision the owner ruled on 2026-09-12
+  (#2255): `Goal` becomes an append-only sequence of interpretation revisions and
+  `ActionPlan` gains the interpretation revision a plan targets. Both are rows this store
+  holds, so its on-disk schema evolves for the first time.
+
+  **The clause that moves.** §1 reads *"**The migration is table creation only.** There is no
+  prior persistent `PlanStore` and therefore no on-disk schema to evolve: a fresh database is
+  the only starting state this store has ever had."* After ADR-0249 there is a prior schema to
+  evolve, and its §12 evolves it: `schema_version` moves 1 → 2, each `goals` row gains an
+  interpretation of exactly one revision whose outcome is the row's stored `statement`, and
+  each `plans` row's `targets_revision` is left absent. A reader holding only this ADR would
+  implement table creation and refuse a version 1 database, which is ADR-0070 §1's test coming
+  out on the supersession side.
+
+  **The marker is relied on rather than moved.** §1's stated reason for writing
+  `meta("schema_version")` at creation — *"so a **future** schema change has the version
+  marker `SqliteMemoryStore` had to backfill after the fact; this store starts with it"* — is
+  exactly what ADR-0249 §12 uses, and the sentence is true of this decision for the first
+  time. §1's loud refusal of a database *"whose `schema_version` is **newer** than the code
+  understands"* binds entire and is not what a recognised predecessor receives.
+
+  **Nothing else in this ADR moves.** §1's tables, its foreign keys, its live-execution
+  refusal ordering, §2's crash and restart semantics, §3's execution-id non-reuse, §4's
+  deferral and §5's durable tests all stand as ratified.
 - **Not a contract change.** The `PlanStore` Protocol
   (`core/protocols.py`) is ratified by ADR-0014 and strengthened by ADR-0044 §1
   (#303); this ADR adds an *implementation* of it and touches no Protocol, no

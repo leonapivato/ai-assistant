@@ -11,7 +11,18 @@
   calls now also receive the same `GoalBrief`. Its reason, *"a second goal would make one turn
   look like two in every store that holds goals"*, binds entire. §1's authored-at-the-seam
   clause, its context-assembled-once clause, its nothing-else-is-re-run clause and its
-  capability-re-read clause are relied on unchanged, and §§2–15 are untouched.
+  capability-re-read clause are relied on unchanged, and §§2–15 are untouched **but for the
+  second scope below**.
+
+  **And §1's one-field clause together with §5's every-other-field clause, in the count
+  alone**: *"The **one** field any other component ever sets is `supersedes`"* and *"Every
+  other field is **exactly as the planner returned it**"* become two fields, `supersedes` and
+  `targets_revision`, both under §5's identical discipline — taken by the loop, taken once,
+  immediately on return, discarding whatever the plan came back carrying. Every remaining field
+  of every plan is still exactly as the planner returned it, §5's discard-silently clause, its
+  no-plan-identifier clause, its `save_plan` refusal, its export-closure clause and its
+  persistence clauses bind entire, and §1's authored-at-the-seam enumeration is untouched
+  because `targets_revision` is not among the five fields it names.
 - **Partially supersedes** [ADR-0014](0014-planning-model.md)
   — **three scopes, each narrow. §5's `PlanStore` member enumeration and its `save_goal`
   upsert contract**: the roster gains members and `save_goal` becomes the opening write alone,
@@ -22,8 +33,22 @@
   superseded in the roster alone; the return type moves here for the first time. §5's
   compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency,
   export-completeness and deletion obligations, and §6's parameters-not-fetched argument all
-  bind entire and are the grounds this ADR reasons from. **§1 is fulfilled and superseded in
-  none** (§14), and §§2, 3, 4 and 7 are untouched.
+  bind entire and are the grounds this ADR reasons from. **And §1's `Goal` model declaration**:
+  `statement` ceases to be a constructor field and becomes a read-only projection absent from
+  the dump, and `conversation_id`, `interpretation`, `interpretation_elided`, `version` and
+  `last_engaged_at` join the declaration, so a reader holding only §1 writes
+  `Goal(statement=…)` and does not build a conforming `Goal`. **§1's prose is fulfilled and
+  superseded in none** — its not-an-utterance rule, its `core`-type-not-memory-kind rule, its
+  used-for-retrieval annotation, its outlives-any-one-conversation clause and its `Provenance`
+  sentence each bind entire (§14) — and §§2, 3, 4 and 7 are untouched.
+- **Partially supersedes** [ADR-0049](0049-a-durable-plan-store.md)
+  — **§1's migration clause alone: "The migration is table creation only. There is no prior
+  persistent `PlanStore` and therefore no on-disk schema to evolve" stops being true, and §12
+  lands that store's first migration, 1 → 2. Nothing else in that ADR.** §1's durable
+  `meta("schema_version")` marker is relied on as the thing it was written for — *"so a
+  **future** schema change has the version marker"* — its loud refusal of a database *"whose
+  `schema_version` is **newer** than the code understands"* binds entire, and §1's schema, its
+  foreign keys, its live-execution ordering and §§2–5 are untouched.
 - **Partially supersedes** [ADR-0244](0244-a-confirm-on-a-search-parks-as-a-durable-question-and-the-answer-runs-that-exact-read-once.md)
   — **§2's field enumeration in the count and in one field's type, layering on ADR-0248's
   record: `ParkedRead.goal` becomes a `GoalBrief`, and the record gains a non-content field
@@ -96,9 +121,9 @@ decides the values those lanes write into and the seam they write across, and no
 > tuple;
 > `outcome`, a `NonBlankEncodableText` stating the understood outcome; `constraints`,
 > `criteria` and `conditions`, each a possibly-empty `tuple[GoalElement, ...]`;
-> `recorded_at`, a `UtcInstant`; and `raised_by`, the `Identifier` of the conversation turn
-> whose message caused this revision. It carries no plan, no attempt, no evidence and no
-> status.
+> `recorded_at`, a `UtcInstant`; and `raised_by`, an `Identifier | None` naming the
+> conversation turn whose message caused this revision. It carries no plan, no attempt, no
+> evidence and no status.
 
 > **Normative.** A `GoalElement` is a frozen model with `extra="forbid"` whose fields are
 > exactly `text` (`NonBlankEncodableText`), `ground` (a `Ground`), `evidence_id`
@@ -147,10 +172,20 @@ clause is about a record's own content being **derived from other content** at r
 from any other span of content"* — and nothing here derives anything. It reads one stored
 field of one stored element by a fixed rule.
 
-> **Normative.** `Goal.conversation_id` is the `Identifier` of the conversation the goal was
-> **opened in**. It is provenance and **not a fence**: no clause of this ADR makes a goal
-> unreachable from another conversation, and whether and how a goal is resumed from one is
+> **Normative.** `Goal.conversation_id` is an `Identifier | None` naming the conversation the
+> goal was **opened in**. It is provenance and **not a fence**: no clause of this ADR makes a
+> goal unreachable from another conversation, and whether and how a goal is resumed from one is
 > A2's (§13). ADR-0014 §1's *"a goal … **outlives any one conversation**"* binds entire.
+
+> **Normative — the three fields that admit absence, and the one route that produces it.**
+> `Goal.conversation_id`, `Goal.last_engaged_at` and `GoalInterpretation.raised_by` are each
+> typed `| None`, and **`None` is reachable by exactly one route: a row written before this
+> decision** (§12). **No lane writes `None` into any of them.** `orchestration` supplies all
+> three on every goal it opens and every revision it records, and an implementation that leaves
+> one absent on a value it authored does not conform. This is ADR-0248 §3's move applied to
+> three more fields for its own reason: requiring them would make every stored goal fail to
+> decode, and a goal that cannot be read is worse than one whose provenance says, truthfully,
+> that this system did not record it.
 
 > **Normative.** `Goal.version` is an `int` starting at 0, and it is the **compare-and-swap
 > token** every mutation of the goal advances. It is a different value from a
@@ -164,8 +199,8 @@ because the store is the only place with a total order over writes"* — and reu
 uses is what keeps one reader from taking a stale-write refusal for a stale-understanding one.
 The design report calls both values "revision"; that collision is not carried here.
 
-> **Normative.** `Goal.last_engaged_at` is a `UtcInstant` stamped when a turn engages the
-> goal. **What engages a goal is A2's** (§13), and no lane in this decision reads
+> **Normative.** `Goal.last_engaged_at` is a `UtcInstant | None` stamped when a turn engages
+> the goal. **What engages a goal is A2's** (§13), and no lane in this decision reads
 > `last_engaged_at` for any purpose: this ADR lands the field and nothing else.
 
 ### 2. The revision history is bounded, the elision is on the record, and no message is lost
@@ -465,17 +500,35 @@ which side interpretation sits on.
 
 ### 8. A plan names the interpretation revision it targets, and a stale target is not driven
 
-> **Normative.** `ActionPlan` gains one field, **`targets_revision: int`**, `ge=1`, **required
-> with no default**, naming the `GoalInterpretation.revision` the plan was planned against.
+> **Normative.** `ActionPlan` gains one field, **`targets_revision: int | None`**, `ge=1` where
+> present and **defaulting to `None`**, naming the `GoalInterpretation.revision` the plan was
+> planned against. `None` means **not yet stamped**, and it is the only value a planner can
+> return, because `GoalBrief` carries no revision for a planner to copy.
+
+> **Normative.** **The unstamped state exists only between the planner's return and the loop's
+> stamp, and `PlanStore.save_plan` refuses a plan that still carries it** — with the same error
+> class ADR-0228 §5 gives an unresolvable `supersedes`, and for the same reason: the window is
+> closed at the store rather than trusted to close itself. A plan **already on disk** carrying
+> `None` — the one route being a row written before this decision (§12) — decodes, and §8's
+> not-driven rule below reads it as targeting no revision, so it is **not driven**.
 
 > **Normative.** **The loop sets it, and the planner never does.** On every plan a planner
 > returns, the loop takes the field for its own: it discards any value the plan came back
 > carrying and sets it to the `revision` of the interpretation **whose brief it projected for
 > that call** — a value the loop holds on the `Goal` itself, which is why `GoalBrief` need not
-> and does not carry it (§9). This is
-> ADR-0228 §5's rule for `supersedes` applied unchanged — *"there is never a moment at which a
-> component other than the loop holds a plan whose `supersedes` is the planner's"* — and a
-> value the planner supplied is discarded **silently**.
+> and does not carry it (§9). It does this **once** per plan, immediately on return and before
+> any other component observes it, and a value the planner supplied is discarded **silently**.
+
+> **Normative — ADR-0228's one-field clause becomes a two-field clause, and nothing else about
+> it moves.** §1's *"The **one** field any other component ever sets is `supersedes`"* and §5's
+> *"Every other field is **exactly as the planner returned it**"* are **partially superseded in
+> that count alone**: the fields any other component sets are `supersedes` and
+> `targets_revision`, both under §5's identical discipline — taken by the loop, taken once, at
+> the same moment, discarding whatever came back — and every remaining field of every plan is
+> still exactly as the planner returned it. §1's authored-at-the-seam clause binds entire and is
+> untouched: `targets_revision` is not among the fields it enumerates (`id`, `goal_id`, `steps`,
+> `rationale`, `read_request`), and no implementation authors or edits any of those anywhere but
+> at the `Planner.plan` seam.
 
 > **Normative.** **A plan whose `targets_revision` is not the goal's current revision is not
 > driven.** Nothing dispatches a step of it and nothing claims a step of it. What happens
@@ -733,8 +786,16 @@ need"* and whose bound is A3's.
 > - **`commit_attempt(transition: AttemptTransition) -> GoalAttempt`** — the attempt's **only**
 >   mutation route. `core/types.py` gains **`AttemptTransition`**, a frozen command carrying
 >   `attempt_id`, the `expected_version`, and the fields it sets — `to_phase`, `to_state`,
->   `outcome`, `ended_at` and the effort members it advances, each optional and each leaving
->   its field unchanged where absent.
+>   `outcome`, `ended_at`, the effort members it advances, and **`add_plan_id`,
+>   `add_execution_id` and `add_authorization_id`**, each an `Identifier | None`. Every member
+>   is optional and every absent member leaves its field unchanged.
+
+> **Normative.** **The three reference tuples grow by append and never by replacement.** An
+> `add_*` member appends its identifier to the corresponding tuple; an identifier the tuple
+> already holds is ignored rather than duplicated or refused; and no member of
+> `AttemptTransition` removes, reorders or replaces an identifier. Without these the tuples
+> could never be filled at all — an attempt is opened before its first plan exists, so every
+> plan, execution and authorization it produces arrives after the row is written.
 
 > **Normative.** **Both new writes are compare-and-swap, on ADR-0014 §5's existing discipline
 > and for its existing reason.** `record_interpretation` succeeds only where the stored
@@ -761,16 +822,23 @@ need"* and whose bound is A3's.
 > gain the new obligations **in the same change that adds them** (`CONTRIBUTING.md` → "Adding
 > a Protocol": *"The triad is what a Protocol *change* is measured against too"*).
 
-> **Normative.** **`PROTOCOL_VERSION` moves by exactly one**, on the single lane of §15 that
-> changes the wire-visible surface, and `wire/envelope.py`'s log gains an entry naming this
-> ADR and this reason. **`TurnResult.goal`'s change of type is the whole of the ground**:
-> `TurnResult` is carried on `TurnOutcome.turn`, `TurnOutcome` is what the promoted surface
-> returns, `TurnResult` sets `extra="forbid"` and `wire/codec.py` renders a model by
-> `model_dump()`, so a hub emitting a `GoalBrief`-shaped `goal` is invalid for a client
-> expecting a `Goal`-shaped one. That is ADR-0124 §9's second limb — *"a change to a
-> wire-carried `core` type that makes a value one peer emits invalid for the other"* — and
-> ADR-0178 §6 is the precedent for stating the bump in the deciding ADR rather than leaving the
-> lane to discover it.
+> **Normative.** **`PROTOCOL_VERSION` moves by exactly one, in the same change that makes a
+> wire-carried value one peer emits invalid for the other**, and `wire/envelope.py`'s log gains
+> an entry naming this ADR and the reason. That is ADR-0124 §9's second limb quoted rather than
+> restated — *"a change to a wire-carried `core` type that makes a value one peer emits invalid
+> for the other, whether the change widens or narrows the type"* — and §15 cuts the lanes so
+> that **exactly one** lane satisfies it, which is what makes the bump singular rather than a
+> property of the cut.
+
+> **Normative.** **Three changes of this decision are each independently that ground, and the
+> lane carrying any of them carries the bump.** `Goal` gains required fields and loses
+> `statement` from its dump; `ActionPlan` gains `targets_revision`; and `TurnResult.goal`
+> changes type. `TurnResult` is carried on `TurnOutcome.turn`, `TurnOutcome` is what the
+> promoted surface returns, `TurnResult`, `Goal` and `ActionPlan` all set `extra="forbid"`, and
+> `wire/codec.py` renders a model by `model_dump()` — so each of the three, on its own, makes a
+> hub's turn undecodable by a client at the previous version. **No lane lands one of them
+> without the bump**, and ADR-0178 §6 is the precedent for stating that in the deciding ADR
+> rather than leaving a lane to discover it.
 
 > **Normative.** **`PlanExport.schema_version` is a stored-record version and is not a second
 > wire ground.** `PlanExport` crosses no frame: it is the portable document `PlanStore.export`
@@ -784,11 +852,47 @@ need"* and whose bound is A3's.
 > §3's exact-match handshake is the mechanism and the refusal naming both versions is the
 > intended user-visible outcome.
 
-> **Normative.** **The parked-read store's `schema_version` moves by exactly one**, because
-> `ParkedRead`'s stored object definition changes again. The upgrade reads no park content and
-> rewrites none. **A park written before this decision is not repaired**: no lane back-fills,
-> re-derives or re-validates a stored `goal` column, and ADR-0248 §3's transitional fallback is
-> untouched.
+> **Normative.** **Every stored row this decision reshapes stays readable, and this decision
+> lands the migrations that make that true.** `ParkedRead` and `Goal` both change shape on
+> disk, and both stores hold rows written before it. A refusal to open, a silent failure to
+> decode, and a row read back with a fabricated value are each ruled out: ADR-0244 §15 —
+> *"**A park survives a restart and is offered again**"* — is the obligation for one store, and
+> ADR-0004 §6's export and deletion rights are the obligation for the other.
+
+> **Normative.** **The parked-read store's `schema_version` moves by exactly one, and its
+> upgrade converts the `goal` column.** A stored `goal` object of the pre-decision shape is
+> read and rewritten as a `GoalBrief`: `goal_id` and the record's new `goal_id` column both
+> from its `id`; `outcome` from its `statement`; `status` and `deadline` carried across;
+> `constraints`, `criteria`, `conditions` and `open_questions` empty. **The conversion is
+> lossless and not a fabrication**: by §3 a goal opened before this decision has exactly one
+> interpretation, whose outcome is its statement, so the brief states what the record already
+> said and invents nothing. This upgrade **does** read park content, unlike ADR-0248 §7's,
+> because its alternative is a park that cannot be decoded at all; it writes no new content, and
+> ADR-0004 §5's rule that *"Tier 0/1 data must never be logged"* binds it unchanged.
+
+> **Normative.** **A pre-decision park's stored `plan` is left byte for byte as it is**, decodes
+> with `targets_revision` `None`, and its resumption is unaffected: ADR-0244 §8 composes a
+> resumed turn from the park and drives no step, so a plan that §8 refuses to drive costs such a
+> park nothing. ADR-0248 §3's `utterance` fallback is untouched and composes with this: a park
+> may carry an absent `utterance` and a converted `goal` at once.
+
+> **Normative.** **The plan store's on-disk `schema_version` moves 1 → 2, and this decision
+> lands that store's first migration.** ADR-0049 §1 wrote the marker for exactly this — *"A
+> durable `meta("schema_version")` row is written at creation so a **future** schema change has
+> the version marker"* — and its loud refusal is stated of a database *"whose `schema_version`
+> is **newer** than the code understands"*, which a version 1 store is not. A version 1 store is
+> upgraded in place rather than refused: each `goals` row
+> gains an `interpretation` of exactly one revision, whose `outcome` is the row's stored
+> `statement`, whose `recorded_at` is its `created_at`, and whose `raised_by` is **absent**;
+> `conversation_id` and `last_engaged_at` are **absent**; `version` and `interpretation_elided`
+> are 0; and each `plans` row's `targets_revision` is **absent**.
+
+> **Normative.** **The migration writes no value this system did not record, and the absences
+> are the whole of how it says so.** It does not invent a turn id for `raised_by`, a
+> conversation for `conversation_id`, an instant for `last_engaged_at` or a revision for
+> `targets_revision`; §1's three-fields clause and §8's unstamped clause admit exactly these
+> rows and no others. A synthesised `raised_by` would attribute an understanding to a turn that
+> never raised it, which is the falsehood §2 refuses silent truncation on the same ground.
 
 > **Normative.** **Nothing else under `wire/` changes.** The connect exchange gains no member,
 > no existing frame's encoding changes, no `FrameKind` is added, no codec entry is registered,
@@ -872,17 +976,44 @@ obligations are **relied on as written and extended**, and §6's parameters-not-
 is quoted in ADR-0211 §2's own words and applied rather than moved. §5's `PlanExport` block is
 in the same scope, for the same reason, in `attempts` alone.
 
-**ADR-0014 §1 — fulfilled, and superseded in none.** Its sentence *"A `Goal` is deliberately
-**not** the same thing as a user utterance"* becomes true of the implementation for the first
-time; its *"`Goal` is a `core` type rather than a memory kind. A goal is planning input, not a
-retrieval record"* is the ground for not making this a `MemoryKind` and binds entire; its
-*"outlives any one conversation"* binds entire and is why §1 makes `conversation_id`
-provenance rather than a fence. Its code block gains fields, which is the same kind of change
-ADR-0226 §4 made to §2's `ActionPlan` block — additively, with no record owed against §2, as
-ADR-0014's own header shows — and a reader holding only ADR-0014 §1 builds a conforming `Goal`
-and reads a conforming `statement`. Applying ADR-0082 §1's test — *"Would a reader holding only the earlier
-ADR now act differently, or read one of its clauses more widely than it now holds?"* — the
-answer is no, so no record is owed and none is written.
+**ADR-0014 §1 — partially superseded in its `Goal` model declaration, and fulfilled in its
+prose.** The two halves come apart, and the showing is why.
+
+Its **model declaration** is superseded. §1 declares `statement: str` as a constructor field of
+`Goal` and enumerates six fields. After §1 of this decision `statement` is not a field at all —
+it is not accepted in a constructor and does not appear in a dump — and `conversation_id`,
+`interpretation`, `interpretation_elided`, `version` and `last_engaged_at` join the declaration.
+A reader holding only ADR-0014 §1 writes `Goal(statement=…)` and does **not** build a conforming
+`Goal`, which is ADR-0070 §1's test coming out on the supersession side. This is **not** the
+additive case ADR-0226 §4 made against §2's `ActionPlan` block, where every earlier constructor
+call still worked: a field that stops being constructible is a different kind of change, and it
+is recorded as one.
+
+Its **prose binds entire and is fulfilled**. *"A `Goal` is deliberately **not** the same thing as
+a user utterance"* becomes true of the implementation for the first time; *"`Goal` is a `core`
+type rather than a memory kind. A goal is planning input, not a retrieval record"* is the ground
+for not making this a `MemoryKind`; *"canonical text rendering, used for retrieval"* is the
+ground §11 reads the query off; and *"a goal … **outlives any one conversation**"* is why §1
+makes `conversation_id` provenance rather than a fence. §1's `Provenance` sentence is untouched
+and the field stays on `Goal`.
+
+**ADR-0049 §1 — partially superseded**, in its migration clause alone, and the header records
+it. §1 reads *"**The migration is table creation only.** There is no prior persistent
+`PlanStore` and therefore no on-disk schema to evolve: a fresh database is the only starting
+state this store has ever had."* After this decision there is a prior on-disk schema to evolve
+and §12 evolves it, so a reader holding only ADR-0049 would implement table creation and refuse
+a version 1 database — ADR-0070 §1's test coming out on the supersession side. The scope is that
+clause: §1's `meta("schema_version")` marker is **relied on as the thing it was written for**
+and is quoted in §12 as such; §1's loud refusal of a database *"whose `schema_version` is newer
+than the code understands"* binds entire; and §1's schema, its foreign keys, its live-execution
+ordering and §§2–5 are untouched.
+
+**ADR-0228 §1's one-field clause and §5's every-other-field clause — partially superseded**, in
+the count alone, and §8 states the showing. A reader holding only ADR-0228 would refuse to let
+any component set a second field of a plan; after this decision two are loop-owned, under §5's
+identical discipline — taken by the loop, taken once, discarding whatever came back. Nothing
+else about either clause moves, and §1's authored-at-the-seam enumeration is untouched because
+`targets_revision` is not among the fields it names.
 
 **ADR-0244 §2 — partially superseded**, layering on ADR-0248's record, in the field count and
 in `goal`'s type. A reader holding only ADR-0244 as ADR-0248 left it would refuse an eleventh
@@ -902,47 +1033,60 @@ and ADR-0213 §4 supply the elision shape and the fixed-constant shape respectiv
 is widened. ADR-0248 is **fulfilled**: §8's list of what it left to A1 is what §§1–13 above
 decide, and every clause of ADR-0248 binds entire.
 
-### 15. The lane cut, and which lane moves the wire
+### 15. The lane cut, and the one lane that moves the wire
 
-> **Normative.** The implementation lands in **four lanes**, in this order, each a separate PR.
+> **Normative.** The implementation lands in **three lanes**, in this order, each a separate PR.
 >
-> - **L1 — the contract, with a green tree at unchanged behaviour.** `core/types.py` and
->   `core/protocols.py` gain every type and member above; the `PlanStore` conformance suite,
->   the `Planner` conformance suite, `InMemoryPlanStore`, `planning/sqlite_store.py` and the
->   canonical fakes in `ai_assistant.testing` gain the new obligations; and every call site is
->   moved mechanically so the tree type-checks — the loop opens a goal carrying revision 1
->   (§3) and projects a brief, and `planning/planner.py` returns `PlannerOutput(plan=…,
->   understanding=None)`. **No behaviour changes in L1.**
+> - **L1 — the contract, the wire and the stored shapes, at unchanged behaviour.**
+>   `core/types.py` and `core/protocols.py` gain every type and member above, **including**
+>   `TurnResult.goal`'s change of type, `ParkedRead.goal` and `goal_id`, and `PlanExport`. Both
+>   conforming `PlanStore` implementations, the `PlanStore` and `Planner` conformance suites and
+>   the canonical fakes in `ai_assistant.testing` gain the new obligations; §12's two store
+>   migrations land; and every call site is moved mechanically so the tree type-checks — the
+>   loop opens a goal carrying revision 1 (§3), projects a brief, stamps `targets_revision`
+>   (always 1 in this lane), and hands the record to `Engine` on §11's carrier, while
+>   `planning/planner.py` returns `PlannerOutput(plan=…, understanding=None)`. **L1 moves
+>   `PROTOCOL_VERSION`, the plan store's `schema_version`, the parked-read store's
+>   `schema_version` and `PlanExport.schema_version`, and it is the only lane that moves any of
+>   them.** No behaviour changes in L1: no attempt is opened, no phase is stamped, no
+>   understanding is proposed and no ground is resolved.
 > - **L2 — the `Planner` seam.** `planning/` alone: `_render_request` renders the brief, the
 >   request and the evidence digest; the model envelope proposes a `ProposedUnderstanding`.
 > - **L3 — the `orchestration` threading.** `orchestration/` alone: recording the revision,
->   resolving grounds, stamping the phase, opening and committing attempts, setting
->   `targets_revision`, and moving `Engine`'s `save_goal` call onto §11's in-package carrier.
-> - **L4 — the wire-visible consumers.** `TurnResult.goal`, `ParkedRead.goal` and `goal_id`,
->   `PlanExport`, and their stores. **L4 moves `PROTOCOL_VERSION` and the parked-read store's
->   `schema_version`, and it is the only lane that moves either.**
+>   resolving grounds, stamping the phase, and opening and committing attempts.
+
+> **Normative.** **Every wire-visible change of this decision rides L1, and that is the whole
+> reason the cut has three lanes rather than four.** §12 requires the bump in the same change
+> that makes a peer's value invalid, and `Goal`'s new fields, `ActionPlan.targets_revision` and
+> `TurnResult.goal`'s type each do that on their own. A cut that landed any of them ahead of the
+> bump would leave two peers passing the exact-match handshake and then failing to decode a
+> turn — the failure ADR-0124 §9 exists to prevent — so **no lane of this decision lands a
+> `core` type change that reaches `TurnOutcome` except L1**.
 
 > **Normative.** **L1 is the one sanctioned cross-subsystem lane**, and it is sanctioned by
 > ADR-0137 §2, which makes *"the **contract triad together with its primary production
 > implementation** … one unit of work — one lane, one PR"* and fixes that *"Primary means the
-> consumer whose demands shape the contract, not the one that is cheapest to write"* — here
-> the `PlanStore` implementations, which are what the interpretation chain, the elision and the two
-> compare-and-swap writes are actually shaped by. **L2, L3 and L4 are each one subsystem**, and
-> no other cross-subsystem pairing is authorised by this decision.
+> consumer whose demands shape the contract, not the one that is cheapest to write"* — here the
+> `PlanStore` implementations, which are what the interpretation chain, the elision, the two
+> compare-and-swap writes and both migrations are actually shaped by. **L2 and L3 are each one
+> subsystem**, and no other cross-subsystem pairing is authorised by this decision.
 
-**Why L1 cannot be smaller, stated rather than assumed.** A `Planner.plan` signature change is
-not confinable to `planning/`: `core/protocols.py` declares it, `planning/planner.py`
-implements it, `ai_assistant.testing` fakes it and `orchestration/loop.py` calls it, and a PR
-that moved fewer than all four would not type-check under `mypy --strict`. ADR-0137 §2's
-argument is exactly the one that applies — the contract *"stays **soft while its hardest
-consumer stress-tests it**"* — and the alternative, ratifying the seam and discovering its
-shape a lane later, is the failure that section exists to prevent.
+**Why L1 cannot be smaller, stated rather than assumed, and it is two reasons and not one.**
+First, a `Planner.plan` signature change is not confinable to `planning/`: `core/protocols.py`
+declares it, `planning/planner.py` implements it, `ai_assistant.testing` fakes it and
+`orchestration/loop.py` calls it, and a PR that moved fewer than all four would not type-check
+under `mypy --strict`. Second, the wire: three independent changes of this decision make a hub's
+turn undecodable by an older client, and splitting them across lanes would mean two bumps, two
+incompatible releases and an interval in which a lane had landed one of them without one.
+ADR-0137 §2's argument covers the first — the contract *"stays **soft while its hardest consumer
+stress-tests it**"* — and ADR-0124 §9 covers the second.
 
 **Why the behaviour is held back to L2 and L3 rather than riding L1.** L1 is a large mechanical
 diff and a review of it is a review of a translation; L2 and L3 are where the judgements are,
 and a reviewer reading them is reading a decision rather than a rename. That is the same
 division ADR-0137 §2 draws between the triad and its consumers, applied inside one contract
-change.
+change. It also means the **operator restarts once**: L1 is the only release of this decision
+that a hub and its clients must upgrade together.
 
 ### 16. The arms this decision owes
 
@@ -960,11 +1104,17 @@ change.
 3. **The writer clause.** A planner double returning an envelope carrying a phase, a revision
    number, a `raised_by` and a `recorded_at` — every one discarded, the turn not degraded, and
    the stamped values `orchestration`'s.
-4. **The namer rule.** A planner double that renders **every field of every value it receives**
-   into its prompt produces a prompt in which no goal id, no evidence id and no span reference
-   of that turn appears — the structural half asserted over `GoalBrief`'s and
-   `EvidenceDigest`'s field sets, the behavioural half over the rendered prompt. This is
-   ADR-0230's arm 20 shape applied to this seam.
+4. **The namer rule, in two arms that do not contradict each other.**
+   **(a) Structural, over ground references.** A planner double that renders **every field of
+   every value it receives** into its prompt produces a prompt in which **no evidence id and no
+   ground span** of that turn appears — because `GoalBrief` and `EvidenceDigest` have no field
+   one could sit in. This is ADR-0230's arm 20 shape applied to this seam, and it is asserted
+   over the two types' field sets as well as over the prompt.
+   **(b) Behavioural, over the goal id.** `GoalBrief` **does** carry `goal_id` (§9), so the
+   structural arm cannot cover it and does not claim to. What is asserted instead is over the
+   **production** `_render_request`: given a brief whose `goal_id` is a distinctive string, the
+   prompt it builds does not contain that string. §9's distinction between what the type
+   contains and what the renderer prints is what these two arms are testing separately.
 5. **Ground resolution and its refusals.** A `FROM_EVIDENCE` element whose label is outside the
    shown set, and a `USER_STATED` element whose span is not a span of the turn's request: each
    dropped from the recorded revision, silently, with the revision's `outcome` still recorded
@@ -1001,6 +1151,29 @@ change.
 15. **A park outlives a goal the store never got.** A park written on a turn that then ended
     early is still answerable, its resumption composes from what the park itself carries, and
     nothing repairs or refuses it (§11).
+16. **A pre-decision park upgrades and is answered.** A parked-read database carrying the
+    store's **pre-decision** table, its indexes, its settlement trigger and its
+    `schema_version` marker, holding an unexpired `OPEN` park whose `goal` column is a
+    pre-decision `Goal` and whose `plan` carries no `targets_revision`, is opened, upgraded,
+    read back with a `GoalBrief` whose `outcome` is the stored `statement` and whose `goal_id`
+    matches the record's new column, **answered**, and then settled — with a park written after
+    the upgrade settled in the same run. A fresh database seeded with converted JSON cannot
+    stand in for it, on ADR-0248 §10's own ground: it is the **stored** definition and not the
+    row that the object check refuses. The same arm composes with an absent `utterance`.
+17. **A pre-decision plan store upgrades and stays exportable.** A plan store at
+    `schema_version` 1 holding goals and plans is opened and upgraded; each goal reads back with
+    exactly one interpretation whose `outcome` is its stored `statement` and whose `raised_by`,
+    `conversation_id` and `last_engaged_at` are **absent**; each plan reads back with
+    `targets_revision` absent and is **not driven**; `export` produces a `PlanExport` at the new
+    `schema_version` that validates and closes; and `delete_goal` still cascades.
+18. **The absences have exactly one producer.** No path through `orchestration` writes `None`
+    into `Goal.conversation_id`, `Goal.last_engaged_at`, `GoalInterpretation.raised_by` or
+    `ActionPlan.targets_revision`, and `PlanStore.save_plan` refuses a plan whose
+    `targets_revision` is still absent (§8, §12).
+19. **The attempt's references grow.** An attempt opened with empty tuples takes a plan id, then
+    an execution id, then an authorization id through `commit_attempt`, each appended in order;
+    a repeated identifier is ignored rather than duplicated; and no member of `AttemptTransition`
+    removes or reorders one.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1026,9 +1199,15 @@ lane and not ten.
 conversation, a turn and at least one interpretation. `Planner.plan`'s signature moves again —
 ADR-0211 added `capabilities`, and `core/protocols.py`'s own note records that *"ADR-0230 §3 and
 ADR-0240 §7 each add one"* — and every fake, every conformance arm and every benchmark harness
-call site moves with it. The four-lane cut means
-four reviews and four base moves rather than one, and L1's diff is large even though its
-behaviour is unchanged.
+call site moves with it. The three-lane cut means three reviews and three base moves rather
+than one, and L1's diff is large even though its behaviour is unchanged — it carries the
+contract, both store migrations and every wire-visible change at once, because §15 shows it
+cannot be split without landing an incompatible value ahead of the version that announces it.
+
+**And the deployment is a coordinated upgrade, once.** L1 is a release a hub and its clients
+install together; L2 and L3 are ordinary releases behind it. That is the cost of ADR-0084 §3's
+exact-match handshake applied to a change this wide, and it is paid once rather than twice
+because §15 refuses to spread the wire surface across lanes.
 
 **What is deliberately left uncomfortable.** A goal that was fully served stays `ACTIVE` until
 A10 lands (§4), and a first turn whose request is contentless retrieves exactly as badly as it
