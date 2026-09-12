@@ -286,29 +286,74 @@ async def test_a_turn_whose_composition_failed_ends_no_attempt() -> None:
     assert attempt.outcome is None
 
 
-async def test_a_parked_turn_leaves_its_attempt_where_it_stood() -> None:
-    """§6, §13: no state is written that this decision cannot move back.
+async def test_a_parked_attempt_waits_and_then_moves_on_when_the_user_approves() -> None:
+    """§5, §6, §12: the waiting state is written, and the resumption leaves it.
 
-    ``AWAITING_AUTHORIZATION`` is §5's truthful reading of a parked attempt at the
-    instant of the park, and nothing here can ever clear it: the approval is a **user
-    act**, "which user acts open an attempt is A2's and A3's", and what a resumption
-    drives is A7's and A9's (§13). A state written here would be a durable record that
-    goes stale the moment the user approves. So the attempt stays ``RUNNING`` at
-    ``AUTHORIZE``, and issue #2283 carries the gap to the lane that owns the resumption.
+    §5 calls a goal paused when "its current attempt's state is
+    ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``", and §12
+    requires every later fact to reach the stored attempt through ``commit_attempt``,
+    "**in this turn as in any later one**". A resumption is that later one: the attempt
+    already exists and already references this execution, so moving it is bookkeeping
+    rather than an association — §13's deferral of *which user acts open an attempt* is
+    untouched, because none is opened here.
+
+    Asserted over the **same stored attempt** before and after the approval, which is
+    the only way the two halves can be shown to be about one record.
     """
     plans = _Recording()
     harness = Harness(tools=(confirmable(),), plans=plans)
 
-    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
 
-    assert outcome.step is not None
-    assert outcome.step.confirmation is not None, "the step parked"
+    assert parked.step is not None
+    assert parked.step.confirmation is not None, "the step parked"
     (stored,) = plans.opened
-    attempt = await harness.plans.get_attempt(stored.id)
-    assert attempt is not None
-    assert attempt.phase is AttemptPhase.AUTHORIZE, "the authorisation has not been given"
-    assert attempt.state is AttemptState.RUNNING
-    assert (attempt.outcome, attempt.ended_at) == (None, None)
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+    assert waiting.phase is AttemptPhase.AUTHORIZE, "the authorisation has not been given"
+    assert waiting.state is AttemptState.AWAITING_AUTHORIZATION
+    assert (waiting.outcome, waiting.ended_at) == (None, None)
+    assert parked.step.state.id in waiting.execution_ids, "the reference it is found by"
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    moved = await harness.plans.get_attempt(stored.id)
+    assert moved is not None
+    assert moved.phase is AttemptPhase.VERIFY, "EXECUTE and VERIFY, in §6's order"
+    assert moved.state is AttemptState.ENDED
+    assert moved.outcome is AttemptOutcome.ANSWERED
+    assert moved.ended_at == AT
+
+
+async def test_a_refused_confirmation_leaves_the_attempt_unended() -> None:
+    """§5: a condition blocked, so ``ANSWERED`` is not true of this pass.
+
+    The attempt still leaves ``AWAITING_AUTHORIZATION`` — the user answered, so it is no
+    longer waiting on them — and stands at ``VERIFY`` with no outcome, because **which
+    ``AttemptOutcome`` a refused act earns is A10's** (§13).
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=False, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.DENIED
+    (stored,) = plans.opened
+    moved = await harness.plans.get_attempt(stored.id)
+    assert moved is not None
+    assert moved.phase is AttemptPhase.VERIFY
+    assert moved.state is AttemptState.RUNNING, "no longer waiting, and not ended"
+    assert (moved.outcome, moved.ended_at) == (None, None)
 
 
 def test_the_ledger_never_decreases_when_the_clock_goes_backwards() -> None:

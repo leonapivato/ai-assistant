@@ -178,7 +178,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     notification_is_speakable,
 )
-from ai_assistant.orchestration.loop import ConversationalOperation
+from ai_assistant.orchestration.loop import ConversationalOperation, OpenedAttempt
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
@@ -289,7 +289,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
-    from ai_assistant.orchestration.loop import LearningLoop, OpenedAttempt, RecordedGoal
+    from ai_assistant.orchestration.loop import LearningLoop, RecordedGoal
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
@@ -8108,6 +8108,67 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
+    async def _resume_attempt(
+        self, step: StepOutcome, composed: ComposedReply | None, *, since: datetime
+    ) -> None:
+        """Move the attempt this resumed execution belongs to (ADR-0249 §12).
+
+        **After the first write, every change goes through ``commit_attempt``, in this
+        turn as in any later one** — and a resumption is the "any later one" that clause
+        names. The attempt already exists and already references this execution, so what
+        is owed here is bookkeeping and not an association: nothing opens an attempt, and
+        §13's deferral of **which user acts open** one is untouched.
+
+        **The attempt is found through the reference it already carries**, not guessed at:
+        the execution names its plan, the plan names its goal, and exactly one of that
+        goal's attempts holds this execution's id (§5, and §12's write-time closure, which
+        is what makes that reference resolve). A resumption whose attempt this store does
+        not hold — a park written by a turn that ended before §11's site, or a store
+        migrated from before this decision — moves nothing, exactly as ADR-0244 §11's park
+        whose goal the store never got is answered on what the park itself carries.
+
+        **The phases it passes are the ones it had not reached.** A parked attempt stands
+        at ``AUTHORIZE``; the approval drives the step, so ``EXECUTE`` is stamped, and the
+        answer then composed puts it at ``VERIFY``. It ends ``ANSWERED`` only where §5's
+        three conjuncts hold (:meth:`_answered`) — a refused confirmation is a condition
+        that blocked, and **which ``AttemptOutcome`` it earns is A10's** (§13).
+
+        **The ledger counts this pass and not the wait** (§5): ``working`` "excludes every
+        interval spent waiting for the user", and the park *is* that wait — so the
+        interval measured here starts when this resumption began and never at the park.
+
+        Args:
+            step: The step this resumption drove.
+            composed: What the composing stage produced, or ``None``.
+            since: When this resumption's own work began.
+
+        Raises:
+            PlanningError: As the store raises it.
+        """
+        plan = await self._plans.get_plan(step.state.plan_id)
+        if plan is None:  # pragma: no cover — the execution's plan was persisted with it
+            return
+        found = [
+            one
+            for one in await self._plans.attempts_of(plan.goal_id)
+            if step.state.id in one.execution_ids
+        ]
+        if not found:
+            # No attempt references this execution: the park outlived a turn that never
+            # reached §11's site, or the store predates this decision. Nothing to move.
+            return
+        held = OpenedAttempt(attempt=found[0])
+        answered = self._answered(composed, step)
+        moved = await self._move_attempt(held, to_phase=AttemptPhase.EXECUTE)
+        await self._move_attempt(
+            moved,
+            to_phase=AttemptPhase.VERIFY,
+            to_state=AttemptState.ENDED if answered else AttemptState.RUNNING,
+            outcome=AttemptOutcome.ANSWERED if answered else None,
+            ended_at=self._clock() if answered else None,
+            working=self._worked(moved, since),
+        )
+
     def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
         """The attempt's ledger, advanced by the interval since ``since`` (ADR-0249 §5).
 
@@ -8588,23 +8649,18 @@ class Engine:
             if step.confirmation is not None
             else None
         )
-        # ADR-0249 §6: where the drive **parked**, the attempt stands where it stood —
-        # the authorisation has not been given, so the phase does not move. Where it did
-        # not park, the attempt has left `AUTHORIZE` whatever the step earned, so
-        # `EXECUTE` is stamped — vacuously on a step nothing ran, which is §6's own rule.
-        #
-        # **No state is written on the parked branch, and that is deliberate.** §5's
-        # `AWAITING_AUTHORIZATION` is the truthful reading of a parked attempt *at this
-        # instant*, and nothing in this decision can ever move it back: the approval is a
-        # **user act**, and "which user acts open an attempt is A2's and A3's" (§13),
-        # while what a resumption then drives is A7's and A9's. A state written here would
-        # be a durable record that goes stale the moment the user approves — the failure
-        # §12's "no lane writes an attempt that claims a result before it happened" refuses
-        # in the other direction. So the attempt stays `RUNNING` at `AUTHORIZE`, which is
-        # §4's stated cost taken again: a legible gap, and an honest one. Issue #2283
-        # carries it to the lane that owns the resumption.
+        # ADR-0249 §5, §6: where the drive **parked**, the attempt is waiting for the
+        # user and stands where it stood — the phase does not move, because the
+        # authorisation has not been given, and the state becomes
+        # `AWAITING_AUTHORIZATION`, which is one of the three §5 calls a paused goal.
+        # :meth:`_resume_attempt` is what moves it on again, so this is a state the
+        # system can leave rather than one that goes stale the moment the user approves.
+        # Where the drive did not park, the attempt has left `AUTHORIZE` whatever the
+        # step earned, so `EXECUTE` is stamped — vacuously on a step nothing ran, which
+        # is §6's own rule.
         attempt = await self._move_attempt(
             attempt,
+            to_state=AttemptState.AWAITING_AUTHORIZATION if parked is not None else None,
             to_phase=None if parked is not None else AttemptPhase.EXECUTE,
         )
         # The terminal composing stage, after execution and before the exchange is
@@ -9669,6 +9725,11 @@ class Engine:
                 "nothing was claimed and the operation may be asked for again (ADR-0235 §2)"
             )
             raise UngrantableActError(msg)
+        # ADR-0249 §5's ledger: when **this resumption's** work began. The interval the
+        # park spent waiting for the user is not work and is never counted — "excluding
+        # every interval spent waiting for the user" — so the mark is taken here and
+        # never read off the park.
+        resumed_from = self._clock()
         if token.handle in self._read_parks:
             # ADR-0244 §6: **a parked read is answered through ``resume`` and through no
             # second operation.** Taken first and returned from here, because every
@@ -9727,6 +9788,11 @@ class Engine:
             establishing, approved=approved, remember_recipients_until=remember_recipients_until
         )
         composed = await self._compose(parked.turn, step, deliveries={})
+        # ADR-0249 §12: the attempt this execution belongs to, moved on at the moment the
+        # facts become true — "in this turn as in any later one". `resumed_from` is read
+        # above the resolution so the ledger counts this pass's own work and not the
+        # interval the park spent waiting for the user (§5).
+        await self._resume_attempt(step, composed, since=resumed_from)
         return await self._capture_resumption(
             parked, step, composed, recipient_grant=recipient_grant
         )
