@@ -296,7 +296,12 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >   authorised by a recorded act of the user** (the clause below), because copying an account
 >   and a destination set off the request would let the selection authorise the recipient. Every
 >   member it carries is minted by §10's resolutions from that turn's own span under §9's three
->   clauses entire. **The row is written
+>   clauses entire. **A row carries members for the arguments of its *own* declaration that the
+>   act's words bear on, and for no others** (§9 clause (ii)) — so one act opening rows for two
+>   declarations may leave them carrying **different bounds for an argument of the same name**:
+>   *"up to fifty pounds for the train and a hundred for the hotel"* fixes two amounts, and §2's
+>   rule that no two members of a record name one argument is what makes two rows the only
+>   representable answer. **The row is written
 >   by `orchestration` when the goal's first request reaching that declaration is built, before
 >   `ActionPolicy.decide` is called and before any `CONFIRM` about a concrete call exists** —
 >   the declaration, the account and the destination set are not knowable at the turn itself
@@ -399,9 +404,10 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >
 > - **What was recorded is restated to the user on the turn that recorded it.** The act is a
 >   revision of the goal's interpretation — the bound is an element of its `constraints` — and
->   **§11 gives it a carrier of its own**, `TurnOutcome.authorization`, composed by
->   `orchestration` from the typed value with no model writing it, carrying the bounds the act
->   recorded and the instant they expire. **It does not ride ADR-0250 §5's announcement rule**,
+>   **§11 gives it a carrier of its own**, `TurnOutcome.authorizations`, composed by
+>   `orchestration` from the rows it wrote with no model writing it, carrying one view per
+>   authority opened — its declaration, its bounds with the user's own spans, its expiry and its
+>   revocation handle. **It does not ride ADR-0250 §5's announcement rule**,
 >   which is silent on a grounding-only revision and whose carrier holds neither a coverage nor
 >   an expiry — §11 states the whole of it and §18 records the one count that moves. The user
 >   reads what was recorded on the turn they said it, which is what makes an authority
@@ -1594,9 +1600,10 @@ all three would be one thing to be wrong about.
 > `NonBlankEncodableText`, **required** — the user's own words the member rests on, transcribed
 > from its basis (§8). And **`AuthorizationProjection`**, a frozen model with
 > `extra="forbid"` carrying exactly `coverage`, a **possibly-empty** `tuple[CoverageView,
-> ...]`, and `expires_at`, a `UtcInstant`. **It is named for what it projects and not for where
-> it is carried**, because two surfaces carry it: the confirmation below, and the announcement
-> of an opening act (the clause after next). `Confirmation` gains **one** member,
+> ...]`, and `expires_at`, a `UtcInstant`. **It is named for what it projects rather than for
+> the question that carries it**, because what it states — the coverage an answer would
+> establish and the instant it would expire — is a fact about an authorization and not about a
+> confirmation. `Confirmation` gains **one** member,
 > **`authorization: AuthorizationProjection | None`, required with no default**, and it is
 > **absent** — not empty — on a `CONFIRM` that proposes no row (§1).
 >
@@ -1642,28 +1649,43 @@ all three would be one thing to be wrong about.
 > of forty-five pounds and nothing else cannot say whether answering fixes forty-five or permits
 > sixty.
 
-> **Normative — an opening act is announced, on a member of its own, and the announcement is of
-> the *act* rather than of a row.** `TurnOutcome` gains **one** `None`-defaulting member,
-> **`authorization: AuthorizationProjection | None`**, carrying the coverage the act recorded —
-> each member with the user's own span — and the instant §12's ladder yields for it. It is set
-> on **exactly** the turn whose recorded act opens an authority under §1's path (iii), and is
-> `None` on every other turn.
+> **Normative — an opening act is announced, on a member of its own, once per row it opens.**
+> `TurnOutcome` gains **one** member, **`authorizations: tuple[AuthorizationView, ...]`**,
+> possibly empty and **defaulting to empty**, carrying **one view per `Authorization` opened
+> under §1's path (iii) during that turn**, in the order the rows were written. It is **empty**
+> on every turn that opened none.
 >
-> **One projection is total because one turn records one act, and because the act's coverage and
-> its horizon are the same on every row it opens.** §1 permits a plan reaching two declarations
-> to need two rows, and one opening act may open both — at different moments, since a row is
-> written when the request that reaches its declaration is built, which may be a later turn
-> altogether. **So an announcement per row could not be delivered at all**: the later rows are
-> written during execution, on turns that may carry no reply. What the user is owed, and what the
-> owner's direction asks for, is that *"the reply restates what was recorded"* — the bound and
-> the horizon **they stated**, on the turn they stated it — and those are one value however many
-> declarations the plan later reaches, because §12's ladder reads the act and the goal and
-> nothing about a declaration. **The per-row detail is the listing's** (below): which
-> declaration, which expiry the row carries, and whether it still stands. `Confirmation`
-> and `TurnOutcome` carry **one** projection type between them, because the question and the
-> announcement state the same three facts about a member — the argument, the fixed value or the
-> bound, and the user's own words — and a second shape of one fact is what ADR-0150 is named
-> after.
+> **It is a tuple, because one act can open two authorities that are not the same authority.**
+> §1 permits a plan reaching two declarations to need two rows, and one instruction — *"up to
+> fifty pounds for the train and a hundred for the hotel, until Sunday"* — opens both. Their
+> coverage is **not** interchangeable: both declarations may name their price argument `amount`,
+> so merging the two would either authorise an eighty-pound train booking or refuse an
+> eighty-pound hotel one, and carrying both members in one row is refused outright by §2's rule
+> that no two members of a record name one argument. **Each authority is announced as itself**,
+> and §1's per-row rule is what it transcribes: a row carries members for the arguments **of its
+> own declaration** that the act's words bear on (§9 clause (ii)), so two rows of one act may
+> carry different bounds for an argument of the same name.
+>
+> **It carries `AuthorizationView` and mints no second shape**, which is the carrier §11's
+> listing renders below: the declaration's own `VisibleIdentifier` and description, each coverage
+> member as a `CoverageView` with the user's own span, the expiry, whether the row is live, and
+> **the row's `id` as the revocation handle**. That is what makes two announcements legible — the
+> user tells them apart by the declaration each is about — and it puts the withdrawal handle in
+> front of them at the moment the authority comes into being rather than only afterwards. **The
+> listing's own rendering bar binds here entire**: no subject digest, no `BoundAccount`, no
+> account or connection reference, no `confirmation`, no `supersedes`, no resolution and no
+> `destinations`.
+>
+> **The trigger is that the row was written, and the row is what the view is transcribed from**,
+> so the value the announcement needs always exists at the instant it is emitted and there is no
+> act-time projection to keep in step with a row written later. **A path-(iii) row is therefore
+> written only during a turn that produces a `TurnOutcome`** — which is every turn in this
+> decision's scope, a step being dispatched inside one. §19 books the case a driver dispatching
+> **outside** a turn would open, and that driver is **A7's** and is not decided here. `Confirmation`
+> carries the **question's** projection and `TurnOutcome` the **announcement's**, and neither
+> mints a shape the other does not already need: a question is about a row that does not exist
+> yet and names no identifier, and an announcement is about a row that does, so it carries the
+> listing's own view and its revocation handle.
 >
 > **This does not ride ADR-0250 §5's announcement rule, and the reason it cannot is stated
 > rather than discovered.** That rule is about `goal_engagement`, and it is explicitly silent in
@@ -2096,7 +2118,7 @@ all three would be one thing to be wrong about.
 > **Normative.** **No model output writes any of the above, and none clears a coverage test.**
 > A planner envelope carrying an authorization, a member, a bound, a basis, an expiry, a goal
 > scope, an `authorised_by`, an `authorised_goal` or a phase has those values discarded silently
-> (§9). **`orchestration` composes `TurnOutcome.authorization`** from the row it wrote (§11),
+> (§9). **`orchestration` composes `TurnOutcome.authorizations`** from the rows it wrote (§11),
 > by transcription and never by a model. **And `orchestration` fills every system-supplied
 > argument itself** (§3): a plan step
 > whose own arguments name one is refused before any request is built, so no model supplies a
@@ -2105,15 +2127,15 @@ all three would be one thing to be wrong about.
 ### 16. The `core` surface, the store, the wire, and the data rights
 
 > **Normative — the `core` surface this decision adds, in full, with the lane that lands each
-> so that this roster and §20's cut cannot drift apart.** `core/types.py` gains **twelve**
-> types: **nine with Lane 1** — `Authorization`, `AuthorizationDisposition`,
+> so that this roster and §20's cut cannot drift apart.** `core/types.py` gains **thirteen**
+> types: **ten with Lane 1** — `Authorization`, `AuthorizationDisposition`,
 > `AuthorizationSettlement`, `AuthorizationOrigin`, `CoverageMember`, `ValueBound`, `BoundKind`,
 > `AuthorizationBasis`, `ValueResolution` and `ResolutionRule`, the settlement vocabulary landing there because
 > `GoalAuthorizationStore.settle` is Lane 1's and answers with it — and **three with Lane 3**:
 > `CoverageView`, `AuthorizationProjection` and `AuthorizationView`. It gains **five**
 > fields: `PermissionRuling.authorised_goal`, `ActionRequest.goal` and
 > **`ToolDefinition.system_supplied`** (§3) with Lane 1, each of which route (d) or §6's bar
-> reads, and `Confirmation.authorization` and **`TurnOutcome.authorization`** (§11) with
+> reads, and `Confirmation.authorization` and **`TurnOutcome.authorizations`** (§11) with
 > Lane 3. `core/protocols.py` gains **`GoalAuthorizations`**,
 > **`AuthorizationResolution`** and **`GoalAuthorizationStore`** with Lane 1, and
 > **`AssistantEngine` gains `standing_authorizations` and `revoke_authorization`** with Lane 3
@@ -2305,8 +2327,9 @@ all three would be one thing to be wrong about.
 
 > **Normative — what crosses the wire, and what does not.** Four things cross: the **listing**
 > as a `tuple[AuthorizationView, ...]`, the **revocation** as an `AuthorizationSettlement`, and
-> **`Confirmation.authorization`** and **`TurnOutcome.authorization`**, each as an
-> `AuthorizationProjection` (§11). **No `Authorization`
+> **`Confirmation.authorization`** as an `AuthorizationProjection`, and the **announcement** as
+> a `tuple[AuthorizationView, ...]` on `TurnOutcome.authorizations` — the same carrier as the
+> listing and not a second shape of it (§11). **No `Authorization`
 > crosses whole and no member of `GoalAuthorizations`, `AuthorizationResolution` or
 > `GoalAuthorizationStore` is promoted**: the confirmation carries a **projection** of the
 > coverage the answer would establish, not the record — there is no record yet — and the
@@ -2484,10 +2507,13 @@ classification is a field **beside** the schema and never a keyword inside it (�
 
 **ADR-0250 §5 — partially superseded, in `TurnOutcome`'s member count alone.** §5 states that
 *"`TurnOutcome` gains **four** `None`-defaulting members, one per fact"* and enumerates them.
-§11 above adds a **fifth**, `authorization`, carrying the coverage an opening act established and
-the instant it expires — so a reader holding only §5 authors an outcome type that cannot carry
-the announcement this decision requires. That is ADR-0082 §1's test met, and the scope is the
-count and the enumeration and nothing else.
+§11 above adds a **fifth**, `authorizations`, a possibly-empty `tuple[AuthorizationView, ...]`
+carrying one view per authority an opening act established on that turn — so a reader holding
+only §5 authors an outcome type that cannot carry the announcement this decision requires. That
+is ADR-0082 §1's test met, and the scope is the count and the enumeration and nothing else.
+**The member is a tuple defaulting to empty rather than a `None`-defaulting value**, because
+absence and *"no authority was opened"* are one fact here and an empty tuple states it; §5's
+shape is followed where it applies and not imitated where it does not.
 
 **Every other clause of §5 binds entire, and two of them are what the new member rests on.**
 *"No member is derived from another and a client renders each on its own"* is why a fifth sits
@@ -2585,6 +2611,12 @@ check are each consumed as written, and §13 and §14 state where.
 > any of them. Each is named so that a reader cannot mistake this ADR's silence for a ruling,
 > and each carries the condition that fires it.
 
+- **How an authority opened outside a turn is announced.** §11 emits the announcement on the
+  `TurnOutcome` of the turn during which the row was written, which is every case in this
+  decision's scope because a step is dispatched inside a turn. A driver that walks a plan's
+  steps **outside** one is **A7's**, as §19 already reserves the plan-driving stage, and the
+  decision that lands it states how an authority opened there reaches the user. **No lane reads
+  this as licence to write a path-(iii) row where no `TurnOutcome` will carry its announcement.**
 - **An opening act for a request whose recipient authority is the configured provider rather
   than a grant.** §1's path (iii) rests on a live `RecipientGrant` and on nothing else, because
   route (d)'s re-check is stated over `RecipientGrants.covering` and the configured-provider
@@ -2670,7 +2702,7 @@ check are each consumed as written, and §13 and §14 state where.
 > `AWAITING_AUTHORIZATION` commit and the `add_authorization_id` append are ADR-0249's lane's
 > and are relied on rather than repeated. **Lane 3, the surfaces.** `core/types.py`'s **three**
 > remaining types — `CoverageView`, `AuthorizationProjection` and `AuthorizationView` —
-> `Confirmation.authorization` **and `TurnOutcome.authorization`** (§11),
+> `Confirmation.authorization` **and `TurnOutcome.authorizations`** (§11),
 > `AssistantEngine`'s two members
 > `standing_authorizations` and `revoke_authorization` (§11), the engine's assembly of both and
 > of the confirmation projection, and the interface adapters that render them.
@@ -3076,15 +3108,16 @@ check are each consumed as written, and §13 and §14 state where.
 >     to `proposed_at` equal to the turn's instant, `expires_at` the goal's `deadline`, one
 >     member bounding the amount with the turn's own span as its basis — and the request draws
 >     **`ALLOW` on route (d)** with **no `CONFIRM` put at all**.
->     **`TurnOutcome.authorization` on the turn that recorded the act is present**, carrying the
->     bound the act recorded and that same instant, with the user's own span on the member and
->     **no identifier of any kind**; it is `None` on every turn whose act opens no authority,
->     **including a turn that only re-grounds an existing constraint** — the case ADR-0250 §5
->     requires to stay unannounced, which is why this member exists. **And one act that later
->     opens rows for two declarations is announced once**: those rows are written when their own
->     requests are built, on turns that may carry no reply at all, and the announcement states
->     the act's bound and horizon, which both rows carry; **the listing is where the two are
->     told apart**, by declaration and by their own expiries.
+>     **`TurnOutcome.authorizations` on that turn carries exactly one `AuthorizationView`** for
+>     the row — its declaration's `VisibleIdentifier` and description, the bound with the user's
+>     own span, the expiry, `live` true, and the row's `id` as the revocation handle — and it is
+>     **empty** on every turn that opened none, **including a turn that only re-grounds an
+>     existing constraint**, which is the case ADR-0250 §5 requires to stay unannounced and is
+>     why this member exists. **And an act opening two authorities announces two**: *"up to fifty
+>     pounds for the train and a hundred for the hotel"* over two declarations whose price
+>     argument is each named `amount` → **two rows, two views, two different bounds**, each
+>     naming its own declaration, and neither row carrying the other's member. **A lane that
+>     merged them fails this arm**, and so does one that announced only the first.
 >     `standing(goal)` returns the row, §11's listing renders its coverage, its span and its
 >     expiry, and `revoke_authorization` on it → `REVOKED`, after which the next request of that
 >     goal draws `CONFIRM`. **And the safeguards**: where the span admits two admissible values
@@ -3163,13 +3196,21 @@ check are each consumed as written, and §13 and §14 state where.
 >     covers. **The same with the grant lapsed by its own `expires_at`**, and **the same with a
 >     grant narrowed to a destination set the request exceeds**, one test each. **And where a
 >     *different* live grant covers the request, route (d) covers** — the condition is *a live
->     grant covers this request* and never *this grant*. **The grant seam is consulted exactly
->     once** on such a ruling and **zero** times on a ruling over a path-(i) or path-(ii) row
->     that route (d) covers. **And the displayed instant never outlives the grant**: a goal whose
->     `deadline` falls after the grant's `expires_at` yields a row carrying the **grant's**
->     instant, and one whose earlier instant is at or before `proposed_at` yields **no row**.
->     **A lane that wrote an opening-act row and then let route (d) carry it alone fails this
->     arm.**
+>     grant covers this request* and never *this grant*. **The seam is read over `origin` and
+>     never over the pointer shape**: it is consulted exactly **once** on a ruling over any row
+>     whose `origin` is `OPENING_ACT`, **including a path-(ii) correction of one**, and **zero**
+>     times on a ruling over a row whose `origin` is `CONFIRMED`, whichever path wrote it.
+>     **The dependency therefore survives a correction**: open the row, correct it under path
+>     (ii) to a narrower bound, **then** revoke the grant → the next request draws **`CONFIRM`**.
+>     **And a path-(i) supersession discharges it**: ask the user, who is shown the destination
+>     set and approves → the replacement carries `origin` `CONFIRMED`, route (d) covers with the
+>     seam consulted **zero** times, and revoking the grant thereafter changes nothing.
+>     **And the grant's instant is never copied onto the row**: a goal whose `deadline` falls at
+>     18:00 and a grant expiring at 12:00 yield a row carrying **18:00** — §12's ladder and
+>     nothing else — and the authority nevertheless stops covering at 12:00, because the recheck
+>     and not the field is what enforces it. **A lane that wrote an opening-act row and then let
+>     route (d) carry it alone fails this arm**, as does one that stated the discriminator over
+>     the pointer shape, and as does one that copied the grant's expiry onto the row.
 > 71. **A clock that moves backwards refuses rather than disagreeing** (§1). Establish a row at
 >     11:00 with `expires_at` 18:00, then move the clock to 10:00 → `live_for` answers **`None`**
 >     because the reading is before `settled_at`, no route (d) is taken, the ruling is
