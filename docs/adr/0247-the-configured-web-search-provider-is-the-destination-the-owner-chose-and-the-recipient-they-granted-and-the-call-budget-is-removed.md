@@ -944,12 +944,17 @@ trigger.
 
 > **Normative.** **Lane 1 — the authority, in `permissions/` alone.** §2's route (c) in
 > `ThresholdActionPolicy.decide`: the one new constructor argument carrying the configured
-> search destination, §1's predicate taken over the request's binding, the `ALLOW` with no
-> grant seam consulted, taken **before** `_covering` is reached, `authorised_by` set to the
-> binding's `account.reference`, `authorised_subject` unset, and a reason naming the basis
-> and no identifier. In `permissions/audit.py`: the route-(b) scope narrowed by the
-> `closed_loop` conjunct and the route-(c) pointer check added, with both arms in the
-> `AuditTrailContract` suite in the same change. **`app/composition.py` supplies the new
+> search destination; §2's derived *at the configured provider* fact, taken over the
+> request's binding; **both limbs of `_only_the_disclosure_floor` restated over it** (§3),
+> which is the change that keeps the floors on a mismatched binding; the `ALLOW` with no
+> grant seam consulted, taken **before** `_covering` is reached; `authorised_by` set to the
+> binding's `account.reference`; `authorised_subject` unset; and a reason naming the basis
+> and no identifier. In `permissions/audit.py`: the route-(b) scope narrowed by
+> **`authorised_subject is not None`** — **not** by `closed_loop`, which §2 reserves for
+> eligibility — ADR-0193 §6's pairing refusal moved inside that scope, and the route-(c)
+> branch admitting a digest-free standing row **only** on `closed_loop` **and** the pointer
+> equality and refusing it otherwise. **No `Settings` value reaches the trail.** Every arm of
+> §12 that names lane 1 lands in the `AuditTrailContract` suite in the same change. **`app/composition.py` supplies the new
 > argument**, which is the one file outside `permissions/` this lane touches and is the
 > composition root's own job. **It lands before lane 3 and changes no live behaviour on its
 > own**, because no production deployment has a recorded trust act and so nothing yet
@@ -1066,6 +1071,15 @@ trigger.
 > narrowed the scope by `closed_loop` instead fails it. **This replaces ADR-0238 §15 Arm
 > 5b's premise** and keeps its `OriginUnrecordedBinding` limb: such a decision is refused by
 > name in both cases.
+
+> **Normative.** **Arm D″ — a digest-free standing row of another kind is refused (lane
+> 1).** A non-resolving `send_email` `ALLOW` with a valid binding whose `closed_loop` is
+> `False`, `authorised_subject` unset and `authorised_by` equal to the binding's
+> `account.reference`, with **no grant in the store**, is **refused** by
+> `AuditTrail.record`, exactly as it is at `origin/main`. The arm exists because the digest
+> alone would have admitted it, which is the hole §2's eligibility conjunct closes, and it
+> is asserted for a fetch and a tool call beside the email so that no kind is admitted by
+> the shape alone.
 
 > **Normative.** **Arm D′ — the discriminator survives an emptied grant store and an
 > identifier collision (lane 1).** A route-(b) row recorded and then read back after
@@ -1212,7 +1226,10 @@ trigger.
 > recorded there.** §3's first clause, in its application to a `WEB_SEARCH` request at the
 > configured provider, which takes route (c) rather than needing coverage (§1); and §6's
 > pairing clause together with the scope of its eight-check invariant, in the limb that
-> reaches a non-resolving `ALLOW` whose `authorised_subject` is unset (§2). **Relied on as
+> reaches a non-resolving `ALLOW` whose `authorised_subject` is unset **and whose binding
+> carries `closed_loop`** (§2) — the pairing refusal standing entire on every other such
+> row, so that a digest-free standing `ALLOW` of any other kind is refused exactly as it is
+> today. **Relied on as
 > written**: §1's store, §2's establishing act, §3's five comparisons wherever a grant is
 > the route, §3's comparison-not-inference rule, §4, §5's payload clause, §6's eight checks
 > themselves, §7's check point, §§8–9, §11's rendering bar, and §§12–16. §9's rule that a
