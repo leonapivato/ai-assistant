@@ -8108,6 +8108,35 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
+    def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
+        """The attempt's ledger, advanced by the interval since ``since`` (ADR-0249 §5).
+
+        **Waiting is not work**, and the ledger separates them: this interval runs from
+        the moment the turn stage returned to the moment the pass is finishing, which is
+        driving and composing and nothing else. The interval the turn stage itself spent
+        is already on the value the loop handed over, so the two do not overlap.
+
+        **It never decreases** (§5): "both are monotonically non-decreasing within an
+        attempt … and no implementation subtracts from one". The injected clock supplies
+        wall-clock instants and guarantees no monotonicity (ADR-0009), so an adjustment
+        backwards would otherwise make this a negative interval — which
+        :class:`~ai_assistant.core.types.AttemptEffort` refuses at construction and
+        ``commit_attempt`` refuses as a reduction. A reading that went backwards
+        contributes **nothing** rather than failing a turn that had already answered:
+        what the ledger would lose is a duration, and what a raise here would lose is the
+        record of everything the turn did.
+
+        Args:
+            opened: The attempt as this pass last held it, or ``None``.
+            since: When this pass's remaining work began.
+
+        Returns:
+            The ledger's new value, or ``None`` where there is no attempt to advance.
+        """
+        if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
+            return None
+        return opened.attempt.effort.working + max(self._clock() - since, timedelta(0))
+
     @staticmethod
     def _answered(composed: ComposedReply | None, step: StepOutcome | None) -> bool:
         """Whether ADR-0249 §5's ``ANSWERED`` is **literally** true of this pass.
@@ -8164,6 +8193,7 @@ class Engine:
         to_state: AttemptState | None = None,
         outcome: AttemptOutcome | None = None,
         ended_at: datetime | None = None,
+        working: timedelta | None = None,
         add_execution_id: str | None = None,
     ) -> OpenedAttempt | None:
         """Commit one attempt transition and carry the moved attempt forward (§12).
@@ -8185,6 +8215,7 @@ class Engine:
             to_state: The state to move to; never out of a terminal member (§5).
             outcome: What the attempt produced, set as it reaches a terminal state.
             ended_at: When it reached one.
+            working: The ledger's new value; never below the one held (§5).
             add_execution_id: An execution this attempt opened, appended to
                 :attr:`~ai_assistant.core.types.GoalAttempt.execution_ids`.
 
@@ -8201,7 +8232,7 @@ class Engine:
         """
         if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
             return None
-        if not any((to_phase, to_state, outcome, ended_at, add_execution_id)):
+        if not any((to_phase, to_state, outcome, ended_at, working, add_execution_id)):
             # Every absent member leaves its field unchanged (§12), so a transition that
             # sets none of them would advance the compare-and-swap token and change
             # nothing else — a write whose only effect is to invalidate a version
@@ -8215,6 +8246,7 @@ class Engine:
                 to_state=to_state,
                 outcome=outcome,
                 ended_at=ended_at,
+                working=working,
                 add_execution_id=add_execution_id,
             )
         )
@@ -8353,6 +8385,10 @@ class Engine:
             # already hold (ADR-0181 §5's third clause, ADR-0097 §7).
             conversation_id=conversation.id,
         )
+        # ADR-0249 §5's ledger: when this pass's **remaining** work began. The turn
+        # stage's own interval is already on the attempt it handed over, so the two do
+        # not overlap, and what follows this line is driving and composing — not waiting.
+        drove_from = self._clock()
         turn = responded.turn
         hop_reached = responded.hop_reached
         # ADR-0228 §5: **every** plan the turn produced, oldest first, and
@@ -8465,6 +8501,7 @@ class Engine:
                 to_state=AttemptState.ENDED if answered else None,
                 outcome=AttemptOutcome.ANSWERED if answered else None,
                 ended_at=self._clock() if answered else None,
+                working=self._worked(attempt, drove_from),
             )
             return await self._capture(
                 conversation.id,
@@ -8551,15 +8588,23 @@ class Engine:
             if step.confirmation is not None
             else None
         )
-        # ADR-0249 §5, §6: where the drive **parked**, the attempt is waiting for the
-        # user and stands where it stood — `AWAITING_AUTHORIZATION` is one of the three
-        # states §5 calls a paused goal, it is not terminal, and the phase does not move
-        # because the authorisation has not been given. Where it did not park, the
-        # attempt has left `AUTHORIZE` whatever the step earned, so `EXECUTE` is stamped
-        # — vacuously on a step nothing ran, which is §6's own rule.
+        # ADR-0249 §6: where the drive **parked**, the attempt stands where it stood —
+        # the authorisation has not been given, so the phase does not move. Where it did
+        # not park, the attempt has left `AUTHORIZE` whatever the step earned, so
+        # `EXECUTE` is stamped — vacuously on a step nothing ran, which is §6's own rule.
+        #
+        # **No state is written on the parked branch, and that is deliberate.** §5's
+        # `AWAITING_AUTHORIZATION` is the truthful reading of a parked attempt *at this
+        # instant*, and nothing in this decision can ever move it back: the approval is a
+        # **user act**, and "which user acts open an attempt is A2's and A3's" (§13),
+        # while what a resumption then drives is A7's and A9's. A state written here would
+        # be a durable record that goes stale the moment the user approves — the failure
+        # §12's "no lane writes an attempt that claims a result before it happened" refuses
+        # in the other direction. So the attempt stays `RUNNING` at `AUTHORIZE`, which is
+        # §4's stated cost taken again: a legible gap, and an honest one. Issue #2283
+        # carries it to the lane that owns the resumption.
         attempt = await self._move_attempt(
             attempt,
-            to_state=AttemptState.AWAITING_AUTHORIZATION if parked is not None else None,
             to_phase=None if parked is not None else AttemptPhase.EXECUTE,
         )
         # The terminal composing stage, after execution and before the exchange is
@@ -8593,6 +8638,7 @@ class Engine:
             to_state=AttemptState.ENDED if answered else None,
             outcome=AttemptOutcome.ANSWERED if answered else None,
             ended_at=self._clock() if answered else None,
+            working=self._worked(attempt, drove_from),
         )
         return await self._capture(
             conversation.id,
