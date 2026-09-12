@@ -43,10 +43,12 @@ from ai_assistant.core.types import (
     AssociationVerdict,
     AttemptPhase,
     ExecutionState,
+    Goal,
     GoalAssociation,
     GoalAttempt,
     GoalCandidates,
     GoalDeletion,
+    GoalQuestion,
     GoalQuestionDisposition,
     PlanExport,
     PlannerOutput,
@@ -64,10 +66,8 @@ if TYPE_CHECKING:
         AttemptTransition,
         CurrentContext,
         EvidenceDigest,
-        Goal,
         GoalBrief,
         GoalCandidacy,
-        GoalQuestion,
         GoalRevision,
         GoalStatus,
         MemoryRecord,
@@ -79,6 +79,34 @@ if TYPE_CHECKING:
         UtcInstant,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+
+
+def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
+    """Re-run ``Goal``'s validators over a goal built by ``model_copy`` (ADR-0023 §2).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph. §2's own words are
+    why it exists at all: "``model_copy(update=...)`` skips validators … and **a write
+    that reaches past it must re-validate**" — so a naive ``at`` reaching
+    ``engage_goal`` is refused here as the real stores refuse it, rather than stored
+    and handed back.
+
+    Args:
+        goal: The goal as ``model_copy`` built it.
+        what: What the caller was doing, for the refusal message.
+
+    Returns:
+        The goal, validated.
+
+    Raises:
+        PlanningError: If the rebuilt goal is not one ``Goal`` admits.
+    """
+    try:
+        return Goal.model_validate(goal.model_dump())
+    except ValidationError as exc:
+        msg = f"{what} would leave goal {goal.id} in a shape Goal refuses: {exc}"
+        raise PlanningError(msg) from exc
+
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
@@ -776,12 +804,15 @@ class FakePlanStore:
         """
         async with self._resource.held():
             stored = self._goal_for_write_locked(goal_id, expected_version, "engage")
-            updated = stored.model_copy(
-                update={
-                    "last_engaged_at": at,
-                    "last_engaged_in": conversation_id,
-                    "version": stored.version + 1,
-                }
+            updated = _revalidated_goal(
+                stored.model_copy(
+                    update={
+                        "last_engaged_at": at,
+                        "last_engaged_in": conversation_id,
+                        "version": stored.version + 1,
+                    }
+                ),
+                what="the engagement stamp",
             )
             self._goals[updated.id] = updated
             return updated.model_copy(deep=True)
@@ -806,7 +837,10 @@ class FakePlanStore:
         """
         async with self._resource.held():
             stored = self._goal_for_write_locked(goal_id, expected_version, "set the status of")
-            updated = stored.model_copy(update={"status": status, "version": stored.version + 1})
+            updated = _revalidated_goal(
+                stored.model_copy(update={"status": status, "version": stored.version + 1}),
+                what="the status move",
+            )
             self._goals[updated.id] = updated
             return updated.model_copy(deep=True)
 
@@ -854,8 +888,16 @@ class FakePlanStore:
             if question.goal_id not in self._goals:
                 msg = f"cannot record a question for unknown goal {question.goal_id}"
                 raise PlanningError(msg)
-            if question.attempt_id not in self._attempts:
+            attempt = self._attempts.get(question.attempt_id)
+            if attempt is None:
                 msg = f"cannot record a question for unknown attempt {question.attempt_id}"
+                raise PlanningError(msg)
+            if attempt.goal_id != question.goal_id:
+                msg = (
+                    f"question {question.id} names attempt {question.attempt_id}, which "
+                    f"belongs to goal {attempt.goal_id} and not to {question.goal_id}: a "
+                    f"question's attempt is one its own goal holds (ADR-0250 §9)"
+                )
                 raise PlanningError(msg)
             if question.id in self._questions:
                 msg = f"question {question.id} already exists"
@@ -923,7 +965,7 @@ class FakePlanStore:
             stored = self._questions.get(question_id)
             if stored is None or stored.disposition is not GoalQuestionDisposition.OPEN:
                 return False
-            self._questions[question_id] = stored.model_copy(
+            settled = stored.model_copy(
                 update={
                     "disposition": disposition,
                     "settled_at": at,
@@ -931,6 +973,14 @@ class FakePlanStore:
                     "about": None,
                 }
             )
+            try:
+                self._questions[question_id] = GoalQuestion.model_validate(settled.model_dump())
+            except ValidationError as exc:
+                msg = (
+                    f"the settlement would leave question {question_id} in a shape it "
+                    f"refuses: {exc}"
+                )
+                raise PlanningError(msg) from exc
             return True
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
