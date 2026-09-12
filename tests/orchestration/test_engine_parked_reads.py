@@ -173,7 +173,13 @@ def _wired(
     binder = _binder(definition=FAKE_WEB_SEARCH) if configured else _binder()
     harness = Harness(
         memory=memory,
-        planner=_AskingPlanner(_search()),
+        # **One asking round** (ADR-0251 §4). ADR-0228 §2(e) used to end this turn
+        # after the first servicing, because a search that parked admitted no record;
+        # §4 dissolves (e), so a planner that went on asking would park, be handed
+        # `REFUSED` (§2), and ask again — a second park attempt on a conversation
+        # ADR-0244 §3 allows one open park in. Every case here is about the **one**
+        # lookup that parked, so the planner says one round and settles.
+        planner=_AskingPlanner(_search(), rounds=1),
         composing=composing,
         now=clock,
         search=SearchServicer(

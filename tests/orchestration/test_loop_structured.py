@@ -623,12 +623,16 @@ async def test_a_read_whose_records_were_all_deduplicated_away_fires_no_revision
     """§13 item 7: the case ADR-0240 §6 turns on.
 
     A servicing whose only ask is a structured read, and whose every returned record
-    was already in the supply, fires **no** revision — nothing satisfies either branch
-    of ADR-0228 §2(e) — and records the outcome as having **returned records**. This is
-    the arm a servicer reading the union's
-    admissions rather than the store's own result gets wrong: it would see zero new
-    records, call the read empty, and spend a model round trip telling the planner to
-    broaden away from records already in front of it.
+    was already in the supply, records the outcome as having **returned records**. This
+    is the arm a servicer reading the union's admissions rather than the store's own
+    result gets wrong: it would see zero new records, call the read empty, and spend a
+    model round trip telling the planner to broaden away from records already in front
+    of it.
+
+    **ADR-0251 §4 dissolves (e), so the round that follows is admitted** — and what the
+    planner is handed for it is ``ReadOutcomeKind.DUPLICATE`` rather than ``EMPTY``,
+    which is the distinction ADR-0240 §6 drew and §2 keeps at the wider seam. The
+    planner settles on that round here, so the turn still stops at two calls.
     """
     memory = _StructuredJournal()
     await memory.add(_belief("belief-1", "the boiler question"))
@@ -642,7 +646,7 @@ async def test_a_read_whose_records_were_all_deduplicated_away_fires_no_revision
         responded = await _turn(memory, planner, episodic_limit=5)
 
     assert _ids(responded.turn.memories) == ["belief-1", "already-held"], "no second copy"
-    assert len(planner.calls) == 1, "ADR-0228 §2(e) is unsatisfied on both branches"
+    assert len(planner.calls) == 2, "(e) is dissolved, and the planner settled"
     assert planner.calls[0][1] == ()
     serviced = _serviced(captured)
     assert serviced["structured"] == StructuredOutcome.RETURNED_RECORDS.value
@@ -1079,7 +1083,7 @@ async def test_an_earlier_reads_reach_survives_a_second_read_of_the_same_turn() 
 
     responded = await _turn(memory, planner)
 
-    assert len(planner.calls) == 2, "the first read's novelty fired ADR-0228 §2(e)"
+    assert len(planner.calls) == 3, "two reads, and a third call that settled"
     assert _ids(responded.turn.memories) == ["belief-1", "by-person", "by-window"]
     assert responded.structured.reach is True, "the first read's reach survives the second"
     assert responded.structured.temporal is True
@@ -1208,13 +1212,18 @@ async def test_a_store_that_raises_during_a_structured_read_establishes_nothing(
 # --------------------------------------------------------------------------- #
 
 
-async def test_two_empty_structured_reads_make_exactly_two_planner_calls() -> None:
-    """§13 item 18: ADR-0228 §3's bound is untouched by ADR-0240 §6.
+async def test_two_empty_structured_reads_stop_the_turn_as_an_unproductive_run() -> None:
+    """ADR-0251 §7: two consecutive rounds that admitted nothing stop the investigation.
 
-    "A turn makes at most two planner calls, so a turn takes at most one revision
-    whatever fired it; a second empty structured read on the second plan fires nothing,
-    and the turn stops." The composing stage is told **both** that the turn stopped
-    while still asking (ADR-0228 §10) and, under §8, what the last read did not reach.
+    ADR-0240 §6's own arm read "ADR-0228 §3's bound is untouched", and §4 has now moved
+    that bound to the attempt — so what stops this turn is **not** a count of calls but
+    §7's run test, two rounds before the allowance is reached. That is #2170's "a
+    repeated-result task stops before blindly exhausting the maximum", driven on the
+    shape ADR-0240 §6 was written for.
+
+    The composing stage is told **both** that the turn stopped while still asking
+    (ADR-0228 §10, as §7 widens the trigger to this stop) and, under ADR-0240 §8, what
+    the last read did not reach.
     """
     memory = _StructuredJournal()
     await memory.add(_belief("belief-1", "the boiler question"))
@@ -1225,8 +1234,12 @@ async def test_two_empty_structured_reads_make_exactly_two_planner_calls() -> No
     with structlog.testing.capture_logs() as captured:
         responded = await _turn(memory, planner)
 
-    assert len(planner.calls) == 2, "ADR-0228 §3's bound, not raised"
-    assert _record(captured)["stop"] == StopReason.BOUND_REACHED.value
+    record = _record(captured)
+    assert len(planner.calls) == 2, "§7's run test, two rounds in"
+    assert record["stop"] == StopReason.UNPRODUCTIVE.value
+    assert record["attempt_planner_calls"] < record["attempt_allowance"], (
+        "#2170: before blindly exhausting the maximum"
+    )
     assert responded.stopped_while_asking is True
     assert responded.structured.empty is True
     assert responded.structured.reach is True
@@ -1254,7 +1267,7 @@ async def test_an_empty_read_fact_survives_a_later_servicing_that_read_no_struct
 
     responded = await _turn(memory, planner)
 
-    assert len(planner.calls) == 2, "the empty structured read fired ADR-0228 §2(e)"
+    assert len(planner.calls) == 3, "two servicings, and a third call that settled"
     assert "by-query" in _ids(responded.turn.memories), "the revision's query was serviced"
     assert responded.structured.empty is True, (
         "a servicing that performed no structured read neither sets nor clears the fact"
@@ -1301,7 +1314,7 @@ async def test_a_budget_blocked_second_read_neither_sets_nor_clears_the_emptines
     with structlog.testing.capture_logs() as captured:
         responded = await _turn(memory, planner, history=(tail,))
 
-    assert len(planner.calls) == 2
+    assert len(planner.calls) == 3, "two servicings, and a third call that settled"
     assert _serviced(captured, 1)["structured"] == StructuredOutcome.NO_SLOT.value
     assert responded.structured.empty is True, (
         "a read that made no store call cannot clear a fact an earlier read established"

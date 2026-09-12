@@ -1264,6 +1264,13 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         "planner_calls",
         "stop",
         "servicings",
+        # ADR-0251 §7's **three** turn-level additions, and the pin stays closed over
+        # them for §9's own reason: two are counts and the third is a member of a
+        # closed enumeration, so there is nowhere in any of them for a query, a label,
+        # an ask, an excerpt or an identifier to sit.
+        "attempt_kind",
+        "attempt_planner_calls",
+        "attempt_allowance",
     }
     assert set(serviced) == {
         "kinds",
@@ -1314,6 +1321,11 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
+        # ADR-0251 §7's **one** added per-servicing field: what became of each ask this
+        # servicing reached, as members of a closed enumeration in servicing order. The
+        # pin stays closed over it for §9's own reason — the ask itself is not here, so
+        # there is nowhere in it for a query, a label, a window or an excerpt to sit.
+        "outcomes",
     }
     assert record["log_level"] == "info"
     assert serviced["kinds"] == (ReadKind.SIGHTED_QUERY.value, ReadKind.CITATION_HOP.value)

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 import structlog
+from test_loop_search import SettlesAfter
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -595,24 +596,13 @@ async def test_the_same_label_names_the_same_entry_on_both_calls_of_a_revising_t
     ``M`` label deliberately unstable — the supply grows and the listing does not.
     """
     fetcher = _RecordingFetcher(_ROOT)
-    planner = FakePlanner(
-        now=_clock,
-        read_request=_file("F1"),
-        revision=ActionPlan(
-            id="plan-2",
-            goal_id="goal-1",
-            steps=(),
-            created_at=_NOW,
-            rationale="asked for the same file again",
-            read_request=_file("F1"),
-        ),
-    )
+    planner = SettlesAfter(FakePlanner(now=_clock, read_request=_file("F1")))
 
     await _loop(planner=planner, fetcher=fetcher).respond(
         "how did the quarter go", narrow=_bounded(), operation=_REVISING
     )
 
-    assert len(planner.calls) == 2, "the turn revised (ADR-0228 §2)"
+    assert len(planner.calls) == 3, "two asking rounds, and a third call that settled"
     assert [entry.name for entry in fetcher.fetched] == ["quarterly-review.md"] * 2
     assert fetcher.listing_count == 1, "§3: no lane re-reads it between a turn's two calls"
 
@@ -836,17 +826,19 @@ async def test_a_serviced_fetch_revises_the_plan_and_each_servicing_draws_its_ow
     did, and no lane "suppresses a revision because the read was outward".
     """
     fetcher = _RecordingFetcher(_ROOT)
-    planner = FakePlanner(
-        now=_clock,
-        read_request=_file("F1"),
-        revision=ActionPlan(
-            id="plan-2",
-            goal_id="goal-1",
-            steps=(),
-            created_at=_NOW,
-            rationale="the review pointed at the roster",
-            read_request=_file("F3"),
-        ),
+    planner = SettlesAfter(
+        FakePlanner(
+            now=_clock,
+            read_request=_file("F1"),
+            revision=ActionPlan(
+                id="plan-2",
+                goal_id="goal-1",
+                steps=(),
+                created_at=_NOW,
+                rationale="the review pointed at the roster",
+                read_request=_file("F3"),
+            ),
+        )
     )
 
     with structlog.testing.capture_logs() as captured:
@@ -858,7 +850,7 @@ async def test_a_serviced_fetch_revises_the_plan_and_each_servicing_draws_its_ow
     fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][3]) :]]
     assert fourth == [_ROOT["quarterly-review.md"], _ROOT["roster.txt"]], "in servicing order"
     record = _record(captured)
-    assert record["planner_calls"] == 2
+    assert record["planner_calls"] == 3, "two servicings, and a third call that settled"
     assert len(record["servicings"]) == 2, "one entry per servicing (ADR-0228 §9)"
     for ordinal in (0, 1):
         entry = _serviced(captured, ordinal)

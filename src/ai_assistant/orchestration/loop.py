@@ -853,6 +853,29 @@ _STOPPED_LOOKING: Final[frozenset[StopReason]] = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _Spent:
+    """What the two time gates compare, from **one** reading of the injected clock.
+
+    ADR-0228 §4 and ADR-0251 §4(h) both say their gate is checked "immediately before
+    each additional planner call and **at no other point**", and each measures a
+    different quantity: the per-turn budget measures *one user's wait* from the turn's
+    entry into the loop, the investigation share measures *one attempt's consumption*.
+    Two quantities, one instant — reading the clock twice at one check would let the
+    two gates disagree about when "now" was, and would make "how many readings does a
+    turn take" a number an implementation could move without changing any decision.
+
+    Attributes:
+        working: ``AttemptEffort.working`` as it stands at that instant — what earlier
+            turns of this attempt left plus what this turn has run, with every interval
+            spent waiting for the user excluded (§12).
+        elapsed: How long **this turn** has run, from its entry into the loop.
+    """
+
+    working: timedelta
+    elapsed: timedelta
+
+
 def _advanced(
     attempt: GoalAttempt, phases: tuple[AttemptPhase, ...], to: AttemptPhase
 ) -> tuple[GoalAttempt, tuple[AttemptPhase, ...]]:
@@ -902,8 +925,7 @@ def _stop_reason(  # noqa: PLR0911, PLR0913 — ADR-0251 §4's conditions are a 
     serviced: ServicedRead,
     unproductive_run: int,
     planning_budget: timedelta | None,
-    working: Callable[[], timedelta],
-    elapsed: Callable[[], timedelta],
+    spent: Callable[[], _Spent],
 ) -> StopReason | None:
     """Which of ADR-0251 §4's conditions stops the investigation, or ``None``.
 
@@ -979,19 +1001,17 @@ def _stop_reason(  # noqa: PLR0911, PLR0913 — ADR-0251 §4's conditions are a 
             one is evidence that the route is not there.
         planning_budget: The operation's declared budget, or ``None`` where it
             declared none (§2(a)).
-        working: The attempt's ``AttemptEffort.working`` **as it stands at this
-            moment** — its accumulated working intervals, this turn's included and
-            every interval spent waiting for the user excluded. §4(h)'s subject, and a
-            callable for ``elapsed``'s own reason.
-        elapsed: How long **this turn** has run, measured from its entry into the loop
-            against the injected clock (§2(g)). **A callable, and read only where the
-            check is actually reached** — ADR-0228 §4 rules that the budget is checked
+        spent: The two quantities §4(h) and §2(g) compare, from one reading of the
+            injected clock (:class:`_Spent`). **A callable, and read only where a time
+            gate is actually reached** — ADR-0228 §4 rules that the budget is checked
             "immediately before each additional planner call and at no other point",
             and a reading taken eagerly would be a clock read on a turn that had
             already stopped for another reason. It matters beyond tidiness: the
             guarded clock turns a non-conforming reading into a ``PlanningError``, so
             an eager read would fail a turn on an operation that declares no budget
-            over a clock that turn never needed.
+            over a clock that turn never needed. It is called **once**, where the
+            first of the two gates is reached, and both comparisons are taken against
+            that one instant.
 
     Returns:
         The reason the investigation stops, or ``None`` where a further round is
@@ -1028,7 +1048,8 @@ def _stop_reason(  # noqa: PLR0911, PLR0913 — ADR-0251 §4's conditions are a 
         # (ADR-0226 §5), so the loop's own stage did not run to its end and there is
         # nothing this round learned to plan over.
         return StopReason.NOT_ITERATED
-    if working() >= allowance.investigation_share:
+    at = spent()
+    if at.working >= allowance.investigation_share:
         # §4(h), against the injected clock (ADR-0026) and checked immediately before
         # each additional planner call and at no other point. **Strictly less is what
         # admits a round**: the boundary instant is spent, not available — ADR-0228
@@ -1050,7 +1071,7 @@ def _stop_reason(  # noqa: PLR0911, PLR0913 — ADR-0251 §4's conditions are a 
         # planner one chance to take a different route, and a second consecutive one
         # is evidence that the route is not there.
         return StopReason.UNPRODUCTIVE
-    if elapsed() >= planning_budget:
+    if at.elapsed >= planning_budget:
         # §2(g), against the injected clock, and **kept entire and not re-keyed**
         # (ADR-0251 §5): PT20S measures *one user's wait* from the turn's entry into
         # the loop, where the attempt's working allowance measures *one attempt's
@@ -2287,14 +2308,14 @@ class LearningLoop:
                 serviced=serviced,
                 unproductive_run=unproductive_run,
                 planning_budget=None if operation is None else operation.planning_budget,
-                # §12: `working` excludes every interval spent waiting for the user, and
-                # nothing in this method waits for one — so the attempt's ledger at this
-                # instant is what earlier turns left plus what this turn has run.
-                # ADR-0249 §5's monotonicity is why the interval is floored at zero: the
-                # injected clock supplies wall-clock instants and guarantees no
-                # monotonicity (ADR-0009).
-                working=lambda: opened_working + max(self._now_utc() - started, timedelta(0)),
-                elapsed=lambda: self._now_utc() - started,
+                # **One reading, two quantities** (:class:`_Spent`). §12's `working`
+                # excludes every interval spent waiting for the user, and nothing in
+                # this method waits for one — so the attempt's ledger at this instant is
+                # what earlier turns left plus what this turn has run. ADR-0249 §5's
+                # monotonicity is why the interval is floored at zero: the injected
+                # clock supplies wall-clock instants and guarantees no monotonicity
+                # (ADR-0009).
+                spent=lambda: self._spent(started, opened_working),
             )
             if stop is not None:
                 audit.stop = stop
@@ -2604,6 +2625,31 @@ class LearningLoop:
             plan=plan,
             memory_degraded=degraded or history_degraded,
         )
+
+    def _spent(self, started: datetime, carried: timedelta) -> _Spent:
+        """Both time gates' subjects, from **one** reading of the injected clock.
+
+        ADR-0228 §4 and ADR-0251 §4(h) are checked at the same moment and measure two
+        different quantities (:class:`_Spent`), so they are answered from one instant:
+        two readings at one check would let the gates disagree about when "now" was.
+
+        **§12's working excludes every interval spent waiting for the user**, and
+        nothing in :meth:`_turn` waits for one — so what this turn contributes is
+        simply the interval since its entry into the loop. The interval is floored at
+        zero because ADR-0249 §5 forbids a ledger that decreases and the injected
+        clock guarantees no monotonicity (ADR-0009): a reading that went backwards
+        would otherwise make this negative, which ``AttemptEffort`` refuses at
+        construction.
+
+        Args:
+            started: When this turn entered the loop.
+            carried: What the attempt's ledger held as this turn found it.
+
+        Returns:
+            The attempt's accumulated working time and this turn's elapsed time.
+        """
+        now = self._now_utc()
+        return _Spent(working=carried + max(now - started, timedelta(0)), elapsed=now - started)
 
     async def _planned(  # noqa: PLR0913 — the brief plus one keyword per thing the loop assembled for this call; ADR-0230 §3, ADR-0251 §3 and ADR-0249 §7 each add to it, and the audit record rides beside them
         self,
