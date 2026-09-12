@@ -537,6 +537,34 @@ argument that actually needs one.
 > monotonicity continues to compare requests equal in every other respect including that one,
 > **with the records in the store held equal**.
 
+> **Normative — what "including that one" excludes, stated because two readings are available
+> and the corpus has already chosen one.** ADR-0021 §5's obligation ends: *"Monotonicity is
+> stated over the outcome and is unaffected by `authorised_by`: a user authorisation is an input
+> the policy was given, not a severity axis, and the comparison holds requests equal in every
+> other respect **including that one**."* So a pair of requests differing only in `risk_level`,
+> one of which a stored record covers and the other of which it does not, is **outside** the
+> comparison: one carries a user authorisation and the other carries none, which is the
+> respect §5 names. **That is not a reading this decision invents.** ADR-0193 §3's second
+> comparison is *"the request's `tool` equals the grant's `ToolDefinition` by value"*, so route
+> (b) has exactly this shape — a grant established about a `MEDIUM`-risk declaration covers no
+> `LOW`-risk request of the same tool id and covers the `MEDIUM` one — and that section rules
+> the question in terms: *"ADR-0021 §5's monotonicity obligation is unchanged and is not stated
+> over this … with the grants in the store held equal."* **Route (d) takes that ruling unchanged
+> and adds nothing to it**, and §7 of this decision is why it must: a record established about
+> one declaration authorising a call made under another is the rebinding #54 closed, and a
+> standing record is exposed to it for as long as it is live.
+
+> **Normative — so no supersession of ADR-0021 §5 is owed, and the alternative is named rather
+> than left implicit.** No sentence of §5 is read more widely or more narrowly than it now
+> holds; what changes is that a second kind of record can now be the authorisation input §5's
+> last sentence holds equal. **The other reading — that the comparison holds only the store
+> equal, so a severity edit that moves a request into or out of coverage is in scope — would
+> condemn ratified route (b) on the same facts**, and a decision taking it would be amending
+> ADR-0193 §3's comparison as well as this one. That is a decision with its own argument and
+> its own arms, and it is not this one. **§6's bar is a separate matter and is monotone
+> outright**: it reads no field of the declaration, so it stays on the safe side of the
+> question whichever reading is right.
+
 > **Normative.** **A resolved result reference is compared over its resolved value, exactly as
 > a literal is, and its origin is no further input to the ruling** — the question ADR-0253 §6
 > and §11 push here by name. ADR-0253 §6 places the resolution *"before the `ActionRequest` for
@@ -2114,7 +2142,13 @@ check are each consumed as written, and §13 and §14 state where.
 >     accommodation for a sourced policy. **It exercises the bar's own severity case**: with one
 >     live record held fixed, raising a declaration's `risk_level` or `reversibility` below the
 >     policy's threshold never produces a less restrictive outcome — the row is still found by
->     its `id`, §3's condition 3 now fails by value, and the bar fires where it fired before.
+>     its `id`, the arguments are unchanged, and the bar fires where it fired before. **And it
+>     pins §3's reading of "including that one" rather than leaving it to an implementation**:
+>     the comparison holds the **authorisation input** equal as well as the store, so a pair
+>     differing only in severity where one request is covered by a record and the other is not
+>     is **outside** it — the suite asserts that pair is not required to order, exactly as it is
+>     not required to for route (b) on `origin/main`, and a suite that required it would fail
+>     ADR-0193's ratified grant policy too.
 > 45. **§6's bar over route (b), which is the case it exists for.** A live record of the goal
 >     bounding `amount` at GBP 60, **and** a `RecipientGrant` covering the same declaration,
 >     account and destination set. A request of that goal for GBP 80, every other floor
