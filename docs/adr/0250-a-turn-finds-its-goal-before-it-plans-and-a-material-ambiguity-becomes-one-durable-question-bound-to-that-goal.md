@@ -26,8 +26,8 @@
   by §1 below. §§2-6 and §§8-17 of ADR-0249 stand entire.
 - **Partially supersedes** [ADR-0014](0014-planning-model.md)
   — **§5's `PlanStore` member enumeration and its `PlanExport` shape, layering on
-  ADR-0249 §12's record.** The roster gains seven members — `engage_goal`,
-  `candidates_for`, `record_question`, `get_question`, `open_question`,
+  ADR-0249 §12's record.** The roster gains eight members — `engage_goal`,
+  `set_goal_status`, `candidates_for`, `record_question`, `get_question`, `open_question`,
   `outstanding_questions` and `settle_question` — `delete_goal`'s cascade reaches a goal's
   questions, and `PlanExport` gains `questions` with §5's closure rule extending to
   `question_id` rather than changing. A reader holding only ADR-0014, or only ADR-0249's
@@ -48,6 +48,14 @@
   surface is reachable from it and is `core`'s. **`converse_streaming` needs no record of
   its own**: ADR-0173 defines it as *"taking exactly `converse`'s arguments in exactly its"*
   order, so it takes the new keyword by that clause rather than by an amendment to it.
+- **Partially supersedes** [ADR-0177](0177-the-browsers-control-surface-is-thirty-operations-and-a-credential-is-entered-only-on-a-loopback-origin.md)
+  — **§1's thirty-operation enumeration alone, which gains `goals`,
+  `withdraw_clarification` and `abandon_goal`.** This is ADR-0200's precedent exactly: that
+  decision recorded against the same clause when it added `converse_spoken`. Nothing else in
+  that ADR moves — §1's every-argument-the-browser-owns clause, its caller-owned-deadline
+  class (which gains **no** member, because none of the three takes a turn budget), its
+  `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are
+  untouched.
 
 ## Context
 
@@ -175,7 +183,7 @@ every deferral with the condition that fires it. In particular this decision wri
 >
 > 1. A **turn that associates to it** under §3, including the turn that opens it.
 > 2. A **turn answering that goal's `GoalQuestion`** — a turn whose `TurnReference` names
->    the question (§10), whatever the question's disposition.
+>    the question (§11), whatever the question's disposition.
 > 3. A **resumed park of that goal**: `AssistantEngine.resume` answering a `ParkedRead`
 >    whose `goal_id` names it (ADR-0249 §11), on the path that dispatches.
 > 4. A **resumed step of that goal**: `AssistantEngine.resume` answering a parked
@@ -187,6 +195,12 @@ every deferral with the condition that fires it. In particular this decision wri
 > whose association came back `UNDECIDED` (§3) — a turn that asked **which** goal has
 > engaged none of them, and stamping the candidates would reorder the very set the next
 > turn's question is asked over.
+
+> **Normative.** **Neither engagement field reaches any model-facing projection.**
+> `GoalBrief`'s fields are ADR-0249 §9's and gain nothing here; `GoalCandidacy` carries no
+> instant and no conversation (§4); and no prompt this decision builds renders either value.
+> They are read by the candidate-set query, by the focus derivation and by `GoalSummary`
+> (§15), and by nothing else.
 
 > **Normative.** `Goal.last_engaged_in` is an `Identifier | None` naming the conversation
 > of the goal's **most recent** engagement. **`Goal.conversation_id` is never rewritten**:
@@ -375,19 +389,20 @@ apart.
 ### 4. `GoalAssociator`: one seam, one member, one value, and it is not a `Planner.plan` call
 
 > **Normative.** `core/protocols.py` gains **`GoalAssociator`**, a Protocol with **exactly
-> one member and no more**:
->
-> ```python
-> class GoalAssociator(Protocol):
->     async def associate(self, candidacy: GoalCandidacy, /) -> GoalAssociation: ...
-> ```
->
-> The parameter is **positional-only and is the only one**, there is **no second member**,
-> and an implementation holds a `ModelProvider` and **nothing else that reads** — not a
-> `MemoryStore`, not a `PlanStore`, not a `ConversationStore`, not a `ContextProvider` and
-> not any other. It lives in `ai_assistant.planning` and is reached by `orchestration`
-> **through this Protocol and by no other route**. This is a **BREAKING** contract change
-> under golden rule 5.
+> one member and no more**: `associate`, an `async` method taking one **positional-only**
+> parameter, a `GoalCandidacy`, and returning a `GoalAssociation`. There is **no second
+> member**, **no keyword parameter** and **no second positional**, and an implementation
+> holds a `ModelProvider` and **nothing else that reads** — not a `MemoryStore`, not a
+> `PlanStore`, not a `ConversationStore`, not a `ContextProvider` and not any other. It
+> lives in `ai_assistant.planning` and is reached by `orchestration` **through this Protocol
+> and by no other route**. This is a **BREAKING** contract change under golden rule 5.
+
+The signature, shown rather than marked (ADR-0089 §2), is:
+
+```python
+class GoalAssociator(Protocol):
+    async def associate(self, candidacy: GoalCandidacy, /) -> GoalAssociation: ...
+```
 
 > **Normative.** `core/types.py` gains **`GoalCandidacy`**, a frozen model with
 > `extra="forbid"` whose fields are exactly: `request`, an `EncodableText` carrying the
@@ -669,9 +684,13 @@ deny."*
 > spells likewise resolves to nothing: the label space is per tuple.
 
 > **Normative.** **`orchestration` resolves `about` to the proposed element it names and
-> records that element's `text`**, not its label, on the `GoalQuestion` (§8). The label
-> does not survive the call, and **no label is persisted as a reference**, which is
-> ADR-0226 §3's cost clause binding here as it binds everywhere else.
+> records that element's `text`**, not its label, on the `GoalQuestion` (§8). Where `about`
+> is `None` it records the **outcome statement of the revision this turn recorded** — the
+> one the understanding stated, or the one retention copied forward (ADR-0249 §7) — so
+> `GoalQuestion.about` is a statement of what the question is about in every case and is
+> never absent on an `OPEN` question. The label does not survive the call, and **no label is
+> persisted as a reference**, which is ADR-0226 §3's cost clause binding here as it binds
+> everywhere else.
 
 > **Normative.** **Resolution happens over the proposal as it was received, before any
 > element is dropped by ADR-0249 §7's ground resolution.** A question about an element
@@ -774,8 +793,9 @@ the two cases come apart.** That decision gave a parked read a store in `permiss
 `decision_id`"*, and ADR-0004 §7 charters that subsystem for gating access to Tier 0/1 data
 *and recording it*. A `GoalQuestion` is joined to no decision, gates no access and records no
 permission: it is an unanswered question about **what the user wants**, which is planning
-state, and ADR-0014 §5 charters `PlanStore` for exactly that — *"Durable planning state:
-goals, plans, and execution"*.
+state, and ADR-0014 §5 charters `PlanStore` for exactly that — *"Durable planning state
+belongs to `planning`, not to the wiring layer"*, over values that are *"all personal data,
+so this state is squarely within ADR-0004's scope"*.
 
 **And the deletion argument decides it even if the charter did not.** A question's life is its
 goal's, and `PlanStore.delete_goal` is the one act that removes a goal, with ADR-0014 §5's
@@ -802,17 +822,21 @@ row holding Tier 1 content that no act, no enumeration and no reclaim would ever
 here a question nothing can free would block that goal's next question **forever**, which is
 the one-open rule turning from a correctness constraint into a trap.
 
-### 9. `PlanStore` gains seven members, and this is a BREAKING contract change
+### 9. `PlanStore` gains eight members, and this is a BREAKING contract change
 
-> **Normative.** `PlanStore` gains the following members, and this is a **BREAKING**
-> contract change under golden rule 5, layering on ADR-0249 §12's widening of the same
-> Protocol:
+> **Normative.** `PlanStore` gains the following **eight** members, and this is a
+> **BREAKING** contract change under golden rule 5, layering on ADR-0249 §12's widening of
+> the same Protocol:
 >
 > - `async def engage_goal(self, goal_id: str, /, *, at: UtcInstant, conversation_id: str,
 >   expected_version: int) -> Goal` — stamps `last_engaged_at` and `last_engaged_in`,
 >   advances `version`, and returns the goal as written. It refuses on a stale
 >   `expected_version` with ADR-0014 §5's stale-write error class, and it writes **nothing
 >   else**: not the status, not the interpretation, not the attempt.
+> - `async def set_goal_status(self, goal_id: str, /, *, status: GoalStatus, at: UtcInstant,
+>   expected_version: int) -> Goal` — the goal's **only** status-mutation route. It advances
+>   `version`, refuses on a stale `expected_version`, and writes **nothing else**: not the
+>   engagement stamp, not the interpretation, not the attempt.
 > - `async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates`
 >   — §2's set for that conversation, in §1's order, truncated to `limit`, with `elided`
 >   counting what the truncation dropped.
@@ -830,6 +854,18 @@ the one-open rule turning from a correctness constraint into a trap.
 >   the caller that moved it and `False` to every other. The read, the comparison and the
 >   write are one indivisible step, and `settle_question` on an already-terminal question
 >   answers `False` and changes nothing.
+
+> **Normative.** **This decision writes exactly two `GoalStatus` values through
+> `set_goal_status`**: `ACTIVE`, on a reopen (§13), and `ABANDONED`, on `abandon_goal` (§12).
+> **The member refuses neither `ACHIEVED` nor `BLOCKED`**, because A10 and A3 write them
+> through this same route and a store that refused a member would be a second place the
+> vocabulary is decided.
+
+> **Normative.** **All eight are commands and none is a snapshot.** Each names the change it
+> makes and returns the stored record; none takes a whole `Goal` or a whole `GoalQuestion`
+> back in order to write it. ADR-0014 §5's argument binds unchanged and no fifth frozen
+> command type is minted for it — a keyword list that names one change is a command in that
+> section's sense, which is the shape ADR-0244 §3's `settle` already uses.
 
 > **Normative.** **`settle_question` is the resolve-once gate.** No lane reads a question,
 > decides, and writes back; no lane acts on an answer before `settle_question` has answered
@@ -991,13 +1027,20 @@ different reason.
 > is terminal the turn opens a new one (§12); where it is not, the turn resumes it.
 
 > **Normative.** `TurnOutcome.goal_engagement` carries **`reference: ReferenceOutcome |
-> None`** saying which of the four happened. **`ReferenceOutcome`** is a `StrEnum` valued
-> by lower-cased member name and **closed at exactly four members**, decided in this order,
-> so that the answer is deterministic across implementations: **`UNKNOWN`** (no such
-> question), **`EXPIRED`** (its deadline had passed, whether this turn settled it or an
-> earlier read did), **`ALREADY_SETTLED`** (answered, withdrawn or superseded before this
-> turn arrived), **`ANSWERED`** (this turn took it). The vocabulary is added to and never
+> None`** saying what became of the turn's reference. **`ReferenceOutcome`** is a `StrEnum`
+> valued by lower-cased member name and **closed at exactly four members**, decided in this
+> order, so that the answer is deterministic across implementations: **`UNKNOWN`** — the
+> reference named no question and no goal this store holds; **`EXPIRED`** — the question's
+> deadline had passed, whether this turn settled it or an earlier read did;
+> **`ALREADY_SETTLED`** — the question was answered, withdrawn or superseded before this
+> turn arrived; **`ANSWERED`** — this turn took it. The vocabulary is added to and never
 > renamed.
+
+> **Normative.** **`reference` is `None` on a turn that carried none, and on a `goal_id`
+> reference that resolved.** A resolved goal reference has nothing to report beyond the
+> engagement itself, which `disposition` already carries as `RESUMED` or `REOPENED` (§5);
+> a `goal_id` naming no goal this store holds is `UNKNOWN`, and the turn is then associated
+> by §3 like any other.
 
 > **Normative — decision 3, as the rule for a late answer.** After an answer the turn
 > **briefly restates the understanding** — which is §5's revision sentence, owed here
@@ -1066,3 +1109,759 @@ during investigation advances the goal's `version`, which is what §8's stale-ta
 on, and leaves the attempt where it stood."* So the plan the paused turn made is stale by
 construction the moment the answer is recorded, and §8's stale-target refusal is what stops it
 being driven. **Nothing new enforces that**; the rule ADR-0249 already landed does.
+
+### 12. Expiry, withdrawal, supersession, abandonment, and which user acts open an attempt
+
+> **Normative.** **An expiry is settled and is never inferred.** A question whose
+> `expires_at` is at or before the clock's reading is settled `EXPIRED` by the **first
+> operation that reads it** — a `record_question` on the same goal, an `open_question`
+> read, an `outstanding_questions` enumeration, or a turn whose reference names it. The
+> settlement clears the content (§8) and moves **nothing else**: not the goal's status, not
+> the attempt's state, not `last_engaged_at`.
+
+> **Normative.** **A goal whose question expired is still paused and still resumable.** Its
+> attempt stays `AWAITING_CLARIFICATION`, it stays in the candidate set, it stays engageable
+> by an ordinary turn, and **no lane reads an expiry as a refusal, an abandonment, a denial
+> or a decision of any kind.** Decision 2 binds here in terms: *"Silence is neither refusal
+> nor abandonment."*
+
+> **Normative.** `AssistantEngine` gains **`async def withdraw_clarification(self,
+> question_id: Identifier, /) -> ClarificationWithdrawal`**. It settles an `OPEN` question
+> `WITHDRAWN`, clearing its content in the same step and freeing the goal's one question
+> slot. **It takes no reason, no free text and no deadline.**
+
+> **Normative.** `core/types.py` gains **`ClarificationWithdrawal`**, a `StrEnum` valued by
+> lower-cased member name and **closed at exactly two members**: `WITHDRAWN` and
+> `NOTHING_TO_WITHDRAW` — the question is already terminal, or no such question exists. An
+> unknown id is `NOTHING_TO_WITHDRAW` and **never a raise**, which is
+> `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception` binding at this
+> seam.
+
+> **Normative.** **Withdrawing removes the question and not the pause.** The attempt stays
+> `AWAITING_CLARIFICATION` and the goal stays open; what the act buys is the freedom to ask
+> again, which is exactly what the one-open rule's genuine constraint (§8) is about. A
+> withdrawal **records no answer**, revises no interpretation and engages no goal — the
+> difference from an answer, on ADR-0244 §11's own distinction between a denial and a
+> cancellation: *"a denial is the user answering *no* and is a ruling; a cancellation is the
+> user withdrawing the question and is not one."*
+
+> **Normative.** **`SUPERSEDED` has exactly one producer: opening a new attempt on a goal
+> whose earlier attempt's question is still `OPEN`.** That act settles the question
+> `SUPERSEDED` in the same sequence that opens the attempt. **Nothing else writes it** — not
+> a revision, not an expiry, not a second question, not a withdrawal.
+
+> **Normative.** **No terminal disposition is inferred from silence.** A question is `OPEN`
+> until something settles it; `OPEN` is never read as answered, as declined, or as
+> permission to act; and there is no timeout, retry, sweep or reclaim that revises an
+> understanding the user did not answer for.
+
+> **Normative — which user acts open an attempt**, settling the half ADR-0249 §13 leaves to
+> A2. Exactly three, and **no non-user act opens one**:
+>
+> 1. A turn that **opens a goal** opens that goal's first attempt.
+> 2. A turn that **reopens a closed goal** opens a new attempt, which is ADR-0249 §5's *"A
+>    reopened goal starts a new attempt"* binding entire.
+> 3. A turn that **associates to an open goal whose current attempt is in a terminal
+>    `AttemptState`** — `CANCELLED` or `ENDED` — opens a new attempt.
+>
+> **An answer to a clarification opens none** (§11), a resumed park opens none, a resumed
+> step opens none, and a turn that associates to a goal whose attempt is non-terminal opens
+> none. **A3 may name further acts for the investigation loop and may name none that is not
+> a user act**, which is ADR-0249 §5's clause and is not reopened here.
+
+> **Normative.** **A new attempt opens at `UNDERSTAND`** (ADR-0249 §6) and carries **no
+> reference of the attempt it follows**: `plan_ids`, `execution_ids` and
+> `authorization_ids` each start empty. What ties the two together is the **goal**, which
+> is what ADR-0249 §5 means by *"Plans, executions and authorizations are referenced by id
+> and never inlined"* — the goal's record is the join and an attempt-to-attempt pointer
+> would be a second one.
+
+> **Normative — `GoalStatus.ABANDONED` and its one producer.** `AssistantEngine` gains
+> **`async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment`**, and **it is
+> the only thing in this system that writes `ABANDONED`.** No expiry, no silence, no
+> timeout, no sweep, no reclaim, no model output and no inference writes it.
+> `core/types.py` gains **`GoalAbandonment`**, a `StrEnum` valued by lower-cased member name
+> and **closed at exactly three members**: `ABANDONED`, `ALREADY_CLOSED` and `NO_SUCH_GOAL`.
+
+> **Normative.** **Abandoning writes the goal's status through `PlanStore.set_goal_status`
+> (§9) and settles its open question `WITHDRAWN`, and does nothing else.** It does **not** move the attempt's state, does not
+> write an `AttemptOutcome`, does not end an execution and does not cancel anything in
+> flight: **what becomes of an attempt on an abandoned goal is A9's** (§17), and ADR-0249
+> §4's rule that *"An attempt reaching a terminal state **does not** move the goal's
+> status"* is obeyed in the direction it is stated and not inverted here. An abandoned goal
+> leaves the open set (§1), so nothing associates to it and nothing plans for it.
+
+> **Normative.** **`GoalStatus.BLOCKED` gains no producer here.** ADR-0249 §4 reads
+> *"`ABANDONED` and `BLOCKED` likewise gain no producer here; which act writes each is A2's
+> and A3's **respectively**"* — so `BLOCKED` is **A3's**, and no clause of this decision, and
+> no lane implementing it, writes it. **`GoalStatus.ACHIEVED` likewise gains none**, which
+> is A10's and the owner's correction 2.
+
+**Expiry settled by the next reader rather than by a sweep, on ADR-0244 §10's own reason.**
+That decision settles an expired park *"at the first operation that reads it"* and states why
+it is safe: there is no live answerer for the settlement to race, because the answer path
+refuses an expired row before it acts. The same holds here — a reference naming an expired
+question is `EXPIRED` and never `ANSWERED` — so no scheduler, no job and no background pass is
+added, and ADR-0083 §7's *"no job gets new store surface"* is not reached.
+
+**Why `SUPERSEDED` exists and has exactly that producer.** Without it, a user who reopens a
+completed goal while an old attempt's question is still open would have a question bound to an
+attempt that is over: answering it would resume an attempt the new one replaced, and not
+answering it would block the new attempt from asking anything. Settling it in the same
+sequence that opens the attempt closes both, and naming a single producer is what stops a
+later lane inventing a second one — a supersession written on every revision would settle
+exactly the questions whose answer is the revision the user is about to give.
+
+**And the abandonment is a user act because ADR-0249 §4 defines the member as a decision
+nobody but the user can take.** `ABANDONED` means *"was given up"*, and a system that writes
+it from an expiry writes that the user gave up because they did not reply within a window —
+which is decision 2's prohibition stated as an implementation. One explicit act, one
+disposition, and the alternative refused by name.
+
+### 13. Reopening, and resumption from another conversation by explicit reference
+
+> **Normative.** **A closed goal is reopened by a turn that associates to it**, by any path
+> of §3: a `TurnReference` naming it, or an `ASSOCIATES` verdict whose label resolves to it.
+> Reopening writes `GoalStatus.ACTIVE` through `PlanStore.set_goal_status` (§9), opens a new
+> attempt (§12) and engages the goal (§1),
+> and the outcome's `EngagementDisposition` is `REOPENED`, which §5 makes an announced case.
+
+> **Normative.** **Reopening preserves everything the goal holds.** Its interpretation chain
+> is appended to and never reset, its `interpretation_elided` count is not touched, its
+> `conversation_id` is not rewritten, its earlier attempts stay exactly as they stand with
+> their outcomes and their references, and **no effect any earlier attempt produced is
+> replayed, undone or re-attempted.** ADR-0249 §1's append-only rule binds entire.
+
+> **Normative — decision 5.** **A goal is resumed from another conversation by explicit
+> reference and by that alone.** The reference is a `TurnReference` carrying a `goal_id`
+> (§11), performed from a surface listing the user was shown (§15). **There is no automatic
+> cross-conversation association**: no candidate set of any conversation is widened to
+> another's goals, no search, ranking or match runs across conversations, and no model is
+> ever shown a goal of a conversation other than the one the turn is running in.
+
+> **Normative.** **The reference quotes no internal identifier to any model.** The `goal_id`
+> is resolved by `orchestration` before any call is made; the candidacy carries no
+> identifier at all (§4); and on the turn a reference fires, **no `associate` call is made**
+> (§3 step 1). A goal id therefore reaches a model on no path of this decision.
+
+> **Normative.** **`Goal.conversation_id` keeps its provenance meaning while a second
+> conversation engages the goal.** It is written once, at the opening, and is **never
+> rewritten**; what the second conversation moves is `last_engaged_in` (§1), which is a
+> separate field with a separate meaning. So the record still answers *"where did this
+> objective come from"* truthfully after any number of cross-conversation resumptions, which
+> is the question ADR-0249 §1 put the field there to answer.
+
+> **Normative.** **A goal engaged from a second conversation becomes a candidate there and
+> stays one until a third engages it** (§2), and becoming a candidate is not an association:
+> every later turn of that conversation still resolves its goal by §3 over the whole set.
+
+> **Normative.** **A reference resolves against the `PlanStore` and against nothing else.**
+> A goal whose row `PlanStore.delete_goal` removed resolves to nothing and the reference is
+> `UNKNOWN`; a goal whose **conversation** was deleted keeps its row and **stays
+> referenceable**, because ADR-0074 §8's deletion reaches episodes, the index and the
+> conversation record, and **this decision adds no cross-store deletion of its own** (§17).
+> Such a goal is a candidate in no conversation but the one that next engages it, which is
+> the honest state and not one to repair.
+
+**This is the owner overruling the design report, and the mechanism is the cheap middle option
+that report named.** Its recommendation was *"no, in this design"*, with the gap named:
+*"yes-by-association would need a cross-thread candidate set nothing in the corpus has;
+yes-by-explicit-reference is the cheap middle option if the owner wants it, and is additive
+later."* The owner wanted it, and it is additive exactly as described: the reference path (§3
+step 1) already exists for the question handle, so cross-conversation resumption is that path
+given a second shape rather than a second mechanism.
+
+**Why `last_engaged_in` rather than requiring the reference every turn.** The alternative —
+candidacy strictly by `conversation_id` — would make a resumed goal invisible to the very next
+turn, so *"actually, make it Sunday"* the turn after a resumption would find nothing and open
+a duplicate goal. That is not "explicit reference is supported"; it is "one turn may borrow a
+goal". One field, one writer, and the property decision 5 actually asks for: **the user points
+once and the work is here.** What is still not built is any way for the system to find a goal
+in another conversation on its own, which is the half the owner deferred.
+
+**What this costs, stated rather than hidden.** A goal's candidate membership is now a
+two-field test rather than a one-field one, and a goal that has moved between conversations is
+a candidate in **two** of them — the one that opened it and the one that last engaged it. That
+is the honest reading of what happened to it, and the cap (§2) bounds what either set costs.
+A goal that has moved through five conversations is a candidate in two, not five, because
+`last_engaged_in` holds one value; the other three reach it by reference, which is the same
+route they used the first time.
+
+### 14. Pauses as the user experiences them, and the elision the reply discloses
+
+> **Normative — decision 1, as a rule and not a judgement.** **A paused goal is mentioned in
+> exactly two places and in no other:**
+>
+> 1. the reply of the turn that **associated to it** — which is §5's announcement, owed
+>    because the disposition is `RESUMED` or `REOPENED`; and
+> 2. the reply of a turn whose association came back **`UNDECIDED`** with that goal among
+>    the labels the model named — the ask (§3) names the goals it is asking between.
+>
+> **No turn mentions a paused goal it neither associated to nor asked about**, and in
+> particular **no turn mentions one merely because it is a candidate.** A user who asks an
+> unrelated question is answered, and their reply says nothing about the campsite.
+
+> **Normative.** **No notification, no interruption and no proactive contact** is produced
+> for a paused goal, an outstanding question, an expiring question or an expired one (§10).
+
+> **Normative — decision 2's telling.** **An expiry is explained on the turn it becomes
+> relevant and on no other.** Where a turn's reference names a question this decision
+> settled `EXPIRED`, or names one already `EXPIRED`, `goal_engagement.reference` carries
+> `EXPIRED` and the reply says that the question expired and that the goal is still being
+> worked on. **No turn announces an expiry it did not encounter**, and no sweep announces
+> one at all.
+
+> **Normative.** **Where the candidate set was capped, the reply says so on the turns where
+> it could have mattered.** Where `elided` is non-zero and the association came back
+> `UNDECIDED` or `FRESH`, the reply states that older goals were not considered and that one
+> may be named directly. **On an `ASSOCIATES` or a `CONTINUES` the elision is not
+> mentioned**: a goal was found, and reciting what was not looked at would be noise on the
+> turns the mechanism worked.
+
+**"Relevant or useful" made checkable, which is what the owner's ruling needs to be
+implementable.** The ruling reads *"A paused goal is mentioned once when relevant or useful,
+not automatically on the next unrelated turn."* Relevance is not a judgement any two
+implementations would make alike, so it is read as the two places where the association
+machinery has **already established** relevance: the turn that went to the goal, and the turn
+that could not tell whether it should. The "once" then falls out of the structure rather than
+needing a marker on the record — a resumption is a resumption exactly once, because the next
+turn on that goal is a `CONTINUED`, and an ask is settled by the answer.
+
+**And the prohibited case is prohibited explicitly, because it is the tempting one.** A
+system that knows a goal is paused wants to say so, and the next unrelated turn is where it
+would. The owner ruled against it; the clause above is that ruling written as a place the
+sentence may not appear, which is how a reviewer can check it.
+
+**Why the elision is disclosed on exactly two of the four dispositions.** ADR-0086 §4 refuses
+a silent elision because *"A displaced citation that leaves no trace would make a belief report
+a narrower warrant than it has, which is a *false* answer to the one question the provenance
+display exists to answer."* The question the candidate set exists to answer is *which of your
+goals is this about*, and the only answers a cap can falsify are the two that say **none of
+them** — `FRESH` opens a goal that may duplicate an elided one, and `UNDECIDED` asks between a
+set that may be missing the right answer. `ASSOCIATES` and `CONTINUES` found a goal, and an
+elision cannot have made either false.
+
+### 15. What the surfaces owe, and the names they do not take
+
+> **Normative.** `AssistantEngine` gains **`async def goals(self, *, limit: int =
+> DEFAULT_PAGE_SIZE, offset: int = 0) -> tuple[GoalSummary, ...]`**, the listing from which
+> a user learns what is outstanding and obtains the references §11 and §13 take. It is
+> paged on ADR-0085 §3's own convention and answers no total count, on ADR-0074 §2's
+> ground.
+
+> **Normative.** `core/types.py` gains **`GoalSummary`**, a frozen model with
+> `extra="forbid"` whose fields are exactly: `id`, an `Identifier`; `outcome`, a
+> `NonBlankEncodableText`; `status`, a `GoalStatus`; `paused`, a `bool`;
+> `last_engaged_at`, a `UtcInstant | None`; and `clarification`, a `Clarification | None`
+> carrying the goal's open question where one stands. **It carries no attempt id, no
+> revision number, no element, no ground, no evidence reference and no plan.**
+
+> **Normative.** **`paused` is computed and never stored**, by ADR-0249 §5's own
+> definition: the goal's status is `ACTIVE` and its current attempt's state is
+> `AWAITING_CLARIFICATION`, `AWAITING_AUTHORIZATION` or `BLOCKED`. **The engine computes
+> it**, so that two surfaces cannot render it differently — which is why ADR-0249 §5 states
+> the derivation once — and **no adapter derives it**.
+
+> **Normative.** **The command line and the browser both implement this decision.** Each
+> renders a raised clarification in the exchange that raised it, lists outstanding goals and
+> their questions, carries an answer with its reference, and offers the withdrawal and the
+> abandonment acts. A **spoken** channel renders none of the acts and its reply is the whole
+> of what the user is told, which is ADR-0244 §13's placement posture unchanged;
+> `SpokenTurn` gains nothing.
+
+> **Normative.** **A surface that renders no statement for a `ReferenceOutcome`, an
+> `EngagementDisposition` or a `ClarificationWithdrawal` member it was given has not
+> implemented this section** — it is not permissibly degraded, which is ADR-0242 §9's last
+> clause read here.
+
+> **Normative.** **No adapter reads a store, joins a row, computes a member or composes a
+> reply.** Rendering a fixed statement per enum member is presentation (ADR-0242 §9), and
+> golden rule 3 binds: `interfaces/` gains no read of a `Goal`, a `GoalAttempt`, a
+> `GoalQuestion`, a `GoalCandidates` or a `PlanStore`, and ADR-0042 §6's prohibition stands
+> word for word.
+
+> **Normative.** **The names are new and overload none.** `AssistantEngine.questions`,
+> `AssistantEngine.answer`, `AssistantEngine.forget_question`, the CLI's `assistant
+> questions`, `assistant answer` and `assistant forget-question`, and the type `Question`
+> with its `QuestionState` are **ADR-0078 §8's deferred memory questions** and are untouched
+> by this decision: it adds no member to them, changes no argument of them, and renames
+> nothing. **No surface of this decision presents a goal clarification in the same list, the
+> same command or the same vocabulary as a memory question.**
+
+> **Normative.** **No statement rendered for any member of this decision's vocabularies
+> carries** a record identifier other than the question id the answer act requires, a
+> destination, an account identity, a provider name, a query or any fragment of one, a
+> monetary figure, a budget, a threshold or a `Settings` field name. That is ADR-0242 §9's
+> bar binding on these vocabularies as it binds on that one, and for the same reason.
+
+**The question id is rendered because the act takes it, and that is the tree's own
+pattern rather than an exception carved here.** ADR-0078 §8's `Question.id` is documented as
+*"The question's id, which `answer` and `forget_question` take"*, and the CLI has printed it
+since. A surface that showed a question but no way to name it would have put a question the
+user cannot answer, and the alternative — a re-minted opaque handle — is ADR-0052 §1's
+machinery bought for a record that is already durable (§11). What the bar above forbids is
+everything else.
+
+**Two goal-shaped things with the same English word is the confusion this section is written
+to prevent.** A deferred memory question asks *may I believe this about you*, is answered
+yes-or-no, and its answer writes a belief. A goal clarification asks *which of two things did
+you mean*, is answered in words, and its answer revises an interpretation. Sharing a command
+would make the binary answer reachable for a question that has no binary answer, and would
+make `assistant questions` a list of two kinds nobody asked to see together.
+
+### 16. The writer clauses
+
+> **Normative.** **`orchestration` writes every value this decision adds, and no model
+> writes any of them.** Focus (§1), the association outcome (§3), the goal a turn is
+> associated to, the question's id, its `asked_at`, its `expires_at`, its `attempt_id` and
+> every disposition it ever carries (§§8–12), the attempt-opening act (§12), the goal's
+> status through `set_goal_status` (§§9, 12, 13) and the engagement announcement (§5) are each stamped by the loop from the
+> injected clock, the injected id factory and typed outcomes.
+
+> **Normative.** **What a model supplies is exactly three things**, and each is a judgement
+> about meaning: an `AssociationVerdict` with its labels (§4), a `ProposedQuestion`'s `text`
+> and `about` (§7), and — through ADR-0249 §7, unchanged — a `ProposedUnderstanding`. **No
+> model supplies an identifier, an instant, a disposition, a status, a phase, a state, a
+> deadline or a count**, and a value coming back carrying one has it **discarded silently**,
+> which is ADR-0249 §6's posture and ADR-0228 §5's before it.
+
+> **Normative.** **No model output clears anything.** ADR-0249 §7's asymmetry binds this
+> decision entire: *"A model may never clear a permission, a coverage test, a prerequisite
+> or a dependency."* An association is not an authorization, a `FRESH` verdict is not a
+> finding that no goal applies to anything, and the absence of a `ProposedQuestion` is not a
+> finding that nothing is ambiguous — it is the absence of a report.
+
+> **Normative.** **No interface adapter authors any of them either.** Golden rule 3 and
+> ADR-0042 §6 bind: an adapter relays a reference the user gave it and renders what the
+> outcome carries, and derives, defaults, composes and synthesises nothing — which is
+> ADR-0177 §1's *"the gateway derives none of them, defaults none of them, composes no
+> operation out of two, and synthesises no result from a call it did not make"*.
+
+### 17. What this ADR does not decide, by name, each with what fires it
+
+> **Normative.** This decision settles nothing about the following, and no lane cites it
+> toward any of them.
+
+- **`GoalStatus.BLOCKED`'s producer, the bounded investigation loop, the per-attempt
+  allowance and its reserve, progress and stopping, and any further member of
+  `AttemptEffort`.** A3, by ADR-0249 §4 and §13. Fired by this ADR landing.
+- **Whether the association call is counted against, or changes, any per-turn model-call
+  budget.** ADR-0228 §3's figure is a bound on `Planner.plan` and is untouched (§4);
+  whether a turn's **total** model calls acquire a bound of their own is A3's, which owns
+  the effort ledger. Fired by an ADR against ADR-0228 §3's own reservation of that figure.
+- **`GoalStatus.ACHIEVED`, verification against the goal's criteria, and which
+  `AttemptOutcome` member an attempt earns.** A10, by ADR-0249 §4. This decision supplies
+  none, which is the owner's correction 2.
+- **What becomes of an attempt on an abandoned goal, and cancellation generally.** A9.
+  §12 writes the goal's status and nothing on the attempt.
+- **`GoalEvidence`, evidence standing, and what "recheck evidence" compares.** A4. §11
+  states what "recheck" means until A4 lands and names A4 as what extends it.
+- **Authorization coverage, and what "recheck authorization" compares beyond the gates
+  that already run at dispatch.** A6. §11 likewise.
+- **Whether a `GoalQuestion` ever earns a notification.** Deferred by name. Fired by an
+  ADR that mints a `NotificationCandidate` producer with its class, its reach level and its
+  budget under ADR-0130 §§5–7. §10 makes the absence of a producer this decision's ruling
+  and not an oversight.
+- **Automatic cross-conversation association.** Deferred by the owner's decision 5, and
+  §13 forecloses nothing: a candidate set that spanned conversations, and whatever would
+  bound it, is what such a decision would have to supply.
+- **Whether a question may be asked outside a planner's return** — by the composing stage,
+  by a driver, by a verification. Fired by A5, A7 or A10 needing one. §6's three
+  conditions are stated over a `ProposedQuestion`, and a second raiser would need its own
+  subject and its own materiality test.
+- **Whether ADR-0244 §3's one-open-park-per-conversation rule survives ADR-0247 §5.**
+  Booked by the owner on 2026-09-12 (decision 9) as a separate contract review, and
+  **untouched here**. §8's one-open rule is **per goal** and is a different rule about a
+  different record with a different constraint; nothing in this decision reads, relies on or
+  disturbs that clause.
+- **A retention horizon for a goal row.** §2 mints none, on decision 4. Fired by a lane
+  that needs one, which would owe its own export, deletion and disclosure obligations.
+- **Any cross-store deletion beyond `delete_goal`'s cascade.** §9's cascade is internal to
+  one store; ADR-0074 §8's conversation deletion is untouched and reaches no goal.
+
+### 18. Records owed on earlier ADRs, under ADR-0082 §1
+
+**ADR-0249 §7 — partially superseded**, in `ProposedUnderstanding.questions`'s element type
+alone, and §7 above states the showing. A reader holding only ADR-0249 builds a
+`ProposedUnderstanding` whose `questions` are bare strings, which after this decision does not
+construct — ADR-0070 §1's test on the supersession side. **Everything else about that field is
+fulfilled rather than moved**: it is still carried, still the planner's, still read by no lane
+of ADR-0249, and §7's own sentence — *"**what a raised question becomes is A2's**"* — is what
+this decision does. §7's `Planner.plan` roster, its `PlannerOutput` enumeration, its
+retained-or-restated validator, its retention clauses, its `ProposedElement` shapes, its
+ground resolution and its refusals, its minted-record clause and its
+interpretation-is-the-model's asymmetry all bind entire and are the grounds §§6–7 reason from.
+
+**ADR-0249 §1 — partially superseded**, in the `Goal` model declaration's field count alone.
+`Goal` gains `last_engaged_in`, so a reader holding only §1 authors a goal that never carries
+one and does not conform. The scope is the declaration: §1's `conversation_id`-is-provenance
+clause is **relied on as the ground for the new field**, §1's four-absences clause is
+**extended and not weakened** — the fifth absence has the same one route and the same
+no-lane-writes-`None` rule — and §1's `statement` projection, its append-only rule, its
+`version` clause and its elision reference are untouched. **§1's clause that *"no lane in this
+decision reads `last_engaged_at` for any purpose"* is fulfilled**, not superseded: it is a
+statement about ADR-0249's lanes and it stays true of them.
+
+**ADR-0014 §5 — partially superseded**, in the `PlanStore` member enumeration and the
+`PlanExport` shape, layering on ADR-0249 §12's record. §9 states the showing. §5's
+compare-and-swap discipline, its transitions-not-snapshots rule, its local-residency,
+export-completeness and deletion obligations bind entire and are what §9 reasons from; §5's
+charter sentence — *"Durable planning state belongs to `planning`, not to the wiring
+layer"* — is the ground §8 argues the store choice on.
+
+**ADR-0085 §3 — partially superseded**, in `converse`'s parameter list and in the roster's
+count. A reader holding only §3 writes a `converse` with no `reference` parameter, so a client
+answering a clarification has nowhere to name it — ADR-0070 §1's test on the supersession
+side. §3's spelled-out-annotation rule, its docstring obligations and §5's closed-graph
+obligation bind entire and are obeyed: `TurnReference`, `GoalSummary`, `Clarification`,
+`GoalEngagement`, `ClarificationWithdrawal`, `GoalAbandonment`, `EngagementDisposition` and
+`ReferenceOutcome` are `core` types reachable from the surface. **`converse_streaming` needs
+no record**: ADR-0173 defines it as taking exactly `converse`'s arguments in exactly its
+order, so it inherits the keyword by that clause.
+
+**ADR-0177 §1 — partially superseded**, in its thirty-operation enumeration alone, which gains
+`goals`, `withdraw_clarification` and `abandon_goal`. This is ADR-0200's precedent exactly —
+that decision recorded against the same clause when it added `converse_spoken` — and the scope
+is the enumeration and nothing else: §1's arguments-the-browser-owns clause, its
+caller-owned-deadline class (which gains no member, because none of the three takes a turn
+budget), its `learn`-is-unreached clause and its single-principal clause all bind entire.
+
+**One record that is *not* this decision's, and it is filed rather than folded in.** ADR-0244
+§11 added `cancel_read` to the promoted surface and §13 admitted the browser for it, and the
+gateway routes it — `("POST", "/confirmation/cancel-read"): "cancel_read"` in
+`interfaces/gateway/server.py` — but ADR-0244 recorded nothing against ADR-0177 §1's closed
+enumeration, and its own §21 does not list that ADR among the four it records against or the
+three it cites without one. That is ADR-0244's record to make, so it is **#2274** and not a
+clause of this document.
+
+**ADR-0244, ADR-0226, ADR-0228, ADR-0074, ADR-0086, ADR-0130, ADR-0052, ADR-0176, ADR-0211,
+ADR-0213, ADR-0042, ADR-0078 and ADR-0247 — relied on unchanged, and the showings are above.**
+**ADR-0244** is reused and not amended: §1's the-turn-does-not-park shape, §3's store
+properties, §9's one-member-per-fact widening of `TurnOutcome` and its own two members' mutual
+exclusion, §10's expiry-as-settlement and no-disposition-from-silence rules, §11's
+withdrawal-is-not-an-answer distinction and §13's surface posture are each read and applied;
+**its §3 one-open-park-per-conversation clause is untouched** and is the owner's separate
+review (§17). **ADR-0226 §3** is the labelling mechanism §3 and §7 resolve through, unchanged
+and unwidened. **ADR-0228 §3's bound is not reached** (§4), §5's persistence-site prohibition
+is obeyed, and §8's namer rule binds this decision's two seams. **ADR-0074 §2** supplies §1's
+timestamp argument and its tie-break, and §7 and §8 supply §2's retention reading; no clause of
+either moves. **ADR-0086 §4** supplies the disclosed-elision shape and its count-versus-flag
+test, and is not widened. **ADR-0130 §5** is cited to say that this decision reaches its
+chassis on no path. **ADR-0052 §1 is deliberately not extended** (§11), and a reader holding it
+does nothing wrong — a question is not a parked step. **ADR-0176 §1** supplies §4's asserted
+decline. **ADR-0211 §2's ruling is obeyed**: the associator's one value is a projection bought
+for containment and not packaging, exactly as ADR-0249 §7 says of `GoalBrief`. **ADR-0213 §4**
+supplies the fixed-constant shape for §2's cap. **ADR-0042 §6** and golden rule 3 are what §15
+binds the adapters under. **ADR-0078 §8's surface is untouched** (§15), so a reader holding it
+is not wrong about anything. **ADR-0247** is not reached at all: this decision touches no
+search, no provider, no draw and no admission.
+
+### 19. The lane cut, and the one lane that moves the wire
+
+> **Normative.** **Every lane of this decision lands after ADR-0249's L1, L2 and L3**, in
+> that order and without exception. M1 supersedes a type L1 lands and M3 threads code L3
+> writes, so a lane of this decision that landed first would either break the tree or
+> re-land ADR-0249's own diff.
+
+> **Normative.** The implementation lands in **four lanes**, in this order, each a separate
+> PR.
+>
+> - **M1 — the contract, the wire and the stored shapes, at unchanged behaviour.**
+>   `core/types.py` and `core/protocols.py` gain every type and member above — the
+>   `GoalAssociator` Protocol, `GoalCandidacy`, `CandidateGoal`, `GoalAssociation`,
+>   `AssociationVerdict`, `MAX_ASSOCIATION_CANDIDATES`, `GoalCandidates`,
+>   `ProposedQuestion`, `GoalQuestion`, `GoalQuestionDisposition`, `TurnReference`,
+>   `Clarification`, `GoalEngagement`, `EngagementDisposition`, `ReferenceOutcome`,
+>   `GoalSummary`, `ClarificationWithdrawal`, `GoalAbandonment`, `Goal.last_engaged_in`,
+>   `ProposedUnderstanding.questions`'s element type, `PlanStore`'s eight members,
+>   `PlanExport.questions`, `TurnOutcome`'s two members, `converse`'s keyword and
+>   `AssistantEngine`'s three operations. Both conforming `PlanStore` implementations, the
+>   `PlanStore` and `Planner` conformance suites and the canonical fakes in
+>   `ai_assistant.testing` gain the new obligations; the **`GoalAssociator` triad** —
+>   Protocol, shared conformance suite and canonical fake — lands whole; the plan store's
+>   migration lands; `Settings.goal_question_ttl` lands; and every call site is moved
+>   mechanically so the tree type-checks. **M1 moves `PROTOCOL_VERSION`, the plan store's
+>   `schema_version` and `PlanExport.schema_version`, and it is the only lane that moves any
+>   of them.** **No behaviour changes in M1**: no association is run, no focus is stamped,
+>   no question is raised and no reference is resolved.
+> - **M2 — the `planning` seam.** `planning/` alone: `planning/associator.py` implements
+>   `GoalAssociator` over a `ModelProvider` and nothing else that reads; `_render_request`
+>   renders the brief's `open_questions` and the envelope proposes `ProposedQuestion`
+>   values with their `about` labels.
+> - **M3 — the `orchestration` threading.** `orchestration/` alone: the candidate read and
+>   the association in `Engine`, the four engagement acts, the materiality test over the
+>   registry, raising and settling a question, opening attempts, `abandon_goal`, and the
+>   engagement and clarification members on the outcome.
+> - **M4 — the surfaces.** `interfaces/` alone: the CLI's and the browser's listing, answer,
+>   withdraw and abandon acts, and a rendered statement for every member of every vocabulary
+>   this decision adds.
+
+> **Normative.** **M1 is the one sanctioned cross-subsystem lane**, and it is sanctioned by
+> ADR-0137 §2, which makes *"the **contract triad together with its primary production
+> implementation** … one unit of work — one lane, one PR"* and fixes that *"Primary means
+> the consumer whose demands shape the contract, not the one that is cheapest to write"* —
+> here the `PlanStore` implementations, which the question record, its one-open gate, its
+> settlement, its cascade, its export and its migration are actually shaped by. **M2, M3 and
+> M4 are each one subsystem**, and no other cross-subsystem pairing is authorised.
+
+> **Normative.** **Every wire-visible change rides M1.** `TurnOutcome`'s two members,
+> `converse`'s keyword, the three promoted operations and `Goal.last_engaged_in` each make a
+> hub's turn or a client's call undecodable by a peer at the previous version, so splitting
+> them across lanes would leave two peers passing the exact-match handshake and then failing
+> to decode a turn — the failure ADR-0124 §9 exists to prevent. **The operator restarts
+> once.**
+
+> **Normative.** **The `GoalAssociator` triad is not deferred.** `CONTRIBUTING.md` →
+> "Adding a Protocol" binds: the Protocol, the shared conformance suite and the canonical
+> fake in `ai_assistant.testing` are one unit of work and land together, with the production
+> implementation following in M2 as the seam's second consumer.
+
+### 20. The arms this decision owes
+
+> **Normative.** The lanes implementing this decision owe representative-input tests for
+> each of the following, and a lane that lands without its arm has not discharged this ADR.
+
+1. **A first turn costs nothing new.** *"What is two plus two?"* on a conversation's first
+   turn: the candidate set is empty, **no `associate` call is made**, a goal is opened at
+   revision 1, and the turn's model calls are exactly today's — which keeps ADR-0249 §16 arm
+   1 true unchanged.
+2. **One candidate still costs a call.** The same request on a conversation holding one open
+   campsite goal: **an `associate` call is made**, a `FRESH` verdict opens a second goal,
+   the campsite goal's `last_engaged_at` is **unmoved**, and its interpretation chain gains
+   no revision. The arm fails if the answer is composed against the campsite goal or if its
+   revision count moves.
+3. **Two plausible campsites remain.** A goal whose brief carries two equally plausible
+   readings of *"our usual campsite"* and a plan proposing a side-effecting booking step:
+   the planner's `ProposedQuestion` is taken, a `GoalQuestion` is written, the attempt's
+   state is `AWAITING_CLARIFICATION`, its **phase does not move**, **no step is driven**,
+   and the outcome carries the clarification. The same turn with the registry declaring the
+   step **not** side-effecting and the subject a `constraints` element asks **nothing**.
+4. **The usual campsite resolves.** A planner that returns no `ProposedQuestion` on a
+   side-effecting plan: no question is written, the attempt is not paused, and the turn
+   proceeds — asserted so that the second materiality limb cannot become "ask whenever
+   acting".
+5. **Materiality by kind, over both tuples and the outcome.** A `ProposedQuestion` whose
+   `about` names a `criteria` element, one naming a `conditions` element, and one that is
+   `None`: each material on a turn proposing **no** side-effecting step. One naming a
+   `constraints` element on the same turn: **dropped**. And three that resolve to nothing —
+   a label outside the proposal's tuples, a label of a different tuple, and a label naming an
+   element ADR-0249 §7's ground resolution dropped — each **dropped** with the turn otherwise
+   unharmed. Where several come back, the **first** whose subject resolves and is material is
+   the one taken and every other is dropped.
+6. **The answer reaches the right goal across an unrelated turn and a restart (Q6).** A
+   paused campsite goal; an unrelated question answered normally with focus moving to the
+   new goal and the campsite goal's question still `OPEN`; the process restarted; then a
+   turn carrying the question's reference — which associates to the campsite goal with
+   **no** `associate` call, settles the question `ANSWERED`, resumes the **same** attempt at
+   the phase it stood, and records a revision.
+7. **Decision 3's late answer.** The same answer arriving after the attempt has been paused
+   for hours: the reply restates the revised understanding, a **fresh** `Planner.plan` call
+   is made over the new brief, nothing from the paused turn's supply or plan is reused, and
+   no second question is raised where the answer resolved the ambiguity.
+8. **An answer after expiry reopens rather than vanishes (decision 2).** The question is
+   settled `EXPIRED` and its content cleared; a turn carrying its reference still engages
+   the goal, `goal_engagement.reference` reads `EXPIRED`, the reply says the question
+   expired and the work continues, and **nothing reads the expiry as a refusal or an
+   abandonment.** The goal's status is still `ACTIVE`. And `Settings.goal_question_ttl` is
+   **refused at load** where it is zero or negative, and admits no disable spelling.
+9. **Decision 5: an explicit-reference resume from another conversation.** A goal opened in
+   conversation A and referenced by `goal_id` from conversation B: the turn associates to it
+   with no `associate` call, `conversation_id` still reads **A**, `last_engaged_in` reads
+   **B**, the goal is a candidate in **both**, and the **next** turn of B associates to it by
+   the ordinary rule. The arm fails if `conversation_id` moved or if the goal appears in a
+   third conversation's candidate set.
+10. **Never a silent rewrite.** Two open goals; an `associate` returning two labels: the
+    turn asks, opens no goal, records no revision, **engages neither goal** and drives
+    nothing. And an `ASSOCIATES` naming a label outside the candidacy's range: the same.
+11. **The announcement rule, over all four dispositions.** `RESUMED` and `REOPENED` each
+    produce the sentence; `CONTINUED` with `revised` `False` produces none; `OPENED` with
+    `revised` `False` produces none; and **any** disposition with `revised` `True` produces
+    one stating the revised outcome.
+12. **Focus, and the four acts that move it.** Each of §1's four acts advances
+    `last_engaged_at` and `last_engaged_in`; and a candidate-set read, an export, a
+    retrieval, an expiry, a withdrawal, an attempt transition and an `UNDECIDED` turn each
+    leave both untouched. Run against **both** conforming `PlanStore` implementations
+    through the shared suite.
+13. **The one-open-question gate, and both compare-and-swap writes.** Two
+    `record_question` calls on one goal: one succeeds and one answers `False`, with no
+    second row. Two `settle_question` calls on one question: one answers `True` and one
+    `False`, with the content cleared exactly once. Two `engage_goal` calls computed against
+    the same `expected_version`: one succeeds and one raises. All on **both**
+    implementations through the shared suite.
+14. **A refused question is not reported.** `record_question` answering `False`: the
+    outcome's `clarification` is `None`, the attempt's state is **not** moved, and the turn
+    still drives no side-effecting step.
+15. **The cap is bounded and disclosed.** A conversation with more than
+    `MAX_ASSOCIATION_CANDIDATES` goals: the candidacy carries exactly the cap in §1's order,
+    `elided` carries the true remainder, the reply discloses it on a `FRESH` and an
+    `UNDECIDED` and **not** on an `ASSOCIATES` or a `CONTINUES`, and no dropped goal is
+    rendered.
+16. **The namer rule, in two arms that assert only what is true.** **(a) Structural**:
+    `GoalCandidacy` and `CandidateGoal` carry **no field in which an identifier could
+    sit**, asserted over the two types' declared field sets. **(b) Behavioural**: given a
+    candidacy built from goals with distinctive ids and a turn carrying a `TurnReference`
+    with a distinctive `goal_id`, the prompt the production associator builds contains
+    neither string.
+17. **`set_goal_status` is the one status route, `ABANDONED` has exactly one caller of it,
+    and two statuses have none.** Over the
+    shipped tree, the only assignment of `GoalStatus.ABANDONED` under `src/` is
+    `abandon_goal`'s, the only `ACTIVE` one is the reopen path's, both go through
+    `set_goal_status`, and **no** assignment of `GoalStatus.ACHIEVED` or
+    `GoalStatus.BLOCKED` exists anywhere — asserted as a test over the tree, not as a review
+    convention, so that a later lane cannot supply one without the ADR that decides it. And
+    `set_goal_status` refuses a stale `expected_version` on **both** conforming
+    implementations through the shared suite.
+18. **`SUPERSEDED` has exactly one producer.** Reopening a closed goal whose earlier
+    attempt's question is still `OPEN` settles it `SUPERSEDED` and clears its content in the
+    same sequence that opens the new attempt; a revision, an expiry, a withdrawal and a
+    second question each settle nothing `SUPERSEDED`.
+19. **Which acts open an attempt.** Opening a goal, reopening one, and associating to a
+    goal whose current attempt is `ENDED` each open one at `UNDERSTAND` with empty id
+    tuples; answering a clarification, resuming a park, resuming a step and associating to a
+    goal with a live attempt each open **none**.
+20. **A migrated goal reads back and is a candidate.** A plan store at ADR-0249 §12's
+    version holding goals is opened and upgraded: each goal reads back with
+    `last_engaged_in` **absent** and no questions; a conversation's candidate set orders
+    such a goal **after** every goal carrying an engagement instant; and the goal is still
+    associable, still reopenable and still referenceable.
+21. **The export closes, and a settled question exports empty.** A `PlanExport` naming a
+    question whose `goal_id` the document does not hold does not validate; one whose
+    references all resolve does; a settled question exports with its content absent;
+    `schema_version` reads the new value and a document at the previous value does not
+    validate at all.
+22. **`delete_goal` reaches questions**, open and terminal alike, and an open question does
+    not block a deletion.
+23. **No notification is minted, on any path.** Raising a question, a question expiring, a
+    question superseded and a goal paused each produce **no** `NotificationCandidate`, no
+    `NotificationPolicy` call and no `NotificationStore` row — asserted over the shipped
+    tree, so that the absence of a producer is a fact rather than a reading of this
+    document.
+24. **The surfaces are separate.** `assistant questions` and `assistant answer` list and
+    answer **memory** questions only, and neither lists nor accepts a `GoalQuestion`; the
+    clarification acts neither list nor accept an ADR-0078 `Question`.
+25. **A turn that ends early persists nothing new.** A turn whose planner raises, one
+    rejected for capacity and one that fails before the planner is reached each leave **no
+    question row** and no engagement stamp — ADR-0228 §5's clause asserted over this
+    decision's record kinds as well.
+
+### 21. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+> **Normative.** This is a **substantive contract ADR** under `CONTRIBUTING.md` → "Contract
+> ADRs land before their implementation": it changes Protocols and `core` types that cross
+> subsystem boundaries. It ships as its own PR, is reviewed by **both** lenses while
+> `Proposed`, and is ratified only once that set is green on one tree (ADR-0015 §5,
+> ADR-0165). No implementation lands in this PR.
+
+**ADR-0070 §1's test is whether a reader holding only the earlier ADR would do the wrong
+thing, and it comes out on the supersession side five times.** A lane holding only ADR-0249 §7
+builds a `ProposedUnderstanding` that does not construct; one holding only ADR-0249 §1 authors
+a `Goal` missing a field `orchestration` must set; one holding only ADR-0014 §5 implements a
+store with no clarification and no engagement stamp; one holding only ADR-0085 §3 writes a
+`converse` a client cannot pass a reference to; and one holding only ADR-0177 §1 refuses three
+operations the browser now reaches. Each is named in the header with its scope and each has a
+dated note in the superseded document's own header, which is ADR-0082 §1's form.
+
+This ADR is marked, so ADR-0089 §3 governs: the block quotes above are the whole of what
+binds, and the prose beside them is read to determine what a marked clause means.
+
+## Consequences
+
+**What becomes possible.** A conversation can hold more than one objective and a turn can say
+which one it is about, which is the whole of what #2255's Q5 asked. A request the assistant
+did not understand can be put back to the user as a durable question bound to the objective it
+is about, answered a day later from any surface and across a restart, and resumed into the
+same attempt at the phase it stood. A finished objective can be picked up again without
+losing its interpretation history, and a goal can be carried into a second conversation by
+pointing at it once. `Goal.last_engaged_at`, `Goal.conversation_id` and
+`ProposedUnderstanding.questions` — three values ADR-0249 landed with nothing reading them —
+acquire their readers.
+
+**What becomes harder, and what it costs.** Every turn of a conversation that has ever opened
+a goal now makes one model call it did not make before, bounded by an eight-candidate prompt,
+and §3 argues why the cheaper heuristic is not available. `PlanStore` grows eight members, a
+second migration and a wider export, and both conforming implementations and the shared suite
+carry all of it. The promoted surface grows three operations and one keyword, so the wire
+moves and the operator restarts once. And a user can now be asked a question, which is a cost
+paid on every turn the model reports an ambiguity about a material subject — §6's three
+conditions exist to keep that cost proportional, and arm 4 is what stops the second
+materiality limb from becoming "ask whenever acting".
+
+**What is deliberately still missing.** A goal row has no retention horizon and nothing
+reclaims one; "recheck evidence and authorization" means replanning and the existing gates
+until A4 and A6 land; a paused goal earns no notification and no proactive contact; and
+nothing finds a goal in another conversation without the user pointing at it. Each is named in
+§17 with the condition that fires it.
+
+**What would trigger revisiting this.** A deployment that hits
+`MAX_ASSOCIATION_CANDIDATES` routinely would mean one conversation genuinely carries more live
+objectives than the cap admits, which is a signal about the product rather than a figure to
+raise. An association whose model call proves unreliable in the `UNDECIDED` direction — asking
+often where a person would not — would fire a decision about what else the candidacy should
+carry, which is the one value this decision deliberately kept at two fields. And A3's effort
+ledger reaching a per-turn model-call bound would be the lane that decides whether the
+`associate` call is counted.
+
+## Alternatives considered
+
+**Focus as a pointer on the conversation record.** Rejected on ADR-0074 §2's own reasoning: a
+mutable "the focused one" is a second authority two concurrent turns can race, and the loser's
+write leaves the conversation pointing at a goal neither turn engaged. A per-goal timestamp
+each turn writes on its own row cannot disagree with itself, and the derivation every reader
+computes is the same one.
+
+**One non-terminal goal per conversation, with a paused goal blocking a new one.** Rejected
+under the owner's standing rule and Q6. Its only ground was that association over one
+candidate is easier to get right than association over N, which is convenience, and the
+user-facing cost is that a paused campsite request would prevent answering an unrelated
+question or force a new conversation.
+
+**A recency tie-break instead of the ask.** Rejected: two labels come back exactly when the
+user is switching between two live things, so the tie-break revises the goal they were not
+talking about, and the wrongness is invisible until a later turn plans against it. Asking
+costs one sentence.
+
+**Association inside the planner's envelope.** Rejected as structurally circular:
+`Planner.plan` takes a `GoalBrief` projected from *the* goal's current interpretation
+(ADR-0249 §7, §9), so calling it requires already knowing which goal. Handing it every
+candidate's brief would give back the containment ADR-0230 §4 and ADR-0249 §9 bought, and
+would count against ADR-0228 §3's bound, which is A3's figure and not this decision's.
+
+**A second member on `ProposedUnderstanding` carrying question subjects.** Rejected as one
+value with two carriers: the texts and the subjects would be two tuples that can disagree in
+length and in order, which is the shape ADR-0249 §9 already refused when it declined the
+design report's separate `questions` keyword beside the brief's own field.
+
+**Keeping `questions` as bare texts and testing materiality over the text.** Rejected because
+the test would be a substring match between two free-text strings — material because a word
+recurred, not material because a synonym did — which is not a code test in the sense #2255's
+addendum demands, and which would make condition 2 a reviewer's judgement wearing a type's
+clothes.
+
+**A `GoalQuestions` Protocol and store of its own, mirroring `ParkedReads`.** Rejected on
+ADR-0244 §3's own argument read the other way: a park belongs in `permissions/` because it is
+*"the unanswered half of a recorded permission question"*, and a clarification is joined to no
+decision and gates no access. The deciding cost is deletion — a question's life is its goal's,
+and a second store would put it behind a second cascade with no transaction between the two,
+which is exactly the cross-store protocol ADR-0074 §8 had to ratify and which `PlanStore`
+makes unnecessary.
+
+**A dedicated `answer_clarification` operation.** Rejected: decision 3 requires the answer to
+restate, recheck and **proceed**, which is a planner call, a supply, a composition and a
+reply — everything `converse` already is. A second turn path is a path every later decision
+would have to be stated over twice.
+
+**A re-minted `ContinuationToken` for the question, on ADR-0052 §1's path.** Rejected as
+machinery bought for a record that is already durable. That path exists because a parked step
+lives in a process-scoped table (ADR-0042 §4); a `GoalQuestion` is a row, so the handle is its
+id and a restart changes nothing.
+
+**Writing `ABANDONED` on expiry, or on a long silence.** Rejected in terms by decision 2 —
+*"Silence is neither refusal nor abandonment"* — and by what the member means: a system that
+writes "the user gave up" because nobody replied within a window has recorded a decision
+nobody took.
+
+**A notification for an outstanding or expiring question.** Rejected here rather than ruled
+impossible. A `GoalQuestion` carries a required deadline and would satisfy ADR-0130 §5's
+perishability condition, so the reason none is minted is that a producer is a decision with
+its own class, reach level and budget, and this decision takes none — which is ADR-0244 §10's
+posture and the owner's decision 1.

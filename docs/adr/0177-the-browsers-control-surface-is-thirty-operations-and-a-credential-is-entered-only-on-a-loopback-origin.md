@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget)
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched)
 - Date: 2026-08-22
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
   and this note retires the count rather than correcting it.** The change carrying
@@ -185,6 +185,26 @@
   §8 says why that is the right way round.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-22**,
   the durability form ADR-0100 established. Refs #1230, #1365.
+
+- **Partially superseded: 2026-09-12 by ADR-0250 — §1's thirty-operation enumeration alone.
+  Nothing else in this ADR.** ADR-0250 is A2 of #2255, and its surface section requires the
+  browser as well as the command line to list outstanding goals and their clarifications,
+  carry an answer with its reference, and offer the withdrawal and the abandonment acts. So
+  the enumeration gains `goals`, `withdraw_clarification` and `abandon_goal`. A reader
+  holding only §1 refuses three operations the browser now reaches — ADR-0070 §1's test
+  coming out on the supersession side, and **ADR-0200's precedent exactly**, that decision
+  having recorded against this same clause when it added `converse_spoken`.
+
+  **The caller-owned-deadline class gains no member.** §1 fixes it at *"the turn budget
+  given to `converse`, `converse_streaming` and `resume`"* and `next_notification`'s; none
+  of the three new operations takes a turn budget, so the class is not widened *"by
+  resemblance"* and the clause binds entire.
+
+  **Nothing else moves.** §1's every-operation-reached-with-the-arguments-it-declares clause
+  and its *"the gateway derives none of them, defaults none of them, composes no operation
+  out of two, and synthesises no result from a call it did not make"* are what ADR-0250 §16
+  binds its adapters under rather than anything it relaxes; §1's `learn`-is-unreached clause
+  and its single-principal clause bind entire; and §§2-13 are untouched.
 
 ## Context
 
