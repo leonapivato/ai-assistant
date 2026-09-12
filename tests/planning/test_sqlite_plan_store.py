@@ -32,8 +32,9 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
-    AttemptPhase,
     AttemptTransition,
+    Goal,
+    GoalAttempt,
     GoalRevision,
     Ground,
     MemorySource,
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import Goal
     from ai_assistant.testing.cancellation import SuspendedCall
 
 
@@ -464,21 +464,122 @@ async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> N
         b.close()
 
 
-async def test_two_connections_serialise_an_interpretation_and_an_attempt(
+@contextlib.contextmanager
+def _entering_together(*stores: SqlitePlanStore, attribute: str) -> Iterator[None]:
+    """Hold each store's worker at a barrier on entry, so the calls genuinely overlap.
+
+    A gather alone leaves *whether* the two workers are inside their sync methods at
+    the same moment to the scheduler, and a case that only sometimes exercises the
+    invariant is not evidence about it — which is
+    :class:`~ai_assistant.testing.cancellation.ThreadSuspension`'s own stated reason,
+    applied to a pair of workers rather than to one.
+
+    Each wrapped method announces itself and waits for the other before doing anything,
+    so both read-compare-write sequences are in flight together and SQLite's
+    ``BEGIN IMMEDIATE`` is the only thing separating them. An implementation that read
+    and compared *outside* its transaction would have both workers read the same
+    version here and both write.
+
+    Args:
+        stores: The stores whose workers to synchronise — one call each.
+        attribute: The synchronous method to wrap.
+
+    Yields:
+        Nothing; the wrapping is in force for the block.
+    """
+    barrier = threading.Barrier(len(stores), timeout=5)
+    originals = [getattr(store, attribute) for store in stores]
+
+    def wrap(original: Callable[..., object]) -> Callable[..., object]:
+        def blocking(*args: object) -> object:
+            barrier.wait()
+            return original(*args)
+
+        return blocking
+
+    for store, original in zip(stores, originals, strict=True):
+        setattr(store, attribute, wrap(original))
+    try:
+        yield
+    finally:
+        barrier.abort()
+        for store, original in zip(stores, originals, strict=True):
+            setattr(store, attribute, original)
+
+
+async def test_two_connections_race_an_interpretation_and_one_loses(tmp_path: Path) -> None:
+    """ADR-0249 §12's first compare-and-swap, raced across **separate connections**.
+
+    This is the level at which "the read, the comparison and the write are **one
+    indivisible step**" is load-bearing: two stores over one file share no in-process
+    lock, so what serialises them is the ``BEGIN IMMEDIATE`` each write opens. Both
+    callers read version 0 first — the shape a real race has, two turns that each read
+    a goal and then commit — and both workers are held at a barrier until the other
+    arrives, so the two sequences are genuinely in flight together rather than
+    whenever the scheduler happens to interleave them.
+
+    **Exactly one lands**, and the stored history is the winner's. An implementation
+    that read and compared outside its transaction would let both through and leave a
+    goal at version 2 carrying a revision neither caller could have computed.
+
+    The loser's error is asserted as ``PlanningError`` rather than as
+    ``StaleExecutionError`` specifically: the ordinary outcome is the stale refusal,
+    but a caller whose wait for the write lock expires is refused by the driver
+    instead, and both are this layer's error and both are a loss.
+    """
+    path = tmp_path / "plans.db"
+    a = SqlitePlanStore(path=path, now=_fixed_now)
+    b = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await a.save_goal(_goal())
+        held_a = await a.get_goal("g1")
+        held_b = await b.get_goal("g1")
+        assert held_a is not None
+        assert held_b is not None
+        assert held_a.version == held_b.version == 0, "both read the same version"
+
+        with _entering_together(a, b, attribute="_record_interpretation_sync"):
+            settled = await asyncio.gather(
+                a.record_interpretation(
+                    GoalRevision(
+                        goal_id="g1",
+                        interpretation=_revision(2, outcome="a's understanding"),
+                        expected_version=held_a.version,
+                    )
+                ),
+                b.record_interpretation(
+                    GoalRevision(
+                        goal_id="g1",
+                        interpretation=_revision(2, outcome="b's understanding"),
+                        expected_version=held_b.version,
+                    )
+                ),
+                return_exceptions=True,
+            )
+
+        won = [one for one in settled if isinstance(one, Goal)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one write of a version lands"
+        assert all(isinstance(one, PlanningError) for one in lost)
+
+        stored = await b.get_goal("g1")
+        assert stored is not None
+        assert stored.version == 1, "one write, one version"
+        assert [one.revision for one in stored.interpretation] == [1, 2]
+        assert stored.statement == won[0].statement, "and the stored history is the winner's"
+    finally:
+        a.close()
+        b.close()
+
+
+async def test_two_connections_race_an_attempt_transition_and_one_loses(
     tmp_path: Path,
 ) -> None:
-    """ADR-0249 §12's two compare-and-swap writes, across **separate connections**.
+    """ADR-0249 §12's second compare-and-swap, on the same construction.
 
-    ``test_two_connections_serialise_a_compare_and_swap``'s construction over the two
-    writes ADR-0249 adds. This is the level at which §12's "the read, the comparison
-    and the write are **one indivisible step**" is actually load-bearing: two stores
-    over one file cannot share an in-process lock, so what serialises them is the
-    ``BEGIN IMMEDIATE`` each write opens — and an implementation that read outside its
-    transaction would let both callers through here while passing every single-store
-    arm in the shared suite.
-
-    Both readers take their version **before** either writes, which is the shape a
-    real race has: two turns that each read a goal at version 0 and then commit.
+    :func:`test_two_connections_race_an_interpretation_and_one_loses`'s reasoning
+    applied to ``commit_attempt``, because §12 states the rule of both writes and an
+    implementation can get one right and the other wrong.
     """
     path = tmp_path / "plans.db"
     a = SqlitePlanStore(path=path, now=_fixed_now)
@@ -486,56 +587,39 @@ async def test_two_connections_serialise_an_interpretation_and_an_attempt(
     try:
         await a.save_goal(_goal())
         await a.save_plan(_plan())
+        await a.save_plan(_plan(plan_id="p2"))
         await a.open_attempt(_attempt())
-
-        held_a = await a.get_goal("g1")
-        held_b = await b.get_goal("g1")
+        held_a = await a.get_attempt("a1")
+        held_b = await b.get_attempt("a1")
         assert held_a is not None
         assert held_b is not None
-        assert held_a.version == held_b.version == 0, "both read the same version"
+        assert held_a.version == held_b.version == 0
 
-        await a.record_interpretation(
-            GoalRevision(
-                goal_id="g1",
-                interpretation=_revision(2, outcome="a's understanding"),
-                expected_version=held_a.version,
-            )
-        )
-        with pytest.raises(StaleExecutionError):
-            await b.record_interpretation(
-                GoalRevision(
-                    goal_id="g1",
-                    interpretation=_revision(2, outcome="b's understanding"),
-                    expected_version=held_b.version,
-                )
+        with _entering_together(a, b, attribute="_commit_attempt_sync"):
+            settled = await asyncio.gather(
+                a.commit_attempt(
+                    AttemptTransition(
+                        attempt_id="a1", expected_version=held_a.version, add_plan_id="p1"
+                    )
+                ),
+                b.commit_attempt(
+                    AttemptTransition(
+                        attempt_id="a1", expected_version=held_b.version, add_plan_id="p2"
+                    )
+                ),
+                return_exceptions=True,
             )
 
-        stored = await b.get_goal("g1")
+        won = [one for one in settled if isinstance(one, GoalAttempt)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one transition of a version lands"
+        assert all(isinstance(one, PlanningError) for one in lost)
+
+        stored = await b.get_attempt("a1")
         assert stored is not None
-        assert stored.statement == "a's understanding", "the winner's, read back on the loser"
         assert stored.version == 1
-
-        attempt_a = await a.get_attempt("a1")
-        attempt_b = await b.get_attempt("a1")
-        assert attempt_a is not None
-        assert attempt_b is not None
-
-        await a.commit_attempt(
-            AttemptTransition(attempt_id="a1", expected_version=attempt_a.version, add_plan_id="p1")
-        )
-        with pytest.raises(StaleExecutionError):
-            await b.commit_attempt(
-                AttemptTransition(
-                    attempt_id="a1",
-                    expected_version=attempt_b.version,
-                    to_phase=AttemptPhase.EXECUTE,
-                )
-            )
-
-        settled = await b.get_attempt("a1")
-        assert settled is not None
-        assert settled.plan_ids == ("p1",)
-        assert settled.phase is AttemptPhase.UNDERSTAND, "the loser's move landed on nothing"
+        assert stored.plan_ids == won[0].plan_ids, "and the stored record is the winner's"
+        assert len(stored.plan_ids) == 1, "the loser appended nothing"
     finally:
         a.close()
         b.close()
