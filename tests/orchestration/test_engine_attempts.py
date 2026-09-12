@@ -947,3 +947,55 @@ async def test_a_resolution_that_reached_no_ruling_still_leaves_the_attempt_wait
     assert attempt.phase is AttemptPhase.VERIFY
     assert attempt.authorization_ids == (), "and no ruling was recorded to name"
     assert attempt.outcome is None, "nothing succeeded, so nothing is ANSWERED"
+
+
+async def test_a_recovery_that_overtakes_a_parking_turn_does_not_fail_it() -> None:
+    """§12's compare-and-swap has a loser, and the loser must not take the turn down.
+
+    A park is durably answerable from **inside** the drive: ``StepRunner.run`` commits
+    ``→ AWAITING_APPROVAL`` before it returns, so ``pending_confirmations`` can enumerate
+    it, mint a token and a ``resume`` can resolve it while the turn that made it is still
+    composing its "I need your approval" reply. ADR-0052 §2's recovery exists so that it
+    can, and no ordering inside this engine removes the window — the park is published by
+    the store, not by this method.
+
+    So the two writes a parking turn still owes its attempt can find the row moved on,
+    and both describe a state the attempt has provably left: one says
+    ``AWAITING_AUTHORIZATION``, which the answer made false, and the other adds to a
+    ledger §5 makes monotonic that the resolution has already advanced past. Raising
+    there would lose the whole turn — its capture and its reply — to preserve a field
+    about a moment that has passed.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateTheWaitingWrite(_Recording):
+        """Suspends the parking turn on the commit that records it is waiting."""
+
+        async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+            """Hold the first ``AWAITING_AUTHORIZATION`` write until released."""
+            if transition.to_state is AttemptState.AWAITING_AUTHORIZATION and not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await super().commit_attempt(transition)
+
+    plans = _GateTheWaitingWrite()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parking = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    (recovered,) = await harness.engine.pending_confirmations()
+    resumed = await harness.engine.resume(recovered.token, approved=True, timeout=PATIENT)
+    release.set()
+    parked = await parking
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED, "the recovery really answered"
+    assert parked.step is not None, "and the overtaken turn still returned its own outcome"
+    assert parked.step.confirmation is not None
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.state is AttemptState.ENDED, "the winner's record stands"
+    assert attempt.outcome is AttemptOutcome.ANSWERED
+    assert attempt.phase is AttemptPhase.VERIFY, "and nothing took it backwards"
