@@ -147,10 +147,16 @@ def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
     """§16: one stored-record version moves, and it is not one of this wire's.
 
     ``PlanExport`` carries ``tuple[GoalAttempt, ...]`` and every attempt in it now emits
-    ``kind``. The **plan store's** own marker stays at 2: ADR-0249 §12 moved it 1 → 2
-    because a version 1 ``goals`` row "no longer decodes", and a version 2 ``attempts``
-    row decodes here unchanged — ``kind`` defaults to ``None``, which is what makes no
-    migration owed rather than merely convenient.
+    ``kind``. The **plan store's** own marker did not move *for this decision*: ADR-0249
+    §12 moved it 1 → 2 because a version 1 ``goals`` row "no longer decodes", and a
+    version 2 ``attempts`` row decodes under this contract unchanged — ``kind`` defaults
+    to ``None``, which is what makes no migration owed rather than merely convenient.
+
+    **The two figures are floors rather than equalities**, and that is what keeps this
+    a statement about ADR-0251 rather than about whatever landed after it: a later
+    decision that moves either marker has not falsified anything this one claimed, and
+    would falsify an equality (`CONTRIBUTING.md` -> "No state claims in living
+    documents"). The absolute figures have exactly one home each.
     """
     from ai_assistant.permissions.parked_reads import (  # noqa: PLC0415 — asserted about
         _SCHEMA_VERSION as _PARKED_SCHEMA,
@@ -159,8 +165,16 @@ def test_the_document_version_moved_and_the_two_store_markers_did_not() -> None:
         _SCHEMA_VERSION as _PLAN_SCHEMA,
     )
 
-    assert PlanExport.model_fields["schema_version"].default == 9
-    assert _PLAN_SCHEMA == 2, "a version 2 attempts row decodes under this contract"
+    assert PlanExport.model_fields["schema_version"].default >= 9, (
+        "ADR-0251 §16 moved it to 9; a later decision moving it again is not a "
+        "violation of this one, and the absolute figure has its home in "
+        "tests/core/test_planning_types.py"
+    )
+    assert _PLAN_SCHEMA >= 2, (
+        "a version 2 attempts row decodes under *this* contract, which is why "
+        "ADR-0251 owed no migration; a later decision owing one is not a violation of "
+        "that, and the absolute figure lives in tests/planning/test_sqlite_plan_store.py"
+    )
     assert _PARKED_SCHEMA == 3
     assert ConversationExport.model_fields["schema_version"].default == 2
 
