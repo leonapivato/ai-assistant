@@ -1,6 +1,6 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's two enumerations, in their counts alone: `reply` is `None` on a fourth shape and `turn` on a second — the turn whose goal association came back `UNDECIDED`, which engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, and returns a `GoalDisambiguation` with no `TurnResult` and nothing composed. That one scope, and nothing else in this ADR: §4's both-directions rule binds entire and the new shape is stated in both, `reply_degraded` stays `True` on the composition-failure shape and on no other, §4's park clause, its recovered-park clause and its composition-failure clause are untouched, and §§1-3 and §§5-9 stand entire)
+- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand) and ADR-0197 (§4's second `None` shape and its two clauses stated in the "`turn is None`" direction, each only as it reaches an outcome carrying `TurnOutcome.routed`) and ADR-0250 (§4's `turn`-`None` enumeration, in its count alone: the turn whose goal association came back `UNDECIDED` engaged no goal, took no relevance read, no episodic supplement and no `Planner.plan` call, so it has no `TurnResult` — a second shape beyond the recovered park, returning a `GoalDisambiguation` beside a reply `orchestration` composed from that typed value. That one scope, and nothing else in this ADR: §4's `reply` enumeration does not move, the three shapes on which `reply` is `None` staying exactly the three it names; §4's both-directions rule binds entire and the new shape is stated in both; `reply_degraded` stays `True` on the composition-failure shape and on no other and is never `True` where `turn` is `None`; §4's park clause, its recovered-park clause and its composition-failure clause are untouched; and §§1-3 and §§5-9 stand entire)
 - Date: 2026-08-21
 - **Partially superseded: 2026-08-21 by
   [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
@@ -94,25 +94,30 @@
 
 - **Partially superseded: 2026-09-12 by
   [ADR-0250](0250-a-turn-finds-its-goal-before-it-plans-and-a-material-ambiguity-becomes-one-durable-question-bound-to-that-goal.md),
-  §4's two enumerations, in their counts alone. Nothing else in this ADR.** ADR-0250 is A2 of
-  #2255: a turn now finds which goal it is about before it plans, and where the association
-  is ambiguous it **asks which goal** rather than picking one.
+  §4's `turn`-`None` enumeration, in its count alone. Nothing else in this ADR.** ADR-0250 is
+  A2 of #2255: a turn now finds which goal it is about before it plans, and where the
+  association is ambiguous it **asks which goal** rather than picking one.
 
-  **That turn has no `TurnResult` and nothing to compose.** The association runs before the
-  relevance read, the episodic supplement and `Planner.plan` — an undecided turn makes none
-  of the three — so there is no goal, no plan and no retrieved supply to build a `TurnResult`
-  from, and no model call to compose a `reply` with. Its outcome carries `turn` `None`,
-  `reply` `None`, `reply_degraded` `False` and a `GoalDisambiguation` holding the candidate
-  goals' outcome statements. A reader holding only §4 refuses it, which is ADR-0070 §1's test
-  coming out on the supersession side.
+  **That turn has no `TurnResult`.** The association runs before the relevance read, the
+  episodic supplement and `Planner.plan` — an undecided turn makes none of the three — so
+  there is no goal, no plan and no retrieved supply to build one from. Its outcome carries
+  `turn` `None` beside a `GoalDisambiguation` holding the candidate goals' outcome
+  statements, and a reader holding only §4 refuses it, which is ADR-0070 §1's test coming out
+  on the supersession side.
 
   **This is ADR-0197 §8's move, taken a second time.** That decision admitted the first
   `turn`-`None` shape beyond the recovered park — *"a `None` `turn` beside a non-`None`
   `routed` may carry a `reply`"* — by naming the shape, admitting it in the validator and
-  recording the supersession. ADR-0250 does the same for the undecided association, and
-  carries the question as **structured data** rather than composed prose on §4's own
-  argument: *"a `reply` beside a parked confirmation is prose competing with a yes/no
-  question the user must answer, and the prose is what they will read."*
+  recording the supersession. ADR-0250 does the same for the undecided association.
+
+  **§4's `reply` enumeration does not move.** The undecided turn **carries** a reply, so the
+  three shapes on which `reply` is `None` are exactly the three this section names. The reply
+  is composed by `orchestration` from the typed value and never by a model, which is what §4's
+  own refusal is about — it declines *"a second, **model-written** account"* beside structured
+  data, and a sentence rendered from the structure is not a second account of it. It is
+  carried rather than left absent because ADR-0200 §4 rules that *"`spoken` is `None`
+  wherever `outcome.reply` is `None`"*, so an absent reply would answer a spoken request with
+  silence while waiting for an answer it never asked for aloud.
 
   **Nothing else moves.** §4's requirement that both invariants be stated *"in **both**
   directions"* as a `model_validator(mode="after")` binds entire and reaches the new shape;
