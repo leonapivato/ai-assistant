@@ -1,6 +1,6 @@
 # 250. A turn finds its goal before it plans, focus is the most recently engaged goal, and a material ambiguity the planner reported becomes one durable question bound to that goal
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0254 (one scope. §5's `TurnOutcome` member count and enumeration alone: the type gains a **fifth** `None`-defaulting member, `authorization`, carrying the coverage an authority the user opened before any concrete call established and the instant it expires, set on exactly the turn that wrote such a record and `None` on every other, so a reader holding only §5 authors an outcome type that cannot carry that announcement. The member exists **because** §5's grounding-only silence rule is untouched: *"A grounding-only revision is recorded and not announced"* leaves an opening instruction that only re-grounds an existing constraint unannounced, and §5's engagement carrier holds neither an expiry nor a coverage to render, so the safeguard could not be inherited from it and is stated on a carrier of its own with its own trigger — the record was written — and no materiality judgement anywhere in it. Every other clause of §5 binds entire, and two are what the new member rests on: *"No member is derived from another and a client renders each on its own"* is why a fifth sits beside the four rather than inside one, and *"The reply is composed by `orchestration` from the typed value, and no model writes it"* is the division it takes unchanged. §5's `GoalDisambiguation` clauses, its `UNDECIDED` outcome shape, its candidates rule and the outcome-shape count it takes from one decision over are untouched, as are §§1-4 and §§6-17)
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **two scopes, each narrow. §7's `ProposedUnderstanding` field enumeration, in one
@@ -69,6 +69,36 @@
   class (which gains **no** member, because none of the three takes a turn budget), its
   `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are
   untouched.
+
+- **Partially superseded: 2026-09-12 by ADR-0254 — §5's `TurnOutcome` member count
+  and enumeration alone. Nothing else in this ADR.** §5 rules that *"`TurnOutcome` gains
+  **four** `None`-defaulting members, one per fact"* and enumerates them. ADR-0254 §11
+  adds a **fifth**, `authorization`, carrying the coverage and the expiry of an authority
+  the user opened **before any concrete call existed** — *"you may spend up to fifty
+  pounds on this"* — so that an authority established without a confirmation is
+  nevertheless restated to the user on the turn that recorded it. A reader holding only §5
+  would author an outcome type that cannot carry it.
+
+  **The member exists because §5's grounding-only silence rule is untouched, which is the
+  part worth reading twice.** ADR-0254's first draft claimed the safeguard rode this
+  section's announcement rule. It cannot: an opening instruction can move an existing
+  constraint's ground from inferred to user-stated without changing its text, establish an
+  authority on that act, and be exactly the revision §5 requires to stay **unannounced** —
+  *"A grounding-only revision is recorded and not announced"*, because *"a sentence there
+  would announce a change the user cannot see"*. `GoalEngagement` also carries neither an
+  expiry nor a coverage to render. So the announcement is a member of ADR-0254's own, with
+  its own trigger — the record was written — and no materiality judgement in it.
+
+  **Everything else of §5 stands entire, and two of its clauses are what the new member
+  rests on.** *"No member is derived from another and a client renders each on its own"* is
+  why a fifth member sits beside the four rather than inside one, so an engagement
+  announcement and an authorization announcement can both be present, either alone, or
+  neither. *"The reply is composed by `orchestration` from the typed value, and no model
+  writes it"* is the division ADR-0254 §15 takes unchanged. §5's `GoalDisambiguation`
+  declaration, its two-shapes-of-`UNDECIDED` candidates rule, its one-outcome-shape clause
+  and its ADR-0170 §4 count are untouched, as are §§1-4 and §§6-17 — §6's three conditions
+  for putting a question conspicuously so, since ADR-0254 §9 makes them the whole of when
+  an ambiguous bound is asked about. Refs #2255.
 
 ## Context
 
