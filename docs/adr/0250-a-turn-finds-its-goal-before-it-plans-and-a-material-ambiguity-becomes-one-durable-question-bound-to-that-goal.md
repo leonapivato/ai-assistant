@@ -1575,58 +1575,37 @@ catches it, because what the turn did was `OPENED` whatever the model called it.
 > `GoalQuestion`, a `GoalCandidates` or a `PlanStore`, and ADR-0042 §6's prohibition stands
 > word for word.
 
-> **Normative — a candidate goal's stored outcome is supply, and ADR-0203 §1 binds it.**
-> On an operation whose output channel's audience is **unbounded** (`converse_spoken`, as
-> ADR-0200 §3 declares it), a `GoalCandidacy` (§4) carries **only** candidates whose current
-> interpretation's `outcome_ground` is `USER_STATED`. Every other candidate is **subtracted
-> before the `associate` call**, is rendered nowhere, carries no label, and **cannot be
-> associated to on that turn** — which is ADR-0203 §1's rule that withheld content *"reaches
-> no stage of that turn: not the planner, not the composing stage, and not whatever renders
-> what either produced"*, applied to the supply this decision adds.
+> **Normative — a turn on a channel of unbounded audience does not associate to a stored
+> goal.** On such an operation (`converse_spoken`, as ADR-0200 §3 declares it) **no
+> `GoalCandidacy` is built and no `GoalAssociator.associate` call is made**: §3's second step
+> governs and the turn **opens a goal of its own**, carrying revision 1 minted from this
+> turn's request (ADR-0249 §3). **No stored goal, no stored interpretation element, no
+> stored outcome statement and no stored question text reaches any stage of such a turn.**
 
-> **Normative.** **A `GoalDisambiguation` on such an operation carries only candidates that
-> survived that subtraction**, and a withheld candidate is neither named, counted in
-> `elided` (§2), nor described.
+> **Normative.** **So no `GoalDisambiguation` and no `RESUMED`, `REOPENED` or `CONTINUED`
+> disposition is reachable on such an operation**, and the brief its planner receives is a
+> revision-1 brief carrying this turn's own request, **no elements** and **no
+> `open_questions`** (ADR-0249 §9). A clarification that turn's planner raises is composed on
+> that turn over that supply and is spoken in the ordinary way (§10, §11).
 
-> **Normative — this decision places exactly one class, and ADR-0199 §3's floor is
-> untouched.** A goal outcome whose `outcome_ground` is `USER_STATED` is **content the owner
-> stated**: ADR-0249 §7 resolves that ground only by checking the text is a span of the
-> owner's own request, so its recorded origin is the owner and ADR-0199 §2's
-> decide-from-origin rule is satisfied without reading a word of it. It is **placed as
-> speakable** on a channel of unbounded audience. An outcome grounded `INFERRED` or
-> `FROM_EVIDENCE` is placed by no ratified ADR and is therefore withheld under ADR-0199 §3's
-> *"any content of a class no ratified ADR has placed as speakable on such a channel"*.
-> **ADR-0199 §3's Tier 0 floor is not relaxed**: no reply on any channel carries a Tier 0
-> value or a span of one, whatever a goal's ground says.
+> **Normative.** **This decision places no class as speakable and reads no ground for a
+> disclosure purpose.** `GoalInterpretation.outcome_ground` is not a disclosure marker, is not
+> read as one, and no lane admits stored goal content to an unbounded channel on the strength
+> of it. ADR-0199 §3's enumeration is untouched, its Tier 0 floor binds entire, and
+> ADR-0199 §2's *"No implementation, lane or later ADR may decide a class by reading …
+> a composed reply, or any other span of the content itself"* is obeyed by deciding nothing.
 
-> **Normative — the engaged goal's own outcome is the turn's subject and the subtraction
-> does not reach it.** ADR-0203 §4 rules that *"The turn's own **goal statement** is the
-> turn's subject and is not a member of the supply §1 subtracts from"*, on the ground that
-> the other reading *"would make no turn on such a channel answerable at all"*. So
-> `GoalEngagement.outcome` (§5) and `GoalBrief.outcome` are reached by no clause above; what
-> is subtracted is **other goals**, which are supply rather than subject.
-
-> **Normative.** **A withholding is deflected and never silently dropped.** Where the
-> subtraction removed a candidate, the composing stage is told **that** a withholding
-> occurred and the reply states it, naming no part of what was withheld — ADR-0199 §5's
-> clause binding here as it binds everywhere, and **no implementation composes over the wider
-> set and narrows afterwards**.
-
-> **Normative.** **Where the subtraction leaves no candidate at all, no `associate` call is
-> made** and §3's second step governs: the turn opens a new goal, and the reply carries the
-> deflection above. **No implementation associates to a withheld goal, ranks one, or reveals
-> its existence by a count.**
-
-> **Normative.** **`converse` and `converse_streaming` are bounded and run over the whole
-> candidate set**, which is ADR-0203 §1's last clause unchanged — *"An operation whose
+> **Normative.** **`converse` and `converse_streaming` are bounded and associate over the
+> whole candidate set**, which is ADR-0203 §1's last clause unchanged — *"An operation whose
 > channel audience is bounded … runs over its whole supply exactly as before"*. **No caller
 > puts an operation on either side of that line** (ADR-0200 §3), and this decision moves no
 > operation across it.
 
-> **Normative.** **`converse_spoken` gains no `reference` parameter and `SpokenTurn` gains
-> nothing.** A goal whose outcome is not placed is therefore reachable from a bounded channel
-> and not by voice, **which is a stated cost rather than a gap**: widening it is a decision
-> about what a spoken channel may be told, and it is deferred by name (§17).
+> **Normative.** **`converse_spoken` gains no parameter and `SpokenTurn` gains nothing.**
+> A goal opened on a spoken turn is an ordinary goal: it is a candidate for the bounded
+> operations of its conversation, it is listed by `goals`, and it is engageable from any
+> bounded surface. **What is not available is continuing one *by voice*, and that is a
+> stated cost rather than a gap** (§17).
 
 > **Normative.** **The names are new and overload none.** `AssistantEngine.questions`,
 > `AssistantEngine.answer`, `AssistantEngine.forget_question`, the CLI's `assistant
@@ -1642,22 +1621,36 @@ catches it, because what the turn did was `OPENED` whatever the model called it.
 > monetary figure, a budget, a threshold or a `Settings` field name. That is ADR-0242 §9's
 > bar binding on these vocabularies as it binds on that one, and for the same reason.
 
-**Why the candidate set is a supply and the engaged goal is not, which is ADR-0203's own
-line and not a new one.** That decision subtracts *"the turn's supply"* and exempts *"the
-turn's own goal statement"* because it *"is the turn's subject"* — and it gives the reason
-for the exemption in terms: the other reading *"would make no turn on such a channel
-answerable at all"*. A candidacy is neither: it is a set of **other** objectives, drawn from
-stored rows of earlier turns, injected into this turn so that a model can choose among them.
-That is supply in the exact sense §1 of ADR-0203 uses, and the reason the exemption exists
-does not reach it — a spoken turn is perfectly answerable without being told what else the
-owner is working on.
+**Why nothing stored is admitted rather than some of it, and what was tried first.** The
+narrower rule is tempting: admit a candidate whose outcome the **owner stated**, withhold the
+rest, and a spoken turn keeps most of its reach. It is unsound, and the reason is worth
+stating because it is not obvious. ADR-0249 §7 resolves a `USER_STATED` ground by checking
+that the **span** is a span of the turn's request — it does not check that the `outcome`
+*equals* that span. A planner may therefore return an outcome carrying anything at all
+beside a valid one-word span and have it recorded `USER_STATED`, so the ground is a **model's
+attribution** and not a recorded origin. Admitting content on it would make the model the
+disclosure authority, which is exactly what ADR-0199 §2 forbids: *"The **class** of a piece
+of content is decided from what the system recorded about where the content came from, and
+never by inspecting the content for what it appears to be about."* A tighter test —
+`outcome` byte-equal to its span — would be sound for the outcome and would still say
+nothing about the goal's **elements** or its **open question**, each of which the brief
+carries and each of which an earlier bounded turn may have composed over content this channel
+withholds.
 
-**And it is stored content rather than this turn's completion, which is why the subtraction
-is needed at all.** ADR-0203's whole construction is to subtract **before** the turn plans,
-so that whatever a model then writes is composed over material already placed — which is why
-a clarification question *this* turn's planner raised is speakable, and why a goal outcome
-*an earlier* turn's planner wrote is not. The two look alike on the page and are on opposite
-sides of the line.
+**So the line is drawn where it is decidable: nothing stored crosses.** A spoken turn runs
+over its own request, which is what ADR-0203 §1 already says such a turn's goal is — *"its
+`goal` is the owner's utterance as ADR-0074 §3 carries it"* — and ADR-0203 §4's exemption of
+*"the turn's own goal statement"* is left meaning exactly what it meant before this decision,
+because on such a turn the goal **is** that utterance. No class is placed, no ground is read
+for a disclosure purpose, and the rule is checkable by looking at which operation is running
+rather than at any content at all.
+
+**And it is stored content rather than this turn's completion, which is why the line falls
+there.** ADR-0203's whole construction is to subtract **before** the turn plans, so that
+whatever a model then writes is composed over material already placed — which is why a
+clarification question *this* turn's planner raised is speakable, and why a goal outcome or
+constraint *an earlier* turn's planner wrote is not. The two look alike on the page and are
+on opposite sides of the line.
 
 **The question id is rendered because the act takes it, and that is the tree's own
 pattern rather than an exception carved here.** ADR-0078 §8's `Question.id` is documented as
@@ -1739,11 +1732,13 @@ make `assistant questions` a list of two kinds nobody asked to see together.
   **untouched here**. §8's one-open rule is **per goal** and is a different rule about a
   different record with a different constraint; nothing in this decision reads, relies on or
   disturbs that clause.
-- **Whether a channel of unbounded audience may be told about a goal whose outcome is not
-  placed as speakable, and by what route a spoken turn reaches one.** §15 subtracts such a
-  candidate and states the cost; `converse_spoken` gains no reference parameter here. Fired
-  by a decision that places a second class as speakable under ADR-0199 §3, or that gives a
-  spoken turn a content-free way to name a goal.
+- **Whether a channel of unbounded audience may ever be told about a stored goal, and by
+  what route a spoken turn continues one.** §15 withholds every stored goal value from such a
+  turn and states the cost; `converse_spoken` gains no parameter here. Fired by a decision
+  that **places** goal content as speakable under ADR-0199 §3 on a recorded origin this
+  system actually holds — which `GoalInterpretation.outcome_ground` is not, because ADR-0249
+  §7 resolves it against a span rather than against the outcome — or that gives a spoken turn
+  a content-free way to name a goal.
 - **A retention horizon for a goal row.** §2 mints none, on decision 4. Fired by a lane
   that needs one, which would owe its own export, deletion and disclosure obligations.
 - **Any cross-store deletion beyond `delete_goal`'s cascade.** §9's cascade is internal to
@@ -1820,18 +1815,18 @@ enumeration, and its own §21 does not list that ADR among the four it records a
 three it cites without one. That is ADR-0244's record to make, so it is **#2274** and not a
 clause of this document.
 
-**ADR-0203, ADR-0199 and ADR-0200 — relied on unchanged and applied, not amended.**
-ADR-0203 §1's subtraction is stated over *"the turn's supply"* and over every *"stage of that
-turn"*, so it reaches the candidacy this decision adds by its own terms rather than by an
-extension of it; ADR-0203 §4's exemption of *"the turn's own goal statement"* is what keeps
-the engaged goal's outcome speakable, quoted and not widened. ADR-0199 §2's
-decide-from-recorded-origin rule is obeyed — the class is read off `outcome_ground` and never
-off the words — §3's *"any content of a class no ratified ADR has placed as speakable"* is the
-clause §15 **places** one class under, and §3's Tier 0 floor and §5's deflect-rather-than-
-redact rule both bind entire. **ADR-0200 is untouched**: §4's *"`spoken` is the rendering of
-`outcome.reply` and of nothing else"* is what §5 satisfies by carrying a reply, `converse_spoken`
-gains no parameter, `SpokenTurn` gains no member, and ADR-0207's live-confirmation sentence
-gains no sibling.
+**ADR-0203, ADR-0199 and ADR-0200 — relied on unchanged, and nothing is placed, widened or
+amended.** ADR-0203 §1's subtraction is stated over *"the turn's supply"* and over every
+*"stage of that turn"*, and §15 satisfies it by admitting **no** stored goal value to such a
+turn at all; ADR-0203 §1's *"its `goal` is the owner's utterance as ADR-0074 §3 carries it"*
+stays literally true of a spoken turn, and §4's exemption of *"the turn's own goal statement"*
+is left meaning what it meant before this decision. **ADR-0199 gains nothing**: §3's
+enumeration of what is withheld is untouched, **no class is placed as speakable**, §2's
+decide-from-recorded-origin rule is obeyed by deciding nothing from content, and §3's Tier 0
+floor binds entire. **ADR-0200 is untouched**: §4's *"`spoken` is the rendering of
+`outcome.reply` and of nothing else"* is what §5 satisfies by carrying a reply,
+`converse_spoken` gains no parameter, `SpokenTurn` gains no member, and ADR-0207's
+live-confirmation sentence gains no sibling.
 
 **ADR-0244, ADR-0226, ADR-0228, ADR-0074, ADR-0086, ADR-0130, ADR-0052, ADR-0176, ADR-0211,
 ADR-0213, ADR-0042, ADR-0078 and ADR-0247 — relied on unchanged, and the showings are above.**
@@ -2007,19 +2002,23 @@ search, no provider, no draw and no admission.
     is `False`, and the user hears the question. The same over a turn that raised a
     clarification. The arm fails if either path yields `spoken` `None`.
 
-14. **A spoken turn is never told about an unplaced goal.** A conversation holding two
-    candidates, one whose current `outcome_ground` is `USER_STATED` and one `INFERRED`,
-    driven through `converse_spoken`: the `GoalCandidacy` the associator receives carries
-    **only** the first, the prompt contains no byte of the second's outcome text, any
-    `GoalDisambiguation` carries only the first, and the reply **states that something was
-    withheld** while naming no part of it. And where **every** candidate is unplaced: no
-    `associate` call is made at all, the turn opens a new goal, and the deflection still
-    appears. The same conversation through `converse` carries **both** candidates, which is
-    ADR-0203 §1's bounded-operation clause.
+14. **A spoken turn is told nothing a stored goal holds.** A conversation holding two
+    candidates — one carrying an `INFERRED` outcome, one carrying a `USER_STATED` outcome, a
+    stored `FROM_EVIDENCE` constraint and an open question — driven through
+    `converse_spoken`: **no `associate` call is made**, no `GoalCandidacy` is constructed,
+    the turn opens a goal of its own, and the prompt its planner receives contains **no byte**
+    of either candidate's outcome text, of the stored constraint's text, or of the open
+    question's text. Its brief carries this turn's request, no elements and no
+    `open_questions`. The arm is asserted over the **production** renderer and over the
+    absence of the call, not over a filter. The **same** conversation driven through
+    `converse` makes the call over **both** candidates, which is ADR-0203 §1's
+    bounded-operation clause.
 
-15. **The engaged goal's own outcome is not subtracted.** A spoken turn that associates by
-    §3 to a goal whose outcome is placed: `GoalEngagement.outcome` is spoken in the
-    announcement, on ADR-0203 §4's subject exemption, and no clause of §15 removes it.
+15. **No disposition of a stored goal is reachable by voice, and the cost is the one
+    stated.** Over `converse_spoken`, no outcome carries a `GoalDisambiguation`, and no
+    `GoalEngagement` carries `RESUMED`, `REOPENED` or `CONTINUED`. The goal such a turn opens
+    **is** an ordinary goal: the next `converse` turn of that conversation has it in its
+    candidate set, `goals` lists it, and it is engageable from a bounded surface.
 
 16. **The revision invariant holds over every revision ADR-0249 §7 permits, the
     grounding-only one included.** `revised` `False` with `outcome_changed` `False` and both
