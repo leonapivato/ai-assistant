@@ -17,7 +17,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -1366,6 +1366,73 @@ class PlanStoreContract:
         assert stored is not None
         assert (stored.last_engaged_at, stored.last_engaged_in) == (_ENGAGED_AT, "c1")
 
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            pytest.param(datetime(2026, 2, 1), id="naive"),  # noqa: DTZ001 — the subject
+            pytest.param(datetime(2026, 2, 1, tzinfo=timezone(timedelta(hours=2))), id="offset"),
+        ],
+    )
+    async def test_an_engagement_instant_is_validated_before_it_is_committed(
+        self, store: PlanStore, instant: datetime
+    ) -> None:
+        """ADR-0023 §2: a write that reaches past ``model_copy`` must re-validate.
+
+        "``model_copy(update=...)`` skips validators (a pydantic property no type can
+        close), so the invariant holds *at the validation boundary*, and **a write that
+        reaches past it must re-validate**." A store that stamped an unvalidated
+        instant would **commit** it and then fail to decode its own row on the next
+        read — a record the type is supposed to make impossible, persisted, with the
+        fault surfacing at a reader that did nothing wrong.
+
+        The offset case is the other half of §2: an aware instant is **converted** to
+        UTC rather than refused, because "Python compares two aware datetimes sharing a
+        ``tzinfo`` by their naive wall-clock values", so an unconverted one orders
+        wrongly among its peers — which is exactly what ADR-0250 §1's key sorts on.
+        """
+        await store.save_goal(_goal())
+
+        if instant.tzinfo is None:
+            with pytest.raises(PlanningError):
+                await store.engage_goal("g1", at=instant, conversation_id="c1", expected_version=0)
+            unmoved = await store.get_goal("g1")
+            assert unmoved is not None
+            assert (unmoved.last_engaged_at, unmoved.version) == (None, 0), "and nothing moved"
+            return
+
+        engaged = await store.engage_goal(
+            "g1", at=instant, conversation_id="c1", expected_version=0
+        )
+        assert engaged.last_engaged_at == instant
+        assert engaged.last_engaged_at is not None
+        assert engaged.last_engaged_at.tzinfo is UTC, "converted rather than stored as given"
+        assert await store.get_goal("g1") == engaged, "so the row reads back"
+
+    async def test_a_settlement_instant_is_validated_before_it_is_committed(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0023 §2, over the other record this decision stamps.
+
+        The same clause reaches ``settle_question``'s ``at``: a naive settlement
+        instant committed here would leave a question the store can write and then
+        cannot decode, and the question would be **terminal** — its content already
+        cleared — so nothing could recover what it had asked.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        with pytest.raises(PlanningError):
+            await store.settle_question(
+                "q1",
+                disposition=GoalQuestionDisposition.ANSWERED,
+                at=datetime(2026, 3, 1),  # noqa: DTZ001 — the subject
+            )
+
+        held = await store.get_question("q1")
+        assert held is not None
+        assert held.disposition is GoalQuestionDisposition.OPEN, "and nothing moved"
+        assert held.text == "which campsite?", "and the content is still there"
+
     async def test_the_candidate_set_is_the_two_field_membership_test(
         self, store: PlanStore
     ) -> None:
@@ -1497,9 +1564,10 @@ class PlanStoreContract:
         assert await store.get_question("q2") is None, "no second row"
         assert await store.outstanding_questions() == (await store.open_question("g1"),)
 
-        assert await store.record_question(_question(question_id="q3", goal_id="g2")) is True, (
-            "per goal and never per conversation (ADR-0250 §8)"
-        )
+        assert (
+            await store.record_question(_question(question_id="q3", goal_id="g2", attempt_id="a2"))
+            is True
+        ), "per goal and never per conversation (ADR-0250 §8)"
 
     async def test_two_questions_dispatched_together_leave_one_loser(
         self, store: PlanStore
@@ -1623,6 +1691,32 @@ class PlanStoreContract:
         held = await store.get_question("q1")
         assert held is not None
         assert held.disposition is GoalQuestionDisposition.OPEN
+
+    async def test_a_question_names_an_attempt_of_its_own_goal(self, store: PlanStore) -> None:
+        """§9: the closure kept at write time, over a reference that can outlive it.
+
+        ``goal_id`` and ``attempt_id`` are both references ADR-0014 §5 requires to
+        resolve within the same export, which ADR-0250 §9 extends to ``question_id``.
+        An attempt belonging to **another** goal resolves at the write and stops
+        resolving at the first ``delete_goal``: that call cascades one goal's attempts
+        and its questions together, so a question bound across the two survives the
+        attempt it names and makes the next ``export`` unvalidatable — the precise
+        failure :meth:`commit_attempt` already confines its own references to prevent.
+
+        Asserted **through** the deletion rather than at the refusal alone, because the
+        refusal is only worth having for what it stops happening later.
+        """
+        await _goal_with_attempt(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+
+        with pytest.raises(PlanningError, match="its own goal holds"):
+            await store.record_question(_question(goal_id="g2", attempt_id="a1"))
+
+        assert await store.get_question("q1") is None
+        assert await store.record_question(_question(goal_id="g2", attempt_id="a2")) is True
+        assert (await store.delete_goal("g1")).deleted
+        export = await store.export()
+        assert {one.attempt_id for one in export.questions} <= {one.id for one in export.attempts}
 
     async def test_a_question_needs_its_goal_and_its_attempt_to_exist(
         self, store: PlanStore

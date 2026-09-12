@@ -16,8 +16,8 @@ import shutil
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from plan_store_contract import (
@@ -36,6 +36,8 @@ from ai_assistant.core.types import (
     AttemptTransition,
     Goal,
     GoalAttempt,
+    GoalQuestion,
+    GoalQuestionDisposition,
     GoalRevision,
     GoalStatus,
     Ground,
@@ -2311,6 +2313,119 @@ def _version_1_database(path: Path, *, source: MemorySource = MemorySource.USER_
         conn.execute(
             "INSERT INTO plans(id, goal_id, data) VALUES ('p1', 'g1', ?)", (json.dumps(plan),)
         )
+
+
+#: The question text the retention cases look for in the file. A string no schema, no
+#: SQL keyword and no other fixture contains, so its presence is the row's doing — and
+#: long enough that repeating it pushes the row's JSON off the leaf page and into
+#: overflow, which is a second place freed content can be left behind.
+_QUESTION_NEEDLE: Final = b"heliotrope-belfry-quintessence"
+
+#: One question small enough to sit in a leaf page, and one whose blob needs overflow
+#: pages. The parametrisation is not decoration: `secure_delete` has to reach both.
+_QUESTION_SIZES: Final = {"one leaf page": 1, "several overflow pages": 800}
+
+
+def _needling_question(repeats: int) -> GoalQuestion:
+    """An open question whose ``text`` is :data:`_QUESTION_NEEDLE` ``repeats`` over."""
+    return GoalQuestion(
+        id="q1",
+        goal_id="g1",
+        attempt_id="a1",
+        text=_QUESTION_NEEDLE.decode() * repeats,
+        about="the usual campsite",
+        asked_at=_AT,
+        expires_at=_AT + timedelta(hours=72),
+    )
+
+
+@pytest.mark.parametrize("repeats", list(_QUESTION_SIZES.values()), ids=list(_QUESTION_SIZES))
+async def test_a_settlement_leaves_no_trace_of_the_question_in_the_file(
+    tmp_path: Path, repeats: int
+) -> None:
+    """ADR-0250 §8's retention rule is about the **content**, not about the row.
+
+    "``settle_question`` clears ``text`` and ``about`` **in the same step that moves
+    the disposition**, and no implementation retains a copy, a digest, a snapshot or an
+    archive of either. **The content lives exactly as long as the question does**."
+    A settlement that rewrote the blob and left the old bytes in a page SQLite marks
+    free would satisfy every assertion the shared suite can make — it reads decoded
+    rows — while the question the user was asked stayed recoverable by reading the
+    file, which is the one thing this rule is stated to make untrue.
+
+    **This store takes the pragma ``permissions/parked_reads.py`` reasoned it was alone
+    in needing**, and ADR-0250 §8 is what changed: that module's comment says it "is
+    the one in the tree whose ADR states a retention rule over named fields it clears
+    **in place**", and this decision states a second one.
+
+    The first assertion is the anti-vacuity half: the bytes are genuinely there while
+    the question stands, so their absence afterwards is the settlement's doing and not
+    the needle's.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        assert await store.record_question(_needling_question(repeats))
+    finally:
+        store.close()
+    assert _QUESTION_NEEDLE in path.read_bytes(), "the question is on disk while it stands"
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert await reopened.settle_question(
+            "q1", disposition=GoalQuestionDisposition.ANSWERED, at=_LATER
+        )
+    finally:
+        reopened.close()
+
+    assert _QUESTION_NEEDLE not in path.read_bytes()
+
+
+@pytest.mark.parametrize("repeats", list(_QUESTION_SIZES.values()), ids=list(_QUESTION_SIZES))
+async def test_a_goals_deletion_leaves_no_trace_of_its_question_in_the_file(
+    tmp_path: Path, repeats: int
+) -> None:
+    """The same rule at the other destructive member (ADR-0250 §9, ADR-0004 §6).
+
+    ``delete_goal`` is the one act that removes a goal, and it cascades to that goal's
+    questions "open and terminal alike" — so a user who asked for a goal to be
+    destroyed and was told it was is the person this assertion is about. A ``DELETE``
+    that merely unlinked the row would leave the question they had been asked sitting
+    in the file.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        assert await store.record_question(_needling_question(repeats))
+    finally:
+        store.close()
+    assert _QUESTION_NEEDLE in path.read_bytes()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert (await reopened.delete_goal("g1")).deleted
+    finally:
+        reopened.close()
+
+    assert _QUESTION_NEEDLE not in path.read_bytes()
+
+
+async def test_the_store_asks_sqlite_to_overwrite_what_it_frees(tmp_path: Path) -> None:
+    """The pragma itself, asserted where a lane could quietly drop it.
+
+    The two cases above would keep passing on a build whose ``SQLITE_SECURE_DELETE`` is
+    compiled **on** by default, so they are not on their own evidence that this store
+    asks for it. This is: the connection says so, whatever the build's default.
+    """
+    store = SqlitePlanStore(path=tmp_path / "plans.db", now=_fixed_now)
+    try:
+        assert store._conn.execute("PRAGMA secure_delete").fetchone() == (1,)
+    finally:
+        store.close()
 
 
 def _version_2_database(path: Path, *, engaged_at: datetime | None = None) -> None:

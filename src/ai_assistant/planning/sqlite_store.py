@@ -457,6 +457,30 @@ class SqlitePlanStore:
             # Per-connection, not persisted: the referential-integrity guard of
             # ADR-0049 §1 is only in force while this pragma is on.
             conn.execute("PRAGMA foreign_keys = ON")
+            # **Why this store takes a pragma the family did not**, and what changed.
+            # `permissions/parked_reads.py` reasons that it "is the one in the tree
+            # whose ADR states a retention rule over named fields it clears **in
+            # place** … nowhere else here does a store's contract promise that a value
+            # is gone while the row survives". ADR-0250 §8 makes that no longer true:
+            # `settle_question` "clears `text` and `about` **in the same step that
+            # moves the disposition**", "no implementation retains a copy, a digest, a
+            # snapshot or an archive of either", and "the content lives exactly as long
+            # as the question does". Without this, replacing the row's JSON leaves the
+            # cleared text readable in freed pages, so the promise would hold of the
+            # record and not of the file.
+            #
+            # **What it does and does not reach**, stated narrowly because this store
+            # is older than the pragma. It covers the pages **this connection** frees,
+            # overflow pages included, for every byte written from this open onward —
+            # which is every question this decision writes, since the record is new and
+            # no question content can predate it. It does **not** retroactively scrub a
+            # goal, plan or execution page an earlier open already freed, and it does
+            # not reach the rollback journal SQLite unlinks at commit, a filesystem
+            # snapshot, a copy-on-write clone or a device's wear levelling — ADR-0004
+            # §4's owner-only mode is where that question is answered and ADR-0099 §1's
+            # single-user model is what scopes it. **Run outside the transaction**: a
+            # pragma issued inside one is silently ignored by SQLite.
+            conn.execute("PRAGMA secure_delete = ON")
             with conn:
                 # BEGIN IMMEDIATE takes the write lock for the whole of setup, so
                 # two processes opening a fresh file are serialised — one creates
@@ -1503,13 +1527,22 @@ class SqlitePlanStore:
             ):
                 msg = f"question {question.id} refers to unknown goal {question.goal_id}"
                 raise PlanningError(msg)
-            if (
-                conn.execute(
-                    "SELECT 1 FROM attempts WHERE id = ?", (question.attempt_id,)
-                ).fetchone()
-                is None
-            ):
+            attempt = conn.execute(
+                "SELECT goal_id FROM attempts WHERE id = ?", (question.attempt_id,)
+            ).fetchone()
+            if attempt is None:
                 msg = f"question {question.id} refers to unknown attempt {question.attempt_id}"
+                raise PlanningError(msg)
+            if str(attempt[0]) != question.goal_id:
+                # ADR-0014 §5's closure kept at write time, as `commit_attempt` keeps it
+                # for an attempt's own references: `delete_goal` cascades one goal's
+                # attempts and questions together, so a question naming *another* goal's
+                # attempt outlives that attempt and makes the next export unvalidatable.
+                msg = (
+                    f"question {question.id} names attempt {question.attempt_id}, which "
+                    f"belongs to goal {attempt[0]} and not to {question.goal_id}: a "
+                    f"question's attempt is one its own goal holds (ADR-0250 §9)"
+                )
                 raise PlanningError(msg)
             if (
                 conn.execute("SELECT 1 FROM goal_questions WHERE id = ?", (question.id,)).fetchone()

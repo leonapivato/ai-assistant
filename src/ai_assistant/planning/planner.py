@@ -1700,15 +1700,27 @@ def _proposed_questions(understanding: dict[str, object]) -> object:
     outcome" — so an envelope written against the previous prompt still reads exactly
     as it did.
 
-    **What this function does not do is read an ``about`` label**, because the prompt
-    does not yet ask for one: rendering the brief's ``open_questions`` and proposing a
-    subject beside each question is ADR-0250 §19's M2, and a reader that accepted a
-    label the prompt never described would be accepting a value no model was asked to
-    produce.
+    **Each mapping becomes an explicit two-key payload**, which is
+    :func:`_proposed_elements`'s own construction and is load-bearing for the same
+    reason one level up: "a key this function does not read reaches nothing", so a
+    value a model wrote beside the two permitted ones is **discarded structurally**.
+    ADR-0250 §6 requires exactly that and names the cost of the alternative: "No
+    planner envelope carries a question id, a deadline, a disposition or a settlement,
+    and any such value that comes back is **discarded silently** — not an error, not a
+    park, not a degradation of the turn." Passing the mapping through whole would meet
+    ``ProposedQuestion``'s ``extra="forbid"`` and turn an invented ``id`` into an
+    extraction failure — a question the model raised correctly, lost because of a key
+    beside it.
+
+    **What this function does not do is read an ``about`` label from a *string*
+    entry**, because the prompt does not yet ask for one: rendering the brief's
+    ``open_questions`` and proposing a subject beside each question is ADR-0250 §19's
+    M2, and until then every legacy entry is a question about the outcome.
 
     A value that is not a sequence is passed through unchanged, so
     :class:`~ai_assistant.core.types.ProposedUnderstanding` refuses it exactly as it
-    refused a malformed ``questions`` before.
+    refused a malformed ``questions`` before — and so is an entry that is neither a
+    mapping nor a string, which is a shape ``ProposedQuestion`` is right to reject.
 
     Args:
         understanding: The raw ``understanding`` object the envelope carried.
@@ -1719,7 +1731,23 @@ def _proposed_questions(understanding: dict[str, object]) -> object:
     raw = understanding.get("questions", ())
     if not isinstance(raw, list | tuple):
         return raw
-    return [entry if isinstance(entry, dict) else {"text": entry} for entry in raw]
+    return [_proposed_question(entry) for entry in raw]
+
+
+def _proposed_question(entry: object) -> object:
+    """One ``questions`` entry, projected onto the two fields §7 admits.
+
+    Args:
+        entry: What the envelope carried at that position.
+
+    Returns:
+        A two-key mapping for a mapping entry, ``{"text": entry}`` for anything else —
+        which is what makes a legacy string read as a question about the outcome and
+        leaves every other shape for the type to refuse.
+    """
+    if not isinstance(entry, dict):
+        return {"text": entry}
+    return {"text": entry.get("text"), "about": entry.get("about")}
 
 
 def _proposed_elements(understanding: dict[str, object], member: str) -> list[dict[str, object]]:

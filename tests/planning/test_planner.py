@@ -4547,6 +4547,89 @@ async def test_a_proposed_understanding_is_extracted_whole() -> None:
     assert model.call_count == 1, "one pass decides the plan and the understanding"
 
 
+async def test_a_question_a_model_wrote_metadata_beside_is_taken_and_the_metadata_is_not() -> None:
+    """ADR-0250 §6: a value ``orchestration`` owns is **discarded silently**.
+
+    "No planner envelope carries a question id, a deadline, a disposition or a
+    settlement, and any such value that comes back is **discarded silently** — not an
+    error, not a park, not a degradation of the turn." So an envelope whose question
+    object carries an invented ``id`` beside a perfectly good ``text`` yields the
+    question and drops the id: the reading is the one ``_proposed_elements`` already
+    takes one level up, where "a key this function does not read reaches nothing".
+
+    The failure this prevents is precise. ``ProposedQuestion`` sets
+    ``extra="forbid"``, so a mapping passed through whole fails validation, fails the
+    **whole** ``understanding``, and the turn enters repair — losing a question the
+    model raised correctly because of a key beside it. §16 is what makes that the wrong
+    answer: "what a model supplies is exactly three things", and every other value
+    coming back "has it discarded silently".
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "constraints": [],
+                "criteria": [],
+                "conditions": [],
+                "questions": [
+                    {
+                        "text": "which weekend?",
+                        "about": "S1",
+                        "id": "q-invented",
+                        "expires_at": "2026-01-01T00:00:00Z",
+                        "disposition": "answered",
+                        "goal_id": "g-invented",
+                    }
+                ],
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    output = await planner.plan(
+        _goal(), utterance="book it", context=_context(), capabilities=_VOCABULARY
+    )
+
+    proposed = output.understanding
+    assert proposed is not None, "the invented keys did not cost the understanding"
+    [question] = proposed.questions
+    assert (question.text, question.about) == ("which weekend?", "S1")
+    assert set(question.model_dump()) == {"text", "about"}, "and nothing else crossed"
+    assert model.call_count == 1, "no repair pass was bought for it"
+
+
+async def test_a_question_entry_that_is_neither_a_mapping_nor_a_text_is_refused() -> None:
+    """§7: the two content values are the whole of what an entry may be.
+
+    The projection above drops a key ``orchestration`` owns, which is §6's rule. What
+    it must **not** do is read *any* shape, because that would manufacture a question
+    out of a number — inventing a ``text`` nobody wrote, which is the opposite failure
+    and one no clause licenses. So a malformed entry reaches ``ProposedQuestion``
+    unprojected and is refused there, which takes the repair path a malformed
+    ``understanding`` has always taken and, unrepaired, is a ``PlanningError``.
+
+    This is the anti-vacuity half of the case above: without it, a projection that
+    coerced everything would pass that one and lose nothing visible.
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "constraints": [],
+                "criteria": [],
+                "conditions": [],
+                "questions": [17],
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    with pytest.raises(PlanningError, match="questions"):
+        await planner.plan(
+            _goal(), utterance="book it", context=_context(), capabilities=_VOCABULARY
+        )
+
+
 async def test_a_restated_outcome_is_extracted_with_its_ground() -> None:
     """ADR-0249 §7's other outcome shape: restated rather than retained.
 
