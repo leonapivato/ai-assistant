@@ -43,6 +43,7 @@ from test_loop_reads import (
 from test_loop_revision import _ASKED, _Elapsed, _Script, _system_prompt_over
 
 from ai_assistant import orchestration
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
     AttemptEffort,
@@ -823,3 +824,68 @@ def test_the_stop_distribution_is_readable_over_all_seven_members() -> None:
     assert len({member.value for member in StopReason}) == 7, "seven distinct values"
     for member in StopReason:
         assert member.value == member.name.lower(), "valued by lower-cased name"
+
+
+# --------------------------------------------------------------------------- #
+# §17 arm 17: the charge precedes the call, and §12's two cases stay apart      #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_planner_call_that_raises_is_charged_to_the_attempt_all_the_same() -> None:
+    """§17 arm 17(a): a call that raises leaves the ledger advanced.
+
+    §12: ``AttemptEffort.planner_calls`` "is incremented once per ``Planner.plan``
+    call, immediately *before* the call and after the capability vocabulary is read,
+    and it is counted **whether or not the call returns**. A call that raises, that is
+    cancelled, or that the turn does not survive is a call the attempt made and a call
+    its allowance paid for; a ledger advanced on return would let a recovery re-invoke
+    a planner past an allowance already spent."
+
+    **Every error this admits runs in the same direction**, which is the property worth
+    naming: a charge can stand for a call that never ran, and a call can never run
+    uncharged. Asserted on the record the turn emits on its way out — ADR-0226 §9's
+    ``finally`` writes one on *every* exit, the raising one included — because that is
+    where the attempt's figure is observable on a turn that produced no carrier.
+    """
+    memory = await _chain()
+    planner = _Script(requests=[_hop("M1")], raises=1)
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(PlanningError, match="the planner is down"),
+    ):
+        await _turn(memory, planner, attempt=_carried(timedelta(0)))
+
+    record = _record(captured)
+    assert len(planner.calls) == 2, "the second call was entered and raised"
+    assert record["attempt_planner_calls"] == 2, "charged before the call, not on return"
+    assert record["stop"] == StopReason.PLANNING_FAILED.value
+
+
+async def test_a_turn_that_dies_carries_no_attempt_out_of_the_loop_to_persist() -> None:
+    """§17 arm 17(b), at this seam: a turn that dies leaves no attempt to write.
+
+    §12's **first** case: on an attempt this turn opened, "the charge is on the
+    in-memory attempt… and it reaches the store with everything else the turn produced.
+    **A turn that dies before that site charges nothing**, exactly as it records no goal
+    and no plan." ADR-0249 §11's site is ``Engine``'s and is reached with the carrier
+    this loop returns, so what makes that true here is that a raising turn returns
+    **nothing at all** — there is no second path out of this method carrying an attempt,
+    and ADR-0228 §5 forbids minting one ("no lane… carries a plan out of a failing turn
+    in order to write it").
+
+    **§12's *second* case — an attempt an earlier turn persisted — is not reached from
+    this lane**, and that is recorded rather than left to be discovered. Its charge is
+    an ``AttemptTransition`` through ``commit_attempt``, which only a holder of a
+    ``PlanStore`` can issue, and ADR-0249 §11 rules that "**No lane gives
+    ``LearningLoop`` a ``PlanStore``**" while ADR-0251 §12 itself "adds no persistence
+    site, moves none, and supersedes no clause of §11 or §12". No caller supplies a
+    persisted attempt today either: which attempt a turn continues is A2's.
+    """
+    memory = await _chain()
+    planner = _Script(requests=[_hop("M1")], raises=0)
+
+    with pytest.raises(PlanningError, match="the planner is down"):
+        await _turn(memory, planner)
+
+    assert len(planner.calls) == 1, "and the turn produced no carrier to persist"
