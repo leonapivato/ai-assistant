@@ -42,6 +42,11 @@ from ai_assistant.core.types import (
     encodable_text,
 )
 from ai_assistant.planning.composer import (
+    # The scan's own bound, taken from the module under test rather than restated, so
+    # the pair of arms below cannot drift from the figure the parse actually uses.
+    _MAX_EXTRACTION_MISSES as _MISS_BUDGET,
+)
+from ai_assistant.planning.composer import (
     DEFAULT_SEARCH_QUERY_MAX_CHARS,
     ModelBackedQueryComposer,
 )
@@ -434,6 +439,158 @@ async def test_one_model_call_and_no_repair_round() -> None:
     be spend §15 states this mechanism does not make.
     """
     model = FakeModelProvider("not an envelope at all")
+
+    outcome = await _over(model).compose(supply_of(UTTERANCE))
+
+    assert outcome.refusal is QueryRefusal.MALFORMED
+    assert model.call_count == 1
+
+
+# --- the envelope is found behind prose (ADR-0071; issue #2267) -------------
+
+#: Two replies the production model actually wrote, verbatim, from the twenty-pass
+#: reproduction of issue #2267: a production-shaped supply of 61 records and the
+#: utterance the QA drives used. Eight of the twenty came back in exactly this shape
+#: — one sentence resolving what the request referred to, a blank line, then the
+#: envelope the prompt asked for — and ``json.loads`` over the whole reply made every
+#: one of them ``MALFORMED``, which under ADR-0231 §15's no-retry bound cost the turn
+#: its whole lookup. They are fixtures rather than paraphrases because the failure
+#: class is the *shape*, and a paraphrase is a shape this test chose.
+_OBSERVED_PREAMBLES: Final = [
+    (
+        "The most recent thread is the Puglia gravel route.\n\n"
+        '{"query": "Ciclovia dell\'Acquedotto Pugliese gravel bike route stages train access"}',
+        "Ciclovia dell'Acquedotto Pugliese gravel bike route stages train access",
+    ),
+    (
+        '"that" refers to the Ciclovia dell\'Acquedotto Pugliese — the Puglia route the '
+        "user asked more about, with train access and not-too-technical preferences.\n\n"
+        '{"query": "Ciclovia dell\'Acquedotto Pugliese gravel route train access difficulty"}',
+        "Ciclovia dell'Acquedotto Pugliese gravel route train access difficulty",
+    ),
+]
+
+
+@pytest.mark.parametrize(("content", "expected"), _OBSERVED_PREAMBLES)
+async def test_an_observed_production_preamble_still_yields_its_envelope(
+    content: str, expected: str
+) -> None:
+    """Issue #2267's measured failure class, with the model's own replies as fixtures.
+
+    The query is asserted **byte-identical** to what the envelope carried, not merely
+    containing it: the preamble is discarded rather than folded in, and nothing
+    normalises the span inside the envelope (ADR-0231 §4, §18 arm 4a's discipline read
+    one seam earlier).
+    """
+    outcome = await _answering(content, max_chars=DEFAULT_SEARCH_QUERY_MAX_CHARS).compose(
+        supply_of(UTTERANCE)
+    )
+
+    assert outcome.refusal is None
+    assert outcome.query == expected
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'Here is {the requested query}:\n{"query": "porto"}',
+        '```json\n{"query": "porto"}\n```',
+        '{"query": "porto"}\n\nI hope that helps.',
+        '   \n\t{"query": "porto"}\n',
+    ],
+    ids=["brace-in-the-prose", "code-fence", "trailing-sentence", "whitespace"],
+)
+async def test_the_envelope_survives_what_a_model_wraps_it_in(content: str) -> None:
+    """ADR-0071's tolerance goal, at this seam.
+
+    The first case is #293's own reply shape: the brace in the prose is what defeats a
+    first-``{``-to-last-``}`` slice, and the scanning parse steps over it.
+    """
+    outcome = await _answering(content).compose(supply_of(UTTERANCE))
+
+    assert outcome.query == "porto"
+
+
+async def test_a_decline_behind_a_preamble_is_still_a_decline() -> None:
+    """The other envelope gets the same tolerance, or the widening would be lopsided."""
+    outcome = await _answering(
+        'The user is asking about themselves.\n\n{"no_search_needed": true}'
+    ).compose(supply_of(UTTERANCE))
+
+    assert outcome.refusal is QueryRefusal.DECLINED
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"query": 42}\n{"query": "porto"}',
+        '{"quer": "porto"}\n{"query": "porto"}',
+        '{"no_search_needed": 1}\n{"query": "porto"}',
+    ],
+    ids=["wrong-type", "wrong-key", "unmarked-decline"],
+)
+async def test_a_decoy_ahead_of_the_envelope_is_stepped_over(content: str) -> None:
+    """ADR-0071's reason for selecting on the envelope *shape* rather than a key.
+
+    Each leading object decodes cleanly and is not one of the two envelopes, so it
+    would shadow the real one if the scan took the leftmost object outright.
+    """
+    outcome = await _answering(content).compose(supply_of(UTTERANCE))
+
+    assert outcome.query == "porto"
+
+
+async def test_the_earlier_of_two_genuine_envelopes_wins() -> None:
+    """Two real envelopes cannot be told apart locally, so the earlier one is taken.
+
+    ADR-0071's rule, unchanged: the outcome stays bounded and deterministic, and a
+    reply saying two different things is not resolved by preferring the second.
+    """
+    outcome = await _answering('{"query": "porto"}\n{"query": "lisbon"}').compose(
+        supply_of(UTTERANCE)
+    )
+
+    assert outcome.query == "porto"
+
+
+async def test_a_query_nested_inside_a_malformed_object_does_not_rescue_it() -> None:
+    """A decoded object is advanced **past**, never re-entered (ADR-0071).
+
+    Without that rule the inner object would be a second candidate and this reply
+    would compose, so a malformed answer would be rescued by its own metadata.
+    """
+    outcome = await _answering('{"query": {"query": "porto"}}').compose(supply_of(UTTERANCE))
+
+    assert outcome.refusal is QueryRefusal.MALFORMED
+    assert outcome.query is None
+
+
+async def test_an_envelope_behind_exactly_the_miss_budget_is_still_found() -> None:
+    """The budget's inclusive half: exactly ``_MAX_EXTRACTION_MISSES`` misses pass."""
+    content = "{" * _MISS_BUDGET + '{"query": "porto"}'
+
+    outcome = await _answering(content).compose(supply_of(UTTERANCE))
+
+    assert outcome.query == "porto"
+
+
+async def test_an_envelope_behind_more_braces_than_the_budget_is_malformed() -> None:
+    """The bound bites rather than stalling the loop, and it bites as a refusal.
+
+    ADR-0071 degrades this case to the planner's bounded repair; there is no repair
+    round here (ADR-0231 §15), so it degrades to the refusal an unreadable reply
+    always earned. What it must not do is scan quadratically on the event loop.
+    """
+    content = "{" * (_MISS_BUDGET + 1) + '{"query": "porto"}'
+
+    outcome = await _answering(content).compose(supply_of(UTTERANCE))
+
+    assert outcome.refusal is QueryRefusal.MALFORMED
+
+
+async def test_prose_carrying_no_object_at_all_is_still_one_call_and_malformed() -> None:
+    """The widening buys the model no second attempt (ADR-0231 §15)."""
+    model = FakeModelProvider("I would search for {something} but I am not sure what.")
 
     outcome = await _over(model).compose(supply_of(UTTERANCE))
 

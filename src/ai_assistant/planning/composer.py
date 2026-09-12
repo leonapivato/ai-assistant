@@ -26,6 +26,15 @@ fail. The composer's model call is also **outside ADR-0194's subject** and is
 accounted for nowhere — §15 states that plainly, and §19 defers model-spend
 accounting by name.
 
+**The reply is read with ADR-0071's scanning parse, and that is what makes the bound
+above survivable** (issue #2267). A model that answers the envelope it was asked for
+*behind a sentence of prose* was, until this was measured, a lost lookup: 8 of 20
+compositions against the production model over a production-shaped supply, and 5 of 9
+production servicings across two deployments. Nothing about that reply is a
+different answer — it carries exactly one of the two envelopes — so
+:func:`_extract_envelope` finds it where ``json.loads`` over the whole reply could
+not. The two envelopes, the refusal set and the prompt are all unchanged.
+
 **Nothing here reads a store, and there is no parameter through which one could
 arrive.** This class holds a ``ModelProvider`` and a bound. It is handed one
 :class:`~ai_assistant.core.types.SearchSupply` — see
@@ -80,6 +89,15 @@ DEFAULT_SEARCH_QUERY_MAX_CHARS: Final = 256
 #: The key a decline is expressed by, and the key a query is.
 _DECLINE_KEY: Final = "no_search_needed"
 _QUERY_KEY: Final = "query"
+
+#: The most decode **misses** :func:`_extract_envelope` tolerates in one reply before
+#: giving up, ADR-0071's own bound and its own figure. A failed ``raw_decode`` costs
+#: work proportional to how far into the reply it reached, so attempting one at every
+#: brace of a brace-dense reply is quadratic on the event loop the parse runs
+#: synchronously on; bounding the misses bounds that. Held here rather than imported
+#: from :mod:`ai_assistant.planning.planner`, whose copy is a private name of a module
+#: this one deliberately shares no code with.
+_MAX_EXTRACTION_MISSES: Final = 256
 
 #: What the model is asked for. Two envelope shapes and nothing else, because the
 #: parse below reads exactly two and a prompt offering a third would be asking for
@@ -201,6 +219,131 @@ def _quoted_span(value: str) -> str:
         The span quoted, with its delimiters included.
     """
     return json.dumps(value)
+
+
+def _is_envelope(candidate: dict[str, object]) -> bool:
+    """Whether ``candidate`` is one of the two shapes the prompt asks for.
+
+    The predicate :func:`_extract_envelope` selects with, and it is the prompt's own
+    two envelopes and nothing else: a decline marked with the JSON literal ``true``,
+    or a ``query`` key holding a JSON string. Both halves are the shapes
+    :meth:`ModelBackedQueryComposer._read` and
+    :meth:`ModelBackedQueryComposer._bounded` already rule on, so this adds no third
+    admissible answer — it decides only *which decoded object* those arms are run
+    over when a reply carries more than one.
+
+    **The ``query`` half tests the type, not the key.** A decoy ``{"query": 42}``
+    ahead of the real envelope is stepped over rather than allowed to shadow it,
+    which is ADR-0071's own reason for making its planner predicate the envelope
+    *shape* rather than the presence of a key. A decoy that is a string but blank,
+    unencodable or over the bound is indistinguishable from a genuine envelope here
+    and wins as the earlier of two, exactly as ADR-0071 rules for its own pair; it
+    then earns whatever refusal it earned before.
+
+    Args:
+        candidate: A decoded JSON object from the reply.
+
+    Returns:
+        Whether the object is a decline envelope or a query envelope.
+    """
+    return candidate.get(_DECLINE_KEY) is True or isinstance(candidate.get(_QUERY_KEY), str)
+
+
+def _extract_envelope(content: str) -> dict[str, object] | None:
+    """The JSON envelope embedded in ``content``, or ``None`` if there is none.
+
+    ADR-0071's scanning parse, applied to this module's two envelopes. Each ``{`` in
+    the reply is tried left to right with :meth:`json.JSONDecoder.raw_decode`, which
+    decodes one object and stops at its end, ignoring any trailing text. The first
+    decoded object that is an envelope under :func:`_is_envelope` is returned; where
+    none is, the first decoded object stands in, so a single malformed object still
+    reaches :meth:`ModelBackedQueryComposer._bounded` and its precise verdict rather
+    than a generic miss.
+
+    **Why this replaced ``json.loads`` over the whole reply (issue #2267).** Twenty
+    compositions against the production model over a production-shaped supply of 61
+    records returned **eight** replies this module could not read — 40%, matching the
+    56% measured across nine production servicings on two deployments. Every one of
+    the eight was the same shape and it was not a truncation, a fence, a refusal, a
+    third envelope or a context overflow: the model wrote **one sentence of prose
+    resolving what the request referred to, a blank line, and then exactly the
+    envelope it had been asked for** — for instance the line ``The most recent thread
+    is the Puglia gravel route.``, a blank line, then ``{"query": "Ciclovia
+    dell'Acquedotto Pugliese gravel bike route stages train access"}``, which
+    ``tests/planning/test_composer.py`` carries verbatim as a fixture.
+    ``json.loads`` over the whole reply
+    raises on the first character of that sentence and the composition is
+    :attr:`~ai_assistant.core.types.QueryRefusal.MALFORMED`, which under ADR-0231
+    §15's no-retry bound costs the turn its whole lookup. This corpus had already
+    ruled that case for its other envelope reader — ADR-0071 replaced the planner's
+    slice with this scan precisely so "a model that wraps the object in prose or a
+    Markdown code fence" is tolerated — and the composer was the one reader still
+    decoding the whole reply.
+
+    **This widens no envelope and admits no third answer.** The two shapes are the
+    two the prompt names, :func:`_is_envelope` is the only predicate, and the
+    refusals are unchanged: a reply with no decodable object is ``MALFORMED``, a
+    decoded object that is not an envelope is ``MALFORMED`` by the arms that already
+    judged it, and a decline is still only the JSON literal ``true``. What changes is
+    that surrounding prose — including prose carrying a brace, the case ADR-0071
+    exists for — no longer defeats a conforming envelope. The prompt is left
+    byte-identical: it already asks for one object and nothing else, and the evidence
+    is that the model *wrote* that object, so nothing here is a licence for the model
+    to answer a different shape.
+
+    **A decoded object is advanced past, never re-entered**, so a nested object is
+    part of its parent rather than a separate candidate: ``{"query": {"query": "x"}}``
+    stays ``MALFORMED`` and cannot be rescued by the object inside it. Only a brace
+    that opens nothing decodable is stepped over one character at a time.
+
+    A candidate raising for a bounded reason that is not a syntax miss — the
+    digit-limit ``ValueError`` CPython raises for an over-limit integer literal, the
+    ``RecursionError`` a pathologically nested payload raises — is a miss like any
+    other, so no unhandled error escapes and the scan carries on.
+
+    At most :data:`_MAX_EXTRACTION_MISSES` decode **misses** are tolerated, for
+    ADR-0071's reason: a failed ``raw_decode`` costs work proportional to how far
+    into the reply it reached, so trying it at every brace of a brace-dense reply is
+    quadratic on the event loop this runs synchronously on. A decoded object is not a
+    miss and does not spend the budget. A conforming reply, whose envelope is the
+    first decodable object, is unaffected; a reply burying the envelope behind more
+    misses than that is ``MALFORMED`` rather than a stall — and unlike the planner
+    there is no repair round behind it (ADR-0231 §15), which is the same bounded
+    outcome this module always had for an unreadable reply.
+
+    Args:
+        content: The assistant turn's content, verbatim.
+
+    Returns:
+        The envelope, the first decoded object where none is an envelope, or
+        ``None`` where the reply carried no decodable object at all.
+    """
+    decoder = json.JSONDecoder()
+    first: dict[str, object] | None = None
+    misses = 0
+    index = 0
+    length = len(content)
+    while index < length:
+        if content[index] != "{":
+            index += 1
+            continue
+        try:
+            candidate, end = decoder.raw_decode(content, index)
+        except ValueError, RecursionError:
+            misses += 1
+            # `> budget`, not `>=`: exactly `_MAX_EXTRACTION_MISSES` misses are
+            # tolerated, and only the miss beyond it gives up (ADR-0071).
+            if misses > _MAX_EXTRACTION_MISSES:
+                break
+            index += 1  # this brace opened nothing usable; try the next one
+            continue
+        if isinstance(candidate, dict):
+            if _is_envelope(candidate):
+                return candidate
+            if first is None:
+                first = candidate
+        index = end  # resume past the decoded object; never re-enter its interior
+    return first
 
 
 class ModelBackedQueryComposer:
@@ -328,10 +471,15 @@ class ModelBackedQueryComposer:
         """Read one model reply into an outcome (ADR-0231 §3).
 
         The three arms in order, because the order is what makes each refusal mean
-        one thing: an unreadable envelope is
+        one thing: a reply carrying no readable object at all is
         :attr:`~ai_assistant.core.types.QueryRefusal.MALFORMED`, a decline is
         :attr:`~ai_assistant.core.types.QueryRefusal.DECLINED` whatever else the
         object carries, and only then is a query read.
+
+        **The envelope is located by :func:`_extract_envelope`, not by decoding the
+        whole reply** (ADR-0071, issue #2267). The arm is otherwise unchanged: what
+        that function hands back is exactly the object this method used to get from
+        ``json.loads``, when the model wrote the object and nothing else.
 
         **The decline is tested for first and against the JSON literal ``true``.**
         A model that answered ``{"query": "…", "no_search_needed": true}`` has said
@@ -346,11 +494,8 @@ class ModelBackedQueryComposer:
         Returns:
             The outcome that reply amounts to.
         """
-        try:
-            envelope = json.loads(content)
-        except ValueError:
-            return QueryOutcome(refusal=QueryRefusal.MALFORMED)
-        if not isinstance(envelope, dict):
+        envelope = _extract_envelope(content)
+        if envelope is None:
             return QueryOutcome(refusal=QueryRefusal.MALFORMED)
         if envelope.get(_DECLINE_KEY) is True:
             return QueryOutcome(refusal=QueryRefusal.DECLINED)
