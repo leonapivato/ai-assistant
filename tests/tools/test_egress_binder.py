@@ -20,8 +20,10 @@ from egress_binder_contract import (
     ENDPOINT,
     IDENTITY,
     REFERENCE,
+    SEARCH_ORIGIN,
     SEND_EMAIL,
     EgressBinderContract,
+    https_tool,
     recipients,
     tool_declaring,
 )
@@ -257,6 +259,68 @@ async def test_the_derived_extent_is_the_one_core_recomputes(value: FrozenJson) 
         tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
     )
     assert request.egress_binding == bound.binding
+
+
+async def test_a_rotated_credential_leaves_a_true_park_answerable() -> None:
+    """ADR-0247 §12's **Arm F'**, over the production seam and the record store it reads.
+
+    "With the connection reference and origin unchanged and the stored secret
+    replaced, the same park answers and the read dispatches."
+
+    **It lives here rather than in the shared suite because a rotation is not
+    expressible through the contract's arrangement hooks.** ``set_connection`` rewrites
+    an identity and a state, which are the only two facts the canonical fake's record
+    holds — so a rotation arranged through it produces a byte-identical record and
+    asserts nothing. What a real provisioning act moves is ADR-0148 §6's own pair: the
+    record's **monotonic revision**, "incremented by **every** provisioning act on that
+    reference — including one that leaves the identity unchanged", and **its own**
+    credential slot, never a slot an earlier act wrote. Both are arranged here.
+
+    Neither is a member of the binding and this seam reads neither (ADR-0148 §6's
+    two-non-secret-facts clause, ADR-0152 §10), so the re-derived binding equals the
+    recorded one and the ``closed_loop`` ADR-0247 §7 transcribes rides through with it.
+    A seam that had folded a slot, a revision or a credential into the binding refuses
+    here, which is what separates this arm from Arm F one file over — where a changed
+    **origin** must still refuse.
+    """
+    rotated = SecretName(scope=SecretScope.INTEGRATION, key="written-by-the-rotating-act")
+    assert rotated != _SLOT, "the rotating act writes its own slot (ADR-0148 §6)"
+    tool = https_tool()
+    harness = _Harness()
+    harness.registry.register(tool, _refuses)
+    harness.table.register(
+        EgressRegistration(tool_id=tool.id, reference=REFERENCE, transport_endpoint=ENDPOINT)
+    )
+    harness.records.put(REFERENCE, identity=IDENTITY, state=ProvisioningState.ACTIVE)
+    parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
+    parked = await harness.seam.bind(
+        tool,
+        parameters=parameters,
+        provenance=CarriedProvenance(
+            spans={},
+            planned_with_external_content=False,
+            coverage=SpanCoverage.NOT_COVERED,
+            closed_loop=True,
+        ),
+    )
+    assert parked is not None
+    assert parked.binding.closed_loop is True
+    before = harness.records.records[REFERENCE]
+
+    harness.records.records[REFERENCE] = ConnectionEntry(
+        reference=REFERENCE,
+        revision=before.revision + 1,
+        identity=IDENTITY,
+        state=ProvisioningState.ACTIVE,
+        slot=rotated,
+    )
+    assert harness.records.records[REFERENCE] != before, "the record the seam reads has moved"
+
+    again = await harness.seam.rebind(tool, parameters=parameters, approved=parked.binding)
+
+    assert again is not None
+    assert again.binding.closed_loop is True
+    assert again.binding == parked.binding
 
 
 def test_the_declaration_keywords_leave_the_schema_readable_and_validating_identically() -> None:

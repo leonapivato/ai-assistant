@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.testing.cancellation import SuspendedCall
 
-__all__ = ["EgressBinderContract", "either", "recipients", "tool_declaring"]
+__all__ = ["EgressBinderContract", "either", "https_tool", "recipients", "tool_declaring"]
 
 #: The connection reference and identity every case arranges unless it says
 #: otherwise. The identity is a Tier 1 value and is asserted to appear in **no**
@@ -306,7 +306,7 @@ HTTPS_REFUSES: Final = (
 )
 
 
-def _https_tool() -> ToolDefinition:
+def https_tool() -> ToolDefinition:
     """A search integration declaring an HTTPS origin, as ADR-0231 §5's schema does.
 
     Two arguments and no more: an ``origin`` bearing ``x-egress-destination:
@@ -328,7 +328,7 @@ def _https_tool() -> ToolDefinition:
     )
 
 
-#: The origin :func:`_https_tool` is supplied unless a case varies it — the shape a
+#: The origin :func:`https_tool` is supplied unless a case varies it — the shape a
 #: deployment's configured search provider takes as it reaches this seam, which is a
 #: destination-bearing **argument** and not a value the seam holds (ADR-0231 §5, §8).
 SEARCH_ORIGIN: Final = "https://search.example.com"
@@ -649,7 +649,7 @@ class EgressBinderContract(ABC):
         exists: a protocol admitted to the enum and wired into only *one* of the
         two implementations is a divergence nothing else in this suite reaches.
         """
-        searcher = _https_tool()
+        searcher = https_tool()
         self.register_egress(binder, searcher)
 
         bound = await binder.bind(
@@ -679,7 +679,7 @@ class EgressBinderContract(ABC):
         a fake admitting a form production refuses lets a consumer's test approve a
         call production would never make.
         """
-        searcher = _https_tool()
+        searcher = https_tool()
         self.register_egress(binder, searcher)
 
         with pytest.raises(EgressBindingError):
@@ -2142,7 +2142,7 @@ class EgressBinderContract(ABC):
         passed a ``False`` literal here; that is Arm E's "asserted to fail before the
         transcription lands", recorded rather than re-run.
         """
-        searcher = _https_tool()
+        searcher = https_tool()
         self.register_egress(binder, searcher)
         parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
 
@@ -2217,7 +2217,7 @@ class EgressBinderContract(ABC):
         given (ADR-0152 §7), asserted by identity so that a seam handing back
         ``approved`` cannot pass by value.
         """
-        searcher = _https_tool()
+        searcher = https_tool()
         self.register_egress(binder, searcher)
         parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
         first = await binder.bind(
@@ -2258,7 +2258,7 @@ class EgressBinderContract(ABC):
         of this arm (§11 fences lane 2 to ``tools/``); what is owed here is the refusal
         they follow from, and that the recorded binding is untouched by it.
         """
-        searcher = _https_tool()
+        searcher = https_tool()
         self.register_egress(binder, searcher)
         parked = await binder.bind(
             searcher,
@@ -2281,46 +2281,6 @@ class EgressBinderContract(ABC):
             )
 
         assert parked.binding.model_dump_json() == stored, "the recorded binding is unmoved"
-
-    async def test_rebind_answers_a_true_park_across_a_credential_rotation(
-        self, binder: EgressBinder
-    ) -> None:
-        """ADR-0247 §12's **Arm F'**, binder half: a rotated credential does not refuse.
-
-        "With the connection reference and origin unchanged and the stored secret
-        replaced, the same park answers and the read dispatches." ADR-0148 §6 binds the
-        account by two **non-secret** facts — its identity and its connection reference —
-        and a re-provisioning act rewrites the record, increments its revision and writes
-        **its own** credential slot while leaving both of those alone. Nothing a rotation
-        moves is a member of the binding, so the derived binding equals the recorded one
-        and the transcribed ``closed_loop`` rides through with it.
-
-        The rotation is driven as the provisioning act this seam can see: the record
-        ``REFERENCE`` names is rewritten with the identity it already carried. A seam
-        that had folded a credential, a slot or a revision into the binding would refuse
-        here, which is what the arm exists to catch.
-        """
-        searcher = _https_tool()
-        self.register_egress(binder, searcher)
-        parameters: dict[str, FrozenJson] = {"origin": SEARCH_ORIGIN, "query": "weather"}
-        parked = await binder.bind(
-            searcher,
-            parameters=parameters,
-            provenance=CarriedProvenance(
-                spans={},
-                planned_with_external_content=False,
-                coverage=SpanCoverage.NOT_COVERED,
-                closed_loop=True,
-            ),
-        )
-        assert parked is not None
-
-        self.set_connection(binder, REFERENCE, identity=IDENTITY)
-        again = await binder.rebind(searcher, parameters=parameters, approved=parked.binding)
-
-        assert again is not None
-        assert again.binding.closed_loop is True
-        assert again.binding == parked.binding
 
     async def test_rebind_answers_false_where_the_approved_binding_said_false(
         self, binder: EgressBinder
