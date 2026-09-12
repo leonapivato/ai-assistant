@@ -14,6 +14,7 @@ this turn opened through ``save_goal``, a goal the store already holds through
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -27,7 +28,7 @@ from test_engine import (
     confirmable,
     tool,
 )
-from test_engine_composing import _refusing
+from test_engine_composing import _GatedProvider, _refusing
 from test_engine_read_envelope import _recorder
 
 from ai_assistant.core.errors import PlanningError, ToolError
@@ -327,6 +328,42 @@ async def test_a_parked_attempt_waits_and_then_moves_on_when_the_user_approves()
     assert moved.state is AttemptState.ENDED
     assert moved.outcome is AttemptOutcome.ANSWERED
     assert moved.ended_at == AT
+
+
+async def test_a_cancellation_during_composition_leaves_the_attempt_out_of_waiting() -> None:
+    """§12: "at the moment the fact becomes true", and composing is not that moment.
+
+    Composing runs **outside** the resolution's lock and is an arbitrarily slow model
+    call, so a cancellation can land in it after the step has already executed. A
+    bookkeeping commit that waited for the answer would leave an attempt whose step has
+    run still recorded as awaiting the user's approval — and the token now **restates**
+    rather than resolving, so nothing would ever repair it.
+
+    The half that does depend on the answer is not committed, which is correct: no answer
+    exists, so ``ANSWERED`` is not true and ``VERIFY`` is not where the attempt stands.
+    """
+    plans = _Recording()
+    provider = _GatedProvider()
+    stage = ComposingStage(model=provider, streaming=FakeStreamingCompleter())
+    harness = Harness(tools=(confirmable(),), plans=plans, composing=stage)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    resuming = asyncio.create_task(
+        harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+    )
+    await asyncio.wait_for(provider.entered.wait(), timeout=5)
+
+    resuming.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.state is AttemptState.RUNNING, "the user answered, so it is not waiting"
+    assert attempt.phase is AttemptPhase.EXECUTE, "and the step it stamps really did run"
+    assert attempt.outcome is None, "no answer exists, so none is claimed"
 
 
 async def test_a_refused_confirmation_leaves_the_attempt_unended() -> None:
