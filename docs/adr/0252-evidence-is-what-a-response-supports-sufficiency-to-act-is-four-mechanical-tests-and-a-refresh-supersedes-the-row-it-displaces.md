@@ -837,13 +837,32 @@ record.
 > **Normative — two rows conflict where all of the following hold**: both are `STANDING`; both
 > have `basis` `INTERPRETATION`; their **`declaration`s are equal**, so both verdicts are members
 > of one enumeration about one proposition; their `supported` tuples **overlap** in §2's sense;
-> and their `verdict`s are **different members**.
+> **both verdicts are `settling`** in §5's sense; and their `verdict`s are **different members**.
 
-> **Normative.** **Where a condition is covered by two conflicting rows it is not satisfied, and
-> the disagreement is reported.** No rule picks a winner: **not recency, not source, not
-> confidence, not a count of rows on each side, and not a preference between kinds.** The
-> condition fails §6's second test because no single row settles it, and the obstacle is what the
-> turn reports rather than a constraint quietly relaxed.
+> **Normative — a does-not-settle row conflicts with nothing, and that is stated because the
+> member is a different member.** A row carrying the member meaning *the record does not settle
+> it* established no answer, so it is not one side of a disagreement: it neither satisfies (§6),
+> nor refreshes (§8 limb 5), nor blocks. **It is retained, exported and rendered in the digest**
+> like every other row — what it does not do is veto a reading that did settle the proposition
+> merely by carrying a different member of the same enumeration.
+
+> **Normative.** **Where a condition is blocked by two conflicting rows it is not satisfied, and
+> the disagreement is reported. Only a conflict between rows that could have satisfied *that
+> condition* blocks it** — both of the conflicting rows carry the `basis` the condition declares
+> and, on the `INTERPRETATION` basis, the `declaration` it declares (§6 test 2). A disagreement
+> about **another** proposition, however its applicability overlaps, blocks nothing and is
+> reported as what it is. No rule picks a winner among the rows that do block: **not recency, not
+> source, not confidence, not a count of rows on each side, and not a preference between kinds.**
+> The condition is unsatisfied because no single row the condition asked for settles it, and the
+> obstacle is what the turn reports rather than a constraint quietly relaxed.
+
+**The veto is scoped for the reason §6's second test is scoped, and an earlier draft scoped only
+one of them.** A condition requiring declaration A's verdict for Sunday was blocked by two rows
+disagreeing about declaration B over the same Sunday, because the veto read *covered by two
+conflicting rows* and coverage is a statement about applicability alone. The row that answers the
+condition is unaffected by an argument about a different question, and letting one stop a dispatch
+would be the *"second authority that can disagree"* ADR-0249 §5 refuses — arriving through an
+unrelated proposition.
 
 **No tie-break, and each of the tempting ones is refused by a clause already ratified.** A
 recency rule would let a later, weaker read overturn an earlier, stronger one — and §8's
@@ -906,7 +925,7 @@ scenario actually lives — two readings of a source, not two readings of a stor
 This section is the owner's **correction 1** implemented: *"Refreshed evidence needs supersession
 rules, so retained historical disagreements do not permanently block progress."*
 
-> **Normative — the refresh test, and all seven limbs must hold.** A row `L` **refreshes** an
+> **Normative — the refresh test, and all six limbs must hold.** A row `L` **refreshes** an
 > earlier row `E` of the same goal where:
 >
 > 1. `E.standing` is `STANDING`;
@@ -919,8 +938,7 @@ rules, so retained historical disagreements do not permanently block progress."*
 > 5. `L`'s verdict is **affirmative** in §5's sense — **answering** on the `READ_OUTCOME`
 >    basis, **settling** on the `INTERPRETATION` basis;
 > 6. `L`'s **effective instant** is **strictly later than** `E`'s, where a row's **effective
->    instant** is its `as_of` where the source declared one and its `read_at` otherwise; and
-> 7. on the **`INTERPRETATION`** basis only, `L.attempt_id` does **not** equal `E.attempt_id`.
+>    instant** is its `as_of` where the source declared one and its `read_at` otherwise.
 >
 > **A row that refreshes an earlier row supersedes it**: the earlier row's `standing` becomes
 > `SUPERSEDED` and its `superseded_by` names `L`, in the same indivisible write that records `L`
@@ -931,10 +949,9 @@ rules, so retained historical disagreements do not permanently block progress."*
 > **`declaration`**; a row whose `supported` is **empty**, and a row whose earlier candidate's
 > `supported` is empty; a row whose `supported` **merely overlaps** the earlier row's without
 > covering it; a row whose verdict is **non-answering** or **non-settling**; a row whose
-> **effective instant is not strictly later** than the earlier row's, equal instants included; an
-> `INTERPRETATION` row **recorded by the same attempt** as the earlier one; a **model sentence**,
-> which is never a row at all (§14); and a row of a **different goal**, which the store refuses
-> outright (§12).
+> **effective instant is not strictly later** than the earlier row's, **equal instants
+> included**; a **model sentence**, which is never a row at all (§14); and a row of a
+> **different goal**, which the store refuses outright (§12).
 
 **Limb 4 is coverage and not overlap, and the difference is a user's evidence quietly
 disappearing.** A fresh read of **Saturday** overlaps a standing row supporting **the whole
@@ -999,27 +1016,34 @@ implementation happened to evaluate them in. Strictness makes the relation a str
 and the outcome determinate; it costs only the case of two readings the clock cannot tell apart,
 where leaving both standing is the honest record.
 
-**Limb 7 is what keeps a second opinion from being mistaken for a refresh, and it is the
-`INTERPRETATION` basis alone that needs it.** Round 2's case is real: two interpretation rows
-about one `declaration`, over two **different** originating records, both carrying `read_kind` and
-`source` absent, differ in nothing limbs 2 and 3 compare — so an affirmative one recorded a
-moment later retires the opposing one, and §7's live disagreement vanishes into the order the loop
-wrote them in. **Requiring the two rows to interpret the *same* record is the fix that was
-available and it is refused**, because it defeats the correction this section exists to implement:
-a re-reading necessarily interprets a **new** record, so comparing `records` would mean that
-reading again never retires anything and a three-day-old disagreement blocks the goal forever.
-What separates a refresh from a second opinion is not the record, it is **when the work was
-done** — and the row already carries that, on `attempt_id`. Two interpretations of one attempt are
-a live disagreement, which §7 reports and no rule of this decision resolves; an interpretation of a
-**later** attempt is the re-reading correction 1 asks for, and it supersedes. *Retained
-historical* is the correction's own word for the rows an earlier attempt left behind.
+**On the `INTERPRETATION` basis, limb 6 is what separates a refresh from a second opinion, and
+two other candidates were tried and rejected.** An interpretation row's effective instant is its
+`as_of` where the record it interpreted carries an attestation — which is that **source's own
+report instant** (§4) — and its `read_at` otherwise. So *strictly later* on that basis means the
+later row rests on a source statement the source made **later**, about the same `declaration`,
+covering everything the earlier row supported. That is a relationship between the two readings and
+not an artefact of the order the loop wrote them in, and it is what limbs 2 and 3 cannot supply
+on a basis where no source identity exists.
 
-**What limb 7 costs is stated rather than hidden.** An attempt that reads twice and interprets
-twice cannot refresh its own earlier interpretation, so a disagreement it created stands for the
-rest of that attempt. That is §7's posture and not a defect of it: *"No rule picks a winner"*
-inside a live investigation, and the route out is the next attempt. **The limb does not reach the
-`READ_OUTCOME` basis**, where two rows never conflict (§7) and a broader read taken later in the
-same attempt should displace a narrower one it covers.
+**Round 2 asked for the same record and round 3 asked for a different attempt, and each defeats
+the other.** Requiring `L` and `E` to interpret the **same** member of `records` would mean that
+reading again never retires anything, because a re-reading necessarily interprets a **new**
+record — and a three-day-old disagreement would block the goal forever, which is exactly what
+correction 1 forbids. Requiring a **different `attempt_id`** would mean that an attempt which
+pauses and resumes cannot refresh its own evidence, and ADR-0250 §12 is explicit that ordinary
+resumption keeps the attempt — *"the attempt stays `AWAITING_CLARIFICATION`, it stays in the
+candidate set, it stays engageable"* — so the retained historical disagreement correction 1
+names is precisely the one that proxy would leave standing. Both proxies fail on the same
+question, and the answer the row can actually carry is **when the source spoke**.
+
+**What this accepts, stated plainly.** Two readings of two sources about one proposition, whose
+sources reported at two different instants, are ordered by those instants: the later-reported one
+refreshes the earlier-reported one where it covers it. A live disagreement survives where the two
+sources reported at the **same** instant, and where neither reading covers the other — and every
+disagreement survives until something covering and later arrives, which is the route out §8 exists
+to be. This is the narrow case in which recency decides, and it is bought by the other five limbs
+rather than asserted; §7's refusal to pick a winner among rows that are **not** so related is
+untouched.
 
 > **Normative.** **Supersession never un-marks, exactly as invalidation does not (§9).** A row
 > that is `SUPERSEDED` is never returned to `STANDING`, by a later revision, by a later refresh,
@@ -1299,15 +1323,31 @@ costs nothing and makes both testable in the shared conformance suite.
 > refusals, then the append, then the marks, then §13's elision.** A row named by `supersedes`
 > is checked against the history **as it stood before the call**, so a call can never be refused
 > because its own write displaced its operand, and the elision can never drop a row the same call
-> was marking. **A call that would elide the row it is writing is not reachable**, because the
-> elision drops the oldest and the appended row is the newest.
+> was marking. **The row being written is excluded from that write's elision candidates**, whatever
+> place §12's order gives it: a store that dropped the row it had just been told to persist would
+> return an id from `record_evidence` that resolves in nothing, and the oldest **other** row is
+> dropped instead.
 
-> **Normative — a `superseded_by` never dangles in a history a reader holds.** A row marked
-> `SUPERSEDED` is older than the row that marked it, and §13's elision drops by age alone, so any
-> row the bound drops is dropped **before** the row that displaced it. A surviving row's
-> `superseded_by` therefore resolves in the same history, and the only reference §13's elision
-> can break is a `GoalElement.evidence_row_id`, which §10 answers and `EvidenceHistory.elided`
-> discloses.
+> **Normative — a `superseded_by` may name a row the bound has dropped, and that is admitted
+> and disclosed rather than denied.** §12's order is `(read_at, id)` and §8 limb 6 orders by the
+> **effective instant**, which is `as_of` where a source declares one; the two orders are not the
+> same, so a row that superseded another can sort **before** it and be elided first. Such a
+> `superseded_by` is answered exactly as §10 answers a `GoalElement.evidence_row_id` naming an
+> elided row — *"an identifier and not a resolution guarantee"* — the mark still states what it
+> states, the loss is carried on `EvidenceHistory.elided`, and **no lane repairs it, back-fills
+> it, un-marks the row, reorders retention to prevent it, or keeps a row alive because something
+> names it.**
+
+**Reconciling the two orders was the alternative and it is refused in both directions.** Ordering
+retention by the effective instant would make the elision depend on a value a *source* supplies,
+so a source declaring an old `as_of` could decide which of the owner's rows the bound drops —
+which is the same authority §3's prohibition list keeps out of `supported`. Keeping a row alive
+because another names it would make the history *"a curated selection rather than a record"*,
+which §13 refuses in terms, and would let a chain of marks defeat the bound entirely. What is
+left is the honest one: the bound drops by age, and every reference it can break is disclosed by
+a count beside the value a reader consults. The `superseded_by` case now joins the
+`evidence_row_id` case rather than claiming an exemption from it — an earlier draft asserted the
+exemption and it was not true.
 
 > **Normative — the predicate is `orchestration`'s and the atomicity is the store's, and the
 > split is deliberate.** The loop computes **which** rows a new row refreshes (§8) and **which** a
@@ -1764,10 +1804,11 @@ it anticipates, not a contradiction of it.
    two such rows with **different** `declaration`s do not conflict; and two `READ_OUTCOME` rows
    over overlapping applicabilities **never** conflict (§7).
 7. **A refresh supersedes and progress resumes.** A later affirmative row of the same basis,
-   kind, source and declaration whose `supported` **covers** the earlier row's, whose effective
-   instant is strictly later, and — on the `INTERPRETATION` basis — whose `attempt_id` differs,
-   marks it `SUPERSEDED` with `superseded_by` set, in one indivisible write; the remaining row
-   stands alone and the condition is satisfied again (§8, §12).
+   kind, source and declaration whose `supported` **covers** the earlier row's and whose
+   **effective instant** is strictly later marks it `SUPERSEDED` with `superseded_by` set, in one
+   indivisible write; the remaining row stands alone and the condition is satisfied again. **The
+   arm runs within one attempt as well as across two**, because ordinary resumption keeps the
+   attempt (ADR-0250 §12) and a refresh may not depend on the attempt boundary (§8, §12).
 8. **A narrower refresh retires nothing.** A later affirmative row covering **Saturday** does
    **not** supersede a standing row covering **the whole week**, and the week row keeps its Sunday
    support; a later row covering the **week** does supersede a Saturday row (§8 limb 4).
@@ -1838,7 +1879,7 @@ it anticipates, not a contradiction of it.
     it.
 25. **The counts survive the turn and no test reads them.** A row read back on a later turn
     carries the `returned` and `admitted` it was written with, reconstructed from no supply (§1);
-    and §6's four tests, §8's seven limbs and §9's predicate each reach the same verdict on two
+    and §6's four tests, §8's six limbs and §9's predicate each reach the same verdict on two
     rows differing **only** in those two fields — the arm that pins sufficiency out of
     productivity (§1, §5).
 26. **The row names the attempt that recorded it** on `attempt_id`, and is read back by
@@ -1872,21 +1913,37 @@ it anticipates, not a contradiction of it.
     topics: a row supporting one satisfies no condition naming the other, and the two neither
     overlap nor cover. Two `participants` values differing only by case **are** one participant,
     and so are two `about_person` values (§6, ADR-0237 §3).
-33. **Two interpretations of one attempt are a disagreement, not a refresh.** Two
-    `INTERPRETATION` rows with equal `declaration`s, overlapping `supported`, different settling
-    verdicts and the **same** `attempt_id` supersede one another in neither direction and leave the
-    condition unsatisfied; a settling row of a **later** attempt whose support covers one of them
-    supersedes it, and the goal proceeds (§7, §8 limb 7).
-34. **Every entry gets a row and nothing else does.** A completed servicing on a goal turn writes
+33. **Two readings whose sources reported at one instant disagree; a later-reported one
+    refreshes.** Two `INTERPRETATION` rows with equal `declaration`s, overlapping `supported`,
+    different **settling** verdicts and the **same effective instant** supersede one another in
+    neither direction and leave the condition unsatisfied, whether or not they share an
+    `attempt_id`; a settling row whose effective instant is strictly later and whose support
+    covers one of them supersedes it, and the goal proceeds (§7, §8 limb 6).
+34. **A does-not-settle reading vetoes nothing.** Two `INTERPRETATION` rows with equal
+    `declaration`s and identical `supported`, one carrying the does-not-settle member and one
+    carrying the member the condition requires, **do not conflict**; the condition is
+    **satisfied** by the second, and the first stays `STANDING`, exported and in the digest (§5,
+    §7).
+35. **A disagreement about another proposition blocks nothing.** A condition requiring
+    declaration A's member is satisfied by its matching row while two standing rows disagree about
+    declaration **B** over the same applicability; the same two rows do block a condition
+    requiring declaration B (§6 test 2, §7).
+36. **A `superseded_by` may name an elided row, and the count says so.** Where §12's
+    `(read_at, id)` order elides the superseding row before the row it superseded, the surviving
+    row stays `SUPERSEDED`, its `superseded_by` resolves in nothing, `EvidenceHistory.elided`
+    carries the loss, and no lane repairs or un-marks it. **A write never elides the row it is
+    writing**, whatever place the order gives it: the oldest other row is dropped instead
+    (§12, §13).
+37. **Every entry gets a row and nothing else does.** A completed servicing on a goal turn writes
     exactly one row per outcome entry — the `EMPTY`, `REFUSED`, `FAILED` and `EXPIRED` entries
     included, each persisted with `supported` empty and read back on a later turn. An ask in
     ADR-0251 §2's classifier case 1, a servicing that did not complete, and a turn working on no
     goal each write **none** (§14).
-35. **A `WEB_SEARCH` row and a `LOCAL_FILE` row satisfy nothing today.** Composed from the
+38. **A `WEB_SEARCH` row and a `LOCAL_FILE` row satisfy nothing today.** Composed from the
     records ADR-0231 §16 and ADR-0230 §5 mint — `topics` empty, `about_person` absent, `extent`
     `None`, `validity` open — each carries `supported` empty and fails §6's first test, while
     still being written, exported and rendered in the digest (§3, §14).
-36. **The history's order is total and the bound reads it.** Two rows sharing a `read_at` to the
+39. **The history's order is total and the bound reads it.** Two rows sharing a `read_at` to the
     microsecond are returned by `evidence_of` in `id` order by both conforming implementations, the
     `E` labels follow that order, and the elision drops the first of them (§12, §13).
 
@@ -1962,10 +2019,10 @@ long ago*, and only the step knows.
 
 **A recency tie-break for conflicting evidence.** Rejected because it would let a later, weaker
 reading overturn an earlier, stronger one on no ground but its timestamp. §8's supersession is
-the narrow case where recency does decide, and it is bought by seven limbs — same basis, same
-kind, same source, same declaration, covering support, an affirmative verdict, a strictly later
-effective instant, and on the interpretation basis a different attempt — every one of which the
-bare tie-break would skip.
+the narrow case where recency does decide, and it is bought by six limbs — same basis, same kind,
+same source, same declaration, covering support, an affirmative verdict and a strictly later
+**effective** instant, which on the interpretation basis is the instant the **source** reported
+— every one of which the bare tie-break would skip.
 
 **A confidence or source-preference ranking.** Rejected on ADR-0098 §6, which forbids stating a
 bound obtained from a detector, and on ADR-0146 §2's recorded-never-inferred rule. A ranking is a
