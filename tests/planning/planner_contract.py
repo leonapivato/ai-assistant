@@ -761,8 +761,27 @@ class PlannerContract:
         clause bounds the rest — it "cannot say how many records anything held, how
         much of the budget is gone, or how long the turn has left", so ADR-0226 §8's
         fire rate is measuring the same judgement on every deployment.
+
+        **``utterance`` and ``evidence`` joined the set with ADR-0249 §7 and §10, and
+        neither is the widening this refuses either.** ``utterance`` is the turn's own
+        request — the user's words, which ADR-0248 §1 put on the turn and which this
+        seam has always carried in the goal's statement — and ``evidence`` is a
+        projection of reads **this goal** already took, carrying no record identifier,
+        no evidence row id and no address (§10). Neither says anything about whether a
+        search account is connected, which sources are reachable, or how full a budget
+        is, so a planner's judgement of its own supply is conditioned on nothing from
+        the far side of the seam.
         """
-        pushed = {"goal", "context", "memories", "capabilities", "files", "empty_reads"}
+        pushed = {
+            "goal",
+            "utterance",
+            "context",
+            "memories",
+            "capabilities",
+            "files",
+            "empty_reads",
+            "evidence",
+        }
         taken = set(inspect.signature(planner.plan).parameters)
 
         assert taken <= pushed, (

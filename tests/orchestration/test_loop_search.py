@@ -159,7 +159,7 @@ from ai_assistant.testing.searching import (
 from ai_assistant.tools.web_search import WEB_SEARCH
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, MutableMapping, Sequence
+    from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
     from ai_assistant.core.protocols import (
         ActionPolicy,
@@ -173,6 +173,24 @@ if TYPE_CHECKING:
         ToolCall,
     )
     from ai_assistant.orchestration.loop import RespondedTurn
+
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
 
 
 _NOW: Final = datetime(2026, 9, 4, 10, 0, tzinfo=UTC)
@@ -561,7 +579,7 @@ def _loop(  # noqa: PLR0913 — one keyword per seam or bound a case may replace
             retrieval_limit=30,
             episodic_limit=episodic_limit,
             now=_clock,
-            id_factory=lambda: "goal-1",
+            id_factory=_goal_ids("goal"),
         ),
         footing=held,
     )

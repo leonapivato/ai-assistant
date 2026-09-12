@@ -345,7 +345,7 @@ async def _an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
         created_at=AT,
     )
     await store.save_goal(goal)
-    plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT)
+    plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await store.save_plan(plan)
     return await store.start_execution(plan.id)
 

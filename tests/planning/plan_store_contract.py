@@ -31,10 +31,16 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_GOAL_INTERPRETATIONS,
     ActionPlan,
+    AttemptOutcome,
+    AttemptPhase,
+    AttemptState,
+    AttemptTransition,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
-    GoalStatus,
+    GoalRevision,
     Ground,
     MemorySource,
     PlanStep,
@@ -69,15 +75,17 @@ _RELEASED_EARLY = (
 )
 
 
-def _goal(goal_id: str = "g1") -> Goal:
+def _goal(goal_id: str = "g1", *, statement: str = "relocate to Lisbon") -> Goal:
+    """A goal opened at revision 1, in the shape ADR-0249 §3 mints."""
     return Goal(
         id=goal_id,
+        conversation_id="c1",
         interpretation=(
             GoalInterpretation(
                 revision=1,
-                outcome="relocate to Lisbon",
+                outcome=statement,
                 outcome_ground=Ground.USER_STATED,
-                outcome_span="relocate to Lisbon",
+                outcome_span=statement,
                 recorded_at=_WHEN,
                 raised_by="t-1",
             ),
@@ -89,6 +97,29 @@ def _goal(goal_id: str = "g1") -> Goal:
     )
 
 
+def _revision(
+    revision: int, *, outcome: str = "relocate to Lisbon in September"
+) -> GoalInterpretation:
+    """One interpretation revision, in the shape ADR-0249 §1 admits.
+
+    Grounded ``INFERRED`` rather than ``USER_STATED`` because nothing here is a span
+    of any turn's request — the suite records revisions, it does not resolve grounds,
+    and §7's resolution is L3's.
+    """
+    return GoalInterpretation(
+        revision=revision,
+        outcome=outcome,
+        outcome_ground=Ground.INFERRED,
+        recorded_at=_WHEN,
+        raised_by=f"t-{revision}",
+    )
+
+
+def _attempt(attempt_id: str = "a1", goal_id: str = "g1") -> GoalAttempt:
+    """A freshly opened attempt: ``UNDERSTAND``/``RUNNING``, nothing spent (§5, §6)."""
+    return GoalAttempt(id=attempt_id, goal_id=goal_id, opened_at=_WHEN)
+
+
 #: One read request of each of ADR-0226 §2's two kinds, for the export arms below.
 _READ_REQUEST = ReadRequest(
     asks=(
@@ -98,14 +129,21 @@ _READ_REQUEST = ReadRequest(
 )
 
 
-def _plan(
+def _plan(  # noqa: PLR0913 — the plan's own fields, each a distinct thing an arm varies
     plan_id: str = "p1",
     goal_id: str = "g1",
     *,
     steps: int = 1,
     read_request: ReadRequest | None = None,
     supersedes: str | None = None,
+    targets_revision: int | None = 1,
 ) -> ActionPlan:
+    """A plan the store accepts: stamped, as ADR-0249 §8 requires every saved plan.
+
+    ``targets_revision`` defaults to the revision every goal this suite builds stands
+    at, because a plan whose stamp is still absent is one ``save_plan`` refuses (§8).
+    The arm that drives that refusal passes ``None`` explicitly.
+    """
     return ActionPlan(
         id=plan_id,
         goal_id=goal_id,
@@ -116,6 +154,7 @@ def _plan(
         created_at=_WHEN,
         read_request=read_request,
         supersedes=supersedes,
+        targets_revision=targets_revision,
     )
 
 
@@ -484,9 +523,17 @@ class PlanStoreContract:
     async def test_missing_goal_reads_as_none(self, store: PlanStore) -> None:
         assert await store.get_goal("nope") is None
 
-    async def test_saving_a_goal_twice_upserts(self, store: PlanStore) -> None:
+    async def test_save_goal_is_the_opening_write_alone(self, store: PlanStore) -> None:
+        """ADR-0249 §12: ``save_goal`` refuses a goal whose id the store already holds.
+
+        No longer an upsert, and the reason is stated rather than stylistic: "an upsert
+        that replaced a whole goal would defeat §1's append-only interpretation and
+        this section's compare-and-swap in one call". The refusal is the same error
+        class an unknown goal already raises.
+        """
         await store.save_goal(_goal())
-        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.save_goal(_goal())
         export = await store.export()
         assert len(export.goals) == 1
 
@@ -588,26 +635,23 @@ class PlanStoreContract:
         assert [step.id for step in stored.steps] == ["s1"]
 
     async def test_a_goals_objective_cannot_be_rewritten(self, store: PlanStore) -> None:
-        """Otherwise plans already recorded would come to describe a new objective."""
+        """Otherwise plans already recorded would come to describe a new objective.
+
+        Under ADR-0249 §12 the refusal is ``save_goal``'s own — it is the opening
+        write alone — and the objective moves only by appending a revision, which is
+        what :meth:`test_record_interpretation_appends_and_advances_the_version`
+        drives.
+        """
         await store.save_goal(_goal())
         await store.save_plan(_plan())
 
-        rewritten = _goal().model_copy(update={"statement": "delete all mail"})
+        rewritten = _goal(statement="delete all mail")
         with pytest.raises(PlanningError):
             await store.save_goal(rewritten)
 
         stored = await store.get_goal("g1")
         assert stored is not None
         assert stored.statement == "relocate to Lisbon"
-
-    async def test_a_goals_status_may_still_change(self, store: PlanStore) -> None:
-        """Identity is fixed; a goal's progress is exactly what should move."""
-        await store.save_goal(_goal())
-        await store.save_goal(_goal().model_copy(update={"status": GoalStatus.ACHIEVED}))
-
-        stored = await store.get_goal("g1")
-        assert stored is not None
-        assert stored.status is GoalStatus.ACHIEVED
 
     async def test_saving_an_identical_plan_again_is_idempotent(self, store: PlanStore) -> None:
         """A retry must not be punished — only a *differing* plan is a conflict."""
@@ -617,6 +661,336 @@ class PlanStoreContract:
 
         export = await store.export()
         assert len(export.plans) == 1
+
+    # --- ADR-0249 §12: the interpretation chain and the attempt --------------
+    # §12 obliges the existing suite to gain the new obligations "in the same change
+    # that adds them", so both conforming stores are held to every clause here rather
+    # than to whichever one a lane happened to edit.
+
+    async def test_record_interpretation_appends_and_advances_the_version(
+        self, store: PlanStore
+    ) -> None:
+        """§12: one revision appended, ``version`` advanced, the goal returned.
+
+        ``version`` and ``revision`` are different values and are never read for each
+        other (§1): the first orders writes, the second names an understanding.
+        """
+        await store.save_goal(_goal())
+
+        updated = await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
+        )
+
+        assert [one.revision for one in updated.interpretation] == [1, 2]
+        assert updated.version == 1
+        assert updated.interpretation_elided == 0
+        assert updated.statement == "relocate to Lisbon in September"
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored == updated
+
+    async def test_record_interpretation_refuses_an_unknown_goal(self, store: PlanStore) -> None:
+        with pytest.raises(PlanningError):
+            await store.record_interpretation(
+                GoalRevision(goal_id="ghost", interpretation=_revision(2), expected_version=0)
+            )
+
+    async def test_record_interpretation_refuses_a_revision_out_of_order(
+        self, store: PlanStore
+    ) -> None:
+        """§1: each revision is **one greater** than the element before it."""
+        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.record_interpretation(
+                GoalRevision(goal_id="g1", interpretation=_revision(3), expected_version=0)
+            )
+
+    async def test_two_interpretations_against_one_version_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§16 arm 10, the goal half: compare-and-swap, with nothing lost.
+
+        Two commands computed against the same ``expected_version``: one succeeds and
+        one raises, with no interpretation lost and no interleaving. §12 states the
+        read, the comparison and the write are **one indivisible step**.
+        """
+        await store.save_goal(_goal())
+        first = GoalRevision(
+            goal_id="g1", interpretation=_revision(2, outcome="the first"), expected_version=0
+        )
+        second = GoalRevision(
+            goal_id="g1", interpretation=_revision(2, outcome="the second"), expected_version=0
+        )
+
+        await store.record_interpretation(first)
+        with pytest.raises(StaleExecutionError):
+            await store.record_interpretation(second)
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert [one.outcome for one in stored.interpretation] == [
+            "relocate to Lisbon",
+            "the first",
+        ]
+        assert stored.version == 1
+
+    async def test_the_interpretation_history_is_bounded_and_the_elision_is_disclosed(
+        self, store: PlanStore
+    ) -> None:
+        """§16 arm 9: the bound holds, the **oldest** goes, and the count says so.
+
+        A goal driven past ``MAX_GOAL_INTERPRETATIONS`` keeps its **current**
+        revision, drops the oldest, and reports how many have gone — ADR-0086 §4's
+        ground applied: "a displaced citation that leaves no trace would make a belief
+        report a narrower warrant than it has".
+        """
+        await store.save_goal(_goal())
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        for revision in range(2, MAX_GOAL_INTERPRETATIONS + 4):
+            goal = await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_revision(revision, outcome=f"understanding {revision}"),
+                    expected_version=goal.version,
+                )
+            )
+
+        assert len(goal.interpretation) == MAX_GOAL_INTERPRETATIONS
+        assert goal.interpretation_elided == 3
+        assert goal.interpretation[-1].revision == MAX_GOAL_INTERPRETATIONS + 3
+        assert goal.interpretation[0].revision == 4, "the oldest went, not the current"
+        assert goal.statement == f"understanding {MAX_GOAL_INTERPRETATIONS + 3}"
+
+    async def test_an_attempt_opens_reads_back_and_lists_in_opened_order(
+        self, store: PlanStore
+    ) -> None:
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        await store.open_attempt(_attempt("a2"))
+
+        assert await store.get_attempt("a1") == _attempt()
+        assert [one.id for one in await store.attempts_of("g1")] == ["a1", "a2"]
+        assert await store.get_attempt("nope") is None
+        assert await store.attempts_of("ghost") == ()
+
+    async def test_open_attempt_refuses_an_unknown_goal_and_a_reused_id(
+        self, store: PlanStore
+    ) -> None:
+        with pytest.raises(PlanningError):
+            await store.open_attempt(_attempt(goal_id="ghost"))
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        with pytest.raises(PlanningError):
+            await store.open_attempt(_attempt())
+
+    async def test_commit_attempt_moves_the_phase_state_outcome_and_effort(
+        self, store: PlanStore
+    ) -> None:
+        """§12: every absent member leaves its field unchanged."""
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+
+        moved = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1", expected_version=0, to_phase=AttemptPhase.PLAN, planner_calls=2
+            )
+        )
+        assert moved.phase is AttemptPhase.PLAN
+        assert moved.state is AttemptState.RUNNING, "an absent member changes nothing"
+        assert moved.effort.planner_calls == 2
+        assert moved.version == 1
+
+        ended = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=1,
+                to_phase=AttemptPhase.VERIFY,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=_WHEN,
+            )
+        )
+        assert (ended.phase, ended.state, ended.outcome) == (
+            AttemptPhase.VERIFY,
+            AttemptState.ENDED,
+            AttemptOutcome.ANSWERED,
+        )
+        assert await store.get_attempt("a1") == ended
+
+    async def test_the_attempts_references_grow_by_append_and_ignore_a_repeat(
+        self, store: PlanStore
+    ) -> None:
+        """§16 arm 19: appended in order, and a repeated identifier is ignored."""
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+
+        moves = (
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1"),
+            AttemptTransition(attempt_id="a1", expected_version=1, add_execution_id="e1"),
+            AttemptTransition(attempt_id="a1", expected_version=2, add_authorization_id="auth-1"),
+            AttemptTransition(attempt_id="a1", expected_version=3, add_plan_id="p2"),
+            AttemptTransition(attempt_id="a1", expected_version=4, add_plan_id="p1"),
+        )
+        for move in moves:
+            attempt = await store.commit_attempt(move)
+
+        assert attempt.plan_ids == ("p1", "p2"), "appended in order, the repeat ignored"
+        assert attempt.execution_ids == ("e1",)
+        assert attempt.authorization_ids == ("auth-1",)
+
+    async def test_commit_attempt_refuses_a_stale_version(self, store: PlanStore) -> None:
+        """§16 arm 10, the attempt half."""
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
+        )
+        with pytest.raises(StaleExecutionError):
+            await store.commit_attempt(
+                AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p2")
+            )
+
+    async def test_commit_attempt_refuses_a_backwards_phase_and_a_terminal_move(
+        self, store: PlanStore
+    ) -> None:
+        """§5, §6: the phase never moves backwards, and no move leaves a terminal."""
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        moved = await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, to_phase=AttemptPhase.EXECUTE)
+        )
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=moved.version,
+                    to_phase=AttemptPhase.INVESTIGATE,
+                )
+            )
+
+        ended = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=moved.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=_WHEN,
+            )
+        )
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=ended.version,
+                    to_state=AttemptState.RUNNING,
+                )
+            )
+
+    async def test_commit_attempt_refuses_an_effort_that_would_go_backwards(
+        self, store: PlanStore
+    ) -> None:
+        """§5: both counters are monotonically non-decreasing within an attempt."""
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        moved = await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, planner_calls=3)
+        )
+        with pytest.raises(PlanningError):
+            await store.commit_attempt(
+                AttemptTransition(attempt_id="a1", expected_version=moved.version, planner_calls=2)
+            )
+
+    async def test_commit_attempt_refuses_an_unknown_attempt(self, store: PlanStore) -> None:
+        with pytest.raises(PlanningError):
+            await store.commit_attempt(AttemptTransition(attempt_id="nope", expected_version=0))
+
+    async def test_save_plan_refuses_a_plan_that_is_still_unstamped(self, store: PlanStore) -> None:
+        """§16 arm 18's last clause, and §8's window closed at the store."""
+        await store.save_goal(_goal())
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan(targets_revision=None))
+        assert await store.get_plan("p1") is None
+
+    async def test_a_plan_targeting_a_stale_revision_cannot_be_claimed(
+        self, store: PlanStore
+    ) -> None:
+        """§16 arm 26: the stale-target refusal is the **store's**, not the driver's.
+
+        A plan targeting the goal's current revision claims normally; once a later
+        revision is recorded the same plan is refused, with the error class a stale
+        ``expected_version`` already raises. Nothing dispatches a step of such a plan
+        and nothing claims one.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        current = await store.commit_transition(_claim(state))
+        assert current.step("s1") is not None
+
+        await store.save_plan(_plan(plan_id="p2"))
+        second = await store.start_execution("p2")
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
+        )
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(_claim(second))
+
+    async def test_an_unstamped_stored_plan_is_not_driven(self, store: PlanStore) -> None:
+        """§8: a plan **already on disk** carrying ``None`` targets no revision.
+
+        The one route to such a row is ADR-0249 §12's migration, so the row is put
+        here the only way this contract admits — through ``save_plan`` with the check
+        bypassed is not available, so the arm drives the rule the migration leaves
+        behind by recording a revision the stored plan cannot target.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
+        )
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(_claim(state))
+
+    async def test_delete_goal_cascades_to_attempts(self, store: PlanStore) -> None:
+        """§16 arm 12: the cascade reaches attempts, and a live attempt blocks nothing.
+
+        ADR-0014 §5's live-step refusal is unchanged — it keys on a ``RUNNING`` step,
+        not on an attempt's state — so an attempt still ``RUNNING`` does not block a
+        deletion no execution blocks.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        await store.save_plan(_plan())
+
+        deletion = await store.delete_goal("g1")
+
+        assert deletion.deleted
+        assert await store.attempts_of("g1") == ()
+        assert await store.get_attempt("a1") is None
+
+    async def test_clear_removes_attempts_too(self, store: PlanStore) -> None:
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        assert await store.clear() >= 2
+        assert await store.get_attempt("a1") is None
+
+    async def test_the_export_carries_attempts_and_closes_over_them(self, store: PlanStore) -> None:
+        """§16 arm 11: the document carries the attempt and its references resolve."""
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        await store.open_attempt(_attempt())
+        await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
+        )
+
+        export = await store.export()
+
+        assert export.schema_version == 8
+        assert [one.id for one in export.attempts] == ["a1"]
+        assert export.attempts[0].plan_ids == ("p1",)
 
     # --- starting an execution ------------------------------------------
 

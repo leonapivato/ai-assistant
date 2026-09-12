@@ -94,6 +94,25 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import ActionPolicy, AuditTrail
     from ai_assistant.core.types import CurrentContext, FrozenJson, MemoryRecord, ShownFile
 
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
+
+
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
 
@@ -320,7 +339,7 @@ def _make_engine(
         planner=_OneStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
-        id_factory=lambda: "g-1",
+        id_factory=_goal_ids("g"),
         # The same object the runner below resolves against (ADR-0211 §3): a loop
         # told one vocabulary while selection resolved against another could plan a
         # step the selecting registry never advertised. Built after the invoker for

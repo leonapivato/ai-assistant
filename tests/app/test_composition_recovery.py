@@ -117,6 +117,7 @@ async def _a_crash_left_a_claim_open(engine: Engine) -> tuple[str, str]:
             goal_id="g-1",
             steps=(PlanStep(id=STEP, intent="send the note", capability="send_email"),),
             created_at=AT,
+            targets_revision=1,
         )
     )
     state = await plans.start_execution("p-1")

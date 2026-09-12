@@ -77,7 +77,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import (
         ContextProvider,
@@ -96,6 +96,25 @@ if TYPE_CHECKING:
         ShownFile,
         SourceReading,
     )
+
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
+
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
 
@@ -186,7 +205,7 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
         feedback=feedback or FakeFeedbackProcessor(),
         resolution_limit=resolution_limit,
         now=_clock,
-        id_factory=lambda: "goal-1",
+        id_factory=_goal_ids("goal"),
     )
 
 
@@ -1331,7 +1350,7 @@ def _supplementing_loop(
         retrieval_limit=retrieval_limit,
         episodic_limit=episodic_limit,
         now=_clock,
-        id_factory=lambda: "goal-1",
+        id_factory=_goal_ids("goal"),
         registry=FakeToolRegistry(),
     )
 

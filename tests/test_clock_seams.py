@@ -206,6 +206,25 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
 
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
+
+
 #: A naive reading: the one every seam used to accept and now must refuse.
 _NAIVE = datetime(2026, 7, 21, 12)  # noqa: DTZ001 — the naive reading is the subject
 _AWARE = datetime(2026, 7, 21, 12, tzinfo=UTC)
@@ -290,7 +309,9 @@ def _context() -> CurrentContext:
 
 
 def _plan() -> ActionPlan:
-    return ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_AWARE, rationale="because")
+    return ActionPlan(
+        id="p1", goal_id="g1", steps=(), created_at=_AWARE, rationale="because", targets_revision=1
+    )
 
 
 def _proposal() -> MemoryUpdateProposal:
@@ -705,6 +726,7 @@ async def _claimed(store: FakePlanStore) -> str:
             steps=(PlanStep(id="s1", intent="send the note", capability="send_email"),),
             created_at=_AWARE,
             rationale="because",
+            targets_revision=1,
         )
     )
     state = await store.start_execution("p1")
@@ -1004,7 +1026,7 @@ async def _recipient_grant_operations(now: Clock) -> None:
         store=FakeRecipientGrantStore(),
         trail=FakeAuditTrail(),
         policy=FakeActionPolicy(),
-        id_factory=lambda: "g-1",
+        id_factory=_goal_ids("g"),
         clock=now,
     ).grantable_decisions(limit=1)
 

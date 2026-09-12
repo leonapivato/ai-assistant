@@ -340,6 +340,7 @@ async def test_a_scripted_plan_also_takes_a_fresh_id_and_changes_in_nothing_else
         created_at=_fixed_now(),
         rationale="the consumer's own",
         read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),)),
+        targets_revision=1,
     )
     planner = FakePlanner(scripted, now=_fixed_now)
 
@@ -364,9 +365,16 @@ async def test_a_scripted_revision_answers_the_call_after_the_first() -> None:
     A first plan that cannot name a value and asks for it, and a second that carries
     it — scripted, without standing a model up.
     """
-    first_plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
+    first_plan = ActionPlan(
+        id="p1", goal_id="g1", steps=(), created_at=_fixed_now(), targets_revision=1
+    )
     revision = ActionPlan(
-        id="p2", goal_id="g1", steps=(), created_at=_fixed_now(), rationale="the revision"
+        id="p2",
+        goal_id="g1",
+        steps=(),
+        created_at=_fixed_now(),
+        rationale="the revision",
+        targets_revision=1,
     )
     planner = FakePlanner(first_plan, now=_fixed_now, revision=revision)
 
@@ -389,7 +397,9 @@ async def test_a_scripted_revision_reusing_the_first_plans_id_is_refused() -> No
     behaves oddly — it is a fake that cannot be used at all. Refused by the fake
     rather than surfacing as a store error the consumer would blame the store for.
     """
-    shared = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now())
+    shared = ActionPlan(
+        id="p1", goal_id="g1", steps=(), created_at=_fixed_now(), targets_revision=1
+    )
     planner = FakePlanner(shared, now=_fixed_now, revision=shared)
 
     await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
@@ -411,7 +421,9 @@ async def test_a_revision_colliding_with_the_synthesised_first_id_is_refused() -
     planner = FakePlanner(
         now=_fixed_now,
         read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.CITATION_HOP, labels=("M1",)),)),
-        revision=ActionPlan(id="g1-plan", goal_id="g1", steps=(), created_at=_fixed_now()),
+        revision=ActionPlan(
+            id="g1-plan", goal_id="g1", steps=(), created_at=_fixed_now(), targets_revision=1
+        ),
     )
 
     first = (
@@ -436,9 +448,11 @@ async def test_a_revision_scripted_fake_refuses_a_third_call() -> None:
     the fix rather than answering wrongly.
     """
     planner = FakePlanner(
-        ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now()),
+        ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_fixed_now(), targets_revision=1),
         now=_fixed_now,
-        revision=ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_fixed_now()),
+        revision=ActionPlan(
+            id="p2", goal_id="g1", steps=(), created_at=_fixed_now(), targets_revision=1
+        ),
     )
     await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
     await planner.plan(_goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=())
