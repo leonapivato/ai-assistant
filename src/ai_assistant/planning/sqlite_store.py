@@ -46,6 +46,8 @@ from ai_assistant.core.types import (
     GoalAttempt,
     GoalDeletion,
     GoalInterpretation,
+    GoalQuestion,
+    GoalQuestionDisposition,
     MemorySource,
     PlanExport,
     StepStatus,
@@ -53,14 +55,22 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended, bounded
+from ai_assistant.planning.goals import advanced, appended, bounded, capped, engaged, settled
+from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import AttemptTransition, GoalRevision, StepTransition
+    from ai_assistant.core.types import (
+        AttemptTransition,
+        GoalCandidates,
+        GoalRevision,
+        GoalStatus,
+        StepTransition,
+        UtcInstant,
+    )
 
 _OWNER_ONLY = 0o600
 
@@ -85,12 +95,21 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: was written for — "so a **future** schema change has the version marker" — and its
 #: loud refusal of a newer label binds entire: a version 1 store is **older**, and is
 #: upgraded in place rather than refused.
-_SCHEMA_VERSION = 2
+#: **3 since ADR-0250 §9**, which lands this store's **second** migration: the
+#: ``goal_questions`` table, and the two ``goals`` columns ``candidates_for`` reads.
+#: A version 2 ``goals`` row still **decodes** — ``Goal.last_engaged_in`` is defaulted,
+#: so the blob needs no rewrite — but the columns beside it do not exist, so the
+#: candidate-set query would be a raw "no such column" on every conversation. The
+#: marker is what makes the upgrade in place possible, exactly as at 2, and §1's loud
+#: refusal of a **newer** label binds entire.
+_SCHEMA_VERSION = 3
 
-#: The version a database this code can upgrade carries. One member, because there is
-#: one earlier shape (ADR-0049 §1: "a fresh database is the only starting state this
-#: store has ever had", true until ADR-0249).
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1})
+#: The versions a database this code can upgrade carries. Two members since ADR-0250:
+#: version 1 is ADR-0049 §1's original shape and version 2 is ADR-0249 §12's, and the
+#: two need different work — a version 1 store's ``goals`` blobs are rewritten
+#: (:meth:`SqlitePlanStore._upgrade_goal_rows`) where a version 2 store's are not,
+#: while **both** gain the new columns and the questions table.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -116,8 +135,20 @@ _WRITE_HIGH_WATER = "INSERT INTO meta(key, value) VALUES ('exec_high_water', ?)"
 
 _UPDATE_HIGH_WATER = "UPDATE meta SET value = ? WHERE key = 'exec_high_water'"
 
+#: The two ``goals`` columns ADR-0250 §9's migration adds, beside the blob. They are
+#: the two that decide **candidate-set membership** (§2) — the conversation the goal
+#: was opened in, and the conversation that last engaged it — so
+#: ``candidates_for`` is a query rather than a scan-and-decode of every goal in the
+#: store. Both are nullable: ``conversation_id`` because a row written before ADR-0249
+#: carries none, and ``last_engaged_in`` because a row written before ADR-0250 does
+#: (§1's one route to a ``None``). The **order** the set is then put in is
+#: :func:`~ai_assistant.planning.goals.capped`'s, over the decoded rows, so §1's key
+#: is stated once for both stores rather than once here in SQL and once in Python.
+_GOAL_COLUMNS: Final[tuple[str, ...]] = ("conversation_id", "last_engaged_in")
+
 _RECORD_SCHEMA = (
-    "CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS goals("
+    "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS executions("
@@ -132,6 +163,17 @@ _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS attempts("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
     "opened_at TEXT NOT NULL, data TEXT NOT NULL)",
+    # ADR-0250 §9's questions table, with the foreign key onto `goals` ADR-0049 §1's
+    # schema discipline requires. `attempt_id` carries no declared key: this store
+    # declares one foreign key per table, and `record_question` refuses a dangling
+    # attempt at the write exactly as `open_attempt` refuses a dangling plan.
+    # `disposition` is a plain column and decides nothing but the one-open gate's
+    # query and `outstanding_questions`; `asked_at` decides that member's contractual
+    # order; the blob is the record, as it is for the four tables above.
+    "CREATE TABLE IF NOT EXISTS goal_questions("
+    "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
+    "attempt_id TEXT NOT NULL, asked_at TEXT NOT NULL, disposition TEXT NOT NULL, "
+    "data TEXT NOT NULL)",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -155,6 +197,12 @@ _INDEXES = ("CREATE UNIQUE INDEX IF NOT EXISTS executions_created_seq ON executi
 #: #349 applied to a ``meta`` table this code did not shape.
 _ORDINAL_INDEX = "executions_created_seq"
 
+#: The one ``_UPGRADABLE_FROM`` version whose ``goals`` **blobs** need rewriting: at
+#: version 1 a row carries a ``statement`` and no ``interpretation`` (ADR-0249 §12), so
+#: it does not decode at all, while a version 2 row decodes unchanged and needs only
+#: the two columns beside it (ADR-0250 §9).
+_VERSION_BEFORE_INTERPRETATIONS: Final[int] = 1
+
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
 #: EXISTS`` is a no-op against a pre-existing table of a different shape (#373),
 #: exactly as it is for the ``meta`` table (#349) and the ordinal index (#364), so
@@ -170,7 +218,12 @@ _ORDINAL_INDEX = "executions_created_seq"
 #: ``TEXT PRIMARY KEY``, which SQLite does not make implicitly ``NOT NULL``, so a
 #: file that hardens it is compatible and must not be refused.
 _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
-    "goals": {"id": ("TEXT", False), "data": ("TEXT", True)},
+    "goals": {
+        "id": ("TEXT", False),
+        "conversation_id": ("TEXT", False),
+        "last_engaged_in": ("TEXT", False),
+        "data": ("TEXT", True),
+    },
     "plans": {
         "id": ("TEXT", False),
         "goal_id": ("TEXT", True),
@@ -188,6 +241,14 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": ("TEXT", False),
         "goal_id": ("TEXT", True),
         "opened_at": ("TEXT", True),
+        "data": ("TEXT", True),
+    },
+    "goal_questions": {
+        "id": ("TEXT", False),
+        "goal_id": ("TEXT", True),
+        "attempt_id": ("TEXT", True),
+        "asked_at": ("TEXT", True),
+        "disposition": ("TEXT", True),
         "data": ("TEXT", True),
     },
 }
@@ -208,6 +269,7 @@ _RECORD_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
     "plans": ("goal_id", "goals", "id"),
     "executions": ("plan_id", "plans", "id"),
     "attempts": ("goal_id", "goals", "id"),
+    "goal_questions": ("goal_id", "goals", "id"),
 }
 
 
@@ -395,6 +457,30 @@ class SqlitePlanStore:
             # Per-connection, not persisted: the referential-integrity guard of
             # ADR-0049 §1 is only in force while this pragma is on.
             conn.execute("PRAGMA foreign_keys = ON")
+            # **Why this store takes a pragma the family did not**, and what changed.
+            # `permissions/parked_reads.py` reasons that it "is the one in the tree
+            # whose ADR states a retention rule over named fields it clears **in
+            # place** … nowhere else here does a store's contract promise that a value
+            # is gone while the row survives". ADR-0250 §8 makes that no longer true:
+            # `settle_question` "clears `text` and `about` **in the same step that
+            # moves the disposition**", "no implementation retains a copy, a digest, a
+            # snapshot or an archive of either", and "the content lives exactly as long
+            # as the question does". Without this, replacing the row's JSON leaves the
+            # cleared text readable in freed pages, so the promise would hold of the
+            # record and not of the file.
+            #
+            # **What it does and does not reach**, stated narrowly because this store
+            # is older than the pragma. It covers the pages **this connection** frees,
+            # overflow pages included, for every byte written from this open onward —
+            # which is every question this decision writes, since the record is new and
+            # no question content can predate it. It does **not** retroactively scrub a
+            # goal, plan or execution page an earlier open already freed, and it does
+            # not reach the rollback journal SQLite unlinks at commit, a filesystem
+            # snapshot, a copy-on-write clone or a device's wear levelling — ADR-0004
+            # §4's owner-only mode is where that question is answered and ADR-0099 §1's
+            # single-user model is what scopes it. **Run outside the transaction**: a
+            # pragma issued inside one is silently ignored by SQLite.
+            conn.execute("PRAGMA secure_delete = ON")
             with conn:
                 # BEGIN IMMEDIATE takes the write lock for the whole of setup, so
                 # two processes opening a fresh file are serialised — one creates
@@ -409,6 +495,12 @@ class SqlitePlanStore:
                 counter, mark = self._verify_or_init_meta(conn)
                 for statement in (*_RECORD_SCHEMA, *_INDEXES):
                     conn.execute(statement)
+                # ADR-0250 §9's column half of the migration, *before* the shape
+                # checks: `CREATE TABLE IF NOT EXISTS` is a no-op against the
+                # pre-existing `goals` of a version 1 or 2 store, so the two new
+                # columns have to be added by `ALTER TABLE` or `_verify_record_tables`
+                # would refuse the very file this open is here to upgrade.
+                self._add_missing_goal_columns(conn)
                 self._verify_record_tables(conn)
                 self._verify_the_ordinal_index(conn)
                 # **ADR-0249 §12's migration, in the same transaction the shape checks
@@ -418,6 +510,10 @@ class SqlitePlanStore:
                 # because it rewrites rows of one of them, and *before* the marker is
                 # moved below.
                 self._upgrade_goal_rows(conn)
+                # And the column half's backfill, after the blobs are whatever this
+                # file's version leaves them: the two columns are projections of the
+                # blob, so they are written from it rather than guessed.
+                self._backfill_goal_columns(conn)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
                 # to the current shape — and a failure rolls it back rather than
@@ -591,13 +687,67 @@ class SqlitePlanStore:
         Raises:
             PlanningError: If a stored goal is not a shape this migration can read.
         """
-        if self._upgrade_from is None:
+        if self._upgrade_from != _VERSION_BEFORE_INTERPRETATIONS:
             return
         rows = conn.execute("SELECT id, data FROM goals").fetchall()
         for row_id, data in rows:
             conn.execute(
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (_migrated_goal(str(row_id), str(data)), row_id),
+            )
+
+    def _add_missing_goal_columns(self, conn: sqlite3.Connection) -> None:
+        """Add ADR-0250 §9's two ``goals`` columns to an older file, in place.
+
+        **The second half of this store's second migration**, and the half a
+        ``CREATE TABLE IF NOT EXISTS`` cannot do: that statement is a no-op against
+        the ``goals`` table a version 1 or 2 store already holds, so without this the
+        file would reach :meth:`_verify_record_tables` missing two columns and be
+        refused — the store refusing to open the very file the upgrade exists for.
+
+        Read back with ``PRAGMA table_info`` rather than assumed from the version
+        marker, so a file that already carries one of the two (a partial hand
+        migration, a third-party tool) gains only what it lacks rather than failing
+        on a duplicate column. Runs inside the setup transaction, before the shape
+        checks and before either row pass.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+        """
+        if self._upgrade_from is None:
+            return
+        held = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
+        for column in _GOAL_COLUMNS:
+            if column not in held:
+                # `column` is a fixed literal of `_GOAL_COLUMNS`, never caller input.
+                conn.execute(f"ALTER TABLE goals ADD COLUMN {column} TEXT")
+
+    def _backfill_goal_columns(self, conn: sqlite3.Connection) -> None:
+        """Write the two ``goals`` columns from the rows themselves (ADR-0250 §9).
+
+        The columns are **projections of the blob** — ``Goal.conversation_id`` and
+        ``Goal.last_engaged_in`` — so a migrated row's values are read out of the
+        record rather than invented, which is ADR-0249 §12's "the migration writes no
+        value this system did not record" binding on this half too. A version 1 store's
+        rows are read **after** :meth:`_upgrade_goal_rows` has rewritten them, so both
+        passes see one shape; a version 2 store's blobs are not rewritten at all, and
+        every one of them yields ``last_engaged_in`` absent, which is §1's one route to
+        a ``None``.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+
+        Raises:
+            PlanningError: If a stored goal no longer decodes.
+        """
+        if self._upgrade_from is None:
+            return
+        rows = conn.execute("SELECT id, data FROM goals").fetchall()
+        for row_id, data in rows:
+            goal = _decode_goal(str(data))
+            conn.execute(
+                "UPDATE goals SET conversation_id = ?, last_engaged_in = ? WHERE id = ?",
+                (goal.conversation_id, goal.last_engaged_in, row_id),
             )
 
     def _verify_the_ordinal_index(self, conn: sqlite3.Connection) -> None:
@@ -1161,8 +1311,13 @@ class SqlitePlanStore:
             # admits is stored trimmed, with the count saying how many went.
             stored = bounded(goal)
             conn.execute(
-                "INSERT INTO goals(id, data) VALUES (?, ?)",
-                (stored.id, stored.model_dump_json()),
+                "INSERT INTO goals(id, conversation_id, last_engaged_in, data) VALUES (?, ?, ?, ?)",
+                (
+                    stored.id,
+                    stored.conversation_id,
+                    stored.last_engaged_in,
+                    stored.model_dump_json(),
+                ),
             )
 
     async def get_goal(self, goal_id: str) -> Goal | None:
@@ -1205,11 +1360,315 @@ class SqlitePlanStore:
                 )
                 raise StaleExecutionError(msg)
             updated = appended(stored, revision.interpretation)
+            # The two columns are unmoved by a revision — `record_interpretation`
+            # leaves both engagement fields exactly as it found them (ADR-0250 §1) and
+            # `conversation_id` is never rewritten — so only the blob is written here.
             conn.execute(
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
         return updated
+
+    # --- engagement, status and the candidate set (ADR-0250 §§1, 2, 9) -----
+
+    def _goal_for_write(
+        self, conn: sqlite3.Connection, goal_id: str, expected: int, what: str
+    ) -> Goal:
+        """Read a goal for a compare-and-swap write inside an open transaction.
+
+        The read, the comparison and the caller's write all run inside one ``BEGIN
+        IMMEDIATE``, so a second writer that read the same version cannot also commit
+        — it reads the advanced version and is refused. ADR-0014 §5's discipline,
+        stated once for both of ADR-0250's goal writes.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            goal_id: The goal to read.
+            expected: The ``Goal.version`` the caller computed against.
+            what: What the caller is about to do, for the refusal message.
+
+        Returns:
+            The stored goal.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        row = conn.execute("SELECT data FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if row is None:
+            msg = f"cannot {what} unknown goal {goal_id}"
+            raise PlanningError(msg)
+        stored = _decode_goal(row[0])
+        if stored.version != expected:
+            msg = (
+                f"goal {goal_id} is at version {stored.version}, not {expected}: re-read "
+                f"it and recompute the write"
+            )
+            raise StaleExecutionError(msg)
+        return stored
+
+    async def engage_goal(
+        self, goal_id: str, /, *, at: UtcInstant, conversation_id: str, expected_version: int
+    ) -> Goal:
+        """Stamp the goal's engagement, compare-and-swap (ADR-0250 §1, §9).
+
+        The **one** writer of ``last_engaged_at`` and ``last_engaged_in``, which is
+        why the ``last_engaged_in`` column is written here and nowhere else.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        async with self._lock:
+            return await _run_to_completion(
+                self._engage_goal_sync, goal_id, at, conversation_id, expected_version
+            )
+
+    def _engage_goal_sync(
+        self, goal_id: str, at: UtcInstant, conversation_id: str, expected_version: int
+    ) -> Goal:
+        with self._transaction(f"engage goal {goal_id!r}") as conn:
+            stored = self._goal_for_write(conn, goal_id, expected_version, "engage")
+            updated = engaged(stored, at=at, conversation_id=conversation_id)
+            conn.execute(
+                "UPDATE goals SET last_engaged_in = ?, data = ? WHERE id = ?",
+                (updated.last_engaged_in, updated.model_dump_json(), updated.id),
+            )
+        return updated
+
+    async def set_goal_status(
+        self,
+        goal_id: str,
+        /,
+        *,
+        status: GoalStatus,
+        at: UtcInstant,  # noqa: ARG002 — the contract's instant; no field of `Goal` records it, and this store mints no second record to hold it (ADR-0250 §9)
+        expected_version: int,
+    ) -> Goal:
+        """Move the goal's status, compare-and-swap (ADR-0250 §9).
+
+        The goal's **only** status-mutation route, and it refuses no member of the
+        vocabulary: A10 and A3 write ``ACHIEVED`` and ``BLOCKED`` through it, and a
+        store that refused one would be a second place the vocabulary is decided.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        async with self._lock:
+            return await _run_to_completion(
+                self._set_goal_status_sync, goal_id, status, expected_version
+            )
+
+    def _set_goal_status_sync(self, goal_id: str, status: GoalStatus, expected: int) -> Goal:
+        with self._transaction(f"set the status of goal {goal_id!r}") as conn:
+            stored = self._goal_for_write(conn, goal_id, expected, "set the status of")
+            updated = _with_status(stored, status=status)
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return updated
+
+    async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
+        """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
+
+        The membership test is the query — the goal was **opened in** this
+        conversation or was **last engaged in** it — and the order is
+        :func:`~ai_assistant.planning.goals.capped`'s over the decoded rows, so §1's
+        key is stated once for both conforming stores rather than once here in SQL and
+        once in Python.
+
+        Raises:
+            PlanningError: If ``limit`` is not positive, or a stored goal no longer
+                decodes.
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._candidates_for_sync, conversation_id)
+        return capped((_decode_goal(data) for data in rows), limit=limit)
+
+    def _candidates_for_sync(self, conversation_id: str) -> list[str]:
+        try:
+            return [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT data FROM goals WHERE conversation_id = ? OR last_engaged_in = ?",
+                    (conversation_id, conversation_id),
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("read the candidate set of", conversation_id, exc) from exc
+
+    # --- a goal's clarification (ADR-0250 §§8-12) --------------------------
+
+    async def record_question(self, question: GoalQuestion, /) -> bool:
+        """Write an ``OPEN`` question, or refuse a second on one goal (§9).
+
+        Revalidated before it is persisted, for :meth:`save_goal`'s own reason, and
+        that revalidation is this method's ADR-0065 snapshot. The read of the existing
+        question and the write run inside one ``BEGIN IMMEDIATE``, so two turns of one
+        conversation — or two engines over one data directory — cannot both be
+        admitted against the same goal.
+
+        Raises:
+            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record,
+                this store already holds a question under this ``id``, or the question
+                does not revalidate.
+        """
+        snapshot = _revalidated_question(question)
+        if snapshot.disposition is not GoalQuestionDisposition.OPEN:
+            # Refused before the lock and before any read: a terminal record written
+            # here would answer `True` while `open_question` answered `None` for the
+            # same goal. Only `settle_question` reaches a terminal disposition
+            # (ADR-0250 §9, §12).
+            msg = (
+                f"question {snapshot.id} arrives {snapshot.disposition.value} and "
+                f"record_question writes an OPEN question: a terminal disposition is "
+                f"written by settle_question and by nothing else (ADR-0250 §9)"
+            )
+            raise PlanningError(msg)
+        async with self._lock:
+            return await _run_to_completion(self._record_question_sync, snapshot)
+
+    def _record_question_sync(self, question: GoalQuestion) -> bool:
+        with self._transaction(f"record question {question.id!r}") as conn:
+            if (
+                conn.execute("SELECT 1 FROM goals WHERE id = ?", (question.goal_id,)).fetchone()
+                is None
+            ):
+                msg = f"question {question.id} refers to unknown goal {question.goal_id}"
+                raise PlanningError(msg)
+            attempt = conn.execute(
+                "SELECT goal_id FROM attempts WHERE id = ?", (question.attempt_id,)
+            ).fetchone()
+            if attempt is None:
+                msg = f"question {question.id} refers to unknown attempt {question.attempt_id}"
+                raise PlanningError(msg)
+            if str(attempt[0]) != question.goal_id:
+                # ADR-0014 §5's closure kept at write time, as `commit_attempt` keeps it
+                # for an attempt's own references: `delete_goal` cascades one goal's
+                # attempts and questions together, so a question naming *another* goal's
+                # attempt outlives that attempt and makes the next export unvalidatable.
+                msg = (
+                    f"question {question.id} names attempt {question.attempt_id}, which "
+                    f"belongs to goal {attempt[0]} and not to {question.goal_id}: a "
+                    f"question's attempt is one its own goal holds (ADR-0250 §9)"
+                )
+                raise PlanningError(msg)
+            if (
+                conn.execute("SELECT 1 FROM goal_questions WHERE id = ?", (question.id,)).fetchone()
+                is not None
+            ):
+                msg = f"question {question.id} already exists"
+                raise PlanningError(msg)
+            held = conn.execute(
+                "SELECT 1 FROM goal_questions WHERE goal_id = ? AND disposition = ?",
+                (question.goal_id, GoalQuestionDisposition.OPEN.value),
+            ).fetchone()
+            if held is not None:
+                return False
+            conn.execute(
+                "INSERT INTO goal_questions"
+                "(id, goal_id, attempt_id, asked_at, disposition, data) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    question.id,
+                    question.goal_id,
+                    question.attempt_id,
+                    question.asked_at.isoformat(),
+                    question.disposition.value,
+                    question.model_dump_json(),
+                ),
+            )
+        return True
+
+    async def get_question(self, question_id: str, /) -> GoalQuestion | None:
+        """Return the question under that id, whatever its disposition (§9)."""
+        async with self._lock:
+            row = await _run_to_completion(self._read_one, "goal_questions", question_id)
+        return None if row is None else _decode_question(row)
+
+    async def open_question(self, goal_id: str, /) -> GoalQuestion | None:
+        """Return that goal's open question, or ``None`` (ADR-0250 §9)."""
+        async with self._lock:
+            row = await _run_to_completion(self._open_question_sync, goal_id)
+        return None if row is None else _decode_question(row)
+
+    def _open_question_sync(self, goal_id: str) -> str | None:
+        try:
+            row = self._conn.execute(
+                "SELECT data FROM goal_questions WHERE goal_id = ? AND disposition = ?",
+                (goal_id, GoalQuestionDisposition.OPEN.value),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _wrap("read the open question of goal", goal_id, exc) from exc
+        return None if row is None else str(row[0])
+
+    async def outstanding_questions(self) -> tuple[GoalQuestion, ...]:
+        """Return every ``OPEN`` question, in ``asked_at`` order (ADR-0250 §9).
+
+        It takes no view of the clock: an expired question is still ``OPEN`` until
+        something settles it, and settling it is the caller's (§12).
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._outstanding_questions_sync)
+        return tuple(_decode_question(data) for data in rows)
+
+    def _outstanding_questions_sync(self) -> list[str]:
+        try:
+            return [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT data FROM goal_questions WHERE disposition = ? "
+                    "ORDER BY asked_at ASC, id ASC",
+                    (GoalQuestionDisposition.OPEN.value,),
+                ).fetchall()
+            ]
+        except sqlite3.Error as exc:
+            raise _wrap("read outstanding questions", "", exc) from exc
+
+    async def settle_question(
+        self, question_id: str, /, *, disposition: GoalQuestionDisposition, at: UtcInstant
+    ) -> bool:
+        """Settle an ``OPEN`` question, clearing its content (ADR-0250 §9).
+
+        The resolve-once gate: the read, the comparison and the write run inside one
+        ``BEGIN IMMEDIATE``, so one of two racing callers answers ``True`` and the
+        other ``False``, and the content is cleared exactly once.
+
+        Raises:
+            PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+        """
+        if disposition is GoalQuestionDisposition.OPEN:
+            # Refused before the lock and before any read, because it is a malformed
+            # command rather than a lost race (ADR-0250 §9, §12).
+            msg = (
+                "settle_question moves an OPEN question to a terminal member: OPEN "
+                "settles nothing and no disposition is inferred from silence "
+                "(ADR-0250 §9, §12)"
+            )
+            raise PlanningError(msg)
+        async with self._lock:
+            return await _run_to_completion(
+                self._settle_question_sync, question_id, disposition, at
+            )
+
+    def _settle_question_sync(
+        self, question_id: str, disposition: GoalQuestionDisposition, at: UtcInstant
+    ) -> bool:
+        with self._transaction(f"settle question {question_id!r}") as conn:
+            row = conn.execute(
+                "SELECT data FROM goal_questions WHERE id = ? AND disposition = ?",
+                (question_id, GoalQuestionDisposition.OPEN.value),
+            ).fetchone()
+            if row is None:
+                return False
+            updated = settled(_decode_question(str(row[0])), disposition=disposition, at=at)
+            conn.execute(
+                "UPDATE goal_questions SET disposition = ?, data = ? WHERE id = ?",
+                (updated.disposition.value, updated.model_dump_json(), updated.id),
+            )
+        return True
 
     # --- attempts ---------------------------------------------------------
 
@@ -1723,16 +2182,18 @@ class SqlitePlanStore:
         """Return a portable, internally consistent snapshot (ADR-0004 §6)."""
         exported_at = self._now()
         async with self._lock:
-            goals, plans, executions, attempts = await _run_to_completion(self._export_sync)
+            snapshot = await _run_to_completion(self._export_sync)
+        goals, plans, executions, attempts, questions = snapshot
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
             plans=tuple(_decode_plan(data) for data in plans),
             executions=tuple(_decode_execution(data) for data in executions),
             attempts=tuple(_decode_attempt(data) for data in attempts),
+            questions=tuple(_decode_question(data) for data in questions),
         )
 
-    def _export_sync(self) -> tuple[list[str], list[str], list[str], list[str]]:
+    def _export_sync(self) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
         # between the goals read and the plans read and leave the export with a
@@ -1756,14 +2217,20 @@ class SqlitePlanStore:
                     "SELECT data FROM attempts ORDER BY opened_at ASC, id ASC"
                 ).fetchall()
             ]
-        return goals, plans, executions, attempts
+            questions = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT data FROM goal_questions ORDER BY asked_at ASC, id ASC"
+                ).fetchall()
+            ]
+        return goals, plans, executions, attempts, questions
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
-        """Delete a goal, its plan history and its attempts, unless work is live.
+        """Delete a goal, its plan history, its attempts and its questions.
 
         Refused while any of the goal's executions has a ``RUNNING`` step. The
         cascade deletes children before parents — executions, then plans, then
-        attempts, then the goal — so the enforced foreign keys are satisfied at each
+        attempts, then questions, then the goal — so the enforced foreign keys are satisfied at each
         step, and
         the live-execution refusal runs first, before anything is removed
         (ADR-0049 §1).
@@ -1816,6 +2283,13 @@ class SqlitePlanStore:
             # not block a deletion no execution blocks. Deleted before the goal so
             # the enforced foreign key holds at each step.
             conn.execute("DELETE FROM attempts WHERE goal_id = ?", (goal_id,))
+            # ADR-0250 §9: and it reaches that goal's questions, **open and terminal
+            # alike**. An open question does not block a deletion, on ADR-0073 §5's
+            # "the store deletes what it is told to delete", and `GoalDeletion` reports
+            # them exactly as ADR-0249 §12 has it report attempts — which is to say the
+            # record carries no count for either. Before the goal, so the foreign key
+            # holds at each step.
+            conn.execute("DELETE FROM goal_questions WHERE goal_id = ?", (goal_id,))
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,
@@ -1851,6 +2325,7 @@ class SqlitePlanStore:
             removed += conn.execute("DELETE FROM executions").rowcount
             removed += conn.execute("DELETE FROM plans").rowcount
             removed += conn.execute("DELETE FROM attempts").rowcount
+            removed += conn.execute("DELETE FROM goal_questions").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -1921,6 +2396,22 @@ def _revalidated_attempt(attempt: GoalAttempt) -> GoalAttempt:
         raise PlanningError(msg) from exc
 
 
+def _revalidated_question(question: GoalQuestion) -> GoalQuestion:
+    """Rebuild ``question`` as a validated, detached record, or refuse it.
+
+    Same reasoning as :func:`_revalidated_goal`.
+
+    Raises:
+        PlanningError: If the question does not satisfy its own model.
+    """
+    try:
+        return GoalQuestion.model_validate(question.model_dump())
+    except ValidationError as exc:
+        subject = getattr(question, "id", "<no id>")  # see _revalidated_goal
+        msg = f"question {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def _migrated_goal(row_id: str, data: str) -> str:
     """Rewrite one version 1 ``goals`` row as ADR-0249 §12's shape.
 
@@ -1988,6 +2479,15 @@ def _decode_goal(data: str) -> Goal:
         return Goal.model_validate_json(data)
     except ValidationError as exc:
         msg = f"the plan store holds a goal that no longer validates: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _decode_question(data: str) -> GoalQuestion:
+    """Rebuild a stored question from its JSON, surfacing corruption as ``PlanningError``."""
+    try:
+        return GoalQuestion.model_validate_json(data)
+    except ValidationError as exc:
+        msg = f"the plan store holds a question that no longer validates: {exc}"
         raise PlanningError(msg) from exc
 
 

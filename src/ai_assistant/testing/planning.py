@@ -40,10 +40,16 @@ from ai_assistant.core.types import (
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    AssociationVerdict,
     AttemptPhase,
     ExecutionState,
+    Goal,
+    GoalAssociation,
     GoalAttempt,
+    GoalCandidates,
     GoalDeletion,
+    GoalQuestion,
+    GoalQuestionDisposition,
     PlanExport,
     PlannerOutput,
     SkipReason,
@@ -60,17 +66,47 @@ if TYPE_CHECKING:
         AttemptTransition,
         CurrentContext,
         EvidenceDigest,
-        Goal,
         GoalBrief,
+        GoalCandidacy,
         GoalRevision,
+        GoalStatus,
         MemoryRecord,
         ProposedUnderstanding,
         ReadAskOutcome,
         ReadRequest,
         ShownFile,
         StepTransition,
+        UtcInstant,
     )
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+
+
+def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
+    """Re-run ``Goal``'s validators over a goal built by ``model_copy`` (ADR-0023 §2).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph. §2's own words are
+    why it exists at all: "``model_copy(update=...)`` skips validators … and **a write
+    that reaches past it must re-validate**" — so a naive ``at`` reaching
+    ``engage_goal`` is refused here as the real stores refuse it, rather than stored
+    and handed back.
+
+    Args:
+        goal: The goal as ``model_copy`` built it.
+        what: What the caller was doing, for the refusal message.
+
+    Returns:
+        The goal, validated.
+
+    Raises:
+        PlanningError: If the rebuilt goal is not one ``Goal`` admits.
+    """
+    try:
+        return Goal.model_validate(goal.model_dump())
+    except ValidationError as exc:
+        msg = f"{what} would leave goal {goal.id} in a shape Goal refuses: {exc}"
+        raise PlanningError(msg) from exc
+
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
@@ -506,6 +542,77 @@ class FakePlanner:
         return PlannerOutput(plan=synthesised, understanding=self._understanding)
 
 
+class FakeGoalAssociator:
+    """A scripted ``GoalAssociator`` test double (ADR-0250 §4).
+
+    Structurally implements
+    :class:`~ai_assistant.core.protocols.GoalAssociator`, and it is the canonical fake
+    the Protocol's triad lands with (``CONTRIBUTING.md`` -> "Adding a Protocol"): the
+    Protocol, its shared conformance suite and this value are one unit of work, with
+    the production implementation following in ADR-0250 §19's M2.
+
+    **It decides nothing.** A consumer scripts the answer it wants and the fake hands
+    it back, recording the candidacy it was given so a test can assert over what
+    crossed the seam — which is what arm 22's behavioural half is written against.
+    Deciding here would make the double a second associator with a second rule to
+    drift from the real one.
+
+    **The default answer is** ``UNDECIDED`` **with no labels**, and that is deliberate
+    rather than convenient: ADR-0250 §4 makes the decline the shape an implementation
+    returns when it cannot read its model's answer, and a fake that defaulted to
+    ``CONTINUES`` would hand every unconfigured consumer a silent association to the
+    focused goal.
+
+    Attributes:
+        answer: What :meth:`associate` returns.
+    """
+
+    def __init__(self, *, answer: GoalAssociation | None = None) -> None:
+        """Create an associator that returns ``answer`` to every call.
+
+        Args:
+            answer: What to return, or ``None`` for ADR-0250 §4's decline.
+        """
+        self.answer = answer or GoalAssociation(verdict=AssociationVerdict.UNDECIDED)
+        self._calls: list[GoalCandidacy] = []
+
+    @property
+    def calls(self) -> tuple[GoalCandidacy, ...]:
+        """Every candidacy this associator was handed, in call order.
+
+        Returns:
+            The candidacies, oldest first. A tuple, so a caller that mutated the
+            page has changed nothing about the record.
+        """
+        return tuple(self._calls)
+
+    @property
+    def call_count(self) -> int:
+        """How many times :meth:`associate` has been called.
+
+        The figure ADR-0250 §3's arms are stated over — "a first turn costs nothing
+        new", "one candidate still costs a call", "a turn carrying a reply reference
+        costs nothing new" — each of which is an assertion about whether this seam was
+        reached at all.
+
+        Returns:
+            The call count.
+        """
+        return len(self._calls)
+
+    async def associate(self, candidacy: GoalCandidacy, /) -> GoalAssociation:
+        """Return the scripted answer, recording what it was asked (ADR-0250 §4).
+
+        Args:
+            candidacy: The turn's request and its labelled candidates.
+
+        Returns:
+            :attr:`answer`, unchanged.
+        """
+        self._calls.append(candidacy)
+        return self.answer
+
+
 class FakePlanStore:
     """A non-persistent ``PlanStore`` test double backed by dicts.
 
@@ -524,6 +631,7 @@ class FakePlanStore:
         """
         self._goals: dict[str, Goal] = {}
         self._attempts: dict[str, GoalAttempt] = {}
+        self._questions: dict[str, GoalQuestion] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
         self._clock = checked_clock(now, owner="FakePlanStore")
@@ -649,6 +757,242 @@ class FakePlanStore:
             )
             self._goals[updated.id] = updated
             return updated.model_copy(deep=True)
+
+    def _goal_for_write_locked(self, goal_id: str, expected: int, what: str) -> Goal:
+        """Read a goal for a compare-and-swap write; the caller holds the resource.
+
+        Re-implemented here rather than imported from ``ai_assistant.planning``, for
+        the reason this module's docstring gives: importing it would pull in the very
+        subsystem the fake stands in for. ``PlanStoreContract`` is what holds the two
+        statements honest.
+
+        Args:
+            goal_id: The goal to read.
+            expected: The ``Goal.version`` the caller computed against.
+            what: What the caller is about to do, for the refusal message.
+
+        Returns:
+            The stored goal.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        stored = self._goals.get(goal_id)
+        if stored is None:
+            msg = f"cannot {what} unknown goal {goal_id}"
+            raise PlanningError(msg)
+        if stored.version != expected:
+            msg = (
+                f"goal {goal_id} is at version {stored.version}, not {expected}: re-read "
+                f"it and recompute the write"
+            )
+            raise StaleExecutionError(msg)
+        return stored
+
+    async def engage_goal(
+        self, goal_id: str, /, *, at: UtcInstant, conversation_id: str, expected_version: int
+    ) -> Goal:
+        """Stamp the goal's engagement, compare-and-swap (ADR-0250 §1, §9).
+
+        The one writer of ``last_engaged_at`` and ``last_engaged_in``; it writes
+        nothing else, and ``conversation_id`` is never rewritten.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        async with self._resource.held():
+            stored = self._goal_for_write_locked(goal_id, expected_version, "engage")
+            updated = _revalidated_goal(
+                stored.model_copy(
+                    update={
+                        "last_engaged_at": at,
+                        "last_engaged_in": conversation_id,
+                        "version": stored.version + 1,
+                    }
+                ),
+                what="the engagement stamp",
+            )
+            self._goals[updated.id] = updated
+            return updated.model_copy(deep=True)
+
+    async def set_goal_status(
+        self,
+        goal_id: str,
+        /,
+        *,
+        status: GoalStatus,
+        at: UtcInstant,  # noqa: ARG002 — the contract's instant; no field of `Goal` records it, and this fake mints no second record to hold it (ADR-0250 §9)
+        expected_version: int,
+    ) -> Goal:
+        """Move the goal's status, compare-and-swap (ADR-0250 §9).
+
+        The goal's only status-mutation route, and it refuses no member of the
+        vocabulary: which act writes which member is the caller's rule.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        async with self._resource.held():
+            stored = self._goal_for_write_locked(goal_id, expected_version, "set the status of")
+            updated = _revalidated_goal(
+                stored.model_copy(update={"status": status, "version": stored.version + 1}),
+                what="the status move",
+            )
+            self._goals[updated.id] = updated
+            return updated.model_copy(deep=True)
+
+    async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
+        """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
+
+        Membership is §2's two-field test — opened in this conversation, or last
+        engaged in it — and the order is §1's: ``last_engaged_at`` descending, the
+        ``goal_id`` ascending as the tie-break, and a goal carrying no instant after
+        every goal that carries one.
+
+        Raises:
+            PlanningError: If ``limit`` is not positive.
+        """
+        if limit < 1:
+            msg = f"a candidate set is read with a positive limit and not {limit} (ADR-0250 §9)"
+            raise PlanningError(msg)
+        async with self._resource.held():
+            members = [
+                goal.model_copy(deep=True)
+                for goal in self._goals.values()
+                if conversation_id in (goal.conversation_id, goal.last_engaged_in)
+            ]
+        ordered = sorted(
+            members,
+            key=lambda goal: (
+                goal.last_engaged_at is None,
+                -(goal.last_engaged_at.timestamp() if goal.last_engaged_at is not None else 0.0),
+                goal.id,
+            ),
+        )
+        return GoalCandidates(goals=tuple(ordered[:limit]), elided=max(0, len(ordered) - limit))
+
+    async def record_question(self, question: GoalQuestion, /) -> bool:
+        """Write an ``OPEN`` question, or refuse a second on one goal (§9).
+
+        The read of the existing question and the write happen under one hold of the
+        modelled resource, so two callers cannot both be admitted against one goal.
+
+        Raises:
+            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record, or
+                the store already holds a question under this ``id``.
+        """
+        async with self._resource.held():
+            if question.disposition is not GoalQuestionDisposition.OPEN:
+                # A terminal record written here would answer `True` while `open_question`
+                # answered `None` for the same goal — a question reported as opened that
+                # occupies no slot and carries a `settled_at` nothing settled. Only
+                # `settle_question` reaches a terminal disposition (ADR-0250 §9, §12).
+                msg = (
+                    f"question {question.id} arrives {question.disposition.value} and "
+                    f"record_question writes an OPEN question: a terminal disposition is "
+                    f"written by settle_question and by nothing else (ADR-0250 §9)"
+                )
+                raise PlanningError(msg)
+            if question.goal_id not in self._goals:
+                msg = f"cannot record a question for unknown goal {question.goal_id}"
+                raise PlanningError(msg)
+            attempt = self._attempts.get(question.attempt_id)
+            if attempt is None:
+                msg = f"cannot record a question for unknown attempt {question.attempt_id}"
+                raise PlanningError(msg)
+            if attempt.goal_id != question.goal_id:
+                msg = (
+                    f"question {question.id} names attempt {question.attempt_id}, which "
+                    f"belongs to goal {attempt.goal_id} and not to {question.goal_id}: a "
+                    f"question's attempt is one its own goal holds (ADR-0250 §9)"
+                )
+                raise PlanningError(msg)
+            if question.id in self._questions:
+                msg = f"question {question.id} already exists"
+                raise PlanningError(msg)
+            if any(
+                held.goal_id == question.goal_id
+                and held.disposition is GoalQuestionDisposition.OPEN
+                for held in self._questions.values()
+            ):
+                return False
+            self._questions[question.id] = question.model_copy(deep=True)
+            return True
+
+    async def get_question(self, question_id: str, /) -> GoalQuestion | None:
+        """Return the question under that id, whatever its disposition (§9)."""
+        async with self._resource.held():
+            stored = self._questions.get(question_id)
+        return None if stored is None else stored.model_copy(deep=True)
+
+    async def open_question(self, goal_id: str, /) -> GoalQuestion | None:
+        """Return that goal's open question, or ``None`` (ADR-0250 §9)."""
+        async with self._resource.held():
+            for held in self._questions.values():
+                if held.goal_id == goal_id and held.disposition is GoalQuestionDisposition.OPEN:
+                    return held.model_copy(deep=True)
+        return None
+
+    async def outstanding_questions(self) -> tuple[GoalQuestion, ...]:
+        """Return every ``OPEN`` question, in ``asked_at`` order (ADR-0250 §9).
+
+        It takes no view of the clock: an expired question is still ``OPEN`` until
+        something settles it, and settling it is the caller's (§12).
+        """
+        async with self._resource.held():
+            open_ones = [
+                one
+                for one in self._questions.values()
+                if one.disposition is GoalQuestionDisposition.OPEN
+            ]
+        return tuple(
+            one.model_copy(deep=True)
+            for one in sorted(open_ones, key=lambda one: (one.asked_at, one.id))
+        )
+
+    async def settle_question(
+        self, question_id: str, /, *, disposition: GoalQuestionDisposition, at: UtcInstant
+    ) -> bool:
+        """Settle an ``OPEN`` question, clearing its content (ADR-0250 §9).
+
+        The resolve-once gate: the read, the comparison and the write happen under one
+        hold, so one of two racing callers answers ``True`` and the other ``False``,
+        and the content is cleared exactly once.
+
+        Raises:
+            PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+        """
+        if disposition is GoalQuestionDisposition.OPEN:
+            msg = (
+                "settle_question moves an OPEN question to a terminal member: OPEN "
+                "settles nothing and no disposition is inferred from silence "
+                "(ADR-0250 §9, §12)"
+            )
+            raise PlanningError(msg)
+        async with self._resource.held():
+            stored = self._questions.get(question_id)
+            if stored is None or stored.disposition is not GoalQuestionDisposition.OPEN:
+                return False
+            settled = stored.model_copy(
+                update={
+                    "disposition": disposition,
+                    "settled_at": at,
+                    "text": None,
+                    "about": None,
+                }
+            )
+            try:
+                self._questions[question_id] = GoalQuestion.model_validate(settled.model_dump())
+            except ValidationError as exc:
+                msg = (
+                    f"the settlement would leave question {question_id} in a shape it "
+                    f"refuses: {exc}"
+                )
+                raise PlanningError(msg) from exc
+            return True
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -1129,6 +1473,7 @@ class FakePlanStore:
                     state.model_copy(deep=True) for state in self._executions.values()
                 ),
                 attempts=tuple(one.model_copy(deep=True) for one in self._attempts.values()),
+                questions=tuple(one.model_copy(deep=True) for one in self._questions.values()),
             )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -1167,6 +1512,11 @@ class FakePlanStore:
         # non-terminal state does not block a deletion no execution blocks.
         for attempt_id in [one.id for one in self._attempts.values() if one.goal_id == goal_id]:
             del self._attempts[attempt_id]
+        # ADR-0250 §9: and it reaches that goal's questions, open and terminal alike.
+        # An open question does not block a deletion, and `GoalDeletion` reports them
+        # exactly as it reports attempts — which is to say with no count at all.
+        for question_id in [one.id for one in self._questions.values() if one.goal_id == goal_id]:
+            del self._questions[question_id]
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -1185,13 +1535,18 @@ class FakePlanStore:
                 raise ActiveExecutionError(msg)
 
             removed = (
-                len(self._goals) + len(self._attempts) + len(self._plans) + len(self._executions)
+                len(self._goals)
+                + len(self._attempts)
+                + len(self._questions)
+                + len(self._plans)
+                + len(self._executions)
             )
             self._goals.clear()
             self._attempts.clear()
+            self._questions.clear()
             self._plans.clear()
             self._executions.clear()
         return removed
 
 
-__all__ = ["FakePlanStore", "FakePlanner", "SkipReason"]
+__all__ = ["FakeGoalAssociator", "FakePlanStore", "FakePlanner", "SkipReason"]

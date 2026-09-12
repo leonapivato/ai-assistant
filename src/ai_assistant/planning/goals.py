@@ -24,11 +24,22 @@ from ai_assistant.core.types import (
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     AttemptPhase,
+    Goal,
     GoalAttempt,
+    GoalCandidates,
+    GoalQuestion,
+    GoalQuestionDisposition,
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import AttemptTransition, Goal, GoalInterpretation
+    from collections.abc import Iterable
+
+    from ai_assistant.core.types import (
+        AttemptTransition,
+        GoalInterpretation,
+        GoalStatus,
+        UtcInstant,
+    )
 
 #: ADR-0249 §6's order, read off the declaration rather than restated: "within one
 #: attempt, ``phase`` advances in that order and never moves backwards".
@@ -107,6 +118,184 @@ def appended(goal: Goal, interpretation: GoalInterpretation) -> Goal:
             }
         )
     )
+
+
+def _revalidated(goal: Goal, *, what: str) -> Goal:
+    """Re-run ``Goal``'s validators over a goal built by ``model_copy`` (ADR-0023 §2).
+
+    That section is explicit about why this exists: "``model_copy(update=...)`` skips
+    validators (a pydantic property no type can close), so the invariant holds *at the
+    validation boundary*, and **a write that reaches past it must re-validate**. That
+    mechanism already exists — ``planning/execution.py:72`` re-validates after
+    ``model_copy`` for exactly this reason."
+
+    It is load-bearing for both of this module's stamps and not merely tidy. A naive
+    or unconvertible ``at`` reaching :func:`engaged` would otherwise be **committed**,
+    and a SQLite store would then fail to decode its own row on the next
+    ``get_goal`` — a record the type is supposed to make impossible, persisted, with
+    the fault surfacing at a reader that did nothing wrong.
+
+    Args:
+        goal: The goal as ``model_copy`` built it.
+        what: What the caller was doing, for the refusal message.
+
+    Returns:
+        The goal, validated.
+
+    Raises:
+        PlanningError: If the rebuilt goal is not one ``Goal`` admits.
+    """
+    try:
+        return Goal.model_validate(goal.model_dump())
+    except ValidationError as exc:
+        msg = f"{what} would leave goal {goal.id} in a shape Goal refuses: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def engaged(goal: Goal, *, at: UtcInstant, conversation_id: str) -> Goal:
+    """Stamp ``goal``'s engagement and advance its version (ADR-0250 §1, §9).
+
+    The **one** place either engagement field is written, so the two conforming stores
+    in this package cannot drift on §1's "exactly one writer" clause. It writes
+    **nothing else**: not the status, not the interpretation, not the attempt — and
+    :attr:`Goal.conversation_id` is **never rewritten**, because that stays the
+    conversation the goal was opened in (ADR-0249 §1's provenance clause).
+
+    **The result is revalidated** (ADR-0023 §2, :func:`_revalidated`), because both
+    values a caller supplies here reach past ``model_copy``'s validators: ``at`` is a
+    :data:`~ai_assistant.core.types.UtcInstant` and ``conversation_id`` an
+    :data:`~ai_assistant.core.types.Identifier`, and neither is checked by the
+    annotation alone in process.
+
+    Args:
+        goal: The goal as stored.
+        at: The engagement instant.
+        conversation_id: The conversation the engaging turn ran under.
+
+    Returns:
+        The goal as it stands after the stamp, with ``at`` normalised to UTC.
+
+    Raises:
+        PlanningError: If ``at`` is not a conforming instant, or ``conversation_id``
+            is blank or has no UTF-8 encoding.
+    """
+    return _revalidated(
+        goal.model_copy(
+            update={
+                "last_engaged_at": at,
+                "last_engaged_in": conversation_id,
+                "version": goal.version + 1,
+            }
+        ),
+        what="the engagement stamp",
+    )
+
+
+def with_status(goal: Goal, *, status: GoalStatus) -> Goal:
+    """Move ``goal``'s status and advance its version (ADR-0250 §9).
+
+    The goal's **only** status-mutation route, stated once for both stores. It writes
+    **nothing else**: not the engagement stamp, not the interpretation, not the
+    attempt. **No member of the vocabulary is refused here**, because A10 and A3 write
+    ``ACHIEVED`` and ``BLOCKED`` through this same route and "a store that refused a
+    member would be a second place the vocabulary is decided" — which act may write
+    which member is the caller's rule.
+
+    Revalidated for :func:`engaged`'s reason. The status is a closed enumeration and a
+    caller reaching past the annotation with something else is the shape this catches.
+
+    Args:
+        goal: The goal as stored.
+        status: The status to write.
+
+    Returns:
+        The goal as it stands after the move.
+
+    Raises:
+        PlanningError: If ``status`` is not a :class:`GoalStatus`.
+    """
+    return _revalidated(
+        goal.model_copy(update={"status": status, "version": goal.version + 1}),
+        what="the status move",
+    )
+
+
+def capped(goals: Iterable[Goal], *, limit: int) -> GoalCandidates:
+    """Order a candidate set by ADR-0250 §1's key and hold it to ``limit`` (§2).
+
+    The order is ``last_engaged_at`` **descending** with the ``goal_id`` **ascending**
+    as the tie-break, and a goal carrying **no** instant sorts **after** every goal
+    that carries one. ADR-0074 §2's reason binds: "some total order must be named or
+    two implementations answer the same page differently", and two goals engaged in
+    the same instant is reachable because a migrated pair carries no instant at all.
+
+    **The absent instant sorts last rather than first, and that is the conservative
+    direction**: sorting it first would make the oldest, least-touched objective in
+    the store the focused goal of every conversation that holds one.
+
+    Args:
+        goals: The whole membership of the set, in any order.
+        limit: The most candidates to return.
+
+    Returns:
+        The capped set, with ``elided`` counting what the truncation dropped.
+
+    Raises:
+        PlanningError: If ``limit`` is not positive.
+    """
+    if limit < 1:
+        msg = f"a candidate set is read with a positive limit and not {limit} (ADR-0250 §9)"
+        raise PlanningError(msg)
+    ordered = sorted(
+        goals,
+        key=lambda goal: (
+            goal.last_engaged_at is None,
+            -(goal.last_engaged_at.timestamp() if goal.last_engaged_at is not None else 0.0),
+            goal.id,
+        ),
+    )
+    return GoalCandidates(goals=tuple(ordered[:limit]), elided=max(0, len(ordered) - limit))
+
+
+def settled(
+    question: GoalQuestion, *, disposition: GoalQuestionDisposition, at: UtcInstant
+) -> GoalQuestion:
+    """Settle ``question``, clearing its content in the same step (ADR-0250 §8).
+
+    "A settled question keeps its facts and loses its content": ``text`` and ``about``
+    are cleared **in the same step that moves the disposition**, and no implementation
+    retains a copy, a digest, a snapshot or an archive of either. ``goal_id`` and
+    ``attempt_id`` survive, so a late answer still reaches the goal (§11).
+
+    Args:
+        question: The open question as stored.
+        disposition: The terminal member to write.
+        at: The settlement instant.
+
+    Returns:
+        The question as it stands after the settlement.
+
+    Raises:
+        PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+    """
+    if disposition is GoalQuestionDisposition.OPEN:
+        msg = (
+            "settle_question moves an OPEN question to a terminal member: OPEN settles "
+            "nothing and no disposition is inferred from silence (ADR-0250 §9, §12)"
+        )
+        raise PlanningError(msg)
+    settled_question = question.model_copy(
+        update={"disposition": disposition, "settled_at": at, "text": None, "about": None}
+    )
+    try:
+        return GoalQuestion.model_validate(settled_question.model_dump())
+    except ValidationError as exc:
+        # ADR-0023 §2: `model_copy(update=...)` skips validators, so `at` reaches past
+        # them. A naive settlement instant committed here would be a question the store
+        # could write and then fail to decode — see `_revalidated` above, whose
+        # reasoning this is, over the other record this module stamps.
+        msg = f"the settlement would leave question {question.id} in a shape it refuses: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def advanced(attempt: GoalAttempt, transition: AttemptTransition) -> GoalAttempt:

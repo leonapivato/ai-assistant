@@ -17,7 +17,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     ActionPlan,
     AttemptEffort,
@@ -42,7 +43,10 @@ from ai_assistant.core.types import (
     Goal,
     GoalAttempt,
     GoalInterpretation,
+    GoalQuestion,
+    GoalQuestionDisposition,
     GoalRevision,
+    GoalStatus,
     Ground,
     MemorySource,
     PlanStep,
@@ -67,6 +71,12 @@ if TYPE_CHECKING:
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: The two engagement instants ADR-0250's arms order goals by. Distinct and both
+#: after ``_WHEN``, so "engaged later" is a fact about the values rather than about
+#: whichever call happened to run first.
+_ENGAGED_AT = datetime(2026, 2, 1, tzinfo=UTC)
+_LATER_ENGAGED = datetime(2026, 3, 1, tzinfo=UTC)
 
 
 #: What a failure of the cancellation case below means, in one place: every
@@ -120,6 +130,42 @@ def _revision(
 def _attempt(attempt_id: str = "a1", goal_id: str = "g1") -> GoalAttempt:
     """A freshly opened attempt: ``UNDERSTAND``/``RUNNING``, nothing spent (§5, §6)."""
     return GoalAttempt(id=attempt_id, goal_id=goal_id, opened_at=_WHEN)
+
+
+def _question(
+    question_id: str = "q1",
+    *,
+    goal_id: str = "g1",
+    attempt_id: str = "a1",
+    asked_at: datetime = _WHEN,
+) -> GoalQuestion:
+    """An ``OPEN`` question carrying both content fields (ADR-0250 §8).
+
+    ``expires_at`` is stamped from ``asked_at`` because §8 computes it "**once**, at
+    the instant the question is written" — the figure is ``Settings.goal_question_ttl``'s
+    default, and no store reads that setting or this deadline.
+    """
+    return GoalQuestion(
+        id=question_id,
+        goal_id=goal_id,
+        attempt_id=attempt_id,
+        text="which campsite?",
+        about="the usual campsite",
+        asked_at=asked_at,
+        expires_at=asked_at + timedelta(hours=72),
+    )
+
+
+async def _goal_with_attempt(
+    store: PlanStore, *, goal_id: str = "g1", attempt_id: str = "a1"
+) -> None:
+    """Write the two records every question resolves against (ADR-0250 §9).
+
+    ``record_question`` refuses a dangling ``goal_id`` or ``attempt_id`` at the write,
+    so the arms below need both rows before they can ask about anything else.
+    """
+    await store.save_goal(_goal(goal_id))
+    await store.open_attempt(_attempt(attempt_id, goal_id=goal_id))
 
 
 #: One read request of each of ADR-0226 §2's two kinds, for the export arms below.
@@ -1170,6 +1216,638 @@ class PlanStoreContract:
         with pytest.raises(StaleExecutionError):
             await store.commit_transition(_claim(state))
 
+    # --- ADR-0250 §§1, 2, 9: engagement, status and the candidate set ------
+
+    async def test_engage_goal_stamps_both_fields_and_advances_the_version(
+        self, store: PlanStore
+    ) -> None:
+        """§1, §9: the one writer of ``last_engaged_at`` and ``last_engaged_in``.
+
+        It writes **nothing else** — not the status, not the interpretation, not the
+        attempt — and ``conversation_id`` is **never rewritten**, which is ADR-0249
+        §1's provenance clause binding entire: the record still answers *where did this
+        objective come from* after the goal has been engaged from a second
+        conversation.
+        """
+        await store.save_goal(_goal())
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert (stored.last_engaged_at, stored.last_engaged_in) == (None, None)
+
+        engaged = await store.engage_goal(
+            "g1", at=_ENGAGED_AT, conversation_id="c2", expected_version=0
+        )
+
+        assert engaged.last_engaged_at == _ENGAGED_AT
+        assert engaged.last_engaged_in == "c2"
+        assert engaged.conversation_id == "c1", "provenance, and never rewritten"
+        assert engaged.version == 1
+        assert engaged.status is GoalStatus.ACTIVE
+        assert [one.revision for one in engaged.interpretation] == [1]
+        assert await store.attempts_of("g1") == ()
+        assert await store.get_goal("g1") == engaged
+
+    async def test_engage_goal_refuses_a_stale_version_and_an_unknown_goal(
+        self, store: PlanStore
+    ) -> None:
+        """§9: "It refuses on a stale ``expected_version``".
+
+        ADR-0249 §1 makes ``version`` "the **compare-and-swap** token every mutation of
+        the goal advances", and a stamp that skipped it would be the one mutation two
+        concurrent turns could interleave.
+        """
+        await store.save_goal(_goal())
+        await store.engage_goal("g1", at=_ENGAGED_AT, conversation_id="c1", expected_version=0)
+
+        with pytest.raises(StaleExecutionError):
+            await store.engage_goal("g1", at=_ENGAGED_AT, conversation_id="c1", expected_version=0)
+        with pytest.raises(PlanningError):
+            await store.engage_goal(
+                "missing", at=_ENGAGED_AT, conversation_id="c1", expected_version=0
+            )
+
+    async def test_two_engagements_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§20 arm 19's third pair, on the interleaving §12's indivisibility is about.
+
+        "Two ``engage_goal`` calls computed against the same ``expected_version``: one
+        succeeds and one raises." Dispatched before either completes, so an
+        implementation that read and compared before a suspension and wrote after it
+        without re-reading fails here rather than passing a sequential arm.
+        """
+        await store.save_goal(_goal())
+
+        settled = await asyncio.gather(
+            *(
+                store.engage_goal("g1", at=_ENGAGED_AT, conversation_id=name, expected_version=0)
+                for name in ("c2", "c3")
+            ),
+            return_exceptions=True,
+        )
+
+        won = [one for one in settled if isinstance(one, Goal)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one write of a version lands"
+        assert all(isinstance(one, StaleExecutionError) for one in lost)
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.version == 1, "one write, one version"
+        assert stored.last_engaged_in == won[0].last_engaged_in
+
+    @pytest.mark.parametrize(
+        "status",
+        [GoalStatus.ACTIVE, GoalStatus.ABANDONED, GoalStatus.ACHIEVED, GoalStatus.BLOCKED],
+    )
+    async def test_set_goal_status_refuses_no_member_of_the_vocabulary(
+        self, store: PlanStore, status: GoalStatus
+    ) -> None:
+        """§9: the store refuses neither ``ACHIEVED`` nor ``BLOCKED``.
+
+        "A10 and A3 write them through this same route and a store that refused a
+        member would be a second place the vocabulary is decided." **Which act may
+        write which member is the caller's rule**, and ADR-0250 §20 arm 23 is what
+        pins that over the shipped tree — the store's job is to make the route exist
+        and to make it the only one.
+        """
+        await store.save_goal(_goal())
+
+        moved = await store.set_goal_status("g1", status=status, at=_ENGAGED_AT, expected_version=0)
+
+        assert moved.status is status
+        assert moved.version == 1
+        assert (moved.last_engaged_at, moved.last_engaged_in) == (None, None), (
+            "it writes nothing else: not the engagement stamp (ADR-0250 §9)"
+        )
+        assert [one.revision for one in moved.interpretation] == [1]
+
+    async def test_set_goal_status_refuses_a_stale_version_and_an_unknown_goal(
+        self, store: PlanStore
+    ) -> None:
+        """§20 arm 23's last limb: "on **both** conforming implementations"."""
+        await store.save_goal(_goal())
+        await store.set_goal_status(
+            "g1", status=GoalStatus.ABANDONED, at=_ENGAGED_AT, expected_version=0
+        )
+
+        with pytest.raises(StaleExecutionError):
+            await store.set_goal_status(
+                "g1", status=GoalStatus.ACTIVE, at=_ENGAGED_AT, expected_version=0
+            )
+        with pytest.raises(PlanningError):
+            await store.set_goal_status(
+                "missing", status=GoalStatus.ACTIVE, at=_ENGAGED_AT, expected_version=0
+            )
+
+    async def test_no_other_write_moves_either_engagement_field(self, store: PlanStore) -> None:
+        """§1, §20 arm 18's store half: exactly one writer, and these are not it.
+
+        "``save_goal``, ``record_interpretation``, ``open_attempt`` and
+        ``commit_attempt`` each leave both exactly as they found them", and neither a
+        candidate-set read nor an export moves either. The four *acts* that engage a
+        goal are ADR-0250 §19's M3; what a store can be held to is that nothing else
+        does.
+        """
+        await store.save_goal(_goal())
+        await store.engage_goal("g1", at=_ENGAGED_AT, conversation_id="c1", expected_version=0)
+        await store.save_plan(_plan())
+        await store.open_attempt(_attempt())
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=1)
+        )
+        await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
+        )
+        await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+        await store.export()
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert (stored.last_engaged_at, stored.last_engaged_in) == (_ENGAGED_AT, "c1")
+
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            pytest.param(datetime(2026, 2, 1), id="naive"),  # noqa: DTZ001 — the subject
+            pytest.param(datetime(2026, 2, 1, tzinfo=timezone(timedelta(hours=2))), id="offset"),
+        ],
+    )
+    async def test_an_engagement_instant_is_validated_before_it_is_committed(
+        self, store: PlanStore, instant: datetime
+    ) -> None:
+        """ADR-0023 §2: a write that reaches past ``model_copy`` must re-validate.
+
+        "``model_copy(update=...)`` skips validators (a pydantic property no type can
+        close), so the invariant holds *at the validation boundary*, and **a write that
+        reaches past it must re-validate**." A store that stamped an unvalidated
+        instant would **commit** it and then fail to decode its own row on the next
+        read — a record the type is supposed to make impossible, persisted, with the
+        fault surfacing at a reader that did nothing wrong.
+
+        The offset case is the other half of §2: an aware instant is **converted** to
+        UTC rather than refused, because "Python compares two aware datetimes sharing a
+        ``tzinfo`` by their naive wall-clock values", so an unconverted one orders
+        wrongly among its peers — which is exactly what ADR-0250 §1's key sorts on.
+        """
+        await store.save_goal(_goal())
+
+        if instant.tzinfo is None:
+            with pytest.raises(PlanningError):
+                await store.engage_goal("g1", at=instant, conversation_id="c1", expected_version=0)
+            unmoved = await store.get_goal("g1")
+            assert unmoved is not None
+            assert (unmoved.last_engaged_at, unmoved.version) == (None, 0), "and nothing moved"
+            return
+
+        engaged = await store.engage_goal(
+            "g1", at=instant, conversation_id="c1", expected_version=0
+        )
+        assert engaged.last_engaged_at == instant
+        assert engaged.last_engaged_at is not None
+        assert engaged.last_engaged_at.tzinfo is UTC, "converted rather than stored as given"
+        assert await store.get_goal("g1") == engaged, "so the row reads back"
+
+    async def test_a_settlement_instant_is_validated_before_it_is_committed(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0023 §2, over the other record this decision stamps.
+
+        The same clause reaches ``settle_question``'s ``at``: a naive settlement
+        instant committed here would leave a question the store can write and then
+        cannot decode, and the question would be **terminal** — its content already
+        cleared — so nothing could recover what it had asked.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        with pytest.raises(PlanningError):
+            await store.settle_question(
+                "q1",
+                disposition=GoalQuestionDisposition.ANSWERED,
+                at=datetime(2026, 3, 1),  # noqa: DTZ001 — the subject
+            )
+
+        held = await store.get_question("q1")
+        assert held is not None
+        assert held.disposition is GoalQuestionDisposition.OPEN, "and nothing moved"
+        assert held.text == "which campsite?", "and the content is still there"
+
+    async def test_the_candidate_set_is_the_two_field_membership_test(
+        self, store: PlanStore
+    ) -> None:
+        """§2: opened **in** this conversation, **or** last engaged in it.
+
+        "A goal that has moved between conversations is a candidate in **two** of
+        them — the one that opened it and the one that last engaged it", and in no
+        more, because ``last_engaged_in`` holds one value. A closed goal is a
+        candidate too: "open or closed alike".
+        """
+        await store.save_goal(_goal("g1"))
+        await store.save_goal(_goal("g2"))
+        await store.engage_goal("g2", at=_ENGAGED_AT, conversation_id="c2", expected_version=0)
+        await store.set_goal_status(
+            "g1", status=GoalStatus.ACHIEVED, at=_ENGAGED_AT, expected_version=0
+        )
+
+        first = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+        second = await store.candidates_for("c2", limit=MAX_ASSOCIATION_CANDIDATES)
+        third = await store.candidates_for("c3", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert {one.id for one in first.goals} == {"g1", "g2"}, "both were opened in c1"
+        assert [one.id for one in second.goals] == ["g2"], "and one was last engaged in c2"
+        assert third.goals == (), "a third conversation reaches neither"
+        assert (first.elided, second.elided, third.elided) == (0, 0, 0)
+        assert first.goals[0].status is GoalStatus.ACHIEVED or any(
+            one.status is GoalStatus.ACHIEVED for one in first.goals
+        ), "a closed goal is a candidate while its conversation is retained"
+
+    async def test_the_candidate_set_is_ordered_with_the_absent_instant_last(
+        self, store: PlanStore
+    ) -> None:
+        """§1, §20 arm 26's ordering half: the key, its tie-break, and the absence.
+
+        "``last_engaged_at`` descending with the ``goal_id`` ascending as the
+        tie-break, and a goal whose ``last_engaged_at`` is absent sorts **after** every
+        goal carrying one." The absent instant sorts last because "sorting it first
+        would make the oldest, least-touched objective in the store the focused goal of
+        every conversation that holds one", and the tie-break is stated because a
+        migrated pair carrying no instant at all is reachable.
+        """
+        for name in ("g1", "g2", "g3", "g4"):
+            await store.save_goal(_goal(name))
+        await store.engage_goal("g3", at=_ENGAGED_AT, conversation_id="c1", expected_version=0)
+        await store.engage_goal("g1", at=_LATER_ENGAGED, conversation_id="c1", expected_version=0)
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert [one.id for one in page.goals] == ["g1", "g3", "g2", "g4"], (
+            "engaged later first, then the two carrying no instant by id ascending"
+        )
+
+    async def test_the_candidate_set_is_capped_and_counts_what_it_dropped(
+        self, store: PlanStore
+    ) -> None:
+        """§2, §20 arm 21's store half: the cap, and the true remainder.
+
+        "``elided`` carries the true remainder, and no dropped goal is rendered." A
+        count and never an identifier, and "a store that cannot count them does not
+        answer ``0``".
+        """
+        for index in range(1, MAX_ASSOCIATION_CANDIDATES + 4):
+            await store.save_goal(_goal(f"g{index:02d}"))
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert len(page.goals) == MAX_ASSOCIATION_CANDIDATES
+        assert page.elided == 3, "the true remainder, not a flag"
+        assert [one.id for one in page.goals] == [
+            f"g{index:02d}" for index in range(1, MAX_ASSOCIATION_CANDIDATES + 1)
+        ]
+
+    async def test_a_candidate_set_is_read_with_a_positive_limit(self, store: PlanStore) -> None:
+        """§9: ``limit`` is what the caller truncates to, and zero truncates to nothing.
+
+        A store that answered an empty page for ``limit=0`` would report every goal as
+        elided, which is a disclosure §2 keys the reply on — so the malformed argument
+        is refused rather than answered.
+        """
+        await store.save_goal(_goal())
+        for limit in (0, -1):
+            with pytest.raises(PlanningError):
+                await store.candidates_for("c1", limit=limit)
+
+    # --- ADR-0250 §§8-12: the goal's one clarification ---------------------
+
+    async def test_a_question_is_written_read_back_and_enumerated(self, store: PlanStore) -> None:
+        """§9: ``record_question``, ``get_question``, ``open_question`` and the listing.
+
+        ``outstanding_questions`` "takes no view of the clock": an expired question is
+        still ``OPEN`` until something settles it, which is ``ParkedReads.outstanding``'s
+        own division — "a store that read one would be deciding a lifetime the engine
+        owns".
+        """
+        await _goal_with_attempt(store)
+
+        assert await store.open_question("g1") is None
+        assert await store.outstanding_questions() == ()
+
+        assert await store.record_question(_question()) is True
+
+        held = await store.get_question("q1")
+        assert held is not None
+        assert held.disposition is GoalQuestionDisposition.OPEN
+        assert (held.text, held.about) == ("which campsite?", "the usual campsite")
+        assert await store.open_question("g1") == held
+        assert await store.outstanding_questions() == (held,)
+        assert await store.get_question("missing") is None
+        assert await store.open_question("missing") is None
+
+    async def test_a_goal_holds_at_most_one_open_question(self, store: PlanStore) -> None:
+        """§8, §20 arm 19's first pair: the gate is the store's, not a caller's.
+
+        "Two ``record_question`` calls on one goal: one succeeds and one answers
+        ``False``, with no second row." The restriction is kept for a **correctness**
+        reason rather than a storage one: "two outstanding questions about one
+        objective have no order and answering either changes what the other means".
+
+        **It is per goal and never per conversation**: a conversation may hold any
+        number of paused goals, each with its own question — which the second half of
+        this case is what pins.
+        """
+        await _goal_with_attempt(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+
+        assert await store.record_question(_question()) is True
+        assert await store.record_question(_question(question_id="q2")) is False
+
+        assert await store.get_question("q2") is None, "no second row"
+        assert await store.outstanding_questions() == (await store.open_question("g1"),)
+
+        assert (
+            await store.record_question(_question(question_id="q3", goal_id="g2", attempt_id="a2"))
+            is True
+        ), "per goal and never per conversation (ADR-0250 §8)"
+
+    async def test_two_questions_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§9: "the read of the existing question and the write are **one indivisible
+        step**", over calls that are actually in flight together.
+
+        The sequential arm above would pass an implementation that read before a
+        suspension and wrote after it without re-reading — which is exactly the
+        interleaving two engines over one data directory produce.
+        """
+        await _goal_with_attempt(store)
+
+        settled = await asyncio.gather(
+            *(store.record_question(_question(question_id=name)) for name in ("q1", "q2")),
+            return_exceptions=True,
+        )
+
+        assert sorted(one for one in settled if isinstance(one, bool)) == [False, True]
+        rows = [name for name in ("q1", "q2") if await store.get_question(name) is not None]
+        assert len(rows) == 1, "one row, whichever caller won"
+
+    async def test_settling_clears_the_content_in_the_same_step(self, store: PlanStore) -> None:
+        """§8, §9: the disposition moves and the content goes, indivisibly.
+
+        "A settled question keeps its facts and loses its content", and ``goal_id``
+        **survives settlement** so that a late answer still reaches the goal (§11).
+        There is no intermediate state in which a terminal question still carries its
+        text: the type refuses one.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        assert (
+            await store.settle_question(
+                "q1", disposition=GoalQuestionDisposition.ANSWERED, at=_LATER_ENGAGED
+            )
+            is True
+        )
+
+        settled = await store.get_question("q1")
+        assert settled is not None
+        assert settled.disposition is GoalQuestionDisposition.ANSWERED
+        assert (settled.text, settled.about) == (None, None)
+        assert settled.settled_at == _LATER_ENGAGED
+        assert (settled.goal_id, settled.attempt_id) == ("g1", "a1")
+        assert await store.open_question("g1") is None, "and the goal's slot is free"
+        assert await store.outstanding_questions() == ()
+
+    async def test_a_settle_that_lost_the_race_changes_nothing(self, store: PlanStore) -> None:
+        """§9, §20 arm 19's second pair: the resolve-once gate.
+
+        "Two ``settle_question`` calls on one question: one answers ``True`` and one
+        ``False``, with the content cleared exactly once." A caller that lost "records
+        nothing, revises nothing and reports the settled state", which is ADR-0244 §3's
+        gate at the seam a goal has instead of a decision.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        settled = await asyncio.gather(
+            *(
+                store.settle_question("q1", disposition=disposition, at=_LATER_ENGAGED)
+                for disposition in (
+                    GoalQuestionDisposition.ANSWERED,
+                    GoalQuestionDisposition.WITHDRAWN,
+                )
+            ),
+            return_exceptions=True,
+        )
+
+        assert sorted(one for one in settled if isinstance(one, bool)) == [False, True]
+        held = await store.get_question("q1")
+        assert held is not None
+        assert held.disposition is not GoalQuestionDisposition.OPEN
+        assert (held.text, held.about) == (None, None)
+
+    async def test_settling_an_already_terminal_or_unknown_question_answers_false(
+        self, store: PlanStore
+    ) -> None:
+        """§9: "``settle_question`` on an already-terminal question answers ``False``
+        and changes nothing", and one naming no question does the same.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+        await store.settle_question(
+            "q1", disposition=GoalQuestionDisposition.WITHDRAWN, at=_LATER_ENGAGED
+        )
+        before = await store.get_question("q1")
+
+        assert (
+            await store.settle_question(
+                "q1", disposition=GoalQuestionDisposition.ANSWERED, at=_ENGAGED_AT
+            )
+            is False
+        )
+        assert (
+            await store.settle_question(
+                "missing", disposition=GoalQuestionDisposition.ANSWERED, at=_ENGAGED_AT
+            )
+            is False
+        )
+        assert await store.get_question("q1") == before, "and changes nothing"
+
+    async def test_settling_to_open_settles_nothing_and_is_refused(self, store: PlanStore) -> None:
+        """§9, §12: "no terminal disposition is inferred from silence", and ``OPEN``
+        is not a terminal one.
+
+        A malformed command rather than a lost race, so it is refused rather than
+        answered ``False`` — which is what keeps ``False`` meaning "another caller
+        moved it".
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        with pytest.raises(PlanningError):
+            await store.settle_question(
+                "q1", disposition=GoalQuestionDisposition.OPEN, at=_LATER_ENGAGED
+            )
+
+        held = await store.get_question("q1")
+        assert held is not None
+        assert held.disposition is GoalQuestionDisposition.OPEN
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            GoalQuestionDisposition.ANSWERED,
+            GoalQuestionDisposition.WITHDRAWN,
+            GoalQuestionDisposition.EXPIRED,
+            GoalQuestionDisposition.SUPERSEDED,
+        ],
+    )
+    async def test_record_question_refuses_a_question_that_is_already_terminal(
+        self, store: PlanStore, disposition: GoalQuestionDisposition
+    ) -> None:
+        """§9: this member "writes an ``OPEN`` question", and that is the whole of it.
+
+        The type admits both shapes and has to — a settled question is read back,
+        exported and returned by ``get_question`` — so the state it does not close is a
+        **caller** handing a terminal record here. Writing one would answer ``True``
+        while ``open_question`` answered ``None`` for the same goal: a record with a
+        ``settled_at`` nothing settled, occupying no slot, reported as a question that
+        was opened.
+
+        §12 is the same rule read from the other side — "**no terminal disposition is
+        inferred from silence**" — because a disposition is written by the act that
+        reaches it, and ``settle_question`` is the only act that reaches a terminal one.
+        All four are driven, because they are four distinct acts and "no implementation
+        treats any as a weaker form of another".
+        """
+        await _goal_with_attempt(store)
+        already = _question().model_copy(
+            update={
+                "disposition": disposition,
+                "settled_at": _LATER_ENGAGED,
+                "text": None,
+                "about": None,
+            }
+        )
+
+        with pytest.raises(PlanningError, match="record_question writes an OPEN question"):
+            await store.record_question(already)
+
+        assert await store.get_question("q1") is None, "and the refusal left no record"
+        assert await store.open_question("g1") is None
+        assert await store.outstanding_questions() == ()
+        assert await store.record_question(_question()) is True, "the slot is still free"
+
+    async def test_a_question_names_an_attempt_of_its_own_goal(self, store: PlanStore) -> None:
+        """§9: the closure kept at write time, over a reference that can outlive it.
+
+        ``goal_id`` and ``attempt_id`` are both references ADR-0014 §5 requires to
+        resolve within the same export, which ADR-0250 §9 extends to ``question_id``.
+        An attempt belonging to **another** goal resolves at the write and stops
+        resolving at the first ``delete_goal``: that call cascades one goal's attempts
+        and its questions together, so a question bound across the two survives the
+        attempt it names and makes the next ``export`` unvalidatable — the precise
+        failure :meth:`commit_attempt` already confines its own references to prevent.
+
+        Asserted **through** the deletion rather than at the refusal alone, because the
+        refusal is only worth having for what it stops happening later.
+        """
+        await _goal_with_attempt(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+
+        with pytest.raises(PlanningError, match="its own goal holds"):
+            await store.record_question(_question(goal_id="g2", attempt_id="a1"))
+
+        assert await store.get_question("q1") is None
+        assert await store.record_question(_question(goal_id="g2", attempt_id="a2")) is True
+        assert (await store.delete_goal("g1")).deleted
+        export = await store.export()
+        assert {one.attempt_id for one in export.questions} <= {one.id for one in export.attempts}
+
+    async def test_a_question_needs_its_goal_and_its_attempt_to_exist(
+        self, store: PlanStore
+    ) -> None:
+        """§9: a dangling reference is refused at the write, not repaired at the read.
+
+        ADR-0014 §5's closure promise kept at write time, which is the division
+        ``save_plan`` already records for ``supersedes`` — and what makes
+        ``PlanExport``'s extension of that rule to ``question_id`` hold across a
+        deletion.
+        """
+        await _goal_with_attempt(store)
+
+        with pytest.raises(PlanningError):
+            await store.record_question(_question(question_id="q2", goal_id="missing"))
+        with pytest.raises(PlanningError):
+            await store.record_question(_question(question_id="q3", attempt_id="missing"))
+
+        await store.record_question(_question())
+        with pytest.raises(PlanningError):
+            await store.record_question(_question())
+
+    async def test_delete_goal_reaches_its_questions_open_and_terminal_alike(
+        self, store: PlanStore
+    ) -> None:
+        """§9, §20 arm 28: the cascade reaches questions, and an open one does not block.
+
+        "An open question does not block a deletion, on ADR-0073 §5's ruling that *the
+        store deletes what it is told to delete*." ``GoalDeletion`` reports them
+        exactly as ADR-0249 §12 has it report attempts — which is to say the record
+        carries no count for either, so what is asserted is the rows' absence.
+        """
+        await _goal_with_attempt(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+        await store.record_question(_question())
+        await store.settle_question(
+            "q1", disposition=GoalQuestionDisposition.EXPIRED, at=_LATER_ENGAGED
+        )
+        await store.record_question(_question(question_id="q2"))
+        await store.record_question(_question(question_id="q3", goal_id="g2", attempt_id="a2"))
+
+        removal = await store.delete_goal("g1")
+
+        assert removal.deleted, "an open question does not block a deletion"
+        assert await store.get_question("q1") is None, "the terminal one went too"
+        assert await store.get_question("q2") is None
+        assert await store.get_question("q3") is not None, "and another goal's did not"
+
+    async def test_clear_removes_questions_too(self, store: PlanStore) -> None:
+        """§9: a bulk erase reaches what a goal-scoped one would."""
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+
+        assert await store.clear() >= 1
+        assert await store.get_question("q1") is None
+        assert await store.outstanding_questions() == ()
+
+    async def test_the_export_carries_questions_and_closes_over_them(
+        self, store: PlanStore
+    ) -> None:
+        """§9, §20 arm 27: the document gains ``questions`` and the closure reaches them.
+
+        ADR-0014 §5's closure rule **extends** to ``question_id`` rather than changing:
+        a question names a goal and an attempt, and both survive its settlement, so
+        both must resolve within the same document. **A settled question exports with
+        its content already absent**, which is §8's retention rule and not an omission
+        from the export — so the whole document is the proof that the content is gone.
+        """
+        await _goal_with_attempt(store)
+        await store.record_question(_question())
+        await store.record_question(_question(question_id="q2"))  # refused: one open per goal
+        await store.settle_question(
+            "q1", disposition=GoalQuestionDisposition.SUPERSEDED, at=_LATER_ENGAGED
+        )
+        await store.record_question(_question(question_id="q3"))
+
+        export = await store.export()
+
+        assert {one.id for one in export.questions} == {"q1", "q3"}
+        by_id = {one.id: one for one in export.questions}
+        assert (by_id["q1"].text, by_id["q1"].about) == (None, None), "content already absent"
+        assert by_id["q1"].goal_id == "g1", "and the facts it closes over survive"
+        assert by_id["q3"].text == "which campsite?"
+        assert {one.goal_id for one in export.questions} <= {one.id for one in export.goals}
+        assert {one.attempt_id for one in export.questions} <= {one.id for one in export.attempts}
+
     async def test_delete_goal_cascades_to_attempts(self, store: PlanStore) -> None:
         """§16 arm 12: the cascade reaches attempts, and a live attempt blocks nothing.
 
@@ -1204,7 +1882,7 @@ class PlanStoreContract:
 
         export = await store.export()
 
-        assert export.schema_version == 9
+        assert export.schema_version == 10
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
 
@@ -1834,7 +2512,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 9
+        assert export.schema_version == 10
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:

@@ -125,6 +125,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CanonicalDestination,
         CarriedProvenance,
+        ClarificationWithdrawal,
         Confirmation,
         ConflictRelation,
         ConnectedAccount,
@@ -154,10 +155,18 @@ if TYPE_CHECKING:
         FetchOutcome,
         FrozenJsonMapping,
         Goal,
+        GoalAbandonment,
+        GoalAssociation,
         GoalAttempt,
         GoalBrief,
+        GoalCandidacy,
+        GoalCandidates,
         GoalDeletion,
+        GoalQuestion,
+        GoalQuestionDisposition,
         GoalRevision,
+        GoalStatus,
+        GoalSummary,
         GrantableSource,
         GrantScope,
         HeldNotification,
@@ -230,6 +239,7 @@ if TYPE_CHECKING:
         TranscriptHit,
         TransportEndpoint,
         TurnOutcome,
+        TurnReference,
         UtcInstant,
         WalkPosition,
     )
@@ -3565,6 +3575,94 @@ class WebSearcher(Protocol):
 
 
 @runtime_checkable
+class GoalAssociator(Protocol):
+    """Decides which of a conversation's goals a turn is about (ADR-0250 §4).
+
+    **One seam, one member, one value.** An implementation holds a
+    :class:`ModelProvider` and **nothing else that reads** — not a
+    :class:`MemoryStore`, not a :class:`PlanStore`, not a ``ConversationStore``, not a
+    :class:`ContextProvider` and not any other. It lives in ``ai_assistant.planning``
+    and is reached by ``orchestration`` **through this Protocol and by no other
+    route**.
+
+    **This is not a new mechanism; it is** :class:`QueryComposer`'s **applied to a
+    second judgement**, and that Protocol's own docstring states the shape copied
+    here: "The parameter stays positional-only and stays the only one, this stays a
+    single-member Protocol … no keyword, no second member, and no constructor
+    dependency on a store seam." The reason that decides it is ADR-0238 §2's: "Three
+    parameters would put the bound back in the caller's hands one member at a time — a
+    supply site that passed the right records would be conforming and one that passed
+    the wrong ones would be a defect nobody could see from the signature. One value
+    names the whole of what a composition may draw on in a place a reviewer reads
+    once."
+
+    **And the association cannot ride the planner's envelope**, which is the argument
+    against the cheaper-looking design. :meth:`Planner.plan` takes a
+    :class:`~ai_assistant.core.types.GoalBrief` first, and a brief is projected from
+    *the* goal's current interpretation alone (ADR-0249 §9) — so calling the planner
+    requires already knowing **which** goal. The circularity is structural, not
+    incidental: the association is what makes the brief, so it precedes the call that
+    consumes one.
+
+    **This is not a** :meth:`Planner.plan` **call and ADR-0228 §3's bound is
+    untouched.** That section rules that "A turn makes **at most two** calls to
+    ``Planner.plan``"; an :meth:`associate` call is a call to a different Protocol
+    with a different value and a different answer, so the figure two is neither read,
+    raised nor made configurable here. **A turn makes at most one** ``associate``
+    **call**, and no lane makes a second, retries one, or re-asks on a different
+    prompt.
+
+    **A BREAKING contract change under golden rule 5**, landing with its shared
+    conformance suite and its canonical fake in :mod:`ai_assistant.testing`
+    (``CONTRIBUTING.md`` -> "Adding a Protocol").
+
+    Cancelling :meth:`associate` is governed by this module's cancellation clause
+    (ADR-0060).
+    """
+
+    async def associate(self, candidacy: GoalCandidacy, /) -> GoalAssociation:
+        """Decide which candidate this turn is about, or decline to (ADR-0250 §4).
+
+        **The labels are rendered from the tuple this call was given and resolved by
+        nobody but the caller.** The label of the candidate at 1-based index *n* is
+        the ASCII string ``G`` followed by *n* in decimal with no padding — "that is
+        the whole of the scheme, it is the same on both sides of the seam, both sides
+        derive it from the value they hold and neither consults the other, and no
+        label survives the call that rendered it and none is persisted as a
+        reference" (ADR-0250 §3, on ADR-0226 §3's scheme). The worst a label a model
+        invents can do is name a candidate index that is not there, which the caller
+        turns into an ask.
+
+        **A declining answer is asserted rather than empty** (ADR-0176 §1's shape).
+        An implementation that cannot parse its model's answer returns
+        :attr:`~ai_assistant.core.types.AssociationVerdict.UNDECIDED` and **never a
+        guess**: it never reads an unparseable answer as ``FRESH``, as ``CONTINUES``,
+        or as an error that fails the turn. A parse failure read as ``FRESH`` would
+        open a duplicate goal on every malformed answer, and one read as ``CONTINUES``
+        would revise the focused goal on the strength of nothing at all.
+
+        **It renders no identifier and accepts none** (ADR-0228 §8). A
+        :class:`~ai_assistant.core.types.GoalCandidacy` carries none to render, which
+        is a property of the type rather than a discipline an implementation keeps.
+
+        Args:
+            candidacy: The turn's request, the labelled candidates in ADR-0250 §1's
+                order, what the cap dropped, and the focused candidate's label where
+                there is one. Positional-only and the only parameter, for the reason
+                the class docstring gives.
+
+        Returns:
+            The verdict and the labels it names, in one of the four shapes
+            :class:`~ai_assistant.core.types.GoalAssociation` admits.
+
+        Raises:
+            ModelError: If the provider could not be reached at all. An answer that
+                came back and could not be read is ``UNDECIDED`` and not a raise.
+        """
+        ...
+
+
+@runtime_checkable
 class Planner(Protocol):
     """Turns a :class:`~ai_assistant.core.types.GoalBrief` into a plan (ADR-0014 §6).
 
@@ -4020,6 +4118,27 @@ class PlanStore(Protocol):
     still does. **The read, the comparison and the write are one indivisible step**,
     and there is **no separate read on which a decision is taken** before either.
 
+    **Eight members carry ADR-0250's goal clarification and engagement stamp**, and
+    that too is a **BREAKING** contract change under golden rule 5, layering on
+    ADR-0249 §12's widening: :meth:`engage_goal`, :meth:`set_goal_status`,
+    :meth:`candidates_for`, :meth:`record_question`, :meth:`get_question`,
+    :meth:`open_question`, :meth:`outstanding_questions` and
+    :meth:`settle_question`. **All eight are commands and none is a snapshot** —
+    each names the change it makes and returns the stored record, and none takes a
+    whole ``Goal`` or a whole ``GoalQuestion`` back in order to write it. No fifth
+    frozen command type is minted for them: "a keyword list that names one change is
+    a command in that section's sense", which is the shape ``ParkedReads.settle``
+    already uses.
+
+    **The question record lives here rather than in a store of its own** (ADR-0250
+    §8). ADR-0244 §3 gave a parked read a store in ``permissions/`` because "a park is
+    the unanswered half of a recorded permission question, joined to the trail by
+    ``decision_id``"; a clarification is joined to no decision, gates no access and
+    records no permission, and ADR-0014 §5's charter — "Durable planning state belongs
+    to ``planning``, not to the wiring layer" — reaches it. The deciding cost is
+    deletion: a question's life is its goal's, and a second store would put it behind
+    a second cascade with no transaction between the two.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
     """
@@ -4146,6 +4265,263 @@ class PlanStore(Protocol):
 
     async def get_goal(self, goal_id: str) -> Goal | None:
         """Return the goal with ``goal_id``, or ``None`` if absent."""
+        ...
+
+    async def engage_goal(
+        self, goal_id: str, /, *, at: UtcInstant, conversation_id: str, expected_version: int
+    ) -> Goal:
+        """Stamp the goal's engagement and return it as written (ADR-0250 §9).
+
+        **The one writer of** ``Goal.last_engaged_at`` **and**
+        ``Goal.last_engaged_in`` (§1). :meth:`save_goal`,
+        :meth:`record_interpretation`, :meth:`open_attempt` and :meth:`commit_attempt`
+        each leave both exactly as they found them, and no model output, planner
+        envelope or interface adapter reaches either. It writes **nothing else**: not
+        the status, not the interpretation, not the attempt.
+
+        **A member rather than a stamp folded into the writes that already exist.** A
+        turn that associates to a goal and records **no** revision — a continuation
+        that adds nothing to the understanding — still engaged it, and there is no
+        other write on that path to carry the stamp. Folding it into
+        :meth:`record_interpretation` would leave focus unmoved on exactly the turns a
+        user would be most surprised to find it unmoved on, and folding it into
+        :meth:`commit_attempt` would make an attempt transition a focus event, which
+        §1 says it is not. One member with one writer is also what makes §1's "exactly
+        one writer" clause checkable rather than a convention spread over four call
+        sites.
+
+        **Compare-and-swap, indivisibly**, because everything on a goal is: ADR-0249
+        §1 makes ``version`` "the compare-and-swap token every mutation of the goal
+        advances", and a stamp that skipped it would be the one mutation two concurrent
+        turns could interleave.
+
+        Args:
+            goal_id: The goal to stamp.
+            at: The engagement instant, from the caller's injected clock.
+            conversation_id: The conversation the engaging turn ran under.
+            expected_version: The ``Goal.version`` this was computed against.
+
+        Returns:
+            The goal as written, with ``version`` advanced by one.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        ...
+
+    async def set_goal_status(
+        self, goal_id: str, /, *, status: GoalStatus, at: UtcInstant, expected_version: int
+    ) -> Goal:
+        """Move the goal's status and return it as written (ADR-0250 §9).
+
+        **The goal's only status-mutation route.** It advances ``version``, refuses on
+        a stale ``expected_version``, and writes **nothing else**: not the engagement
+        stamp, not the interpretation, not the attempt.
+
+        **It refuses neither** ``ACHIEVED`` **nor** ``BLOCKED``, because A10 and A3
+        write them through this same route and "a store that refused a member would be
+        a second place the vocabulary is decided". Which acts may write which member is
+        the caller's rule, not this member's: ADR-0250 writes exactly two through it —
+        ``ACTIVE`` on a reopen (§13) and ``ABANDONED`` on ``abandon_goal`` (§12).
+
+        Args:
+            goal_id: The goal to move.
+            status: The status to write.
+            at: The instant of the act, from the caller's injected clock.
+            expected_version: The ``Goal.version`` this was computed against.
+
+        Returns:
+            The goal as written, with ``version`` advanced by one.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal.
+        """
+        ...
+
+    async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
+        """Return a conversation's candidate goals, capped (ADR-0250 §2, §9).
+
+        The set is **every goal whose ``conversation_id`` is this conversation or
+        whose ``last_engaged_in`` is**, open or closed alike, ordered by §1's key —
+        ``last_engaged_at`` descending, the ``goal_id`` ascending as the tie-break, and
+        a goal carrying **no** instant sorting **after** every goal that carries one —
+        truncated to ``limit``, with ``elided`` counting what the truncation dropped.
+        It is assembled by no other route.
+
+        **Some total order must be named or two implementations answer the same page
+        differently** (ADR-0074 §2), which is why the tie-break is stated rather than
+        left to a store's row order: two goals engaged in the same instant is
+        reachable, since a migrated pair carries no instant at all.
+
+        **The absent instant sorts last rather than first, and that is the
+        conservative direction.** Sorting it first would make the oldest,
+        least-touched objective in the store the focused goal of every conversation
+        that holds one.
+
+        **It engages nothing and moves nothing.** A candidate-set read is not an act
+        on any goal it returns (§1).
+
+        Args:
+            conversation_id: The conversation whose candidates to read.
+            limit: The most candidates to return. Callers pass
+                :data:`~ai_assistant.core.types.MAX_ASSOCIATION_CANDIDATES`, which is
+                the cap the type also enforces.
+
+        Returns:
+            The capped set and the count the cap dropped. Empty, with ``elided`` zero,
+            for a conversation this store holds no goal of.
+
+        Raises:
+            PlanningError: If ``limit`` is not positive, or the store could not be
+                read.
+        """
+        ...
+
+    async def record_question(self, question: GoalQuestion, /) -> bool:
+        """Write an ``OPEN`` clarification, or refuse a second on one goal (§9).
+
+        **The read of the existing question and the write are one indivisible step**,
+        and the enforcement is the store's rather than a caller's: two turns of one
+        conversation, two conversations engaging one goal, and two engines over one
+        data directory can none of them open a second question on the same goal. This
+        is ``ParkedReads.park``'s shape at the seam a goal has instead of a
+        conversation (ADR-0244 §3).
+
+        **The restriction is a correctness constraint and not a storage convenience**
+        (§8): "two outstanding questions about one objective have no order and
+        answering either changes what the other means" — a user asked which campsite
+        and which weekend, answering the second, has answered a question whose first
+        reading the first answer would have changed. **It is per goal and never per
+        conversation**: a conversation may hold any number of paused goals, each with
+        its own question.
+
+        **A caller whose call answered ``False`` has written no question**, and
+        ADR-0250 §10 governs what the turn then is: no question exists, the outcome's
+        ``clarification`` is ``None``, the attempt's state is **not** moved, and
+        nothing durable is outstanding. "A lane that reported a question it did not
+        write would tell the user to answer a question nothing holds."
+
+        **No implementation refuses a question whose attempt is not
+        ``AWAITING_CLARIFICATION``** (§11): the write precedes the attempt's move, so a
+        crash between them leaves an ``OPEN`` question on a ``RUNNING`` attempt, and
+        that state is answerable rather than repaired.
+
+        **The attempt must be one the question's own goal holds, or the write is
+        refused.** ``goal_id`` and ``attempt_id`` are both references ADR-0014 §5's
+        closure requires to resolve within the same export, extended to
+        ``question_id`` by ADR-0250 §9 — and this is that promise **kept at write time
+        rather than repaired at read time**, which is the division
+        :meth:`commit_attempt` already records for an attempt's own references.
+        Requiring the attempt's goal to be *this* goal rather than merely some goal is
+        what keeps the closure true across a deletion: :meth:`delete_goal` cascades a
+        goal's attempts and its questions together, so a reference so confined cannot
+        outlive its target, while a question naming another goal's attempt survives
+        that attempt and makes the next ``export`` unvalidatable.
+
+        **A question this member writes is ``OPEN``, and a terminal one is refused.**
+        The type admits both shapes — it has to, because a settled question is read
+        back, exported and returned by :meth:`get_question` — so the state it does not
+        close is a *caller* handing a terminal record here. Writing one would answer
+        ``True`` while :meth:`open_question` answered ``None`` for the same goal: a
+        record with a ``settled_at`` nothing settled, occupying no slot, reported as a
+        question that was opened. §12's "**no terminal disposition is inferred from
+        silence**" is the rule read from the other side — a disposition is written by
+        the act that reaches it, and :meth:`settle_question` is the only act that
+        reaches a terminal one.
+
+        Args:
+            question: The question to write. Its ``disposition`` is ``OPEN``, which the
+                store checks: the type enforces only that an ``OPEN`` question carries
+                both content fields and a terminal one carries neither.
+
+        Returns:
+            ``True`` where this call wrote the question; ``False`` where that goal
+            already holds an ``OPEN`` one.
+
+        Raises:
+            PlanningError: If ``question``'s disposition is not ``OPEN``, if ``goal_id``
+                or ``attempt_id`` names no stored record, if the attempt is not one
+                this question's goal holds, or if the store already holds a question
+                under this ``id``.
+        """
+        ...
+
+    async def get_question(self, question_id: str, /) -> GoalQuestion | None:
+        """Return the question under that id, or ``None`` (ADR-0250 §9).
+
+        Args:
+            question_id: The question's own identifier.
+
+        Returns:
+            The question, **whatever its disposition** — a settled one keeps its facts
+            and its ``goal_id``, so that a late answer still reaches the goal (§8) —
+            or ``None`` where no row holds that id.
+        """
+        ...
+
+    async def open_question(self, goal_id: str, /) -> GoalQuestion | None:
+        """Return that goal's open question, or ``None`` (ADR-0250 §9).
+
+        Args:
+            goal_id: The goal to read.
+
+        Returns:
+            The one question of that goal whose disposition is ``OPEN``, or ``None``
+            where it holds none. Empty for a goal this store does not hold: an absent
+            goal is not a fault to raise on a read that is already a lookup.
+        """
+        ...
+
+    async def outstanding_questions(self) -> tuple[GoalQuestion, ...]:
+        """Return every ``OPEN`` question, in ``asked_at`` order (ADR-0250 §9).
+
+        **It lists expired questions too, and settling them is the caller's.**
+        ADR-0250 §12 puts the settlement at the operation that reads rather than in a
+        sweep of its own, so this member reports what is ``OPEN`` and takes no view of
+        the clock — a store that read one would be deciding a lifetime the engine owns,
+        which is ``ParkedReads.outstanding``'s own division.
+
+        A tuple rather than a list, like every other enumeration on a contract: a
+        caller that mutated a returned page has changed nothing about the store's state
+        and may believe otherwise (ADR-0085 §3b).
+
+        Returns:
+            Every open question, oldest first.
+        """
+        ...
+
+    async def settle_question(
+        self, question_id: str, /, *, disposition: GoalQuestionDisposition, at: UtcInstant
+    ) -> bool:
+        """Move an ``OPEN`` question to a terminal member, clearing it (§9).
+
+        **It clears ``text`` and ``about`` in the same step that moves the
+        disposition**, and no implementation retains a copy, a digest, a snapshot or an
+        archive of either. ``goal_id`` and ``attempt_id`` **survive**, so a late answer
+        still reaches the goal (§8, §11).
+
+        **The resolve-once gate.** The read, the comparison and the write are one
+        indivisible step; no lane reads a question, decides, and writes back; no lane
+        acts on an answer before this member has answered ``True`` for it; and a caller
+        that lost the compare-and-swap records nothing, revises nothing and reports the
+        settled state. That is ADR-0244 §3's gate at the seam a goal has instead of a
+        decision.
+
+        Args:
+            question_id: The question to settle.
+            disposition: The terminal member to write.
+            at: The settlement instant, from the caller's injected clock.
+
+        Returns:
+            ``True`` to the caller that moved it, and ``False`` to every other —
+            including a call naming an already-terminal question, which **changes
+            nothing**, and one naming no question this store holds.
+
+        Raises:
+            PlanningError: If ``disposition`` is ``OPEN``, which settles nothing.
+        """
         ...
 
     async def save_plan(self, plan: ActionPlan) -> str:
@@ -4279,20 +4655,28 @@ class PlanStore(Protocol):
         """Return a portable snapshot of all planning state (ADR-0004 §6).
 
         The document carries the store's attempts as well as its goals, plans and
-        executions (ADR-0249 §11), and ADR-0014 §5's closure rule reaches them: an
-        export naming an attempt's goal, plan or execution it does not carry does not
-        validate as a :class:`~ai_assistant.core.types.PlanExport` at all.
+        executions (ADR-0249 §11), and its **questions** beside them (ADR-0250 §9).
+        ADR-0014 §5's closure rule reaches all of them: an export naming an attempt's
+        goal, plan or execution, or a question's goal or attempt, that it does not
+        carry does not validate as a
+        :class:`~ai_assistant.core.types.PlanExport` at all. **A settled question
+        exports with its content already absent**, which is the retention rule
+        (ADR-0250 §8) and not an omission from the export.
         """
         ...
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
-        """Delete a goal, cascading to its plans, executions and attempts.
+        """Delete a goal, cascading to its plans, executions, attempts and questions.
 
-        **The cascade reaches attempts** (ADR-0249 §12), which extends ADR-0014 §5's
-        rule — "a goal the user deletes must not leave its plan history behind" —
-        rather than re-promising it. Its live-step refusal is unchanged: it keys on a
-        ``RUNNING`` step, not on an attempt's state, and an attempt in a non-terminal
-        state does not block a deletion.
+        **The cascade reaches attempts** (ADR-0249 §12) **and questions, open and
+        terminal alike** (ADR-0250 §9), which extends ADR-0014 §5's rule — "a goal the
+        user deletes must not leave its plan history behind" — rather than
+        re-promising it. Its live-step refusal is unchanged: it keys on a ``RUNNING``
+        step, not on an attempt's state, and neither an attempt in a non-terminal state
+        nor an **open question** blocks a deletion, on ADR-0073 §5's ruling that "the
+        store deletes what it is told to delete". :class:`GoalDeletion` reports the
+        removed questions exactly as ADR-0249 §12 has it report attempts — which is to
+        say the record gains no member for either, and both counts stay out of it.
 
         Refused while any of the goal's executions has a **live** (``RUNNING``)
         step: erasing one would destroy the record its executor is about to
@@ -10623,6 +11007,7 @@ class AssistantEngine(Protocol):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam that owns the deadline (ADR-0029 §4)
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Run one turn: plan against the utterance, and drive the step it produces.
 
@@ -10643,6 +11028,15 @@ class AssistantEngine(Protocol):
             timeout: The budget for the whole turn.
             conversation_id: The conversation to continue, or ``None`` to run in a
                 fresh one. The id the outcome carries back is what a client keeps.
+            reference: What this turn is answering, or which goal it is about, or
+                ``None`` (ADR-0250 §11). **Answering is a turn and not an operation of
+                its own**, which is why this is a keyword here rather than a fifth
+                verb on the surface: decision 3 requires the answer to restate the
+                understanding, recheck and *proceed*, which is a planner call, a
+                supply, a composition and a reply — everything ``converse`` already is.
+                A reference is **never rendered to a model and never accepted from
+                one**: it is resolved against records this system holds, and no prompt
+                prints it or the goal id it resolves to (ADR-0228 §8).
 
         Returns:
             What the turn produced, including the conversation it ran under and
@@ -10667,6 +11061,7 @@ class AssistantEngine(Protocol):
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Run one turn as :meth:`converse` does, streaming the answer as it composes.
 
@@ -10735,6 +11130,9 @@ class AssistantEngine(Protocol):
             conversation_id: The conversation to continue, or ``None`` to run in a
                 fresh one. The id the terminal outcome carries back is what a client
                 keeps.
+            reference: Exactly :meth:`converse`'s, which this method takes by
+                ADR-0173's own clause — it takes "exactly ``converse``'s arguments in
+                exactly its" order — rather than by an amendment to it (ADR-0250 §11).
 
         Returns:
             An async iterator over the answer's chunks followed by the turn's
@@ -11274,6 +11672,105 @@ class AssistantEngine(Protocol):
             RuntimeError: If the engine is shutting down.
             UnknownContinuationError: If ``token`` names no park this engine holds,
                 exactly as :meth:`resume` raises it for a token it does not hold.
+        """
+        ...
+
+    # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
+    #
+    # **The names are new and overload none** (§15). `questions`, `answer` and
+    # `forget_question` below, with the type `Question` and its `QuestionState`, are
+    # ADR-0078 §8's **deferred memory questions** — a contradiction about a belief,
+    # answered `--accept`/`--reject`. A goal's clarification is a different thing
+    # about a different subject with a different vocabulary: it asks *which of two
+    # things did you mean*, is answered in words, and its answer revises an
+    # interpretation. Sharing a command would make the binary answer reachable for a
+    # question that has no binary answer, so these three take names of their own and
+    # no surface presents the two kinds in one list.
+
+    async def goals(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[GoalSummary, ...]:
+        """List the user's goals, most recently engaged first (ADR-0250 §15).
+
+        The listing from which a user learns what is outstanding and obtains the
+        references :meth:`converse`'s ``reference`` keyword takes — a question's id to
+        answer it, or a goal's id to resume it, including **from another
+        conversation**, which is the one route to a cross-conversation resumption
+        (§13).
+
+        Paged on ADR-0085 §3's own convention and **answers no total count**, on
+        ADR-0074 §2's ground.
+
+        :attr:`~ai_assistant.core.types.GoalSummary.paused` **is computed here and by
+        no adapter**, so that two surfaces cannot render it differently — which is why
+        ADR-0249 §5 states the derivation once.
+
+        Args:
+            limit: How many summaries to return. The default is normative.
+            offset: How many to skip.
+
+        Returns:
+            The page, as a tuple.
+
+        Raises:
+            ValueError: If ``limit`` is not positive or ``offset`` is negative.
+        """
+        ...
+
+    async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
+        """Take back a clarification without answering it (ADR-0250 §12).
+
+        Settles an ``OPEN`` question ``WITHDRAWN``, clearing its content in the same
+        step and freeing the goal's one question slot. **It takes no reason, no free
+        text and no deadline.**
+
+        **Withdrawing removes the question and not the pause**: the attempt stays
+        ``AWAITING_CLARIFICATION`` and the goal stays open. What the act buys is the
+        freedom to ask again, which is exactly what the one-open rule's genuine
+        constraint (§8) is about. A withdrawal **records no answer**, revises no
+        interpretation and engages no goal, on ADR-0244 §11's distinction between a
+        denial and a cancellation.
+
+        Args:
+            question_id: The clarification to withdraw.
+
+        Returns:
+            Which of the two states this call reached. **An unknown id is
+            ``NOTHING_TO_WITHDRAW`` and never a raise**, which is
+            ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``
+            binding at this seam.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+        """
+        ...
+
+    async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
+        """Give up on a goal, and say what that did (ADR-0250 §12).
+
+        **The only thing in this system that writes**
+        :attr:`~ai_assistant.core.types.GoalStatus.ABANDONED`: no expiry, no silence,
+        no timeout, no sweep, no reclaim, no model output and no inference writes it.
+        ADR-0249 §4 defines the member as a decision nobody but the user can take, and
+        a system that wrote it from an expiry would be recording that the user gave up
+        because they did not reply within a window.
+
+        It writes the status through ``PlanStore.set_goal_status`` and settles the
+        goal's open question ``WITHDRAWN``, **and does nothing else**: it does not move
+        the attempt's state, does not write an ``AttemptOutcome``, does not end an
+        execution and does not cancel anything in flight — what becomes of an attempt
+        on an abandoned goal is A9's. An abandoned goal leaves the open set, so nothing
+        associates to it and nothing plans for it.
+
+        Args:
+            goal_id: The goal to abandon.
+
+        Returns:
+            Which of the three states this call reached. An unknown id is
+            ``NO_SUCH_GOAL`` and never a raise.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
         """
         ...
 

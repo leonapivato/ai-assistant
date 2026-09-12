@@ -53,7 +53,7 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier
+    from ai_assistant.core.types import EncodableText, Identifier, TurnReference
 
 pytestmark = pytest.mark.integration
 
@@ -78,6 +78,7 @@ class _Unreachable(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Fail the way a closed door fails: a transport error, not an answer."""
         self.calls.append(("converse", {"utterance": utterance}))
@@ -94,6 +95,7 @@ class _Declining(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Refuse the way the hub refuses: an ``AssistantError`` it authored."""
         self.calls.append(("converse", {"utterance": utterance}))
@@ -116,6 +118,7 @@ class _Blocking(FakeAssistantEngine):
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the Protocol's own signature
         conversation_id: Identifier | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Occupy a hub connection until released, so the ceiling can be reached."""
         self.occupied.set()
@@ -914,6 +917,25 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     terminal-only acts no ratified decision gives this surface. It therefore renders none
     of the nine, and #2237 carries the lane that changes that.
 
+    **``goal_engagement``, ``clarification``, ``reference`` and ``disambiguation`` are
+    ADR-0250 §5's four members, and the decision taken here is "not rendered".** That is
+    a decision rather than an omission, and ADR-0250 §19 is where it is made: the lane
+    that lands these members is **M1**, "the contract, the wire and the stored shapes,
+    at unchanged behaviour", and §19 assigns every surface to **M4** — "``interfaces/``
+    alone: the CLI's and the browser's listing, answer, withdraw and abandon acts, and a
+    rendered statement for every member of every vocabulary this decision adds". So the
+    four cross the wire — they are on ``TurnOutcome`` and this page decodes the whole
+    outcome — and no panel reads one.
+
+    **The cost is stated rather than hidden, and in this lane it is nil.** §19 also
+    rules that "no behaviour changes in M1": no association is run, no question is
+    raised and no reference is resolved, so every one of the four is ``None`` on every
+    outcome this adapter can see until M3 lands. What M4 owes is not optional when it
+    arrives — §15's last clause makes a surface that "renders no statement for a
+    ``ReferenceOutcome``, an ``EngagementDisposition`` or a ``ClarificationWithdrawal``
+    member it was given" one that "has not implemented this section" — which is the
+    obligation ADR-0244 §13's own last clause already put on the two members above.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -931,6 +953,10 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "search_not_serviced",
         "read_confirmation",
         "read_answer",
+        "goal_engagement",
+        "clarification",
+        "reference",
+        "disambiguation",
     }
 
 
