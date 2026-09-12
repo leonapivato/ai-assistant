@@ -74,6 +74,41 @@
   and supplied-narrowed-at-two limbs and its one-identifier-and-no-other rule, §1's rule
   that `Placement.reach` does not bind at all on a chosen destination's supply, §§2-10,
   §11's other arms, §12's deferrals and §§13-15 bind as written.
+- **Note (2026-09-12) — two things this ADR's own implementation found its text got wrong,
+  recorded rather than rewritten.** All four lanes §11 cuts are merged (PRs #2253, #2254,
+  #2259 and #2261), and two statements above did not survive being implemented. This is a
+  self-amendment naming no other ADR, so under ADR-0082 §1's self-amendment clause and
+  ADR-0070 §1 the appended dated note is the whole record, no `Status` line moves, and
+  **every ratified section below is byte-identical** (#2260).
+  - **(a) Eight representative-input arms retire with the read they are arms over (PR
+    #2259).** The `Partially supersedes` record on ADR-0238 above, and §14's restatement of
+    it, say that *"§15's other arms … bind as those records left them"*. That is over-wide.
+    §1 replaces `SearchFooting.trusted`'s two `trust_of` reads with the registration fact
+    and §4 retires ADR-0238 §5's build-time read, and **ADR-0238 §15 Arms 5d, 5e, 6f2(iii)
+    and 6f3** — a revocation recorded before the build-time read is honoured, the window §5
+    states, and the two discriminations between an admission and the fold's stored flag —
+    are each an arm over exactly that read. So are **ADR-0242 §15's four trust journeys**:
+    Arm 2's fixtures **(b)** and **(c)**, which §15 says *"differ in the `trust_of` answer
+    alone"*; **Arm 2c**'s recovery journey walked to its end; and **Arm 3**'s limb **(b)**.
+    Once the servicing site takes no `trust_of` answer at either position, none of the eight
+    has a subject, and a lane cannot both implement §1 and pass them. Read the record above
+    and §14's restatement as reaching §15's arms **other than those eight**, and §12's own
+    enumeration — Arms 1a, 2, 5b and 5c restated, Arms 3, 4, 6 and 6b replaced or retired —
+    as extended by them and by nothing else. Every other arm of either ADR binds exactly as
+    recorded, and lane 3 restated the fold-based ones in place rather than dropping them.
+  - **(b) §11's lane-4 enumeration of two `SearchFooting` members is withdrawn; §3 governs
+    (PR #2261).** §11 names `minted_user_chosen` and `selected` among the members lane 4
+    deletes. They are ADR-0238 §2's populations at the one construction site,
+    `_search_supply`: `selected` carries the first two, `minted_user_chosen` the third. §3
+    rules that *"`SearchSupply`, its populations and its construction site are untouched"*
+    and that §2's three populations *"bind entire"*, and the record on ADR-0238 above
+    repeats it. Deleting the two sets would admit into the supply every record another
+    servicing of the turn contributed — a fetched file, a citation hop — which §2 excludes
+    by name. So **the enumeration is wrong where §3 is right**, and §3 governs:
+    `SearchFooting.selected` and `minted_user_chosen` **stand**. Lane 4 removed the
+    enumeration's other `SearchFooting` members and kept these two, reading §11's
+    enumeration as a scope bound satisfied by removing fewer. Every other limb of that
+    enumeration, and every other clause of §11, binds as written.
 
 ## Context
 
