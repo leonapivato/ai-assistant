@@ -945,6 +945,15 @@ makes it and the branch not taken is visible in it as a step that was skipped.
 > of the two is in force per call**, and it is always the sequence that describes the revision the
 > plan will target.
 
+> **Normative — the prompt states which sequence is in force, and states both cases.** The system
+> turn says that a condition label names a condition of the goal *as this reply leaves it*: a
+> `D` label of the conditions block rendered below where the reply proposes no understanding, and
+> the 1-based position within the reply's own `conditions` list where it proposes one. Stating
+> only the first would make a condition on a proposition the same reply introduces unnameable in
+> practice, which is the case §9's ordering exists to admit; stating only the second would make
+> every ordinary follow-up turn's label wrong. `_render_request` already renders the `D`-labelled
+> conditions block (ADR-0249 §9) and gains nothing.
+
 **One label space per call falls out of ADR-0249 §7's completeness rule rather than being imposed
 on top of it.** That section makes a revision *"a complete statement of an understanding"*: an
 element the `ProposedUnderstanding` neither retains nor replaces *"is **not** in the new
@@ -980,11 +989,14 @@ understanding holding a plan §8 forbids driving"*.
 > **Normative — a label that resolves to nothing is refused, and the plan is neither saved nor
 > driven.** An ordinal outside the range, a value that is not such a label, an ordinal naming a
 > proposed element the loop dropped, and a label naming an element carrying no `id` (§7) each
-> resolve to nothing. The loop **refuses the plan**: it is not passed to `PlanStore.save_plan`, no
-> step of it is dispatched and no interpretation of it is performed, and the turn proceeds as one
-> whose planner produced no usable plan. **No lane drops the condition instead**, because a step
-> whose condition was dropped is a step with fewer requirements than the plan declared — the
-> fail-open direction, and the one §1 refuses for a dropped dependency for the same reason.
+> resolve to nothing. The loop **refuses the plan** with a `PlanningError` of the class
+> `PlanStore.save_plan` raises below: it is not passed to `save_plan`, no step of it is dispatched
+> and no interpretation of it is performed. **What that refusal then causes** — a report, a
+> replan, a turn that composes without acting — is recovery policy and is **A7's and A9's**, which
+> is ADR-0249 §8's own division for a refused stale claim. **No lane drops the condition instead**,
+> because a step whose condition was dropped is a step with fewer requirements than the plan
+> declared — the fail-open direction, and the one §1 refuses for a dropped dependency for the same
+> reason.
 
 > **Normative — the window is closed at the store as well as at the loop.**
 > `PlanStore.save_plan` **refuses a plan any of whose `StepCondition.about` or
