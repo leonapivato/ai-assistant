@@ -1531,6 +1531,31 @@ class LearningLoop:
                 and open an attempt on it, which is what passing ``continuing`` alone
                 means and what every turn of this lane does today.
 
+                **The ledger this turn charges is the in-memory one, and ADR-0251
+                §12's *persisted-attempt* case is not reached from here.** §12 keeps
+                two cases apart and rules that a charge on an attempt an **earlier turn
+                persisted** is an ``AttemptTransition`` through ``commit_attempt``,
+                "issued immediately and buffered for nothing" — and in the same breath
+                that the section "adds no persistence site, moves none, and supersedes
+                no clause of §11 or §12". ADR-0249 §11 is one of those clauses and it is
+                absolute: *"no lane adds a second persistence site, gives
+                ``LearningLoop`` a ``PlanStore``, or carries a plan out of a failing
+                turn in order to write it. **No lane gives ``LearningLoop`` a
+                ``PlanStore``.**"* The planner calls happen here, so a per-call
+                ``commit_attempt`` issued from here — directly or through an injected
+                writer — is the site §11 forbids and §12 disclaims adding.
+
+                **Nothing is lost today, because no persisted attempt reaches this
+                seam.** Which attempt a turn continues is A2's, no caller of this lane
+                supplies one, and a turn that opens an attempt writes its row at
+                ADR-0249 §11's one site with everything else the turn produced — which
+                is §12's **first** case, implemented here entire: the charge is on the
+                in-memory attempt, a replan within the turn is charged by it, and a
+                turn that dies before that site charges nothing, "exactly as it records
+                no goal and no plan". The persisted case becomes reachable with the
+                association that produces a persisted attempt, and is deferred to the
+                lane that lands it.
+
         Returns:
             The turn — its goal's **brief**, context, assembled memories and last plan
             — beside the goal **record** and what this turn decided about it
@@ -2729,7 +2754,10 @@ class LearningLoop:
                 tree's existing discipline and not a new one" names this line, and the
                 attempt's figure is **derived** from it rather than counted a second
                 time — so a charge can stand for a call that never ran, and a call can
-                never run uncharged.
+                never run uncharged. **On the in-memory attempt** — see
+                :meth:`respond`'s ``continuing_attempt`` for which of ADR-0251 §12's two
+                cases this lane implements and why the other is not reachable from
+                here.
 
         Returns:
             The envelope, exactly as the planner returned it. Neither ``supersedes``
