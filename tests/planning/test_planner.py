@@ -4701,6 +4701,9 @@ async def test_a_malformed_understanding_is_refused_and_repaired() -> None:
             {"retains_outcome": True, "constraints": {"C1": "keep"}}, id="member-not-a-list"
         ),
         pytest.param({"retains_outcome": True, "criteria": ["C1"]}, id="element-not-an-object"),
+        pytest.param({"retains_outcome": True, "constraints": None}, id="constraints-written-null"),
+        pytest.param({"retains_outcome": True, "criteria": None}, id="criteria-written-null"),
+        pytest.param({"retains_outcome": True, "conditions": None}, id="conditions-written-null"),
     ],
 )
 async def test_no_half_of_a_malformed_understanding_is_ever_adopted(
@@ -4763,3 +4766,65 @@ async def test_an_absent_understanding_leaves_the_plan_untouched() -> None:
     assert [step.capability for step in output.plan.steps] == ["search_housing"]
     assert output.plan.read_request is not None
     assert model.call_count == 1
+
+
+async def test_an_absent_member_proposes_none_and_a_null_one_is_refused() -> None:
+    """ADR-0249 §7: omission is removal, so the two replies are not the same reply.
+
+    A member the reply leaves out is the statement "this revision has no constraints",
+    and §7 makes that a removal of every constraint the goal holds — which is the
+    mechanism working. A member written as ``null`` states nothing of the kind: it is a
+    value of a type the member does not take, and coercing it to the same empty tuple
+    would turn a malformed reply into that same durable removal, silently. The first is
+    adopted; the second is refused and repaired.
+    """
+    omitted = FakeModelProvider(_understanding_reply({"retains_outcome": True}))
+    proposed = (
+        await ModelBackedPlanner(omitted, now=_fixed_now, id_factory=_counter()).plan(
+            _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+        )
+    ).understanding
+    assert proposed is not None
+    assert proposed.constraints == ()
+    assert omitted.call_count == 1, "an omitted member is a statement, not a defect"
+
+    written = FakeModelProvider.scripted(
+        _understanding_reply({"retains_outcome": True, "constraints": None}),
+        _understanding_reply({"retains_outcome": True}),
+    )
+    await ModelBackedPlanner(written, now=_fixed_now, id_factory=_counter()).plan(
+        _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+    )
+    assert written.call_count == 2
+    assert "keeping the shape you sent" in _repair_turn(written)
+
+
+async def test_plan_forwards_the_request_and_the_evidence_into_the_user_turn() -> None:
+    """The seam, not the renderer: ADR-0249 §7 and §10 reach the model through ``plan``.
+
+    Every rendering arm above drives ``_render_request`` directly, which is what those
+    arms are about — but dropping ``utterance=`` or ``evidence=`` from the one call site
+    would leave all of them passing while the model lost this turn's correction and
+    everything already read for the goal. The request is deliberately different bytes
+    from the goal's outcome, so a call handing the statement through in its place fails
+    here rather than passing on a coincidence (ADR-0248 §4).
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(
+        _goal(statement="relocate somewhere warm"),
+        utterance="actually, make it Lisbon",
+        context=_context(),
+        capabilities=_VOCABULARY,
+        evidence=[_digest(requested="rents in Lisbon", supported="a one-bed is under 1200")],
+    )
+
+    user_turn = next(one.content for one in model.calls[0].messages if one.role is Role.USER)
+    lines = user_turn.splitlines()
+    assert lines[0] == _REQUEST_HEADING
+    assert lines[1] == '  "actually, make it Lisbon"'
+    assert "  statement: relocate somewhere warm" in lines
+    assert _EVIDENCE_HEADING in lines
+    assert '  - asked for "rents in Lisbon", read at 2026-01-01T00:00:00+00:00' in lines
+    assert '    establishes something about: "a one-bed is under 1200"' in lines
