@@ -53,7 +53,7 @@ from test_loop_search import (
     _NOW,
     _RESULT,
     _REVISING,
-    ActionPlanFor,
+    SettlesAfter,
     _belief,
     _bounded,
     _clock,
@@ -232,10 +232,14 @@ def _chosen_footing() -> Any:
 
 
 def _revising(*, results: Sequence[str] = (_RESULT,)) -> Any:
-    """A planner that asks for a search on both of the turn's two calls (ADR-0228 §2)."""
-    return FakePlanner(
-        now=_clock, read_request=_search(), revision=ActionPlanFor(read_request=_search())
-    )
+    """A planner that asks for a search on two rounds and then settles (ADR-0251 §4).
+
+    Two rounds is what every case here is about, and under §4 that is the *planner's*
+    judgement rather than a bound: (e) is dissolved and the count is the attempt's, so
+    a planner that went on asking would be called until §7's run test or §5's
+    allowance refused it. :class:`SettlesAfter` says the two rounds out loud.
+    """
+    return SettlesAfter(FakePlanner(now=_clock, read_request=_search()))
 
 
 def _trail() -> FakeAuditTrail:

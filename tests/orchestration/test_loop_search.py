@@ -349,6 +349,94 @@ def ActionPlanFor(*, read_request: ReadRequest | None = None) -> ActionPlan:  # 
     )
 
 
+@final
+class SettlesAfter:
+    """A planner that asks for ``rounds`` rounds and then stops asking.
+
+    **Why a wrapper rather than a second scripted revision.** ADR-0251 §4 dissolves
+    ADR-0228 §2(e) and raises the count to the attempt's allowance, so a planner that
+    goes on asking is called until §7's run test or §5's allowance refuses it — where
+    under §3 the *bound* ended every such turn at two. A case about **two servicings**
+    therefore has to say so with the planner, which is the honest way round: what ends
+    a turn short of its allowance is the planner's own judgement that its supply
+    suffices, and "sufficient-context restraint is the absence of a mechanism rather
+    than the presence of one" (§7).
+
+    :class:`~ai_assistant.testing.FakePlanner`'s ``revision`` scripts a turn's
+    **second** call and cannot say what its third returns, so this wraps one: the first
+    ``rounds`` calls of each turn are the fake's own answers, and every call after them
+    is answered **here**, with a plan carrying no ``read_request`` at all. ADR-0228
+    §2(b) then fails and the turn stops with ``SETTLED``, having serviced exactly
+    ``rounds`` requests. The wrapped planner is not reached on a settling call, which
+    is what keeps a scripted ``revision`` usable underneath one.
+
+    **The count is per *turn*, and a turn's first call is the one whose
+    ``read_outcomes`` is empty** — ADR-0251 §3: "On a turn's **first** planner call it
+    is always ``()``". A counter over the planner's whole life would have the second
+    turn of a two-turn case settle on its opening call, which is not a shape any
+    conforming loop produces.
+
+    Every plan it mints carries a fresh ``id`` (ADR-0014 §2), because a turn persists
+    every plan it produced and ``save_plan`` refuses a reused one (ADR-0228 §5).
+    """
+
+    def __init__(self, inner: FakePlanner, *, rounds: int = 2) -> None:
+        """Wrap one planner.
+
+        Args:
+            inner: The planner answering the asking rounds.
+            rounds: How many calls of each turn ask before the planner settles.
+        """
+        self._inner = inner
+        self._rounds = rounds
+        self._round = 0
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list
+        self,
+        goal: GoalBrief,
+        *,
+        utterance: str,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
+        """Answer this call, asking for the first ``rounds`` of this turn."""
+        self._round = 1 if not read_outcomes else self._round + 1
+        self.calls.append(
+            (
+                tuple(memories),
+                tuple(capabilities),
+                tuple(files),
+                tuple(read_outcomes),
+                tuple(evidence),
+            )
+        )
+        if self._round <= self._rounds:
+            return await self._inner.plan(
+                goal,
+                utterance=utterance,
+                context=context,
+                memories=memories,
+                capabilities=capabilities,
+                files=files,
+                read_outcomes=read_outcomes,
+                evidence=evidence,
+            )
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"settled-{len(self.calls)}",
+                goal_id=goal.goal_id,
+                steps=(),
+                created_at=_NOW,
+                rationale="the supply suffices",
+            )
+        )
+
+
 def _file_only(entry: str) -> ReadRequest:
     """A ``LOCAL_FILE`` ask and nothing else — a turn that reads a file and never searches."""
     return ReadRequest(asks=(ReadAsk(kind=ReadKind.LOCAL_FILE, entry=entry),))
@@ -806,11 +894,7 @@ async def test_a_second_search_in_the_same_turn_is_serviced_at_the_configured_pr
     line while passing every outcome below it.
     """
     searcher = FakeWebSearcher(results=(_RESULT,))
-    planner = FakePlanner(
-        now=_clock,
-        read_request=_search(),
-        revision=ActionPlanFor(read_request=_search()),
-    )
+    planner = SettlesAfter(FakePlanner(now=_clock, read_request=_search()))
     trail = FakeAuditTrail(recipient_grants=FakeRecipientGrantResolution([_grant()]))
 
     with structlog.testing.capture_logs() as captured:
@@ -819,7 +903,7 @@ async def test_a_second_search_in_the_same_turn_is_serviced_at_the_configured_pr
             search=_servicer(searcher=_CostedSearcher(searcher), trail=trail, granted=True),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
-    assert len(planner.calls) == 2, "the turn revised (ADR-0228 §2)"
+    assert len(planner.calls) == 3, "two asking rounds, and a third call that settled"
     assert len(searcher.searched) == 2, "`search` was reached on both servicings"
     assert _serviced(captured, 0)["disposition"] is None, "the first yielded"
     assert _serviced(captured, 1)["disposition"] is None, "and so did the refinement"

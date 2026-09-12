@@ -137,10 +137,24 @@ class _AskingPlanner(NoStepPlanner):
     Subclassed rather than written out so the plan is the one every other engine
     case is built on: ADR-0226 §4's field is additive, so "a planner that emits a
     request" and "a planner" differ by one field and nothing else.
+
+    **It asks for ``rounds`` rounds and then stops asking** (ADR-0251 §4). Under
+    ADR-0228 §3 a planner that always asked was called twice because the *bound* said
+    so; §4 moves the count to the attempt, so what ends a turn short of its allowance
+    is the planner's own judgement that its supply suffices. A case about two
+    servicings therefore says two, and ADR-0228 §2(b) then fails on the third call.
+
+    **The count is per *turn*, and a turn's first call is the one whose
+    ``read_outcomes`` is empty** — ADR-0251 §3: "On a turn's **first** planner call it
+    is always ``()``". A counter over the planner's whole life would have the second
+    turn of a two-turn case settle on its opening call, which is not a shape any
+    conforming loop produces.
     """
 
-    def __init__(self, request: ReadRequest | None) -> None:
+    def __init__(self, request: ReadRequest | None, *, rounds: int = 2) -> None:
         self._request = request
+        self._rounds = rounds
+        self._round = 0
         self.calls: list[tuple[MemoryRecord, ...]] = []
 
     async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list; ADR-0230 §3 and ADR-0240 §7 each add one
@@ -156,6 +170,7 @@ class _AskingPlanner(NoStepPlanner):
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         self.calls.append(tuple(memories))
+        self._round = 1 if not read_outcomes else self._round + 1
         produced = await super().plan(
             goal,
             utterance=utterance,
@@ -163,8 +178,9 @@ class _AskingPlanner(NoStepPlanner):
             memories=memories,
             capabilities=capabilities,
         )
+        asked = self._request if self._round <= self._rounds else None
         return produced.model_copy(
-            update={"plan": produced.plan.model_copy(update={"read_request": self._request})}
+            update={"plan": produced.plan.model_copy(update={"read_request": asked})}
         )
 
 
@@ -650,6 +666,12 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         "planner_calls",
         "stop",
         "servicings",
+        # ADR-0251 §7's three turn-level additions: a member of a closed enumeration
+        # and two counts, so the pin stays closed over them for ADR-0226 §9's own
+        # reason.
+        "attempt_kind",
+        "attempt_planner_calls",
+        "attempt_allowance",
     }
     assert set(_serviced(captured)) == {
         "kinds",
@@ -699,6 +721,10 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
+        # ADR-0251 §7's one added per-servicing field: the member each ask this
+        # servicing reached resolved to, in servicing order and with the asks left
+        # behind — so there is nowhere in it for a query, a label or an excerpt to sit.
+        "outcomes",
     }
 
 
