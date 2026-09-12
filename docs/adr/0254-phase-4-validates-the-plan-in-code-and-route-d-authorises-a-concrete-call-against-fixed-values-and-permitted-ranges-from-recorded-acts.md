@@ -986,7 +986,9 @@ all three would be one thing to be wrong about.
 > render, per record: the goal's **statement** (never its id), the declaration's human-readable
 > name and description, each coverage member as *this argument is fixed at that value* or *this
 > argument is bounded by that limit* **together with the span the user said**, the expiry, and
-> whether the record is live. They render **no** internal identifier, **no** subject digest and
+> whether the row is still live or has lapsed. It renders a `PROPOSED` row not at all — that is
+> the confirmation's question and not an authority the user holds — and §16's `standing(goal)`
+> is what makes that a fact about the read rather than a filter a renderer applies. They render **no** internal identifier, **no** subject digest and
 > **no** account reference. A revocation names the record by the same rendering the listing
 > gave it.
 
@@ -1264,7 +1266,8 @@ all three would be one thing to be wrong about.
 > on the annotated types.
 
 > **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** `covering` and
-> `standing` evaluate liveness and read the clock **exactly once per call**, measuring every
+> `standing` read the clock **exactly once per call** — `covering` to evaluate liveness and
+> `standing` to report it per row — measuring every
 > row they consider against that one instant, and each settles an expired `PROPOSED` row it
 > reads (§1). `resolve`, `recent`, `export`, `record` and `settle` evaluate no liveness and read
 > **no** clock — `settle` takes its `settled_at` from the caller, as `record` takes its
@@ -1272,10 +1275,14 @@ all three would be one thing to be wrong about.
 > no clock at all (ADR-0021 §3, ADR-0036 §1), and `AuditTrail.record` decides both ends against
 > the decision's own `decided_at`.
 
-> **Normative — `standing(goal)` returns the live rows of that goal and nothing else**, so the
-> listing §11 fixes never renders a question the user has not answered as an authority they
-> hold. `recent` and `export` carry every row whatever its disposition, which is where a
-> declined, an expired and a superseded one are read.
+> **Normative — `standing(goal)` returns the `ESTABLISHED` rows of that goal and nothing
+> else**, live **and** lapsed, each carrying its own `expires_at` so a caller reads liveness
+> from the row. It never returns a `PROPOSED` row, so the listing §11 fixes never renders a
+> question the user has not answered as an authority they hold; and it does return a lapsed
+> one, so a user can see and revoke what they once authorised — which is ADR-0193 §9's own
+> reason for keeping an expired grant visible and revocable, one store over, and it is why the
+> withdrawal path needs no history query. `recent` and `export` carry every row whatever its
+> disposition, which is where a declined and a superseded one are read.
 
 > **Normative — a store fault is not a record.** An `AuthorizationError` out of `covering` is
 > logged and answered `None`, so the ruling proceeds to the `CONFIRM` the request would have
@@ -1530,7 +1537,7 @@ check are each consumed as written, and §13 and §14 state where.
 >    carried forward from the first act — there is no contributor left standing that the
 >    revocation missed. **And a revoked or superseded row cannot be settled again**: `settle`
 >    refuses every move that is not one of §1's five edges, and none leaves `REVOKED` or
->     `SUPERSEDED`.
+>    `SUPERSEDED`.
 > 4. **Revocation between `covering` and `record`.** Settle the row the ruling names `REVOKED`
 >    after `covering` returned and before `AuditTrail.record` begins its resolution read → the
 >    write is **refused**, on §7's disposition check, for the row behind **every** argument.
@@ -1622,10 +1629,11 @@ check are each consumed as written, and §13 and §14 state where.
 >     `NOT_COVERED` → `CONFIRM` in both, and `covering` called **zero** times in both.
 > 32. **An `UNKNOWN` cost, a threshold `risk_level` and a threshold `reversibility`** each
 >     still draw `CONFIRM` with a covering record in the store.
-> 33. **Export and erasure.** `export` returns granting, revoking, live and expired records
->     **with each member's basis whole** — act, span and resolution; `standing(goal)` returns
->     the live records of that goal and no other's; `clear` returns the count and leaves every
->     recorded `ALLOW` readable as what it was.
+> 33. **Export, enumeration and erasure.** `export` returns rows of every disposition **with
+>     each member's basis whole** — act, span and resolution; `standing(goal)` returns the
+>     `ESTABLISHED` rows of that goal, **live and lapsed**, never a `PROPOSED` one and never
+>     another goal's; `clear` returns the count and leaves every recorded `ALLOW` readable as
+>     what it was.
 > 34. **Each `ResolutionRule` admits its own argument shape and refuses the other two** —
 >     `AS_STATED` with either argument, `DATE_FROM_CONTEXT` missing `now` or `timezone`,
 >     `FROM_SHOWN_RECORD` missing `record` — each refused at construction.
