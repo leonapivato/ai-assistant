@@ -885,6 +885,17 @@ class FakePlanStore:
                 the store already holds a question under this ``id``.
         """
         async with self._resource.held():
+            if question.disposition is not GoalQuestionDisposition.OPEN:
+                # A terminal record written here would answer `True` while `open_question`
+                # answered `None` for the same goal — a question reported as opened that
+                # occupies no slot and carries a `settled_at` nothing settled. Only
+                # `settle_question` reaches a terminal disposition (ADR-0250 §9, §12).
+                msg = (
+                    f"question {question.id} arrives {question.disposition.value} and "
+                    f"record_question writes an OPEN question: a terminal disposition is "
+                    f"written by settle_question and by nothing else (ADR-0250 §9)"
+                )
+                raise PlanningError(msg)
             if question.goal_id not in self._goals:
                 msg = f"cannot record a question for unknown goal {question.goal_id}"
                 raise PlanningError(msg)

@@ -1692,6 +1692,51 @@ class PlanStoreContract:
         assert held is not None
         assert held.disposition is GoalQuestionDisposition.OPEN
 
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            GoalQuestionDisposition.ANSWERED,
+            GoalQuestionDisposition.WITHDRAWN,
+            GoalQuestionDisposition.EXPIRED,
+            GoalQuestionDisposition.SUPERSEDED,
+        ],
+    )
+    async def test_record_question_refuses_a_question_that_is_already_terminal(
+        self, store: PlanStore, disposition: GoalQuestionDisposition
+    ) -> None:
+        """§9: this member "writes an ``OPEN`` question", and that is the whole of it.
+
+        The type admits both shapes and has to — a settled question is read back,
+        exported and returned by ``get_question`` — so the state it does not close is a
+        **caller** handing a terminal record here. Writing one would answer ``True``
+        while ``open_question`` answered ``None`` for the same goal: a record with a
+        ``settled_at`` nothing settled, occupying no slot, reported as a question that
+        was opened.
+
+        §12 is the same rule read from the other side — "**no terminal disposition is
+        inferred from silence**" — because a disposition is written by the act that
+        reaches it, and ``settle_question`` is the only act that reaches a terminal one.
+        All four are driven, because they are four distinct acts and "no implementation
+        treats any as a weaker form of another".
+        """
+        await _goal_with_attempt(store)
+        already = _question().model_copy(
+            update={
+                "disposition": disposition,
+                "settled_at": _LATER_ENGAGED,
+                "text": None,
+                "about": None,
+            }
+        )
+
+        with pytest.raises(PlanningError, match="record_question writes an OPEN question"):
+            await store.record_question(already)
+
+        assert await store.get_question("q1") is None, "and the refusal left no record"
+        assert await store.open_question("g1") is None
+        assert await store.outstanding_questions() == ()
+        assert await store.record_question(_question()) is True, "the slot is still free"
+
     async def test_a_question_names_an_attempt_of_its_own_goal(self, store: PlanStore) -> None:
         """§9: the closure kept at write time, over a reference that can outlive it.
 

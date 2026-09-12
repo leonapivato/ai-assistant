@@ -4420,18 +4420,31 @@ class PlanStore(Protocol):
         outlive its target, while a question naming another goal's attempt survives
         that attempt and makes the next ``export`` unvalidatable.
 
+        **A question this member writes is ``OPEN``, and a terminal one is refused.**
+        The type admits both shapes — it has to, because a settled question is read
+        back, exported and returned by :meth:`get_question` — so the state it does not
+        close is a *caller* handing a terminal record here. Writing one would answer
+        ``True`` while :meth:`open_question` answered ``None`` for the same goal: a
+        record with a ``settled_at`` nothing settled, occupying no slot, reported as a
+        question that was opened. §12's "**no terminal disposition is inferred from
+        silence**" is the rule read from the other side — a disposition is written by
+        the act that reaches it, and :meth:`settle_question` is the only act that
+        reaches a terminal one.
+
         Args:
-            question: The question to write. Its ``disposition`` is ``OPEN`` and both
-                content fields are present, which the type already enforces.
+            question: The question to write. Its ``disposition`` is ``OPEN``, which the
+                store checks: the type enforces only that an ``OPEN`` question carries
+                both content fields and a terminal one carries neither.
 
         Returns:
             ``True`` where this call wrote the question; ``False`` where that goal
             already holds an ``OPEN`` one.
 
         Raises:
-            PlanningError: If ``goal_id`` or ``attempt_id`` names no stored record, if
-                the attempt is not one this question's goal holds, or if the store
-                already holds a question under this ``id``.
+            PlanningError: If ``question``'s disposition is not ``OPEN``, if ``goal_id``
+                or ``attempt_id`` names no stored record, if the attempt is not one
+                this question's goal holds, or if the store already holds a question
+                under this ``id``.
         """
         ...
 
