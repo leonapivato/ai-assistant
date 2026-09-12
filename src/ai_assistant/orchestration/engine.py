@@ -8108,6 +8108,54 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
+    @staticmethod
+    def _answered(composed: ComposedReply | None, step: StepOutcome | None) -> bool:
+        """Whether ADR-0249 §5's ``ANSWERED`` is **literally** true of this pass.
+
+        §5 fixes the member's whole content: "**``ANSWERED`` means the attempt produced
+        an answer and nothing was verified.** It is not a weaker ``VERIFIED`` and no lane
+        reads it as one: it asserts that **a reply exists**, that **no step failed** and
+        that **no condition blocked**, and it asserts nothing about whether the reply is
+        correct." Each of the three is checked here, and a pass failing any of them ends
+        no attempt — **which member it earns instead is A10's** (§13), and §4's stated
+        cost is taken rather than papered over: "an attempt … ends with an outcome saying
+        what happened, and its disposition records that nobody established the outcome".
+
+        **A reply exists** means a reply this pass actually produced. A composition that
+        returned no text produced no answer at all, and one that **did not complete**
+        (ADR-0173 §6's fourth outcome) produced a reply that stopped part way — neither is
+        "the attempt produced an answer", and §12's "no lane writes an attempt that claims
+        a result before it happened" is the clause that makes the distinction matter.
+
+        **No step failed** is read off the execution and not off the disposition.
+        :attr:`~ai_assistant.core.types.Disposition.EXECUTED` says the tool was
+        *reached*, not that it succeeded: a tool answering ``INVALID_REQUEST`` leaves
+        that disposition beside a step whose
+        :class:`~ai_assistant.core.types.StepStatus` is ``FAILED``, which is exactly the
+        case §5's second conjunct names.
+
+        **No condition blocked** covers the remaining dispositions — a denial, no capable
+        tool, an ambiguous capability, invalid parameters — and a turn still awaiting a
+        confirmation, which has not finished at all.
+
+        Args:
+            composed: What the composing stage produced for this pass, or ``None``
+                where it produced nothing at all — which is no answer either.
+            step: The step this pass drove, or ``None`` on a no-action decision — which
+                has no step to fail and no condition to block.
+
+        Returns:
+            Whether this pass may write ``ANSWERED``.
+        """
+        if composed is None or composed.text is None or composed.degraded:
+            return False
+        if step is None:
+            return True
+        if step.confirmation is not None or step.disposition is not Disposition.EXECUTED:
+            return False
+        state = step.state.step(step.step_id)
+        return state is not None and state.status is StepStatus.SUCCEEDED
+
     async def _move_attempt(  # noqa: PLR0913 — one parameter per member of the frozen command a move may set; a bundle here would be a second spelling of `AttemptTransition`
         self,
         opened: OpenedAttempt | None,
@@ -8404,17 +8452,19 @@ class Engine:
                 structured,
                 search_not_serviced,
             )
-            # §5, §6: written **after the answer exists**, which is the whole of what
-            # `ANSWERED` asserts — "a reply exists, no step failed and no condition
-            # blocked". Nothing here claims a result before it happened, and nothing
-            # moves `GoalStatus`: §4 gives `ACHIEVED` no producer, and "producing a
-            # reply never by itself establishes that a goal was achieved".
+            # §5, §6: written **after the answer exists**, and only where §5's own
+            # three conjuncts are literally true (:meth:`_answered`). Nothing here claims
+            # a result before it happened, and nothing moves `GoalStatus`: §4 gives
+            # `ACHIEVED` no producer, and "producing a reply never by itself establishes
+            # that a goal was achieved". `VERIFY` is stamped either way — the phase says
+            # where the attempt stands, not what it earned.
+            answered = self._answered(composed, None)
             attempt = await self._move_attempt(
                 attempt,
                 to_phase=AttemptPhase.VERIFY,
-                to_state=AttemptState.ENDED,
-                outcome=AttemptOutcome.ANSWERED,
-                ended_at=self._clock(),
+                to_state=AttemptState.ENDED if answered else None,
+                outcome=AttemptOutcome.ANSWERED if answered else None,
+                ended_at=self._clock() if answered else None,
             )
             return await self._capture(
                 conversation.id,
@@ -8529,13 +8579,14 @@ class Engine:
             search_not_serviced,
         )
         # §5, §6: `VERIFY` is stamped once the answer exists, and the attempt **ends**
-        # only where §5's own definition of `ANSWERED` is literally satisfied — "a reply
-        # exists, no step failed and no condition blocked". A parked turn is still
-        # waiting; a step that was denied, found no capable tool or carried invalid
-        # parameters is a turn whose attempt this decision disposes of not at all, and
-        # **which `AttemptOutcome` it earns is A10's** (§13). That gap is §4's stated
-        # cost taken deliberately: an outcome nothing established would be worse.
-        answered = parked is None and step.disposition is Disposition.EXECUTED
+        # only where §5's own definition of `ANSWERED` is literally satisfied
+        # (:meth:`_answered`). A parked turn is still waiting; a composition that
+        # produced no text or did not complete produced no answer; a step that failed,
+        # was denied, found no capable tool or carried invalid parameters is a turn whose
+        # attempt this decision disposes of not at all, and **which `AttemptOutcome` it
+        # earns is A10's** (§13). That gap is §4's stated cost taken deliberately: an
+        # outcome nothing established would be worse.
+        answered = parked is None and self._answered(composed, step)
         attempt = await self._move_attempt(
             attempt,
             to_phase=None if parked is not None else AttemptPhase.VERIFY,

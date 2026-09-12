@@ -346,6 +346,11 @@ def test_an_element_the_understanding_omits_is_removed() -> None:
         pytest.param("C01", id="padded"),
         pytest.param("c1", id="lower-cased"),
         pytest.param("constraint one", id="not-a-label-at-all"),
+        # Longer than CPython's own int-str conversion limit, which `int()` refuses with
+        # a `ValueError`. A model-supplied string is bounded by nothing, and §7's
+        # "dropped … silently and without failing the turn" is what makes converting
+        # before bounding a defect rather than a curiosity.
+        pytest.param("C" + "9" * 5000, id="more-digits-than-int-will-convert"),
     ],
 )
 def test_a_retains_label_outside_the_shown_set_drops_its_element(label: str) -> None:

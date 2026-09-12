@@ -183,6 +183,7 @@ if TYPE_CHECKING:
         ShownFile,
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
+    from ai_assistant.testing.invoker import FakeToolImplementation
 
 
 def _goal_ids(prefix: str) -> Callable[[], str]:
@@ -644,6 +645,7 @@ class Harness:
         trace_retention: timedelta | None = TRACE_RETENTION,
         binder: EgressBinder | None = None,
         plans: FakePlanStore | None = None,
+        tool_handler: FakeToolImplementation | None = None,
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
         routing: RoutingStage | None = None,
@@ -695,8 +697,16 @@ class Harness:
         # One object as both registry and invoker, as ADR-0029 §8 requires.
         # The seam claims through the **same** trail the runner records rulings
         # into (ADR-0192 §9's wiring clause); a second one would refuse every claim.
+        # A knob for the same reason ``plans`` is one: ADR-0249 §5 makes ``ANSWERED``
+        # assert that **no step failed**, and a case about that needs a tool that fails
+        # rather than the one that succeeds. The default is unchanged.
         self.invoker = FakeToolInvoker(
-            [(definition, _succeeds) for definition in tools], ledger=self.trail, gate=self.trail
+            [
+                (definition, _succeeds if tool_handler is None else tool_handler)
+                for definition in tools
+            ],
+            ledger=self.trail,
+            gate=self.trail,
         )
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)

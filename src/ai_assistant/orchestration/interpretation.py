@@ -88,21 +88,32 @@ CRITERIA_LETTER: Final = "S"
 CONDITIONS_LETTER: Final = "D"
 
 #: The label form, per letter: the letter followed by a 1-based decimal ordinal with no
-#: padding. ``[0-9]`` and not a shorthand digit class, which is
+#: padding, **bounded in width** — the same form
+#: :data:`~ai_assistant.orchestration.reads.resolve_label` matches an ``M`` label by, one
+#: sequence over. The bound is what keeps an unresolvable label from *failing* the turn:
+#: a model-supplied string is bounded by nothing, ``int()`` refuses one past CPython's
+#: own digit limit with a ``ValueError``, and §7 has every label outside the shown set
+#: "dropped … silently and without failing the turn". No brief has 10**9 elements, so
+#: nothing resolvable is refused by it.
+#:
+#: ``[0-9]`` and not a shorthand digit class, which is
 #: :data:`~ai_assistant.orchestration.reads.resolve_label`'s own reason: the shorthand
 #: admits every Unicode decimal digit, and a label the renderer could not have produced
 #: is not a label this side resolves.
-_ORDINAL: Final = re.compile(r"[1-9][0-9]*")
+_ORDINAL: Final = re.compile(r"[1-9][0-9]{0,8}")
 
 
 def _resolved_ordinal(label: str, letter: str, length: int) -> int | None:
     """Resolve one brief label to a 0-based index of its own tuple, or to nothing (§9).
 
     **Every way of being outside the shown set lands here alike**: a label of another
-    tuple's letter, a string that does not match the form, an ordinal below 1, and an
-    ordinal beyond the tuple's length. Each resolves to nothing, and the retaining
-    element is then dropped — silently, exactly as ADR-0226 §3 drops an ``M`` label
-    outside the shown set.
+    tuple's letter, a string that does not match the form, an ordinal below 1, an ordinal
+    beyond the tuple's length, and an ordinal of more digits than any shown set could
+    have. Each resolves to nothing, and the retaining element is then dropped —
+    silently, exactly as ADR-0226 §3 drops an ``M`` label outside the shown set. **None
+    of them fails the turn**, which is why the last is tested before the conversion
+    rather than after it: a model-supplied string is not bounded by anything, and
+    ``int()`` refuses one past CPython's digit limit.
 
     Args:
         label: What the planner named. Model-supplied text, treated as a label and
