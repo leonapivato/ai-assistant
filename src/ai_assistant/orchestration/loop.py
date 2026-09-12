@@ -72,6 +72,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     AttemptEffort,
+    AttemptKind,
     AttemptPhase,
     BeliefBand,
     CurrentContext,
@@ -340,22 +341,144 @@ class RespondedTurn:
     parked_decision: PermissionDecision | None = None
 
 
-#: ADR-0228 §3's bound: **at most two** calls to ``Planner.plan`` on one turn, so a
-#: turn that revises takes **one** revision and no more.
+#: ADR-0251 §5's planner-call allowance for
+#: :attr:`~ai_assistant.core.types.AttemptKind.CONVERSATIONAL`.
 #:
-#: "Two is read off the replay rather than chosen for tidiness": its measured shape
-#: is "10.0pt then 4.6pt on the miss set and 11.3pt then 7.4pt on the hop set", so
-#: the second read is worth roughly twice the third and the third roughly a fifth of
-#: the first. A bound of two spends one extra model round trip where the evidence
-#: says the return is largest and stops where it halves.
+#: **A round is one planner call, so this is a count of rounds** (§1). It supersedes
+#: ADR-0228 §3's *"A turn makes **at most two** calls to ``Planner.plan``"* in that
+#: clause's **count and subject alone**: a per-turn total becomes a per-**attempt
+#: admission threshold on iteration**, so a further call within a turn is admitted
+#: only while the attempt's consumed calls are fewer than this, **every turn the
+#: owner starts makes its first call whatever the ledger holds**, and the attempt's
+#: total is therefore bounded by how many times the owner asks rather than by this
+#: figure.
 #:
-#: **Not configurable, and read from this constant rather than taken as a
-#: parameter** — the same construction ``reads.READ_BUDGET`` uses for ADR-0226 §6's
-#: ten, and for the reason §3 gives one level up: a plan count is a count of model
-#: calls, so a configurable one is a configurable per-turn cost with no ceiling
-#: anyone reviewed. A keyword defaulted to this figure would be exactly such a
-#: setting, reachable by any caller in this package and by any later lane.
-_PLANNER_CALL_BOUND: Final = 2
+#: **Four, and what the figure is read off** (§5). It must exceed two, because #1908
+#: requires "an investigation that requires more than two decision rounds". Three
+#: would satisfy the letter and not the shape: the obligation asks for an
+#: investigation that "chooses a later operation from newly discovered evidence",
+#: which needs a round to ask, a round to see and ask again *from* what came back,
+#: and a round to act on what that second ask discovered. Four gives those three and
+#: one more that **plans over** the third read's yield. ADR-0228 §8's replay is the
+#: nearest measured shape this corpus has — "311/349 need exactly one belief, 29 need
+#: two, 9 need three" — and four is the smallest bound that reaches the third level
+#: and still plans over it. **This is a first declaration and is labelled as one**:
+#: nothing in this repository measures how many rounds an investigation needs, and
+#: §7's extended stop distribution is what turns it into a measurement.
+_PLANNER_CALL_ALLOWANCE: Final = 4
+
+#: ADR-0251 §5's working allowance for ``CONVERSATIONAL``, and §6's reserve within it.
+#:
+#: **PT3M and PT30S, and the relation they are chosen to keep.** ADR-0228 §4 states
+#: the relation between its own two guards — "the count in §3 is meant to be the
+#: binding guard in the ordinary case and the budget to be the tail guard for a turn
+#: whose first phase already ran long" — and these keep it one level up: the
+#: planner-call allowance is meant to bind in the ordinary case and the working
+#: allowance to be the tail guard for an attempt whose rounds ran long or whose turns
+#: were many. PT3M is the smallest round figure that admits four rounds and their
+#: servicings across several turns without the tail guard firing in the ordinary
+#: case; PT30S is anchored on the one judged figure this corpus has for a model round
+#: trip on this path — ADR-0228 §4's PT20S — plus headroom for the verification call
+#: A10 has not yet specified. **Both are judged figures and both are labelled as
+#: such**, and §14 fires their revision off §7's stop distribution and off nothing
+#: else: not off a lane finding four restrictive, and not off a deployment wanting
+#: more reach.
+_WORKING_ALLOWANCE: Final = timedelta(minutes=3)
+_RESERVE: Final = timedelta(seconds=30)
+
+
+@dataclass(frozen=True, slots=True)
+class _Allowance:
+    """What one :class:`~ai_assistant.core.types.AttemptKind` declares (ADR-0251 §5, §6).
+
+    **A declaration and never a value that crosses a seam.** ADR-0228 §4's
+    construction applied one level up — "what crosses the seam is the operation's
+    identity rather than a duration" — so no caller, no ``core`` model and no
+    ``AttemptEffort`` carries a limit: what an attempt carries is its **kind**, and
+    this is what that kind declares. A ``timedelta`` or an ``int`` stored beside the
+    consumed figure would be "a figure a caller can contradict", which ADR-0228 §4
+    refuses by name.
+
+    **Not ``Settings`` values, not deployment flags and not per-request parameters**
+    (§5). ADR-0228 §3's non-configurability binds entire and is the clause this rests
+    on: "a plan count is a count of model calls, so a configurable one is a
+    configurable per-turn cost with no ceiling anyone reviewed". The figures move only
+    by the ADR that moves them.
+
+    Attributes:
+        planner_calls: How many ``Planner.plan`` calls the attempt may consume before
+            a further round is refused (§4(f')).
+        working: How much **working** time the attempt declares in total.
+        reserve: The part of that the investigation gate may not reach (§6).
+    """
+
+    planner_calls: int
+    working: timedelta
+    reserve: timedelta
+
+    @property
+    def investigation_share(self) -> timedelta:
+        """The working allowance **less** the reserve, which is §4(h)'s subject.
+
+        **The reserve is not a second pool and nothing draws it down** (§6): it is
+        the part of the declared allowance the investigation gate is forbidden to
+        reach, so this is a subtraction taken once here rather than a balance
+        maintained anywhere. No implementation transfers time from the reserve to
+        this share, spends the reserve on a round, releases it when investigation
+        finishes early, or admits a round on the ground that the reserve is
+        untouched.
+
+        Returns:
+            How much working time §4(h) admits a further round below.
+        """
+        return self.working - self.reserve
+
+
+#: What each attempt kind declares (ADR-0251 §5).
+#:
+#: **Membership is the declaration**, read with a ``None`` default and never as a
+#: branch with a figure at the end of it — ADR-0228 §2(a)'s rule one level up: "no
+#: implementation reads an absent declaration as a default, as
+#: unknown-and-therefore-permitted, or as a case to decide at run time from anything
+#: other than a declaration".
+#:
+#: **``SPOKEN``'s absence is itself a decision; every future member's absence is an
+#: accident, and both fail closed** — an attempt kind that declares no allowance does
+#: not iterate, whatever its audience, and its attempt makes exactly one planner call
+#: per turn, exactly as an operation absent from :data:`_PLANNING_BUDGETS` does.
+_ALLOWANCES: Final[Mapping[AttemptKind, _Allowance]] = MappingProxyType(
+    {
+        AttemptKind.CONVERSATIONAL: _Allowance(
+            planner_calls=_PLANNER_CALL_ALLOWANCE,
+            working=_WORKING_ALLOWANCE,
+            reserve=_RESERVE,
+        ),
+    }
+)
+
+#: ADR-0251 §7's unproductive-run bound: **at two consecutive unproductive rounds the
+#: investigation stops**, and a productive round resets the count to zero.
+#:
+#: **The run is counted within one turn and starts at zero on each turn of the
+#: attempt, and no implementation persists it** (§7). The run is a claim about one
+#: continuous line of enquiry; a new turn carries a new utterance and may carry a new
+#: interpretation revision, which is new information and honestly breaks it. The
+#: supply it was counted over is ephemeral in any case — ADR-0052 §3's "context and
+#: retrieved memories are ephemeral and were never persisted" — so persisting the
+#: count would mean persisting a claim about a supply nothing can reconstruct. §14
+#: defers the persisted variant with exactly that as what fires it.
+#:
+#: **Two rather than three**, and the figure is stated rather than hoped for: under
+#: ADR-0228 §2(e) it was effectively **one** — the first unproductive round ended the
+#: turn — so two is the smallest increment that changes anything, and a third would be
+#: the loop reworking itself rather than converging.
+_UNPRODUCTIVE_RUN: Final = 2
+
+
+#: :class:`~ai_assistant.core.types.AttemptPhase`'s members in §6's declared order,
+#: so "never moves backwards" is a comparison of two positions in one sequence rather
+#: than a hand-written ordering a later member could fall out of.
+_PHASE_ORDER: Final[tuple[AttemptPhase, ...]] = tuple(AttemptPhase)
 
 
 class ConversationalOperation(StrEnum):
@@ -461,6 +584,27 @@ _PLANNING_BUDGETS: Final[Mapping[ConversationalOperation, timedelta]] = MappingP
     {
         ConversationalOperation.CONVERSE: _PLANNING_BUDGET,
         ConversationalOperation.CONVERSE_STREAMING: _PLANNING_BUDGET,
+    }
+)
+
+
+#: Which :class:`ConversationalOperation` stamps which
+#: :class:`~ai_assistant.core.types.AttemptKind`, at the instant an attempt is opened
+#: (ADR-0251 §5).
+#:
+#: **Read once, at the open, from the opening turn's operation** — never re-stamped,
+#: never derived at read time and never taken from a later turn's operation. An
+#: attempt opened by a ``converse`` turn keeps its allowance when a
+#: ``converse_spoken`` turn later engages the same goal, and the reverse: an allowance
+#: the user could halve by speaking is one nobody decided.
+#:
+#: A turn that named **no** operation stamps ``None``, which this mapping expresses by
+#: never being consulted rather than by holding a key for it.
+_ATTEMPT_KINDS: Final[Mapping[ConversationalOperation, AttemptKind]] = MappingProxyType(
+    {
+        ConversationalOperation.CONVERSE: AttemptKind.CONVERSATIONAL,
+        ConversationalOperation.CONVERSE_STREAMING: AttemptKind.CONVERSATIONAL,
+        ConversationalOperation.CONVERSE_SPOKEN: AttemptKind.SPOKEN,
     }
 )
 
@@ -683,50 +827,165 @@ def _narrowed(
     return narrow(context, memories, retrieved_ids)
 
 
-def _stop_reason(
-    *,
-    plans: Sequence[ActionPlan],
-    serviced: ServicedRead,
-    empty_structured_read: bool,
-    planning_budget: timedelta | None,
-    elapsed: Callable[[], timedelta],
-) -> StopReason | None:
-    """Which of ADR-0228 §2's conditions stops the turn after a servicing, or ``None``.
+#: Which stop reasons set ADR-0228 §10's carrier, as ADR-0251 §7 widens it.
+#:
+#: §7: "On an attempt whose investigation stopped **while its last plan still carried
+#: a ``read_request``** — at the planner-call allowance, at the investigation share, at
+#: the per-turn planning budget, or on the unproductive run — the composing stage is
+#: given the bare fact that the turn stopped looking while it was still asking."
+#: **What changes is which stops set the flag, and nothing else**: ADR-0228 §10 binds
+#: entire and gains no field, so the fact still carries no count, no duration, no guard
+#: name, no stop reason, no query and no label, and a turn that did not stop while
+#: asking still assembles a byte-identical prompt.
+#:
+#: ``NOT_ITERATED`` is deliberately **not** here, and §4(j) says so in terms for its
+#: own case: "A round refused by (j) records ``NOT_ITERATED`` and **sets no composing
+#: flag**", because ADR-0228 §10's carrier "is reserved for a turn that stopped at a
+#: **guard** while still asking". ``SETTLED`` is not here because the planner stopped
+#: asking, and ``PLANNING_FAILED`` is not because that turn has no answer to compose.
+_STOPPED_LOOKING: Final[frozenset[StopReason]] = frozenset(
+    {
+        StopReason.BOUND_REACHED,
+        StopReason.BUDGET_REACHED,
+        StopReason.WORKING_ALLOWANCE_REACHED,
+        StopReason.UNPRODUCTIVE,
+    }
+)
 
-    The conditions that can only be judged once a servicing has run — (a), (d), (e),
-    (f) and (g), with (e) read as ADR-0240 §6 partially supersedes it — stated in one
-    place so that the loop reads as the sequence §2
-    describes rather than as a stack of guards. ``None`` means all of them hold and a
-    revision is admissible; a value is both the answer *no* and ADR-0228 §9's reason
-    for it. Conditions (b) and (c) are decided before a servicing runs and so are the
-    loop's own.
 
-    **(f) is tested first, though §2 lists it sixth**, and that changes no outcome
-    because §2's conditions are conjunctive: what it changes is which reason is
-    recorded on a turn where more than one has failed. ADR-0228 §3 rules that case in
-    terms — "a turn that reaches the bound with its planner still asking is recorded
-    as having stopped at the bound" — and once two calls are made no other condition
-    is what stopped the turn. It can only fire after a revision, so nothing about a
-    turn that never iterated is decided by the ordering.
+def _advanced(
+    attempt: GoalAttempt, phases: tuple[AttemptPhase, ...], to: AttemptPhase
+) -> tuple[GoalAttempt, tuple[AttemptPhase, ...]]:
+    """Stamp a phase, or leave an attempt that has already passed it (ADR-0249 §6).
+
+    **"Within one attempt the phase advances in that order and never moves
+    backwards."** A turn that opens an attempt passes through every phase this method
+    stamps and each is an advance; a turn **continuing** an attempt (ADR-0251 §13) may
+    find it standing at ``AUTHORIZE`` or beyond, and stamping ``UNDERSTAND``,
+    ``INVESTIGATE`` or ``PLAN`` there would be exactly the backwards move §6 forbids.
+
+    **One place rather than three guarded assignments**, because "never moves
+    backwards" is a property of the sequence of stamps and not of any one of them: a
+    later lane adding a fourth stamp inherits the rule instead of restating it. The
+    comparison is over :data:`_PHASE_ORDER`, which is
+    :class:`~ai_assistant.core.types.AttemptPhase`'s own declared order, so a member
+    added tomorrow is ordered by where it is declared rather than by a hand-written
+    table that could disagree with the vocabulary.
+
+    **The test is strict, so re-stamping the phase an attempt already stands at is a
+    no-op**: §6 makes a phase an attempt's *position*, and recording a transition to
+    where it already is would put a phase in ``OpenedAttempt.phases`` that nothing
+    transitioned through. An attempt's **opening** phase is not a transition either and
+    is not stamped here — the caller records it where the attempt is opened, which is
+    the one place that knows the difference between opening at ``UNDERSTAND`` and
+    arriving there.
 
     Args:
-        plans: The plans the turn has produced so far, oldest first. Its length is
-            how many planner calls the turn has made, which is §2(f)'s subject.
-        serviced: What the servicing just performed carried — §2(d)'s failure and
-            §2(e)'s count of records the supply did not already hold.
-        empty_structured_read: Whether that servicing performed an **empty structured
-            read** — ADR-0240 §6's second branch of §2(e): a ``STRUCTURED_READ`` ask
-            that was serviced, was reached with at least one slot of the budget
-            remaining, whose store call completed, and whose store call returned no
-            record at all. A read the budget did not reach, one the supply's shape
-            blocked, one whose records were merely deduplicated out and a servicing
-            that failed are none of them this, and the servicer is what tells them
-            apart.
+        attempt: The attempt as this turn holds it.
+        phases: The phases this turn has stamped so far, in order.
+        to: The phase this turn has just entered.
+
+    Returns:
+        The attempt standing at ``to``, and the stamps with ``to`` appended — or both
+        unchanged where the attempt already stands at ``to`` or beyond.
+    """
+    if _PHASE_ORDER.index(to) <= _PHASE_ORDER.index(attempt.phase):
+        return attempt, phases
+    return attempt.model_copy(update={"phase": to}), (*phases, to)
+
+
+def _stop_reason(  # noqa: PLR0911, PLR0913 — ADR-0251 §4's conditions are a conjunction whose *failing* member is the value returned, so one exit per condition is the decision rather than a shape to fold; and one keyword per condition, each a distinct fact the loop already holds
+    *,
+    attempt_calls: int,
+    allowance: _Allowance | None,
+    phase: AttemptPhase,
+    serviced: ServicedRead,
+    unproductive_run: int,
+    planning_budget: timedelta | None,
+    working: Callable[[], timedelta],
+    elapsed: Callable[[], timedelta],
+) -> StopReason | None:
+    """Which of ADR-0251 §4's conditions stops the investigation, or ``None``.
+
+    §4 is ADR-0228 §2 with **(e) dissolved and three conditions added**, and it keeps
+    §2's framing entire: the loop makes a further planner call **if and only if all**
+    of the conditions hold, each is "a fact the loop already has in hand", **none is a
+    setting and none is a judgement**, and where any fails "the turn proceeds with the
+    plan it has… No implementation retries a failed servicing, widens a request,
+    re-asks the planner on a different prompt, or substitutes a read of its own for
+    one the planner did not ask for". ``None`` means every condition holds and a
+    further round is admissible; a value is both the answer *no* and ADR-0228 §9's
+    reason for it.
+
+    **These conditions govern a *further* call and never a turn's first** (§4). Every
+    turn the owner starts makes its first planner call whatever the attempt's ledger
+    holds — this function is not reached before it — so an attempt whose allowance is
+    spent still plans **once** per turn and iterates no further. Its investigation has
+    stopped and its conversation has not, which is the standing rule of 2026-09-12
+    binding in terms: no gate here takes a user's turn away from them.
+
+    **Conditions (b) and (c) are decided before a servicing runs and so are the
+    loop's own**, exactly as they were: no request, nothing to iterate over; a
+    servicing declined under ADR-0226 §5, nothing serviced to iterate over.
+
+    **The order is not §4's listing order, and what it decides is which reason is
+    recorded on a turn where more than one condition has failed** — never whether the
+    turn stops, because the conditions are conjunctive. Four choices are load-bearing
+    and each is ruled rather than preferred:
+
+    1. **(f') is tested first**, as ADR-0228 §3's own rule requires one level up — "a
+       turn that reaches the bound with its planner still asking is recorded as having
+       stopped at the bound" — and once the allowance is spent no other condition is
+       what stopped the investigation.
+    2. **An undeclared allowance and an undeclared budget precede every guard**,
+       because an attempt that does not iterate at all has not reached a guard: it is
+       ADR-0228 §9's ``NOT_ITERATED`` and reporting a bound would claim a figure was
+       in force when none was declared.
+    3. **(h) precedes (g)**, which is what makes §17's fourteenth arm reachable: an
+       attempt at exactly its investigation share has also spent ADR-0228 §4's PT20S
+       many times over, and a budget tested first would record the per-turn guard on
+       every turn the attempt-level one fired.
+    4. **(i) precedes (g)** for the same shape of reason: the unproductive run is a
+       fact about the enquiry the turn just made, and the per-turn budget is §4's own
+       "tail guard". A turn whose second unproductive round also ran past PT20S
+       stopped because the route was not there.
+
+    Args:
+        attempt_calls: The attempt's consumed ``Planner.plan`` calls **including this
+            turn's**, charged before each call (§12) — ``AttemptEffort.planner_calls``
+            as it stands at this moment, which is §4(f')'s subject. It counts every
+            call the attempt made, a turn's first included, so the comparison is
+            against the whole ledger and never against a per-turn subtotal.
+        allowance: What this attempt's kind declares, or ``None`` where it declares
+            none (§5). ``None`` **does not iterate**, whatever the audience: an absent
+            declaration is not a default and not a case to decide at run time, and
+            ``SPOKEN``'s absence is a decision where a future member's is an accident.
+        phase: Where the attempt stands (§4(j)). Every round sits inside one occupancy
+            of ``INVESTIGATE`` (§1), so an attempt whose phase has advanced past it
+            makes its turn's one planner call and does not iterate — iterating there
+            would either run the loop in a phase §1 does not place it in, or move the
+            phase backwards, which ADR-0249 §6 forbids.
+        serviced: What the servicing just performed carried — §2(d)'s failure. **(d)
+            is about the loop's own stage and not about what a source answered**
+            (§2): a servicing that ran to its end and carries a typed failure
+            satisfies it, and one ADR-0226 §5 left partial does not. ``(e)`` is
+            **gone**: a servicing that completed admits a further round whatever its
+            typed outcome, because §3's carrier gives that round an input the round
+            before it did not have.
+        unproductive_run: How many **consecutive** rounds of this turn admitted no
+            record the supply did not already hold (§7). §4(i) refuses a round after
+            the **second**: one unproductive round is admissible precisely so the
+            planner can take #2169's "justified alternative", and a second consecutive
+            one is evidence that the route is not there.
         planning_budget: The operation's declared budget, or ``None`` where it
             declared none (§2(a)).
-        elapsed: How long the turn has run, measured from its entry into the loop
+        working: The attempt's ``AttemptEffort.working`` **as it stands at this
+            moment** — its accumulated working intervals, this turn's included and
+            every interval spent waiting for the user excluded. §4(h)'s subject, and a
+            callable for ``elapsed``'s own reason.
+        elapsed: How long **this turn** has run, measured from its entry into the loop
             against the injected clock (§2(g)). **A callable, and read only where the
-            budget check is actually reached** — §4 rules that the budget is checked
+            check is actually reached** — ADR-0228 §4 rules that the budget is checked
             "immediately before each additional planner call and at no other point",
             and a reading taken eagerly would be a clock read on a turn that had
             already stopped for another reason. It matters beyond tidiness: the
@@ -735,37 +994,71 @@ def _stop_reason(
             over a clock that turn never needed.
 
     Returns:
-        The reason the turn stops, or ``None`` where a revision is admissible.
+        The reason the investigation stops, or ``None`` where a further round is
+        admissible.
     """
-    if len(plans) >= _PLANNER_CALL_BOUND:
+    if allowance is None:
+        # §5's fail-closed reading of an attempt kind that declares nothing, and of
+        # the `None` kind a turn that named no operation stamps. There is no figure
+        # to compare against, so there is no bound to report: this is a turn that did
+        # not iterate, exactly as an operation absent from `_PLANNING_BUDGETS` is.
+        return StopReason.NOT_ITERATED
+    if attempt_calls >= allowance.planner_calls:
+        # §4(f'), superseding ADR-0228 §2(f). The counter becomes the **attempt's**
+        # and the bound becomes the attempt kind's declaration; nothing else about
+        # (f) moves, the member keeps its name and its value, and reaching it is
+        # neither a failure nor a blocker (§9).
         return StopReason.BOUND_REACHED
     if planning_budget is None:
-        # §2(a). An undeclared budget is not a default, not
+        # §2(a), verbatim. An undeclared budget is not a default, not
         # unknown-and-therefore-permitted, and not a case to decide at run time: a
         # lane that adds an operation and forgets to price it gets the turn the
         # system already has, not a second model call nobody budgeted.
         return StopReason.NOT_ITERATED
-    if serviced.failed or (serviced.new == 0 and not empty_structured_read):
-        # §2(d) and §2(e). A failed or partial servicing left the supply as planning
-        # saw it (ADR-0226 §5), and a servicing whose every record was deduplicated
-        # out left it byte-identical — either way a second call would be handed the
-        # first call's own input, at the price of a model round trip.
-        #
-        # **ADR-0240 §6 partially supersedes (e) in one scope and this is it**: a
-        # servicing that performed an empty structured read satisfies (e) too, and the
-        # second call is *not* handed the first call's own input, because ADR-0240 §7
-        # gives it the ask that came back empty. The other six conditions bind
-        # unchanged and all of them must still hold — which is why this reading sits
-        # inside (d)'s guard rather than beside it: a servicing that failed
-        # established nothing, so its empty-read fact is `False` by construction and
-        # the conjunction is belt and braces rather than a second rule.
+    if phase is not AttemptPhase.INVESTIGATE:
+        # §4(j). **Records `NOT_ITERATED` and sets no composing flag**, exactly as a
+        # round refused by (a) to (d) does: ADR-0228 §9 makes `NOT_ITERATED` the
+        # record's default for a turn on which no revision was admissible, and §10's
+        # carrier is reserved for a turn that stopped at a **guard** while still
+        # asking. How a later turn's planning relates to an attempt that is
+        # authorizing, executing or verifying is A7's and A9's (§14).
         return StopReason.NOT_ITERATED
+    if serviced.failed:
+        # §2(d). A failed or partial servicing left the supply as planning saw it
+        # (ADR-0226 §5), so the loop's own stage did not run to its end and there is
+        # nothing this round learned to plan over.
+        return StopReason.NOT_ITERATED
+    if working() >= allowance.investigation_share:
+        # §4(h), against the injected clock (ADR-0026) and checked immediately before
+        # each additional planner call and at no other point. **Strictly less is what
+        # admits a round**: the boundary instant is spent, not available — ADR-0228
+        # §4's own posture, and for its own reason, that "an injected clock makes
+        # equality an ordinary case in a test rather than a measure-zero curiosity".
+        #
+        # **This is the gate the reserve holds back** (§6): the share is the working
+        # allowance less the reserve, so the round this check admits overruns the
+        # share by that one round and no more, where without the reserve a check
+        # would have admitted a round up to the whole allowance and overrun from
+        # there. It is a gate on **starting** a round and never a cancellation of one
+        # in flight, so `working` is not bounded by the allowance at any moment and
+        # §6 claims it is not.
+        return StopReason.WORKING_ALLOWANCE_REACHED
+    if unproductive_run >= _UNPRODUCTIVE_RUN:
+        # §4(i), §7. Two is the smallest increment that changes anything — under
+        # ADR-0228 §2(e) the figure was effectively one — and what it buys is exactly
+        # the scenario #2169 fixes in advance: one unproductive round gives the
+        # planner one chance to take a different route, and a second consecutive one
+        # is evidence that the route is not there.
+        return StopReason.UNPRODUCTIVE
     if elapsed() >= planning_budget:
-        # §2(g), against the injected clock. **Strictly less** is what admits a call:
-        # the boundary instant is spent, not available, because leaving equality to
-        # the implementation would let two conforming loops differ on identical input
-        # — one spending a model call the other refuses, with a different reply, a
-        # different cost and a different audit record.
+        # §2(g), against the injected clock, and **kept entire and not re-keyed**
+        # (ADR-0251 §5): PT20S measures *one user's wait* from the turn's entry into
+        # the loop, where the attempt's working allowance measures *one attempt's
+        # consumption*. Two quantities with two jobs, and both gates bind. Strictly
+        # less is again what admits a call: leaving equality to the implementation
+        # would let two conforming loops differ on identical input — one spending a
+        # model call the other refuses, with a different reply, a different cost and
+        # a different audit record.
         return StopReason.BUDGET_REACHED
     return None
 
@@ -1153,6 +1446,7 @@ class LearningLoop:
         operation: ConversationalOperation | None = None,
         conversation_id: str | None = None,
         continuing: Goal | None = None,
+        continuing_attempt: GoalAttempt | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
@@ -1198,6 +1492,23 @@ class LearningLoop:
                 goal the store already holds, under §12's compare-and-swap, and a **new
                 attempt on the same goal** (§5) — is this lane's to build and §16's arm 2
                 to assert.
+            continuing_attempt: The **attempt** this turn continues, or ``None`` where
+                it opens one (ADR-0251 §13, ADR-0250 §12). A turn that engages a goal
+                whose attempt is non-terminal **opens none** and continues that one,
+                "with its consumed figures as they stand and its ``kind`` as stamped" —
+                so the ledger §5's gates read spans the attempt's turns rather than
+                restarting at each. **Which attempt a turn continues is A2's**, exactly
+                as ``continuing`` is: association, focus and what makes an attempt
+                runnable are ADR-0250's, no caller of this lane supplies one, and this
+                parameter is the seam that decision fills. It is here rather than in A2
+                because what a continued attempt costs this loop — a ledger that is not
+                reset, a ``kind`` that is not re-stamped, a phase that does not move
+                backwards, and §4(j)'s refusal to investigate outside ``INVESTIGATE`` —
+                is this lane's to build and ADR-0251 §17's arms 6a, 13, 16, 19 and 20
+                to assert. **It is orthogonal to ``continuing``**: ADR-0249 §3 has a
+                *reopened* goal start a **new** attempt, so a turn may continue a goal
+                and open an attempt on it, which is what passing ``continuing`` alone
+                means and what every turn of this lane does today.
 
         Returns:
             The turn — its goal's **brief**, context, assembled memories and last plan
@@ -1233,6 +1544,7 @@ class LearningLoop:
                 footing=footing,
                 conversation_id=conversation_id,
                 continuing=continuing,
+                continuing_attempt=continuing_attempt,
             )
         finally:
             audit.emit()
@@ -1255,6 +1567,7 @@ class LearningLoop:
         footing: SearchFooting | None,
         conversation_id: str | None,
         continuing: Goal | None = None,
+        continuing_attempt: GoalAttempt | None = None,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
 
@@ -1359,34 +1672,56 @@ class LearningLoop:
         iterations would record a value about a supply the turn did not compose over
         — the same failure §7 moved the clause to prevent, one iteration later.
 
-        **And a turn that serviced a read may plan a second time over what came
-        back** (ADR-0228). That is the whole of this milestone: a plan whose step's
-        parameters cannot be filled until something has been read is a plan the
-        first call cannot make, so the loop calls the planner **again** over the
-        supply as it stands after the servicing — the same goal, the same
-        ``CurrentContext``, the same three groups, and the fourth group the servicing
-        appended. What comes back is a *new* plan with a new ``id`` (ADR-0014 §2),
-        never an edit of the first, and it is the plan the engine drives.
+        **And a turn that serviced a read plans again over what came back, in
+        bounded rounds** (ADR-0228, ADR-0251 §1). That is the whole of this
+        milestone: a plan whose step's parameters cannot be filled until something has
+        been read is a plan the first call cannot make, so the loop calls the planner
+        **again** over the supply as it stands after the servicing — the same goal,
+        the same ``CurrentContext``, the same three groups, and the fourth group each
+        servicing appended. What comes back is a *new* plan with a new ``id``
+        (ADR-0014 §2), never an edit of the first, and the last of them is the plan
+        the engine drives. **A round is one planner call together with the servicing
+        of the request that call returned**, so the attempt's planner-call allowance
+        is a count of rounds.
 
-        **Seven conditions, all of them, and every one a fact this method already
-        holds** (§2). The operation declared a planning budget (a); the plan carried
-        a request (b); it was serviced rather than declined under ADR-0226 §5 (c);
-        the servicing completed (d); it returned at least one record the supply did
-        not already hold, counted after deduplication (e); the turn has made fewer
-        planner calls than §3's bound (f); and it is within its budget at the moment
-        the check is made (g). None is a setting and none is a judgement — a
-        revision gated on anything a deployment tunes would make the second
-        emission's rate a property of the configuration rather than of the planner
-        — and where any fails the turn proceeds with the plan it has, exactly as it
-        does today. Nothing here retries a failed servicing, widens a request,
-        re-asks the planner on a different prompt, or substitutes a read of its own
-        for one the planner did not ask for.
+        **Every round sits inside one occupancy of ``INVESTIGATE``** (ADR-0251 §1). No
+        round moves the phase, forward or backward; ADR-0249 §6's "advances in that
+        order and never moves backwards" binds verbatim, and so does its clause that
+        recording an interpretation revision does not move it — a round that returns
+        an understanding this method records advances the **goal's** revision and
+        leaves the attempt where it stood. There is no re-entry into ``INVESTIGATE``
+        from a later phase, which is what §4(j) refuses.
 
-        **(e) is the condition that pays for itself.** A sighted query returning only
-        records already in the supply is common, and a second planner call over an
-        unchanged prompt is not merely wasted spend but a *wrong* instrument reading:
-        §9's iteration rate would count a turn that learned nothing as a turn that
-        looked again.
+        **The conditions, all of them, and every one a fact this method already
+        holds** (ADR-0251 §4, ADR-0228 §2). The attempt's kind declares an allowance
+        (§5); the operation declared a planning budget (a); the plan carried a request
+        (b); it was serviced rather than declined under ADR-0226 §5 (c); the servicing
+        completed (d); the attempt has made fewer planner calls than its kind's
+        declared allowance (f'); the attempt's phase is ``INVESTIGATE`` (j); its
+        ``working`` is below its investigation share (h); it has not just completed a
+        second consecutive unproductive round (i); and the turn is within its
+        operation's budget at the moment the check is made (g). None is a setting and
+        none is a judgement, and where any fails the turn proceeds with the plan it
+        has. Nothing here retries a failed servicing, widens a request, re-asks the
+        planner on a different prompt, or substitutes a read of its own for one the
+        planner did not ask for.
+
+        **(e) is dissolved, and it is paid for rather than waived** (ADR-0251 §4). Its
+        own words are "a planner called twice over one input is being asked the same
+        question twice at the price of a model round trip", and the answer is §3's
+        carrier: the further call is **never** over one input, because it is over the
+        same supply **plus** a statement of what each ask returned, which is a fact the
+        call before it did not have and could not have derived. What (e) also bought —
+        that a round never follows a round that learned nothing — is given up for
+        **one** such round, the one #2169's "justified alternative" needs, and taken
+        back at the second by the unproductive-run test.
+
+        **A turn's first planner call is never gated** (ADR-0251 §4). These conditions
+        govern a *further* call, exactly as ADR-0228 §2 governed a turn's second, and
+        every turn the owner starts makes its first call whatever the attempt's ledger
+        holds. An attempt whose allowance is spent still plans **once** per turn and
+        iterates no further: its investigation has stopped and its conversation has
+        not, and what bounds its total is how many times the owner asks.
 
         **Nothing else about the turn is re-run** (§1). Not the conversation tail,
         not the retrieval, not the episodic supplement — the turn's blind reads,
@@ -1410,16 +1745,30 @@ class LearningLoop:
         degradation, and not a count in §9's record — following ADR-0226 §3's own
         posture for a label a model invents.
 
-        **The bound is two planner calls and the budget is the tail guard** (§§3-4).
-        The count is meant to bind in the ordinary case; the budget catches a turn
-        whose first phase already ran long, is measured **from this method's entry**
-        against the injected clock, and admits a call only while the elapsed time is
-        *strictly* less than it — the boundary instant is spent, not available. It
-        gates **starting** an iteration and never cancels one in flight, so a turn's
-        total duration may exceed its budget by one planner call and one servicing.
-        An operation that declares none does not iterate, whatever its audience, and
-        ``None`` is never read as a default, as unknown-and-therefore-permitted, or
-        as a case to decide at run time.
+        **Four gates, each kept where its argument holds** (ADR-0251 §4, §5). The
+        attempt's **planner-call allowance** is meant to bind in the ordinary case and
+        its **working allowance** to be the tail guard for an attempt whose rounds ran
+        long or whose turns were many; ADR-0228 §4's **per-turn budget** is kept entire
+        and not re-keyed, because it measures *one user's wait* from this method's
+        entry where the attempt's figures measure *one attempt's consumption*; and the
+        **unproductive-run** test stops a line of enquiry that is not going anywhere.
+        Both time gates are read against the injected clock and admit a call only while
+        the reading is *strictly* less than the figure — the boundary instant is spent,
+        not available — and both gate **starting** a round rather than cancelling one
+        in flight, so a turn's total duration may exceed either by one planner call and
+        one servicing. An attempt kind that declares no allowance, and an operation
+        that declares no budget, do not iterate whatever their audience, and neither
+        absence is ever read as a default, as unknown-and-therefore-permitted, or as a
+        case to decide at run time.
+
+        **The reserve is a margin and not a hard reservation** (ADR-0251 §6). §4(h) is
+        checked against the working allowance **less** the reserve, so the composing
+        call runs — it is gated on nothing — and the round a given check admits
+        overruns the investigation share by that one round and no more. What is **not**
+        guaranteed is that ``AttemptEffort.working`` is below the working allowance at
+        any moment, and in particular not when composing begins: the ungated first call
+        means a long attempt may pass the allowance once per turn the owner starts, and
+        §6 claims no more than this method delivers.
 
         Args:
             utterance: What the user said. **Stripped once, here** — trimmed of
@@ -1474,6 +1823,10 @@ class LearningLoop:
                 (ADR-0249 §3, §13). **Which goal a turn continues is A2's** and no
                 caller of this lane supplies one, so every production turn opens a goal
                 — see :meth:`respond`, which states what the seam is for.
+            continuing_attempt: The attempt this turn continues, or ``None`` where it
+                opens one (ADR-0251 §13, :meth:`respond`). Its consumed figures and its
+                stamped ``kind`` are what §4's gates read, and its ``phase`` is what
+                §4(j) tests.
 
         **And which records the hop reached rides out beside the turn** (ADR-0227
         §3). The servicer is the one component that can distinguish a
@@ -1552,10 +1905,52 @@ class LearningLoop:
         # writes no goal row and no plan row. **A reopened goal starts a new attempt**,
         # so a turn continuing a goal opens one on that same goal rather than reaching
         # for the earlier attempt.
-        attempt = GoalAttempt(id=self._id_factory(), goal_id=goal.id, opened_at=turn_at)
+        #
+        # **ADR-0251 §5: the kind is stamped once, here, from the *opening* turn's
+        # operation** — `CONVERSE` and `CONVERSE_STREAMING` stamp `CONVERSATIONAL`,
+        # `CONVERSE_SPOKEN` stamps `SPOKEN`, and a turn that named no operation stamps
+        # `None`. A continued attempt keeps the kind it was opened with, which is why
+        # the stamp is inside the `else` and not applied to `continuing_attempt`: an
+        # allowance the user could halve by speaking is one nobody decided, and §5
+        # forbids re-stamping, deriving at read time and taking a later turn's
+        # operation in the same sentence.
+        #
+        # **ADR-0251 §13, ADR-0250 §12: a turn that engages a goal whose attempt is
+        # non-terminal opens none** and continues that one, with its consumed figures
+        # as they stand. Which attempt that is is A2's; this is the seam.
+        attempt = continuing_attempt or GoalAttempt(
+            id=self._id_factory(),
+            goal_id=goal.id,
+            opened_at=turn_at,
+            effort=AttemptEffort(kind=None if operation is None else _ATTEMPT_KINDS.get(operation)),
+        )
+        # ADR-0251 §5, §13: what this turn's gates are measured against, read **off the
+        # ledger** and never re-derived from this turn's own operation. `opened_calls`
+        # and `opened_working` are what the attempt carried in — zero and zero on one
+        # this turn opened — so §4(f') and §4(h) compare the attempt's whole
+        # consumption and never a per-turn subtotal, and ADR-0249 §5's monotonicity
+        # ("no replan, branch, recovery or phase transition resets either") has a
+        # consequence rather than only a prohibition.
+        allowance = None if attempt.effort.kind is None else _ALLOWANCES.get(attempt.effort.kind)
+        opened_calls = attempt.effort.planner_calls
+        opened_working = attempt.effort.working
+        # ADR-0251 §7's three turn-level audit additions, written from the ledger the
+        # loop holds. `attempt_calls_before` is what the attempt carried in; the record
+        # adds this turn's own charges at emission, so there is one count and not two.
+        audit.attempt_kind = attempt.effort.kind
+        audit.attempt_calls_before = opened_calls
+        audit.attempt_allowance = None if allowance is None else allowance.planner_calls
         # §6: a new attempt opens at `UNDERSTAND`, and this is the first of the six
-        # observable transitions the phase vocabulary is.
-        phases: tuple[AttemptPhase, ...] = (AttemptPhase.UNDERSTAND,)
+        # observable transitions the phase vocabulary is. A **continued** attempt
+        # stands where it stood and this turn stamps nothing it has already passed —
+        # ADR-0249 §6's "advances in that order and never moves backwards", which
+        # :func:`_advanced` is the one place in this method that keeps.
+        # A turn **continuing** an attempt stamps nothing at the open: the attempt
+        # already stands where it stands, and §6's six transitions were observed on the
+        # turn that made them.
+        phases: tuple[AttemptPhase, ...] = (
+            () if continuing_attempt is not None else (AttemptPhase.UNDERSTAND,)
+        )
         recorded: tuple[GoalInterpretation, ...] = ()
         # ADR-0231 §16: the ids of the records this turn's searches minted, which
         # "resolve in no store" — so a `FROM_EVIDENCE` ground naming one is dropped
@@ -1704,7 +2099,19 @@ class LearningLoop:
         # vacuous is stamped and left in the same instant" — and stamped once, because
         # the phase advances in §6's order and never moves backwards however many
         # servicings the turn performs.
-        phases += (AttemptPhase.INVESTIGATE,)
+        #
+        # **ADR-0251 §1: every round of one attempt's investigation sits inside one
+        # occupancy of `INVESTIGATE`, and no round moves the phase.** So the stamp is
+        # taken once here however many rounds follow, and on an attempt already past
+        # `INVESTIGATE` it is taken **not at all** — "there is no re-entry into
+        # `INVESTIGATE` from a later phase, and no clause of this decision creates
+        # one". §4(j) is the gate that follows from it.
+        attempt, phases = _advanced(attempt, phases, AttemptPhase.INVESTIGATE)
+        # ADR-0251 §7's run, counted **within this turn** and started at zero on each
+        # turn of the attempt. Nothing persists it: §14 defers the persisted variant,
+        # fired by an ADR that first decides what an attempt's ephemeral supply is
+        # reconstructed from — which ADR-0052 §3 says is nothing.
+        unproductive_run = 0
         while True:
             request = plan.read_request
             # ADR-0226 §8: the trigger *is* the emission, and ADR-0228 §9 makes it a
@@ -1854,18 +2261,39 @@ class LearningLoop:
                     carried.empty_read is not None if carried.structured_ran else structured.empty
                 ),
             )
-            # §2's remaining conditions, in one place (:func:`_stop_reason`). The
-            # clock is read **here**, immediately before the call the budget gates,
-            # and at no other point (§4).
+            # **ADR-0251 §7's progress fold, over the whole round and once.** "A round
+            # is productive where *any* ask of it admitted at least one record the
+            # supply did not already hold, counted after ADR-0226 §7's deduplication,
+            # and unproductive otherwise" — and `serviced.new` is that disjunction
+            # already summed, because it is the fourth group's own length over every
+            # ask of this servicing. A round that reached no ask at all is unproductive,
+            # which the same expression gives.
+            #
+            # **The fold is over records admitted and never over the member**, which is
+            # what keeps it total and free of the contradiction a member-based test
+            # carries: `TRUNCATED` is productive where it admitted a record and
+            # unproductive where it admitted none. It is a count and never a judgement
+            # about relevance, quality or usefulness.
+            unproductive_run = 0 if serviced.new else unproductive_run + 1
+            # ADR-0251 §4's conditions, in one place (:func:`_stop_reason`). Both
+            # clocks are read **here**, immediately before the call they gate, and at
+            # no other point (ADR-0228 §4, ADR-0251 §4(h)).
             stop = _stop_reason(
-                plans=plans,
+                # §12: charged **before** each call, so this already counts the call
+                # that produced the plan this round serviced.
+                attempt_calls=opened_calls + audit.planner_calls,
+                allowance=allowance,
+                phase=attempt.phase,
                 serviced=serviced,
-                # ADR-0240 §6's second branch of §2(e), taken from the servicer's own
-                # answer rather than re-derived here: which of five states the read
-                # reached is a fact only the servicer holds, and a loop reading it off
-                # `serviced.new` would read a deduplicated-away read as an empty one.
-                empty_structured_read=carried.empty_read is not None,
+                unproductive_run=unproductive_run,
                 planning_budget=None if operation is None else operation.planning_budget,
+                # §12: `working` excludes every interval spent waiting for the user, and
+                # nothing in this method waits for one — so the attempt's ledger at this
+                # instant is what earlier turns left plus what this turn has run.
+                # ADR-0249 §5's monotonicity is why the interval is floored at zero: the
+                # injected clock supplies wall-clock instants and guarantees no
+                # monotonicity (ADR-0009).
+                working=lambda: opened_working + max(self._now_utc() - started, timedelta(0)),
                 elapsed=lambda: self._now_utc() - started,
             )
             if stop is not None:
@@ -1916,21 +2344,32 @@ class LearningLoop:
             )
             plans += (plan,)
         # §6: `PLAN` is stamped where the turn takes its final plan — after the
-        # revision loop, so a turn that revised is stamped once rather than moved
-        # backwards and forwards across its two calls.
-        phases += (AttemptPhase.PLAN,)
+        # rounds, so a turn that iterated is stamped once rather than moved backwards
+        # and forwards across its calls. On an attempt already past `PLAN` it is not
+        # stamped at all (:func:`_advanced`).
+        attempt, phases = _advanced(attempt, phases, AttemptPhase.PLAN)
         attempt = attempt.model_copy(
             update={
-                "phase": AttemptPhase.PLAN,
                 # ADR-0249 §5: **referenced by id and never inlined**, and the whole
-                # sequence, because ADR-0228 §5 persists every plan a turn produced.
-                "plan_ids": tuple(one.id for one in plans),
-                # §5's ledger. `planner_calls` is the count this turn's audit already
-                # keeps — one value, not two that agree — and `working` is this turn's
-                # own working interval, which excludes no user wait because nothing in
-                # this method waits for the user.
+                # sequence, because ADR-0228 §5 persists every plan a turn produced. A
+                # continued attempt **appends**: §12's tuples "grow by append and never
+                # by replacement", so a turn that dropped the plans earlier turns
+                # recorded would break the reference `open_attempt` and `commit_attempt`
+                # are checked against.
+                "plan_ids": attempt.plan_ids + tuple(one.id for one in plans),
+                # §5's ledger, as ADR-0251 §5 and §12 leave it. `planner_calls` is what
+                # the attempt carried in plus the count this turn's audit already keeps
+                # — one value per scope, not two that agree — and each of this turn's
+                # was charged on the line before its call was entered, so a call that
+                # raised is charged and a recovery within the turn finds the slot gone.
+                # `working` adds this turn's own interval, which excludes no user wait
+                # because nothing in this method waits for the user.
+                #
+                # **`kind` is carried, never re-derived** (ADR-0251 §5): it is the value
+                # stamped at the open, and this copy is the one place a later turn's
+                # operation could have leaked into it.
                 "effort": AttemptEffort(
-                    planner_calls=audit.planner_calls,
+                    planner_calls=opened_calls + audit.planner_calls,
                     # §5: monotonically non-decreasing, and "no implementation
                     # subtracts from one". The injected clock supplies wall-clock
                     # instants and guarantees no monotonicity (ADR-0009), so a reading
@@ -1939,7 +2378,8 @@ class LearningLoop:
                     # nothing instead of failing a turn that has already planned: what
                     # the ledger loses is a duration, and what a raise here would lose
                     # is the record of everything the turn did.
-                    working=max(self._now_utc() - started, timedelta(0)),
+                    working=opened_working + max(self._now_utc() - started, timedelta(0)),
+                    kind=attempt.effort.kind,
                 ),
             }
         )
@@ -1979,15 +2419,13 @@ class LearningLoop:
             ),
             hop_reached=hop_reached,
             plans=plans,
-            # ADR-0228 §10: the bare fact that the turn stopped looking while it was
-            # still asking, and nothing else. Stated as §10 states it — both guards,
-            # and the last plan still carrying a request — rather than inferred from
-            # the stop reason alone, so the carrier cannot come to mean "a guard
-            # fired" if a later lane admits a guard that fires on a settled turn.
-            stopped_while_asking=(
-                audit.stop in {StopReason.BOUND_REACHED, StopReason.BUDGET_REACHED}
-                and plan.read_request is not None
-            ),
+            # ADR-0228 §10, as ADR-0251 §7 widens it: the bare fact that the turn
+            # stopped looking while it was still asking, and nothing else. Stated as
+            # §10 states it — a guard of :data:`_STOPPED_LOOKING`, **and** the last plan
+            # still carrying a request — rather than inferred from the stop reason
+            # alone, so the carrier cannot come to mean "a guard fired" if a later lane
+            # admits a guard that fires on a settled turn.
+            stopped_while_asking=(audit.stop in _STOPPED_LOOKING and plan.read_request is not None),
             # ADR-0240 §8's three facts, carried inside `orchestration` from the
             # component that knows them to the render site, as data. They add no field
             # to a `core` type, no member to a Protocol, and none is inferred at the
@@ -2183,10 +2621,11 @@ class LearningLoop:
         The two are one step because §3 requires the vocabulary to be read "within
         the turn, from the registry selection resolves against, and **immediately
         before the call**" — so the plan is judged against the vocabulary as it stood
-        immediately before the call that produced it. Under ADR-0228 §1 a turn may
-        make two such calls, and each reads again: a plan judged against a vocabulary
-        read before a *different* call is exactly what §3 exists to prevent, and a
-        vocabulary hoisted above the loop would be that.
+        immediately before the call that produced it. Under ADR-0228 §1, as
+        ADR-0251 §1 generalises it to N rounds, a turn may make several such calls, and
+        **each reads again**: a plan judged against a vocabulary read before a
+        *different* call is exactly what §3 exists to prevent, and a vocabulary hoisted
+        above the loop would be that.
 
         Nothing is withheld from the read and nothing needs to be: the registry
         "holds configuration, not personal data" (ADR-0016 §6), so there is no record
@@ -2232,6 +2671,19 @@ class LearningLoop:
                 would report one on a turn whose second call raised, and a record
                 saying that beside **planning failed** would say planning failed on a
                 call it claims never happened.
+
+                **This same line is ADR-0251 §12's charge on the attempt's ledger**,
+                raised from the per-turn count to the durable one: "incremented once
+                per ``Planner.plan`` call, immediately *before* the call and after the
+                capability vocabulary is read, and counted whether or not the call
+                returns". A call that raises, that is cancelled, or that the turn does
+                not survive is a call the attempt made and a call its allowance paid
+                for; a ledger advanced on return would let a recovery re-invoke a
+                planner past an allowance already spent. §12's note that this "is the
+                tree's existing discipline and not a new one" names this line, and the
+                attempt's figure is **derived** from it rather than counted a second
+                time — so a charge can stand for a call that never ran, and a call can
+                never run uncharged.
 
         Returns:
             The envelope, exactly as the planner returned it. Neither ``supersedes``

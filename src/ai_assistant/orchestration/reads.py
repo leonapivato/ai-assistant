@@ -92,6 +92,7 @@ from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import AssistantError, MemoryStoreError
 from ai_assistant.core.types import (
     ActionRequest,
+    AttemptKind,
     CarriedProvenance,
     DestinationTrust,
     EgressBinding,
@@ -241,13 +242,17 @@ class Servicing(StrEnum):
 
 
 class StopReason(StrEnum):
-    """Why a turn stopped iterating (ADR-0228 §9).
+    """Why a turn stopped iterating (ADR-0228 §9, ADR-0251 §7).
 
-    **A closed vocabulary of five**, and "no implementation, setting or later lane
-    adds a sixth without the ADR that decides it". Four describe a turn that ran to
-    its own end and the fifth describes one that did not, which is the hole §9
-    fills deliberately: a second planner call that raises still writes a record, and
-    none of the four successful outcomes describes it — labelling such a turn
+    **A closed vocabulary of seven**, and "no implementation, setting or later lane
+    adds an eighth without the ADR that decides it". ADR-0251 §7 supersedes ADR-0228
+    §9's closure at five **in that count alone**: every existing member keeps its
+    name, its value and its meaning, the vocabulary is added to and never renamed,
+    and the two new members are :attr:`WORKING_ALLOWANCE_REACHED` and
+    :attr:`UNPRODUCTIVE`. Five describe a turn that ran to its own end and
+    :attr:`PLANNING_FAILED` describes one that did not, which is the hole §9
+    fills deliberately: a planner call after the first that raises still writes a
+    record, and none of the successful outcomes describes it — labelling such a turn
     :attr:`SETTLED` would say the planner stopped asking when it did not, and
     :attr:`BOUND_REACHED` would say a guard fired when none did.
 
@@ -266,10 +271,28 @@ class StopReason(StrEnum):
         SETTLED: The last plan carried no request. Reachable only after a revision:
             a turn whose *first* plan carried none failed §2's condition (b) and is
             :attr:`NOT_ITERATED`.
-        BOUND_REACHED: ADR-0228 §3's bound of two planner calls stopped the turn
-            with its planner still asking.
+        BOUND_REACHED: The **attempt's** declared planner-call allowance stopped the
+            turn with its planner still asking. **The name and the value are
+            ADR-0228 §3's and only the subject moves** (ADR-0251 §7): where §3
+            counted a turn's two calls, §5's allowance counts the attempt's, and
+            §4(f') is the comparison. An attempt whose kind declares no allowance
+            never reaches this member — it does not iterate at all, and
+            :attr:`NOT_ITERATED` is what says so.
         BUDGET_REACHED: ADR-0228 §4's per-operation budget was spent when the check
-            was made. The boundary instant is spent, not available.
+            was made. The boundary instant is spent, not available. **Unchanged and
+            still the per-turn gate** (ADR-0251 §5): the attempt's working allowance
+            is a second gate, measures a different quantity and has its own member.
+        WORKING_ALLOWANCE_REACHED: The attempt's **investigation share** — its
+            kind's declared working allowance less its reserve (ADR-0251 §5, §6) —
+            was spent when the check was made, again with the boundary instant spent
+            rather than available. **Neither a failure nor a blocker** (§9): an
+            exhaustion leaves the goal ``ACTIVE``, and the attempt still plans once
+            per turn the owner starts.
+        UNPRODUCTIVE: The attempt had just completed its **second consecutive**
+            unproductive round (ADR-0251 §7) — two rounds in a row whose every ask
+            admitted no record the supply did not already hold. A productive round
+            resets the run, the run is counted within one turn and nothing persists
+            it. Also neither a failure nor a blocker.
         PLANNING_FAILED: A planner call after the first raised, or the turn ended
             between a servicing and the next plan's return.
     """
@@ -278,6 +301,8 @@ class StopReason(StrEnum):
     SETTLED = "settled"
     BOUND_REACHED = "bound_reached"
     BUDGET_REACHED = "budget_reached"
+    WORKING_ALLOWANCE_REACHED = "working_allowance_reached"
+    UNPRODUCTIVE = "unproductive"
     PLANNING_FAILED = "planning_failed"
 
 
@@ -1270,6 +1295,23 @@ class ServicedRead:
             its first returned is as partial as a hop that returned before a query
             raised, and a field keyed on asks would call the one-ask case a total
             failure".
+        outcomes: ADR-0251 §7's one added per-servicing field: the
+            :class:`~ai_assistant.core.types.ReadOutcomeKind` of each ask this
+            servicing **reached**, in ADR-0226 §6's servicing order — the same
+            sequence, member for member, that §3's carrier hands the next planner
+            call. Empty on a servicing that failed or was partial, which reaches no
+            ask's outcome at all (§2's precedence case 1), and on one that reached
+            none.
+
+            **Members of a closed enumeration and never free text**, which is what
+            admits it under ADR-0226 §9's counts-and-kinds rule at all: the ask
+            itself is *not* here — no query, no label, no window, no axis value —
+            because §9 copies no text and the ask stays durable on the frozen
+            ``ActionPlan``. What the field buys is the **stop distribution's**
+            companion: ADR-0251 §14 fires the revision of §5's figures off this
+            record, and a distribution over stops with no account of what the reads
+            returned cannot say whether a bound fired on an attempt that was
+            learning or on one that was not.
     """
 
     kinds: tuple[ReadKind, ...] = ()
@@ -1288,6 +1330,7 @@ class ServicedRead:
     truncated_kinds: tuple[ReadKind, ...] = ()
     failed: bool = False
     failed_after_read_returned: bool = False
+    outcomes: tuple[ReadOutcomeKind, ...] = ()
 
 
 @dataclass(slots=True)
@@ -3278,6 +3321,11 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # second ground (ADR-0128 §2), observed rather than read because this kind is
             # several store calls behind one call.
             ledger.note(query, reached=asked, non_yield=None, certified=not capped.seen)
+        # ADR-0251 §3 and §7 read one classification, not two: the carrier the next
+        # planner call receives and the members §9's record accounts per servicing are
+        # the same sequence, so classifying twice would be two authorities on what
+        # became of one ask.
+        classified = classified_reads(ledger.facts)
         completed = ServicedRead(
             kinds=tuple(ask.kind for ask in request.asks),
             records=tuple(union.admitted),
@@ -3305,6 +3353,9 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # complete" and nothing else.
             structured=outcome,
             truncated_kinds=tuple(truncated),
+            # ADR-0251 §7: the member per ask, in servicing order — the carrier's own
+            # sequence projected onto its outcomes, with the asks left behind.
+            outcomes=tuple(one.outcome for one in classified),
         )
         # ADR-0227 §3's carrier, computed on the success path alone and over
         # `union.held` — which is seeded from the pre-servicing supply and grown by
@@ -3328,7 +3379,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # servicing that failed or was partial carries none, which is §2's
             # precedence case 1 and ADR-0226 §5's all-or-nothing posture reaching
             # this carrier exactly as it reaches the records and the counts.
-            read_outcomes=classified_reads(ledger.facts),
+            read_outcomes=classified,
             # ADR-0240 §8 keys the emptiness fact on the turn's last **structured
             # read**, not on its last servicing, so the loop needs to know whether this
             # servicing performed one at all — a servicing whose request carried none,
@@ -4138,6 +4189,25 @@ class TurnReadAudit:
             the turn ended before the planner was reached at all, which is the same
             turn §8 records as **not reached**.
         stop: Why the turn stopped iterating (:class:`StopReason`).
+        attempt_kind: ADR-0251 §7's first added turn-level field: the
+            :class:`~ai_assistant.core.types.AttemptKind` of the attempt this turn
+            ran inside, or ``None`` where the turn that opened that attempt declared
+            no operation. **Written by the loop from the ledger it holds**, never
+            derived at read time and never taken from this turn's own operation
+            (§5's stamping clause).
+        attempt_calls_before: What the attempt's ledger held **as this turn found
+            it** — zero on an attempt this turn opened. The record ADR-0251 §7 asks
+            for is the attempt's *consumed* calls, and :meth:`emit` derives it as
+            this plus :attr:`planner_calls`: the two counts are one quantity read at
+            two scopes, and storing the sum beside its own addend would be two
+            places for one figure to disagree.
+        attempt_allowance: ADR-0251 §7's third: the planner-call allowance that
+            attempt's kind **declares**, or ``None`` where its kind declares none —
+            which is the fail-closed case §5 names, and is what makes an attempt that
+            did not iterate distinguishable in the record from one that iterated to a
+            bound. A count and never a duration: the reserve, the working allowance
+            and the per-turn budget are not here, because ADR-0226 §9's record
+            "carries no timing figure".
     """
 
     trigger: TriggerOutcome = TriggerOutcome.NOT_REACHED
@@ -4145,6 +4215,9 @@ class TurnReadAudit:
     servicings: tuple[ServicedRead, ...] = ()
     planner_calls: int = 0
     stop: StopReason = StopReason.NOT_ITERATED
+    attempt_kind: AttemptKind | None = None
+    attempt_calls_before: int = 0
+    attempt_allowance: int | None = None
 
     def emit(self) -> None:
         """Write this turn's record — see :func:`emit_read_audit`."""
@@ -4154,16 +4227,26 @@ class TurnReadAudit:
             servicings=self.servicings,
             planner_calls=self.planner_calls,
             stop=self.stop,
+            attempt_kind=self.attempt_kind,
+            # **Derived at emission and charged before each call** (ADR-0251 §12):
+            # `planner_calls` advances on the line before `Planner.plan` is entered,
+            # so a turn whose second call raised contributes that call to the
+            # attempt's consumed figure exactly as it contributes it to its own.
+            attempt_planner_calls=self.attempt_calls_before + self.planner_calls,
+            attempt_allowance=self.attempt_allowance,
         )
 
 
-def emit_read_audit(
+def emit_read_audit(  # noqa: PLR0913 — one keyword per field of ADR-0226 §9's record, as ADR-0228 §9 and ADR-0251 §7 each extend it; a bundle here would be a second spelling of `TurnReadAudit`
     *,
     trigger: TriggerOutcome,
     servicing: Servicing,
     servicings: Sequence[ServicedRead] = (),
     planner_calls: int = 0,
     stop: StopReason = StopReason.NOT_ITERATED,
+    attempt_kind: AttemptKind | None = None,
+    attempt_planner_calls: int = 0,
+    attempt_allowance: int | None = None,
 ) -> None:
     """Write ADR-0226 §9's record for one turn, once, at ``INFO``.
 
@@ -4283,6 +4366,11 @@ def emit_read_audit(
         planner_calls: How many calls to ``Planner.plan`` the turn made (ADR-0228
             §9).
         stop: Why the turn stopped iterating (ADR-0228 §9).
+        attempt_kind: The attempt's kind, or ``None`` (ADR-0251 §7).
+        attempt_planner_calls: What the attempt's ledger holds after this turn's
+            charges (ADR-0251 §7).
+        attempt_allowance: What that kind declares, or ``None`` where it declares
+            none (ADR-0251 §7).
     """
     _log.info(
         READ_AUDIT_EVENT,
@@ -4291,6 +4379,15 @@ def emit_read_audit(
         servicing=servicing.value,
         planner_calls=planner_calls,
         stop=stop.value,
+        # ADR-0251 §7's three turn-level additions, extending ADR-0226 §9's record
+        # rather than replacing it: a kind, a count and a count. **The stop
+        # distribution is the instrument §14 fires the revision of §5's figures
+        # off**, and it is unreadable without them — a `bound_reached` says nothing
+        # about whether four was the wrong figure unless the record also says which
+        # allowance was in force and how much of it the attempt had consumed.
+        attempt_kind=None if attempt_kind is None else attempt_kind.value,
+        attempt_planner_calls=attempt_planner_calls,
+        attempt_allowance=attempt_allowance,
         servicings=tuple(
             {
                 "kinds": tuple(kind.value for kind in read.kinds),
@@ -4325,6 +4422,11 @@ def emit_read_audit(
                 "truncated_kinds": tuple(kind.value for kind in read.truncated_kinds),
                 "failed": read.failed,
                 "failed_after_read_returned": read.failed_after_read_returned,
+                # ADR-0251 §7's per-servicing addition: what became of each ask this
+                # servicing reached, as **members** and never as the asks themselves
+                # — §9's no-copy rule is what shapes the field, exactly as it shapes
+                # `refusal`, `disposition` and `structured` above.
+                "outcomes": tuple(outcome.value for outcome in read.outcomes),
             }
             for read in servicings
         ),
