@@ -38,7 +38,7 @@ authority (ADR-0247)."*
 a production deployment until the verification, uncertain-outcome and cancellation guarantees
 for its class are implemented and demonstrated. A milestone may demonstrate dependent execution
 against controlled integrations with no such capability wired; wiring one is what this rule
-binds."* §16 carries that rule and this ADR dispatches nothing under it.
+binds."* §17 carries that rule and this ADR dispatches nothing under it.
 
 ### The gap this closes
 
@@ -94,7 +94,7 @@ ruled against.
   the moment a `CONFIRM` is recorded at dispatch. §14 relies on that and adds no second
   writer.
 
-### The tree, read rather than assumed, at `origin/main` `f6a22821`
+### The tree, read rather than assumed, at `origin/main` `9ecb0e04`
 
 - `permissions/policy.py` — `ThresholdActionPolicy.decide` builds `fired`/`grounds`, computes
   `at_configured` through `_at_configured_provider`, and consults `_only_the_disclosure_floor`'s
@@ -131,7 +131,7 @@ The plan-driving stage and the claim's second conjunct (A7); retry, reconciliati
 `EFFECT_UNRESOLVED` (A8); the cancellation boundary and what a cancellation racing a dispatch
 does (A9); verification and which `AttemptOutcome` an attempt earns (A10); `GoalEvidence`, its
 verdicts and its invalidation (A4); the plan's own step fields (A5); which user acts open an
-attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with what fires it.
+attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with what fires it.
 
 ## Decision
 
@@ -196,7 +196,7 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 
 > **Normative.** **An expiry is settled and is never inferred**, which is ADR-0244 §10's
 > mechanism: a `PROPOSED` row whose `expires_at` is at or before the clock's reading is settled
-> `EXPIRED` by the **first operation that reads it**, and there are exactly two — a `covering`
+> `EXPIRED` by the **first operation that reads it**, and there are exactly two — a `live_for`
 > read, and the answer that names it. That is safe for ADR-0244 §10's own reason, since an
 > expired proposal is refused as an establishment at all and there is no live answerer for the
 > settlement to race. **`standing`, `resolve`, `recent` and `export` settle nothing**, because
@@ -260,6 +260,40 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > row carrying `confirmation` is **written** `PROPOSED` and reaches every later disposition
 > through `settle` alone — a rule of the write path and not of the type, for the reason below.
 
+> **Normative — which `CONFIRM` proposes a row, stated because §11's absence rule needs it and
+> because *"when a `CONFIRM` is put"* (§15) is not a rule a lane could apply.** `orchestration`
+> writes a path-(i) proposal for a recorded `CONFIRM` where **all three** hold:
+>
+> - the request carries a `goal` (§6) — a request carrying `None` reaches route (d) in no case,
+>   so a row proposed against one could authorise nothing;
+> - the request is an **egress call**, its `egress_binding` not `None` — every clause of this
+>   decision is scoped to one (§19);
+> - and the coverage the row would carry is **complete for this request**: every argument of
+>   the request is named by a member §10's resolutions minted from the user's own recorded
+>   words of this goal, **or** the request carries no arguments at all.
+>
+> Failing any of the three, **no row is proposed**, `Confirmation.authorization` is absent
+> (§11), and the answer establishes nothing: the `CONFIRM` is resolved and the one call is
+> authorised by ADR-0148 §3's route (a), which is the path that exists today and is unchanged.
+
+> **Normative — the completeness condition is what makes §11's projection honest, and the cost
+> it carries is the one the Consequences already state.** §3 requires **every** argument of a
+> request to be covered, so a row naming only some of them could never cover a later call of
+> that goal and the projection would tell the user their answer established an authority that
+> authorises nothing. Proposing only a complete row is what makes *"answering this question
+> would establish a standing authority"* true whenever it is shown. The cost is that a
+> declaration carrying an argument no act could reasonably have named is one whose calls always
+> ask — which is stated rather than hidden, and is the same cost §3's every-argument rule
+> already carries.
+
+> **Normative — the proposal reads none of §6's floors, and that is deliberate.** Conditions 3,
+> 4 and 5 of route (d)'s reachability are taken over a **concrete request** at every dispatch
+> (§6, §13). A row proposed against a request whose binding carried
+> `planned_with_external_content` authorises no such dispatch — the floor is unrelaxed and is
+> re-taken — and may still cover a later request of that goal that carries none. Putting those
+> conditions at the write would refuse an authority on the strength of one call's taint, which
+> is a different rule from the one §6 states and a weaker one.
+
 > **Normative — what path (ii) may change, and what it may never touch.** It may **replace a
 > fixed value** for an argument the superseded row already fixed, and **narrow a bound** for an
 > argument it already bounded. It may **never** add a member for an argument the superseded row
@@ -310,7 +344,7 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > clock.** `record` **refuses** a write that would leave two rows of one `goal` and one `tool`
 > both `ESTABLISHED`. The refusal is stated over the **disposition** rather than over liveness,
 > so the write path reads no clock, which is ADR-0193 §1's duplicate-refusal discipline. **And
-> `covering` returns `None` where more than one live row of that goal and declaration would
+> `live_for` returns `None` where more than one live row of that goal and declaration would
 > answer** — a state this refusal makes unreachable, and refused at the read as well because a
 > query that chose between two would be the composition §5 declines.
 
@@ -438,14 +472,26 @@ argument that actually needs one.
 >
 > A row that fails any of them covers nothing about that request.
 
+> **Normative — where each of the six is taken, because the seam is keyed rather than asked.**
+> `GoalAuthorizations.live_for(goal, tool)` (§16) answers conditions **1, 2 and 3**: it returns
+> the row of that `goal` and that `tool` whose `disposition` is `ESTABLISHED` and whose
+> `expires_at` is strictly after the one instant it read, and `None` where there is none. The
+> **policy** takes conditions **4, 5 and 6** over the row it returned. **Coverage is still
+> their conjunction and no component treats either half as the whole**, which is ADR-0193 §3's
+> own sentence read onto this split — that section splits its five the same way, four at the
+> seam and the fifth at the policy. **The split is what lets a policy tell *no record* from *a
+> record that did not cover***, which §6's bar needs and which a single
+> `covering(request) -> Authorization | None` could not give it: both answers are `None`.
+
 > **Normative.** **Conditions 3, 4 and 5 are ADR-0193 §3's, taken over recorded values and
 > never inferred; conditions 1, 2 and 6 are this decision's.** ADR-0193 §3's liveness condition
 > is not condition 1 — that section's liveness is its own store's and §1 defines this one — and
 > its fifth comparison, the external-content bar, is not a coverage condition here but a
-> reachability condition on route (d) (§6), which is stricter rather than weaker. No component widens an authorization by folding case, by matching a domain, by
-> treating an account member as covering a recipient member or the reverse, by treating a
-> row's larger destination set as covering a request's under any relation other than
-> membership, or by re-canonicalising either side. **A canonicaliser is ADR-0148 §2's, at the
+> reachability condition on route (d) (§6), which is stricter rather than weaker. No component
+> widens an authorization by folding case, by matching a domain, by treating an account member
+> as covering a recipient member or the reverse, by treating a row's larger destination set as
+> covering a request's under any relation other than membership, or by re-canonicalising either
+> side. **A canonicaliser is ADR-0148 §2's, at the
 > seam, and there is not a second one here.**
 
 > **Normative — the per-argument rule.** An argument of the request is **covered** where the
@@ -535,6 +581,16 @@ the binding comparison cannot come apart.
 > refuses is a request the authorization does not cover, and the ruling is the one the policy's
 > table reached without it — which for a transmitting tool is `CONFIRM`, and the user is asked.
 
+> **Normative — what the ruling's `reason` says when coverage fails, because §20's arms assert
+> it and no clause stated it.** It names the **argument key** that was not covered and **never
+> its value**, never the bound, never the record's id and never its digest: a reason is carried
+> on a durable `PermissionDecision` that holds `parameters_digest` and not `parameters` (§7),
+> and a reason quoting an argument's value would put into the trail exactly what that omission
+> keeps out. Where several arguments fail, it names them in the request's own canonical key
+> order. Where **no** member named the argument at all, it says that rather than that a
+> comparison failed — the two are different facts about what the user authorised, and §3's
+> per-argument rule keeps them apart.
+
 > **Normative.** **No reading consults a schema to decide what an argument means, and there is
 > no exception.** Every fact a comparison needs is on the row or in the request: which key holds
 > an amount, which key holds its currency, which zone a date is read in, which strings a term
@@ -562,10 +618,13 @@ the binding comparison cannot come apart.
 > **Normative.** **A correction that would widen takes path (i) and asks.** An instruction
 > raising a ceiling, adding a term, lengthening a period, naming a destination the row does not
 > carry, or naming an argument no member covers is **not** a correction path (ii) can write:
-> the store refuses it, no row is written, and the concrete action reaches no route (d) and is
-> confirmed. That is the owner's *"Ask only when the concrete action introduces something not
-> already covered, such as additional costs or materially different terms"*, and it is that
-> sentence read as a refusal at the write rather than as advice at the prompt.
+> the store refuses it, no row is written, and the concrete action reaches **no standing route
+> at all** and is confirmed. **§6's bar is what makes that true rather than merely intended**:
+> the live row still names the argument the request now exceeds, so the bar fires and neither a
+> recipient grant nor the configured-provider route discharges it. That is the owner's *"Ask
+> only when the concrete action introduces something not already covered, such as additional
+> costs or materially different terms"*, and it is that sentence read as a refusal at the write
+> **and** as a refusal at the ruling, rather than as advice at the prompt.
 
 > **Normative — and a widening the user then confirms is established, by path (i) carrying
 > `supersedes`.** The confirmation that asks about the wider action proposes a row naming the
@@ -614,7 +673,7 @@ It is ADR-0249 §7's own construction for an interpretation revision — *"A rev
 elements in full, and omission is removal … a patch would make two revisions unreadable without
 replaying every one between them"* — applied to an authority rather than to an understanding.
 
-### 6. Route (d) on ADR-0148 §3, and the five conditions it does not relax
+### 6. Route (d) on ADR-0148 §3, the five conditions it relaxes none of, and the bar before every standing route
 
 > **Normative.** **ADR-0148 §3's first clause gains a fourth route.** §3 rules that an `ALLOW`
 > on an egress request requires every member of its canonical destination set to be covered by
@@ -644,7 +703,7 @@ replaying every one between them"* — applied to an authority rather than to an
 > flagged as one.
 
 > **Normative.** `ThresholdActionPolicy` gains **one constructor argument**, a
-> `GoalAuthorizations` (§15), beside the `RecipientGrants` and the `ConfiguredSearchDestination`
+> `GoalAuthorizations` (§16), beside the `RecipientGrants` and the `ConfiguredSearchDestination`
 > it already takes. **A policy constructed without one takes route (d) as unreachable for every
 > request** and leaves `authorised_by` and `authorised_goal` unset, which is ADR-0021 §3's rule
 > unamended in this limb. **ADR-0247 §2's supersession of that rule is not inherited**: it is
@@ -665,12 +724,67 @@ replaying every one between them"* — applied to an authority rather than to an
 >    disclosure floor. An `UNKNOWN` cost still draws `CONFIRM`; so does a `risk_level` or a
 >    `reversibility` at the policy's own threshold; and a threshold `DENY` still stands and
 >    reaches no route at all.
+>
+> **Conditions 3 and 4 are taken in their strict form and not read off
+> `_only_the_disclosure_floor`'s answer.** That predicate carries ADR-0247 §3's disjunct — the
+> limb reads *"or the request is at the configured provider"* — so it answers `True` for a
+> tainted request at the configured provider, and a lane that reused its answer as route (d)'s
+> third and fourth conditions would relax on route (d) exactly what this section says route (d)
+> does not relax. **Route (d) re-takes both over the binding**, and a request at the configured
+> provider carrying `planned_with_external_content` or covered content reaches route (d) in no
+> case (arm 31). ADR-0247 §3's retirement is for the configured provider's own route and for
+> nothing else, which that section states in terms.
 
-> **Normative — the order of the four routes is total, and each answers before the next seam is
-> consulted.** Route (a) is `resolve`'s and is reached by a different method. Within `decide`:
-> **route (c) first** (ADR-0247 §2, unmoved), then **route (d)**, then **route (b)**. Where
-> route (d) answers, `RecipientGrants.covering` is called **zero** times; where route (c)
-> answers, neither of the other two seams is consulted. **At most one durable read per seam per
+> **Normative — the argument-authority bar, and it precedes every standing route.** Where
+> **all three** hold — the request carries a `goal`; the policy's `GoalAuthorizations` holds a
+> **live** `Authorization` of that `goal` and that `tool` (§1); and **some argument of the
+> request that the record names in a member fails that member's comparison** under §3's
+> per-argument rule — **no standing route is taken at all**. Route (c) does not answer, the
+> recipient-grant seam is consulted **zero** times, route (d) does not cover, and the ruling is
+> the one the table reached with no standing route — `CONFIRM` for a transmitting tool, which
+> is what §13 and §14 already require of a changed argument outside coverage and what §5
+> already promises of a widening the store refused.
+
+> **Normative — what the bar is stated over, and what it is deliberately not stated over.** It
+> fires on an argument the record **names** and the request **fails**. It does **not** fire on
+> an argument the record names in no member, on an account the record does not carry, or on a
+> destination outside the record's set. **ADR-0193 §5 is why the payload is different in kind
+> from the recipient**: *"A grant states nothing about the payload and authorises no content"*,
+> and what §5 permits a grant to authorise is a recipient — *"That is the whole of what it
+> authorises."* A recorded act of the user about **this goal** that fixed an argument at one
+> value, or bounded it, is therefore an authority no recipient authority can discharge,
+> whatever route carried the recipient. So a request whose only mismatch is the account or the
+> destination set fails route (d) on §3's conditions 4 and 5 and still reaches route (c) or
+> route (b), exactly as it does today; a request carrying an argument the record names in no
+> member likewise; and a request the record names an argument of and refuses reaches neither.
+
+> **Normative — the bar is a floor and is the stricter direction, which is what makes it
+> available without relaxing anything.** ADR-0148 §8 states the two refusals every conforming
+> policy owes on an egress request and adds: *"A policy may be stricter; it may not be more
+> permissive than these."* The bar adds a refusal and removes none, and ADR-0148 §3's first
+> clause states a **necessary** condition on an `ALLOW` rather than a sufficient one, so
+> nothing about the route enumeration moves for it. §18 records the one clause it does narrow
+> and shows the working for the ones it does not.
+
+> **Normative — where the bar reads, and it is the same read route (d) takes.** The policy
+> calls `GoalAuthorizations.live_for(goal, tool)` (§16) **at most once per ruling**, and both
+> the bar and route (d) are decided from the row it returns: there is no second seam read, no
+> second clock reading and no cached answer. It is called **only** where
+> `_only_the_disclosure_floor` holds, because where it does not no standing route is taken
+> already and the bar could change no outcome; **only** where `request.goal` is set, so a
+> request carrying none reads the seam **zero** times; and **only** where the policy holds a
+> `GoalAuthorizations`, a policy constructed without one taking the bar as never firing exactly
+> as it takes route (d) as unreachable, which the constructor clause above already rules.
+
+> **Normative — the order is total, and each step answers before the next seam is consulted.**
+> Route (a) is `resolve`'s and is reached by a different method. Within `decide`, and only
+> where `_only_the_disclosure_floor` holds: **the bar first**, on the one `live_for` read;
+> then **route (c)** (ADR-0247 §2's ordering before the grant seam, kept); then **route (d)**,
+> decided from the row that same read returned; then **route (b)**. Where the bar fires, no
+> route answers and `RecipientGrants.covering` is called **zero** times. Where route (c)
+> answers, `RecipientGrants.covering` is called **zero** times and no ruling at the configured
+> provider cites a grant, which is ADR-0247 §2's own clause unmoved. Where route (d) answers,
+> `RecipientGrants.covering` is called **zero** times. **At most one durable read per seam per
 > ruling and never a cached answer**, which is ADR-0193 §7's rule read onto the second seam.
 
 > **Normative — why (d) precedes (b), stated so it is a decision and not an accident.** A
@@ -680,19 +794,21 @@ replaying every one between them"* — applied to an authority rather than to an
 > destination set, made about something else, with no basis and a longer life. Citing the
 > narrower and better-evidenced authority records more and asserts less. **Neither route is
 > made reachable or unreachable by the order**: a request route (b) covers and route (d) does
-> not is still route (b)'s, and the reverse.
+> not is still route (b)'s, and the reverse. **The bar is not an ordering and is not stated as
+> one** — it is a refusal taken before any route is tried, and it is the one thing in this
+> section that makes a request neither route's.
 
 > **Normative.** **Route (d) is an egress route and opens nothing else.** ADR-0021 §6's
 > standing grants *"for other actions"* stay deferred and unnarrowed: a decision carrying no
 > `egress_binding` falls outside every clause of this ADR rather than needing an exception
-> inside it, and the ADR that opens that space states its own scope beside this one. §18 names
+> inside it, and the ADR that opens that space states its own scope beside this one. §19 names
 > it with what fires it.
 
 **What genuinely widens, flagged as such and not smuggled.** ADR-0193 §3 states five
 comparisons, all over a canonical **destination set**, the declaration and the account. §3
 above keeps the three that transfer and adds a kind of comparison the corpus has not had
-before — over an **argument value**. That is a
-real extension of what a standing authority may decide, and the three things that keep it
+before — over an **argument value**. That is a real extension of what a standing authority may
+decide, and the three things that keep it
 fail-closed are stated rather than assumed: the reading of every argument is total and refuses
 what it cannot prove (§4); the route relaxes none of the floors route (c) relaxes (above); and
 the interpretation that produced a bound may narrow what the act covers and may never widen it
@@ -707,7 +823,7 @@ authorisation, standing policy, standing recipient grant, configuration, connect
 declaration or approved payload description covers such a call, **ever**"* — and ADR-0238 §7 and
 ADR-0247 §3 opened the **one** exception this corpus admits, for the configured search provider
 and nothing else. Opening a second is a decision with its own argument and its own arms, and it
-is not this one. §18 books it with what fires it.
+is not this one. §19 books it with what fires it.
 
 ### 7. The discriminator, and what the trail checks and cannot check
 
@@ -716,7 +832,7 @@ is not this one. §18 books it with what fires it.
 > on. A **validator** refuses it where `authorised_by` is unset — the same shape and the same
 > reason as `authorised_subject`'s refusal (ADR-0193 §6): a scope for an authorisation the row
 > names none of is incoherent. It is set **only** on a route-(d) `ALLOW`, and a policy sets it
-> **only** to the `goal` of the record `covering` returned, read off that record and carried
+> **only** to the `goal` of the record `live_for` returned, read off that record and carried
 > from nowhere else.
 
 > **Normative — the four routes are told apart from the row alone, and the partition is
@@ -749,13 +865,13 @@ is not this one. §18 books it with what fires it.
 > the coverage, not the declaration, not the account, not the basis, not the expiry.
 
 > **Normative.** `AuditTrail` implementations are constructed with an
-> **`AuthorizationResolution`** (§15) beside the `RecipientGrantResolution` they already take,
+> **`AuthorizationResolution`** (§16) beside the `RecipientGrantResolution` they already take,
 > and `record` resolves a route-(d) pointer against it. The trail therefore holds a **read and
 > nothing else**: it cannot append an authorization, revoke one, enumerate the user's goals or
 > erase the store. `ActionPolicy` is unchanged in signature, `AuditTrail`'s own Protocol gains
 > no member, no argument and no widened return, and what ADR-0021 §4 gains is an invariant.
 
-> **Normative — `AuditTrail.record` refuses a route-(d) row unless all eight hold.**
+> **Normative — `AuditTrail.record` refuses a route-(d) row unless all nine hold.**
 > `resolve(authorised_by)` returns a row; that row's `disposition` is **`ESTABLISHED`** — the
 > existence, the kind, the unrevoked, the unsuperseded and the answered check at once, since
 > every other disposition is retired and none of them is live; that row's `settled_at` is **at
@@ -766,7 +882,10 @@ is not this one. §18 books it with what fires it.
 > destination set, compared as `CanonicalDestination` compares — every field, never across
 > protocols; its `goal` equals the ruling's `authorised_goal`; and the ruling's
 > `authorised_subject` equals that row's subject digest, **recomputed by `record` over the row
-> the store returned**. Seven of the eight are ADR-0193 §6's, adopted with its reasoning entire
+> the store returned**. **Nine, because the disposition check and the goal check are this
+> decision's own and the other seven are ADR-0193 §6's** — the resolution read, both ends of
+> liveness, tool equality, account equality, destination-set containment and the recomputed
+> digest. Those seven are adopted with that section's reasoning entire
 > — including that equality is permitted at the lower end and that what is refused there is a
 > **backdated** authority, and including that the digest *"is never taken on the decision's
 > word"*. `record` reads **no clock**: both ends are decided against the decision's own
@@ -794,7 +913,7 @@ is not this one. §18 books it with what fires it.
 > user's most sensitive material"* — so the arguments the coverage rule is stated over are not
 > in the trail's hand and putting them there would breach ADR-0021 §1 and ADR-0004 §7 at once.
 > It **cannot** check that the request belonged to the goal the ruling names either, because
-> `ActionRequest.goal` is not transcribed onto the decision (§15). Both limits are stated here
+> `ActionRequest.goal` is not transcribed onto the decision (§16). Both limits are stated here
 > rather than implied, exactly as ADR-0247 §2 states its own — *"what the trail can check about
 > route (c) is that the pointer matches the binding, and not that any record authorises it.
 > That is less than route (b) offers, and it is said rather than implied."* **Neither component
@@ -889,7 +1008,10 @@ is not this one. §18 books it with what fires it.
 > no evidence or established preference resolved it. And where the concrete action introduces
 > what the coverage does not hold — a cost above a `maximum`, a term outside a named set, a
 > destination outside the set, an argument no member names — **the request reaches no route (d)
-> and the user is asked**, whatever the interpretation said.
+> and the user is asked**, whatever the interpretation said. **Where the coverage the live row
+> holds is what the concrete action exceeds — a cost above its `maximum`, a term outside its
+> named set — the request reaches no standing route at all, on §6's bar**, so the asking does
+> not depend on the absence of some other authority.
 
 > **Normative.** **No model output clears a coverage test, and none mints a member.** A planner
 > envelope that comes back carrying an authorization, a coverage member, a bound, a basis, an
@@ -958,13 +1080,36 @@ all three would be one thing to be wrong about.
 > first rather than at the answer.
 
 > **Normative — the carrier, because `Confirmation` forbids extra fields.** `core/types.py`
-> gains **`ConfirmationAuthorization`**, a frozen model with `extra="forbid"` carrying exactly
-> `coverage`, a non-empty `tuple[ConfirmationCoverage, ...]`, and `expires_at`, a `UtcInstant`;
-> and **`ConfirmationCoverage`**, a frozen model carrying exactly `argument`, an
-> `EncodableText`, and one of `fixed`, a `FrozenJsonValue | None`, or `bound`, a `ValueBound |
-> None`, under `CoverageMember`'s own two-shape validator. `Confirmation` gains **one** member,
+> gains **`CoverageView`**, a frozen model with `extra="forbid"` whose fields are exactly
+> `argument`, an `EncodableText`; `fixed`, a `FrozenJsonValue | None`; `bound`, a `ValueBound |
+> None`, the two under `CoverageMember`'s own two-shape validator; and `span`, a
+> `NonBlankEncodableText`, **required** — the user's own words the member rests on, transcribed
+> from its basis (§8). And **`ConfirmationAuthorization`**, a frozen model with
+> `extra="forbid"` carrying exactly `coverage`, a **possibly-empty** `tuple[CoverageView,
+> ...]`, and `expires_at`, a `UtcInstant`. `Confirmation` gains **one** member,
 > **`authorization: ConfirmationAuthorization | None`, required with no default**, and it is
-> **absent** — not empty — on a `CONFIRM` whose answer would establish nothing.
+> **absent** — not empty — on a `CONFIRM` that proposes no row (§1).
+>
+> **`coverage` is possibly-empty because §1 permits an empty `coverage` and this section
+> requires the projection to transcribe it.** The row a `CONFIRM` about an argument-free egress
+> request proposes carries `coverage=()`, and a non-empty projection could not be constructed
+> for it at all: omitting the projection would say falsely that answering establishes no
+> authority, and minting a member would be an invention where this section requires a
+> transcription. An empty projection says what is true — that answering establishes an
+> authority over this goal, this declaration, this account and these destinations, fixing no
+> argument because the call carries none — and §1's rule that an empty `coverage` covers no
+> request whose `parameters` are non-empty is what keeps it narrow. **The other direction was
+> considered and rejected**: forbidding an empty-coverage row outright would make an
+> argument-free egress call of a goal the one call no act of the user could ever cover, for no
+> gain in safety, since such a row bounds exactly the destination set and account it names.
+>
+> **One `CoverageView` rather than a confirmation projection beside a listing projection.** The
+> question and the listing render the same three facts about a member — the argument, the fixed
+> value or the bound, and the user's own words — so one carrier serves both, and a second would
+> be two shapes of one fact, which ADR-0150 is named after. **The span is on both** because
+> §8's *"Both halves survive, and neither is derivable from the other"* is as true at the
+> question as it is afterwards: a user reading *"under sixty pounds"* beside a bound of GBP 60
+> can check the working before they answer rather than only after.
 >
 > **One nested value rather than several flat members**, which is `ConfirmationEgress`'s own
 > construction and its reason: *"four independent optional members admit fifteen partial states
@@ -987,21 +1132,87 @@ all three would be one thing to be wrong about.
 > of forty-five pounds and nothing else cannot say whether answering fixes forty-five or permits
 > sixty.
 
-> **Normative.** **It names no identifier.** Not the goal's id, not the authorization's id, not
+> **Normative.** **The confirmation's projection names no identifier**, and this clause is
+> about that projection alone — the listing below carries the row's `id` as its revocation
+> handle and is governed by its own clause. Not the goal's id, not the authorization's id, not
 > the connection reference, not a credential slot and not a `Settings` field.
 > `BoundAccount.reference` is *"never shown to the user"* (ADR-0148 §6, §8) and this decision
 > does not move that; ADR-0193 §11's bar on what an audit surface renders binds here entire;
 > and ADR-0228 §8's namer rule binds every prompt this decision builds.
 
 > **Normative.** **The surfaces this decision owes are a listing and a revocation**, and they
-> render, per record: the goal's **statement** (never its id), the declaration's human-readable
-> name and description, each coverage member as *this argument is fixed at that value* or *this
-> argument is bounded by that limit* **together with the span the user said**, the expiry, and
-> whether the row is still live or has lapsed. It renders a `PROPOSED` row not at all — that is
-> the confirmation's question and not an authority the user holds — and §16's `standing(goal)`
-> is what makes that a fact about the read rather than a filter a renderer applies. They render **no** internal identifier, **no** subject digest and
-> **no** account reference. A revocation names the record by the same rendering the listing
-> gave it.
+> render, per record: the goal's **statement** (never its id), the declaration's own
+> `VisibleIdentifier` and description, the canonical destination set the record carries, each
+> coverage member as *this argument is fixed at that value* or *this argument is bounded by
+> that limit* **together with the span the user said**, the expiry, and whether the row is
+> still live or has lapsed. It renders a `PROPOSED` row not at all — that is the confirmation's
+> question and not an authority the user holds — and §16's `standing(goal)` is what makes that
+> a fact about the read rather than a filter a renderer applies. They render the row's **`id`**
+> and no other internal value: **no** subject digest, **no** `BoundAccount` and no account
+> reference, **no** connection reference, **no** basis beyond each member's span and **no**
+> `Settings` field. A revocation names the record by that `id`.
+
+> **Normative — the `id` is rendered because it is the revocation handle, and ADR-0193 §11's
+> bar is read as it actually stands rather than one conjunct wider.** That bar is on what an
+> **audit** surface asserts about a recorded decision, and the ratified grant listing exposes a
+> grant id for exactly this reason — `revoke_recipient_grant(grant_id)` could not be reached
+> otherwise, and `recent_recipient_grants` exists in terms because *"a user at the ceiling
+> could hold an expired grant occupying a slot, see it in no listing, and have no id to pass to
+> `revoke_recipient_grant`"*. A listing that named no id would state an act and withhold the
+> means to perform it. **What stays barred is every other internal value**, which is the list
+> above, and ADR-0193 §11's rendering rules on a decision surface are untouched.
+
+> **Normative — the listing is per goal, and that is a decision rather than an omission.**
+> §16's `standing(goal)` is keyed on a goal and this decision adds no goal-free read. A
+> goal-free one would return every `ESTABLISHED` row of every goal the user has ever run, live
+> **and** lapsed; §1's uniqueness bounds that set per goal and declaration and bounds it not at
+> all across goals, and this store carries no outstanding-count ceiling of the kind ADR-0193 §1
+> gives the grant store — so a cross-goal read would have to choose between a truncated answer
+> and an unbounded one, and `standing_recipient_grants`' own reason forbids the first
+> (*"a truncated answer to 'what do I authorise' is a false answer rather than a partial
+> one"*). §19 books the cross-goal listing with what fires it.
+
+> **Normative — the two operations, with their signatures and their carriers, because §16
+> calls its roster complete and no implementing lane may invent a cross-subsystem contract**
+> (golden rule 5, ADR-0015). `AssistantEngine` gains **exactly two** members and
+> `core/types.py` the two carriers they need:
+>
+> - **`standing_authorizations(goal_id: Identifier) -> tuple[AuthorizationView, ...]`** — the
+>   `ESTABLISHED` rows of that goal, live and lapsed, read from
+>   `GoalAuthorizationStore.standing(goal)` and projected. **It takes no `limit`**, for
+>   `standing_recipient_grants`' stated reason quoted above. It composes, filters, enriches and
+>   summarises nothing beyond the projection; the goal's statement it renders is read through
+>   `PlanStore.get_goal`, and a goal that store does not hold is an **empty answer** rather
+>   than a raise. **The liveness is the engine's one clock reading** (§16), taken once for the
+>   whole listing, because `standing` reports none.
+> - **`revoke_authorization(authorization_id: DurableIdentifier) -> AuthorizationRevocation`**
+>   — `settle(id, REVOKED, settled_at=...)` on §1's one edge out of `ESTABLISHED`. **An
+>   unknown id is a result and never a raise**, which is
+>   `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception`'s rule and
+>   `revoke_recipient_grant`'s own shape one store over. **Never refused for a ceiling** —
+>   there is none — and revocation is **whole**: no operation narrows a record, re-scopes one,
+>   extends one or edits one in place (§1).
+>
+> **`AuthorizationView`** is a frozen model with `extra="forbid"` whose fields are exactly
+> `id`, a `DurableIdentifier`; `goal_statement`, a `NonBlankEncodableText`; `tool`, a
+> `ToolDefinition` **by value**, as `RecipientGrant` already carries one across this surface;
+> `destinations`, a non-empty, duplicate-free `tuple[CanonicalDestination, ...]` in the
+> record's own order; `coverage`, a **possibly-empty** `tuple[CoverageView, ...]`;
+> `expires_at`, a `UtcInstant`; and `live`, a `bool` the engine set from its one clock reading.
+> It carries **no** `goal` id, no `BoundAccount`, no subject digest, no `confirmation`, no
+> `supersedes` and no basis beyond each member's span. **`AuthorizationRevocation`** is a
+> `StrEnum` valued by lower-cased member name and **closed at exactly three members**, which
+> are total over what `settle` can answer: **`REVOKED`**, the row stood `ESTABLISHED` and now
+> stands `REVOKED`; **`NOT_ESTABLISHED`**, the store holds the row and it does not stand
+> `ESTABLISHED`, so §1's one edge into `REVOKED` does not leave where it stands — which is
+> `PROPOSED` and all four retired dispositions in one member, and is `settle`'s own refusal
+> restated rather than a second rule; and **`NO_SUCH_AUTHORIZATION`**, the store holds no row
+> with that id. The vocabulary is added to and never renamed.
+>
+> **A `PROPOSED` row is therefore not revocable**, and that is §1's graph rather than an
+> omission here: a question the user has not answered is withdrawn by declining it or by
+> letting it lapse, and `standing` never offers one to a listing in the first place. A lapsed
+> `ESTABLISHED` row **is** revocable, which is why `standing` returns it (§16).
 
 > **Normative.** **The listing renders the span; `export` carries the basis whole.** A
 > surface shows the user's own words because that is what they can recognise; the resolution —
@@ -1017,8 +1228,8 @@ all three would be one thing to be wrong about.
 > covers anything now; none decodes the digest, presents it as a verification or renders a
 > route-(d) row as more trustworthy than a route-(a) row; and none renders the basis as an
 > approval control, an assurance or a reason to suppress or reorder anything ADR-0186 §7
-> requires. **What §11's second state now covers is two kinds of row rather than one**, and §17
-> records that against it.
+> requires. **What ADR-0193 §11's second state now covers is two kinds of row rather than
+> one**, and §18 records that against it.
 
 ### 12. Expiry: justified, visible, with no disable spelling, and for this record alone
 
@@ -1107,13 +1318,15 @@ all three would be one thing to be wrong about.
 
 > **Normative.** **What a changed argument outside coverage does.** The request is rebuilt from
 > the stored step and the resolved references (ADR-0253 §6), `decide` takes the comparison
-> afresh, no route (d) is reached, and the ruling is what the table alone produced — `CONFIRM`
-> for a transmitting tool. The step is committed `PENDING → AWAITING_APPROVAL` (ADR-0037 §4).
+> afresh, and **no standing route is reached**: route (d) does not cover, and where the changed
+> argument is one the live row names, §6's bar refuses route (c) and route (b) as well. The
+> ruling is what the table alone produced — `CONFIRM` for a transmitting tool. The step is
+> committed `PENDING → AWAITING_APPROVAL` (ADR-0037 §4).
 > **Nothing is dispatched, no claim is made, no effect occurs**, and the attempt's state is
 > committed `AWAITING_AUTHORIZATION` (§14).
 
 > **Normative.** **A revocation is prospective, and it bites twice.** It governs every
-> `covering` read that begins after it is recorded, and it refuses the write of any route-(d)
+> `live_for` read that begins after it is recorded, and it refuses the write of any route-(d)
 > `ALLOW` whose resolution read inside `record` begins after it is recorded. **It retracts no
 > decision already recorded and stops no request already claimed.** The residual window runs
 > from `record`'s resolution read to the execution; it is not zero and no clause here rounds it
@@ -1179,7 +1392,8 @@ all three would be one thing to be wrong about.
 > per-capability or per-protocol ceiling, which §8 also forbids adding. **The two compose by
 > both binding and neither lifting the other**: a call inside its bound and over the ceiling is
 > refused with `SpendCeilingError`, because *"nothing a turn can reach lifts a refusal"*; a call
-> under the ceiling and outside its bound reaches no route (d) and is confirmed. **No lane reads
+> under the ceiling and outside its bound reaches no standing route (§6's bar) and is
+> confirmed. **No lane reads
 > a bound as raising, lowering, satisfying or standing in for a ceiling**, and none reads a
 > ceiling as covering an argument.
 
@@ -1248,7 +1462,7 @@ all three would be one thing to be wrong about.
 > deadline it can see rather than a component deciding anything.
 
 > **Normative.** **The policy sets `authorised_by`, `authorised_subject` and `authorised_goal`,
-> and sets each only from the record `covering` returned.** It carries no value from a previous
+> and sets each only from the record `live_for` returned.** It carries no value from a previous
 > ruling, from a request, from a step, from a plan or from anywhere but that record, and it
 > recomputes the digest from that record rather than reading one off anything.
 
@@ -1266,35 +1480,44 @@ all three would be one thing to be wrong about.
 
 ### 16. The `core` surface, the store, the wire, and the data rights
 
-> **Normative — the `core` surface this decision adds, in full.** `core/types.py` gains
-> `Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
-> `ValueResolution`, `ResolutionRule`, `AuthorizationDisposition`, `ConfirmationAuthorization`
-> and `ConfirmationCoverage`;
-> `PermissionRuling` gains `authorised_goal`; `ActionRequest` gains `goal`; `Confirmation`
-> gains `authorization`. `core/protocols.py` gains **`GoalAuthorizations`**,
-> **`AuthorizationResolution`** and **`GoalAuthorizationStore`**. `core/errors.py` gains
-> **`AuthorizationError`**, the class a store fault raises. `core/config.py` gains
-> `Settings.workflow_authorization_ttl` (§12) and no other field. **Every one of these is a BREAKING
-> contract change under golden rule 5 and is flagged as one**; the ADR merges before anything
-> implements against it (ADR-0015).
+> **Normative — the `core` surface this decision adds, in full, with the lane that lands each
+> so that this roster and §20's cut cannot drift apart.** `core/types.py` gains **twelve**
+> types: **eight with Lane 1** — `Authorization`, `AuthorizationDisposition`, `CoverageMember`,
+> `ValueBound`, `BoundKind`, `AuthorizationBasis`, `ValueResolution` and `ResolutionRule` — and
+> **four with Lane 3** — `CoverageView`, `ConfirmationAuthorization`, `AuthorizationView` and
+> `AuthorizationRevocation`. It gains **three** fields: `PermissionRuling.authorised_goal` and
+> `ActionRequest.goal` with Lane 1, both of which route (d) and §6's bar read, and
+> `Confirmation.authorization` with Lane 3. `core/protocols.py` gains **`GoalAuthorizations`**,
+> **`AuthorizationResolution`** and **`GoalAuthorizationStore`** with Lane 1, and
+> **`AssistantEngine` gains `standing_authorizations` and `revoke_authorization`** with Lane 3
+> (§11) — two members on an existing Protocol and no other change to it. `core/errors.py` gains
+> **`AuthorizationError`**, the class a store fault raises, with Lane 1. `core/config.py` gains
+> `Settings.workflow_authorization_ttl` (§12) with Lane 1 and no other field. **Every one of
+> these is a BREAKING contract change under golden rule 5 and is flagged as one**; the ADR
+> merges before anything implements against it (ADR-0015).
 
 > **Normative — three faces, one object** (ADR-0193 §1's construction, and ADR-0097 §3's split
-> behind it). `GoalAuthorizations` carries **`covering(request) -> Authorization | None`** and
-> nothing else — the face a policy holds. `AuthorizationResolution` carries
+> behind it). `GoalAuthorizations` carries **`live_for(goal, tool) -> Authorization | None`**
+> and nothing else — the face a policy holds. **It is keyed and never asked**: it takes the two
+> values §3's conditions 2 and 3 compare and returns the live row of that pair, so the policy
+> holds the record itself and takes conditions 4, 5 and 6 over it (§3). That is what lets the
+> policy distinguish *no record* from *a record that did not cover* — the distinction §6's bar
+> is stated over — and it keeps `Authorization`'s only liveness evaluation, and the store's
+> only clock reading, in one member. `AuthorizationResolution` carries
 > **`resolve(id) -> Authorization | None`** and nothing else — the face a trail holds, and it
 > returns the row whatever its disposition, because the trail's own check reads that field (§7).
 > `GoalAuthorizationStore` carries both plus **`record`**, **`settle`**, **`standing(goal)`**,
 > **`recent`**, **`export`** and **`clear`** — the face a composition root holds. **Structural typing is what
 > makes that sound**: a policy cannot name `record`, and a trail can name neither `record` nor
-> `covering`, because `mypy --strict` runs over `src` and `tests` and those attributes are not
+> `live_for`, because `mypy --strict` runs over `src` and `tests` and those attributes are not
 > on the annotated types.
 
-> **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** `covering` and
-> **`covering` is the only query that evaluates liveness**, and it reads the clock **exactly
-> once per call**, measuring every row it considers against that one instant — ADR-0193 §9's
-> rule and its reason, since a query reading an advancing clock per row could answer over a set
-> true at no real instant. It settles an expired `PROPOSED` row it reads (§1), and it is the
-> **only** query that reads a clock. **`standing` evaluates no liveness, reports none and reads
+> **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** **`live_for`
+> is the only query that evaluates liveness**, and it reads the clock **exactly once per
+> call**, measuring every row it considers against that one instant — ADR-0193 §9's rule and
+> its reason, since a query reading an advancing clock per row could answer over a set true at
+> no real instant. It settles an expired `PROPOSED` row it reads (§1), and it is the **only**
+> query that reads a clock. **`standing` evaluates no liveness, reports none and reads
 > none**: it returns the rows, each carrying its own `expires_at`, and **the caller compares**.
 > `resolve`, `recent`, `export`, `record` and `settle` evaluate no liveness
 > — `settle` takes its `settled_at` from the caller, as `record` takes its instants, because a
@@ -1316,9 +1539,14 @@ all three would be one thing to be wrong about.
 > withdrawal path needs no history query. `recent` and `export` carry every row whatever its
 > disposition, which is where a declined and a superseded one are read.
 
-> **Normative — a store fault is not a record.** An `AuthorizationError` out of `covering` is
-> logged and answered `None`, so the ruling proceeds to the `CONFIRM` the request would have
-> drawn with no store at all — the fail-closed direction, and the reason the user sees is
+> **Normative — a store fault is not a record.** An `AuthorizationError` out of `live_for` is
+> logged and answered `None`, so the ruling proceeds as the request would have with no store
+> at all: **no route (d), and no bar** — the bar cannot fire on a row nothing returned, and a
+> fault is not a record of a refusal. Route (c) and route (b) then rule as they do today, which
+> is the same outcome a deployment holding no `GoalAuthorizations` reaches and is not a
+> widening of either; a request neither covers still draws the `CONFIRM` it would have drawn.
+> That is the fail-closed direction in the one sense available to a policy that could not read,
+> and the reason the user sees is
 > unchanged, because *"a store fault is an operator's fact and not something to put in front of
 > someone deciding about a call."* **The log line names the class and no value**, and the
 > declaration's id is read **before** the await, both of which are
@@ -1346,12 +1574,15 @@ all three would be one thing to be wrong about.
 > the record's **own** text — its coverage, its basis, its expiry — because the decision carries
 > a pointer and a digest and never the record by value.
 
-> **Normative — what crosses the wire, and what does not.** Three things cross: the
-> **listing**, the **revocation** and **`Confirmation.authorization`** (§11). **No
-> `Authorization` crosses whole**: the confirmation carries a **projection** of the coverage
-> the answer would establish, not the record — there is no record yet — and the listing carries
-> the rendering §11 fixes rather than the stored value, so no client holds a record's basis, its
-> digest or its account. That is `ConfirmationEgress`'s discipline, which carries *"the recorded
+> **Normative — what crosses the wire, and what does not.** Three things cross: the **listing**
+> as a `tuple[AuthorizationView, ...]`, the **revocation** as an `AuthorizationRevocation`, and
+> **`Confirmation.authorization`** as a `ConfirmationAuthorization` (§11). **No `Authorization`
+> crosses whole and no member of `GoalAuthorizations`, `AuthorizationResolution` or
+> `GoalAuthorizationStore` is promoted**: the confirmation carries a **projection** of the
+> coverage the answer would establish, not the record — there is no record yet — and the
+> listing carries the projection §11 fixes rather than the stored value, so no client holds a
+> record's basis, its resolution, its digest, its `confirmation`, its `supersedes` or its
+> account. That is `ConfirmationEgress`'s discipline, which carries *"the recorded
 > decision's own value, reaching a surface by ADR-0178 §5's transcription rather than as a
 > second carriage of it"*.
 
@@ -1421,14 +1652,55 @@ destination-set containment, the origin arm and the recomputed `subject_digest`.
 *"how the reference is told apart, whether by tagging it, by a second field, or by narrowing this
 scope"*, and §7 above chooses the second and the third together.
 
-**ADR-0247 §2 — partially superseded, in its discriminator clause alone.** That clause reads
-*"a non-resolving egress `ALLOW` whose `authorised_by` is set is **route (b) where
-`authorised_subject` is set** and **route (c) where it is not**"*. A reader holding it would
-classify a route-(d) row as route (b), which is false. The route-(b) limb takes one further
-conjunct (§7); **the route-(c) limb is untouched**, and so is every other clause of §2 — the
-derived fact, the two configured values, the ordering before the grant seam, the digest-free
-admission on `closed_loop` and pointer equality, the eligibility-versus-discriminator division,
-and the clause reserving the account-and-origin comparison to the policy.
+**ADR-0247 §2 — partially superseded, in two clauses and no others.**
+
+*Its discriminator clause.* That clause reads *"a non-resolving egress `ALLOW` whose
+`authorised_by` is set is **route (b) where `authorised_subject` is set** and **route (c) where
+it is not**"*. A reader holding it would classify a route-(d) row as route (b), which is false.
+The route-(b) limb takes one further conjunct (§7); **the route-(c) limb of the discriminator
+is untouched**.
+
+*Its route-(c) outcome clause, in one limb.* §2 reads that where `_only_the_disclosure_floor`
+holds *"**and the request is at the configured provider**, the ruling is an `ALLOW` on route
+(c) **without consulting the recipient-grant seam at all**"*. §6's bar makes that false of one
+kind of request: one carrying a `goal` for which the store holds a **live** `Authorization` of
+that request's declaration naming an argument of the request in a member the argument fails.
+Such a request draws `CONFIRM` and takes no standing route. A reader holding §2 would read the
+outcome as unconditional on the eligibility and would author an `ALLOW` the policy owes a
+refusal for, which is ADR-0082 §1's test met. **The scope is that limb and nothing else**:
+every other request at the configured provider — one of no goal, one whose goal holds no live
+record of that declaration, one whose record names no argument the request fails — reaches the
+same `ALLOW` on the same pointer with the recipient-grant seam consulted zero times, exactly as
+§2 rules.
+
+**Every other clause of §2 binds entire**: the one derived fact and the rule that `closed_loop`
+alone is never the condition of any relaxation; the two configured values as a constructor
+argument that is not a store handle; route (c) **reachable** exactly where route (b) is and on
+the same five conditions, which the bar does not touch — it refuses after reachability rather
+than narrowing it; route (c) taken before the grant seam is consulted; a policy with no
+`RecipientGrants` reaching route (c); `authorised_by` set to the binding's `account.reference`
+with `authorised_subject` unset; the digest-free admission on `closed_loop` and pointer
+equality; the eligibility-versus-discriminator division; the clause reserving the
+account-and-origin comparison to the policy; and the no-revalidation clause.
+
+**And §3's retirements are untouched.** ADR-0247 §3 retires the lineage floor and the coverage
+exception for a request at the configured provider; the bar retires nothing and relaxes
+nothing, and a request it does not fire on is ruled exactly as §3 leaves it.
+
+**ADR-0193 §5 and ADR-0148 §8 — no record owed for §6's bar, and the working is shown because
+a reader would expect one.** §5 rules that *"A grant states nothing about the payload and
+authorises no content"* and that what a grant may authorise is a recipient — *"That is the
+whole of what it authorises."* The bar refuses a standing route on a **payload** fact, so it
+takes nothing from a grant that §5 ever gave one: a grant that covers the recipient still
+covers the recipient, and ADR-0193 §3's *"only effect"* clause — discharging the
+recipient-authorisation ground of ADR-0148 §3's first clause — is discharged exactly as before.
+What changes is that a **second** ground must also be satisfied, and ADR-0148 §3's first clause
+states a **necessary** condition on an `ALLOW` rather than a sufficient one, so its enumeration
+does not move for the bar either. ADR-0148 §8 is the clause that makes the addition available
+in terms: *"A policy may be stricter; it may not be more permissive than these."* The bar is
+strictly stricter, on every request and in every direction, so no reader of ADR-0193 acts
+differently about any grant and no reader of ADR-0148 §3 or §8 reads a clause of theirs more
+widely than it now holds.
 
 **ADR-0021 — no record owed, and the reason is stated because a reader would expect one.** §3's
 rule that *"`decide` must return `authorised_by is None` from a policy constructed with no
@@ -1518,23 +1790,35 @@ check are each consumed as written, and §13 and §14 state where.
   an ADR that decides what the user is shown when there is no concrete call to show them.
 - **A durable, dated record of the configuring act** for route (c). ADR-0247 §13's deferral,
   untouched.
+- **A cross-goal listing of every authorization the user holds.** §11's listing is per goal,
+  because `standing(goal)` is keyed on one and the set across goals is bounded by nothing this
+  store carries. Fired by the decision that lands a goals listing on the promoted surface —
+  **A3**, which ADR-0250 §12 already reserves the user's acts on a goal to — at which point the
+  cross-goal read can be stated with whatever bound that surface gives it.
 - **Retention for this store beyond `clear`.** Issue #108's shape one store over. Fired by the
   decision that lands retention for the audit trail.
 
 ### 20. The lane cut, and the arms this decision owes
 
-> **Normative — the cut.** **Lane 1, the contract triad and the policy.** `core/types.py`'s
-> seven new types and two new fields, `core/protocols.py`'s three Protocols, `core/errors.py`'s
-> one class, the shared conformance suites, the canonical fakes in `ai_assistant.testing`, the
-> `SqliteGoalAuthorizationStore` in `permissions/`, `ThresholdActionPolicy`'s route (d), and
+> **Normative — the cut, and it agrees with §16's roster member for member.** **Lane 1, the
+> contract triad and the policy.** `core/types.py`'s **eight** new types and **two** new fields
+> — `PermissionRuling.authorised_goal` and `ActionRequest.goal`, both of which the policy reads
+> — `core/protocols.py`'s three Protocols, `core/errors.py`'s one class,
+> `Settings.workflow_authorization_ttl`, the shared conformance suites, the canonical fakes in
+> `ai_assistant.testing`, the `SqliteGoalAuthorizationStore` in `permissions/`,
+> `ThresholdActionPolicy`'s **route (d) and §6's bar** on the one `live_for` read, and
 > `AuditTrail.record`'s route-(d) invariant. ADR-0137 §2's exception is what makes this one
 > change: the triad rides with the primary consumer whose demands shape the contract.
 > **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
-> when a `CONFIRM` is put, settling it on the answer, writing a path-(ii) correction,
-> `ActionRequest.goal`, and phase 4's evaluation. **It writes no attempt bookkeeping**: the
+> on §1's three conditions when a `CONFIRM` is recorded, settling it on the answer, writing a
+> path-(ii) correction, **setting** `ActionRequest.goal`, and phase 4's evaluation. **It adds no
+> `core` type and no field**, both being Lane 1's, and **it writes no attempt bookkeeping**: the
 > `AWAITING_AUTHORIZATION` commit and the `add_authorization_id` append are ADR-0249's lane's
-> and are relied on rather than repeated. **Lane 3, the surfaces.** The
-> listing, the revocation, and `Confirmation.authorization` with its two projection types.
+> and are relied on rather than repeated. **Lane 3, the surfaces.** `core/types.py`'s **four**
+> remaining types — `CoverageView`, `ConfirmationAuthorization`, `AuthorizationView` and
+> `AuthorizationRevocation` — `Confirmation.authorization`, `AssistantEngine`'s two members
+> `standing_authorizations` and `revoke_authorization` (§11), the engine's assembly of both and
+> of the confirmation projection, and the interface adapters that render them.
 
 > **Normative — every lane that changes the wire carries its own bump, and no lane defers
 > one.** ADR-0124 §9 requires the bump *"in the same change"*, and two of these lanes make a
@@ -1543,8 +1827,10 @@ check are each consumed as written, and §13 and §14 state where.
 > and a decision crosses the promoted surface today — so an older client decoding one under
 > `extra="forbid"` refuses it, which is ADR-0124 §9's second limb exactly. **Lane 3 bumps**:
 > it adds methods to the promoted surface and a member to `Confirmation`, each independently
-> that ground. **Lane 2 changes no wire-carried type** — `ActionRequest` crosses no frame — and
-> bumps nothing. **No integer is fixed here**, because other lanes of this batch move the same
+> that ground. **Lane 2 changes no `core` type at all** — every type and field this decision
+> adds lands with Lane 1 or Lane 3 (§16), and `ActionRequest`, whose `goal` Lane 2 sets,
+> crosses no frame in any case — and it bumps nothing. **No integer is fixed here**, because
+> other lanes of this batch move the same
 > constant and a number written in this document would be a claim about an order nobody
 > controls.
 
@@ -1564,15 +1850,16 @@ check are each consumed as written, and §13 and §14 state where.
 > 2. **Permission missing.** No record of that goal → no route (d), `CONFIRM`, the step parks,
 >    the attempt commits `AWAITING_AUTHORIZATION`, **nothing dispatched and no claim made**.
 > 3. **Permission revoked.** `settle(REVOKED)` between the establishment and the dispatch →
->    `covering` answers `None`, `CONFIRM`, and the earlier recorded `ALLOW` is unchanged and
+>    `live_for` answers `None`, **no bar and no route (d)**, `CONFIRM`, and the earlier recorded
+>    `ALLOW` is unchanged and
 >    still true about the moment it was made. **And after a chain of corrections**: revoke the
 >    superseding row and every argument is uncovered, including the ones whose members were
 >    carried forward from the first act — there is no contributor left standing that the
 >    revocation missed. **And a revoked or superseded row cannot be settled again**: `settle`
 >    refuses every move that is not one of §1's five edges, and none leaves `REVOKED` or
 >    `SUPERSEDED`.
-> 4. **Revocation between `covering` and `record`.** Settle the row the ruling names `REVOKED`
->    after `covering` returned and before `AuditTrail.record` begins its resolution read → the
+> 4. **Revocation between `live_for` and `record`.** Settle the row the ruling names `REVOKED`
+>    after `live_for` returned and before `AuditTrail.record` begins its resolution read → the
 >    write is **refused**, on §7's disposition check, for the row behind **every** argument.
 > 5. **Price inside the range.** An argument at, below and above `maximum` → covered, covered,
 >    **not covered**; and at `minimum` where one is carried → covered.
@@ -1650,16 +1937,23 @@ check are each consumed as written, and §13 and §14 state where.
 > 28. **The route discriminator is total.** Rows of all four routes plus a policy-rules row →
 >     each classified from the row alone, with **no store read**, and the route-(b) and
 >     route-(c) classifications unchanged from `origin/main`.
-> 29. **The trail refuses a route-(d) row** on each of §7's eight checks independently — a
->     disposition other than `ESTABLISHED`, a `settled_at` after the decision's `decided_at`
->     (the backdated case), an `expires_at` at or before it, an unequal declaration, an
->     unequal account, a destination of the binding the row does not carry, an unequal goal,
->     and a digest recomputed unequal.
+> 29. **The trail refuses a route-(d) row** on each of §7's **nine** checks independently — a
+>     pointer `resolve` answers `None` for, a disposition other than `ESTABLISHED`, a
+>     `settled_at` after the decision's `decided_at` (the backdated case), an `expires_at` at or
+>     before it, an unequal declaration, an unequal account, a destination of the binding the
+>     row does not carry, an unequal goal, and a digest recomputed unequal.
 > 30. **A sourceless policy reaches no route (d)** and leaves `authorised_by` and
 >     `authorised_goal` unset, on every request including one at the configured provider.
-> 31. **The floors route (d) does not relax.** A request of a goal with a covering record
->     whose binding carries `planned_with_external_content`, and one whose `coverage` is not
->     `NOT_COVERED` → `CONFIRM` in both, and `covering` called **zero** times in both.
+> 31. **The floors route (d) does not relax, taken in both directions.** *(a)* A request of a
+>     goal with a covering record whose binding carries `planned_with_external_content`, and one
+>     whose `coverage` is not `NOT_COVERED`, **neither at the configured provider** →
+>     `CONFIRM` in both, and `live_for` called **zero** times in both, because
+>     `_only_the_disclosure_floor` is false and neither the bar nor any route is reached.
+>     *(b)* The same two requests **at the configured provider**, where that predicate's
+>     ADR-0247 §3 disjunct makes it hold → **route (d) is still unreachable**, on conditions 3
+>     and 4 re-taken over the binding in their strict form, and the ruling is route (c)'s
+>     `ALLOW` unless §6's bar fires. **A lane that read route (d)'s third and fourth conditions
+>     off `_only_the_disclosure_floor`'s answer fails (b).**
 > 32. **An `UNKNOWN` cost, a threshold `risk_level` and a threshold `reversibility`** each
 >     still draw `CONFIRM` with a covering record in the store.
 > 33. **Export, enumeration and erasure.** `export` returns rows of every disposition **with
@@ -1671,20 +1965,22 @@ check are each consumed as written, and §13 and §14 state where.
 > 34. **Each `ResolutionRule` admits its own argument shape and refuses the other two** —
 >     `AS_STATED` with either argument, `DATE_FROM_CONTEXT` missing `now` or `timezone`,
 >     `FROM_SHOWN_RECORD` missing `record` — each refused at construction.
-> 35. **`Confirmation.authorization` is present exactly where an answer would establish a
->     record and absent otherwise**, is required with no default, and carries a bound as a
->     bound and a fixed value as a fixed value. A roster test in ADR-0178 §10's shape over
->     `ConfirmationAuthorization` and `ConfirmationCoverage` asserts that no field of either
->     is named or typed for a goal id, an authorization id, a `BoundAccount`, a connection
->     reference, a `SecretName` or a transport endpoint.
+> 35. **`Confirmation.authorization` is present exactly where §1's three proposal conditions
+>     hold and absent otherwise**, is required with no default, and carries a bound as a bound,
+>     a fixed value as a fixed value and the span as the span. A roster test in ADR-0178 §10's
+>     shape over `ConfirmationAuthorization`, `CoverageView` and `AuthorizationView` asserts
+>     that no field of any of the three is named or typed for a goal id, an authorization
+>     `confirmation` or `supersedes`, a `BoundAccount`, a subject digest, a connection
+>     reference, a `SecretName` or a transport endpoint — and that `AuthorizationView` carries
+>     the row's `id` and `AuthorizationRevocation` nothing at all beyond its three members.
 > 36. **The store refuses a second `ESTABLISHED` row for one goal and declaration**, and
->     `covering` answers `None` where two would; a superseding write for the same pair is
+>     `live_for` answers `None` where two would; a superseding write for the same pair is
 >     accepted and settles the predecessor in the same write.
 > 37. **The transition graph, edge by edge and non-edge by non-edge.** Each of the five edges
 >     succeeds under compare-and-swap; every other move is **refused**, with one test per
 >     retired disposition and one for `PROPOSED → REVOKED`, `PROPOSED → SUPERSEDED` and
 >     `ESTABLISHED → DECLINED`/`EXPIRED`. A `PROPOSED` row is **never** live; a row read after
->     its `expires_at` while still `PROPOSED` is settled `EXPIRED` by a `covering` read and by
+>     its `expires_at` while still `PROPOSED` is settled `EXPIRED` by a `live_for` read and by
 >     the answer that names it, and by no other operation; and an
 >     `ESTABLISHED` row past its `expires_at` is **not live**, is **not** settled `EXPIRED`,
 >     and is still `REVOKED` by a withdrawal and `SUPERSEDED` by a renewal.
@@ -1705,7 +2001,7 @@ check are each consumed as written, and §13 and §14 state where.
 >     answering then settles that same row.
 > 41. **Each lane's wire bump.** Lane 1's and Lane 3's changes each make a value one peer
 >     emits invalid for the other, and each lands with its own `PROTOCOL_VERSION` increment
->     and its own `wire/envelope.py` log entry; Lane 2 changes no wire-carried type and bumps
+>     and its own `wire/envelope.py` log entry; Lane 2 changes no `core` type and bumps
 >     nothing.
 > 42. **Renewal after expiry.** Establish a row expiring at 21:00; at 22:00 the goal needs
 >     authority again. A path-(i) proposal naming that lapsed row in `supersedes` is confirmed
@@ -1720,6 +2016,67 @@ check are each consumed as written, and §13 and §14 state where.
 >     and the monotonicity suite for `ThresholdActionPolicy` stands up a fake
 >     `GoalAuthorizations` and holds its records equal, which is ADR-0193 §12's own
 >     accommodation for a sourced policy.
+> 45. **§6's bar over route (b), which is the case it exists for.** A live record of the goal
+>     bounding `amount` at GBP 60, **and** a `RecipientGrant` covering the same declaration,
+>     account and destination set. A request of that goal for GBP 80, every other floor
+>     satisfied → route (d) does not cover, **the bar fires**, `RecipientGrants.covering` is
+>     called **zero** times, the ruling is `CONFIRM`, the step parks, **nothing is dispatched
+>     and no claim is made**, and the reason names the argument. The same request at GBP 50 →
+>     route (d) `ALLOW`.
+> 46. **§6's bar over route (c).** A live record of the goal bounding or fixing an argument of a
+>     `WEB_SEARCH` declaration, and a request of that goal at the configured provider whose
+>     argument fails that member → **`CONFIRM`**, no route (c) `ALLOW`, and `authorised_by`
+>     unset. The same request of a goal holding **no** such record, and one whose record names
+>     no argument the request fails → route (c) `ALLOW` on the binding's `account.reference`,
+>     unchanged from `origin/main` in both.
+> 47. **What the bar does not fire on, one test each.** A live record of the goal and
+>     declaration that **names the argument in no member**; one whose `account` differs; one
+>     whose `destinations` do not contain the request's; and one that has **lapsed**, so
+>     `live_for` answers `None` → in each the bar does **not** fire,
+>     route (d) does not cover, and route (b) or route (c) rules exactly as it does on
+>     `origin/main`. **ADR-0193 §5 is the ground and the tests are named for it.**
+> 48. **The bar reads nothing it need not.** A request carrying `goal` unset; a policy
+>     constructed with no `GoalAuthorizations`; and a request on which
+>     `_only_the_disclosure_floor` is false → `live_for` is called **zero** times in each, and
+>     the ruling is what `origin/main` produces.
+> 49. **One seam read per ruling.** A request the bar does not fire on and route (d) covers →
+>     `live_for` is called **exactly once** and the row it returned is the row `authorised_by`
+>     names; no second call, and no cached answer reused across two `decide` calls.
+> 50. **A store fault is neither a record nor a bar.** `live_for` raising `AuthorizationError`
+>     → logged by class and no value, answered `None`, **no route (d) and no bar**, and route
+>     (c) or route (b) rules as it would with no store at all.
+> 51. **An empty-coverage authorization, end to end.** An egress declaration whose call carries
+>     `parameters={}`: the `CONFIRM` proposes a row with `coverage=()`, the confirmation carries
+>     a **present** `ConfirmationAuthorization` whose `coverage` is empty and whose `expires_at`
+>     is the row's, answering establishes it, and a later argument-free request of that goal is
+>     **covered** on §3's conditions 1-5 with condition 6 holding vacuously. **The same record
+>     covers no request whose `parameters` are non-empty**, and the bar does not fire on one,
+>     because the record names no argument.
+> 52. **Which `CONFIRM` proposes a row** (§1). A `CONFIRM` on a request carrying `goal` unset; a
+>     `CONFIRM` on a request carrying no `egress_binding`; and a `CONFIRM` on an egress request
+>     one of whose arguments no resolution minted a member for → **no row is written** in each,
+>     `Confirmation.authorization` is **absent**, and answering resolves the `CONFIRM` and
+>     authorises the one call by route (a) and establishes nothing. A `CONFIRM` meeting all
+>     three conditions → a row is written `PROPOSED` and the projection is present.
+> 53. **The proposal reads no floor of §6's.** A `CONFIRM` on an egress request whose binding
+>     carries `planned_with_external_content`, meeting §1's three conditions → a row **is**
+>     proposed and answering establishes it; a later request of that goal carrying the taint
+>     draws `CONFIRM` on §6's condition 3 all the same, and one carrying none is covered.
+> 54. **The listing and the revocation.** `standing_authorizations(goal_id)` returns one
+>     `AuthorizationView` per `ESTABLISHED` row of that goal, live and lapsed, never a
+>     `PROPOSED`, a `DECLINED`, an `EXPIRED`, a `REVOKED` or a `SUPERSEDED` one and never
+>     another goal's; `live` is set from **one** clock reading for the whole listing; the goal's
+>     statement comes from `PlanStore.get_goal` and a goal that store does not hold is an
+>     **empty answer and not a raise**; each `CoverageView` carries the member's span. Then
+>     `revoke_authorization` on a live row → `REVOKED`; on a lapsed `ESTABLISHED` row →
+>     `REVOKED`; on a `PROPOSED`, `DECLINED`, `EXPIRED`, `REVOKED` or `SUPERSEDED` row →
+>     `NOT_ESTABLISHED`, one test each; on an id the store does not hold →
+>     `NO_SUCH_AUTHORIZATION`. **No call raises**, and a revoked row is absent from the next
+>     listing.
+> 55. **The rendering bar, at the listing.** The view carries the row's `id` and the surface
+>     renders it; **no** subject digest, `BoundAccount`, account reference, connection
+>     reference, `confirmation`, `supersedes` or resolution reaches it, one assertion each, and
+>     the goal is rendered by statement and never by id.
 
 ### 21. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1732,7 +2089,7 @@ that evaluates three predicates and adds none. That is ADR-0070 §1's test met, 
 the instrument.
 
 **It is a partial supersession of exactly three documents** (ADR-0070 §3) — ADR-0148 in one
-scope, ADR-0193 in one, and ADR-0247 in one — and the `Status` line of each names its scope
+scope, ADR-0193 in one, and ADR-0247 in **two** — and the `Status` line of each names its scope
 **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction invariant
 holds. Every other ADR it touches is **relied on**, and §18 shows the working for each rather
 than leaving a reader to check.
@@ -1771,10 +2128,17 @@ one — and the attempt bookkeeping ADR-0249's lane already writes needs no addi
 
 **What becomes harder.** There is now a second standing authority for egress, and the trail
 tells four routes apart rather than three — a partition that is total today and that every later
-standing source must extend rather than join. The policy takes a second durable read and a third
-constructor argument. `ActionRequest`, `PermissionRuling` and `Confirmation` each gain a field
-and two projection types arrive with the last, which is three breaking `core` changes and two
-`PROTOCOL_VERSION` bumps at a moment when several lanes of this batch are also moving `core`.
+standing source must extend rather than join. **And for the first time in this corpus one
+standing authority refuses what another would have allowed**: §6's bar is a refusal taken before
+any route is tried, so a reader of the policy can no longer answer *"does a standing route cover
+this?"* from one seam. That is the cost of the ADR-0193 §5 line being real — a grant reaches the
+recipient and never the payload — and it is paid at one store read on every request that reaches
+the standing routes carrying a goal, including a search at the configured provider, which read
+none before. The policy takes a second durable read and a third constructor argument.
+`ActionRequest`, `PermissionRuling` and `Confirmation` each gain a field, four projection types
+arrive with the last and `AssistantEngine` gains two members, which is three breaking `core`
+changes and two `PROTOCOL_VERSION` bumps at a moment when several lanes of this batch are also
+moving `core`.
 A correction now writes a whole record rather than a delta, so a long chain of corrections
 writes a long chain of records — bounded by the expiry, and the store is append-only anyway. And
 the per-argument comparison is the first rule in this corpus that reads a payload: everything
