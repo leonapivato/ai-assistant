@@ -4473,6 +4473,17 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("goals", limit=limit, offset=offset)
+        return await self._tracked(self._goals(), "goals", checked=True)
+
+    async def _goals(self) -> tuple[GoalSummary, ...]:
+        """Answer the empty listing this lane's store surface can produce.
+
+        Split from :meth:`goals` because ADR-0119 §8's envelope sits at
+        :meth:`_tracked` and "already wraps every public method" — a public operation
+        that did not cross it would falsify the claim that makes the placement sound,
+        and a reader would have to know which methods are exempt. It is a real seam
+        crossing whatever the answer's size.
+        """
         return ()
 
     async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
@@ -4499,6 +4510,12 @@ class Engine:
         check_arguments(
             "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
         )
+        return await self._tracked(
+            self._withdraw_clarification(), "withdraw_clarification", checked=True
+        )
+
+    async def _withdraw_clarification(self) -> ClarificationWithdrawal:
+        """Answer the vocabulary's non-acting member (see :meth:`_goals`)."""
         return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
 
     async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
@@ -4523,6 +4540,10 @@ class Engine:
         self._reject_if_closing()
         named = identifier(goal_id, name="goal_id")
         check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
+        return await self._tracked(self._abandon_goal(), "abandon_goal", checked=True)
+
+    async def _abandon_goal(self) -> GoalAbandonment:
+        """Answer the vocabulary's non-acting member (see :meth:`_goals`)."""
         return GoalAbandonment.NO_SUCH_GOAL
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:

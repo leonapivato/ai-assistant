@@ -32,10 +32,12 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
+    MAX_ASSOCIATION_CANDIDATES,
     AttemptTransition,
     Goal,
     GoalAttempt,
     GoalRevision,
+    GoalStatus,
     Ground,
     MemorySource,
     StepStatus,
@@ -64,6 +66,11 @@ def _fixed_now() -> datetime:
 
 #: The instant a pre-ADR-0249 row this suite seeds was written at.
 _AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: Two engagement instants after it, for ADR-0250 §1's ordering key. Distinct, so
+#: "engaged later" is a fact about the values rather than about write order.
+_LATER = datetime(2026, 2, 1, tzinfo=UTC)
+_LATEST = datetime(2026, 3, 1, tzinfo=UTC)
 
 
 def _journal_mode(database: Path) -> int | None:
@@ -1691,13 +1698,13 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY, data BLOB NOT NULL",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data BLOB NOT NULL",
             "data column has BLOB affinity",
             id="goals-data-not-text",
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT",
             "data column is absent",
             id="goals-missing-a-column",
         ),
@@ -1737,19 +1744,20 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         ),
         pytest.param(
             "goals",
-            "id TEXT, data TEXT NOT NULL",
+            "id TEXT, conversation_id TEXT, last_engaged_in TEXT, data TEXT NOT NULL",
             "no PRIMARY KEY",
             id="goals-without-a-primary-key-breaks-on-conflict",
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY COLLATE NOCASE, data TEXT NOT NULL",
+            "id TEXT PRIMARY KEY COLLATE NOCASE, conversation_id TEXT, last_engaged_in TEXT, "
+            "data TEXT NOT NULL",
             "NOCASE-collated id PRIMARY KEY",
             id="goals-case-insensitive-primary-key-folds-distinct-ids",
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY, data TEXT",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data TEXT",
             "data column is nullable",
             id="goals-nullable-data-can-store-a-null-no-decode-accepts",
         ),
@@ -1791,7 +1799,10 @@ async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) 
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
-        raw.execute("CREATE TABLE GOALS(ID TEXT PRIMARY KEY, DATA TEXT NOT NULL)")
+        raw.execute(
+            "CREATE TABLE GOALS(ID TEXT PRIMARY KEY, CONVERSATION_ID TEXT, "
+            "LAST_ENGAGED_IN TEXT, DATA TEXT NOT NULL)"
+        )
         raw.execute(
             "CREATE TABLE PLANS(ID TEXT PRIMARY KEY, "
             "GOAL_ID TEXT NOT NULL REFERENCES GOALS(ID), DATA TEXT NOT NULL)"
@@ -2302,6 +2313,176 @@ def _version_1_database(path: Path, *, source: MemorySource = MemorySource.USER_
         )
 
 
+def _version_2_database(path: Path, *, engaged_at: datetime | None = None) -> None:
+    """Build the database this store shipped **after** ADR-0249 and before ADR-0250.
+
+    Written out here for :func:`_version_1_database`'s reason: it is the **stored**
+    shape the migration has to read, and a fresh database seeded with already-converted
+    rows would assert nothing. A version 2 ``goals`` row already carries the
+    interpretation sequence and decodes unchanged under this contract — what it does
+    **not** carry is ``last_engaged_in``, nor the two columns beside the blob that
+    ``candidates_for`` queries, which is the whole of what ADR-0250 §9's migration adds.
+
+    Args:
+        path: Where to build it.
+        engaged_at: A ``last_engaged_at`` for the seeded goal, or ``None`` for a goal
+            no turn has engaged. A version 2 row can carry one — ADR-0249 §1 landed the
+            field — and carrying one is what makes the ordering arm's "after every goal
+            carrying one" a statement about two real rows.
+    """
+    goal: dict[str, object] = {
+        "id": "g1",
+        "conversation_id": "c1",
+        "interpretation": [
+            {
+                "revision": 1,
+                "outcome": "relocate to Lisbon",
+                "outcome_ground": "user_stated",
+                "outcome_evidence_id": None,
+                "outcome_span": "relocate to Lisbon",
+                "constraints": [],
+                "criteria": [],
+                "conditions": [],
+                "recorded_at": _AT.isoformat(),
+                "raised_by": "t-1",
+            }
+        ],
+        "interpretation_elided": 0,
+        "status": "active",
+        "provenance": {
+            "source": "user_asserted",
+            "confidence": 1.0,
+            "last_updated": _AT.isoformat(),
+            "evidence": [],
+            "attestation": None,
+        },
+        "created_at": _AT.isoformat(),
+        "deadline": None,
+        "version": 0,
+        "last_engaged_at": None if engaged_at is None else engaged_at.isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(_META_SCHEMA)
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '2')")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
+        # Version 2's record tables: `goals` carries the blob and no column beside it,
+        # and `goal_questions` does not exist.
+        conn.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        conn.execute(
+            "CREATE TABLE plans(id TEXT PRIMARY KEY, "
+            "goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE executions(id TEXT PRIMARY KEY, "
+            "plan_id TEXT NOT NULL REFERENCES plans(id), version INTEGER NOT NULL, "
+            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE attempts(id TEXT PRIMARY KEY, "
+            "goal_id TEXT NOT NULL REFERENCES goals(id), opened_at TEXT NOT NULL, "
+            "data TEXT NOT NULL)"
+        )
+        conn.execute("CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq)")
+        conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
+
+
+async def test_a_version_2_plan_store_gains_the_columns_and_the_questions_table(
+    tmp_path: Path,
+) -> None:
+    """ADR-0250 §9's migration, from a **stored** version 2 database.
+
+    "The store migration is the plan store's second, from the version ADR-0249 §12
+    lands to the next, and it is table creation for the questions plus the two new
+    ``Goal`` columns." A version 2 ``goals`` row decodes unchanged — ``last_engaged_in``
+    is defaulted — so the blob is **not** rewritten; what the file lacks is the two
+    columns ``candidates_for`` queries and the table a question is written to, and
+    ``CREATE TABLE IF NOT EXISTS`` cannot supply the first of those.
+
+    "**A goal row written before this decision migrates with ``last_engaged_in``
+    absent** and no question rows", which is ADR-0249 §1's absence posture and §1's one
+    route to a ``None``.
+    """
+    path = tmp_path / "plans.db"
+    _version_2_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
+        assert goal.last_engaged_in is None, "the fifth absence (ADR-0250 §1)"
+        assert goal.last_engaged_at is None
+        assert (goal.version, goal.interpretation_elided) == (0, 0)
+
+        assert await store.open_question("g1") is None, "and no question rows"
+        assert await store.outstanding_questions() == ()
+
+        # The migrated goal is still a candidate of the conversation it was opened in,
+        # which is what the backfilled `conversation_id` column is for.
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+        assert [one.id for one in page.goals] == ["g1"]
+        assert page.elided == 0
+
+        export = await store.export()
+        assert export.schema_version == 10
+        assert export.questions == ()
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "3",
+        )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
+        assert {"conversation_id", "last_engaged_in"} <= columns
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "goal_questions" in tables
+
+
+async def test_a_migrated_goal_sorts_after_one_that_carries_an_engagement_instant(
+    tmp_path: Path,
+) -> None:
+    """ADR-0250 §20 arm 26, driven **through the migration** rather than in memory.
+
+    "A conversation's candidate set orders such a goal **after** every goal carrying an
+    engagement instant; and the goal is still associable, still reopenable and still
+    referenceable." The absent instant sorts last because "sorting it first would make
+    the oldest, least-touched objective in the store the focused goal of every
+    conversation that holds one".
+
+    The upgraded goal carries **no** instant here, and the goal opened after the
+    upgrade is engaged — so the order is a fact about the two rows rather than about
+    which was written first.
+    """
+    path = tmp_path / "plans.db"
+    _version_2_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g2"))
+        await store.engage_goal("g2", at=_LATER, conversation_id="c1", expected_version=0)
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert [one.id for one in page.goals] == ["g2", "g1"], "the absent instant sorts last"
+        assert page.goals[1].last_engaged_at is None
+
+        # Still associable and still reopenable: the migrated row takes every write the
+        # contract offers, and the engagement stamp reaches the queried column.
+        await store.engage_goal("g1", at=_LATEST, conversation_id="c2", expected_version=0)
+        assert [one.id for one in (await store.candidates_for("c2", limit=8)).goals] == ["g1"]
+        reopened = await store.set_goal_status(
+            "g1", status=GoalStatus.ACTIVE, at=_LATEST, expected_version=1
+        )
+        assert reopened.status is GoalStatus.ACTIVE
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -2344,6 +2525,10 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert revision.raised_by is None, "a migrated revision 1 carries no raised_by (§3)"
         assert goal.conversation_id is None
         assert goal.last_engaged_at is None
+        # ADR-0250 §1's fifth absence, on ADR-0249 §1's own posture: a row written
+        # before that decision reaches `last_engaged_in` `None` by the one route
+        # there is, and no lane writes `None` into it.
+        assert goal.last_engaged_in is None
         assert (goal.version, goal.interpretation_elided) == (0, 0)
 
         assert await store.attempts_of("g1") == ()
@@ -2362,8 +2547,12 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         store.close()
 
     with sqlite3.connect(path) as conn:
+        # ADR-0250 §9's second migration runs in the same open: a version 1 file is
+        # taken the whole way to the current marker rather than parked at 2, because
+        # both passes run inside the one setup transaction and the marker is stamped
+        # last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "2",
+            "3",
         )
 
 
