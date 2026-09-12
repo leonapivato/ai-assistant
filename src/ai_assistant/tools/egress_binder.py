@@ -573,13 +573,23 @@ class EgressBindingSeam:
             # refuse the very call the user was shown and approved. This is the
             # third of the three things ADR-0152 §7's count now admits.
             was.coverage,
-            # ADR-0238 §5: **not** transcribed, and that is the decision rather than an
-            # omission. The member defaults to ``False``, and ``False`` is the correct
-            # value for every request that can resume: a ``CONFIRM`` on a ``WEB_SEARCH``
-            # decision "resolves in no turn" (ADR-0231 §9), so no closed-loop request is
-            # ever resumed — which is what keeps ADR-0152 §7's transcription count at
-            # exactly the three above rather than making this a fourth.
-            False,
+            # ADR-0247 §7's first clause: **transcribed** from ``approved`` as well,
+            # "exactly as it takes ``provenance``, ``planned_with_external_content``
+            # and ``coverage``" — the fourth and last thing this member reads out of
+            # the approved binding. ADR-0152 §7's transcription count, moved to two by
+            # ADR-0181 §3 and to three by ADR-0233 §4, becomes **four** here and stops:
+            # no fifth fact is transcribed without the ADR that decides it.
+            #
+            # ADR-0238 §5's non-transcription clause is **superseded**, premise and
+            # all. It rested on a ``CONFIRM`` on a ``WEB_SEARCH`` decision resolving in
+            # no turn, so that no closed-loop request could ever be resumed; ADR-0244
+            # falsified that by making such a ``CONFIRM`` a durable park that can be
+            # answered. Under the ``False`` literal this line used to pass, a park whose
+            # recorded binding carried ``True`` re-derived ``False``, compared unequal
+            # and was refused at every answer — ``OPERATION_CHANGED``, a park nobody
+            # could ever answer, which is #2232. The field's ``False`` **default** is
+            # untouched and still decodes a binding nothing wrote one on.
+            was.closed_loop,
         )
         if binding != was:
             msg = (
@@ -753,10 +763,13 @@ class EgressBindingSeam:
 
         **``closed_loop`` is written from the carrier's value unchanged** — ADR-0238 §5:
         "the seam writes the binding's value from the carrier's unchanged" — and this
-        seam has nothing it could recompute it from: the four conditions are stated over
-        a conversation's recorded turns, the current turn's supply, a trust store and a
-        budget fold, and this object holds none of them. A lane that finds itself
-        computing the fact here has breached §5's last clause.
+        seam has nothing it could recompute it from: every condition the fact is stated
+        over is ``orchestration``'s, the fact is written there and by nothing else, and
+        this object holds none of its inputs. ADR-0247 §4 restates the conditions and
+        leaves that writer clause binding entire, so a lane that finds itself computing
+        the fact here has breached it. On the resuming path the value arrives
+        **transcribed** from the approved binding rather than defaulted, which is
+        ADR-0247 §7 and is what makes ADR-0152 §7's transcription count four.
 
         **A ``PATH_WITHOUT_MODEL`` coverage is refused by the construction below**,
         which is ADR-0233 §6's refusal reaching this seam without a check of its
