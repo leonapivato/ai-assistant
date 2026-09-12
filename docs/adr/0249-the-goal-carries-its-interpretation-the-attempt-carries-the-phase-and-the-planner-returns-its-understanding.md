@@ -91,7 +91,9 @@ decides the values those lanes write into and the seam they write across, and no
 > `version` and `last_engaged_at`; and `Goal.statement` stops being a stored field.
 
 > **Normative.** A `GoalInterpretation` is a frozen model with `extra="forbid"` whose fields
-> are exactly: `revision`, an `int` at least 1, one greater than its predecessor's;
+> are exactly: `revision`, an `int` at least 1, minted one greater than the revision it follows
+> in the goal's **history** — which after §2's elision need not be the element before it in the
+> tuple;
 > `outcome`, a `NonBlankEncodableText` stating the understood outcome; `constraints`,
 > `criteria` and `conditions`, each a possibly-empty `tuple[GoalElement, ...]`;
 > `recorded_at`, a `UtcInstant`; and `raised_by`, the `Identifier` of the conversation turn
@@ -626,12 +628,27 @@ do not read `statement`: `Planner.plan` and `TurnResult.goal`.
 > instead. The request rides beside it on `TurnResult.utterance`, which ADR-0248 §1 already put
 > there.
 
-> **Normative.** **The goal record is persisted by the stage that holds it.** `Engine`'s two
-> `self._plans.save_goal(turn.goal)` calls are removed rather than re-pointed: a turn that
-> carries a projection carries no record to save, and the loop that opened the goal and
-> recorded its revision is the stage with the record. Nothing else about when a turn persists
-> changes, and ADR-0228 §5's *"a turn that ends before that site persists nothing"* binds
-> unchanged for plans.
+> **Normative.** **The loop builds the goal record and its revisions; `Engine` persists them**,
+> at the one site that persists a plan today. `Engine`'s `self._plans.save_goal(turn.goal)`
+> calls stop reading the turn — a turn carrying a projection carries no record to save — and
+> read the carrier instead: the record travels **inside `ai_assistant.orchestration` as data**,
+> adding no member to any Protocol and riding on no wire-carried type. That is the carrier
+> shape ADR-0242 §7 already uses, and it is what keeps ADR-0228 §5's prohibition intact —
+> *"no lane adds a second persistence site, gives `LearningLoop` a `PlanStore`, or carries a
+> plan out of a failing turn in order to write it."* **No lane gives `LearningLoop` a
+> `PlanStore`.**
+
+> **Normative.** ADR-0228 §5's rule that *"A turn that ends before that site persists nothing,
+> exactly as it does today"* binds for the goal and the attempt exactly as it binds for the
+> plan: a turn that ends early leaves no goal row, no attempt row and no plan row, and no lane
+> adds a second site to write one sooner.
+
+> **Normative.** **`ParkedRead.goal_id` is an identifier and not a resolution guarantee.** A
+> park whose goal the store does not hold — the one route being a turn that parked and then
+> ended before its persistence site — is answerable exactly as ADR-0248 §3's `utterance`-less
+> park is: the association finds nothing and the resumption proceeds on what the park itself
+> carries. No lane repairs, back-fills or refuses such a park, and no lane reorders persistence
+> to prevent it.
 
 > **Normative.** **`ParkedRead.goal` becomes a `GoalBrief | None`**, and the record gains
 > **`goal_id: Identifier | None`**, which **settlement does not clear**. `goal_id` joins `id`,
@@ -900,7 +917,7 @@ decide, and every clause of ADR-0248 binds entire.
 >   request and the evidence digest; the model envelope proposes a `ProposedUnderstanding`.
 > - **L3 — the `orchestration` threading.** `orchestration/` alone: recording the revision,
 >   resolving grounds, stamping the phase, opening and committing attempts, setting
->   `targets_revision`, and removing `Engine`'s `save_goal` calls.
+>   `targets_revision`, and moving `Engine`'s `save_goal` call onto §11's in-package carrier.
 > - **L4 — the wire-visible consumers.** `TurnResult.goal`, `ParkedRead.goal` and `goal_id`,
 >   `PlanExport`, and their stores. **L4 moves `PROTOCOL_VERSION` and the parked-read store's
 >   `schema_version`, and it is the only lane that moves either.**
@@ -977,6 +994,13 @@ change.
     deletion that no `RUNNING` step blocks.
 13. **An element-free brief is well-formed.** A goal at revision 1 plans without a question
     being raised on the ground that the brief carried no elements.
+14. **A turn that ends early persists nothing.** A turn whose planner raises, one rejected for
+    capacity and one that fails before the planner is reached each leave **no goal row, no
+    attempt row and no plan row** — ADR-0228 §5's clause asserted over the two new record kinds
+    as well as over the plan, and asserted on a `LearningLoop` that still holds no `PlanStore`.
+15. **A park outlives a goal the store never got.** A park written on a turn that then ended
+    early is still answerable, its resumption composes from what the park itself carries, and
+    nothing repairs or refuses it (§11).
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
