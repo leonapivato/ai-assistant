@@ -1,17 +1,27 @@
-"""ADR-0242's explanation, driven through the **engine** (§15).
+"""ADR-0242's explanation and ADR-0247's authority, driven through the **engine**.
 
 ``tests/orchestration/test_search_not_serviced.py`` drives the servicing site and the
 loop; this module drives the pipeline **above** them — ``Engine.converse``, the real
-``ComposingStage`` it forwards to, and the ``TurnOutcome`` it builds — because §7's
-carrier and §9's field are two consumers of one computed member and a lane that dropped
-either forwarding would leave every loop-level assertion passing while the user lost the
-explanation.
+``ComposingStage`` it forwards to, and the ``TurnOutcome`` it builds — because ADR-0242
+§7's carrier and §9's field are two consumers of one computed member and a lane that
+dropped either forwarding would leave every loop-level assertion passing while the user
+lost the explanation.
+
+**ADR-0247 §12's Arms A, B and J are here on the same ground**, because each is a
+statement about a whole deployment rather than about one servicing: what a turn asks the
+user, what the grant seam is consulted for, and what a trust store that cannot be read
+decides. ADR-0242 §15's journeys through the trust act are **gone rather than moved** —
+ADR-0247 §1 stops the servicing site consulting the store, so ``TRUST_MISSING`` has no
+producer on a configured deployment (§6, #2252) and a journey that established trust to
+make a search run has no subject. The member, its mapping and its statement all stay
+ratified, and the mapping is still asserted over ``not_serviced`` directly.
 
 The harness is ``test_engine``'s, because what these cases are about is the real
-pipeline: the production ``ThresholdActionPolicy``, the real
+pipeline: the production ``ThresholdActionPolicy`` over the destination this deployment
+is configured with, the real
 :class:`~ai_assistant.orchestration.reads.SearchServicer`, the trust store the
-composition root wires into the one servicing site, and the capture point that is "the
-single place a ``TurnOutcome`` is built".
+composition root still wires into the ``trust-destinations`` surface, and the capture
+point that is "the single place a ``TurnOutcome`` is built".
 """
 
 from __future__ import annotations
@@ -19,19 +29,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import structlog
-from test_engine import AT, PATIENT, SEARCH_DESTINATIONS, Harness
+from test_engine import AT, PATIENT, Harness
 from test_engine_read_envelope import _AskingPlanner, _recorder
-from test_loop_search import _CONFIGURED_SEARCH, _DEADLINE, _binder, _CostedSearcher, _search
+from test_loop_search import (
+    _ACCOUNT,
+    _CONFIGURED_SEARCH,
+    _DEADLINE,
+    _binder,
+    _CostedSearcher,
+    _search,
+)
 
+from ai_assistant.core.errors import InvalidDestinationTrustError
 from ai_assistant.core.types import (
-    DestinationTrust,
-    DestinationTrustRecord,
     PermissionOutcome,
     Role,
     SearchNotServiced,
+    SpanCoverage,
 )
 from ai_assistant.orchestration.reads import SearchServicer
 from ai_assistant.permissions.policy import ThresholdActionPolicy
@@ -89,14 +106,30 @@ def _system_prompt(model: FakeModelProvider, ordinal: int = -1) -> str:
     return next(one.content for one in model.calls[ordinal].messages if one.role is Role.SYSTEM)
 
 
-def _chosen() -> DestinationTrustRecord:
-    """A live record over the destination set this deployment's search binds to."""
-    return DestinationTrustRecord(
-        id="t-1",
-        destinations=SEARCH_DESTINATIONS,
-        trust=DestinationTrust.USER_CHOSEN,
-        established_at=AT - timedelta(days=1),
-    )
+@final
+class _CountingGrants:
+    """The grant store, wrapped so the policy's reads of it can be counted.
+
+    ADR-0247 §12's Arm A asks for "the grant seam is consulted **zero** times, asserted
+    over the seam and not over the ruling", because §2 puts route (c) *before* the seam:
+    a policy that looked first and preferred the configuration afterwards passes every
+    outcome assertion while making a ruling at the configured provider cite a grant.
+    The engine's own establishing act still writes through the wrapped store, so the two
+    halves of the journey stay over one set of rows.
+    """
+
+    def __init__(self, inner: FakeRecipientGrantStore) -> None:
+        self.inner = inner
+        self.reads = 0
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate every member this class does not name."""
+        return getattr(self.inner, name)
+
+    async def covering(self, request: Any) -> Any:
+        """Count the read, then answer exactly as the store would."""
+        self.reads += 1
+        return await self.inner.covering(request)
 
 
 @dataclass
@@ -107,24 +140,28 @@ class _Wired:
     ``app/composition.py``'s own discipline and what ADR-0242 §15's journeys are stated
     over: the ruling the search records is the row ``grantable_decisions`` offers, the
     grant the engine establishes is the one the policy consults on the next search, and
-    the record the trust act writes is the one the servicing site's ``trust_of`` reads.
-    A harness holding two of any of them can seed authority and never *perform* it, which
-    is the shape round 2 of this lane's review found.
+    the trust store is the one the ``trust-destinations`` surface writes. A harness
+    holding two of any of them can seed authority and never *perform* it, which is the
+    shape round 2 of that lane's review found.
+
+    **The trust store is here and is not read by the search any more** (ADR-0247 §1),
+    which is what Arm J below is about: it stays wired because the act and its listing
+    stay ratified for every other destination.
     """
 
     engine: Any
     trail: FakeAuditTrail
-    grants: FakeRecipientGrantStore
+    grants: _CountingGrants
     trust: FakeDestinationTrustStore
     searcher: FakeWebSearcher
 
 
-def _wired(*, composing: ComposingStage | None = None) -> _Wired:
+def _wired(*, composing: ComposingStage | None = None, trust: Any = None) -> _Wired:
     """The real pipeline over shared stores, with nothing seeded.
 
-    That empty state is `origin/main`'s and ADR-0238 §14's own exit note — no grant, no
-    trust record — so every journey below **performs** the acts rather than arranging
-    their effects.
+    That empty state is production's: **no grant and no trust record**, which is the
+    premise ADR-0247 §12's Arms A and B are stated over — a deployment whose searches are
+    authorised by its own configuration and by nothing a user has recorded.
 
     **The planner asks for a search on both of a turn's calls**, which is ADR-0231 §12's
     own shape and what lets one ``converse`` reach both a servicing that yields and one
@@ -135,9 +172,9 @@ def _wired(*, composing: ComposingStage | None = None) -> _Wired:
     # The harness's own instant, so a grant established at AT is live when the next
     # ruling is taken at AT — ADR-0193 §6 refuses an ALLOW sourced from a grant
     # that was not live when the ruling was made, and the trail checks it independently.
-    grants = FakeRecipientGrantStore(now=lambda: AT)
-    trail = FakeAuditTrail(recipient_grants=grants)
-    trust = FakeDestinationTrustStore()
+    grants = _CountingGrants(FakeRecipientGrantStore(now=lambda: AT))
+    trail = FakeAuditTrail(recipient_grants=grants.inner)
+    trust = FakeDestinationTrustStore() if trust is None else trust
     searcher = FakeWebSearcher(results=("a result",))
     harness = Harness(
         memory=FakeMemoryStore(now=lambda: AT),
@@ -180,160 +217,131 @@ def _wired(*, composing: ComposingStage | None = None) -> _Wired:
         ),
         trail=trail,
         destination_trust=trust,
-        recipient_grants=grants,
+        recipient_grants=grants.inner,
     )
     return _Wired(engine=harness.engine, trail=trail, grants=grants, trust=trust, searcher=searcher)
 
 
-async def _refused_decision(wired: _Wired) -> str:
-    """The id of the ``CONFIRM`` this deployment's first search recorded.
+async def _bindings(wired: _Wired) -> list[Any]:
+    """Every egress binding the trail recorded, oldest first."""
+    ruled = [row for row in await wired.engine.recent_decisions() if row.egress_binding is not None]
+    return [row.egress_binding for row in sorted(ruled, key=lambda row: row.id)]
 
-    Read from ``grantable_decisions`` — the engine's own listing — rather than from the
-    trail, because that is the surface ADR-0235 §3 offers the grant act on and the one
-    ADR-0242 §5's next-step line points at.
+
+# --- ADR-0247 §12's engine half: the deployment's own search is authorised ----
+
+
+async def test_a_search_planned_over_outside_content_is_allowed_with_no_grant_record() -> None:
+    """ADR-0247 §12's **Arm A**, through the whole pipeline (lane 1 holds the policy half).
+
+    "A turn that has read a local file and then searches, on a deployment whose
+    ``RecipientGrants`` store is **empty** and whose ``DestinationTrustStore`` holds **no
+    record**, binds ``closed_loop`` ``True``, draws an ``ALLOW`` on route (c) whose
+    ``authorised_by`` is the binding's ``account.reference`` and whose
+    ``authorised_subject`` is unset, is recorded by ``AuditTrail.record`` rather than
+    refused, and asks the user nothing. **The grant seam is consulted zero times**,
+    asserted over the seam and not over the ruling."
+
+    **The outside content reaches the second search by the route a real turn has**: the
+    planner asks for a search on both of this turn's calls (ADR-0231 §12), so the first
+    servicing's minted record is in the turn's supply when the second is bound — which is
+    what puts ``planned_with_external_content`` on it. A file read would put it there
+    too and is the ADR's own illustration; what the arm turns on is the fact, and this
+    module's engine composes a real turn to produce it rather than arranging one.
     """
-    [offerable] = await wired.engine.grantable_decisions()
-    return str(offerable.id)
-
-
-# --- §15's journeys, performed through the engine's own operations ------------
-
-
-async def test_the_first_refused_search_is_offered_as_a_grantable_decision() -> None:
-    """§15 Arm 2(a) through the engine, and the row the journey starts from.
-
-    No grant, a first search, a clean footing: the ruling is a ``CONFIRM``, the member is
-    ``AUTHORISATION_AWAITED``, and **the decision it was recorded under is one the
-    establishing act may ride** — which §8 says the member asserts and which is checked
-    here against ``grantable_decisions`` rather than taken on the ADR's word.
-    """
-    composing, model = _recorder()
-    wired = _wired(composing=composing)
+    wired = _wired()
 
     outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert outcome.search_not_serviced is SearchNotServiced.AUTHORISATION_AWAITED
-    assert _AWAITED_FRAGMENT in _system_prompt(model), (
-        "§7's carrier reached the composing stage through the engine's own forwarding"
+    assert outcome.search_not_serviced is None, "the user is told about no lookup"
+    assert await wired.engine.pending_confirmations() == (), "and is asked nothing"
+    assert len(wired.searcher.searched) == 2, "both servicings reached the provider"
+    first, second = await _bindings(wired)
+    assert first.closed_loop is True
+    assert second.closed_loop is True
+    assert second.planned_with_external_content is True, (
+        "the first servicing's record is in the turn's supply when the second is bound"
     )
-    assert len(await wired.engine.grantable_decisions()) == 1
-    assert wired.searcher.searched == [], "the search was ruled on and never made"
+    rulings = [row for row in await wired.engine.recent_decisions() if row.egress_binding]
+    assert {row.ruling.outcome for row in rulings} == {PermissionOutcome.ALLOW}
+    assert {row.ruling.authorised_by for row in rulings} == {_ACCOUNT.reference}, (
+        "route (c) points at the binding's own connection reference"
+    )
+    assert {row.ruling.authorised_subject for row in rulings} == {None}
+    assert list(await wired.grants.standing()) == [], "no grant was established by any of this"
+    assert wired.grants.reads == 0, "and the seam was never consulted (ADR-0247 §2)"
+    assert await wired.trust.live() == [], "nor was any trust record written"
 
 
-async def test_the_grant_act_makes_the_next_search_run_and_the_follow_up_ask_for_trust() -> None:
-    """§15 Arm 2(b) through the engine, reached by **performing** ADR-0235's act.
+async def test_a_query_composed_over_stored_records_takes_the_same_route() -> None:
+    """ADR-0247 §12's **Arm B**, through the engine.
 
-    The grant is established through ``establish_recipient_grant`` over the decision the
-    refused search recorded, so the ``ALLOW`` on the next turn is one the deployment's own
-    thresholds authored over a grant the user made. The follow-up in that same turn is
-    then composed over what the first search returned — ADR-0231 §12's shape — and is
-    refused, and ``trust_of`` answering ``UNCHOSEN`` is the whole of what makes the member
-    ``TRUST_MISSING`` rather than ``AUTHORISATION_AWAITED``.
+    "With the supply carrying memory records, so that the binding's ``coverage`` is
+    ``MODEL_ON_EVERY_PATH``, the ruling is the same ``ALLOW``, which is the arm that
+    asserts §3's **second** retirement rather than only its first." The second servicing
+    of this turn composes over the record the first minted, so its coverage is the one
+    ADR-0238 §7's second exception admits — and the coverage exception ADR-0233 §9 put
+    over it is what §3 retires beside the lineage floor.
+
+    A lane that retired only the lineage limb rules ``CONFIRM`` here and fails.
     """
     wired = _wired()
+
     await wired.engine.converse(_ASKED, timeout=PATIENT)
 
-    await wired.engine.establish_recipient_grant(
-        await _refused_decision(wired), expires_at=AT + timedelta(days=30)
+    first, second = await _bindings(wired)
+    assert first.coverage is SpanCoverage.NOT_COVERED, "the first composed over the utterance"
+    assert second.coverage is SpanCoverage.MODEL_ON_EVERY_PATH, (
+        "and the second over the record the first minted (ADR-0238 §2)"
     )
+    assert second.planned_with_external_content is True
+    rulings = [row for row in await wired.engine.recent_decisions() if row.egress_binding]
+    assert {row.ruling.outcome for row in rulings} == {PermissionOutcome.ALLOW}
+    assert wired.grants.reads == 0
+
+
+async def test_a_trust_store_that_raises_on_every_call_decides_nothing_here() -> None:
+    """ADR-0247 §12's **Arm J**, over the store this deployment still holds.
+
+    "With the ``DestinationTrustStore`` raising on every call, a search at the configured
+    provider is unaffected, because §1 stops consulting it — which is the arm that
+    asserts the read was **removed** rather than merely made to answer ``USER_CHOSEN``."
+
+    The store is wired exactly where ``app/composition.py`` still wires it, into the
+    ``trust-destinations`` surface, and its reads are counted beside the outcome: a lane
+    that kept a read and swallowed the fault would leave both searches serviced and this
+    count above zero.
+    """
+    trust = _RaisingTrustStore()
+    wired = _wired(trust=trust)
+
     outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert len(wired.searcher.searched) == 1, "the grant made one search reachable"
-    assert outcome.search_not_serviced is SearchNotServiced.TRUST_MISSING
+    assert outcome.search_not_serviced is None
+    assert len(wired.searcher.searched) == 2, "both servicings reached the provider"
+    assert [binding.closed_loop for binding in await _bindings(wired)] == [True, True]
+    assert trust.calls == 0, "the servicing site asked it nothing at all"
 
 
-async def test_the_recovery_journey_ends_on_the_earlier_resolved_decision() -> None:
-    """§15's recovery journey, walked through the engine's own operations.
+@final
+class _RaisingTrustStore:
+    """A ``DestinationTrustStore`` whose every member raises (ADR-0247 §12 Arm J)."""
 
-    Grant, a follow-up refusal, ``grantable_decisions`` observed **empty**, the earlier
-    resolved decision found through ``recent_decisions``, and the trust act performed on
-    it — which is §9's clause made checkable: the decision recording the *refusal* carries
-    ``planned_with_external_content`` so ADR-0235 §3's seventh condition excludes it, and
-    the decision the user granted from has been **resolved** so §3's fourth condition has
-    taken it out too. "``assistant remember-recipients`` can therefore be empty at exactly
-    the moment its guidance is followed", which is why §9 sends the user to ``assistant
-    decisions`` instead.
-    """
-    wired = _wired()
-    await wired.engine.converse(_ASKED, timeout=PATIENT)
-    granted_from = await _refused_decision(wired)
-    await wired.engine.establish_recipient_grant(granted_from, expires_at=AT + timedelta(days=30))
-    refused = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    def __init__(self) -> None:
+        self.calls = 0
 
-    assert refused.search_not_serviced is SearchNotServiced.TRUST_MISSING
-    assert await wired.engine.grantable_decisions() == (), (
-        "§9: the listing its guidance would have named is empty at exactly this moment"
-    )
-    listed = await wired.engine.recent_decisions()
-    assert granted_from in {row.id for row in listed}, (
-        "§9: `assistant decisions` carries resolved decisions, which is why it can hold "
-        "an eligible id when the other listing cannot"
-    )
+    def __getattr__(self, name: str) -> Any:
+        """Raise from every member, counting the attempt."""
 
-    record = await wired.engine.establish_destination_trust(granted_from)
+        async def _raise(*_: Any, **__: Any) -> Any:
+            self.calls += 1
+            msg = "this store cannot be read"
+            raise InvalidDestinationTrustError(msg)
 
-    assert await wired.engine.standing_destination_trust() == (record,), (
-        "the act reaches the store the servicing site reads, which is the whole point of "
-        "ADR-0238 §14's one wiring"
-    )
+        return _raise
 
 
-async def test_the_act_reaches_the_search_and_does_not_repair_this_conversation() -> None:
-    """§15 Arm 2c's end, and §9's monotonicity clause, over one engine.
-
-    ADR-0238 §5's recorded half is monotone over a conversation: once a record has arrived
-    from an ``UNCHOSEN`` destination that conversation "fails the recorded half for every
-    later turn", and a trust record established afterwards does not lift it. So the same
-    follow-up **retried in the same conversation** is still refused and now carries
-    ``UNAVAILABLE`` — the member that names no act — while the same follow-up in a
-    **fresh** conversation is serviced, which is the half the statement does promise.
-    """
-    wired = _wired()
-    await wired.engine.converse(_ASKED, timeout=PATIENT)
-    granted_from = await _refused_decision(wired)
-    await wired.engine.establish_recipient_grant(granted_from, expires_at=AT + timedelta(days=30))
-    refused = await wired.engine.converse(_ASKED, timeout=PATIENT)
-    await wired.engine.establish_destination_trust(granted_from)
-
-    retried = await wired.engine.converse(
-        _ASKED, timeout=PATIENT, conversation_id=refused.conversation_id
-    )
-    fresh = await wired.engine.converse(_ASKED, timeout=PATIENT)
-
-    assert refused.search_not_serviced is SearchNotServiced.TRUST_MISSING
-    assert retried.search_not_serviced is SearchNotServiced.UNAVAILABLE, (
-        "the act was performed and this conversation is still closed — naming an act "
-        "that cannot help is worse than naming none (§8)"
-    )
-    assert fresh.search_not_serviced is None, (
-        "§15 Arm 1: both servicings of a fresh conversation are serviced, which is what "
-        "the trust act does change"
-    )
-
-
-async def test_revoking_the_trust_record_returns_the_next_follow_up_to_trust_missing() -> None:
-    """§15 Arm 3(b) through the engine, by **performing** the revocation.
-
-    Prospective: it takes effect for every later request and rewrites no recorded
-    decision, so the ``ALLOW`` rulings recorded before it stay exactly as they were.
-    """
-    wired = _wired()
-    await wired.engine.converse(_ASKED, timeout=PATIENT)
-    granted_from = await _refused_decision(wired)
-    await wired.engine.establish_recipient_grant(granted_from, expires_at=AT + timedelta(days=30))
-    await wired.engine.converse(_ASKED, timeout=PATIENT)
-    record = await wired.engine.establish_destination_trust(granted_from)
-    before = {row.id: row.ruling.outcome for row in await wired.engine.recent_decisions()}
-
-    assert await wired.engine.revoke_destination_trust(record.id) is True
-    after_revocation = await wired.engine.converse(_ASKED, timeout=PATIENT)
-
-    assert await wired.engine.standing_destination_trust() == ()
-    assert after_revocation.search_not_serviced is SearchNotServiced.TRUST_MISSING
-    rulings = {row.id: row.ruling.outcome for row in await wired.engine.recent_decisions()}
-    assert {row: rulings[row] for row in before} == before, (
-        "§4: a ruling recorded before the revocation is not rewritten"
-    )
+# --- §15's journeys, over the state ADR-0247 leaves them in -------------------
 
 
 async def test_the_positive_path_services_both_its_searches_and_parks_nothing() -> None:
@@ -353,7 +361,6 @@ async def test_the_positive_path_services_both_its_searches_and_parks_nothing() 
     why — with an issue against the ADR rather than a silent substitution.
     """
     wired = _wired()
-    await _wired_through_to_trust(wired)
 
     with structlog.testing.capture_logs() as captured:
         outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
@@ -391,7 +398,6 @@ async def test_two_turns_of_one_conversation_each_service_a_search() -> None:
     ``SearchFooting.clean`` admits ADR-0238 §2's first population.
     """
     wired = _wired()
-    await _wired_through_to_trust(wired)
     first = await wired.engine.converse(_ASKED, timeout=PATIENT)
 
     second = await wired.engine.converse(
@@ -424,7 +430,6 @@ async def test_a_turn_that_serviced_every_search_is_told_about_no_lookup_at_all(
     """
     composing, model = _recorder()
     wired = _wired(composing=composing)
-    await _wired_through_to_trust(wired)
 
     outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
 
@@ -432,14 +437,6 @@ async def test_a_turn_that_serviced_every_search_is_told_about_no_lookup_at_all(
     prompt = _system_prompt(model)
     for fragment in _FRAGMENTS:
         assert fragment not in prompt
-
-
-async def _wired_through_to_trust(wired: _Wired) -> None:
-    """Perform both acts, in the order §5's next-step line names them."""
-    await wired.engine.converse(_ASKED, timeout=PATIENT)
-    granted_from = await _refused_decision(wired)
-    await wired.engine.establish_recipient_grant(granted_from, expires_at=AT + timedelta(days=30))
-    await wired.engine.establish_destination_trust(granted_from)
 
 
 def test_the_quoted_fragments_are_the_ones_the_composing_stage_holds() -> None:

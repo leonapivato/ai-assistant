@@ -384,8 +384,10 @@ async def _search_servicer(now: Clock) -> None:
     footing = SearchFooting(
         conversation_id="c-1",
         conversations=conversations,
-        trust=FakeDestinationTrustStore(),
-        destinations=(),
+        # This deployment holds a search registration (ADR-0247 §1) — a servicer is
+        # wired below and its binder holds the registration — which is the fact the
+        # servicing site now reads about the destination in place of `trust_of`.
+        registered=True,
         max_calls=8,
     )
     await SearchServicer(
