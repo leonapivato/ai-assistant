@@ -140,9 +140,9 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > non-empty, duplicate-free `tuple[CanonicalDestination, ...]` in
 > `EgressBinding.canonical_destination_set`'s one canonical order; `coverage`, a possibly-empty
 > `tuple[CoverageMember, ...]`; `decided_at`, a `UtcInstant`; `expires_at`, a `UtcInstant`;
-> `established_by`, a `DurableIdentifier | None`; and `revokes`, a `DurableIdentifier | None`.
-> The field list is **closed**, and a lane adding a member is changing this decision rather
-> than implementing it.
+> `established_by`, a `DurableIdentifier | None`; `supersedes`, a `DurableIdentifier | None`;
+> and `revokes`, a `DurableIdentifier | None`. The field list is **closed**, and a lane adding
+> a member is changing this decision rather than implementing it.
 
 > **Normative.** **One type carries both acts**, on `RecipientGrant`'s shape and for its
 > reason: a revoking record transcribes verbatim every field of the record it withdraws except
@@ -162,11 +162,66 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 > ADR-0193 §1 accepts it.
 
 > **Normative.** **One establishing act establishes an authorization for one declaration**, and
-> a plan whose steps reach two declarations needs two. `established_by` names the recorded
-> `CONFIRM` the act rode (ADR-0193 §1's shape), and a `CONFIRM` is about one request and one
-> declaration (ADR-0021 §1). **One act may mint more than one record only where the user was
-> shown and answered more than one confirmation**, and no lane widens a single answer across
-> declarations it did not name.
+> a plan whose steps reach two declarations needs two. A `CONFIRM` is about one request and one
+> declaration (ADR-0021 §1), and **no lane widens a single answer across declarations it did
+> not name**.
+
+> **Normative — there are exactly two establishment paths and no third.**
+>
+> - **(i) An answered `CONFIRM`.** `established_by` names the recorded `CONFIRM` the act rode
+>   (ADR-0193 §1's shape), `supersedes` is unset, and the record's members are the values that
+>   confirmation put to the user (§11). This is the only path that may **create** a member, set
+>   `destinations`, set `account`, set `tool` or set `expires_at`.
+> - **(ii) A correcting instruction.** A later recorded turn of the same goal whose span names
+>   an argument a **live** record of that goal already carries a member for. It writes a
+>   **superseding** record: `supersedes` names that record, `established_by` is unset, and
+>   **every member of the superseded record that the correction does not replace is carried
+>   forward byte for byte, with its own basis** (§8). `goal`, `tool`, `account`,
+>   `destinations` and `expires_at` are **transcribed unchanged**, and the store verifies the
+>   transcription.
+>
+> A record carrying **both** `established_by` and `supersedes`, or **neither**, is **not
+> constructible**; a **revoking** record carries `revokes` and neither of the other two.
+
+> **Normative — what path (ii) may change, and what it may never touch.** It may **replace a
+> fixed value** for an argument the superseded record already fixed, and **narrow a bound** for
+> an argument it already bounded. It may **never** add a member for an argument the superseded
+> record does not name, **widen** a bound — a raised `maximum`, a lowered `minimum`, an added
+> term, a longer period — change `tool`, `account` or `destinations`, or move `expires_at`.
+> **A change to a destination-bearing argument takes path (i)**, because the canonical
+> destination set is what ADR-0148 §3's first clause is stated over and a correction must not
+> move it. Each of those is **refused at construction**, so the restriction is a property of
+> the type rather than a rule the writing lane remembers.
+
+> **Normative.** **Coverage is always taken over one record** (§3). Superseding at the moment
+> of the act, rather than composing at the moment of the ruling, is what keeps that true: the
+> policy reads one record, `authorised_by` names one record, the trail resolves one record, and
+> a revocation of the authority behind **any** argument is a revocation of the record the
+> ruling would cite. **No component composes coverage across two records**, at ruling time or
+> at any other.
+
+> **Normative — three definitions, stated in order so none is circular.** A granting record is
+> **superseded** when some record names it in `supersedes`, **whether or not that record is
+> itself revoked**. It is **outstanding** when no revoking record names it **and** it is not
+> superseded — which is the existence, the kind, the unrevoked check and the unsuperseded check
+> at once, ADR-0193 §6's `outstanding` extended by one conjunct and by nothing else. It is
+> **live** when it is outstanding and the clock stands at or after its `decided_at` and
+> strictly before its `expires_at`.
+
+> **Normative.** **Supersession is permanent and does not depend on the superseding record's own
+> fate.** Revoking a superseding record leaves **neither** live: that is the fail-closed
+> direction, and the one that refuses to resurrect a broader authority the user has already
+> moved on from. No operation un-supersedes a record. A superseded record needs no revocation,
+> blocks nothing, and stays in the store — both records appear in `export`, and neither is
+> deleted but by `clear`.
+
+> **Normative — at most one live record per goal and declaration, enforced without a clock.**
+> `record` **refuses** a granting record whose `goal` and `tool` equal those of an outstanding
+> record it does not supersede. The refusal is stated over **outstanding** rather than over
+> live, exactly as ADR-0193 §1's duplicate refusal is, so the write path reads no clock. **And
+> `covering` returns `None` where more than one live record of that goal and declaration would
+> answer** — a state this refusal makes unreachable, and refused at the read as well because a
+> query that chose between two would be the composition §5 declines.
 
 > **Normative.** **The goal is a field and the scope is never the conversation.** An
 > authorization of goal A covers no request of goal B, however adjacent, however recent and
@@ -208,6 +263,12 @@ the shape that reservation asks for.
 > adds an addressing syntax"* — stated once more rather than re-derived, and for its reason: a
 > path language is a second thing to get wrong at the one comparison that decides whether a
 > call is authorised.
+
+> **Normative.** **A `MONEY` bound and a fixed currency member of the same record must agree**,
+> refused at construction otherwise: where a record carries a `MONEY` bound for one argument and
+> a `fixed` member for the currency argument the declaration's schema pairs with it, that fixed
+> value equals the bound's `currency`. A record that bounds sixty pounds and fixes the currency
+> to something else is not a record of anything the user said.
 
 > **Normative.** **No two members of one `Authorization` name the same `argument`**, refused at
 > construction. A precedence rule between two members about one argument is a rule somebody
@@ -332,7 +393,12 @@ the binding comparison cannot come apart.
 > where a `minimum` is carried, greater than or equal to it; and the **currency is established
 > by the same record** — either by a `fixed` member naming the request's currency argument
 > whose value equals the bound's `currency`, or by the bound's `currency` being the only
-> currency the declaration's schema admits for that argument. **A JSON floating-point value
+> currency the declaration's schema admits for that argument; **and the currency the request
+> itself carries for that amount equals the bound's `currency` byte for byte**, wherever the
+> declaration's schema declares a currency argument for it. The last conjunct is stated over
+> the **concrete request** and not over the record, so a record whose currency member says one
+> thing and whose request says another covers nothing rather than covering the wrong amount of
+> the wrong money. **A JSON floating-point value
 > never satisfies a `MONEY` bound.** A binary float is not a price, and comparing one against a
 > decimal bound is precisely the unproven comparison ADR-0148 §2 refuses by default: the answer
 > is not to round, to quantise or to pick a tolerance, it is to refuse and ask.
@@ -366,41 +432,67 @@ the binding comparison cannot come apart.
 > direction, and the one that keeps a bound of sixty pounds from covering sixty of anything
 > else.
 
-### 5. Coverage from several acts of one goal, and never across goals
+### 5. A correction supersedes, and the record it leaves covers the whole request
 
-> **Normative.** **Coverage may be supplied per argument by more than one `Authorization` of
-> the same goal.** A request is covered where, for **each** of its arguments, **some** live
-> record of that goal naming the same `tool`, the same `account` and a destination set
-> containing the request's carries a member covering that argument — and where **at least one**
-> such record exists. The five comparisons of §3 are taken over **each** contributing record
-> and no argument is covered by a record that fails any of them.
+> **Normative.** **A later act of one goal supersedes rather than composes.** Where a live
+> record of a goal already carries a member for an argument and the user's later words replace
+> it, `orchestration` writes a superseding record under §1's path (ii): the replaced member
+> takes its value and its basis from the new act, **every other member is carried forward byte
+> for byte with the basis it already had**, and the superseded record stops being live in the
+> same act. The result is **one** record that covers the whole request.
 
-> **Normative.** **A later record displaces an earlier one for the arguments it names, and for
-> no others.** Where two live records of one goal both name an argument, the one with the later
-> `decided_at` governs it; where their `decided_at` are equal, **neither governs and the
-> argument is not covered** — the fail-closed direction, and the one that refuses to invent an
-> order between two acts a coarse clock stamped alike. Nothing else breaks a tie: not the
-> record id, not insertion order, not which is narrower.
+> **Normative.** **The user is not asked to repeat what they have just said.** Path (ii)
+> requires no confirmation, because the values it carries forward were confirmed once and the
+> value it replaces is the user's own recorded words about an argument the earlier act already
+> named. That is the owner's direction implemented: *"A clear later instruction such as 'make
+> it Sunday' can supply authorization for that change; do not automatically ask the user to
+> repeat it."*
 
-> **Normative.** **`PermissionRuling.authorised_by` names the record that governed the last
-> argument to be covered — and where several contributed, the ruling names the one whose
-> `decided_at` is latest**, ties refused as above. The others are reachable from it through the
-> goal, which is what `Authorization.goal` is for, and §6 states what the recorded row does and
-> does not then assert.
+> **Normative.** **A correction that would widen takes path (i) and asks.** An instruction
+> raising a ceiling, adding a term, lengthening a period, naming a destination the record does
+> not carry, or naming an argument no member covers is **not** a correction this path can
+> write: the superseding construction refuses it (§1), no record is written, and the concrete
+> action reaches no route (d) and is confirmed. That is the owner's *"Ask only when the concrete
+> action introduces something not already covered, such as additional costs or materially
+> different terms"*, and it is the same sentence read as a refusal at construction rather than
+> as advice at the prompt.
 
-> **Normative.** **No record of one goal contributes to a request of another**, and no
-> implementation composes coverage across goals, across conversations, across users or across
-> declarations. §1's goal field and §3's `tool` comparison are each independently sufficient to
-> refuse that, and both are stated so that removing one does not open it.
+> **Normative.** **A superseding record never extends authority in time.** `expires_at` is
+> transcribed from the record it supersedes (§1, §12), so a chain of corrections expires when
+> the first act's authority would have expired. **No sequence of corrections outlives the
+> confirmation that began it.**
 
-**This is the owner's *"make it Sunday"* case, and it is what the composition rule is for.** The
-first act fixed the site, the party size and the terms and bounded the price; the correction is
-itself a recorded act and supplies a new fixed value for the date alone. Every other argument
-stays covered by the first record, the changed one is covered by the second, and the user is
-not asked to repeat an instruction they have just given. A Sunday rate **above** the bound, or
-a term outside the named set, is covered by neither record and asks — on that ground and that
-ground alone, which is the whole of the owner's *"Ask only when the concrete action introduces
-something not already covered"*.
+> **Normative.** **No record of one goal is superseded by, or contributes to, a request of
+> another**, and no implementation composes coverage across goals, across conversations, across
+> users or across declarations. §1's `goal` field and §3's `tool` comparison are each
+> independently sufficient to refuse that, and both are stated so that removing one does not
+> open it.
+
+> **Normative.** **`PermissionRuling.authorised_by` names the one record coverage was taken
+> over**, and there is never a second contributor for it to omit. §7 states what the recorded
+> row then does and does not assert.
+
+**This is the owner's *"make it Sunday"* case, and superseding is what makes it safe as well as
+quiet.** The first act fixed the site, the party size and the terms and bounded the price; the
+correction is itself a recorded act and replaces the date alone. The record it leaves carries
+the new date with the correction's basis and every other member with the first act's, so the
+policy compares one record, the trail resolves one record, and **a revocation of the authority
+behind any argument at all is a revocation of the record the ruling would cite**. A Sunday rate
+above the bound, or a term outside the named set, is covered by that record either — it asks,
+on that ground and that ground alone.
+
+**Composing at ruling time was the first design and it was wrong, for a reason worth keeping.**
+If several records contribute and the ruling names one, then revoking a *contributing* record
+that is not the named one leaves every check the trail can make passing — §13's promise that
+revocation bites again at `record`'s resolution read would be true of one record and false of
+the others, and an auditor reading the row would see an authority that no longer stands behind
+half the call. Carrying every contributor on the ruling would put an unbounded tuple and an
+unbounded set of digests on a type ADR-0193 §6 deliberately kept to one pointer and one
+fingerprint. Superseding moves the composition to the moment of the act, where the store can
+verify the transcription and where one record is the honest answer to *"what authorised this"*.
+It is ADR-0249 §7's own construction for an interpretation revision — *"A revision states its
+elements in full, and omission is removal … a patch would make two revisions unreadable without
+replaying every one between them"* — applied to an authority rather than to an understanding.
 
 ### 6. Route (d) on ADR-0148 §3, and the five conditions it does not relax
 
@@ -640,7 +732,9 @@ is not this one. §18 books it with what fires it.
 > resolution turns a span into a value **for an argument the act's own words bear on**. It may
 > not add a member for an argument the act never mentioned, raise a `maximum`, lower a
 > `minimum`, add a member to `terms`, widen `destinations`, change `account` or `tool`, or move
-> `expires_at`. **The interpretation narrows what the act covers and can never widen it.** That
+> `expires_at`. **The interpretation narrows what the act covers and can never widen it**, and
+> §1's path (ii) is where that becomes a construction refusal rather than a rule a lane
+> remembers: a superseding record that would do any of those is not constructible. That
 > is #2096 item 8's ruled asymmetry — *"A model is a safe denier and an unsafe allower, because
 > of who rehearses against it: an attacker who beats a deny-only layer gains a deny"* — applied
 > to resolution, and it is ADR-0249 §7's line read one stage on: *"A model may never clear a
@@ -713,6 +807,36 @@ all three would be one thing to be wrong about.
 > names the tool and not the recipients is not a confirmation of an egress call"* — read onto
 > what the answer would make standing.
 
+> **Normative — the carrier, because `Confirmation` forbids extra fields.** `core/types.py`
+> gains **`ConfirmationAuthorization`**, a frozen model with `extra="forbid"` carrying exactly
+> `coverage`, a non-empty `tuple[ConfirmationCoverage, ...]`, and `expires_at`, a `UtcInstant`;
+> and **`ConfirmationCoverage`**, a frozen model carrying exactly `argument`, an
+> `EncodableText`, and one of `fixed`, a `FrozenJsonValue | None`, or `bound`, a `ValueBound |
+> None`, under `CoverageMember`'s own two-shape validator. `Confirmation` gains **one** member,
+> **`authorization: ConfirmationAuthorization | None`, required with no default**, and it is
+> **absent** — not empty — on a `CONFIRM` whose answer would establish nothing.
+>
+> **One nested value rather than several flat members**, which is `ConfirmationEgress`'s own
+> construction and its reason: *"four independent optional members admit fifteen partial states
+> … One value is either whole or absent."* **Absence is the discriminator** in `egress`'s and
+> `read`'s shape: what it states is that **answering this question would establish a standing
+> authority**, and nothing more — no lane reads its absence as a warrant that the call
+> establishes nothing else, and a surface that cannot render it may refuse *that* confirmation
+> rather than every confirmation (ADR-0178 §4).
+>
+> **The engine assembles it**, because an adapter may read neither the audit trail nor a
+> `PermissionDecision` (ADR-0042 §6), and it carries **the recorded values by transcription and
+> not a second derivation of them** (ADR-0178 §5, ADR-0150 §10). It carries **no** goal id, no
+> authorization id, no `BoundAccount`, no connection reference, no `SecretName` and no
+> transport endpoint. **`ConfirmationEgress` is untouched** — ADR-0178 §10's roster test over
+> *that* type keeps both its subject and its entry count — and the new types get a roster test
+> of their own in its shape (§20).
+>
+> **A client reading it can tell a fixed value from a bound**, which is the whole reason it is a
+> projection of the coverage rather than the concrete parameters: a confirmation showing a price
+> of forty-five pounds and nothing else cannot say whether answering fixes forty-five or permits
+> sixty.
+
 > **Normative.** **It names no identifier.** Not the goal's id, not the authorization's id, not
 > the connection reference, not a credential slot and not a `Settings` field.
 > `BoundAccount.reference` is *"never shown to the user"* (ADR-0148 §6, §8) and this decision
@@ -756,9 +880,28 @@ all three would be one thing to be wrong about.
 > **`workflow_authorization_ttl: timedelta`**, required, defaulting to **PT12H**, and refused at
 > load where it is zero or negative. **It admits no disable sentinel**, which is ADR-0244 §3's
 > shape and its stated reason one record over: an authority nothing can free is a durable row
-> that keeps authorising after everyone has forgotten it exists. `expires_at` is computed from
-> it **once**, at the instant the record is written, against the clock the composition root
-> injects.
+> that keeps authorising after everyone has forgotten it exists.
+
+> **Normative — the expiry is computed from the confirmation's own instant, not from the
+> answer's.** On path (i), `Authorization.decided_at` is the recorded `CONFIRM`'s `decided_at`
+> and `expires_at` is that instant plus `workflow_authorization_ttl`. Both are therefore
+> functions of a value that was already durable when the user was shown the question, so **the
+> instant §11 names in the prompt is the instant the record carries**, whenever the answer
+> arrives. Neither is read from a clock at the moment of the answer, and no lane recomputes
+> either.
+
+> **Normative — an answer arriving at or after that instant establishes nothing.** The
+> `CONFIRM` may still be resolved and the concrete call may still be authorised by ADR-0148
+> §3's route (a) — a decision of the user about *that* request — but **no `Authorization` is
+> written**, because a record born expired *"is a grant in shape and nothing in effect"*. The
+> user is asked again the next time the goal needs one, which is the fail-closed direction and
+> the only one that keeps the displayed instant true.
+
+> **Normative — on path (ii) both instants are transcribed.** A superseding record carries the
+> superseded record's `expires_at` unchanged (§1, §5) and its own `decided_at` is the recorded
+> turn the correction rode. `decided_at` therefore moves forward and `expires_at` does not, and
+> a correction recorded at or after `expires_at` is **not constructible** — the superseded
+> record is no longer live, so there is nothing for it to supersede.
 
 > **Normative.** **The expiry is visible at the moment of the act and in every listing** (§11).
 > That is the whole of decision 7's *"justified, visible"*: justified because it is stated with
@@ -928,9 +1071,11 @@ all three would be one thing to be wrong about.
 
 ### 15. Writer clauses, gathered in one place
 
-> **Normative.** **An `Authorization` is written by `orchestration` and by nothing else**, from
-> a recorded `CONFIRM` the user answered and the turn that answered it. No `ActionPolicy`, no
-> `AuditTrail`, no interface adapter, no reader, no tool and no model output writes one.
+> **Normative.** **An `Authorization` is written by `orchestration` and by nothing else**, on
+> §1's path (i) from a recorded `CONFIRM` the user answered, and on §1's path (ii) from a
+> recorded turn whose span names an argument a live record already carries. No `ActionPolicy`,
+> no `AuditTrail`, no interface adapter, no reader, no tool and no model output writes one, and
+> there is no third path.
 
 > **Normative.** **The policy sets `authorised_by`, `authorised_subject` and `authorised_goal`,
 > and sets each only from the record `covering` returned.** It carries no value from a previous
@@ -953,8 +1098,9 @@ all three would be one thing to be wrong about.
 
 > **Normative — the `core` surface this decision adds, in full.** `core/types.py` gains
 > `Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
-> `ValueResolution` and `ResolutionRule`; `PermissionRuling` gains `authorised_goal`;
-> `ActionRequest` gains `goal`. `core/protocols.py` gains **`GoalAuthorizations`**,
+> `ValueResolution`, `ResolutionRule`, `ConfirmationAuthorization` and `ConfirmationCoverage`;
+> `PermissionRuling` gains `authorised_goal`; `ActionRequest` gains `goal`; `Confirmation`
+> gains `authorization`. `core/protocols.py` gains **`GoalAuthorizations`**,
 > **`AuthorizationResolution`** and **`GoalAuthorizationStore`**. `core/errors.py` gains
 > **`AuthorizationError`**, the class a store fault raises. `core/config.py` gains
 > `Settings.workflow_authorization_ttl` (§12) and no other field. **Every one of these is a BREAKING
@@ -1007,22 +1153,27 @@ all three would be one thing to be wrong about.
 > the record's **own** text — its coverage, its basis, its expiry — because the decision carries
 > a pointer and a digest and never the record by value.
 
-> **Normative — what crosses the wire, and what does not.** The **listing** and the
-> **revocation** of §11 cross, as the recipient-grant operations do. **No `Authorization`
-> crosses inside a `Confirmation`**: what a `CONFIRM` puts to the user is `Confirmation`'s
-> existing members plus the bounds §11 requires, carried as the data a surface renders and not
-> as a record a client could mistake for one already established — the same discipline
-> `ConfirmationEgress` follows, which carries *"the recorded decision's own value, reaching a
-> surface by ADR-0178 §5's transcription rather than as a second carriage of it"*.
+> **Normative — what crosses the wire, and what does not.** Three things cross: the
+> **listing**, the **revocation** and **`Confirmation.authorization`** (§11). **No
+> `Authorization` crosses whole**: the confirmation carries a **projection** of the coverage
+> the answer would establish, not the record — there is no record yet — and the listing carries
+> the rendering §11 fixes rather than the stored value, so no client holds a record's basis, its
+> digest or its account. That is `ConfirmationEgress`'s discipline, which carries *"the recorded
+> decision's own value, reaching a surface by ADR-0178 §5's transcription rather than as a
+> second carriage of it"*.
 
-> **Normative — `PROTOCOL_VERSION` moves by exactly one, on the lane that moves the surface**,
-> and `wire/envelope.py`'s log gains an entry naming this ADR and the reason. **No integer is
-> fixed here**: ADR-0249 §12 already schedules a bump and other lanes of this batch may land
-> before or after, so a number written in this document would be a claim about an order nobody
-> controls. The ground is ADR-0124 §9's first limb — the promoted surface gains methods — and
-> its second, since `PermissionRuling` gains a field and is carried on a decision a client
-> decodes. **No lane adds a compatibility shim, an optional-member negotiation or a lenient
-> decode**; ADR-0084 §3's exact-match handshake is the mechanism.
+> **Normative — `PROTOCOL_VERSION` moves in every change that makes a wire-carried value one
+> peer emits invalid for the other, and `wire/envelope.py`'s log gains an entry per bump naming
+> this ADR and the ground.** ADR-0124 §9 requires the bump *"in the same change"*, and §20 cuts
+> the lanes so that **two** of them carry one: Lane 1 under §9's second limb (`PermissionRuling`
+> gains a field and is carried inside a `PermissionDecision` a client decodes), and Lane 3 under
+> its first (the promoted surface gains methods) and its second (`Confirmation` gains a member).
+> **No lane defers its own bump to a later one**, which is the defect this clause is stated
+> against. **No integer is fixed here**: ADR-0249 §12 already schedules a bump and other lanes
+> of this batch may land before or after, so a number written in this document would be a claim
+> about an order nobody controls. **No lane adds a compatibility shim, an optional-member
+> negotiation, a per-member capability flag or a lenient decode**; ADR-0084 §3's exact-match
+> handshake is the mechanism and the refusal naming both versions is the intended outcome.
 
 > **Normative — `PermissionDecision` gains no field.** `from_request` transcribes the ruling
 > whole (`ruling.model_copy(deep=True)`), so `authorised_goal` reaches the durable record along
@@ -1177,8 +1328,19 @@ check are each consumed as written, and §13 and §14 state where.
 > **Lane 2, the establishment and the recheck.** `orchestration` writing the record from an
 > answered `CONFIRM`, `ActionRequest.goal`, the attempt's `AWAITING_AUTHORIZATION` commit and
 > the `add_authorization_id` append, and phase 4's evaluation. **Lane 3, the surfaces.** The
-> listing, the revocation, what a `CONFIRM` shows, and the `PROTOCOL_VERSION` bump — **the one
-> lane that moves the wire**.
+> listing, the revocation, and `Confirmation.authorization` with its two projection types.
+
+> **Normative — every lane that changes the wire carries its own bump, and no lane defers
+> one.** ADR-0124 §9 requires the bump *"in the same change"*, and two of these lanes make a
+> wire-carried value one peer emits invalid for the other. **Lane 1 bumps**:
+> `PermissionRuling` gains a field, `PermissionRuling` is carried inside `PermissionDecision`,
+> and a decision crosses the promoted surface today — so an older client decoding one under
+> `extra="forbid"` refuses it, which is ADR-0124 §9's second limb exactly. **Lane 3 bumps**:
+> it adds methods to the promoted surface and a member to `Confirmation`, each independently
+> that ground. **Lane 2 changes no wire-carried type** — `ActionRequest` crosses no frame — and
+> bumps nothing. **No integer is fixed here**, because other lanes of this batch move the same
+> constant and a number written in this document would be a claim about an order nobody
+> controls.
 
 > **Normative — Lane 2 and Lane 3 depend on A5 and on A7, and no lane of this decision lands
 > before the contracts it reads.** Phase 4 evaluates `when` and `depends_on`, which **ADR-0253
@@ -1197,7 +1359,13 @@ check are each consumed as written, and §13 and §14 state where.
 >    the attempt commits `AWAITING_AUTHORIZATION`, **nothing dispatched and no claim made**.
 > 3. **Permission revoked.** A revoking record appended between the establishment and the
 >    dispatch → `covering` answers `None`, `CONFIRM`, and the earlier recorded `ALLOW` is
->    unchanged and still true about the moment it was made.
+>    unchanged and still true about the moment it was made. **And after a chain of
+>    corrections**: revoke the superseding record and every argument is uncovered, including
+>    the ones whose members were carried forward from the first act — there is no contributor
+>    left standing that the revocation missed.
+> 3a. **Revocation between `covering` and `record`.** Revoke the record the ruling names after
+>     `covering` returned and before `AuditTrail.record` begins its resolution read → the write
+>     is **refused**, on §7's first check, for the record behind **every** argument.
 > 4. **Price inside the range.** An argument at, below and above `maximum` → covered, covered,
 >    **not covered**; and at `minimum` where one is carried → covered.
 > 5. **A price as a JSON float** → **not covered**, on §4's refusal, whatever its magnitude.
@@ -1217,11 +1385,30 @@ check are each consumed as written, and §13 and §14 state where.
 >    both.
 > 7. **Destination outside the set**, and the same address through a second connected account →
 >    **not covered** in both, the second on `BoundAccount`'s two facts.
-> 8. **"Make it Sunday".** Act 1 fixes a Saturday date and bounds the price; act 2 of the same
->    goal fixes the Sunday date. A Sunday request inside the bound is **covered**, composed from
->    both records; the ruling names the later; **the user is not asked**. A Sunday request above
->    the bound is **not covered** and asks, and the reason names the price and not the date.
-> 9. **Two records of one goal naming one argument with equal `decided_at`** → **not covered**.
+> 8. **"Make it Sunday", end to end from the utterance.** Act 1 is an answered `CONFIRM`
+>    fixing the entity, the party size, the terms and a Saturday date and bounding the price.
+>    Act 2 is a recorded turn carrying *"actually, make it Sunday"* and **no pending
+>    confirmation**. The turn writes a superseding record whose date member carries the new
+>    basis and whose every other member is byte-identical to act 1's, including its basis; act
+>    1's record stops being live; a Sunday request inside the bound is **covered by the one
+>    record**; `authorised_by` names it; **the user is not asked**. A Sunday request above the
+>    bound is **not covered** and asks, and the reason names the price and not the date.
+> 8a. **A correction that would widen takes no path (ii).** *"Make it up to eighty"*, *"add
+>     Bob"*, *"make it next month as well"*, and a correction naming an argument no member
+>     covers → each **refused at construction**, no record written, and the concrete action
+>     confirmed.
+> 8b. **A correction to a destination-bearing argument takes no path (ii)** → refused at
+>     construction, whatever the destination is.
+> 8c. **A superseding record transcribes what it may not change.** `goal`, `tool`, `account`,
+>     `destinations` and `expires_at` altered on an otherwise valid superseding record → the
+>     store refuses the transcription, one test per field.
+> 8d. **A correction changing the currency** — act 1 bounds GBP 60 and fixes `currency` to
+>     `"GBP"`; a correction fixing `"KWD"` → **refused at construction**, because the record
+>     would carry a `MONEY` bound and a fixed currency member that disagree; and a request
+>     carrying `{amount: "60", currency: "KWD"}` against act 1's record is **not covered**, on
+>     §4's request-currency conjunct.
+> 9. **Supersession is permanent.** Revoking a superseding record does **not** make the record
+>    it superseded live again; both stay in the store and both appear in `export`.
 > 10. **An interpretation that would widen** — a member for an argument the act never mentioned,
 >     a raised `maximum`, an added term, a widened destination set, a moved `expires_at` → each
 >     **refused at construction**, and each with its own test.
@@ -1229,8 +1416,16 @@ check are each consumed as written, and §13 and §14 state where.
 >     `act` names no recorded turn, and a basis whose `span` is not a span of that turn's
 >     `TurnResult.utterance` → each refused.
 > 12. **The expiry is shown at the act and enforced at dispatch.** A record whose `expires_at`
->     has passed covers nothing; the `CONFIRM` that would establish one names the instant; the
->     listing names it.
+>     has passed covers nothing; the `CONFIRM` that would establish one names the instant
+>     through `Confirmation.authorization`; the listing names it.
+> 12a. **The instant shown is the instant written, however late the answer.** A `CONFIRM`
+>      recorded at 09:00 under a twelve-hour ttl names 21:00; answered at 10:00, the record
+>      carries `decided_at` 09:00 and `expires_at` 21:00 and **not** 22:00.
+> 12b. **An answer at or after that instant establishes nothing.** The `CONFIRM` resolves and
+>      the one call is authorised by route (a); **no `Authorization` is written**, and the next
+>      dispatch of that goal asks.
+> 12c. **A chain of corrections does not outlive the first act's expiry.** Three successive
+>      superseding records carry one `expires_at`; the third covers nothing after it.
 > 13. **The expiry touches nothing else.** A `RecipientGrant` established in the same run keeps
 >     the instant the user chose; a route-(c) ruling is unaffected by
 >     `workflow_authorization_ttl` at any value.
@@ -1256,6 +1451,17 @@ check are each consumed as written, and §13 and §14 state where.
 > 21. **Each `ResolutionRule` admits its own argument shape and refuses the other two** —
 >     `AS_STATED` with either argument, `DATE_FROM_CONTEXT` missing `now` or `timezone`,
 >     `FROM_SHOWN_RECORD` missing `record` — each refused at construction.
+> 21a. **`Confirmation.authorization` is present exactly where an answer would establish a
+>      record and absent otherwise**, is required with no default, and carries a bound as a
+>      bound and a fixed value as a fixed value. A roster test in ADR-0178 §10's shape over
+>      `ConfirmationAuthorization` and `ConfirmationCoverage` asserts that no field of either is
+>      named or typed for a goal id, an authorization id, a `BoundAccount`, a connection
+>      reference, a `SecretName` or a transport endpoint.
+> 21c. **The store refuses a second live record for one goal and declaration**, and `covering`
+>      answers `None` where two would; a superseding record for the same pair is accepted.
+> 21b. **Each lane's wire bump.** Lane 1's and Lane 3's changes each make a value one peer emits
+>      invalid for the other, and each lands with its own `PROTOCOL_VERSION` increment and its
+>      own `wire/envelope.py` log entry; Lane 2 changes no wire-carried type and bumps nothing.
 > 22. **The conformance suites run against the canonical fakes and against the SQLite store**,
 >     and the monotonicity suite for `ThresholdActionPolicy` stands up a fake
 >     `GoalAuthorizations` and holds its records equal, which is ADR-0193 §12's own
@@ -1299,19 +1505,24 @@ and no other byte (ADR-0165).
 
 **What becomes easier.** The workflow #2255 exists to build stops asking the user to repeat
 themselves: an act that fixes some arguments and bounds another covers every later call of that
-goal inside it, a correction supplies the one argument it changes, and the system asks exactly
-where the owner's direction says it should — *"additional costs or materially different terms"*.
-The authority is auditable in a way no previous route is: a row names a record, the record names
-the acts, and each act names the turn, the user's own words and the working by which those words
-became a value. `GoalAttempt.authorization_ids` and `AttemptState.AWAITING_AUTHORIZATION` get
+goal inside it, a correction **supersedes** it for the one argument it changes and carries the
+rest forward, and the system asks exactly where the owner's direction says it should —
+*"additional costs or materially different terms"*. The authority is auditable in a way no
+previous route is: a row names one record, that record carries a member per argument, and each
+member names the turn, the user's own words and the working by which those words became a
+value — so *"what authorised this, and who said so"* is answerable per **argument** and not
+merely per call. `GoalAttempt.authorization_ids` and `AttemptState.AWAITING_AUTHORIZATION` get
 their first producers, and ADR-0021 §3's carried-but-unread `parameters` gets the per-call gating
 ADR-0017 §3 made a condition on designating the seam.
 
 **What becomes harder.** There is now a second standing authority for egress, and the trail
 tells four routes apart rather than three — a partition that is total today and that every later
 standing source must extend rather than join. The policy takes a second durable read and a third
-constructor argument. `ActionRequest` and `PermissionRuling` each gain a field, which is two
-breaking `core` changes at a moment when several lanes of this batch are also moving `core`. And
+constructor argument. `ActionRequest`, `PermissionRuling` and `Confirmation` each gain a field
+and two projection types arrive with the last, which is three breaking `core` changes and two
+`PROTOCOL_VERSION` bumps at a moment when several lanes of this batch are also moving `core`.
+A correction now writes a whole record rather than a delta, so a long chain of corrections
+writes a long chain of records — bounded by the expiry, and the store is append-only anyway. And
 the per-argument comparison is the first rule in this corpus that reads a payload: everything
 about how an argument is read for a bound (§4) is new surface with new ways to be wrong, which
 is why every reading refuses what it cannot prove and why the arms above test each refusal
@@ -1364,6 +1575,14 @@ corpus already states, is what the owner's direction actually needs.
 §1 and §3. The canonical set is computed by the seam from the arguments under ADR-0148 §2's
 per-protocol rules; comparing arguments does not prove the sets equal, and a rule that assumed it
 did would be an inference at the seam ADR-0148 §2 exists to make exact.
+
+**Composing coverage across several records at ruling time.** Rejected in §5, and it was the
+first design. It cannot keep §13's promise that a revocation bites at `record`'s resolution
+read: with two contributors and one pointer, revoking the contributor the ruling does not name
+leaves every check the trail can make passing. Carrying every contributor on the ruling would
+put an unbounded tuple and an unbounded set of digests on a type ADR-0193 §6 kept to one pointer
+and one fingerprint, and would make the route-(d) invariant a loop over an unbounded set of
+store reads inside a write path that today performs one.
 
 **Tagging `authorised_by` to say which store it names.** Rejected in §7, on ADR-0193 §6's own
 ground for declining it: *"a tag with one value today is a surface with no consumer, and the
