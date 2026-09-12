@@ -643,6 +643,7 @@ class Harness:
         trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
         binder: EgressBinder | None = None,
+        plans: FakePlanStore | None = None,
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
         routing: RoutingStage | None = None,
@@ -679,7 +680,11 @@ class Harness:
         # than waits", and a case that reclaimed a slot before resuming would pass
         # against an implementation whose expiry is only ever noticed by housekeeping.
         self.clock: Clock = (lambda: AT) if now is None else now
-        self.plans = FakePlanStore(now=lambda: AT)
+        # A knob for the same reason ``trail`` is one below: ADR-0249 §6 makes the six
+        # phases "six observable transitions", and three of a turn's six are commits a
+        # case can only see by holding the store that took them. The default stays the
+        # canonical fake, which is what every other case here wants.
+        self.plans = FakePlanStore(now=lambda: AT) if plans is None else plans
         # ``trail`` is a knob because the audit surface's own reader cases need a
         # store that holds **bytes**: ADR-0184 §10 puts the origin-unrecorded row's
         # read half in each implementation's own tests, "because it is a property of
