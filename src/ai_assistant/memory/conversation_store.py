@@ -64,7 +64,6 @@ from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
     ConversationExport,
-    ConversationSearchDraw,
     ConversationTurn,
     ParkedBinding,
     SpokenDelivery,
@@ -186,23 +185,24 @@ _TURN_SELECT = (
 _OBSERVED_COLUMN: Final = "observed_through INTEGER"
 
 #: ADR-0238 §8's per-conversation search budget: one counter and one flag, on the
-#: *conversation* row because that is where the lifecycle already is —
-#: ``stamp_deleted`` fences them with the record and ``drop_if_eligible`` destroys
-#: them with it, so no sweep, reconciliation or lifecycle member of their own is
-#: owed (§8, §15's Arms 6h and 6h2). Held apart from the fresh-database
-#: ``CREATE TABLE`` for :meth:`SqliteConversationStore._migrate_search_draw` to add
-#: to a file written before them, exactly as :data:`_OBSERVED_COLUMN` is.
+#: *conversation* row. **Both are vestigial and both stay** (ADR-0247 §5): the budget
+#: is removed, nothing reads either column and nothing writes either one, and the two
+#: are kept in the schema so that a database written before that decision and one
+#: written after it have **one shape**. No rebuild migration is performed and no column
+#: is dropped — SQLite drops a column by rebuilding the table, which is a destructive
+#: act over the one table holding every conversation, and the pair costs a deployment
+#: two integers per row. ADR-0247 §13 defers the rebuild with what fires it.
 #:
-#: **``NOT NULL DEFAULT 0`` on both, and the flag's default is the decision.**
-#: SQLite adds such a column in constant time without rewriting a row, and a build
-#: written before this member — which names only the columns it knows in its
-#: ``INSERT INTO conversations(...)`` — goes on inserting against the upgraded file.
-#: What the flag's ``0`` means is ADR-0238 §8 and §13 in terms: **a conversation
-#: record written before this decision decodes with the flag ``False``**, which is
-#: ADR-0181 §12's reading of a pre-existing row and the fail-closed direction — this
-#: decision never observed such a conversation's turns, so it may not report them
-#: clean. ``start`` writes ``1`` explicitly, which is the *only* place a ``True``
-#: is ever created and the one instant at which it cannot be wrong.
+#: Held apart from the fresh-database ``CREATE TABLE`` for
+#: :meth:`SqliteConversationStore._migrate_search_draw` to add to a file written
+#: before them, exactly as :data:`_OBSERVED_COLUMN` is — and the migration stays for
+#: the same one-shape reason (§5).
+#:
+#: **``NOT NULL DEFAULT 0`` on both.** SQLite adds such a column in constant time
+#: without rewriting a row, and a build that names only the columns it knows in its
+#: ``INSERT INTO conversations(...)`` goes on inserting against the upgraded file —
+#: which is what ``start`` now does, because ADR-0247 §5 leaves the pair written by
+#: nothing.
 _SEARCH_DRAW_COLUMNS: Final = (
     "search_calls INTEGER NOT NULL DEFAULT 0, all_external_user_chosen INTEGER NOT NULL DEFAULT 0"
 )
@@ -571,31 +571,6 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
         raise ValueError(msg)
 
 
-def _check_call_ceiling(value: object) -> None:
-    """Refuse a search-call ceiling that is not an exact non-negative ``int``.
-
-    ADR-0238 §8 gives ``search_calls_per_conversation`` the domain 0 to 64, but the
-    *contract* obliges only that a ceiling be a non-negative integer: ``Settings``
-    owns the upper bound and a store that restated it would refuse a figure a later
-    decision widened. **The type is part of the domain**, for :func:`_check_page_bound`'s
-    reason read one axis over — ``calls >= float("nan")`` is false for every count, so
-    a store handed one admits without limit while every message still names a ceiling
-    — and ``bool`` is refused with the rest, being an ``int`` subclass that is
-    nobody's ceiling. Zero is admitted and is meaningful: it services no search in any
-    conversation.
-
-    Raises:
-        ValueError: If ``value`` is not an ``int`` or is negative.
-    """
-    if type(value) is not int or value < 0:
-        msg = (
-            f"max_calls must be a non-negative int, got {describe_untrusted(value)}; zero is "
-            f"meaningful (no search is serviced in any conversation) and a negative names no "
-            f"ceiling (ADR-0238 §8)"
-        )
-        raise ValueError(msg)
-
-
 class SqliteConversationStore:
     """A persistent ``ConversationStore`` backed by ``sqlite3``."""
 
@@ -938,18 +913,19 @@ class SqliteConversationStore:
     def _migrate_search_draw(conn: sqlite3.Connection) -> None:
         """Add ADR-0238 §8's counter and flag to a ``conversations`` table without them.
 
-        :meth:`_migrate_observed`'s shape, and ADR-0238 §13 names the state it must
-        produce: **a conversation record written before this decision decodes with a
-        zero draw and the flag ``False``**. ``NOT NULL DEFAULT 0`` on both is what
-        delivers exactly that — SQLite adds the columns in constant time **without
-        rewriting a row**, every existing conversation comes back with nothing spent
-        and the fail-closed footing, and no existing column changes.
+        **It stays although nothing reads either column** (ADR-0247 §5). What it buys
+        is one shape: a file written before ADR-0238, one written under it and one
+        written after the budget's removal all hold the same ``conversations`` table,
+        so no read, export or backup has to know which of the three it is looking at.
+        Dropping the pair instead would mean rebuilding the one table holding every
+        conversation, which ADR-0247 §13 defers with what fires it.
 
-        **The flag's ``0`` is not a convenience and no lane back-fills it** (§8, §13).
-        This decision never observed such a conversation's turns, so it may not report
-        them clean; ``observe_search`` folds by **and**, so no later clean turn raises
-        it. Nothing here infers the value from an episode, a log or a trail, or reads
-        its absence as a clean history.
+        :meth:`_migrate_observed`'s shape. ``NOT NULL DEFAULT 0`` on both is what makes
+        it free — SQLite adds the columns in constant time **without rewriting a row**,
+        and no existing column changes. **Nothing back-fills either one** (ADR-0247
+        §10): no inference, repair or reconstruction is performed on any row, and a
+        conversation whose flag reads ``0`` behaves exactly as one whose flag reads
+        ``1``, because neither is read.
 
         An ``ALTER TABLE ... ADD COLUMN`` rather than the rebuild
         :meth:`_migrate_turns` performs, because that is the whole of what is owed.
@@ -1272,18 +1248,13 @@ class SqliteConversationStore:
             if self._row_of(conn, conversation.id) is not None:
                 return None
             conn.execute(
-                # ADR-0238 §8: `start` is the **only** thing that creates the draw,
-                # and the flag's value at creation is `True`. A conversation `start`
-                # mints has no turns at all, so "every recorded external span this
-                # conversation has carried was minted by a WEB_SEARCH servicing at a
-                # USER_CHOSEN destination" is vacuously true of it — the one instant
-                # at which `True` cannot be wrong. The laundering hole an earlier
-                # revision of §8 had, where a first admission minted a clean row for a
-                # conversation that already had turns, is unreachable by construction
-                # rather than forbidden by a rule.
+                # **Neither vestigial column is named** (ADR-0247 §5). The budget is
+                # removed, so `start` no longer creates a draw and the two columns take
+                # the `DEFAULT 0` their declaration carries — "read by nothing and
+                # written by nothing", which is what makes them costless to keep.
                 "INSERT INTO conversations(id, started_at, last_active_at, last_turn_at, "
-                "deleted_at, search_calls, all_external_user_chosen) "
-                "VALUES (?, ?, ?, NULL, NULL, 0, 1)",
+                "deleted_at) "
+                "VALUES (?, ?, ?, NULL, NULL)",
                 (
                     conversation.id,
                     _to_micros(conversation.started_at),
@@ -2004,214 +1975,6 @@ class SqliteConversationStore:
             conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
-
-    async def search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None:
-        """The conversation's draw, or ``None`` if it is unknown or stamped (ADR-0238 §8).
-
-        **One statement, so it is one indivisible read** of the counter and the flag:
-        a caller never sees a draw assembled from two moments. The ``deleted_at IS
-        NULL`` limb is :meth:`get`'s own rule read over the budget, so a stamped
-        conversation's draw is fenced by the stamp exactly as its record is.
-
-        Raises:
-            ConversationStoreError: If the store cannot be read, or the stored row is
-                corrupt.
-        """
-        async with self._lock:
-            rows = await _run_to_completion(self._search_draw_sync, conversation_id)
-        return self._decode_draw(rows[0]) if rows else None
-
-    def _search_draw_sync(self, conversation_id: str) -> list[Any]:
-        return self._fetch(
-            self._conn,
-            "read a conversation's search draw",
-            "SELECT search_calls, all_external_user_chosen FROM conversations "
-            "WHERE id = ? AND deleted_at IS NULL",
-            (conversation_id,),
-        )
-
-    def _decode_draw(self, row: Any) -> ConversationSearchDraw:
-        """Rebuild one draw row through its own model.
-
-        Decoded rather than read positionally into a tuple, for
-        :meth:`_decode_conversation`'s reason: a row that no longer satisfies the model
-        is a store fault to report, and a negative counter reaching a caller as an
-        ordinary integer would make the ceiling comparison meaningless.
-
-        **Both columns are checked against what this store writes, before either is
-        converted, and neither check may be left to the model.** SQLite's type affinity
-        is not a constraint: an ``INTEGER`` column accepts whatever a writer binds, so a
-        hand-built or damaged row can hold a value of any type at all. Each column fails
-        differently and each failure is silent.
-
-        * **The flag.** A bare ``bool(row[1])`` maps ``2``, ``-1`` and the *string*
-          ``"false"`` all to ``True`` — the fail-**open** direction on the one field
-          ADR-0238 §8 makes monotone, so a conversation whose history this decision
-          never saw would read as clean. That is the state §13's decoded ``False``
-          exists to prevent.
-        * **The counter.** Pydantic is the looser reader here, and the gap is not the
-          obvious one. It accepts ``"1_0"`` as **10** — Python's numeric underscores —
-          while SQLite reads the same stored text as **1** for arithmetic, taking the
-          leading numeric prefix. A caller would be told the draw is 10, an admission
-          against a bound of 12 would be granted and answer 11, and the row would go to
-          **2**: an admission that *lowered* the recorded draw, which ADR-0238 §8
-          forbids in terms ("no path lowers ``calls``") and which buys the conversation
-          further admissions it never earned. No range check catches it, because 10 is
-          in range; only the **type** does.
-
-        Refusing both keeps a corruption a fault the caller is told about rather than a
-        footing or a budget it acts on.
-
-        Raises:
-            ConversationStoreError: If either column holds a value this store does not
-                write, or the pair does not satisfy the model.
-        """
-        spent, footing = row[0], row[1]
-        if type(spent) is not int or spent < 0:
-            msg = (
-                f"the conversation store holds a corrupt search draw: search_calls is "
-                f"{describe_untrusted(spent)}, which is not a non-negative integer this "
-                f"store wrote"
-            )
-            raise ConversationStoreError(msg)
-        if type(footing) is not int or footing not in (0, 1):
-            msg = (
-                f"the conversation store holds a corrupt search draw: "
-                f"all_external_user_chosen is {describe_untrusted(footing)}, which is not one "
-                f"of the two values this store writes"
-            )
-            raise ConversationStoreError(msg)
-        try:
-            return ConversationSearchDraw(calls=spent, all_external_user_chosen=bool(footing))
-        except (ValidationError, TypeError) as exc:
-            msg = f"the conversation store holds a corrupt search draw: {describe_untrusted(exc)}"
-            raise ConversationStoreError(msg) from exc
-
-    async def admit_search(
-        self, conversation_id: str, /, *, max_calls: int
-    ) -> ConversationSearchDraw | None:
-        """Compare, increment and answer, as one step (ADR-0238 §8).
-
-        The read, the comparison and the write run inside one ``BEGIN IMMEDIATE``
-        transaction under the connection lock — the same exclusion an append takes,
-        which is what makes this hold **across processes** as ADR-0074 §9 requires and
-        not merely within one engine. That is the whole of what stops two turns of one
-        conversation, two servicings of one turn, or two engines over one data
-        directory being admitted against the same draw.
-
-        The comparison is ``>=`` against ``max_calls``, never a truthiness guard on
-        it: **zero is a legal bound whose meaning is that no search is serviced in any
-        conversation**, and ``0`` is falsy (ADR-0238 §15's Arm 6g2).
-
-        **It creates nothing**, and answers rather than raises for an unknown id and
-        for a stamped conversation, because it is reached by a servicing that may
-        already have been in flight when the deletion landed.
-
-        Raises:
-            ValueError: If ``max_calls`` is not a non-negative ``int``.
-            ConversationStoreError: If the store cannot be written.
-        """
-        _check_call_ceiling(max_calls)
-        async with self._lock:
-            return await _run_to_completion(self._admit_search_sync, conversation_id, max_calls)
-
-    def _admit_search_sync(
-        self, conversation_id: str, max_calls: int
-    ) -> ConversationSearchDraw | None:
-        with self._transaction("admit a search") as conn:
-            rows = self._fetch(
-                conn,
-                "read a conversation's search draw",
-                "SELECT search_calls, all_external_user_chosen FROM conversations "
-                "WHERE id = ? AND deleted_at IS NULL",
-                (conversation_id,),
-            )
-            if not rows:
-                return None
-            draw = self._decode_draw(rows[0])
-            if draw.calls >= max_calls:
-                return None
-            # **The written value is the decoded one, not `search_calls + 1`.** The
-            # read above happens inside this transaction, so there is no staleness to
-            # guard against — and column arithmetic would put SQLite's own coercion
-            # between the value this store validated and the value it stores. Those two
-            # disagree: `'1_0' + 1` is `2` in SQL and `11` after a decode that read the
-            # underscore, so an admission would *lower* a draw ADR-0238 §8 says no path
-            # lowers. `_decode_draw` refuses that row before this line is reached, and
-            # binding the checked number is what keeps the two readings from being able
-            # to differ at all.
-            #
-            # The `deleted_at IS NULL` limb is repeated here rather than trusted from
-            # the read above, for `drop_if_eligible`'s own reason: what a statement is
-            # allowed to change is the statement's to state.
-            conn.execute(
-                "UPDATE conversations SET search_calls = ? WHERE id = ? AND deleted_at IS NULL",
-                (draw.calls + 1, conversation_id),
-            )
-            return draw.model_copy(update={"calls": draw.calls + 1})
-
-    async def observe_search(
-        self, conversation_id: str, /, *, all_external_user_chosen: bool
-    ) -> None:
-        """Fold the caller's value into the stored flag by ``and`` (ADR-0238 §8).
-
-        Expressed as ``all_external_user_chosen = all_external_user_chosen AND ?`` in
-        SQL rather than as a read followed by a write, so the fold is **monotone by
-        construction**: once false the column never returns to true, whatever order
-        two folds arrive in and whichever engine writes them. That is ADR-0106 §4's
-        monotonicity read on this axis, and it is what keeps a conversation closed
-        after the tainting episode has fallen out of the tail.
-
-        **It does nothing and raises nothing** for an unknown id, for a stamped
-        conversation, and after :meth:`drop_if_eligible` has removed the record —
-        there is nothing for a late fold to resurrect, because the budget is a
-        property of the conversation record and no clause here fences a write with a
-        read of another store.
-
-        Raises:
-            ConversationStoreError: If the store cannot be written.
-        """
-        async with self._lock:
-            await _run_to_completion(
-                self._observe_search_sync, conversation_id, all_external_user_chosen
-            )
-
-    def _observe_search_sync(self, conversation_id: str, observed: bool) -> None:
-        """Read, check and fold, as one transaction.
-
-        **The stored footing is decoded before it is folded**, and that read is not
-        redundant with the fold's own ``AND``. SQL's ``AND`` is a *coercion*: a corrupt
-        ``2`` folded against a clean observation evaluates ``2 AND 1`` and writes ``1``,
-        so a fold would quietly turn a value this store never wrote into a **valid clean
-        flag** — repairing a corruption into the one state ADR-0238 §8's monotonicity
-        makes unrecoverable, and doing it on the path least likely to be looked at.
-        Every *reading* path already refuses such a row; without this the write path was
-        the way round them.
-
-        The fold itself stays SQL's ``AND`` over the checked value, so monotonicity is
-        still by construction rather than by a comparison this method makes.
-
-        **A missing row is still a silent no-op**, which is §8's clause and not an
-        oversight: an unknown id, a stamped conversation and a dropped record each leave
-        nothing to fold, and each is reached by a servicing that may have been in flight
-        when the deletion landed.
-        """
-        with self._transaction("fold a conversation's search footing") as conn:
-            rows = self._fetch(
-                conn,
-                "read a conversation's search draw",
-                "SELECT search_calls, all_external_user_chosen FROM conversations "
-                "WHERE id = ? AND deleted_at IS NULL",
-                (conversation_id,),
-            )
-            if not rows:
-                return
-            self._decode_draw(rows[0])
-            conn.execute(
-                "UPDATE conversations SET all_external_user_chosen = "
-                "(all_external_user_chosen AND ?) WHERE id = ? AND deleted_at IS NULL",
-                (int(observed), conversation_id),
-            )
 
     async def export(self) -> ConversationExport:
         """Return the store's own snapshot: unstamped conversations and their turns.

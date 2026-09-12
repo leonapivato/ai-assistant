@@ -1588,27 +1588,24 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # each pin the root's mount, and the one the loop read from would be the
             # one the ordered shutdown did not close (ADR-0042 §2).
             fetcher=fetcher,
-            # **ADR-0238's footing, built per turn from the conversation the turn runs
-            # under** (§8, §14). It is wired **unconditionally**, not only where a
-            # search account is connected, because §8's early fold is owed by every
-            # turn — "it fires whether or not that turn ever builds a ``WEB_SEARCH``
-            # request" — and a conversation whose footing was never lowered would report
-            # a history this decision never observed as clean.
+            # **The turn's search footing, built per turn from the conversation the
+            # turn runs under.** It is wired **unconditionally**, not only where a
+            # search account is connected, because the registration fact below is what
+            # the servicing site reads to decide both what may be composed over and
+            # whether the request closes the loop (ADR-0247 §1, §4).
             #
-            # **The same `ConversationStore` instance the capture stage holds**, and
-            # never a second handle over the same rows: ADR-0238 §8 puts the counter and
-            # the flag on the conversation record precisely so that one object's own
-            # per-conversation exclusion makes the increment atomic, and ADR-0074 §9
-            # records why a second holder would serialise nothing.
+            # **It holds no store at all** (ADR-0247 §5). ADR-0238 §8's per-conversation
+            # call budget, its stored footing flag and the three `ConversationStore`
+            # members that maintained them are removed, so nothing is spent, folded or
+            # settled here and no conversation index reaches the footing.
             #
-            # **The trust store is no longer wired in here** (ADR-0247 §1). The
+            # **The trust store is not wired in here either** (ADR-0247 §1). The
             # servicing site's two `trust_of` reads are replaced by the registration
-            # fact below, so the footing holds no trust handle at all; the store, the
-            # records it holds and `trust_of`'s answers are untouched, and the
-            # `trust-destinations` act below is still the one surface that writes it.
+            # fact below; the store, the records it holds and `trust_of`'s answers are
+            # untouched, and the `trust-destinations` act below is still the one surface
+            # that writes it.
             footing=lambda conversation_id: SearchFooting(
                 conversation_id=conversation_id,
-                conversations=conversations,
                 # **Whether this deployment holds a search registration at all**
                 # (ADR-0247 §1), which is the whole of what the servicing site now
                 # consults about the destination: the configured provider *is* the
@@ -1623,12 +1620,6 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     settings.web_search_connection is not None
                     and settings.web_search_origin is not None
                 ),
-                # **The bound is passed in rather than read by the store** (ADR-0238
-                # §8): "every judgement about what a bound is stays in
-                # `orchestration`", so the three members read no `Settings` field, hold
-                # no policy and consult no clock. `Settings` refuses a value outside
-                # 0 to 64 at load, and `0` means no search is serviced in any conversation.
-                max_calls=settings.search_calls_per_conversation,
             ),
             # The servicer hoisted above, where this deployment connected an account.
             # **The same object** `ParkedReadOperations` below is handed, and never a
@@ -1680,18 +1671,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         #
         # **The same `SearchServicer` the loop holds**, so §6's approved read is
         # dispatched through the very object that parked its question; **the same
-        # `ConversationStore` the capture stage and the footing hold**, which is
-        # ADR-0238 §8's single-instance obligation reaching a third consumer; and the
-        # same `_utcnow` every other seam here reads, guarded on the way in.
+        # `ConversationStore` the capture stage holds**, so the two cannot disagree
+        # about whether a conversation exists; and the same `_utcnow` every other seam
+        # here reads, guarded on the way in.
         #
-        # **`max_calls` is passed rather than read**, for the footing's reason: ADR-0238
-        # §8 puts "every judgement about what a bound is" in `orchestration`, and `0`
-        # means an answer that reached the dispatch is `UNAVAILABLE_NOW`.
+        # **The conversation index is read for ADR-0244 §6's clause 2 alone**, which
+        # ADR-0247 §6 repoints at `ConversationStore.get`: the fact that clause
+        # establishes is that the conversation exists and is not stamped deleted. No
+        # `Settings` bound is passed, because ADR-0247 §5 removes the one that was.
         parked_read_operations = ParkedReadOperations(
             store=parked_reads,
             conversations=conversations,
             search=search_servicer,
-            max_calls=settings.search_calls_per_conversation,
             clock=_utcnow,
         )
         engine = Engine(

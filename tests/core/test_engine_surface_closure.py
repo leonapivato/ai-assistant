@@ -1049,6 +1049,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     projection emits, and ``AssistantEngine`` gains ``cancel_read``. §17 fixes no
     numeral, for the reason every section above it does not.
 
+    **36 is ADR-0247 §10, and it is under the second limb alone** — the first entry on
+    this pin where the wire-carried type is **narrowed** rather than widened.
+    ``SearchNotServiced`` loses ``SEARCH_DISABLED`` and ``NOT_ADMITTED``, it is carried
+    on ``TurnOutcome.search_not_serviced``, and a peer at 36 handed either value by a
+    peer at 35 fails to decode it — "a change to a wire-carried ``core`` type that makes
+    a value one peer emits invalid for the other", read in the direction a default
+    cannot cover. The method set does **not** move and stands at fifty-eight: the three
+    ``ConversationStore`` members ADR-0247 §5 removes are in-process reads no peer
+    emits, and that store is on neither promoted surface. §10 fixes the numeral, which
+    is why this entry names one.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1057,7 +1068,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 35), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 36), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

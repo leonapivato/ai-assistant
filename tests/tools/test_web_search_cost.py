@@ -498,12 +498,12 @@ def test_the_search_disposition_enumeration_carries_no_member_for_a_cost() -> No
     assert [member.name for member in SearchDisposition] == [
         "NOT_CONFIGURED",
         "NO_BUDGET",
-        # ADR-0238 §11's sixteenth, in the position the servicing reaches it: after the
-        # read budget and before a query is composed. It names a stage — the admission —
-        # and no cost, so the collapse ADR-0236 §5 decided is untouched by it: a
-        # `CONFIRM` whose grounds include the cost floor is still `RULING_CONFIRM`,
-        # exactly as one produced by the disclosure floor alone is.
-        "NOT_ADMITTED",
+        # ADR-0238 §11's sixteenth stood here — `NOT_ADMITTED`, the admission the
+        # servicing reached after the read budget and before a query was composed — and
+        # ADR-0247 §6 removes it with the budget behind it. It named a stage and no cost
+        # either way, so ADR-0236 §5's collapse is untouched by its arrival and by its
+        # departure alike: a `CONFIRM` whose grounds include the cost floor is still
+        # `RULING_CONFIRM`, exactly as one produced by the disclosure floor alone is.
         "COMPOSER_DECLINED",
         "COMPOSER_UNAVAILABLE",
         "COMPOSER_MALFORMED",

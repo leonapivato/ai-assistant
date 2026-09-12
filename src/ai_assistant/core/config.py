@@ -3703,10 +3703,9 @@ class Settings(BaseSettings):
     # **Thirty seconds, unchanged, and it is the figure the tree already ran.**
     # ADR-0241 relocates a bound and reclassifies its expiry; it retunes nothing.
     #
-    # **It ships with a value rather than meaning "unbounded" when unset** (§3), for
-    # `search_calls_per_conversation`'s reason below: ADR-0194 §1's "unset means
-    # unbounded" governs a monetary ceiling an operator chooses, and `search`'s
-    # parameter has no spelling for absent anyway.
+    # **It ships with a value rather than meaning "unbounded" when unset** (§3):
+    # ADR-0194 §1's "unset means unbounded" governs a monetary ceiling an operator
+    # chooses, and `search`'s parameter has no spelling for absent anyway.
     #
     # **`orchestration` reads it and passes it at the call** (§3). The composition
     # root hands the value to `SearchServicer` — the one site holding the
@@ -3729,45 +3728,6 @@ class Settings(BaseSettings):
             "bound either ledger append, which ADR-0192 §3 pins unbounded by that "
             "seam. An expiry is `SearchRefusal.DEADLINE_EXPIRED` and spends the "
             "conversation's admitted call like any other outcome."
-        ),
-    )
-
-    # --- How much searching one conversation may do (ADR-0238 §8) ---------
-    # **The one field ADR-0238 adds, and it bounds provider calls per conversation.**
-    # Not time: §8 deletes an earlier revision's elapsed counter, claim handle and
-    # settlement member outright and states that "no clause here states a
-    # per-conversation bound on wall-clock search time". ADR-0241 §1 supplies the
-    # per-call quantity §8 recited as missing — `search_call_deadline` above — and
-    # ADR-0241 amends that premise and nothing §8 decided: this field still counts
-    # calls and not time, there is still no stored elapsed counter, provisional charge
-    # or claim handle, and a **per-conversation** bound on elapsed search time stays
-    # deferred (ADR-0238 §16, ADR-0241 §13) rather than derived from the two figures.
-    #
-    # **It ships with a value rather than meaning "unbounded" when unset.**
-    # ADR-0194 §1's "unset means unbounded" governs a *monetary* ceiling an operator
-    # chooses; a bound the milestone's exit is stated over may not be absent by
-    # omission, so a deployment that configures nothing still searches under it.
-    #
-    # **Zero is legal and its meaning is stated**: no search is serviced in any
-    # conversation, because `admit_search` refuses where the stored `calls` have
-    # already *reached* the bound. ADR-0238 §15's Arm 6g2 exists because the
-    # idiomatic spelling of a reached-the-bound comparison — a truthiness guard on
-    # the bound — admits at zero, `0` being falsy, and an arm at one call cannot
-    # catch it.
-    #
-    # **The store reads none of this.** The bound is passed in to `admit_search`
-    # rather than read by the store, so the three members ADR-0238 §8 adds to
-    # `ConversationStore` read no `Settings` field, consult no clock and hold no
-    # policy: every judgement about what a bound is stays in `orchestration`.
-    search_calls_per_conversation: _IntegerSetting = Field(
-        default=8,
-        ge=0,
-        le=64,
-        description=(
-            "The most provider calls one conversation's web searches may make "
-            "(ADR-0238 §8). From 0 to 64 inclusive, where **0 means no search is "
-            "serviced in any conversation**. A conversation that reaches it searches "
-            "no more, and the remedy is a new conversation."
         ),
     )
 

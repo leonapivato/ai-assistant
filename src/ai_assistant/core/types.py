@@ -6979,10 +6979,9 @@ class SearchRefusal(StrEnum):
     ``interrupted_outcome`` and an ``UNKNOWN`` incurred cost; where it lands
     before one, there is no claim and no completion row is written.
 
-    **A disposition and never a retry** (ADR-0241 §6). An interrupted search
-    spends the call ADR-0238 §8's ``admit_search`` admitted and no path lowers the
-    draw, because a refund would hand a stalling provider the ability to make its
-    own stalls free."""
+    **A disposition and never a retry** (ADR-0241 §6). An interrupted search is not
+    re-run on the turn that asked for it, because a retry would hand a stalling
+    provider the ability to make its own stalls free."""
 
     PROVIDER_REFUSED = "provider_refused"
     """The provider answered, and its answer is not one a search can be read from.
@@ -7153,22 +7152,34 @@ class SearchOutcome(BaseModel):
 class SearchNotServiced(StrEnum):
     """What a user is told about a search their turn did not make (ADR-0242 §8).
 
-    A **closed** enumeration of exactly **nine** members, each valued by its
+    A **closed** enumeration of exactly **seven** members, each valued by its
     lower-cased name, declared in the order below — **which is also the precedence
     order ADR-0242 §7 applies** where a turn holds more than one servicing that
     recorded a disposition. The vocabulary is *added to and never renamed*, and no
-    implementation or later ADR adds a tenth member without the ADR that decides it
+    implementation or later ADR adds an eighth member without the ADR that decides it
     (ADR-0242 §8, §14).
 
-    **The ninth member is ADR-0244 §12's**, which is the ADR ADR-0242 §8 provided
-    for: that section closes the enumeration "at exactly **eight** members" while
-    ruling that "no implementation or later ADR adds a ninth member without the ADR
-    that decides it", and ADR-0244 is that ADR. :attr:`ANSWER_AWAITED` is declared
-    **first**, which is also its position in ADR-0242 §7's precedence order, and
-    inserting at the head leaves every existing pairwise order and every existing
-    value unchanged. The eight, their values, their declared order relative to one
-    another, the added-to-and-never-renamed rule, the totality of ADR-0242 §8's
-    mapping and its non-injectivity all stand entire.
+    **It closed at nine and now closes at seven, and only the count moved** (ADR-0247
+    §6). ``SEARCH_DISABLED`` and ``NOT_ADMITTED`` were each defined over
+    ``admit_search``'s refusal and over ``Settings.search_calls_per_conversation``'s
+    value, and neither has a producer once ADR-0247 §5 removes the per-conversation
+    call budget — so both are removed, which supersedes ADR-0242 §8's closure at eight
+    members and its two-members-not-one clause, and ADR-0244 §12's re-closure at nine,
+    **in those counts alone**. They stood second and third, so **removing them leaves
+    every remaining pairwise order and every remaining value unchanged**: ADR-0242 §7's
+    precedence order, the totality and non-injectivity of §8's mapping, the
+    added-to-and-never-renamed rule and §9's bar on what a statement may say all stand
+    entire. :attr:`ANSWER_AWAITED` is still declared **first**, which is ADR-0244 §12's
+    position for it.
+
+    **:attr:`TRUST_MISSING` and :attr:`AUTHORISATION_AWAITED` are *not* removed**
+    (ADR-0247 §6). Both become unreachable on a deployment that has configured a search
+    provider — §1 stops the servicing site taking a ``trust_of`` answer at all, and §3
+    stops the establishing act's ``CONFIRM`` being produced for this path — but removing
+    them is outside that decision's own ruling, which named the budget and its
+    dependents and left the choosing act standing for every other destination. The
+    members are kept with no producer, and #2252 is the issue their removal is deferred
+    on.
 
     **It is not** :class:`~ai_assistant.orchestration.reads.SearchDisposition`
     **and neither is derivable from the other** (ADR-0242 §8). That vocabulary names
@@ -7202,15 +7213,15 @@ class SearchNotServiced(StrEnum):
     stated over what the servicing site's three permitted inputs **establish** and never
     over a cause they do not.
 
-    **Eight members chosen by what the user can do.** Five name an act the user or the
+    **Members chosen by what the user can do.** Three name an act the user or the
     operator can perform and each act is different; :attr:`DECLINED` and
     :attr:`INTERRUPTED` name something that happened to the request rather than
     something available; and :attr:`UNAVAILABLE` is the deliberate residue — one member
     rather than thirteen because none of the situations behind it gives the user
     anything to do.
 
-    **And a ninth naming work the system is still holding** (ADR-0244 §12), which is
-    why it is declared first rather than appended: the other eight each name something
+    **And one naming work the system is still holding** (ADR-0244 §12), which is
+    why it is declared first rather than appended: the others each name something
     that already ended, and a member that lost the tie-break on a turn holding one of
     those **and** an open park would leave the park unmentioned in the one place the
     user reads — and an unmentioned park is one nobody answers.
@@ -7256,40 +7267,14 @@ class SearchNotServiced(StrEnum):
     field name, ``SearchDisposition`` value, record id, decision id or command name, and
     it does not say why a ruling was not an ``ALLOW`` (ADR-0242 §9, ADR-0244 §12)."""
 
-    SEARCH_DISABLED = "search_disabled"
-    """``admit_search`` refused, and the per-conversation bound is ``0`` (ADR-0242 §8).
-
-    ADR-0238 §8 defines a bound of ``0`` as "no search is serviced in any
-    conversation", so this is the deployment's own configuration and not this
-    conversation's allowance. **The discriminator against** :attr:`NOT_ADMITTED` **is
-    that** ``Settings`` **value** — constant across every turn and read from no record —
-    which is ADR-0236 §4's own move: "The two grounds are told apart from the
-    deployment's **own configuration** and never from a per-turn record."
-
-    A statement rendered for it names an operator setting and **no user act**, and does
-    not point at a new conversation: a deployment that has switched searching off is one
-    on which a new conversation would fare no better."""
-
-    NOT_ADMITTED = "not_admitted"
-    """``admit_search`` refused under a **positive** bound (ADR-0238 §8, §11).
-
-    **It asserts that the servicing was not admitted and does not assert that this
-    conversation's allowance was consumed** (ADR-0242 §8). ADR-0238 §14 makes
-    ``admit_search`` answer ``None`` on a conversation id that names nothing and on one
-    stamped deleted as well as on a bound that is reached, and the site cannot tell those
-    apart. What a statement for it says is that the search was not admitted **for this
-    conversation** and that the allowance is per conversation — the mechanism ADR-0238 §8
-    fixes — naming no quantity, no bound and no consumption, and promising nothing about
-    what a new conversation will do."""
-
     SPEND_EXHAUSTED = "spend_exhausted"
     """A monetary ceiling or an undetermined accounted total refused it.
 
     ADR-0194, ADR-0236 and ADR-0238 §10 own the ceilings themselves; this member is the
     rendering of an outcome those decisions produce and never a decision about one. A
-    statement for it names an operator setting and no user act, and it is **distinct
-    from** :attr:`NOT_ADMITTED` — an allowance of calls and a ceiling of money are two
-    facts with two different owners."""
+    statement for it names an operator setting and no user act. A ceiling of money is
+    the only quantity left behind this member: the per-conversation allowance of calls
+    it was once told apart from is removed (ADR-0247 §5)."""
 
     DECLINED = "declined"
     """The policy ruled ``DENY`` on the request (ADR-0242 §8).
@@ -8680,80 +8665,6 @@ class ConversationExport(BaseModel):
             raise ValueError(msg)
 
         return self
-
-
-# --- the conversation's search budget: one counter, one flag (ADR-0238 §8) ---
-# **Row state, not presented model state.** `Conversation`, `ConversationTurn` and
-# `ConversationExport` gain no field and change no version — the counter and the
-# flag hold the position the turn index and `ParkedBinding`'s uniqueness already
-# hold, and `ConversationStore.search_draw` is the read that presents them. So
-# `ConversationExport.schema_version` stays at 2 and ADR-0212 §8 and ADR-0014 §5 are
-# untouched (ADR-0238 §8, §13). A lane that finds a *user-facing* need for the draw
-# moves that version in the same change, with the records that entails, rather than
-# reading this as permission not to.
-
-
-class ConversationSearchDraw(BaseModel):
-    """What one conversation has spent, and whether it is still closed (ADR-0238 §8).
-
-    A **read model** — what
-    :meth:`~ai_assistant.core.protocols.ConversationStore.search_draw` answers — and
-    **no member of that store takes one as an argument**. Exactly two fields, and a
-    lane adds no third without the ADR that decides it.
-
-    **The budget lives on the conversation record, and that is a decision with a
-    worked alternative behind it** (§8). A per-conversation durable counter has a
-    lifecycle: it must be fenced when the conversation is deleted and destroyed when
-    the record is, and **that lifecycle already exists, ratified, on exactly one
-    object** — ``stamp_deleted`` fences and ``drop_if_eligible`` destroys (ADR-0074
-    §8). An earlier revision gave the budget a store of its own and every protocol
-    for telling it about a deletion failed in a different place: the retention
-    reclaim only learns a conversation is eligible *after* ``drop_if_eligible`` has
-    destroyed the record, so a cleanup can only be ordered after the destructive act
-    and one process death strands the counter; and a reconciliation walk rests on a
-    cross-store read that **aliases a tombstoned conversation with a dropped one**.
-    Moving the counter removed the question instead of answering it.
-
-    **The pair is one counter and one flag and no content** — no query, no result, no
-    destination, no record, no text. Tier 1, local, durable, never written to a
-    remote service (ADR-0004 §2), and living under the retention, deletion and export
-    rules the conversation record already has rather than under new ones.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    calls: int = Field(
-        ge=0,
-        description=(
-            "The provider calls this conversation has spent (ADR-0238 §8). "
-            "Non-negative. Incremented by "
-            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
-            "**before** the call, so an admitted call is consumed whatever the "
-            "outcome and **no path lowers it** — a servicing that is admitted and "
-            "then does not transmit still spends its increment, because "
-            ":class:`SearchOutcome` carries no transmission fact and a refund rule "
-            "would oblige the servicer to tell two ``PROVIDER_REFUSED`` outcomes "
-            "apart when nothing in the contract distinguishes them."
-        ),
-    )
-    all_external_user_chosen: bool = Field(
-        description=(
-            "Whether **every** recorded external span this conversation has carried "
-            "was minted by a ``WEB_SEARCH`` servicing at a destination of recorded "
-            "trust :attr:`DestinationTrust.USER_CHOSEN` (ADR-0238 §8). **Required "
-            "with no default**: the value at creation is ``True`` and only "
-            ":meth:`~ai_assistant.core.protocols.ConversationStore.start` creates it "
-            "— a conversation ``start`` mints has no turns at all, so the sentence is "
-            "vacuously true of it — while a record written **before** this decision "
-            "decodes ``False``, which is ADR-0181 §12's reading of a pre-existing row "
-            "and the fail-closed direction. A default here would make those two "
-            "states one. "
-            ":meth:`~ai_assistant.core.protocols.ConversationStore.observe_search` "
-            "folds by logical **and**, so **once false it never returns to true** "
-            "(ADR-0106 §4's monotonicity on this axis) and no later clean turn raises "
-            "it."
-        )
-    )
 
 
 # --- severity scales: ordered by declaration, not by value (ADR-0016 §2) -----
@@ -11055,16 +10966,16 @@ class EgressBinding(_OriginRecordedBindingBase):
     closed_loop: bool = Field(
         default=False,
         description=(
-            "Whether this request is **closed-loop** (ADR-0238 §5): its kind is "
-            "``WEB_SEARCH``, the destination its binding carries has recorded trust "
-            ":attr:`DestinationTrust.USER_CHOSEN`, every recorded external span this "
-            "conversation has carried — on any earlier turn, and on this turn up to "
-            "the moment the request is built — was minted by a ``WEB_SEARCH`` "
-            "servicing at such a destination, and this request holds an admission "
-            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
-            "granted for this call. A request failing any of the four is not "
-            "closed-loop, and every clause ADR-0238 supersedes binds on it exactly "
-            "as it does today. **Written by `orchestration` alone**, at the moment "
+            "Whether this request is **closed-loop** (ADR-0238 §5, as ADR-0247 §4 "
+            "restates it): its kind is ``WEB_SEARCH`` and its binding is at the "
+            "destination this deployment configured a search provider at, which "
+            "ADR-0247 §1 makes the destination the owner chose. A request failing "
+            "either of the two is not closed-loop, and every clause ADR-0238 "
+            "supersedes binds on it exactly as it does today. **The third and "
+            "fourth conditions retire** (ADR-0247 §4): the lineage of the "
+            "conversation's recorded external spans no longer decides this, and "
+            "there is no per-conversation admission left to hold (ADR-0247 §5). "
+            "**Written by `orchestration` alone**, at the moment "
             "the request is built, from values it holds as data it fetched; "
             "**discarded, never merged**, if any producer emitted one; and no model "
             "output, request content or search result contributes to it (§12). "
@@ -11909,16 +11820,16 @@ class CarriedProvenance(BaseModel):
     closed_loop: bool = Field(
         default=False,
         description=(
-            "Whether this request is **closed-loop** (ADR-0238 §5): its kind is "
-            "``WEB_SEARCH``, the destination its binding carries has recorded trust "
-            ":attr:`DestinationTrust.USER_CHOSEN`, every recorded external span this "
-            "conversation has carried — on any earlier turn, and on this turn up to "
-            "the moment the request is built — was minted by a ``WEB_SEARCH`` "
-            "servicing at such a destination, and this request holds an admission "
-            ":meth:`~ai_assistant.core.protocols.ConversationStore.admit_search` "
-            "granted for this call. A request failing any of the four is not "
-            "closed-loop, and every clause ADR-0238 supersedes binds on it exactly "
-            "as it does today. **Written by `orchestration` alone**, at the moment "
+            "Whether this request is **closed-loop** (ADR-0238 §5, as ADR-0247 §4 "
+            "restates it): its kind is ``WEB_SEARCH`` and its binding is at the "
+            "destination this deployment configured a search provider at, which "
+            "ADR-0247 §1 makes the destination the owner chose. A request failing "
+            "either of the two is not closed-loop, and every clause ADR-0238 "
+            "supersedes binds on it exactly as it does today. **The third and "
+            "fourth conditions retire** (ADR-0247 §4): the lineage of the "
+            "conversation's recorded external spans no longer decides this, and "
+            "there is no per-conversation admission left to hold (ADR-0247 §5). "
+            "**Written by `orchestration` alone**, at the moment "
             "the request is built, from values it holds as data it fetched; "
             "**discarded, never merged**, if any producer emitted one; and no model "
             "output, request content or search result contributes to it (§12). "
@@ -15359,13 +15270,18 @@ class ReadAnswerOutcome(StrEnum):
     path, since the park's one answer was taken before the append was attempted."""
 
     UNAVAILABLE_NOW = "unavailable_now"
-    """The conversation no longer exists or is stamped deleted, or
-    ``search_calls_per_conversation`` is ``0`` in this deployment; nothing was ruled and
-    nothing was dispatched (ADR-0244 §9).
+    """The conversation no longer exists or is stamped deleted, or this deployment
+    holds no search registration; nothing was ruled and nothing was dispatched
+    (ADR-0244 §9, as ADR-0247 §6 supersedes its third limb).
 
-    ``admit_search`` is **not** called and no second call is drawn: the conversation's
-    call was admitted before the ruling and is consumed whatever the outcome, and
-    parking does not refund it (ADR-0238 §8, ADR-0244 §1, §6)."""
+    **The member keeps its name, its value and its position** and loses one of its
+    three grounds: ADR-0247 §5 removes ``Settings.search_calls_per_conversation``, so
+    the limb reading it goes with it, and the two that remain bind entire. What ADR-0244
+    §6's clause 2 establishes at the instant of the answer is now that the conversation
+    exists and is not stamped deleted, read through
+    :meth:`~ai_assistant.core.protocols.ConversationStore.get`; its remaining
+    sentence — that no second call is drawn — is vacuous rather than false, because
+    there is no call to draw."""
 
 
 class ReadCancellation(StrEnum):
@@ -15382,9 +15298,8 @@ class ReadCancellation(StrEnum):
     compare-and-swap and the running task's own registry.
 
     **Cancellation establishes nothing and forfeits nothing** (ADR-0244 §11). It
-    records no ruling, revokes no grant, writes no trust record, and does not refund
-    the conversation's spent ``admit_search`` call. A cancelled park frees the
-    conversation's one open-park slot and nothing else.
+    records no ruling, revokes no grant and writes no trust record. A cancelled park
+    frees the conversation's one open-park slot and nothing else.
     """
 
     WITHDRAWN = "withdrawn"

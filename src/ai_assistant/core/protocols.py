@@ -132,7 +132,6 @@ if TYPE_CHECKING:
         Conversation,
         ConversationDigest,
         ConversationExport,
-        ConversationSearchDraw,
         ConversationSummary,
         ConversationTurn,
         CurrentContext,
@@ -7442,10 +7441,10 @@ class ParkedReads(Protocol):
 
         **The read of the existing park and the write are one indivisible step**
         (ADR-0244 §3). A conversation holds at most one ``OPEN`` park, and the
-        enforcement is the store's rather than a caller's for ``admit_search``'s own
-        reason (ADR-0238 §8): two turns of one conversation, two servicings of one
-        turn, and two engines over one data directory can none of them be admitted
-        against the same conversation's park.
+        enforcement is the store's rather than a caller's, for the reason any
+        per-conversation exclusion belongs to the object holding the rows: two turns of
+        one conversation, two servicings of one turn, and two engines over one data
+        directory can none of them be admitted against the same conversation's park.
 
         **One park names one decision, and a second naming the same is refused** —
         which is what makes :meth:`park_of_decision` a single answer rather than a
@@ -8494,188 +8493,6 @@ class ConversationStore(Protocol):
             nothing. ``False`` on absence is what makes the sweep idempotent: it
             can run any number of times, and a re-run after a successful drop is a
             no-op rather than an error.
-
-        Raises:
-            ConversationStoreError: If the store cannot be written.
-        """
-        ...
-
-    async def search_draw(self, conversation_id: str, /) -> ConversationSearchDraw | None:
-        """What this conversation has spent, and whether it is still clean (ADR-0238 §8).
-
-        The read half of the budget. **One indivisible read** of the counter and the
-        flag, so a caller never sees a draw assembled from two moments.
-
-        **``None`` for an id that names nothing and for a conversation stamped
-        deleted**, which is :meth:`get`'s own rule — "``None`` when the id names
-        nothing **or** names a conversation stamped deleted" — and ``None`` fails
-        ADR-0238 §5's recorded-half condition. An earlier revision of that section
-        needed a second limb, because a separate store could be *silent* about a
-        conversation that existed; this store cannot be silent about one, so the limb
-        is gone.
-
-        **It creates nothing.** For an unknown id, for a stamped conversation, and
-        after :meth:`drop_if_eligible` has removed the record, this answers ``None``
-        and afterwards still answers ``None``.
-
-        **A record written before ADR-0238 decodes with a zero draw and the flag
-        ``False``** (§8, §13) — ADR-0181 §12's reading of a pre-existing row, and the
-        fail-closed direction: this decision never observed such a conversation's
-        turns, so it may not report them clean. **No lane back-fills the field, infers
-        it from an episode, a log or a trail, or reads its absence as a clean
-        history.**
-
-        **It reads no ``Settings`` field and consults no clock.** That the store has a
-        clock of its own for :meth:`drop_if_eligible`'s grace is not a licence for
-        this one to read it.
-
-        Args:
-            conversation_id: Untrusted input from an adapter, treated as such.
-
-        Returns:
-            The draw, or ``None`` where the conversation is unknown or stamped.
-            ``None`` means exactly that and **never** that the store could not be
-            read.
-
-        Raises:
-            ConversationStoreError: If the store cannot be read, or a stored row is
-                corrupt.
-        """
-        ...
-
-    async def admit_search(
-        self, conversation_id: str, /, *, max_calls: int
-    ) -> ConversationSearchDraw | None:
-        """Admit or refuse the next search call against the ceiling (ADR-0238 §8).
-
-        **One atomic step: compare, increment, and answer.** Given a conversation and
-        the bound, it refuses where the stored ``calls`` have **reached**
-        ``max_calls``; otherwise it increments ``calls`` by one and answers the draw
-        **as it stands after the increment**. The read, the comparison and the write
-        are one indivisible step.
-
-        **There is no handle.** It returns no token, nothing is settled afterwards,
-        and no member of this store takes a claim, a charge, a deadline or an
-        interval. An earlier revision of ADR-0238 §8 carried all of that and it is
-        deleted rather than relocated.
-
-        **The atomicity is an obligation this store already carries, extended rather
-        than invented.** §9 rules that this store "owes per-conversation mutual
-        exclusion between an append and a deletion as a contract obligation … which
-        every implementation satisfies in its own way: an in-memory store with a
-        lock, a SQLite-backed one with a transaction, which is also what makes it
-        hold across processes". **The exclusion the increment needs is the exclusion
-        the record already owes**, and it is why concurrent turns, a failed turn and a
-        process exit are answered by one clause rather than three: **two turns of one
-        conversation, two servicings of one turn, and two engines over one data
-        directory can none of them be admitted against the same draw.** A caller-side
-        lock discharges none of it, for §9's own reason.
-
-        **The bound is passed in rather than read by the store**, so this member reads
-        no ``Settings`` field, consults no clock and holds no policy — every judgement
-        about what a bound *is* stays in `orchestration`. ``max_calls`` of **zero** is
-        legal and refuses every search, because the stored ``calls`` have already
-        reached it; an implementation guarding on the bound's truthiness admits at
-        zero and is wrong.
-
-        **An admitted call is consumed whatever the outcome, and there is no refund**
-        (§8). A servicing that is admitted and then does not transmit — a binding that
-        refused, a ruling that was not ``ALLOW``, a provider that rejected before or
-        after receiving the query — still spends its increment, and **no path lowers
-        ``calls``**. The increment is durable and taken **before** the call rather
-        than written at capture, so a ``PlanningError`` on a later revision cannot
-        erase a completed search's draw.
-
-        **It creates nothing, and that is** :meth:`append`'s **property rather than a
-        new one.** For an id that names nothing, and for one naming a conversation
-        stamped deleted, this answers ``None``. It **answers instead of raising** —
-        where :meth:`append` raises ``UnknownConversationError`` — because it is
-        reached by a servicing that may already have been in flight when the deletion
-        landed, and a user deleting a conversation should not turn a running turn into
-        an error.
-
-        **It does not consult the flag.** Admission is decided on ``calls`` and on
-        nothing else, and **no member of this store gates admission on the footing**.
-        The draw this returns is the value at the moment of admission and is
-        **not** ADR-0238 §5's recorded-half read: that section forbids carrying it
-        forward, and requires the flag to be read by :meth:`search_draw` at the moment
-        the request is built.
-
-        **No ``initial_footing``, and no argument on any member decides what the flag
-        starts at** (§8). An earlier revision passed a history fact in because this
-        member could create a row; it cannot, so there is nothing for such an argument
-        to be for, and **a lane that adds one has reintroduced the creation path that
-        clause removes.**
-
-        Args:
-            conversation_id: Untrusted input from an adapter, treated as such.
-            max_calls: The ceiling to compare against — a deployment's
-                ``Settings.search_calls_per_conversation``, supplied by the caller.
-                Non-negative.
-
-        Returns:
-            The draw after the increment where the call is admitted, or ``None``
-            where it is refused, where the id names nothing, or where the
-            conversation is stamped deleted. ``None`` never means the store could not
-            be read.
-
-        Raises:
-            ValueError: If ``max_calls`` is not a non-negative ``int``. Refused rather
-                than clamped, for :meth:`recent`'s reason: a bound that is not an
-                integer can *disable* the comparison rather than mis-size it.
-            ConversationStoreError: If the store cannot be written.
-        """
-        ...
-
-    async def observe_search(
-        self, conversation_id: str, /, *, all_external_user_chosen: bool
-    ) -> None:
-        """Fold the caller's value into the stored flag by logical **and** (ADR-0238 §8).
-
-        **The store folds; it does not compute.** `orchestration` decides whether
-        **every** recorded external span the turn carried was minted by a
-        ``WEB_SEARCH`` servicing at a destination of recorded trust ``USER_CHOSEN``,
-        from records it holds as data it fetched, and passes the answer here. This
-        member holds no policy, reads no ``Settings`` field and consults no clock.
-
-        **By ``and`` and by no other operation** (§8). **Once false the flag never
-        returns to true** — ADR-0106 §4's monotonicity read on this axis — which is
-        what keeps a conversation closed after the tainting episode has fallen out of
-        the tail (ADR-0223 §6's un-tainting, which ADR-0238 does not disturb). No lane
-        adds a member, a flag or a repair that raises it.
-
-        **Called twice per turn in the ordinary case, and the two agree.** The **early
-        fold** fires the moment `orchestration` admits to a turn a recorded external
-        span that was *not* so minted — whether or not that turn ever builds a search
-        request — and capture's fold remains, unchanged. The early one is *earlier,
-        not instead*, and it is why the flag goes false **as early as the fact
-        exists** rather than at the end of the turn.
-
-        **A half that reads *true* is never folded early** (§8): reporting a turn
-        clean stays capture's alone, because only capture sees the turn's *final*
-        supply. The early fold writes ``False`` and nothing else, it is idempotent,
-        and repeating it costs nothing.
-
-        **It creates nothing and raises nothing at the lifecycle edges** (§8). For an
-        id that names nothing, for a conversation stamped deleted, and after
-        :meth:`drop_if_eligible` has removed the record, this **does nothing and
-        raises nothing** — there is nothing for a late fold to resurrect, because the
-        budget is a property of the conversation record. Like :meth:`admit_search` it
-        answers instead of raising, and for the same reason: the fold may arrive from
-        a servicing that was already in flight when the deletion landed.
-
-        **Nothing here serialises two turns of one conversation** (§8). The store's
-        per-conversation exclusion serialises each member's own read-and-write, not
-        two turns' worth of work, and `orchestration` cannot fold a fact before it
-        holds it — so a :meth:`search_draw` concurrent with this single await can
-        still return the not-yet-lowered value. **A lane that reads any clause here as
-        an ordering obligation on the caller has misread that section**; there is no
-        such obligation, and none would be dischargeable.
-
-        Args:
-            conversation_id: Untrusted input from an adapter, treated as such.
-            all_external_user_chosen: The caller's computed value for one turn, folded
-                by ``and`` into what is stored.
 
         Raises:
             ConversationStoreError: If the store cannot be written.
@@ -11164,9 +10981,8 @@ class AssistantEngine(Protocol):
         ADR-0244 leaves open.
 
         **Cancellation establishes nothing and forfeits nothing.** It records no
-        ruling, revokes no grant, writes no trust record, and does **not** refund the
-        conversation's spent ``admit_search`` call (ADR-0238 §8). A cancelled park
-        frees the conversation's one open-park slot and nothing else.
+        ruling, revokes no grant and writes no trust record. A cancelled park frees the
+        conversation's one open-park slot and nothing else.
 
         Args:
             token: The opaque continuation naming the park, as

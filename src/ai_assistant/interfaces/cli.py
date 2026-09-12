@@ -7078,17 +7078,25 @@ def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = Non
     )
 
 
-def _render_search_not_serviced(  # noqa: C901 — one arm per member of a closed nine-member vocabulary, and ADR-0242 §9 forbids the mapping that would collapse them
+def _render_search_not_serviced(
     member: SearchNotServiced | None,
 ) -> None:
     """ADR-0242 §9's statement for this turn, **beside the reply and never in place of it**.
 
     **One fixed statement per member, written out as a literal** (§9, §13). Neither
-    these nor the composing stage's eight prompt fragments are assembled from a
-    member's value, its name, a format string over the vocabulary, or a mapping a later
-    member would silently join: "A member added without its two texts is a member with
-    no rendering, and §8's closure at eight is what makes that a review question rather
-    than a runtime one."
+    these nor the composing stage's prompt fragments are assembled from a member's
+    value, its name, a format string over the vocabulary, or a mapping a later member
+    would silently join: "A member added without its two texts is a member with no
+    rendering, and §8's closure is what makes that a review question rather than a
+    runtime one."
+
+    **Two arms went with their members** (ADR-0247 §6). ``SEARCH_DISABLED`` and
+    ``NOT_ADMITTED`` were each defined over ``admit_search``'s refusal and over
+    ``Settings.search_calls_per_conversation``'s value, and ADR-0247 §5 removes the
+    per-conversation call budget entire — so neither member has a producer and neither
+    has a statement to render. The remaining seven are unchanged, byte for byte, and
+    this is the one file outside ADR-0247 §11's lane-4 list that its enumeration
+    names.
 
     **The command name is here and not in the reply, and the split is decided rather
     than incidental** (§9). A command name in a model-composed reply is wrong twice
@@ -7134,17 +7142,17 @@ def _render_search_not_serviced(  # noqa: C901 — one arm per member of a close
     say the request was composed from the user's own words alone, does not say no
     external content was involved, and names no source and no kind of source.
 
-    **None of the eight carries** a destination, a host, an origin, a provider name, a
+    **None of them carries** a destination, a host, an origin, a provider name, a
     connection reference, an account identity, a query or any fragment of one, a
     record, a count, a monetary figure, a duration, a budget, a ``Settings`` field name
     or a ``SearchDisposition`` value (§9). §7's bar on the prompt fragments and this
     bar are one rule stated at the two render sites it has to hold at.
 
-    **The ninth statement names ``assistant resume``, which is ADR-0244 §18's own
-    assignment of it to this lane**, and it is the only one of the nine that names
-    work the system is still holding rather than something that already ended
+    **``ANSWER_AWAITED``'s statement names ``assistant resume``, which is ADR-0244
+    §18's own assignment of it to this lane**, and it is the only one that names work
+    the system is still holding rather than something that already ended
     (ADR-0244 §12). So it is the only one whose act *changes this same lookup*: the
-    other eight name an act that might make some later search go differently, and
+    others name an act that might make some later search go differently, and
     this one names where the question already recorded is answered. It names the
     withdrawal beside the answer because ADR-0244 §13 gives this surface both — "the
     command line and the browser each render the pending read, collect the answer,
@@ -7172,16 +7180,6 @@ def _render_search_not_serviced(  # noqa: C901 — one arm per member of a close
                 "as a question rather than made, and the question is still open: "
                 "'assistant resume' is where you answer it, and 'assistant cancel-read' "
                 "withdraws it.[/]"
-            )
-        case SearchNotServiced.SEARCH_DISABLED:
-            _print(
-                "[dim]Note: looking things up outside this system is switched off in "
-                "this installation. That is an operator setting.[/]"
-            )
-        case SearchNotServiced.NOT_ADMITTED:
-            _print(
-                "[dim]Note: this conversation did not admit that lookup. The allowance "
-                "is per conversation, so a new conversation has one of its own.[/]"
             )
         case SearchNotServiced.SPEND_EXHAUSTED:
             _print(

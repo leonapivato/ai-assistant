@@ -84,8 +84,10 @@ _FRAGMENTS: Final = (
     # this one says a lookup is waiting on their answer — and neither says the lookup
     # produced nothing, which is the literal #2221 records as false.
     "waiting on an answer from this person before it can be made",
-    "this installation does not make them at all",
-    "no such lookup was made on this occasion",
+    # `SEARCH_DISABLED`'s and `NOT_ADMITTED`'s fragments stood here and are gone with
+    # their members (ADR-0247 §6): each was defined over `admit_search`'s refusal and
+    # over `Settings.search_calls_per_conversation`'s value, and §5 removes the
+    # per-conversation call budget entire.
     "a limit this installation is run under stood in the way",
     "the rules this installation is run under declined it",
     "is not one this person has chosen to have things composed for",

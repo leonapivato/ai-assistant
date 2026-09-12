@@ -51,13 +51,14 @@ _SCOPE: Final = composing._PLAN_IS_ABOUT_ACTING
 #: the absence of a capability, on a turn whose search had in fact been ruled on.
 _FALSE_CAUSE: Final = "no capability available to me actually performs web retrieval"
 
-#: The three members #2213's brief names, and the three the walkthrough could have hit:
-#: ``UNAVAILABLE`` is what the observed run carried, and the other two are the members a
-#: deployment one act away from that run produces.
+#: The members #2213's brief names that the walkthrough could still hit: ``UNAVAILABLE``
+#: is what the observed run carried, and ``TRUST_MISSING`` is the member a deployment one
+#: act away from that run produces. The third, ``NOT_ADMITTED``, is gone with the
+#: per-conversation call budget (ADR-0247 §5, §6), so there is no longer a deployment
+#: that produces it.
 _REPORTED: Final = (
     SearchNotServiced.UNAVAILABLE,
     SearchNotServiced.TRUST_MISSING,
-    SearchNotServiced.NOT_ADMITTED,
 )
 
 _HEADING: Final = "What the assistant decided to do:"
@@ -248,17 +249,20 @@ def test_the_scope_line_states_no_cause_and_promises_no_outcome() -> None:
 
 
 def test_the_line_forbids_a_reading_and_not_a_true_statement() -> None:
-    """It must not contradict ``SEARCH_DISABLED``'s own fragment.
+    """It forbids a *reading* of the plan block and no fragment's own statement.
 
-    That fragment tells the model to say "this installation does not make them at
-    all" — a true statement about lookups on such a deployment. A blanket prohibition
-    on saying that this assistant does not look things up would put the two texts in
-    conflict and leave the model to pick, which is the shape #1155 calls a deadlock
-    rather than a finding. So the line forbids *reading the plan block* that way and
-    leaves the instruction's own statement standing.
+    The fragment that made this sharpest was ``SEARCH_DISABLED``'s — "this installation
+    does not make them at all", a true statement about lookups on such a deployment —
+    and it is gone with its member (ADR-0247 §6). The clause is stated about the plan
+    block rather than about any one fragment, so it stands unchanged: a blanket
+    prohibition on saying that this assistant does not look things up would put two
+    texts in conflict and leave the model to pick, which is the shape #1155 calls a
+    deadlock rather than a finding.
     """
     assert "Do not read it as saying" in _SCOPE
-    disabled = composing._SEARCH_NOT_SERVICED_PROMPTS[SearchNotServiced.SEARCH_DISABLED]
-    assert "this installation does not make them at all" in disabled, (
-        "the fragment this line must not contradict is unchanged by #2213"
+    assert "Do not" not in _SCOPE.split("Do not read it as saying")[0], (
+        "the prohibition is on the reading and is not a second, earlier blanket one"
+    )
+    assert set(composing._SEARCH_NOT_SERVICED_PROMPTS) == set(SearchNotServiced), (
+        "and every member the vocabulary still holds has a fragment of its own"
     )

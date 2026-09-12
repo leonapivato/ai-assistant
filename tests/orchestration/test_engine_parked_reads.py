@@ -142,7 +142,6 @@ class _Clock:
 def _wired(
     *,
     composing: ComposingStage | None = None,
-    search_calls: int = 8,
     configured: bool = False,
 ) -> _Wired:
     """The real pipeline over shared stores, with a parked-read store wired.
@@ -173,7 +172,6 @@ def _wired(
         planner=_AskingPlanner(_search()),
         composing=composing,
         now=clock,
-        search_calls=search_calls,
         search=SearchServicer(
             composer=composer,
             searcher=searcher if configured else _CostedSearcher(searcher),
@@ -555,19 +553,28 @@ async def test_a_cancelled_parks_decision_does_return_to_the_grantable_listing()
 # --- Arm 6: the changed operation ---------------------------------------------
 
 
-async def test_a_deployment_at_zero_calls_refuses_the_answer_as_unavailable() -> None:
-    """§19's Arm 6, third limb, and ADR-0244 §6's clause 2.
+async def test_unconfiguring_refuses_an_open_parks_answer_as_unavailable() -> None:
+    """ADR-0247 §12's **Arm G**, over the production ``parked_reads`` path.
 
-    ADR-0238 §8 defines a bound of ``0`` as "no search is serviced in any conversation",
-    and an answer reaching a deployment that has since switched searching off is refused
-    before any ruling: nothing was ruled and nothing was dispatched.
+    "With a park open and the deployment holding no search registration, the answer rules
+    nothing, dispatches nothing and returns ``UNAVAILABLE_NOW``; the park is still
+    ``OPEN``." The arm exists because lane 4 deletes the ``max_calls == 0`` limb beside
+    this one and must not disturb it: the no-searcher limb is taken **before** the
+    conversation is read, and it is what a deployment that disconnected its search
+    account answers.
+
+    The limb this replaces was ADR-0238 §8's bound of ``0``, which ADR-0247 §5 removes —
+    so the deployment fact an answer can still meet is this one and the conversation's
+    own existence, which ``test_an_answer_for_a_deleted_conversation_is_refused_as_unavailable``
+    drives through ``ConversationStore.get`` (ADR-0247 §6).
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
+    park = await _parked(wired)
     # The deployment's own configuration, changed under a standing question — which is
     # exactly the state §6's clause 2 is written for.
-    wired.engine._parked_reads._max_calls = 0
+    wired.engine._parked_reads._search = None
 
     outcome = await wired.engine.resume(
         parked.read_confirmation.token, approved=True, timeout=PATIENT
@@ -576,6 +583,9 @@ async def test_a_deployment_at_zero_calls_refuses_the_answer_as_unavailable() ->
     assert outcome.read_answer is ReadAnswerOutcome.UNAVAILABLE_NOW
     assert wired.searcher.searched == []
     assert [row for row in await wired.trail.recent() if row.resolves] == [], "nothing was ruled"
+    still_open = await wired.parks.get(park.id)
+    assert still_open is not None
+    assert still_open.disposition is ParkedReadDisposition.OPEN, "and the park is not spent"
 
 
 # --- Arm 7: cancellation ------------------------------------------------------
@@ -1551,13 +1561,14 @@ async def test_an_expired_park_answered_with_an_act_reports_no_carrier_at_all() 
 async def test_an_unavailable_deployment_answered_with_an_act_reports_no_carrier() -> None:
     """``UNAVAILABLE_NOW`` beside an act: this deployment can rule on nothing.
 
-    ADR-0238 §8's bound of ``0``, read under a standing question. Clause 2 precedes the
-    gate and the policy alike, so the park is not spent and no answer is recorded.
+    A deployment that disconnected its search account, read under a standing question
+    (ADR-0247 §12's Arm G). Clause 2 precedes the gate and the policy alike, so the park
+    is not spent and no answer is recorded.
     """
     wired = _wired()
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
-    wired.engine._parked_reads._max_calls = 0
+    wired.engine._parked_reads._search = None
 
     outcome = await wired.engine.resume(
         parked.read_confirmation.token,
@@ -1835,10 +1846,14 @@ async def test_an_answer_whose_decision_was_already_resolved_dispatches_nothing(
 
 
 async def test_an_answer_for_a_deleted_conversation_is_refused_as_unavailable() -> None:
-    """§19's Arm 6, third limb's other half, and ADR-0244 §6's clause 2.
+    """§19's Arm 6, third limb's other half, and ADR-0244 §6's clause 2 as ADR-0247 §6
+    repoints it.
 
-    "``search_draw`` answers a draw for ``conversation_id`` — so a conversation that
-    names nothing **or is stamped deleted** refuses (ADR-0238 §14)". Nothing is ruled and
+    Clause 2 used to establish that ``search_draw`` answered a draw and that
+    ``Settings.search_calls_per_conversation`` was not ``0``; with both removed, the fact
+    it was establishing is that **the conversation exists and is not stamped deleted**,
+    and ``ConversationStore.get`` answers it by the same rule — "``None`` when the id
+    names nothing **or** names a conversation stamped deleted". Nothing is ruled and
     nothing is dispatched, which is what ``UNAVAILABLE_NOW`` says; and the park is left
     where it is, because clause 2 precedes the gate.
 
@@ -1913,39 +1928,6 @@ async def test_parking_a_read_survives_a_trail_that_cannot_be_read() -> None:
     assert outcome.read_confirmation is not None, "and the question was assembled"
     assert unreadable.gets == 0, "with no trail read on the parking turn's path at all"
     assert len(await wired.parks.outstanding()) == 1
-
-
-async def test_a_resumed_turn_folds_its_supply_onto_the_conversations_footing() -> None:
-    """ADR-0238 §8's two folds, owed by a resumed turn as by any other.
-
-    §8's trigger is *the admission* — "whether or not that turn ever builds a
-    ``WEB_SEARCH`` request" — and a resumed turn admits records to a conversation
-    exactly as any other does. A pass that folded neither would leave
-    ``all_external_user_chosen`` standing at ``True`` over a supply that had just
-    carried external content, and ADR-0238 §5's **recorded** half would then hand a
-    later search a ``closed_loop`` it has not earned.
-
-    **The approved read's own records are what lower it here**, and that is the
-    fail-closed direction ADR-0244 §6 leaves available: at the answer "``trust_of`` is
-    not asked again", so this pass holds no answer to §8's "at a destination of recorded
-    trust ``USER_CHOSEN``" and may not invent one.
-    """
-    wired = _wired()
-    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
-    assert parked.read_confirmation is not None
-    park = await _parked(wired)
-    before = await wired.engine._conversations._conversations.search_draw(park.conversation_id)
-    assert before is not None
-    assert before.all_external_user_chosen is True, "the parking turn carried nothing external"
-
-    await wired.engine.resume(parked.read_confirmation.token, approved=True, timeout=PATIENT)
-
-    after = await wired.engine._conversations._conversations.search_draw(park.conversation_id)
-    assert after is not None
-    assert after.all_external_user_chosen is False, (
-        "the resumed turn's supply carried the read's own records, and §8's fold is "
-        "what keeps a later search from composing over them under a closed loop"
-    )
 
 
 # --- ADR-0247 §12's Arms F and F': what moves a park's binding and what does not

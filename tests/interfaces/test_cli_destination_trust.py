@@ -496,12 +496,10 @@ def test_the_grantable_listing_names_both_acts_as_two(
     assert "standing_destination_trust" not in [call[0] for call in engine.calls]
 
 
-# --- §9: the eight statements, over their rendered bytes ---------------------
+# --- §9: one statement per member, over their rendered bytes -----------------
 
 
 _STATEMENTS: Final = {
-    SearchNotServiced.SEARCH_DISABLED: ("switched off in this installation", "operator setting"),
-    SearchNotServiced.NOT_ADMITTED: ("did not admit that lookup", "per conversation"),
     SearchNotServiced.SPEND_EXHAUSTED: ("spending ceiling refused", "operator setting"),
     SearchNotServiced.DECLINED: ("declined when it was ruled on",),
     SearchNotServiced.TRUST_MISSING: (

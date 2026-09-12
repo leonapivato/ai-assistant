@@ -29,7 +29,6 @@ from conversation_store_contract import (
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
-    ConversationSearchDraw,
     ParkedBinding,
     SpokenDelivery,
     SpokenDeliveryState,
@@ -66,11 +65,6 @@ _SYNC_METHODS = {
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
     "record_observed": "_record_observed_sync",
-    # ADR-0238 §8's three, each its own lock site and so its own place ADR-0054's
-    # bug can reappear.
-    "admit_search": "_admit_search_sync",
-    "observe_search": "_observe_search_sync",
-    "search_draw": "_search_draw_sync",
     "get": "_get_sync",
     "turns": "_turns_sync",
     "turns_after": "_turns_after_sync",
@@ -2144,7 +2138,7 @@ async def test_the_watermark_survives_a_reopen(tmp_path: Path) -> None:
         reopened.close()
 
 
-# --- ADR-0238 §8, §13: what a record written before this decision decodes to ---
+# --- ADR-0247 §5: the two vestigial columns and their migration stay ---------
 
 
 def _drop_the_search_draw_columns(database: Path) -> None:
@@ -2154,9 +2148,7 @@ def _drop_the_search_draw_columns(database: Path) -> None:
     produced by the *current* store and then walked backwards, so everything but the
     two columns under test is authentic and a legacy database in the wild is exactly
     this file. ``ALTER TABLE … DROP COLUMN`` rather than a rebuild, because that is the
-    minimal walk back and it leaves ``observed_through`` in place — the point is a row
-    written by the build *immediately* before this decision, not by one before every
-    decision.
+    minimal walk back and it leaves ``observed_through`` in place.
     """
     raw = sqlite3.connect(database, isolation_level=None)
     try:
@@ -2166,91 +2158,99 @@ def _drop_the_search_draw_columns(database: Path) -> None:
         raw.close()
 
 
-async def test_a_conversation_written_before_this_decision_decodes_with_a_zero_draw(
+def _conversation_columns(database: Path) -> set[str]:
+    """The column names ``conversations`` actually holds, read from the file."""
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        return {str(row[1]) for row in raw.execute("PRAGMA table_info(conversations)")}
+    finally:
+        raw.close()
+
+
+async def test_the_two_vestigial_columns_are_added_to_a_file_written_without_them(
     tmp_path: Path,
 ) -> None:
-    """ADR-0238 §8 and §13, and the ``False`` is the load-bearing half.
+    """ADR-0247 §5: the columns and ``_migrate_search_draw`` stay although nothing reads them.
 
-    "A conversation record written before this decision decodes with a **zero draw and
-    the flag ``False``**." That is ADR-0181 §12's own reading of a pre-existing row and
-    the fail-closed direction: this decision never observed such a conversation's
-    turns, so it may not report them clean. ``observe_search`` folds by **and**, so no
-    later clean turn raises it, and §5's recorded half refuses every search of such a
-    conversation for as long as it lives.
+    What the migration buys once the budget is gone is **one shape**: a file written
+    before ADR-0238, one written under it and one written after the removal all hold the
+    same ``conversations`` table, so no read, export or backup has to know which of the
+    three it is looking at. Dropping the pair instead would mean rebuilding the one
+    table holding every conversation, which §13 defers with what fires it.
 
-    **This is what closes a legacy conversation whose stamped episode is gone** (§8).
-    Such a conversation may, by the time of its next turn, have lost that episode —
-    expired under ADR-0007 §2, deleted, or fallen out of the tail — so its current
-    turn's supply can be perfectly clean. The decoded ``False`` is what refuses it, and
-    no later clean capture rescues it.
+    The older rung of the same ladder is asserted in the same open — a file lacking the
+    watermark *and* the two columns — because ``CREATE TABLE IF NOT EXISTS`` is a no-op
+    against a file that already holds ``conversations``, so an ordering bug between the
+    migrations would be found after a downgrade rather than in review.
     """
     path = tmp_path / "conversations.db"
     first = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         conversation = await first.start()
-        await first.admit_search(conversation.id, max_calls=5)
         await first.append(conversation.id, occurred_at=_NOW)
     finally:
         first.close()
     _drop_the_search_draw_columns(path)
+    _drop_the_watermark_column(path)
+    assert "search_calls" not in _conversation_columns(path)
 
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        assert await reopened.search_draw(conversation.id) == ConversationSearchDraw(
-            calls=0, all_external_user_chosen=False
-        )
-
-        await reopened.observe_search(conversation.id, all_external_user_chosen=True)
-
-        folded = await reopened.search_draw(conversation.id)
-        assert folded is not None
-        assert not folded.all_external_user_chosen
+        assert _conversation_columns(path) >= {
+            "search_calls",
+            "all_external_user_chosen",
+            "observed_through",
+        }
+        # Every presenting read still answers, which is the whole of what the migration
+        # is for: a conversation written before either decision opens and reads.
+        assert (await reopened.get(conversation.id)) is not None
+        assert [turn.ordinal for turn in await reopened.turns(conversation.id)] == [1]
     finally:
         reopened.close()
 
 
-async def test_a_conversation_from_before_every_column_decodes_the_same_way(
+async def test_start_writes_neither_vestigial_column_and_both_take_their_default(
     tmp_path: Path,
 ) -> None:
-    """The older rung of the same ladder, so the migration is not order-dependent.
+    """ADR-0247 §5: "read by nothing and **written by nothing**".
 
-    A file written before ADR-0212 lacks the watermark *and* the two columns here, and
-    both migrations run in one open. Asserted because ``CREATE TABLE IF NOT EXISTS`` is
-    a no-op against a file that already holds ``conversations``, so a store opened over
-    such a database would otherwise fail its first read on columns that are not there —
-    a resident process that will not start, found after a downgrade rather than in
-    review.
+    ``start`` used to be the one place a draw was created, writing the flag ``1``
+    explicitly. With the budget removed it names neither column, so both take the
+    ``NOT NULL DEFAULT 0`` their declaration carries — which is also what makes a build
+    that names only the columns it knows go on inserting against an upgraded file, the
+    property ``_OBSERVED_COLUMN`` already states one column over.
+
+    Read from the file rather than through the store, because there is no longer any
+    read that presents either value — which is the point.
     """
     path = tmp_path / "conversations.db"
-    first = SqliteConversationStore(path=path, now=_fixed_now)
+    store = SqliteConversationStore(path=path, now=_fixed_now)
     try:
-        conversation = await first.start()
+        conversation = await store.start()
     finally:
-        first.close()
-    _drop_the_watermark_column(path)
+        store.close()
 
-    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    raw = sqlite3.connect(path, isolation_level=None)
     try:
-        assert await reopened.search_draw(conversation.id) == ConversationSearchDraw(
-            calls=0, all_external_user_chosen=False
-        )
+        row = raw.execute(
+            "SELECT search_calls, all_external_user_chosen FROM conversations WHERE id = ?",
+            (conversation.id,),
+        ).fetchone()
     finally:
-        reopened.close()
+        raw.close()
+    assert row == (0, 0), "both columns take their declared default and neither is written"
 
 
 async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
     tmp_path: Path,
 ) -> None:
-    """§13 pinned against the **schema** rather than assumed from the code.
+    """The schema half of the same claim, pinned against the file rather than the code.
 
-    A build written before this decision names only the columns it knows in its
+    A build written before ADR-0238 names only the columns it knows in its
     ``INSERT INTO conversations(...)``. ``NOT NULL DEFAULT 0`` is what keeps that
     build's ``start`` working against an upgraded database — a ``NOT NULL`` column with
     no default would make it fail, which is a refusal to serve arriving through the
-    schema, the failure ``_OBSERVED_COLUMN`` already states one column over.
-
-    And the row it writes decodes with the flag ``False``, which is the correct answer:
-    this decision did not create that conversation, so it has not observed its turns.
+    schema.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -2264,210 +2264,6 @@ async def test_an_insert_naming_only_the_pre_decision_columns_still_succeeds(
         finally:
             raw.close()
 
-        assert await store.search_draw("older-build") == ConversationSearchDraw(
-            calls=0, all_external_user_chosen=False
-        )
-        assert await store.admit_search("older-build", max_calls=2) == ConversationSearchDraw(
-            calls=1, all_external_user_chosen=False
-        )
-    finally:
-        store.close()
-
-
-async def test_a_row_carrying_a_negative_counter_is_a_store_fault(tmp_path: Path) -> None:
-    """A corrupt draw is reported rather than handed on as an ordinary integer.
-
-    ``calls`` is what a ceiling is compared against, so a negative one reaching a
-    caller would admit searches past the bound while every message still named a
-    ceiling — the mechanism turned off by a number rather than by an operator. Decoded
-    through the model for that reason, exactly as ``_decode_conversation`` decodes a
-    row rather than reading it positionally.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "UPDATE conversations SET search_calls = -1 WHERE id = ?", (conversation.id,)
-            )
-        finally:
-            raw.close()
-
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.search_draw(conversation.id)
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    "stored",
-    [
-        pytest.param(2, id="a truthy integer that is not one"),
-        pytest.param(-1, id="a negative integer"),
-        pytest.param("false", id="the string a hand-edit writes"),
-    ],
-)
-async def test_a_row_carrying_a_flag_this_store_never_wrote_is_a_store_fault(
-    tmp_path: Path, stored: object
-) -> None:
-    """The fail-**open** direction closed on the one field ADR-0238 §8 makes monotone.
-
-    SQLite's type affinity is not a constraint: an ``INTEGER`` column accepts whatever
-    a writer binds, so a hand-built or damaged row can hold any of these — and ``bool``
-    maps **every one of them** to ``True``, including the string ``"false"``. A
-    conversation whose history this decision never saw would then read as *clean*,
-    which is precisely the state §13's decoded ``False`` exists to prevent, and it
-    would do so silently: ``search_draw``'s documented behaviour for a corrupt row is
-    an error, not a footing.
-
-    Refused rather than coerced, and refused for the truthy values as well as the
-    falsy ones: a store that accepted ``2`` as ``True`` would be reading a value nobody
-    wrote as the answer to a question about what nobody observed.
-
-    **What is *not* here is the class affinity already handles**, and the distinction
-    is worth stating so a later lane does not read the check as wider than it is: an
-    ``INTEGER`` column losslessly converts a value that *is* an integer in another
-    spelling, so ``"0"`` and ``1.0`` arrive as ``0`` and ``1`` and are correct rather
-    than corrupt. What affinity does **not** convert is a value with no integer
-    reading — which is why the string below is the one string in this list.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "UPDATE conversations SET all_external_user_chosen = ? WHERE id = ?",
-                (stored, conversation.id),
-            )
-        finally:
-            raw.close()
-
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.search_draw(conversation.id)
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.admit_search(conversation.id, max_calls=5)
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize("stored", [0, 1])
-async def test_the_two_values_this_store_writes_decode(tmp_path: Path, stored: int) -> None:
-    """The other side of the refusal above: both legitimate values still read.
-
-    Stated because the parametrisation above would pass against an implementation that
-    refused *every* stored flag — which would be a store nobody could read.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "UPDATE conversations SET all_external_user_chosen = ? WHERE id = ?",
-                (stored, conversation.id),
-            )
-        finally:
-            raw.close()
-
-        draw = await store.search_draw(conversation.id)
-
-        assert draw is not None
-        assert draw.all_external_user_chosen is bool(stored)
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize(
-    "stored",
-    [
-        pytest.param("1_0", id="a numeric underscore SQL and pydantic read differently"),
-        pytest.param("2x", id="a numeric prefix SQL takes and pydantic refuses"),
-        pytest.param(-1, id="a negative count"),
-        pytest.param("many", id="text with no numeric reading"),
-    ],
-)
-async def test_a_corrupt_counter_is_refused_without_changing_the_row(
-    tmp_path: Path, stored: object
-) -> None:
-    """ADR-0238 §8's "no path lowers ``calls``", against the reader that would.
-
-    The load-bearing case is ``"1_0"``, and it is not a range problem. **Pydantic reads
-    it as 10** — Python's numeric underscores — while **SQLite reads the same text as 1
-    for arithmetic**, taking the leading numeric prefix. A store that decoded with the
-    first and incremented with the second would tell a caller the draw is 10, grant an
-    admission against a bound of 12, answer 11, and leave the row at **2**: an admission
-    that lowered the recorded draw and bought the conversation further admissions it
-    never earned. Every number in that sentence is in range, so only the **type** check
-    catches it.
-
-    Both halves are asserted: the refusal, and that the refusal **wrote nothing**. A
-    store that raised after mutating would have done the damage and reported it.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "UPDATE conversations SET search_calls = ? WHERE id = ?",
-                (stored, conversation.id),
-            )
-        finally:
-            raw.close()
-
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.search_draw(conversation.id)
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.admit_search(conversation.id, max_calls=12)
-
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            held = raw.execute(
-                "SELECT search_calls FROM conversations WHERE id = ?", (conversation.id,)
-            ).fetchone()
-        finally:
-            raw.close()
-        assert held == (stored,), "a refusal writes nothing"
-    finally:
-        store.close()
-
-
-async def test_a_clean_observation_cannot_repair_a_corrupt_footing(tmp_path: Path) -> None:
-    """The fold is a write path, and SQL's ``AND`` is a coercion (ADR-0238 §8).
-
-    A stored ``2`` folded against a clean observation evaluates ``2 AND 1`` and writes
-    ``1`` — so without a check inside the mutation, a fold would turn a value this store
-    never wrote into a **valid clean flag**. That repairs a corruption into the one
-    state §8's monotonicity makes unrecoverable, and it does so on the path least likely
-    to be looked at: every *reading* path already refuses such a row, which is exactly
-    what makes the write path the way round them.
-
-    Driven with ``True`` because that is the direction that does the damage; the fold's
-    own ``and`` would carry a ``False`` through harmlessly and prove nothing.
-    """
-    path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        conversation = await store.start()
-        raw = sqlite3.connect(path, isolation_level=None)
-        try:
-            raw.execute(
-                "UPDATE conversations SET all_external_user_chosen = 2 WHERE id = ?",
-                (conversation.id,),
-            )
-        finally:
-            raw.close()
-
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.observe_search(conversation.id, all_external_user_chosen=True)
-
-        with pytest.raises(ConversationStoreError, match="corrupt search draw"):
-            await store.search_draw(conversation.id)
+        assert await store.get("older-build") is not None
     finally:
         store.close()

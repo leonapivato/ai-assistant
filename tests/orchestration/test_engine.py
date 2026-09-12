@@ -572,15 +572,11 @@ class Harness:
         recipient_grants: RecipientGrantStore | None = None,
         memory: FakeMemoryStore | None = None,
         conversation_store: FakeConversationStore | None = None,
-        # ADR-0238's two knobs, so an engine-level case can drive the closed-loop
-        # condition end to end — which is the only level it *can* be driven at: §5's
-        # third condition is stated over a conversation's recorded turns, and no
-        # loop-level case has one. `destination_trust` empty is `origin/main`'s state
-        # and ADR-0238's own exit note (no destination reads `USER_CHOSEN`, so nothing
-        # is closed-loop); `search_calls` is `Settings.search_calls_per_conversation`,
-        # passed to `admit_search` rather than read by it.
+        # ADR-0238's remaining knob. `destination_trust` empty is `origin/main`'s
+        # state and ADR-0238's own exit note. It no longer decides a search's standing
+        # — ADR-0247 §1 takes that from the registration — and the per-conversation
+        # call bound it used to sit beside is removed entire (ADR-0247 §5).
         destination_trust: FakeDestinationTrustStore | None = None,
-        search_calls: int = 8,
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
@@ -830,9 +826,7 @@ class Harness:
             # cannot exist.
             footing=lambda conversation_id: SearchFooting(
                 conversation_id=conversation_id,
-                conversations=self.conversation_store,
                 registered=search is not None,
-                max_calls=search_calls,
             ),
         )
         runner = StepRunner(
@@ -879,14 +873,13 @@ class Harness:
         #: and §19's arms are about.
         self.parked_reads = parked_reads
         #: The operations the engine reaches it through (ADR-0244 §5, §6, §11), over the
-        #: **same** conversation index the footing and the capture stage hold: §6's
-        #: clause 2 reads a draw from it, and a second store over the same rows would
-        #: answer about a conversation this one never admitted.
+        #: **same** conversation index the capture stage holds: §6's clause 2 reads the
+        #: conversation from it (ADR-0247 §6), and a second store over the same rows
+        #: could answer about a conversation this one never began.
         self.parked_read_operations = ParkedReadOperations(
             store=parked_reads,
             conversations=self.conversation_store,
             search=search,
-            max_calls=search_calls,
             clock=self.clock,
         )
         self.engine = Engine(
