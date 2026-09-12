@@ -1433,6 +1433,14 @@ def test_every_duration_setting_is_discovered() -> None:
         # guard is the difference between a thirty-second search and one that expires
         # against every provider on the first request.
         "search_call_deadline",
+        # ADR-0250 §8's clarification deadline, acknowledged here for the same reason
+        # every duration above is. It is **not** nullable and admits no disable
+        # sentinel, for `parked_read_ttl`'s reasons and one of its own: a question
+        # nothing can free would block that goal's next question forever, which is the
+        # one-open rule turning from a correctness constraint into a trap. The ``bool``
+        # guard is the difference between three days and one second, and one second is
+        # a question unanswerable the instant it is asked.
+        "goal_question_ttl",
     }
 
 
@@ -2846,3 +2854,58 @@ class TestTheSearchBudgetSettings:
         """
         assert "web_search_incurred_cost" not in Settings.model_fields
         assert "web_search_reported_cost" not in Settings.model_fields
+
+
+class TestGoalQuestionTtl:
+    """ADR-0250 §8's one field, and §20 arm 9's tail over it.
+
+    "``core.config.Settings`` gains exactly one field, ``goal_question_ttl: timedelta``,
+    required, defaulting to **PT72H**, refused at load where it is zero or negative,
+    admitting **no disable sentinel**."
+    """
+
+    def test_the_default_is_seventy_two_hours(self) -> None:
+        """§8: PT72H, and the two reasons are different from ADR-0244's.
+
+        A park's 24-hour deadline "bounds a durable row holding the **exact query**
+        that would leave the device"; a question "holds the system's statement of an
+        objective the goal already carries, so the deadline is not protecting content
+        the goal does not also hold". What it *is* doing is bounding how long one
+        goal's single question slot stays occupied, and three days "spans a weekend,
+        which is the shape of the worked example this whole batch is written around".
+        """
+        assert Settings().goal_question_ttl == timedelta(hours=72)
+
+    @pytest.mark.parametrize("lifetime", [timedelta(0), timedelta(seconds=-1)])
+    def test_a_zero_or_negative_lifetime_is_refused_at_load(self, lifetime: timedelta) -> None:
+        """§8, §20 arm 9: refused at load rather than at the first question.
+
+        A question unanswerable the instant it is asked is what a non-positive value
+        produces, and ``gt=timedelta(0)`` is what stops the deployment starting at all
+        rather than discovering it on the first ambiguity.
+        """
+        with pytest.raises(ValidationError, match="goal_question_ttl"):
+            Settings(goal_question_ttl=lifetime)
+
+    def test_it_admits_no_disable_spelling(self) -> None:
+        """§8, §20 arm 9: "admitting **no disable sentinel**".
+
+        Kept "for both of ADR-0244 §3's reasons and one of this decision's own: … here
+        a question nothing can free would block that goal's next question **forever**,
+        which is the one-open rule turning from a correctness constraint into a trap."
+        So ``None`` is not a value this field accepts, and the annotation is what
+        refuses it rather than a comment asking a reader not to pass one.
+        """
+        with pytest.raises(ValidationError, match="goal_question_ttl"):
+            Settings(goal_question_ttl=None)  # type: ignore[arg-type]
+        assert Settings.model_fields["goal_question_ttl"].is_required() is False, (
+            "required in the sense §8 means — no spelling for 'never' — and defaulted"
+        )
+
+    def test_it_is_read_from_the_environment_as_an_iso_duration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§8: the operator's spelling, on every other duration's own convention."""
+        monkeypatch.setenv("ASSISTANT_GOAL_QUESTION_TTL", "PT1H")
+
+        assert Settings().goal_question_ttl == timedelta(hours=1)

@@ -239,8 +239,42 @@ _NAMESPACE: Final = {
 #: ADR-0225 §10 makes for the two archive Protocols one paragraph up. What ADR-0244
 #: does put on an already-promoted type is ``Confirmation.read``, whose ``ReadKind`` is
 #: already inside this closure through ``TurnResult.plan -> ActionPlan.read_request``.
+#:
+#: The last nine are ADR-0250's. Four are reached through ``TurnOutcome``'s four new
+#: members (§5) — ``GoalEngagement`` with the ``EngagementDisposition`` it names,
+#: ``Clarification``, ``ReferenceOutcome`` and ``GoalDisambiguation``. One is reached
+#: through ``converse``'s and ``converse_streaming``'s ``reference`` keyword (§11),
+#: ``TurnReference``, which is the first type this roster gains through an *argument*
+#: since ``SpokenAudio``. And the last three are the three operations §§12 and 15
+#: promote: ``GoalSummary``, which ``goals`` returns and which nests the
+#: ``Clarification`` already named; ``ClarificationWithdrawal``; and
+#: ``GoalAbandonment``. The walk terminates at every one of them at once —
+#: ``Identifier``, ``NonBlankEncodableText``, ``UtcInstant``, ``int`` and ``bool`` are
+#: scalars ADR-0087 §2c spells, and ``GoalStatus`` is a closed ``StrEnum`` already
+#: inside this closure through ``TurnResult.goal``.
+#:
+#: **``GoalQuestion``, ``GoalCandidates``, ``GoalCandidacy``, ``CandidateGoal``,
+#: ``GoalAssociation``, ``AssociationVerdict``, ``GoalQuestionDisposition`` and
+#: ``ProposedQuestion`` are not here, and their absence is ADR-0250's own split
+#: rather than an omission.** The first two are ``PlanStore``'s records and the next
+#: four are ``GoalAssociator``'s value, and neither Protocol is on this surface —
+#: exactly the split ADR-0225 §10 makes for the two archive Protocols. What a surface
+#: is handed instead is the ``Clarification`` assembled from a question (§10), which
+#: carries the id, the text and the deadline and nothing else; and a candidacy reaches
+#: no client at all, which is the containment §4 buys. ``ProposedQuestion`` rides
+#: ``ProposedUnderstanding`` on the ``Planner`` seam, which is likewise not on this
+#: surface.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
+        "Clarification",
+        "ClarificationWithdrawal",
+        "EngagementDisposition",
+        "GoalAbandonment",
+        "GoalDisambiguation",
+        "GoalEngagement",
+        "GoalSummary",
+        "ReferenceOutcome",
+        "TurnReference",
         "ReadAnswerOutcome",
         "ReadCancellation",
         "TranscriptArchiveSize",
@@ -644,8 +678,25 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     It is not a browser operation: ADR-0244 §13 admits the browser for this kind, but
     that is Lane 4's own change and this surface is Lane 1's, so ADR-0177 §1's
     thirty-one is unmoved a fourth time.
+
+    ADR-0250's **three** take it to sixty-one: ``goals``, the listing §15 gives the
+    user to learn what is outstanding and to obtain the references §§11 and 13 take;
+    and the two acts §12 puts on one goal, ``withdraw_clarification`` and
+    ``abandon_goal``. **Three and not four**, and §11 argues the absence: answering a
+    clarification is **not** a fourth operation, because decision 3 requires the
+    answer to restate the understanding, recheck and *proceed* — "which is a planner
+    call, a supply, a composition and a reply, i.e. everything ``converse`` already
+    is" — so ``converse`` gains a keyword rather than the surface gaining a fifth
+    verb, and a dedicated ``answer_clarification`` "would either duplicate that or
+    call it".
+
+    These three **do** move ADR-0177 §1's enumeration, to thirty-three, which is the
+    first time in this docstring's run that it moves: §15 rules that "the command line
+    and the browser both implement this decision". The gateway serves none of them
+    yet — that is ADR-0250 §19's M4 — so what moved here is the promoted set and the
+    admitted set, and not the served one.
     """
-    assert len(_method_names()) == 58
+    assert len(_method_names()) == 61
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1092,7 +1143,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (58, 39), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 40), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
