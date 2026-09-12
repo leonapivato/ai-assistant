@@ -49,7 +49,10 @@ from test_loop_search import (
 from ai_assistant import orchestration
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    EpisodicMemory,
     MemorySearchResult,
+    MemorySource,
+    Provenance,
     ReadAsk,
     ReadAskOutcome,
     ReadKind,
@@ -106,6 +109,24 @@ def _query_ask(text: str = _MATCHED) -> ReadAsk:
 def _structured_ask() -> ReadAsk:
     """A structured read over a window nothing falls in."""
     return ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=_EMPTY_WINDOW)
+
+
+def _dated_structured_ask() -> ReadAsk:
+    """A structured read over a window this module's seeded episode does fall in."""
+    return ReadAsk(
+        kind=ReadKind.STRUCTURED_READ,
+        structure=StructuredAsk(window=TimeWindow(start=datetime(2026, 1, 1, tzinfo=UTC))),
+    )
+
+
+def _episode(record_id: str, content: str) -> EpisodicMemory:
+    """One episode a structured read over :func:`_dated_structured_ask` reaches."""
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=_clock(),
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_clock()),
+    )
 
 
 async def _outcomes_of(
@@ -708,3 +729,100 @@ class _FaultingSelect(FakeMemoryStore):
         del kwargs
         msg = "fake: the structured read is unavailable"
         raise MemoryStoreError(msg)
+
+
+# --------------------------------------------------------------------------- #
+# §17 arm 4: `capped` at the exact ceiling, and it is not a claim that more     #
+# exists                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+class _CappedSelect(FakeMemoryStore):
+    """A store whose structured read certifies nothing about completeness.
+
+    ``FakeMemoryStore`` answers ``capped=False`` on every read and says why — it has no
+    KNN and so no candidate ceiling, so ``True`` is "unreachable here because the input
+    that produces it is unconstructable". ``SqliteMemoryStore`` is where it bites, and
+    its own suite pins it there; what this subclass supplies is the **value**, so that
+    ADR-0251 §2's fourth fact is driven through the real servicing site rather than
+    argued about.
+    """
+
+    async def select(self, **kwargs: object) -> MemorySearchResult:
+        """Answer as a store whose candidate ceiling bound the read."""
+        found = await super().select(**kwargs)  # type: ignore[arg-type]
+        return MemorySearchResult(records=found.records, capped=True)
+
+
+class _CappedSearch(FakeMemoryStore):
+    """A store whose *every* band read refuses to certify its answer (ADR-0128 §2)."""
+
+    async def search(self, query: str, **kwargs: object) -> MemorySearchResult:
+        """Answer as a store whose candidate ceiling bound each band's read."""
+        found = await super().search(query, **kwargs)  # type: ignore[arg-type]
+        return MemorySearchResult(records=found.records, capped=True)
+
+
+async def test_a_structured_read_the_store_capped_is_truncated_even_having_admitted_records() -> (
+    None
+):
+    """§2 limb 8, on the ground ADR-0128 §2 owns rather than ADR-0226 §6's cut.
+
+    "``True`` on a short result is a refusal to certify and never a claim that more
+    exists", and "an implementation reports ``True`` … where a read's eligible set
+    exactly meets its ceiling". So a read that came back ``capped`` is ``TRUNCATED``
+    **whatever it admitted** — which is the half of §2 limb 8 a classifier testing the
+    counts first would lose, and a fact no budget cut is involved in: this read was given
+    every slot it asked for.
+    """
+    memory = _CappedSelect(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    await memory.add(_episode("e1", "Ada: the boiler broke."))
+    planner = _searching_planner(_dated_structured_ask(), ReadAsk(kind=ReadKind.WEB_SEARCH))
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=planner,
+            memory=memory,
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+            ),
+        ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    carried = planner.calls[1][6]
+    assert _member_for(ReadKind.STRUCTURED_READ, carried) is ReadOutcomeKind.TRUNCATED
+    assert _serviced(captured)["truncated_kinds"] == (), (
+        "ADR-0226 §6's budget cut nothing: the ground is the store's own ceiling, and "
+        "the audit's own field is not widened to carry it (ADR-0240 §10)"
+    )
+    assert _serviced(captured)["structured"] == "returned_records", (
+        "and ADR-0240 §10's state is what it always was — the two facts are separate"
+    )
+
+
+async def test_a_sighted_query_whose_band_read_was_capped_is_truncated() -> None:
+    """§2's fourth fact for the kind whose per-band results never leave the assembler.
+
+    A sighted query is several ``MemoryStore.search`` calls behind one
+    ``assemble_by_band`` call, and the :class:`MemorySearchResult` each returns is
+    discarded there — so without the observer ``assemble_by_band`` now offers, this
+    ground would be unreadable on this kind and a capped query would reach the planner
+    as ``RETURNED_RECORDS``. ADR-0128 §6 is untouched by that: the assembler still takes
+    no policy from ``capped``, cuts no read short on it and returns no differently.
+    """
+    memory = _CappedSearch(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = _searching_planner(_query_ask(), ReadAsk(kind=ReadKind.WEB_SEARCH))
+
+    await _loop(
+        planner=planner,
+        memory=memory,
+        search=_servicer(
+            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+        ),
+    ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    carried = planner.calls[1][6]
+    assert _member_for(ReadKind.SIGHTED_QUERY, carried) is ReadOutcomeKind.TRUNCATED, (
+        "and not DUPLICATE, which is what the counts alone would have said"
+    )
