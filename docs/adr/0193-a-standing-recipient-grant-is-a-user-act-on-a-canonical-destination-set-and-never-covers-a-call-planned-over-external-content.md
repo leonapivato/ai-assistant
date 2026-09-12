@@ -180,12 +180,16 @@
   `PermissionRuling.authorised_goal`, plus this narrowing — rather than the tag §6 declined.
   **§3 is not superseded and ADR-0254 §18 shows the test**: its clauses are stated over *"a
   grant"* and stay true of every grant, and a second standing authority with different
-  comparisons is a stacked addition. **§9 is adopted rather than amended** — liveness,
-  outstanding-ness, the strict ordering of `expires_at` after `decided_at`, prospective
-  revocation biting twice, the residual window, the clock disciplines and the
-  no-deletion-but-`clear` rule are taken over clause for clause by the new store, and
-  ADR-0254 §12 states by name that `RecipientGrant.expires_at` is untouched and that no
-  `Settings` figure bounds it. **§11 is not superseded either**: its three states stay
+  comparisons is a stacked addition. **§9 is neither superseded nor wholly adopted, and ADR-0254 §18
+  says which of its clauses the new store takes**: prospective revocation biting twice, the
+  residual window from `record`'s resolution read to the execution, the one-clock-reading
+  discipline for a liveness query, the *"no unbounded spelling"* rule for an expiry, the strict
+  ordering of the expiry after the instant the row was written, and the
+  no-deletion-but-`clear` rule are each taken over clause for clause; the **append-a-revoking-
+  record** mechanism and the **outstanding** relation it rests on are **not**, because that
+  store settles a durable proposal on ADR-0244's shape instead. Every one of those clauses
+  binds `RecipientGrant` exactly as it did, and ADR-0254 §12 states by name that
+  `RecipientGrant.expires_at` is untouched and that no `Settings` figure bounds it. **§11 is not superseded either**: its three states stay
   total over `ALLOW` rows, a route-(d) row is the second of them, and what it gains is a
   second kind of row inside one state. Refs #2255.
 
