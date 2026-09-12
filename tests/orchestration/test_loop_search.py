@@ -62,6 +62,7 @@ from test_engine import (
     tool,
 )
 from test_engine_capture import _captured, _replying
+from test_loop_understanding import _Understanding
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
@@ -95,6 +96,8 @@ from ai_assistant.core.types import (
     PermissionRuling,
     Placement,
     PlannerOutput,
+    ProposedElement,
+    ProposedUnderstanding,
     Provenance,
     QueryRefusal,
     ReadAsk,
@@ -2360,3 +2363,100 @@ async def test_a_second_turn_whose_search_expires_answers_from_what_is_retained(
     assert [one.id for one in second.turn.memories] == ["belief-1"], (
         "so the reply is composed from what the conversation actually retains"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0249 §16 item 21 — a minted record is not a ground, end to end            #
+# --------------------------------------------------------------------------- #
+
+
+class _NamingTheMintedRecord(_Understanding):
+    """Asks a search on call one, then grounds an element on the record it minted.
+
+    The label it names is **valid** — computed from the supply the second call was
+    actually handed, by ADR-0249 §9's own scheme — which is what makes this item 21's
+    scenario rather than item 24's invented label: what makes the reference unusable is
+    the record, not the label.
+    """
+
+    def __init__(self) -> None:
+        """Script the two calls; the second is built from what the first minted."""
+        super().__init__(requests=[_search(), None])
+        self.named: list[str] = []
+
+    async def plan(  # noqa: PLR0913 — the Planner Protocol's own parameter list
+        self,
+        goal: GoalBrief,
+        *,
+        utterance: str,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+        capabilities: Sequence[str],
+        files: Sequence[ShownFile] = (),
+        empty_reads: Sequence[ReadAsk] = (),
+        evidence: Sequence[EvidenceDigest] = (),
+    ) -> PlannerOutput:
+        """Answer this call, grounding on the minted record where the supply holds one."""
+        found = [
+            index for index, one in enumerate(memories, start=1) if _DISTINCTIVE in one.content
+        ]
+        if found:
+            label = f"M{found[0]}"
+            self.named.append(label)
+            self._understandings = [
+                ProposedUnderstanding(
+                    retains_outcome=True,
+                    constraints=(
+                        ProposedElement(
+                            text="the bell tower the search found",
+                            ground=Ground.FROM_EVIDENCE,
+                            evidence_label=label,
+                        ),
+                    ),
+                )
+            ]
+        return await super().plan(
+            goal,
+            utterance=utterance,
+            context=context,
+            memories=memories,
+            capabilities=capabilities,
+            files=files,
+            empty_reads=empty_reads,
+            evidence=evidence,
+        )
+
+
+async def test_a_search_minted_record_never_grounds_a_durable_interpretation() -> None:
+    """ADR-0249 §16 item 21, through the whole mechanism rather than at the resolver.
+
+    "A second planner call whose supply carries a search-minted record returns a
+    ``FROM_EVIDENCE`` element naming that record's **valid** label: the element is
+    dropped, the revision's ``outcome`` is still recorded, the turn is not degraded, and
+    no durable interpretation anywhere carries that record's id."
+
+    Driven end to end because that is the only place the mechanism exists: nothing at the
+    resolution site can tell a minted record from any other — a minted record sits in
+    ``memories`` beside every other, which is ADR-0226 §7's fourth group working as
+    designed — so the fact is carried from the servicing that knows it
+    (``ServicedCarriers.minted``) through the loop's accumulation to the resolver. A case
+    that handed the resolver the set directly would pass with either of those two links
+    cut.
+    """
+    planner = _NamingTheMintedRecord()
+    searcher = FakeWebSearcher(results=(_RESULT,))
+
+    responded = await _loop(
+        planner=planner,
+        search=_servicer(searcher=_CostedSearcher(searcher), granted=True),
+    ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    assert planner.named, "the second call did name the minted record's own label"
+    minted = [one.id for one in responded.turn.memories if _DISTINCTIVE in one.content]
+    assert len(minted) == 1, "and the search really did mint it into the supply"
+    assert responded.goal is not None
+    recorded = responded.goal.goal.interpretation[-1]
+    assert recorded.constraints == (), "the element is dropped"
+    assert recorded.outcome == _ASK, "the revision's outcome is still recorded"
+    assert responded.turn.plan is not None, "and the turn is not degraded"
+    assert minted[0] not in repr(responded.goal), "no durable interpretation carries the id"

@@ -195,6 +195,40 @@ async def _recorded_ruling(on_ruled: Ruled | None, decision: PermissionDecision)
         await on_ruled(decision)
 
 
+async def _reported_ruling(
+    on_ruled: Ruled | None, decision: PermissionDecision, *, step_id: str
+) -> None:
+    """:func:`_recorded_ruling`, with the observer's failure logged instead of raised.
+
+    Used on :meth:`StepRunner.resume` alone. A confirmation is answerable once
+    (ADR-0044 §2b) and is already spent by the time this runs, so a raise here would
+    strand an authorised act: the step stays ``AWAITING_APPROVAL``, the retry is refused
+    as already resolved, and the binding is absent from ``pending_confirmations``. The
+    observer keeps a record *about* the step, and a record that cannot be kept must not
+    destroy the act it describes — which is ADR-0235 §6's own posture for the
+    establishing act, taken for the same reason: "by the time ``record`` is asked the
+    egress has gone out, so a raise would report a failure for a call nobody can un-send".
+
+    :meth:`StepRunner.run` keeps the raise, and the difference is not arbitrary: there
+    nothing has been answered, the step is still ``PENDING`` and the whole turn is
+    retryable, so failing loudly costs a turn rather than an authorisation.
+
+    Args:
+        on_ruled: The caller's observer, or ``None`` where it wants none.
+        decision: The decision as the trail recorded it.
+        step_id: The step this ruling is about, for the log line.
+    """
+    try:
+        await _recorded_ruling(on_ruled, decision)
+    except Exception:  # the observer is the caller's; nothing it raises may strand a spent approval
+        _log.warning(
+            "resumption_ruling_observer_failed",
+            step_id=step_id,
+            decision_id=decision.id,
+            exc_info=True,
+        )
+
+
 def _detached_state(state: ExecutionState) -> ExecutionState:
     """A private copy of the caller's execution state, taken before the first await.
 
@@ -880,7 +914,17 @@ class StepRunner:
         # the user's answer is a durable fact, and past `_execute` the tool may already
         # have run under a caller that a cancellation will never return to. Both halves of
         # that are why the observation point is here.
-        await _recorded_ruling(on_ruled, decision)
+        #
+        # **Reported and never raised on this path**, which is where it differs from
+        # :meth:`run` and why (ADR-0235 §6's posture, for its reason). A confirmation is
+        # answerable once (ADR-0044 §2b), and the line above has just spent this one: a
+        # failure propagating from here would leave the approval consumed, the step
+        # `AWAITING_APPROVAL`, the retry refused as already resolved and the binding
+        # absent from `pending_confirmations` — an authorised act stranded with no route
+        # back. `run`'s failure costs a turn nobody has answered and the step stays
+        # `PENDING`, so there it raises. Here the observer keeps a record *about* the
+        # step, and a record that cannot be kept must not destroy the act it describes.
+        await _reported_ruling(on_ruled, decision, step_id=step.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             disposition = await self._execute(state, step, request, decision, timeout=timeout)
         else:
