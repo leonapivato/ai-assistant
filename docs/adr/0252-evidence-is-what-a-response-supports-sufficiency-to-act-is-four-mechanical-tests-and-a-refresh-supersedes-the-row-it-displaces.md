@@ -1,6 +1,6 @@
 # 252. Evidence is what a response supports, sufficiency to act is four mechanical tests, and a refresh supersedes the row it displaces
 
-- Status: Partially superseded by ADR-0253 (§14's writer clause, in **one term on one basis**: its enumeration of what *"no model supplies"* stops being true of **`applicability`** on the **`INTERPRETATION`** basis, because §3's second source composes such a row's `supported` from *"the one region the interpretation step **declared**"* and only a plan can declare one — a tension between two clauses of this decision, which ADR-0253 §7 resolves in favour of the specific rule. Every other term of §14 binds entire on both bases — no model supplies an identifier, an instant, a standing, a basis, a read kind, a source, a declaration, a count or a verdict of a read — and §14's *"exactly one thing"* is still the whole of what a model supplies at the interpretation call itself. Nothing else in this ADR: §1's row shape and its four-axis validator, §2's applicability algebra and its three relations, §3's two composition sources and its prohibition list, §4's two instants, §5's verdict vocabularies and the affirmative partition, §6's four mechanical tests, §7's conflict rules, §8's six refresh limbs, §9's invalidation predicate, §§10-13 and §§15-19 all stand entire)
+- Status: Partially superseded by ADR-0253 (two scopes. §1's `GoalEvidence` field enumeration and the `INTERPRETATION` limb of its by-basis validator: the model gains `interpreted_output`, an `InterpretedOutput | None`, and the limb admits a **second** shape — such a row carries **exactly one** of one member of `records` and an `interpreted_output`, `records` being empty in the second and `returned` and `admitted` `0` in both — because an interpretation over the output of a step of the same plan has otherwise no durable way to name its own input, and #2255's dynamic plan is then not expressible in one plan at all. §1's every other clause binds verbatim, including the rule that a `records` identifier resolves in the owner's `MemoryStore` and its refusal of a search-minted or fetch-minted one, which the new shape makes costless rather than contradicts. And §14's writer clause, in **one term on one basis**: its enumeration of what *"no model supplies"* stops being true of **`applicability`** on the **`INTERPRETATION`** basis, because §3's second source composes such a row's `supported` from *"the one region the interpretation step **declared**"* and only a plan can declare one — a tension between two clauses of this decision, which ADR-0253 §7 resolves in favour of the specific rule. Every other term of §14 binds entire on both bases — no model supplies an identifier, an instant, a standing, a basis, a read kind, a source, a declaration, a count or a verdict of a read — and §14's *"exactly one thing"* is still the whole of what a model supplies at the interpretation call itself. Nothing else in this ADR: §1's row shape and its four-axis validator, §2's applicability algebra and its three relations, §3's two composition sources and its prohibition list, §4's two instants, §5's verdict vocabularies and the affirmative partition, §6's four mechanical tests, §7's conflict rules, §8's six refresh limbs, §9's invalidation predicate, §§10-13 and §§15-19 all stand entire)
 - **Partially supersedes [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md),
   in three narrowly stated scopes**, and §16 shows the working for all three.
   **§1's `GoalElement` field enumeration and its three-shape validator** — *"A `GoalElement`
@@ -64,12 +64,15 @@
   entry is discharged: the call's whole input is one recorded record and one element's text, its
   declared output schema is one member and nothing else, and it is **not** a `PlanStep` —
   ADR-0226 §4's reasoning applied, so nothing about it reaches `ExecutionState` or the permission
-  gate. **§14's writer clause is partially superseded in one term and on one basis**, which the
-  `Status` line above records: a `StepCondition`'s declarations are never copied into a row at all,
-  but an element's `applicability` **is** the region §3's second source requires an
-  `INTERPRETATION` row to carry, so §14's `applicability` term cannot bind on that basis. Every
-  other term of §14, and everything else of this ADR, binds entire. Refs #2255, ADR-0253 §7,
-  ADR-0253 §13.
+  gate. **§1's field enumeration and §14's writer clause are each partially superseded in one
+  narrow scope**, which the `Status` line above records. §1 gains `interpreted_output` and a
+  second `INTERPRETATION` shape, so an interpretation over a **step's output** can name its input
+  durably where a minted record cannot be named at all — the refusal of a minted record therefore
+  stands and costs nothing. §14's `applicability` term cannot bind on the `INTERPRETATION` basis,
+  because a `StepCondition`'s declarations are never copied into a row at all but an element's
+  `applicability` **is** the region §3's second source requires such a row to carry. Every other
+  term of §14, every other clause of §1, and everything else of this ADR binds entire. Refs #2255,
+  ADR-0253 §7, ADR-0253 §8, ADR-0253 §13.
 
 ## Context
 
