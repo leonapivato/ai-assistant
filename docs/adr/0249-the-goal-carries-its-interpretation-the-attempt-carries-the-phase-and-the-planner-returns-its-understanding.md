@@ -382,8 +382,10 @@ is bought for exactly that; its **provenance** is not, and §7 is where the line
 > error, a degradation, or an instruction to re-plan.
 
 > **Normative.** **`ActionPlan.read_request` does not move.** ADR-0226 §4 places it on the
-> plan and ADR-0226 §8 makes the plan *"the *whole* of the trigger's record"*; nothing in this
-> decision disturbs either, and `PlannerOutput` carries no read request of its own.
+> plan, and ADR-0226 §8 makes the plan's own field the whole of the trigger's record —
+> *"a turn on which `read_request` is not `None` is a turn the trigger fired on, and a turn on
+> which it is `None` is a turn it did not"*. Nothing in this decision disturbs either, and
+> `PlannerOutput` carries no read request of its own.
 
 > **Normative.** `core/types.py` gains **`ProposedUnderstanding`**, a frozen model with
 > `extra="forbid"` carrying exactly: `outcome`, a `NonBlankEncodableText`; `constraints`,
@@ -865,8 +867,9 @@ decide, and every clause of ADR-0248 binds entire.
 >   `schema_version`, and it is the only lane that moves either.**
 
 > **Normative.** **L1 is the one sanctioned cross-subsystem lane**, and it is sanctioned by
-> ADR-0137 §2: the contract and its guardrails ride with *"its **primary production
-> implementation**, the consumer whose demands shape the contract"* — here the `PlanStore`
+> ADR-0137 §2, which makes *"the **contract triad together with its primary production
+> implementation** … one unit of work — one lane, one PR"* and fixes that *"Primary means the
+> consumer whose demands shape the contract, not the one that is cheapest to write"* — here the `PlanStore`
 > implementations, which are what the interpretation chain, the elision and the two
 > compare-and-swap writes are actually shaped by. **L2, L3 and L4 are each one subsystem**, and
 > no other cross-subsystem pairing is authorised by this decision.
@@ -1002,8 +1005,8 @@ ground for taking `supersedes` off the planner in the first place.
 
 **A ground that crosses the seam as a record identifier rather than a label.** Rejected in §7.
 It would breach ADR-0228 §8's namer rule directly, and the label scheme ADR-0226 §3 already
-fixes resolves the same intent with the property that *"an invented label is an index outside
-the range"*.
+fixes resolves the same intent while keeping §3's own inert failure mode: *"a label the planner
+invents is an index, and an index outside the range it was shown resolves to nothing"*.
 
 **A fifth `GoalStatus` member for "paused".** Rejected in §5: a status member would be a second
 authority that can disagree with the attempt it is supposed to summarise. The derivation is
