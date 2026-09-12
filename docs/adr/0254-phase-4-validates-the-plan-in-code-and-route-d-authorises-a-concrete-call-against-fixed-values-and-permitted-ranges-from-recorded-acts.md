@@ -484,9 +484,26 @@ argument that actually needs one.
 >    never one;
 > 5. **every** member of the request's canonical destination set is a member of the row's,
 >    compared as `CanonicalDestination` compares — every field, never across protocols;
-> 6. and **every argument of the request is covered** by the per-argument rule below.
+> 6. and **the request's arguments and the row's coverage name the same set of keys**, and
+>    every argument of the request is covered by the per-argument rule below.
 >
 > A row that fails any of them covers nothing about that request.
+
+> **Normative — condition 6 is stated in both directions, because an omission is a change as
+> much as an addition is.** An argument the request carries that the row's coverage names in no
+> member is not covered, which is the direction §3 has always had. **And an argument the row's
+> coverage names that the request does not carry leaves condition 6 unsatisfied too**: an act
+> that fixed `refundable_only` to `true` authorised a call *carrying* that value, and a call
+> that omits it is a different call — ADR-0145 inserts no schema default, so nothing downstream
+> restores it, and the omission would silently buy whatever the service does when the field is
+> absent. **There is no default, no wildcard, no "not sent therefore unconstrained" and no
+> omission that reads as consent**, which is the per-argument rule's own sentence read from the
+> other side. The set comparison is over **keys** and the per-argument rule is over values, and
+> together they are the whole of condition 6.
+>
+> **The empty case stays exactly as §1 permits it**: a row with `coverage=()` and a request with
+> `parameters={}` name the same set — the empty one — so condition 6 holds, which is the one
+> request such a row covers.
 
 > **Normative — where each of the six is taken, because the seam is keyed rather than asked.**
 > `GoalAuthorizations.live_for(goal, tool_id)` (§16) answers conditions **1 and 2** and the
@@ -630,15 +647,25 @@ the binding comparison cannot come apart.
 > refuses is a request the authorization does not cover, and the ruling is the one the policy's
 > table reached without it — which for a transmitting tool is `CONFIRM`, and the user is asked.
 
-> **Normative — what the ruling's `reason` says when coverage fails, because §20's arms assert
-> it and no clause stated it.** It names the **argument key** that was not covered and **never
-> its value**, never the bound, never the record's id and never its digest: a reason is carried
-> on a durable `PermissionDecision` that holds `parameters_digest` and not `parameters` (§7),
-> and a reason quoting an argument's value would put into the trail exactly what that omission
-> keeps out. Where several arguments fail, it names them in the request's own canonical key
-> order. Where **no** member named the argument at all, it says that rather than that a
-> comparison failed — the two are different facts about what the user authorised, and §3's
-> per-argument rule keeps them apart.
+> **Normative — what the ruling's `reason` says when coverage fails, and it is ADR-0145 §8's
+> discipline one clause over.** It **never** reproduces an argument's **value**, the bound, the
+> record's id or its digest: a reason is carried on a durable `PermissionDecision` that holds
+> `parameters_digest` and not `parameters` (§7), and quoting a value would put into the trail
+> exactly what that omission keeps out. **And it names an argument's key only where the
+> declaration's `parameters_schema` itself names that key.** ADR-0145 §8 rules that a message
+> about arguments *"renders any part of the parameters — neither a value nor a key"* except what
+> *"the schema itself names"*, on the ground that *"a key can be data"* — a mapping the schema
+> does not describe can be keyed by an address or an identifier — and the same hazard is here,
+> because §2's `argument` is a key of `parameters` and nothing requires the schema to declare
+> it. So a key the schema declares is named; **a key it does not is described by its kind and
+> not quoted**, exactly as ADR-0145 §8 describes an `additionalProperties` violation by keyword
+> and location rather than by key. Where several arguments fail, they are named in the
+> declaration's own schema order, and an undeclared one is counted rather than listed.
+>
+> **The three failures are told apart, whichever way the key is rendered**, because they are
+> different facts about what the user authorised and §3's condition 6 keeps them apart: an
+> argument the record's coverage names in **no** member; an argument a member names that the
+> request **omits**; and an argument whose value the member's comparison **refused**.
 
 > **Normative.** **No reading consults a schema to decide what an argument means, and there is
 > no exception.** Every fact a comparison needs is on the row or in the request: which key holds
@@ -969,7 +996,7 @@ is not this one. §19 books it with what fires it.
 > erase the store. `ActionPolicy` is unchanged in signature, `AuditTrail`'s own Protocol gains
 > no member, no argument and no widened return, and what ADR-0021 §4 gains is an invariant.
 
-> **Normative — `AuditTrail.record` refuses a route-(d) row unless all nine hold.**
+> **Normative — `AuditTrail.record` refuses a route-(d) row unless all eleven hold.**
 > `resolve(authorised_by)` returns a row; that row's `disposition` is **`ESTABLISHED`** — the
 > existence, the kind, the unrevoked, the unsuperseded and the answered check at once, since
 > every other disposition is retired and none of them is live; that row's `settled_at` is **at
@@ -980,10 +1007,12 @@ is not this one. §19 books it with what fires it.
 > destination set, compared as `CanonicalDestination` compares — every field, never across
 > protocols; its `goal` equals the ruling's `authorised_goal`; and the ruling's
 > `authorised_subject` equals that row's subject digest, **recomputed by `record` over the row
-> the store returned**. **Nine, because the disposition check and the goal check are this
-> decision's own and the other seven are ADR-0193 §6's** — the resolution read, both ends of
-> liveness, tool equality, account equality, destination-set containment and the recomputed
-> digest. Those seven are adopted with that section's reasoning entire
+> the store returned**; the decision's binding carries `planned_with_external_content` as
+> **`False`**; and its binding's `coverage` is **`SpanCoverage.NOT_COVERED`**. **Eleven, because
+> the disposition check, the goal check and the `SpanCoverage` check are this decision's own and
+> the other eight are ADR-0193 §6's** — the resolution read, both ends of liveness, tool
+> equality, account equality, destination-set containment, the origin arm and the recomputed
+> digest. Those eight are adopted with that section's reasoning entire
 > — including that equality is permitted at the lower end and that what is refused there is a
 > **backdated** authority, and including that the digest *"is never taken on the decision's
 > word"*. `record` reads **no clock**: both ends are decided against the decision's own
@@ -996,6 +1025,21 @@ is not this one. §19 books it with what fires it.
 > the instants and the recomputed digest all hold. This is not the payload comparison the clause
 > below says the trail cannot take: it needs no extra data, no seam and no arguments, only the
 > binding the decision already carries. **A lane that skipped either has breached this clause.**
+
+> **Normative — the two floor checks are taken in their strict form and inherit no exception.**
+> §6 states that route (d) relaxes neither `planned_with_external_content` nor
+> `SpanCoverage.NOT_COVERED`, and until now only the **policy** enforced that: a faulty policy
+> citing an established authorization on a tainted binding would have passed every other check,
+> because narrowing ADR-0193 §6's invariant to route (b) took its origin arm off this row with
+> it. **Both facts are on the decision's own binding**, so the trail can take them with no seam,
+> no store read and no arguments — unlike the per-argument comparison below, which it cannot.
+> **Neither takes ADR-0238's closed-loop disjunct and neither takes ADR-0247 §3's retirement**:
+> ADR-0193 §6's seventh limb reads *"`False`, or `closed_loop` `True`"* for a closed-loop
+> request and route (c) retires the coverage exception at the configured provider, and **route
+> (d) is neither** — it is a goal-scoped authority over argument values, §6's conditions 3 and 4
+> are stated over it unrelaxed, and a row claiming route (d) on a tainted or covered binding is
+> refused whatever its `closed_loop` says. **A lane that reused route (b)'s origin arm or route
+> (c)'s eligibility here has breached this clause.**
 
 > **Normative.** **`settled_at` is the instant compared and `proposed_at` is not.** A row is
 > proposed before the user answers and authorises nothing until they do, so the instant a
@@ -1283,9 +1327,9 @@ all three would be one thing to be wrong about.
 >   `PlanStore.get_goal`, and a goal that store does not hold is an **empty answer** rather
 >   than a raise. **The liveness is the engine's one clock reading** (§16), taken once for the
 >   whole listing, because `standing` reports none.
-> - **`revoke_authorization(authorization_id: DurableIdentifier) -> AuthorizationRevocation`**
->   — `settle(id, REVOKED, settled_at=...)` on §1's one edge out of `ESTABLISHED`. **An
->   unknown id is a result and never a raise**, which is
+> - **`revoke_authorization(authorization_id: DurableIdentifier) -> AuthorizationSettlement`**
+>   — `settle` to `REVOKED` on §1's one edge out of `ESTABLISHED`, its answer returned
+>   **unmapped** (§16). **An unknown id is a result and never a raise**, which is
 >   `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception`'s rule and
 >   `revoke_recipient_grant`'s own shape one store over. **Never refused for a ceiling** —
 >   there is none — and revocation is **whole**: no operation narrows a record, re-scopes one,
@@ -1308,14 +1352,14 @@ all three would be one thing to be wrong about.
 > and not its reference, and this decision mints none: the destination set is what
 > ADR-0148 §8's fourth clause already puts in front of the user **at the question**, in both
 > forms, and the listing's subject is what the act fixed about the arguments and when it
-> lapses. §19 books the projection with what fires it. **`AuthorizationRevocation`** is a
-> `StrEnum` valued by lower-cased member name and **closed at exactly three members**, which
-> are total over what `settle` can answer: **`REVOKED`**, the row stood `ESTABLISHED` and now
-> stands `REVOKED`; **`NOT_ESTABLISHED`**, the store holds the row and it does not stand
-> `ESTABLISHED`, so §1's one edge into `REVOKED` does not leave where it stands — which is
-> `PROPOSED` and all four retired dispositions in one member, and is `settle`'s own refusal
-> restated rather than a second rule; and **`NO_SUCH_AUTHORIZATION`**, the store holds no row
-> with that id. The vocabulary is added to and never renamed.
+> lapses. §19 books the projection with what fires it. **The revocation's carrier is
+> `AuthorizationSettlement`** (§16), which `settle` already answers with and which this surface
+> returns unmapped: `SETTLED` where the row stood `ESTABLISHED` and now stands `REVOKED`,
+> `NOT_AT_SOURCE` where the store holds the row and §1's one edge into `REVOKED` does not leave
+> where it stands, and `NO_SUCH_AUTHORIZATION` where it holds no row with that id. **A second
+> three-valued vocabulary for the same fact is exactly the second carrier ADR-0150 is named
+> after**, so none is minted; the surface renders prose from the member and never the member's
+> own spelling.
 >
 > **A `PROPOSED` row is therefore not revocable**, and that is §1's graph rather than an
 > omission here: a question the user has not answered is withdrawn by declining it or by
@@ -1590,16 +1634,19 @@ all three would be one thing to be wrong about.
 
 > **Normative — the `core` surface this decision adds, in full, with the lane that lands each
 > so that this roster and §20's cut cannot drift apart.** `core/types.py` gains **twelve**
-> types: **eight with Lane 1** — `Authorization`, `AuthorizationDisposition`, `CoverageMember`,
-> `ValueBound`, `BoundKind`, `AuthorizationBasis`, `ValueResolution` and `ResolutionRule` — and
-> **four with Lane 3** — `CoverageView`, `ConfirmationAuthorization`, `AuthorizationView` and
-> `AuthorizationRevocation`. It gains **three** fields: `PermissionRuling.authorised_goal` and
+> types: **nine with Lane 1** — `Authorization`, `AuthorizationDisposition`,
+> `AuthorizationSettlement`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
+> `ValueResolution` and `ResolutionRule`, the settlement vocabulary landing there because
+> `GoalAuthorizationStore.settle` is Lane 1's and answers with it — and **three with Lane 3**:
+> `CoverageView`, `ConfirmationAuthorization` and `AuthorizationView`. It gains **three**
+> fields: `PermissionRuling.authorised_goal` and
 > `ActionRequest.goal` with Lane 1, both of which route (d) and §6's bar read, and
 > `Confirmation.authorization` with Lane 3. `core/protocols.py` gains **`GoalAuthorizations`**,
 > **`AuthorizationResolution`** and **`GoalAuthorizationStore`** with Lane 1, and
 > **`AssistantEngine` gains `standing_authorizations` and `revoke_authorization`** with Lane 3
 > (§11) — two members on an existing Protocol and no other change to it. `core/errors.py` gains
-> **`AuthorizationError`**, the class a store fault raises, with Lane 1. `core/config.py` gains
+> **`AuthorizationError`** and **`InvalidAuthorizationError`**, the classes a store fault and a
+> refused write raise (below), with Lane 1. `core/config.py` gains
 > `Settings.workflow_authorization_ttl` (§12) with Lane 1 and no other field. **Every one of
 > these is a BREAKING contract change under golden rule 5 and is flagged as one**; the ADR
 > merges before anything implements against it (ADR-0015).
@@ -1616,11 +1663,70 @@ all three would be one thing to be wrong about.
 > only clock reading, in one member. `AuthorizationResolution` carries
 > **`resolve(id) -> Authorization | None`** and nothing else — the face a trail holds, and it
 > returns the row whatever its disposition, because the trail's own check reads that field (§7).
-> `GoalAuthorizationStore` carries both plus **`record`**, **`settle`**, **`standing(goal)`**,
-> **`recent`**, **`export`** and **`clear`** — the face a composition root holds. **Structural typing is what
-> makes that sound**: a policy cannot name `record`, and a trail can name neither `record` nor
-> `live_for`, because `mypy --strict` runs over `src` and `tests` and those attributes are not
-> on the annotated types.
+> `GoalAuthorizationStore` carries both plus `record`, `settle`, `standing`, `recent`, `export`
+> and `clear` — the face a composition root holds. **Structural typing is what makes that
+> sound**: a policy cannot name `record`, and a trail can name neither `record` nor `live_for`,
+> because `mypy --strict` runs over `src` and `tests` and those attributes are not on the
+> annotated types.
+
+> **Normative — the eight signatures in full, because a roster of names is not a contract and a
+> lane may invent none of this** (ADR-0015, golden rule 5). Every member is `async` and returns
+> a **detached snapshot**, which is ADR-0097 §3's discipline for a store and is not restated per
+> member:
+>
+> - `live_for(goal: Identifier, tool_id: VisibleIdentifier) -> Authorization | None`
+> - `resolve(authorization_id: DurableIdentifier) -> Authorization | None`
+> - `record(authorization: Authorization) -> str` — the id it wrote. **Where the row carries
+>   `supersedes`, the predecessor is settled `SUPERSEDED` in the same indivisible write** (§1).
+> - `settle(authorization_id: DurableIdentifier, /, *, to: AuthorizationDisposition,
+>   settled_at: UtcInstant) -> AuthorizationSettlement` — **the read, the comparison and the
+>   write are one indivisible step**, which is `ParkedReadStore.settle`'s own construction and
+>   `PlanStore`'s compare-and-swap argument (ADR-0014 §5): no caller reads a row, decides, and
+>   writes back.
+> - `standing(goal: Identifier) -> tuple[Authorization, ...]`
+> - `recent(*, limit: int = DEFAULT_PAGE_SIZE) -> tuple[Authorization, ...]` — newest first, by
+>   `proposed_at` descending with ties broken by `id` ascending, which is
+>   `RecipientGrantStore.recent`'s order one store over. A `limit` that is not a strictly
+>   positive `int` is refused **locally and before any I/O**, exactly as that member refuses it.
+> - `export() -> tuple[Authorization, ...]`
+> - `clear() -> int` — the number of rows erased.
+
+> **Normative — `settle`'s three outcomes, and they are what `AuthorizationSettlement` is.**
+> `core/types.py` gains **`AuthorizationSettlement`**, a `StrEnum` valued by lower-cased member
+> name and **closed at exactly three members**, total over what a compare-and-swap on the
+> `disposition` can answer:
+>
+> - **`SETTLED`** — the row stood at that edge's source and now stands at its target.
+> - **`NOT_AT_SOURCE`** — the store holds the row and it does not stand at the edge's source, so
+>   §1's graph does not admit the move from where it is. **This is one member and not four**,
+>   and it covers a `PROPOSED` row asked for an edge that leaves `ESTABLISHED`, a retired row
+>   asked for anything, a move that is not an edge at all, **and the loser of two racing
+>   settlements** — which §1 makes one fact rather than several, because the row's own
+>   `disposition` is the compare-and-swap's token and "it was not there" is the whole of what
+>   the store can honestly say.
+> - **`NO_SUCH_AUTHORIZATION`** — the store holds no row with that id.
+>
+> **It is the value `AssistantEngine.revoke_authorization` returns as well** (§11), unmapped and
+> unrenamed: a second three-valued vocabulary for one fact would be the second carrier
+> ADR-0150 is named after, and the surface renders prose from the member rather than the member
+> itself. **A `bool` return was considered and refused** — it cannot tell an unknown id from a
+> row that was not at the source, which §11's revocation surface must tell apart — and so was
+> raising on either, because a refusal that is a **result and never an exception** is
+> `AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception`'s rule.
+
+> **Normative — the two error classes, and a refusal is not a fault.** `core/errors.py` gains
+> **`AuthorizationError`**, raised where the store could not be read or written — and, per §1,
+> where `live_for` finds more than one live row of a goal and declaration id, which is an
+> integrity failure and not an answer. It gains **`InvalidAuthorizationError`**, a subclass,
+> raised by `record` where the write is not one this store admits: a second `ESTABLISHED` row of
+> one goal and declaration id, a path-(ii) row that fails the transcription or non-widening
+> check, a row carrying `confirmation` written in any disposition but `PROPOSED`, a
+> `supersedes` that resolves to no `ESTABLISHED` row of that goal and declaration id. **A
+> refusal is the caller's error and a fault is the store's**, which is ADR-0193 §1's own split
+> between an invalid grant and a store that could not be reached; the subclass relation means a
+> caller catching the base class still catches both, and the policy's fault clause below is
+> stated over the base class deliberately — a `record` refusal never reaches a policy, which
+> writes nothing.
 
 > **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** **`live_for`
 > is the only query that evaluates liveness**, and it reads the clock **exactly once per
@@ -1690,7 +1796,7 @@ all three would be one thing to be wrong about.
 > a pointer and a digest and never the record by value.
 
 > **Normative — what crosses the wire, and what does not.** Three things cross: the **listing**
-> as a `tuple[AuthorizationView, ...]`, the **revocation** as an `AuthorizationRevocation`, and
+> as a `tuple[AuthorizationView, ...]`, the **revocation** as an `AuthorizationSettlement`, and
 > **`Confirmation.authorization`** as a `ConfirmationAuthorization` (§11). **No `Authorization`
 > crosses whole and no member of `GoalAuthorizations`, `AuthorizationResolution` or
 > `GoalAuthorizationStore` is promoted**: the confirmation carries a **projection** of the
@@ -1931,15 +2037,17 @@ check are each consumed as written, and §13 and §14 state where.
 > `ai_assistant.testing`, the `SqliteGoalAuthorizationStore` in `permissions/`,
 > `ThresholdActionPolicy`'s **route (d) and §6's bar** on the one `live_for` read, and
 > `AuditTrail.record`'s route-(d) invariant. ADR-0137 §2's exception is what makes this one
-> change: the triad rides with the primary consumer whose demands shape the contract.
+> change: the triad rides with the primary consumer whose demands shape the contract. The
+> **eight store signatures**, `AuthorizationSettlement`'s three outcomes and the two error
+> classes (§16) are Lane 1's in full, and its conformance suites are what pin them.
 > **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
 > on §1's three conditions when a `CONFIRM` is recorded, settling it on the answer, writing a
 > path-(ii) correction, **setting** `ActionRequest.goal`, and phase 4's evaluation. **It adds no
 > `core` type and no field**, both being Lane 1's, and **it writes no attempt bookkeeping**: the
 > `AWAITING_AUTHORIZATION` commit and the `add_authorization_id` append are ADR-0249's lane's
-> and are relied on rather than repeated. **Lane 3, the surfaces.** `core/types.py`'s **four**
-> remaining types — `CoverageView`, `ConfirmationAuthorization`, `AuthorizationView` and
-> `AuthorizationRevocation` — `Confirmation.authorization`, `AssistantEngine`'s two members
+> and are relied on rather than repeated. **Lane 3, the surfaces.** `core/types.py`'s **three**
+> remaining types — `CoverageView`, `ConfirmationAuthorization` and `AuthorizationView` —
+> `Confirmation.authorization`, `AssistantEngine`'s two members
 > `standing_authorizations` and `revoke_authorization` (§11), the engine's assembly of both and
 > of the confirmation projection, and the interface adapters that render them.
 
@@ -1990,8 +2098,12 @@ check are each consumed as written, and §13 and §14 state where.
 > 7. **A fixed value differing by one byte** — a recipient with one changed character, a
 >    number rendered as a string where the member holds a number → **not covered** in each, on
 >    the canonical JSON comparison and not on a looser one.
-> 8. **An argument the record names in no member** → **not covered**, and the reason names
->    that argument.
+> 8. **An argument the record names in no member** → **not covered**, and the reason says which
+>    of §4's three failures it is. It **names the key** where the declaration's
+>    `parameters_schema` declares it and **does not quote the key** where the schema does not —
+>    one test each, the second over a declaration admitting additional properties and a request
+>    carrying a data-bearing key such as an address, asserting the key appears nowhere in the
+>    recorded `reason` (ADR-0145 §8).
 > 9. **A request carrying `goal` unset** → no route (d), on every request including one every
 >    other comparison would cover.
 > 10. **The `MONEY` bound's currency conjunct, over the concrete request.** A request carrying
@@ -2060,11 +2172,16 @@ check are each consumed as written, and §13 and §14 state where.
 > 28. **The route discriminator is total.** Rows of all four routes plus a policy-rules row →
 >     each classified from the row alone, with **no store read**, and the route-(b) and
 >     route-(c) classifications unchanged from `origin/main`.
-> 29. **The trail refuses a route-(d) row** on each of §7's **nine** checks independently — a
+> 29. **The trail refuses a route-(d) row** on each of §7's **eleven** checks independently — a
 >     pointer `resolve` answers `None` for, a disposition other than `ESTABLISHED`, a
 >     `settled_at` after the decision's `decided_at` (the backdated case), an `expires_at` at or
 >     before it, an unequal declaration, an unequal account, a destination of the binding the
->     row does not carry, an unequal goal, and a digest recomputed unequal.
+>     row does not carry, an unequal goal, a digest recomputed unequal, a binding carrying
+>     `planned_with_external_content`, and a binding whose `coverage` is not
+>     `SpanCoverage.NOT_COVERED`. **The last two are submitted directly as rulings a faulty
+>     policy could have authored**, each with every other check passing, and each is refused
+>     **whatever the binding's `closed_loop` says** — including `True`, which is route (b)'s
+>     ADR-0238 disjunct and route (c)'s eligibility and is neither of them here.
 > 30. **A sourceless policy reaches no route (d)** and leaves `authorised_by` and
 >     `authorised_goal` unset, on every request including one at the configured provider.
 > 31. **The floors route (d) does not relax, taken in both directions.** *(a)* A request of a
@@ -2095,7 +2212,7 @@ check are each consumed as written, and §13 and §14 state where.
 >     that no field of any of the three is named or typed for a goal id, an authorization
 >     `confirmation` or `supersedes`, a `BoundAccount`, a subject digest, a connection
 >     reference, a `SecretName` or a transport endpoint — and that `AuthorizationView` carries
->     the row's `id`, no `destinations`, and `AuthorizationRevocation` nothing at all beyond
+>     the row's `id`, no `destinations`, and `AuthorizationSettlement` nothing at all beyond
 >     its three members.
 > 36. **The store refuses a second `ESTABLISHED` row for one goal and declaration `id`** — a
 >     second row about the *same* declaration and a second about an **edited** declaration of
@@ -2216,7 +2333,15 @@ check are each consumed as written, and §13 and §14 state where.
 >     fault never makes a ruling less restrictive; and a fault on a request carrying `goal`
 >     unset is unreachable, because the seam is not read. **A lane that answered `None` on the
 >     fault fails this arm**, the grant being enough to reach `ALLOW`.
-> 53. **An empty-coverage authorization, end to end.** An egress declaration whose call carries
+> 53. **Removing an argument the record fixes is a change, not a licence.** A live record
+>     covering `{"site": "A", "refundable_only": true}`; a recipient grant covering the same
+>     declaration, account and destinations; then a request of that goal carrying
+>     `{"site": "A"}` alone → **condition 6 fails on the key sets**, the bar fires,
+>     `RecipientGrants.covering` is called **zero** times, the ruling is `CONFIRM`, and the
+>     reason says a member names an argument the request omits. **A lane that read condition 6
+>     over the request's keys alone fails this arm**, `ALLOW`ing a call that drops the term the
+>     user fixed.
+> 54. **An empty-coverage authorization, end to end.** An egress declaration whose call carries
 >     `parameters={}`: the `CONFIRM` proposes a row with `coverage=()`, the confirmation carries
 >     a **present** `ConfirmationAuthorization` whose `coverage` is empty and whose `expires_at`
 >     is the row's, answering establishes it, and a later argument-free request of that goal is
@@ -2226,17 +2351,34 @@ check are each consumed as written, and §13 and §14 state where.
 >     recipient grant covering the same declaration, account and destinations in the store and
 >     `RecipientGrants.covering` called zero times.** An empty `coverage` is an authority over
 >     an argument-free call and is a wildcard over nothing.
-> 54. **Which `CONFIRM` proposes a row** (§1). A `CONFIRM` on a request carrying `goal` unset; a
+> 55. **`settle`'s three outcomes, over every move §1's graph admits and refuses.** Each of the
+>     five edges from its own source → `SETTLED`; the same call repeated → `NOT_AT_SOURCE`; a
+>     move asked of a row standing anywhere but that edge's source, one test per retired
+>     disposition and one for a `PROPOSED` row asked for `REVOKED` → `NOT_AT_SOURCE`; two
+>     settlements raced on one row → one `SETTLED` and one `NOT_AT_SOURCE`, never two winners;
+>     an id the store does not hold → `NO_SUCH_AUTHORIZATION`. **No call raises and none returns
+>     a `bool`**, and the same three values reach the surface through
+>     `revoke_authorization` unmapped.
+> 56. **`record` refuses with `InvalidAuthorizationError` and a fault raises
+>     `AuthorizationError`.** A second `ESTABLISHED` row of one goal and declaration id; a
+>     path-(ii) row failing the transcription check; one failing the non-widening check; a row
+>     carrying `confirmation` written in any disposition but `PROPOSED`; a `supersedes`
+>     resolving to no `ESTABLISHED` row of that goal and declaration id → each raises
+>     `InvalidAuthorizationError`, one test per ground, and nothing is written. An unreadable
+>     store raises `AuthorizationError`, which the subclass relation means a caller catching the
+>     base class still catches. **`recent` refuses a `limit` that is not a strictly positive
+>     `int` locally and before any I/O.**
+> 57. **Which `CONFIRM` proposes a row** (§1). A `CONFIRM` on a request carrying `goal` unset; a
 >     `CONFIRM` on a request carrying no `egress_binding`; and a `CONFIRM` on an egress request
 >     one of whose arguments no resolution minted a member for → **no row is written** in each,
 >     `Confirmation.authorization` is **absent**, and answering resolves the `CONFIRM` and
 >     authorises the one call by route (a) and establishes nothing. A `CONFIRM` meeting all
 >     three conditions → a row is written `PROPOSED` and the projection is present.
-> 55. **The proposal reads no floor of §6's.** A `CONFIRM` on an egress request whose binding
+> 58. **The proposal reads no floor of §6's.** A `CONFIRM` on an egress request whose binding
 >     carries `planned_with_external_content`, meeting §1's three conditions → a row **is**
 >     proposed and answering establishes it; a later request of that goal carrying the taint
 >     draws `CONFIRM` on §6's condition 3 all the same, and one carrying none is covered.
-> 56. **The listing and the revocation.** `standing_authorizations(goal_id)` returns one
+> 59. **The listing and the revocation.** `standing_authorizations(goal_id)` returns one
 >     `AuthorizationView` per `ESTABLISHED` row of that goal, live and lapsed, never a
 >     `PROPOSED`, a `DECLINED`, an `EXPIRED`, a `REVOKED` or a `SUPERSEDED` one and never
 >     another goal's; `live` is set from **one** clock reading for the whole listing; the goal's
@@ -2244,10 +2386,10 @@ check are each consumed as written, and §13 and §14 state where.
 >     **empty answer and not a raise**; each `CoverageView` carries the member's span. Then
 >     `revoke_authorization` on a live row → `REVOKED`; on a lapsed `ESTABLISHED` row →
 >     `REVOKED`; on a `PROPOSED`, `DECLINED`, `EXPIRED`, `REVOKED` or `SUPERSEDED` row →
->     `NOT_ESTABLISHED`, one test each; on an id the store does not hold →
+>     `NOT_AT_SOURCE`, one test each; on an id the store does not hold →
 >     `NO_SUCH_AUTHORIZATION`. **No call raises**, and a revoked row is absent from the next
 >     listing.
-> 57. **The rendering bar, at the listing.** The view carries the row's `id` and the surface
+> 60. **The rendering bar, at the listing.** The view carries the row's `id` and the surface
 >     renders it; **no** subject digest, `BoundAccount`, account reference, connection
 >     reference, `confirmation`, `supersedes`, resolution **or `destinations`** reaches it, one
 >     assertion each, and the goal is rendered by statement and never by id. **The
