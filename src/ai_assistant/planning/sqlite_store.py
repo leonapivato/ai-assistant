@@ -1516,6 +1516,17 @@ class SqlitePlanStore:
                 does not revalidate.
         """
         snapshot = _revalidated_question(question)
+        if snapshot.disposition is not GoalQuestionDisposition.OPEN:
+            # Refused before the lock and before any read: a terminal record written
+            # here would answer `True` while `open_question` answered `None` for the
+            # same goal. Only `settle_question` reaches a terminal disposition
+            # (ADR-0250 §9, §12).
+            msg = (
+                f"question {snapshot.id} arrives {snapshot.disposition.value} and "
+                f"record_question writes an OPEN question: a terminal disposition is "
+                f"written by settle_question and by nothing else (ADR-0250 §9)"
+            )
+            raise PlanningError(msg)
         async with self._lock:
             return await _run_to_completion(self._record_question_sync, snapshot)
 
