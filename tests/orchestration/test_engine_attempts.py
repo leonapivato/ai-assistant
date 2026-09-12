@@ -1045,47 +1045,76 @@ async def test_the_parking_turns_own_work_survives_the_resumption() -> None:
     assert ended.state is AttemptState.ENDED
 
 
-async def test_a_failed_boundary_write_on_a_resumption_does_not_strand_the_approval() -> None:
-    """§12's bookkeeping may not destroy the act it describes (ADR-0235 §6's posture).
+async def test_a_failed_boundary_write_is_recovered_by_the_finishing_commit() -> None:
+    """§12's bookkeeping neither destroys the act it describes nor gives up on it.
 
-    A confirmation is answerable once (ADR-0044 §2b), and by the time the boundary runs
-    the resolving ruling is already in the trail — so a failure propagating from there
-    would leave the approval spent, the step ``AWAITING_APPROVAL``, a retry refused as
-    already resolved and the binding absent from ``pending_confirmations``: an authorised
-    act with no route back. The observer is reported instead, on that path and no other.
+    Two things have to hold at once when the store refuses the boundary's write. The
+    approval must survive: a confirmation is answerable once (ADR-0044 §2b) and the
+    resolving ruling is already in the trail by then, so a failure propagating from the
+    boundary would leave the approval spent, the step ``AWAITING_APPROVAL``, a retry
+    refused as already resolved and the binding absent from ``pending_confirmations`` —
+    an authorised act with no route back. And the record must still be written: §12 asks
+    for the facts established after the opening write, and a store that refused one
+    commit and served the next has left nothing that stops the second from recording
+    them.
+
+    So the boundary is reported rather than raised, the decision's identity is kept before
+    the write that may fail, and the finishing commit reads the attempt itself and commits
+    what is true then — ``VERIFY``, the terminal fields, the ledger, and the authorization
+    the boundary did not manage to append. Nothing is replayed and no failed transition is
+    retried.
 
     ``StepRunner.run`` keeps the raise, and the difference is not arbitrary: nothing has
     been answered there, the step is still ``PENDING``, and the whole turn is retryable,
     so failing loudly costs a turn rather than an authorisation.
     """
+    reading = 0
+
+    def advancing() -> datetime:
+        nonlocal reading
+        reading += 1
+        return AT + timedelta(seconds=reading)
 
     class _FailingOnTheBoundary(_Recording):
-        """Refuses exactly the resumption's ``EXECUTE`` write."""
+        """Refuses exactly the resumption's ``EXECUTE`` write, once."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.refused = 0
 
         async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
-            """Raise once, on the transition the boundary makes."""
+            """Raise on the transition the boundary makes, and serve every other."""
             if transition.to_phase is AttemptPhase.EXECUTE:
+                self.refused += 1
                 msg = "the plan store is unavailable"
                 raise PlanningError(msg)
             return await super().commit_attempt(transition)
 
     plans = _FailingOnTheBoundary()
-    harness = Harness(tools=(confirmable(),), plans=plans)
+    harness = Harness(tools=(confirmable(),), plans=plans, now=advancing)
     parked = await harness.engine.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     assert parked.step.confirmation is not None
+    (stored,) = plans.opened
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+    asked = waiting.effort.working
 
     resumed = await harness.engine.resume(
         parked.step.confirmation.token, approved=True, timeout=PATIENT
     )
 
+    assert plans.refused == 1, "the boundary's write really was refused"
     assert resumed.step is not None
     assert resumed.step.disposition is Disposition.EXECUTED, "the approved act still ran"
     claimed = resumed.step.state.step("step-1")
     assert claimed is not None
     assert claimed.status is StepStatus.SUCCEEDED
-    (stored,) = plans.opened
+    assert claimed.approval_ref is not None
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
-    assert attempt.phase is AttemptPhase.AUTHORIZE, "the record the store refused is absent"
-    assert attempt.state is AttemptState.AWAITING_AUTHORIZATION, "and is not invented"
+    assert attempt.phase is AttemptPhase.VERIFY, "the finishing commit recorded the phase"
+    assert attempt.state is AttemptState.ENDED
+    assert attempt.outcome is AttemptOutcome.ANSWERED
+    assert attempt.authorization_ids == (claimed.approval_ref,), "and what allowed the step"
+    assert attempt.effort.working > asked, "and the resumption's own interval"
