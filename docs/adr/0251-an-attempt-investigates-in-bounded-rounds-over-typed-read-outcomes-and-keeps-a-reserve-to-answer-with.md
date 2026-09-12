@@ -1148,13 +1148,32 @@ wrong, to buy a guarantee §5's own ground already gives.
 >   turn that made two calls and then died leaves the stored count advanced by two, and a later
 >   turn resumes from there rather than from where the earlier turn began.
 
-> **Normative — the commit precedes the call, and it is the only ordering that charges a call
-> that raises.** §12's prohibition on claiming a result before it happened is stated over
+> **Normative — the commit precedes the call, and what it records is an *admission*.** The
+> charge is the attempt taking a slot of its allowance in order to make a call, not a claim that
+> a call completed. It is issued first because that is the only ordering under which a call that
+> raises is charged, and §12's prohibition on claiming a result before it happened is stated over
 > `outcome` — *"an attempt whose `outcome` is `ANSWERED` is written after the answer exists"* —
-> and a call count is not a result: what the transition records is that **this attempt is making
-> this call**, which is true from the instant it is issued and stays true whether the call
-> returns, raises or is cancelled. There is no path between the commit and the invocation on
-> which the attempt does not make the call.
+> where a call count is not a result.
+
+> **Normative — a charge may therefore stand for a call that never started, and this decision
+> permits it rather than promising otherwise.** A cancellation delivered while the commit is in
+> flight, or a process that stops between the commit and the invocation, leaves the slot
+> consumed and `Planner.plan` never entered. **The over-count is bounded by one per turn and is
+> the conservative direction**, and no lane closes it: closing it would need the commit and the
+> invocation to be one atomic act across a store seam and a model seam, which nothing in this
+> corpus provides — ADR-0054's audit worker already establishes that a store call absorbs a
+> cancellation until it physically finishes, so even the commit cannot be un-issued. **No lane
+> re-invokes the planner after a cancellation to "use" a charged slot**, and none subtracts from
+> the ledger to return one: ADR-0249 §5's monotonicity forbids the second in terms, and the
+> first would carry work past a cancellation the caller asked for.
+
+**Every error this section admits is in the same direction, and that is the property worth
+naming.** A charge can stand for a call that never ran; a call can never run uncharged. An
+allowance that over-counts stops an attempt slightly early and costs the owner a round they can
+buy back by asking again; one that under-counts lets a failing turn hand the next turn a free
+allowance, which is a loop with no ceiling. The corpus takes the same direction wherever it
+cannot be atomic — ADR-0194 §2's *"an unknown price is never zero"* is the same choice about
+money.
 
 **The asymmetry between the two cases is ADR-0249 §12's and not this decision's, and it is worth
 saying which way each errs.** A new attempt's turn that dies leaves nothing, so nothing is
@@ -1522,7 +1541,10 @@ than changed.
     persisted** that makes two calls and then dies is asserted to leave the **stored** count
     advanced by two, through `commit_attempt` under §12's compare-and-swap, and a later turn is
     asserted to resume from there — the arm that fails if any implementation buffers a
-    persisted attempt's ledger to the turn's persistence site.
+    persisted attempt's ledger to the turn's persistence site. (d) A cancellation delivered
+    **while the charge commits** is asserted to leave the slot consumed with `Planner.plan`
+    never entered, the planner asserted not to be re-invoked afterwards, and the ledger asserted
+    not to be decremented — the conservative over-count §12's clause permits by name.
 18. **The system opens no attempt to buy budget.** An attempt that exhausts its allowance is
     asserted to leave `GoalAttempt` count unchanged and the goal `ACTIVE`, with no second attempt
     row written by anything but one of ADR-0250 §12's three acts.
