@@ -448,6 +448,99 @@ async def test_the_ledger_covers_the_driving_and_composing_the_turn_stage_did_no
     assert attempt.effort.planner_calls == 1, "and the loop's own counter survives"
 
 
+async def test_the_attempt_records_the_decision_its_step_was_claimed_under() -> None:
+    """§5: "the authorizations it took", referenced by id and never inlined.
+
+    ADR-0014 §5 requires that "a claimed step must be traceable to the decision that
+    allowed it", and ``StepExecution.approval_ref`` is where that decision's id already
+    sits — so the attempt's own record of what it was allowed to do is **that**
+    identifier, resolved against the trail rather than minted here.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(tool(),), plans=plans)
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    state = outcome.step.state.step("step-1")
+    assert state is not None
+    assert state.approval_ref is not None, "the step was claimed under a decision"
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.authorization_ids == (state.approval_ref,)
+    assert await harness.trail.get(state.approval_ref) is not None, "and it resolves"
+
+
+async def test_a_resumption_records_the_decision_the_user_just_gave() -> None:
+    """§5, §12: appended, not replacing — the parked `CONFIRM` and the answer are two.
+
+    "An ``add_*`` member **appends** its identifier to the corresponding tuple; an
+    identifier the tuple already holds is **ignored** rather than duplicated or refused",
+    so a resumption contributes the decision *it* recorded beside the one the parked turn
+    took.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    (stored,) = plans.opened
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    state = resumed.step.state.step("step-1")
+    assert state is not None
+    assert state.approval_ref is not None
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert state.approval_ref in attempt.authorization_ids
+    assert len(set(attempt.authorization_ids)) == len(attempt.authorization_ids), "no duplicate"
+
+
+async def test_a_cancellation_inside_the_tool_leaves_the_attempt_out_of_waiting() -> None:
+    """§12: the attempt leaves waiting when the **user answers**, not when the tool returns.
+
+    The runner may hold an arbitrarily slow tool, so a cancellation can land while the
+    step is already ``RUNNING``. An attempt still recorded as awaiting the user's approval
+    there is a durable misrecord that nothing repairs — the token now **restates** rather
+    than resolving — and §12 puts each commit "at the moment the fact becomes true".
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _gated(parameters: object, *, idempotency_key: str | None) -> None:
+        del parameters, idempotency_key
+        entered.set()
+        await release.wait()
+
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans, tool_handler=_gated)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    resuming = asyncio.create_task(
+        harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    resuming.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await resuming
+    release.set()
+
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.state is AttemptState.RUNNING, "the user answered, so it is not waiting"
+    assert attempt.phase is AttemptPhase.EXECUTE
+
+
 async def test_a_turn_that_ends_before_the_site_writes_no_attempt_row() -> None:
     """§16 item 14's first clause, over the attempt.
 
