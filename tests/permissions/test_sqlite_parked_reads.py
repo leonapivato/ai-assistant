@@ -424,6 +424,20 @@ _SETTLED_BLOB: Final = (
 #: pass against a trigger with no terminal-fact limb at all.
 _SETTLE_BY_HAND: Final = f"UPDATE parked_reads SET data = {_SETTLED_BLOB}"  # noqa: S608 — the interpolated part is this module's own constant, built from CONTENT
 
+#: A settlement that clears every content field **but one**, bound as a parameter. It is
+#: the shape :data:`_SETTLE_BY_HAND` cannot catch: that statement clears all four at once,
+#: so a trigger that had lost one of its four content predicates would admit it and every
+#: assertion here would still pass. Each field's own predicate is exercised by leaving that
+#: field behind and nothing else.
+_KEEP_ONE_FIELD: Final = (
+    # The retained field's JSON path is bound twice; the rest is this module's own
+    # constant, built from CONTENT.
+    f"UPDATE parked_reads SET data = json_set({_SETTLED_BLOB}, ?, json_extract(data, ?))"  # noqa: S608
+)
+
+#: The same, scoped to one row, for a file holding more than the suite's own park.
+_KEEP_ONE_FIELD_OF: Final = f"{_KEEP_ONE_FIELD} WHERE id = ?"
+
 #: The same settlement with one further field forged on top of it, bound as a parameter.
 _FORGE_A_TERMINAL_FACT: Final = (
     # The interpolated part is this module's own constant; the forged field and its
@@ -473,6 +487,60 @@ async def test_the_ordering_key_cannot_be_rewritten(path: Path) -> None:
 
     with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError, match=_TRIGGER):
         conn.execute("UPDATE parked_reads SET parked_at_us = 0")
+
+
+@pytest.mark.parametrize("kept", CONTENT)
+async def test_a_settlement_that_kept_any_one_content_field_is_refused(
+    path: Path, kept: str
+) -> None:
+    """ADR-0244 §3's retention rule, **per field** rather than over the set.
+
+    :func:`test_a_settlement_that_kept_the_content_is_refused_by_the_database` leaves all
+    four behind, so the first predicate to fire covers for the other three: a trigger that
+    had lost one of its four content predicates would still refuse it, and would still
+    admit :data:`_SETTLE_BY_HAND`, which clears all four. So the limb ADR-0248 §3 adds —
+    and every limb beside it — is only actually asserted by a settlement that retains that
+    one field and clears the rest, which is what this case runs.
+
+    The Tier 1 content left behind is the whole point: a settlement admitted here would
+    move the disposition and leave the user's own request, or the query, sitting in a row
+    the retention rule says is empty.
+    """
+    store = SqliteParkedReads(path=path)
+    await store.park(park())
+    store.close()
+
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError, match=_TRIGGER):
+        conn.execute(_KEEP_ONE_FIELD, (f"$.{kept}", f"$.{kept}"))
+
+    reopened = SqliteParkedReads(path=path)
+    try:
+        held = await reopened.get("park-1")
+        assert held is not None
+        assert held.disposition is ParkedReadDisposition.OPEN, "the refused update changed nothing"
+        assert getattr(held, kept) is not None
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("kept", CONTENT)
+async def test_an_upgraded_database_refuses_the_same_settlement(path: Path, kept: str) -> None:
+    """ADR-0248 §9: the upgrade installs **this** version's trigger, asserted behaviourally.
+
+    The object check already refuses a file whose trigger is not this store's, so an
+    upgrade that dropped nothing would fail to open at all. What that does not show is
+    that the trigger now *in the file* enforces the fourth field — an upgraded database
+    and a fresh one must be the same database, and this is the arm that says so over the
+    behaviour rather than over a string comparison.
+    """
+    _version_1_database(path, parks=[park(utterance=None)])
+    store = SqliteParkedReads(path=path)
+    await store.settle("park-1", disposition=ParkedReadDisposition.CANCELLED, at=LATER)
+    await store.park(park(park_id="park-2", conversation_id="conv-2", decision_id="decision-2"))
+    store.close()
+
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError, match=_TRIGGER):
+        conn.execute(_KEEP_ONE_FIELD_OF, (f"$.{kept}", f"$.{kept}", "park-2"))
 
 
 async def test_a_well_formed_settlement_is_admitted_by_the_trigger(path: Path) -> None:

@@ -285,6 +285,102 @@ async def test_the_composed_user_prompt_renders_the_request_under_its_heading() 
     ]
 
 
+# --- source selection: the day the goal stops being the utterance -------------
+#
+# Every arm above runs where the request and the goal statement are byte-equal, which is
+# what §6 asks for and what makes this decision a no-op. It is also what those arms cannot
+# tell apart: an implementation that kept reading `goal.statement` passes all of them. So
+# the cases below drive the same production paths with the two values **deliberately
+# different**, which is the property §5's table is actually about — and the state this
+# tree enters the day A1 gives the goal its intended meaning.
+
+
+#: What an assistant that had understood the request might make the goal say. Nothing in
+#: it overlaps :data:`_SAID`, so an assertion cannot pass on a shared substring.
+_INTERPRETED: Final = "locate the outstanding expense claim and file it"
+
+
+async def test_every_moved_reader_takes_the_request_when_the_goal_says_something_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0248 §4 and §5, over a turn whose goal is **not** its request.
+
+    The goal minting is replaced so the pass produces the shape A1 will produce for real:
+    a turn whose ``goal.statement`` is the assistant's reading of the user and whose
+    ``utterance`` is what they actually said. Every reader §5 moves must then say the
+    user's words — the archive's user half, the episode's ``content`` and the composing
+    prompt's quoted span — and none of them may say the reading.
+
+    This is the case that fails if a reader is reverted, and the reason the no-op arms
+    above cannot be the whole of §10: they run where the two values agree, so they pass
+    against exactly the implementation this decision replaces.
+
+    **Only the minting is replaced**, at the one seam ADR-0228 §1 owns and A1 supersedes.
+    The engine, the capture point, the archive, the episode writer and the production
+    composing stage are all the real ones.
+    """
+    composing, model = _recorder()
+    harness = Harness(planner=NoStepPlanner(), composing=composing)
+    # The seam ADR-0228 §1 owns and A1 supersedes, replaced with the real minting called
+    # on a reading — so the goal is genuinely built, and only its statement diverges.
+    loop = harness.engine._loop
+    minted = loop._goal_from
+    monkeypatch.setattr(loop, "_goal_from", lambda _request: minted(_INTERPRETED))
+
+    outcome = await harness.engine.converse(_SAID, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert outcome.turn.goal.statement == _INTERPRETED, "the goal really did diverge"
+    assert outcome.turn.utterance == _SAID
+    (entry,) = await _entries(harness.archive)
+    assert entry.asked == _SAID, "ADR-0225 §1: the user's own words, unrewritten"
+    (episode,) = await _episodes(harness.memory)
+    assert episode.content.startswith(f"The user asked: {_SAID}")
+    assert _INTERPRETED not in episode.content
+    prompt = next(one.content for one in model.calls[0].messages if one.role is Role.USER)
+    assert prompt.splitlines()[:2] == [
+        "The user said, in their own words:",
+        f"  {json.dumps(_SAID)}",
+    ], "the heading is a claim about the text beneath it (§4)"
+    assert _INTERPRETED not in prompt.split("\n\n")[0]
+
+
+async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> None:
+    """ADR-0248 §3: "**No lane widens it**: not to a park that carries an ``utterance``".
+
+    The fallback is for a park older than the field and for nothing else, so a park that
+    carries one must be read from it even where its goal says something different. Driven
+    by rewriting the stored row — the state A1 produces for real, where the parked goal is
+    an interpretation — and asserted on the resumed turn and on what the resolution
+    archived.
+
+    Together with :func:`test_a_park_written_without_an_utterance_falls_back_to_its_goal_statement`
+    this is the whole of §3's branch: one case per side, each with values that tell the two
+    sides apart.
+    """
+    wired = _wired()
+    parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.read_confirmation is not None
+    park = await _parked(wired)
+    diverged = park.model_copy(
+        update={
+            "utterance": _SAID,
+            "goal": park.goal.model_copy(update={"statement": _INTERPRETED}),
+        }
+    )
+    wired.parks._records[:] = [diverged]  # the row A1 produces: a park whose goal is a reading
+
+    outcome = await wired.engine.resume(
+        parked.read_confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.turn is not None
+    assert outcome.turn.goal.statement == _INTERPRETED, "the parked goal really did diverge"
+    assert outcome.turn.utterance == _SAID, "the park's own request, not its goal statement"
+    assert (await _entries(wired.archive))[-1].asked == _SAID
+    assert _INTERPRETED not in (await _episodes(wired.memory))[-1].content
+
+
 # --- §10's first three arms --------------------------------------------------
 
 
