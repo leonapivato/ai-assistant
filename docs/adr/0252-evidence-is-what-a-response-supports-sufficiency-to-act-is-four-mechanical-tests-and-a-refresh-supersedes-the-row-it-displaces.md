@@ -38,6 +38,36 @@
   should check first: its two instants and its never-a-gate rule are what make sufficiency a
   separate question rather than a freshness verdict on the evidence.
 - Date: 2026-09-12
+- **Note (2026-09-12): every clause this decision pushed onto A5 is discharged by
+  [ADR-0253](0253-the-plan-declares-what-a-step-waits-on-what-fills-its-arguments-and-what-must-be-evidenced-before-it-is-dispatched.md),
+  and nothing of this ADR is superseded.** §6's push — *"A step's condition declares a required
+  `basis`, and on the `INTERPRETATION` basis a `declaration` and the member of its enumeration the
+  condition requires"* — is `StepCondition` (ADR-0253 §5), whose `basis` is **required by the
+  type** so a condition declaring none is not constructible rather than read as a default, and
+  whose `about` names a condition element of the goal's interpretation. §6's open question is
+  answered: a condition **may** require a `read_kind` and **may not** require a `source`, because
+  §1 rules `source` *"absent on every row this decision's producers write"* and a requirement no
+  row could meet is a step that can never dispatch. §6's recency clause — *"The figure lives on
+  the step, A5 lands the field"* — is `PlanStep.evidence_recency`, a `timedelta | None`, and a
+  step declaring none imposes none. §9's operand — *"What a revision **requires**, and therefore
+  §9's two operands"* — is `GoalElement.applicability`, so this ADR's *"until A5 lands,
+  `GoalRevision.invalidates` is empty on every revision"* ends; ADR-0253 §7 carries §9's own
+  safety obligation forward in terms, that no lane lands the plan-driving stage on a tree where
+  that tuple is still empty by construction. §1's *"What form the identifier takes is A5's"* is
+  answered with the **`GoalElement.id`**, which is durable, resolves through the plan store,
+  survives every revision that retains the element, and gives one plan's two interpretations two
+  declarations — where a step id would satisfy §1's parenthetical and fail §8 limb 3, since a
+  re-plan mints new ids. §5's *"Which enumeration it is, what its members are called"* is
+  `InterpretationVerdict`, closed at `QUALIFIES`, `DOES_NOT_QUALIFY` and `INCONCLUSIVE`, with the
+  third as the does-not-settle member and all three disjoint from `ReadOutcomeKind`'s seven; there
+  is **one** enumeration over many propositions, which is §7's own reading. §15's interpretation
+  entry is discharged: the call's whole input is one recorded record and one element's text, its
+  declared output schema is one member and nothing else, and it is **not** a `PlanStep` —
+  ADR-0226 §4's reasoning applied, so nothing about it reaches `ExecutionState` or the permission
+  gate. **§14's writer clause is relied on and not narrowed**: it governs what composes a **row**,
+  and what a condition or an element declares is a **requirement** that is never copied into one.
+  Everything else of this ADR binds entire. Nothing decided here changes and no Status edit is
+  owed (ADR-0082 §1). Refs #2255, ADR-0253 §13.
 
 ## Context
 
