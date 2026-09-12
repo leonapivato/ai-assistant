@@ -589,10 +589,19 @@ revision model, and it copies Tier 1 content into a store with no reason to hold
 is a behaviour change at exactly the site this decision promises not to change, and it
 would make A0 observable in the record — which is the one property the sequencing buys.
 
-**Require `utterance` on an `OPEN` park and migrate the rows.** Rejected in §3: a park
-written before the field existed would fail to decode, so a question the user was asked
-would become unanswerable, and the only available back-fill is parsing a rendering, which
-ADR-0225 §1 refuses in terms.
+**Require `utterance` on an `OPEN` park and back-fill the rows.** This is the strongest
+alternative and it would work: §3's own argument establishes that a legacy park's
+`Goal.statement` is the user's words, so a back-fill inside §9's upgrade could copy them
+across before anything decodes under the new schema — and a row migrated first never fails
+to decode, so the unanswerable-question objection does not apply to *this* shape. It is
+rejected in §3 on its cost. The back-fill **rewrites stored Tier 1 content in rows the user
+is still being asked about**, so the store's guarantee that a park holds byte for byte what
+was recorded when the question was asked would come to rest on upgrade code being correct
+and uninterrupted rather than on nothing having written to the row; and it buys nothing the
+fallback does not already get by reading the same bytes out of the same row with no write
+at all. What it saves is one compatibility branch that §3 makes permanently exact. (The
+objection that *does* apply, and to a different shape, is requiring the field with **no**
+back-fill: that leaves every pre-existing park undecodable, against ADR-0244 §15.)
 
 **Leave the settlement trigger alone and let `settle`'s own code clear the fourth field.**
 Rejected. It would avoid §9's store upgrade entirely, and that is its whole appeal. But the
