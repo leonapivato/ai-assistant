@@ -12,7 +12,7 @@
   — and §15 shows the working for every one.
   **ADR-0228's three:** §2's **condition (e)**, together with the enumeration's
   completeness (its "if and only if **all** of the following hold" read as a claim that
-  the list is closed), as ADR-0240 §6 left both — (e) is dissolved and four further
+  the list is closed), as ADR-0240 §6 left both — (e) is dissolved and three further
   conditions are added, while §2's all-of-them rule, its mechanical-not-a-judgement rule,
   its closing clause, its prohibition on an implementation retrying, widening or
   substituting a read, and conditions (a), (b), (c), (d) and (g) all bind **verbatim**.
@@ -543,11 +543,12 @@ be kept ignorant of a refusal on a round that fires anyway.
 > **all-of-them** rule and its **if-and-only-if** form bind entire over the list as it now
 > stands.
 
-> **Normative.** **No outcome authorises a retry, and that is discharged by two clauses
-> rather than by (e).** First, ADR-0228 §2's closing clause binds verbatim — the **loop** never
-> re-issues, widens or substitutes a read, whatever came back. Second, an ask the **planner**
-> re-issues byte for byte within a turn is refused rather than serviced (§7). A further round
-> is a further **plan**, and what the planner does with it is its own composition (ADR-0240
+> **Normative.** **No outcome authorises a retry, and that is discharged by ADR-0228 §2's
+> closing clause rather than by (e).** That clause binds verbatim — the **loop** never
+> re-issues, widens or substitutes a read, whatever came back — and the distinction it draws is
+> between the loop and the planner: **the loop initiates no retry of its own, and a request the
+> planner authored is serviced under §7 whatever it resembles.** A further round is a further
+> **plan**, and what the planner does with it is its own composition (ADR-0240
 > §6: *"The broadening is the planner's and never the loop's"*).
 
 **Dissolving (e) is the substantive change of this decision and it is paid for rather than
@@ -863,8 +864,8 @@ judgement was redundant.
 
 > **Normative — what composing is told, and it is ADR-0228 §10 unchanged.** On an attempt
 > whose investigation stopped **while its last plan still carried a `read_request`** — at the
-> planner-call allowance, at the investigation share, at the per-turn planning budget, on the
-> or on the unproductive run — the composing stage is given **the bare fact that
+> planner-call allowance, at the investigation share, at the per-turn planning budget, or on
+> the unproductive run — the composing stage is given **the bare fact that
 > the turn stopped looking while it was still asking**, and composes an answer that says so.
 > On every other turn it is given nothing and the assembled prompt is byte-identical.
 > **ADR-0228 §10 binds entire and gains no field**: the fact carries **no count, no duration,
@@ -895,18 +896,13 @@ planner-call allowance be the only stop — would spend four model calls on an a
 learned nothing after the first, which is precisely the *"repeated unproductive work"* #2170
 asks be detected.
 
-**The run resets at a turn boundary and the duplicate test does not, and the asymmetry has a
-reason on each side.** The run is a claim about one continuous line of enquiry; a new turn
-carries a new utterance and may carry a new interpretation revision, which is new information
-and honestly breaks the run. The supply it was counted over is ephemeral in any case —
+**The run resets at a turn boundary, and ADR-0052 §3 is why rather than a preference.** The
+run is a claim about one continuous line of enquiry; a new turn carries a new utterance and may
+carry a new interpretation revision, which is new information and honestly breaks the run. The
+supply it was counted over is ephemeral in any case —
 ADR-0052 §3's *"context and retrieved memories are ephemeral and were never persisted"* — so
-persisting the count would mean persisting a claim about a supply nothing can reconstruct. The
-duplicate test is the opposite case: **within one turn the supply is monotone** (ADR-0228 §7),
-so a byte-identical ask is **certain** to return nothing new, and refusing it is a fact rather
-than a forecast. Across turns it is merely likely — the store may have been written to between
-them — and refusing on a likelihood would be the loop overriding the planner's judgement, which
-ADR-0228 §2's closing clause forbids. So each test is scoped to where its ground actually holds,
-and neither is stretched to the other's.
+persisting the count would mean persisting a claim about a supply nothing can reconstruct.
+§14 defers the persisted variant with exactly that as what fires it.
 
 **Telling composing nothing new is the conservative arm and it is chosen deliberately.** The
 obligation asks that the reply *"says what was found and what was not"*, and composing already
@@ -1450,7 +1446,7 @@ than changed.
 >   the bound is still two, no allowance is declared, no attempt kind is stamped, no progress
 >   test runs and no stop reason is added.
 > - **L2 — the loop.** `orchestration/` alone: §4's conditions and its never-gated first call,
->   §5's declaration mapping and the stamping site, §6's reserve, §7's progress fold, duplicate
+>   §5's declaration mapping and the stamping site, §6's reserve, §7's progress fold, its
 >   two stop reasons, audit extension and widened composing trigger, §9's `BLOCKED`
 >   site, §9's three-limb test and its prohibition — which writes nothing, so the lane ships the
 >   negative arms rather than a `set_goal_status` call — and §12's writer clauses including the
@@ -1597,7 +1593,7 @@ than changed.
     on nothing, carrying the per-servicing `ReadOutcomeKind` sequence, the attempt's kind, its
     consumed planner calls and its declared allowance — and asserted to carry **no** query, no
     label, no ask, no excerpt and no identifier but the ambient correlation id. A second arm
-    asserts the stop distribution is readable over all eight members.
+    asserts the stop distribution is readable over all seven members.
 25. **Byte-identical on every other turn.** A turn that did not stop while asking assembles a
     composing prompt byte-identical to the one it assembles on `origin/main`. ADR-0228 §10's own
     arm, kept.
