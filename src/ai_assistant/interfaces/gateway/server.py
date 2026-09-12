@@ -165,6 +165,7 @@ from ai_assistant.core.types import (
     ConversationSummary,
     CoverageUnrecordedBinding,
     Disposition,
+    EgressBinding,
     EgressSpan,
     Evidence,
     FrozenJson,
@@ -244,7 +245,6 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         CanonicalDestination,
-        EgressBinding,
         RoutableOperation,
         RoutedListing,
         RoutedOperation,
@@ -4960,6 +4960,24 @@ def _decision_view(decision: PermissionDecision) -> dict[str, Any]:
     with no field added to carry the basis itself, so a view that pre-computed the
     state would be putting §6's discriminator in a second place.
 
+    **``authorised_subject`` crosses for the same reason, and it crosses as the row's own
+    value rather than as a verdict** (ADR-0247 §2). A non-resolving ``ALLOW`` whose
+    ``authorised_by`` is set is "route (b) where ``authorised_subject`` is set and route
+    (c) where it is not", and a route-(c) ``authorised_by`` is a **connection reference**,
+    which ADR-0148 §6 and §8's fourth clause bar from every surface. So the page needs the
+    fact to render route (c) as its basis with no identifier — and it needs the binding's
+    ``closed_loop`` beside it, which :func:`_recorded_binding_view` carries for the same
+    reason. Crossing a boolean named for the route instead would be exactly the
+    pre-computed state the clause above rules out, decided here where ``interfaces.cli``
+    decides it from the row.
+
+    **It crosses and the page renders it not at all**, which ADR-0193 §11's fifth clause
+    permits beside rendering it opaque, and nothing on the page presents it as a
+    verification, a match, a badge or a difference from another row. It is a digest over
+    the grant's values and carries none of them back (§11), so what crosses is
+    sixty-four hex characters whatever the grant's size — ADR-0004 §7's minimisation,
+    which is the reason the field is a digest in the first place.
+
     **A row carrying a ``resolves`` and a *different* ``authorised_by`` is not a
     ruling this surface reads at all**, and ``unreadable`` is that fact carried.
     ADR-0193 §11 names exactly three states and this pair is none of them; the trail
@@ -4985,6 +5003,7 @@ def _decision_view(decision: PermissionDecision) -> dict[str, Any]:
         "parameters_digest": decision.parameters_digest,
         "resolves": decision.resolves,
         "authorised_by": decision.ruling.authorised_by,
+        "authorised_subject": decision.ruling.authorised_subject,
         "binding": _recorded_binding_view(decision.egress_binding),
     }
 
@@ -5028,6 +5047,18 @@ def _recorded_binding_view(
     a page reading a missing boolean as ``false`` would turn "not recorded" into "no
     external content", which is a claim the record does not make.
 
+    **``closed_loop`` crosses, and its ``null`` is the arm that carries no such fact**
+    (ADR-0247 §2). It is route (c)'s *eligibility* — the conjunct that keeps the
+    digest-free pointer ADR-0193 §11 reserves from being read as a configuration
+    authority — and the page needs it beside ``authorised_subject`` to tell the two
+    standing routes apart. ADR-0238 §13 added the member to
+    :class:`~ai_assistant.core.types.EgressBinding` alone, so a binding of either
+    unrecorded arm carries none, and ``null`` is that stated rather than inferred: a view
+    crossing ``false`` there would answer "this row is not closed-loop" where the record
+    holds no such member at all, which is ``origin_unrecorded``'s own lesson one field
+    over. **The page renders it not at all** — ADR-0186 §7's enumeration does not name it,
+    and a history row gains no fact from this lane beyond the basis it already stated.
+
     **A ``CoverageUnrecordedBinding`` is not that arm and is not rendered as one**
     (ADR-0233 §14). Such a row *does* record the origin of the call — the member
     rides the rung it shares with :class:`~ai_assistant.core.types.EgressBinding` —
@@ -5049,6 +5080,7 @@ def _recorded_binding_view(
             if isinstance(binding, OriginUnrecordedBinding)
             else binding.planned_with_external_content
         ),
+        "closed_loop": binding.closed_loop if isinstance(binding, EgressBinding) else None,
         "destinations": [
             _recorded_destination_view(member) for member in binding.canonical_destination_set
         ],

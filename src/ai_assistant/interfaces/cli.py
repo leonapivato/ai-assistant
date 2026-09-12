@@ -301,6 +301,7 @@ from ai_assistant.core.types import (
     DestinationTrustRecord,
     DiscloserProvenance,
     Disposition,
+    EgressBinding,
     FeedbackEvent,
     FeedbackKind,
     GrantScope,
@@ -374,7 +375,6 @@ if TYPE_CHECKING:
         ConversationDigest,
         ConversationSummary,
         DestinationProtocol,
-        EgressBinding,
         EgressSpan,
         GrantableSource,
         HeldNotification,
@@ -11894,8 +11894,62 @@ def _render_recorded_egress(
         _print(f"    {_egress_span_line(span)}")
 
 
+def _rests_on_the_configuration(decision: PermissionDecision) -> bool:
+    """Whether this standing ``ALLOW`` is ADR-0247 §2's route (c), read off the row alone.
+
+    **The discriminator is ``authorised_subject``, and the eligibility conjunct is
+    ``closed_loop``, and neither does the other's job** (ADR-0247 §2). The digest says
+    which route a row *claims* — "a non-resolving egress ``ALLOW`` whose ``authorised_by``
+    is set is route (b) where ``authorised_subject`` is set and route (c) where it is
+    not" — and ``closed_loop`` says whether the row is of the one kind ADR-0148 §3's new
+    route covers. Both are members of the row, so this reads no store, no ``Settings`` and
+    no clock, exactly as §2 requires of the discriminator and as ADR-0193 §11's second
+    clause requires of every state this surface renders.
+
+    **Why the conjunct is here and not only in the trail.** ADR-0193 §11 reserves a
+    digest-free pointer "written before this ADR's implementation validated any", and
+    ADR-0247 §2 rules that such a row "is *neither* route, and ADR-0193 §11 governs it
+    entire" — "this ADR does not give it a basis it never had". ``closed_loop`` was added
+    to :class:`~ai_assistant.core.types.EgressBinding` by ADR-0238, which lands after
+    ADR-0193's implementation, so **no row predating that implementation can carry it
+    ``True``**: the conjunct is what makes the exclusion exact rather than hopeful, and a
+    surface branching on the digest alone would render a reserved row as a configuration
+    authority the record never claimed.
+
+    **The pointer equality is the trail's and is deliberately not restated here**
+    (ADR-0247 §2: "the trail asserts what it can see"). ``AuditTrail.record`` admits a
+    digest-free standing row only where ``authorised_by`` equals the binding's
+    ``account.reference``, and it refuses every other one; this adapter is handed rows
+    over the wire by a hub it does not own, and re-deriving that check here would decide
+    the one case it cannot help with in the **wrong** direction — a closed-loop row whose
+    pointer the binding contradicts would fall through to the state that *prints* the
+    pointer, which is the value ADR-0148 §6 bars from every surface.
+
+    **Only the two unrecorded binding arms are excluded by the type test**, and that is
+    ADR-0247 §2 in terms: a binding that records no origin carries no ``closed_loop``
+    either, so neither :class:`~ai_assistant.core.types.OriginUnrecordedBinding` nor
+    :class:`~ai_assistant.core.types.CoverageUnrecordedBinding` can be eligible, and the
+    refusals ADR-0184 §7 and ADR-0233 §14 make of them are untouched.
+
+    Args:
+        decision: The recorded ruling, whose outcome the caller has already established
+            is ``ALLOW`` with ``resolves`` unset and ``authorised_by`` set.
+
+    Returns:
+        Whether this row is route (c) — the deployment's own configuration of its search
+        provider — rather than the standing authorisation ADR-0193 §11's second state
+        names.
+    """
+    binding = decision.egress_binding
+    return (
+        decision.ruling.authorised_subject is None
+        and isinstance(binding, EgressBinding)
+        and binding.closed_loop
+    )
+
+
 def _authorisation_line(decision: PermissionDecision) -> str:
-    """What authorised an ``ALLOW``, in exactly three states (ADR-0193 §11).
+    """What authorised an ``ALLOW`` — §11's three states, route (c) inside the second.
 
     §11 extends ADR-0186 §7 by **one** fact and changes none of its others, so this
     line is appended to the row rather than displacing anything: nothing above it is
@@ -11928,6 +11982,35 @@ def _authorisation_line(decision: PermissionDecision) -> str:
     saying which it is, and no surface has a read with which to find out. So what §6
     makes true of the system is not a claim this renderer is entitled to make about
     the row in front of it.
+
+    **§11's second condition now covers two bases, and ADR-0247 §2's discriminator is
+    what tells them apart.** §11 enumerates three *states* and this function still
+    renders three conditions; what changed under ADR-0247 is that a non-resolving
+    ``ALLOW`` carrying an ``authorised_by`` is no longer only a pointer at a standing
+    grant. Route (c) — an ``ALLOW`` on a ``WEB_SEARCH`` at the provider this deployment
+    was configured with — takes the same shape and sets ``authorised_by`` to the
+    binding's ``account.reference``, so rendering §11's second state over it would print
+    a **connection reference**, which ADR-0148 §6 and §8's fourth clause bar from every
+    surface: the reference "is recorded on the decision for an auditor and is rendered to
+    nobody". :func:`_rests_on_the_configuration` is that split, made from the row alone,
+    and it carries the reasoning for both of its conjuncts.
+
+    **This adds no fourth state and takes nothing away from §11.** The three conditions
+    are unchanged and each is still read off the pair; what ADR-0247 §2's last normative
+    clause adds is *what a surface renders* inside the second — "the reason text says
+    that this deployment's owner configured this search provider, and it names no origin,
+    no host, no connection reference, no credential and no ``Settings`` field". So route
+    (c) is rendered as its **basis with no identifier**, and route (b) — and the reserved
+    digest-free pointer §11 contemplates in terms, which is neither route — is rendered
+    exactly as it was. Every other clause of §11 binds unchanged on the new line: it
+    claims no liveness, states nothing about a configuration being current, and is not an
+    approval control, an assurance or a reason to suppress anything above it.
+
+    **The stored pointer is untouched by any of this** (ADR-0247 §8(d)): the row still
+    carries the reference and the binding still carries the origin, so "which
+    configuration authorised this" stays answerable from the recorded decision alone, and
+    ``assistant export-decisions`` writes the record as it stands. What is withheld is
+    the rendering, and the artifact is where an auditor reads the bytes (ADR-0186 §9).
 
     **The third state is a positive fact and never an absence** (§11's eighth
     clause). It is not rendered as a blank, an omission or a failure to record:
@@ -11994,12 +12077,21 @@ def _authorisation_line(decision: PermissionDecision) -> str:
         a :data:`~ai_assistant.core.types.DurableIdentifier` and not a string a
         policy is free to shape, but it is interpolated into adapter-authored text
         exactly as ``reason`` is, and the neutralisation is what makes that safe
-        without depending on another type's invariant.
+        without depending on another type's invariant. The route-(c) line interpolates
+        **no value at all**, which is ADR-0247 §2's last normative clause rather than a
+        saving: what it would have interpolated is the one value ADR-0148 §6 keeps from
+        every surface.
     """
     authorised_by = decision.ruling.authorised_by
     if authorised_by is None:
         return "[bold]Authorised by:[/] the policy's own rules, resting on no decision of yours"
     if decision.resolves is None:
+        if _rests_on_the_configuration(decision):
+            return (
+                "[bold]Authorised by:[/] this deployment's own configuration: its owner "
+                "configured this search provider [dim](the basis, and no identifier of "
+                "it)[/]"
+            )
         return (
             "[bold]Authorised by:[/] a standing authorisation this ruling names, "
             f"recorded as {_safe(authorised_by)} [dim](what the row names, and no more)[/]"

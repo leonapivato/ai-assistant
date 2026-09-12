@@ -78,6 +78,13 @@ _DIGEST: Final = "d" * 64
 _ACCOUNT = BoundAccount(identity="work@example.com", reference="conn-0001")
 _ENDPOINT = "smtp://mail.example.com:587"
 
+#: The account a search at *the configured provider* is bound to (ADR-0247 §1). The
+#: **reference** is what a route-(c) ``ALLOW`` records as its ``authorised_by`` and
+#: what ADR-0148 §6 and §8's fourth clause keep off every surface, so it is spelled
+#: distinctively enough to be searched for in a whole rendering.
+_SEARCH_ACCOUNT = BoundAccount(identity="Example Search", reference="conn-search-0001")
+_SEARCH_ORIGIN = "https://search.example.com"
+
 #: Every word for an event that ADR-0186 §8's third clause bars beside a ruling.
 #: Matched on word boundaries, because "already" contains "read" and a substring
 #: test would fail on prose that claims nothing.
@@ -147,6 +154,39 @@ def _binding(*, planned: bool, spans: Sequence[EgressSpan] | None = None) -> Egr
     )
 
 
+def _search_binding(*, closed_loop: bool = True) -> EgressBinding:
+    """The binding a ``WEB_SEARCH`` servicing derives (ADR-0238 §5, ADR-0247 §1).
+
+    Its account is :data:`_SEARCH_ACCOUNT`, whose ``reference`` is the value a route-(c)
+    ``ALLOW`` records as ``authorised_by`` — so a case can look for that one string in a
+    whole screen and know what finding it would mean.
+
+    ``closed_loop`` is an argument because it is route (c)'s **eligibility** (ADR-0247
+    §2): the digest-free pointer ADR-0193 §11 reserves carries it ``False`` and is
+    "*neither* route", and a case about that exclusion needs the other value.
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="origin",
+                index=0,
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=len(_SEARCH_ORIGIN),
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.HTTPS,
+                    supplied=_SEARCH_ORIGIN,
+                    canonical=f"{_SEARCH_ORIGIN}:443",
+                ),
+            ),
+        ),
+        account=_SEARCH_ACCOUNT,
+        transport_endpoint=_SEARCH_ORIGIN,
+        planned_with_external_content=False,
+        coverage=SpanCoverage.NOT_COVERED,
+        closed_loop=closed_loop,
+    )
+
+
 def _legacy_binding(spans: Sequence[EgressSpan] | None = None) -> OriginUnrecordedBinding:
     """The same three facts, from a row recorded before ADR-0181 §3 existed.
 
@@ -172,6 +212,7 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
     binding: EgressBinding | OriginUnrecordedBinding | None = None,
     resolves: str | None = None,
     authorised_by: str | None = None,
+    authorised_subject: str | None = None,
 ) -> PermissionDecision:
     """One recorded ruling, built field by field.
 
@@ -183,14 +224,22 @@ def _decision(  # noqa: PLR0913 — a record's fields, each of which some case v
 
     ``authorised_by`` is a plain keyword here for the same reason, and it is what
     lets ADR-0193 §11's cases seed each of the three states *and* the combination
-    ``AuditTrail.record`` refuses but the type still validates. Constructing that
+    ``AuditTrail.record`` refuses but the type still validates. ``authorised_subject``
+    joins it for ADR-0247 §2's sake: it is the discriminator that tells a standing row's
+    two routes apart, and a case seeding a route-(b) row has to set it for the row to be
+    the one it means. Constructing that
     one through the store is impossible by design; constructing it here is the whole
     point, because this module's subject is a renderer handed rows over the wire by
     a hub it does not own.
     """
     return PermissionDecision(
         id=decision_id,
-        ruling=PermissionRuling(outcome=outcome, reason=reason, authorised_by=authorised_by),
+        ruling=PermissionRuling(
+            outcome=outcome,
+            reason=reason,
+            authorised_by=authorised_by,
+            authorised_subject=authorised_subject,
+        ),
         tool=tool if tool is not None else _tool(),
         parameters_digest=_DIGEST,
         decided_at=at if at is not None else _AT,
@@ -1172,6 +1221,120 @@ def test_the_second_state_claims_nothing_about_the_grant_it_names(
     line = _basis_line(output)
     for claim in _BARRED_OF_A_NAMED_GRANT:
         assert re.search(rf"\b{claim}\b", line, flags=re.IGNORECASE) is None, claim
+
+
+def test_an_allow_resting_on_the_configuration_names_the_basis_and_quotes_no_identifier(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0247 §2's last normative clause, on the row that clause is about.
+
+    "What a surface renders for route (c) names the basis and quotes no identifier… it
+    names **no origin, no host, no connection reference, no credential and no
+    ``Settings`` field**. ``BoundAccount.reference`` is *never shown to the user*
+    (ADR-0148 §6, §8's fourth clause) and this ADR does not move that." A route-(c)
+    ``ALLOW`` records the binding's ``account.reference`` as its ``authorised_by``, so
+    ADR-0193 §11's second state would print exactly the value ADR-0148 §6 bars — which is
+    the defect this case pins (#2256).
+
+    The line is pinned whole rather than by containment, for the second state's own
+    reason: the failure the clause is about is a line saying this **and** something
+    further.
+
+    **The reference is asserted absent from the whole screen and not only from this
+    line**, because a rendering that moved it one line down would satisfy a line
+    assertion and breach the clause. The **origin** is not asserted absent: ADR-0186 §7
+    obliges this listing to render the recorded binding whole — "every span, none
+    omitted" — and ADR-0247 §8(d) has an auditor read the account and origin off the row.
+    The clause quoted above is about the **basis text**, and about the one value ADR-0148
+    §6 names.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-1", authorised_by=_SEARCH_ACCOUNT.reference, binding=_search_binding()),
+    )
+    assert _basis_line(output) == (
+        "Authorised by: this deployment's own configuration: its owner configured this "
+        "search provider (the basis, and no identifier of it)"
+    )
+    assert _SEARCH_ACCOUNT.reference not in rendered
+    assert "standing authorisation" not in rendered
+
+
+def test_the_configuration_state_claims_nothing_about_the_configuration_it_names(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0193 §11's clauses bind unchanged on the line ADR-0247 §2 adds under them.
+
+    §2's own words: "ADR-0193 §11's bar on what the audit surface renders binds on this
+    route as it binds on route (b)." So this line derives no liveness and asserts nothing
+    about the configuration being current, held, unrevoked or validated — it is a fact
+    about the decision, and the deployment may have been reconfigured since.
+    """
+    _listing(
+        output,
+        monkeypatch,
+        _decision("d-1", authorised_by=_SEARCH_ACCOUNT.reference, binding=_search_binding()),
+    )
+    line = _basis_line(output)
+    for claim in _BARRED_OF_A_NAMED_GRANT:
+        assert re.search(rf"\b{claim}\b", line, flags=re.IGNORECASE) is None, claim
+
+
+def test_a_standing_row_that_fingerprints_its_grant_renders_exactly_as_it_did(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Route (b) is untouched by this lane, asserted over the closed-loop shape.
+
+    ADR-0247 §2: ``closed_loop`` is route (c)'s **eligibility** and the digest is its
+    **discriminator**, and "neither does the other's job". ADR-0238 permits a
+    grant-covered ``ALLOW`` over a closed-loop binding and that row is **route (b)**,
+    because it carries a digest — so a surface branching on ``closed_loop`` alone would
+    stop naming the grant this row rests on. The line is pinned as the bytes it was
+    before this lane, which is the whole of what "route (b) rendering is unchanged" means.
+
+    ``authorised_subject`` is still rendered **not at all** (§11's fifth clause), which
+    the equality also states: the digest is on the row and nothing of it is on the screen.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision(
+            "d-1",
+            authorised_by="g-1",
+            authorised_subject="b" * 64,
+            binding=_search_binding(),
+        ),
+    )
+    assert _basis_line(output) == (
+        "Authorised by: a standing authorisation this ruling names, recorded as g-1 "
+        "(what the row names, and no more)"
+    )
+    assert "b" * 64 not in rendered
+
+
+def test_the_digest_free_pointer_adr_0193_reserves_is_neither_route(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0247 §2: such a row "is *neither* route, and ADR-0193 §11 governs it entire".
+
+    "This ADR does not give it a basis it never had", and "the eligibility conjunct is
+    what makes that exclusion exact rather than hopeful": ``closed_loop`` reached
+    :class:`~ai_assistant.core.types.EgressBinding` in ADR-0238, which lands after
+    ADR-0193's implementation, so no reserved row can carry it ``True``. A surface
+    branching on the missing digest alone would render this row — a pointer at a grant
+    that may never have been validated — as the deployment's own configuration, which is
+    a basis the record does not determine.
+    """
+    _listing(
+        output,
+        monkeypatch,
+        _decision("d-1", authorised_by="g-1", binding=_search_binding(closed_loop=False)),
+    )
+    assert _basis_line(output) == (
+        "Authorised by: a standing authorisation this ruling names, recorded as g-1 "
+        "(what the row names, and no more)"
+    )
 
 
 def test_a_policy_granted_allow_states_the_policys_own_rules(

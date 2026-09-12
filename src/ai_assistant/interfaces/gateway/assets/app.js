@@ -2319,6 +2319,36 @@ function decisionWords(outcome) {
   return "asked (a question put to you)";
 }
 
+// Whether a standing `allow` is ADR-0247 §2's route (c), read off the row alone.
+//
+// **The digest is the discriminator and `closed_loop` is the eligibility, and neither
+// does the other's job** (ADR-0247 §2). "A non-resolving egress `allow` whose
+// `authorised_by` is set is route (b) where `authorised_subject` is set and route (c)
+// where it is not" — that is what the row *claims* — and `closed_loop` is whether the row
+// is of the one kind ADR-0148 §3's new route covers. Both are members of the row, so this
+// reads nothing the page was not already handed, which is ADR-0193 §11's second clause.
+//
+// **The conjunct is not optional.** ADR-0193 §11 reserves a digest-free pointer "written
+// before this ADR's implementation validated any", and ADR-0247 §2 rules such a row
+// "*neither* route", governed by §11 entire: "this ADR does not give it a basis it never
+// had". `closed_loop` reached `EgressBinding` in ADR-0238, which lands after ADR-0193's
+// implementation, so no reserved row can carry it `true` — the conjunct is what makes the
+// exclusion exact rather than hopeful. `null` is a binding of an arm that carries no such
+// member at all (`_recorded_binding_view`), and it is not eligible either.
+//
+// **The pointer equality is the trail's and is deliberately not restated here**: a
+// closed-loop row whose pointer its binding contradicts is one `AuditTrail.record`
+// refuses, and re-deriving that check on this page would decide the case it cannot help
+// with in the wrong direction — falling through to the state that *prints* the pointer,
+// which is the value ADR-0148 §6 bars from every surface.
+function restsOnTheConfiguration(decision) {
+  return (
+    decision.authorised_subject === null &&
+    decision.binding !== null &&
+    decision.binding.closed_loop === true
+  );
+}
+
 // What authorised an `allow`, in exactly the three states ADR-0193 §11 names, read
 // off the pair the row carries and off no field that pre-computes it (§6).
 //
@@ -2326,6 +2356,23 @@ function decisionWords(outcome) {
 // decision *names* a standing authorisation. It does not state that the named grant
 // exists, is held, is live, is unrevoked or covers anything now — ADR-0186 §8's
 // first clause, read on this fact.
+//
+// **§11's second condition covers two bases since ADR-0247, and this is the one place
+// the page tells them apart.** Route (c) — an `allow` on a `web_search` at the provider
+// this deployment was configured with — takes the second state's exact shape and sets
+// `authorised_by` to the binding's connection reference, so rendering the second state
+// over it would print the one value ADR-0148 §6 and §8's fourth clause bar from every
+// surface: it "is recorded on the decision for an auditor and is rendered to nobody". So
+// route (c) is rendered as ADR-0247 §2's last normative clause requires — **the basis,
+// naming no origin, no host, no connection reference, no credential and no `Settings`
+// field** — and route (b), and the reserved digest-free pointer that is neither route,
+// are rendered exactly as they were. This is not a fourth state: §11's three conditions
+// are unchanged, and every other clause of §11 binds on the new line, which claims no
+// liveness and asserts nothing about the configuration being current.
+//
+// **One vocabulary with `interfaces/cli._authorisation_line`**, whose own branch is the
+// same two conjuncts in the same order: the two surfaces render one fact, and a second
+// wording here would be a second thing to keep in step.
 //
 // **A row whose pointers contradict each other never reaches here** — `unreadable`
 // keeps it out of the listing entirely, which is what holds this function to §11's
@@ -2335,6 +2382,12 @@ function authorisationWords(decision) {
     return "the policy's own rules, resting on no decision of yours";
   }
   if (decision.resolves === null) {
+    if (restsOnTheConfiguration(decision)) {
+      return (
+        "this deployment's own configuration: its owner configured this search " +
+        "provider (the basis, and no identifier of it)"
+      );
+    }
     return (
       "a standing authorisation this ruling names, recorded as " +
       `${decision.authorised_by} (what the row names, and no more)`
