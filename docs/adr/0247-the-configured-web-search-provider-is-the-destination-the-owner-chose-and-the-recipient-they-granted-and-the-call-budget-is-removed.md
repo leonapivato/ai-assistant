@@ -1,7 +1,59 @@
 # 247. The configured web-search provider is the destination the owner chose and the recipient they granted, a search to it never asks on lineage or coverage grounds, and the per-conversation call budget is removed
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0251 (one scope. §5's per-turn sentence alone: "**Per turn**: ADR-0228 §4's planning budget gates the start of each additional planner call, so a turn that declares one starts at most two planner calls and therefore at most two searches, and an operation declaring none does not iterate at all." ADR-0251 §5 moves ADR-0228 §3's count to the attempt and declares four for a conversational one, so the figure two stops being true of a turn inside such an attempt; the sentence's second limb, that an operation declaring none does not iterate at all, binds verbatim and is kept by ADR-0251 §5 unchanged, as is ADR-0228 §4's PT20S gate the first limb names. §5's per-search clause (ADR-0241 §1's deadline and ADR-0231 §5's ceilings), its per-money clause (ADR-0194's ceiling and ADR-0016 §4's unknown-cost floor) and above all its per-conversation clause — "**Per conversation: nothing bounds the number of searches**, and that is the decision rather than an omission" — all bind **verbatim**, and ADR-0251 §11 answers §13's first deferral by keeping that sentence true rather than by reversing it. §5's removal clauses, its two-SQLite-columns clause, its dissolution of two ADR-0238 deferrals and its #1908-sentence clause are untouched, and §§1-4 and §§6-16 are untouched)
 - Date: 2026-09-11
+- **Partially superseded: 2026-09-12 by ADR-0251 — §5's per-turn sentence alone.
+  Nothing else in this ADR.** §13's first deferral names its own trigger — *"Fired by the
+  owner's own trigger, quoted: 'Revisit if planner passes, batching or unattended work
+  expand.'"* — and milestone 32's investigation loop expands planner passes. ADR-0251 is
+  the decision that fires it and answers it.
+
+  **The sentence that moves.** §5 reads *"**Per turn**: ADR-0228 §4's planning budget
+  gates the start of each additional planner call, so a turn that declares one starts at
+  most two planner calls and therefore at most two searches, and an operation declaring
+  none does not iterate at all."* ADR-0251 §5 moves ADR-0228 §3's count from the turn to
+  the attempt and declares **four** for a conversational one, so *at most two* stops being
+  true of a turn inside such an attempt. A reader holding only this ADR would tell an
+  operator a turn runs at most two searches and would be wrong, which is ADR-0070 §1's
+  test coming out on the supersession side.
+
+  **The sentence's second limb is kept, and so is the gate its first limb names.**
+  *"[A]n operation declaring none does not iterate at all"* binds verbatim: ADR-0251 §5
+  keeps ADR-0228 §4 entire — `converse` and `converse_streaming` still declare PT20S from
+  the turn's entry into the loop, `converse_spoken` still declares none — and adds a
+  second, fail-closed declaration one level up, where an attempt kind that declares no
+  allowance likewise does not iterate.
+
+  **What §5 keeps, and the third clause is the one that matters.** Its **per-search**
+  clause and its **per-money** clause bind verbatim and ADR-0251 §11 quotes them as two of
+  the four things bounding the expanded loop. And its **per-conversation** clause binds
+  **verbatim** — *"**Per conversation: nothing bounds the number of searches**, and that
+  is the decision rather than an omission. Every turn is owner-initiated, so the count is
+  bounded by how many times the owner asks."* ADR-0251 §11 answers §13's deferral by
+  **keeping that sentence true**: it rules normatively that no attempt advances without an
+  owner act — nothing schedules, sweeps, resumes, retries or continues an attempt on a
+  timer, at startup or in a background job — and that the expansion is bounded per attempt
+  by a declared allowance. It reintroduces **no** per-conversation bound of any kind, in
+  any form: `Settings.search_calls_per_conversation` stays removed,
+  `ConversationSearchDraw` stays removed, `ConversationStore` regains no member and
+  `SearchDisposition` regains no `NOT_ADMITTED`.
+
+  **§13's first deferral is therefore discharged rather than superseded, and its two
+  remaining limbs stay unfired.** Batching and unattended work would each falsify *"every
+  turn is owner-initiated"*, and ADR-0251 §11 restates them as what would fire a
+  per-conversation bound again. **ADR-0238 §16's rolling-window entry and its
+  per-conversation elapsed-time entry stay exactly where §13 restated them** and are
+  neither discharged nor narrowed.
+
+  **Nothing else in this ADR moves.** §5's removal of the `Settings` field and of
+  `ConversationSearchDraw`, its `ConversationStore` obligation clause, its
+  two-SQLite-columns clause, its dissolution of two ADR-0238 deferrals and its clause
+  about #1908's sentence are untouched; and §§1-4 and §§6-16 — the configured provider as
+  the chosen destination and granted recipient, route (c)'s trail, the lineage floor and
+  coverage exception, `closed_loop`'s two conditions, what the removal took with it,
+  `rebind`'s transcription, the configuration-authority contract, the unchanged list, the
+  `core` surface and version, the lane cut, the tests, the remaining deferrals and the
+  scope record — all stand exactly as ratified.
 - **Partially supersedes** [ADR-0238](0238-a-destination-the-user-chose-may-be-told-what-the-turn-knows-and-the-searching-that-follows-runs-under-a-per-conversation-budget.md)
   — **§1's third clause in the limb reaching a `WEB_SEARCH` request at the configured
   provider; §5's four-condition definition of `closed_loop` in its second, third and fourth

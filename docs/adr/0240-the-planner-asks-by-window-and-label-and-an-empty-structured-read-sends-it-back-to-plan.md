@@ -1,7 +1,62 @@
 # 240. The planner asks by window and by label, and an empty structured read sends it back to plan
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0251 (two scopes. §7's parameter declaration, "`Planner.plan` gains one keyword parameter, `empty_reads: Sequence[ReadAsk] = ()`, additive and defaulted": the parameter becomes `read_outcomes: Sequence[ReadOutcome] = ()`, carrying one entry per ask the attempt has already serviced — the same frozen `ReadAsk`, beside the typed outcome it earned — so that a refusal, a failure, an expiry, a truncation and a duplicate are as visible to the planner as an empty read is. Every other clause of §7 binds verbatim and is restated over the wider carrier: the ask is carried back byte for byte and is never edited on the way, nothing the store said crosses on it, a read the budget did not reach is not in it, `()` on the first call means no read has been serviced, the carrier and §10's audit are governed separately, and the change is flagged BREAKING under golden rule 5. And §6's narrowing to `STRUCTURED_READ`, in one respect only: an empty read of any kind now reaches the planner as a fact about that ask. §6's definition of an empty structured read, its rule that a deduplicated-out read is not one, its clause that the broadening is the planner's and never the loop's, its bound clause and its prohibition on citing ADR-0237 §7 as a ground all bind entire — and the last is honoured, no clause of the superseding ADR citing ADR-0237 §7 as a ground for anything. §§1-5 and §§8-16 are untouched)
 - Date: 2026-09-08
+- **Partially superseded: 2026-09-12 by ADR-0251 — §7's parameter declaration and
+  §6's narrowing to `STRUCTURED_READ`, in the scopes the `Status` line names. Nothing
+  else in this ADR.** Milestone 32's L3 (#2169) requires the planner-visible outcomes of
+  *"success, empty results, duplicates, refusal, failure, and truncation"* to be
+  distinguished; ADR-0251 is the decision that carries them.
+
+  **What §7 loses.** Its first clause reads *"`Planner.plan` gains one keyword parameter,
+  `empty_reads: Sequence[ReadAsk] = ()`, additive and defaulted."* That parameter is
+  replaced by `read_outcomes: Sequence[ReadOutcome] = ()` in the same keyword position. A
+  reader holding only this ADR would implement a parameter that no longer exists on the
+  Protocol, which is ADR-0070 §1's test coming out on the supersession side.
+
+  **What §7 keeps, and it is nearly all of it.** ADR-0251 §3 restates every remaining
+  clause over the wider carrier and relies on each: *"The ask is carried back unaltered and
+  is never edited on the way … No implementation widens a window, drops an axis, rewrites a
+  label or composes a suggested ask to put in its place"*; *"Nothing the store said crosses
+  on it. No record, no count, no identifier, no instant of the read, no `capped` value and
+  no value of any kind that the store returned or computed"*; *"A read the budget did not
+  reach is not in it"*, which keeps `SearchDisposition.NO_BUDGET` and
+  `StructuredOutcome.NOT_ASKED` out of the carrier entirely; the first-call clause, with
+  `()` meaning **no read has been serviced**; the clause governing this carrier and §10's
+  audit **separately**; and the breaking-change flag under golden rule 5.
+
+  **What §6 loses, and what its reason keeps.** §6 admits only a `STRUCTURED_READ`'s
+  emptiness across the seam, on the ground that *"Only a structured read carries a
+  certification about the owner's own records, so only a structured read supports the
+  inference the broadening rests on."* **That ground is unchanged and is not disputed.** It
+  is a statement about which emptiness licenses a *broadening inference*, and ADR-0251
+  neither draws that inference nor invites it: what its §2 carries is what became of one
+  ask, as a member of a closed vocabulary of seven, on a round that was admissible for its
+  own reasons. A reader holding only this ADR would withhold a `WEB_SEARCH`'s `NO_RESULT`
+  from the planner, which is again ADR-0070 §1's test met.
+
+  **§6's own amendment of ADR-0228 §2(e) is overtaken rather than contradicted.** §6
+  extended (e) so that an empty structured read fires a revision; ADR-0251 §4 dissolves (e)
+  altogether, so every completed servicing admits a further round and the sequence is
+  bounded by the attempt's allowance and by a stop at two consecutive unproductive rounds
+  instead. **§6's argument is what licenses that**, quoted in the superseding decision:
+  *"the amendment is not a claim that the second call is worth making anyway: it is paired
+  with §7, which gives the second call an input the first did not have. Without §7 this
+  section would be exactly what (e) forbids."* ADR-0251 owes and gives that pairing for
+  every outcome rather than for one.
+
+  **§6's remaining clauses bind entire**, and two are load-bearing in the superseding
+  decision: the definition of an empty structured read, and the rule that a read whose
+  records were all deduplicated out is **not** one — *"the store returned records, and a
+  planner told otherwise would broaden away from records already in front of it"* — which
+  is exactly why `ReadOutcomeKind` has a `DUPLICATE` member distinct from `EMPTY`. So does
+  *"The broadening is the planner's and never the loop's"*, and so does the prohibition on
+  citing ADR-0237 §7, which the superseding ADR records itself as honouring.
+
+  **§§1-5 and §§8-16 are untouched.** The kind, the ask's four axes and its grammar, what
+  is read, the servicing site and its budget, the prompt's axis rule, §10's two audit
+  fields and its no-value-on-any-axis rule, the persistence clauses and the versions all
+  stand exactly as ratified.
 - **Partially supersedes**
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md)
   — **§2's condition (e), in exactly one scope: a `STRUCTURED_READ` whose store call

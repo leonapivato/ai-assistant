@@ -1,6 +1,6 @@
 # 228. A serviced read may revise the plan once, and the turn stops looking at a bound or a deadline
 
-- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched) and ADR-0242 (§10's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which at least one search servicing did not reach a result, which §6 of the superseding ADR gives the composing stage a second carrier for; §10's first sentence binds entire, so a turn that stopped at the bound or the budget with a read_request standing is still given that fact and still composes an answer that says so, and §10's remaining four clauses bind entire and are the pattern §7 of the superseding ADR follows — the carrier travels inside ai_assistant.orchestration as data, adds no member to a Protocol, is never inferred at the render site, and reaches no step account; §§1-9 and §§11-15 are untouched) and ADR-0249 (§1's third clause in its second sentence alone: "The goal is minted once per turn from the user's unrewritten words and nothing about it changed" is false of a goal that carries an interpretation and false of a turn that associates to a goal an earlier turn opened. That one sentence, and nothing else in this ADR: §1's subject-stability rule, "The revision carries the same `goal_id` as the plan it replaces", binds verbatim, and the two calls of a turn plan for the same goal under that one `goal_id`; what §1 fixed is the subject and not the view of it, so where the first call revised the understanding the second receives the brief of the new revision, which is ADR-0249 §8's stale-target rule working rather than a breach of §1; its reason, that "a second goal would make one turn look like two in every store that holds goals", binds entire; and §1's authored-at-the-seam clause, its context-assembled-once clause, its nothing-else-is-re-run clause and its capability-re-read clause are relied on unchanged; and §1's one-field clause together with §5's every-other-field clause, in the count alone, the fields any other component sets becoming `supersedes` and `targets_revision` under §5's identical discipline, with every remaining field of every plan still exactly as the planner returned it and §1's authored-at-the-seam enumeration untouched)
+- Status: Partially superseded by ADR-0240 (three scopes. §2's condition (e): a serviced structured read that was reached with budget remaining and whose completed store call returned no record at all satisfies (e), so a revision fires on it under the other six conditions unchanged; (a), (b), (c), (d), (f) and (g), §2's all-of-them rule, its closing clause and its prohibition on an implementation widening a request or substituting a read of its own all stand, and §2's other clauses are untouched; §12's no-signal clause and §1's nothing-else clause, in the single respect that the second planner call receives a defaulted parameter holding the asks whose read returned nothing, with every other signal those clauses forbid — an iteration index, a "last look" instruction, a count of the turn's calls, a budget or deadline signal — still forbidden and §1's enumeration of what is not re-run binding verbatim; §§3-11 and 13-15 are untouched) and ADR-0242 (§10's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which at least one search servicing did not reach a result, which §6 of the superseding ADR gives the composing stage a second carrier for; §10's first sentence binds entire, so a turn that stopped at the bound or the budget with a read_request standing is still given that fact and still composes an answer that says so, and §10's remaining four clauses bind entire and are the pattern §7 of the superseding ADR follows — the carrier travels inside ai_assistant.orchestration as data, adds no member to a Protocol, is never inferred at the render site, and reaches no step account; §§1-9 and §§11-15 are untouched) and ADR-0249 (§1's third clause in its second sentence alone: "The goal is minted once per turn from the user's unrewritten words and nothing about it changed" is false of a goal that carries an interpretation and false of a turn that associates to a goal an earlier turn opened. That one sentence, and nothing else in this ADR: §1's subject-stability rule, "The revision carries the same `goal_id` as the plan it replaces", binds verbatim, and the two calls of a turn plan for the same goal under that one `goal_id`; what §1 fixed is the subject and not the view of it, so where the first call revised the understanding the second receives the brief of the new revision, which is ADR-0249 §8's stale-target rule working rather than a breach of §1; its reason, that "a second goal would make one turn look like two in every store that holds goals", binds entire; and §1's authored-at-the-seam clause, its context-assembled-once clause, its nothing-else-is-re-run clause and its capability-re-read clause are relied on unchanged; and §1's one-field clause together with §5's every-other-field clause, in the count alone, the fields any other component sets becoming `supersedes` and `targets_revision` under §5's identical discipline, with every remaining field of every plan still exactly as the planner returned it and §1's authored-at-the-seam enumeration untouched) and ADR-0251 (three scopes. §2's condition (e), together with the enumeration's completeness — its "if and only if **all** of the following hold" read as a claim that the list is closed — as ADR-0240 §6 left both: (e) is dissolved, so a servicing that completed admits a further planner call whatever its typed outcome, and three further conditions are added — the attempt's planner-call allowance, its working allowance less its reserve, and a bound on consecutive unproductive rounds. §2's all-of-them rule, its if-and-only-if form, its "a fact the turn already has in hand … none is a setting, and none is a judgement" framing, its closing clause and the prohibition inside it — that no implementation retries a failed servicing, widens a request, re-asks the planner on a different prompt, or substitutes a read of its own — and conditions (a), (b), (c), (d) and (g) all bind verbatim and are quoted in the superseding ADR's §4. §3's count and its subject, "A turn makes **at most two** calls to `Planner.plan`": the count becomes the attempt's declared planner-call allowance and the subject becomes the attempt, a conversational attempt declaring four. §3's non-configurability clause is not superseded and is the clause the superseding decision rests on, its rule that the last plan's request is still serviced binds entire, its stopped-at-the-bound rule binds entire over the new figure, and its "the two figures differ by at most one" is unchanged in substance. And §9's closure of the stop vocabulary at five, in that count alone: the count becomes eight, gaining `WORKING_ALLOWANCE_REACHED`, `UNPRODUCTIVE` and `DUPLICATE_ASK`; every existing member keeps its name, its value, its meaning and its default, `BOUND_REACHED`'s subject moving with §3 and its name not; and §9's one-record rule, its extend-not-replace clause, its counts-and-no-copy rule, its per-turn fire-rate definition, its "not iterated" default clause and its stop-distribution clause all bind entire and are extended. §1, §4, §5, §6, §7, §8, §10 and §§11-15 are untouched: §4's PT20S stays the per-turn gate keyed on the operation, and §10's carrier gains no field)
 - Date: 2026-09-03
 - **Partially superseded: 2026-09-12 by ADR-0249 — §1's third clause in its second
   sentence alone. Nothing else in this ADR.** The owner ruled on 2026-09-12 (#2255) that
@@ -56,6 +56,89 @@
   clause, its `save_plan` refusal, its export-closure clause and its persistence clauses bind
   entire and are extended rather than reshaped; §8's namer rule binds ADR-0249's whole envelope;
   and §§2-15 stand entire.
+- **Partially superseded: 2026-09-12 by ADR-0251 — §2's condition (e) and the
+  enumeration's completeness, §3's count and its subject, and §9's five-member closure
+  in that count alone. Nothing else in this ADR.** Milestone 32's L3 (#2169) and L4
+  (#2170) require a bounded repeated read/decide loop, and ADR-0249 §13 deferred it by
+  name. ADR-0251 is the decision that raises this ADR's bound and moves it to the
+  attempt.
+
+  **What §2 loses.** (e) reads *"The servicing returned **at least one record the supply
+  did not already hold**, counted after ADR-0226 §7's deduplication"*, as ADR-0240 §6
+  extended it. Under ADR-0251 §4 a servicing that **completed** admits a further planner
+  call whatever its typed outcome, and what bounds the sequence is the attempt's
+  planner-call allowance, its working allowance less its reserve, and a stop at two
+  consecutive unproductive rounds. A reader holding only this ADR would refuse a second
+  round after a refused, failed, expired or fully-deduplicated read, and would admit a
+  fifth round after four productive ones — ADR-0070 §1's test coming out on the
+  supersession side in both directions.
+
+  **(e)'s own reason is met rather than waived.** (e) argues that *"a planner called twice
+  over one input is being asked the same question twice at the price of a model round
+  trip"*. ADR-0251 §3 replaces ADR-0240 §7's `empty_reads` with a carrier stating the
+  **typed outcome of every ask**, so the further call is never over one input — which is
+  exactly the pairing ADR-0240 §6 made for its own single case when it wrote that
+  *"Without §7 this section would be exactly what (e) forbids"*.
+
+  **What §2 keeps, verbatim.** Conditions **(a), (b), (c), (d) and (g)** bind word for
+  word and ADR-0251 §4 quotes them. So do §2's all-of-them rule, its if-and-only-if form,
+  its framing that each condition is *"a fact the turn already has in hand; none is a
+  setting, and none is a judgement"*, and its closing clause — including the prohibition
+  that *"No implementation retries a failed servicing, widens a request, re-asks the
+  planner on a different prompt, or substitutes a read of its own for one the planner did
+  not ask for"*, which is one of the two clauses discharging #2169's requirement that no
+  outcome authorises a retry.
+
+  **What §3 loses, and what it keeps.** *"A turn makes **at most two** calls to
+  `Planner.plan`"* becomes *at most the attempt's declared planner-call allowance*, and
+  the counter becomes `AttemptEffort.planner_calls` rather than the turn's. A reader
+  holding only this ADR would stop at two. **§3's non-configurability is not superseded**
+  and is the clause ADR-0251 §5 is built on — *"a plan count is a count of model calls, so
+  a configurable one is a configurable per-turn cost with no ceiling anyone reviewed"* —
+  and the figures accordingly live on a closed set of attempt kinds, never in `Settings`,
+  never a deployment flag and never a per-request parameter. §3's rule that the last
+  plan's request is still serviced binds entire; so does its rule that a turn reaching the
+  bound with its planner still asking is recorded as having stopped there and tells the
+  composing stage so; and so does *"the two figures differ by at most one"*.
+
+  **What §9 loses, and what it keeps.** *"a closed vocabulary of **five**"* becomes eight,
+  gaining `WORKING_ALLOWANCE_REACHED`, `UNPRODUCTIVE` and `DUPLICATE_ASK`. **The count
+  alone moves.** Every existing member keeps its name, its value and its meaning;
+  `NOT_ITERATED` stays the default and stays the answer for a turn that never reached a
+  first plan; `BUDGET_REACHED` stays §4's per-turn budget, unchanged; `BOUND_REACHED`
+  keeps its name and its value and takes §3's new subject. §9's one-record rule, its
+  *"raises rather than replaces"* extension clause, ADR-0226 §9's counts-and-kinds rule as
+  §9 binds it, the per-turn definition of the fire rate, the *"not iterated" is the
+  record's default* clause and the stop-distribution clause all bind **entire**, and
+  ADR-0251 §7 extends the record under them.
+
+  **§4 is not superseded, and that is deliberate rather than an omission.** ADR-0251 §5
+  keeps this section whole: `converse` and `converse_streaming` still declare **PT20S**
+  from the turn's entry into the loop, `converse_spoken` still declares none, the budget
+  is still checked with the injected clock immediately before each additional planner
+  call, it is still a gate on *starting* rather than a cancellation, and it is still keyed
+  on the operation and never on the channel's audience. The design direction taken into
+  that lane proposed re-keying §4 on the attempt; it was declined because an attempt spans
+  turns under ADR-0250 §12, so a duration measured *"from the turn's entry into the loop"*
+  would be compared against a figure already holding earlier turns. **Both gates bind, and
+  a further round is admitted only while every gate admits it.**
+
+  **§10 gains no field.** ADR-0251 §7 widens only *which* stops set the carrier; the fact
+  still carries *"no count, no duration, no guard name, no query and no label"*, still
+  travels inside `ai_assistant.orchestration` as data, still adds no field to a `core`
+  type and no member to a Protocol, still is never inferred at the render site, and still
+  reaches no step account. §10's byte-identical guarantee for every other turn is kept and
+  is one of ADR-0251 §17's arms.
+
+  **§§1, 5, 6, 7, 8 and 11-15 are untouched.** §1's assemble-once, nothing-else-is-re-run,
+  authored-at-the-seam and capability-re-read clauses bind over N rounds as they bind over
+  two; §7's monotone supply, its one fourth group, its per-servicing budget of ten, its
+  whole-union deduplication and its once-after-the-last-servicing evaluation bind over the
+  wider sequence and are load-bearing in ADR-0251 §7's duplicate-ask refusal; §8's
+  depth-by-judgement clause is how a fourth round reaches a fourth level and is not
+  extended by any other mechanism; and §14's deferral of *"A third planner call, and a
+  configurable bound or budget"* is **fired in its first limb and not in its second** — the
+  bound moves, and it moves by the ADR that decides it rather than becoming configurable.
 - **Partially supersedes five ADRs, in eight narrowly stated scopes** — five of
   ADR-0226, one of ADR-0158, one of ADR-0014 and one of ADR-0204 — and §15 shows the
   working for every one. The first five:
