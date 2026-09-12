@@ -8273,7 +8273,17 @@ class Engine:
         await self._move_attempt(
             held,
             to_phase=AttemptPhase.VERIFY,
-            to_state=AttemptState.ENDED if answered else None,
+            # **``RUNNING`` is written rather than left alone**, and that is the state's
+            # half of the recovery above. A resumption whose answer earns no outcome —
+            # a refusal, a tool that failed, a composition that produced nothing — still
+            # *has* an answer, so the attempt is no longer waiting for one; and where the
+            # boundary's write did not land, the row still says
+            # ``AWAITING_AUTHORIZATION``. Leaving it would pair §5's paused state with a
+            # phase that has reached ``VERIFY``, over a token nothing can answer again.
+            # Where the boundary did land, the row is already ``RUNNING`` and this
+            # changes nothing. **Which ``AttemptOutcome`` such an attempt earns is
+            # A10's** (§13), so none is written and §4's stated cost is taken.
+            to_state=AttemptState.ENDED if answered else AttemptState.RUNNING,
             outcome=AttemptOutcome.ANSWERED if answered else None,
             ended_at=self._clock() if answered else None,
             working=self._worked(held, since),
