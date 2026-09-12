@@ -80,22 +80,26 @@
   self-amendment naming no other ADR, so under ADR-0082 §1's self-amendment clause and
   ADR-0070 §1 the appended dated note is the whole record, no `Status` line moves, and
   **every ratified section below is byte-identical** (#2260).
-  - **(a) Eight representative-input arms retire with the read they are arms over (PR
+  - **(a) Nine representative-input arms retire with the read they are arms over (PR
     #2259).** The `Partially supersedes` record on ADR-0238 above, and §14's restatement of
     it, say that *"§15's other arms … bind as those records left them"*. That is over-wide.
-    §1 replaces `SearchFooting.trusted`'s two `trust_of` reads with the registration fact
-    and §4 retires ADR-0238 §5's build-time read, and **ADR-0238 §15 Arms 5d, 5e, 6f2(iii)
-    and 6f3** — a revocation recorded before the build-time read is honoured, the window §5
-    states, and the two discriminations between an admission and the fold's stored flag —
-    are each an arm over exactly that read. So are **ADR-0242 §15's four trust journeys**:
-    Arm 2's fixtures **(b)** and **(c)**, which §15 says *"differ in the `trust_of` answer
-    alone"*; **Arm 2c**'s recovery journey walked to its end; and **Arm 3**'s limb **(b)**.
-    Once the servicing site takes no `trust_of` answer at either position, none of the eight
-    has a subject, and a lane cannot both implement §1 and pass them. Read the record above
-    and §14's restatement as reaching §15's arms **other than those eight**, and §12's own
-    enumeration — Arms 1a, 2, 5b and 5c restated, Arms 3, 4, 6 and 6b replaced or retired —
-    as extended by them and by nothing else. Every other arm of either ADR binds exactly as
-    recorded, and lane 3 restated the fold-based ones in place rather than dropping them.
+    §1 replaces `SearchFooting.trusted`'s two `trust_of` reads with the registration fact and
+    §4 retires ADR-0238 §5's build-time read, and nine arms are stated over exactly those
+    reads. Four are **ADR-0238 §15 Arms 5d, 5e, 6f2(iii) and 6f3** — a revocation recorded
+    before the build-time read is honoured, the window §5 states, and the two discriminations
+    between an admission and the fold's stored flag. Four are **ADR-0242 §15's trust
+    journeys**: Arm 2's fixtures **(b)** and **(c)**, which §15 says *"differ in the
+    `trust_of` answer alone"*; **Arm 2c**'s recovery journey walked to its end; and **Arm
+    3**'s limb **(b)**. The ninth is **unnumbered**, in ADR-0242 §15's *"Beside the five"*
+    paragraph — *"an arm in which trust is revoked between ADR-0238 §5's two reads, asserting
+    that the carried member is `TRUST_MISSING`"* — which names both reads in terms, so §1 and
+    §4 between them take its whole subject away. Once the servicing site takes no `trust_of`
+    answer at either position none of the nine has a subject, and a lane cannot both implement
+    §1 and pass them. Read the record above and §14's restatement as reaching §15's arms
+    **other than those nine**, and §12's own enumeration — Arms 1a, 2, 5b and 5c restated,
+    Arms 3, 4, 6 and 6b replaced or retired — as extended by them and by nothing else. Every
+    other arm of either ADR, numbered or not, binds exactly as recorded, and lane 3 restated
+    the fold-based ones in place rather than dropping them.
   - **(b) §11's lane-4 enumeration of two `SearchFooting` members is withdrawn; §3 governs
     (PR #2261).** §11 names `minted_user_chosen` and `selected` among the members lane 4
     deletes. They are ADR-0238 §2's populations at the one construction site,
