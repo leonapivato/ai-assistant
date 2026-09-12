@@ -1,6 +1,6 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire)
+- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire) and ADR-0247 (§3's first clause in the route enumeration alone, which takes a third route (c) — the request is a `WEB_SEARCH` whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — and §3's second clause in its *"a configured base URL or host"* limb, for such a request alone. Those two scopes, and nothing else in this ADR beyond what ADR-0192 and ADR-0231 already recorded here: §3's other limbs of that enumeration, its source-grant refusal and its clause reserving three questions to the standing-grant ADR, and §1, §2, §§4-7 including §6's determinism and registry-rebuild clauses, §8's floors and §§9-15 bind as those records left them)
 - Date: 2026-08-13
 - Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
   attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
@@ -163,6 +163,39 @@
   **amendment** qualifier on a leading-token line and is not reached. Appended note per
   ADR-0070 §1; no text below is rewritten. Refs #1996, #1908.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — two scopes, and nothing else in this
+  ADR beyond what ADR-0192 and ADR-0231 already recorded here.** Both are in §3, and they
+  are one ruling read twice.
+
+  **§3's first clause, in the route enumeration alone.** It gives exactly two routes to an
+  `ALLOW` on an egress request — **(a)** a recorded resolution of a `CONFIRM` about *this*
+  request, and **(b)** a standing user policy established by a recorded act of the user.
+  A third is added: **(c)** the request is a `WEB_SEARCH` whose binding's
+  `BoundAccount.reference` equals `Settings.web_search_connection` and whose canonical
+  destination set is the one `Settings.web_search_origin` canonicalises to. Route (a) and
+  route (b) are untouched, and **(c) is not a widening of (b)**: §3's third clause, that no
+  lane reads limb (b) as ratifying, narrowing or pre-shaping ADR-0021 §6, is honoured, and
+  the standing-grant ADR §3 reserved three questions to is ADR-0193, which answered them.
+
+  **§3's second clause, in its *"a configured base URL or host"* limb.** That enumeration
+  of what is **not** a user act binds entire everywhere else — a tool's own declaration, the
+  scope or audience of a credential, an allowlist the system assembled, a recipient
+  appearing in a prior call, a destination extracted from a span, and a configured base URL
+  or host for an email or any other kind. **The exception is one kind and one destination**,
+  and it is the owner's ruling recorded rather than a reading derived from this ADR's
+  silence.
+
+  **What is relied upon as written, and one clause is relied on hard.** §6's determinism
+  clause and its fourth clause — *"a registry rebuilt under a different configuration —
+  across a restart, which is exactly when a parked `CONFIRM` is answered — refuses the call
+  rather than performing it against another account or another endpoint"* — is what makes
+  ADR-0247 §8(b′) answerable: a park bound to a previous configuration is refused at the
+  answer with no new mechanism. §6's rule that a binding carries **no credential value** is
+  what makes a rotated credential change nothing there. §1, §2, §§4-5, §7, §8's floors —
+  including the floor that refuses an `ALLOW` where a request carries no canonical
+  destination set or no payload description, which route (c) does not discharge — and
+  §§9-15 stand entire. **This line already carries the leading token, so under ADR-0082 §2
+  no amendment qualifier is written on it.**
 ## Context
 
 ### What ADR-0017 §3 asks for, and what has and has not answered it

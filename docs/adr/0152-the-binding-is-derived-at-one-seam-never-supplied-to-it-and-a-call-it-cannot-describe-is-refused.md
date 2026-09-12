@@ -1,6 +1,6 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`) and ADR-0233 (that same count clause of §7, narrowed by one further fact)
+- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`) and ADR-0233 (that same count clause of §7, narrowed by one further fact) and ADR-0247 (§7's count of what `rebind` takes from `approved`, in that count alone, which becomes four: `closed_loop` is transcribed beside the provenance, `planned_with_external_content` and `coverage`, because ADR-0244 made a `CONFIRM` on a `WEB_SEARCH` a durable park that can be answered and so falsified the premise that no such request is ever resumed. That scope, and nothing else in this ADR beyond what ADR-0157, ADR-0181 and ADR-0233 already recorded here: §7's every other clause — the derivation afresh, the refusal unless the derived binding equals `approved`, the refusal of an unmatched provenance and the two limbs of §8's partition — and §§1-6 and §§8-16 bind as those records left them)
 - Date: 2026-08-14
 - **Partially superseded: 2026-09-04 by ADR-0233 — §7's count of what `rebind` takes
   from `approved`, by one further fact, and nothing else in §7.** ADR-0181 §3 already
@@ -109,6 +109,33 @@
   reviewer is entitled to contest by naming the sentence that becomes false. No
   `Status` line moves and no ratified text is rewritten anywhere.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — §7's count of what `rebind` takes
+  from `approved`, by one further fact, and nothing else in §7 or in this ADR.** The count
+  was one here, became two under ADR-0181 §3 and three under ADR-0233 §4; it is now
+  **four**, the fourth being `EgressBinding.closed_loop`.
+
+  **The premise that kept it at three was ADR-0238 §5's and it stopped being true.** That
+  section chose a `False` default for `closed_loop` precisely so that `rebind` would
+  transcribe nothing new, on the ground that a `CONFIRM` on a `WEB_SEARCH` decision
+  *"resolves in no turn"*, so no closed-loop request is ever resumed. **ADR-0244 made such a
+  `CONFIRM` a durable park that is answered later**, and ADR-0247 makes a search at the
+  configured provider carry `closed_loop` `True` while still drawing a `CONFIRM` on an
+  independent ground — an unknown per-call cost, or a threshold the operator set. The
+  re-derived binding then carried `False`, compared unequal to the approved one, and the
+  answer was `OPERATION_CHANGED`: **a park nobody could ever answer** (#2232). Transcribing
+  it makes the two compare equal.
+
+  **This is §7's own argument arriving at a fourth field, not a departure from it.** The
+  fact is about a composition made before the confirmation was parked, plausibly before a
+  restart, and `rebind` receives nothing to recompute it from — which is what §7 says of the
+  provenance and ADR-0233 §4 says of the coverage. **Every other clause of §7 binds
+  entire**: the derivation afresh from `tool` and `parameters` subject to §5 and §6; the
+  refusal unless the derived binding **equals** `approved`, whole and by value; the refusal
+  of a `provenance` it cannot match; both limbs of §8's partition; and the returned call
+  carrying the binding it **derived** and never the one it was given. A park recorded before
+  ADR-0247 answers exactly as it does today, its stored value being `False`. **This line
+  already carries the leading token, so under ADR-0082 §2 no amendment qualifier is written
+  on it.**
 ## Context
 
 ### What ADR-0148 §11 fixed about (b), and what it left open

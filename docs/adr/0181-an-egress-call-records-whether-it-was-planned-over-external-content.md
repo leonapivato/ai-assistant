@@ -1,6 +1,6 @@
 # 181. An egress call records whether it was planned over external content, and that fact is the origin the authoriser evaluates
 
-- Status: Partially superseded by ADR-0238 (§5's second clause, the lineage floor, for a closed-loop request as ADR-0238 §5 defines one — a `WEB_SEARCH` request to a destination whose recorded trust is `USER_CHOSEN`, in a conversation every one of whose externally-supplied turns recorded that all of that turn's external content was minted at such a destination, and inside a per-conversation budget — and for no other request; §5's remaining clauses, its memory-ruling-point clause, its ADR-0154 §4 floor clause and every other section of this ADR stand entire)
+- Status: Partially superseded by ADR-0238 (§5's second clause, the lineage floor, for a closed-loop request as ADR-0238 §5 defines one — a `WEB_SEARCH` request to a destination whose recorded trust is `USER_CHOSEN`, in a conversation every one of whose externally-supplied turns recorded that all of that turn's external content was minted at such a destination, and inside a per-conversation budget — and for no other request; §5's remaining clauses, its memory-ruling-point clause, its ADR-0154 §4 floor clause and every other section of this ADR stand entire) and ADR-0247 (§5's second clause, the lineage floor, in its application to a `WEB_SEARCH` request at the configured search provider — the request whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — which supersedes ADR-0238's own scope here by replacing that ADR's four closed-loop conditions with two, and for no other request of any kind. That scope, and nothing else in this ADR beyond what ADR-0238 already recorded here: §5's memory-ruling-point clause, its separate-binding clause on `decide` and `resolve`, its two-comparisons clause, its `authorises` clause, its `ActionPolicy`-contract clause and its ADR-0154 §4 floor clause, and §§1-4 and §§6-12 bind as that record left them)
 - Date: 2026-08-23
 - **Partially superseded: 2026-09-05 by ADR-0238 — §5's second clause, in the scope
   of a closed-loop request alone, and nothing else in this ADR.** That clause closes
@@ -116,6 +116,36 @@
   the corrected record.** The Context's first three subsections state each
   disagreement with the file that settles it.
 
+- **Partially superseded: 2026-09-11 by ADR-0247 — §5's second clause in one
+  application, and nothing else in this ADR beyond what ADR-0238 already recorded here.**
+  ADR-0238 moved this clause once, for a *closed-loop* request as its own §5 defined one:
+  a `WEB_SEARCH` to a destination of recorded trust `USER_CHOSEN`, in a conversation whose
+  every externally-supplied turn recorded that all of that turn's external content was
+  minted at such a destination, and inside a per-conversation budget. **ADR-0247 replaces
+  those four conditions with two** — the kind is `WEB_SEARCH`, and the binding's account
+  reference and canonical destination set are the deployment's configured search connection
+  and origin — so the clause is relaxed for a strictly wider set of requests of the same
+  one kind.
+
+  **The widening is stated plainly rather than glossed.** What ADR-0238's third condition
+  bought was that a conversation which had read a local file, an inbox, a calendar or an MCP
+  result searched under this clause for the rest of its life. That property is **given up**,
+  on the owner's ruling that the configured provider is a destination they chose and that
+  disclosure to it is accepted, not deemed harmless. What contains the call is the
+  destination alone: the transport pins every search to the registration's origin as text
+  (ADR-0154's condition 5), so outside content can steer which of the owner's notes appear
+  in a query and cannot steer where the query goes.
+
+  **The clause's own last sentence is the one being moved, for the second time.** *"An ADR
+  that later lifts ADR-0154's floor may not lift it for a call carrying
+  `planned_with_external_content`"* is moved to a subject narrower in one respect — one
+  kind, one configured destination, one origin — and wider in another. **Everything else
+  stands entire**: §5's memory-ruling-point clause, its separate binding on `decide` and
+  `resolve`, its two-comparisons clause, its `authorises` clause, its `ActionPolicy`-contract
+  clause and its ADR-0154 §4 floor clause, and §§1-4 and §§6-12. §3's carriage of
+  `planned_with_external_content` on the binding is untouched, and ADR-0247 adds no field
+  to `EgressBinding`. **This line already carries the leading token, so under ADR-0082 §2
+  no amendment qualifier is written on it.**
 ## Context
 
 ### The memory half of this seam is already built, and this ADR must not rebuild it
