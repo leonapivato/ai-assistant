@@ -193,10 +193,18 @@ attempt (A2 and A3, by ADR-0249 §5). §16 lists what it declines, each with wha
 
 > **Normative.** **An expiry is settled and is never inferred**, which is ADR-0244 §10's
 > mechanism: a `PROPOSED` row whose `expires_at` is at or before the clock's reading is settled
-> `EXPIRED` by the **first operation that reads it** — a `covering` read, a `standing`
-> enumeration, or the answer that names it. That is safe for ADR-0244 §10's own reason, since
-> an expired proposal is refused as an establishment at all and there is no live answerer for
-> the settlement to race.
+> `EXPIRED` by the **first operation that reads it**, and there are exactly two — a `covering`
+> read, and the answer that names it. That is safe for ADR-0244 §10's own reason, since an
+> expired proposal is refused as an establishment at all and there is no live answerer for the
+> settlement to race. **`standing`, `resolve`, `recent` and `export` settle nothing**, because
+> `standing` returns only `ESTABLISHED` rows and the other three are history reads.
+
+> **Normative — and a `PROPOSED` row neither operation reads again stays `PROPOSED`, which is
+> stated rather than swept.** It is never live, so it authorises nothing and appears in no
+> listing; it is visible in `export` and `recent` as what it is, a question that was put and
+> never answered. **No sweep, no timer, no reclaim and no start-up scan settles it**, which is
+> ADR-0250 §12's posture for a question's disposition read onto this row: nothing infers a
+> terminal state from silence, and the cost of leaving one is a row nobody can act on.
 
 > **Normative — a record is `live` when its `disposition` is `ESTABLISHED` and the clock stands
 > strictly before its `expires_at`.** `PROPOSED` is **never** live, and no clause of this
@@ -1266,18 +1274,26 @@ all three would be one thing to be wrong about.
 > on the annotated types.
 
 > **Normative — the clock disciplines are ADR-0193 §9's and are not re-derived.** `covering` and
-> `standing` read the clock **exactly once per call** — `covering` to evaluate liveness and
-> `standing` to report it per row — measuring every
-> row they consider against that one instant, and each settles an expired `PROPOSED` row it
-> reads (§1). `resolve`, `recent`, `export`, `record` and `settle` evaluate no liveness and read
-> **no** clock — `settle` takes its `settled_at` from the caller, as `record` takes its
-> instants, because a store neither mints ids nor reads a clock (ADR-0021 §3). The policy reads
+> **`covering` is the only query that evaluates liveness**, and it reads the clock **exactly
+> once per call**, measuring every row it considers against that one instant — ADR-0193 §9's
+> rule and its reason, since a query reading an advancing clock per row could answer over a set
+> true at no real instant. It settles an expired `PROPOSED` row it reads (§1), and it is the
+> **only** query that reads a clock. **`standing` evaluates no liveness, reports none and reads
+> none**: it returns the rows, each carrying its own `expires_at`, and **the caller compares**.
+> `resolve`, `recent`, `export`, `record` and `settle` evaluate no liveness
+> — `settle` takes its `settled_at` from the caller, as `record` takes its instants, because a
+> store neither mints ids nor reads a clock (ADR-0021 §3). The policy reads
 > no clock at all (ADR-0021 §3, ADR-0036 §1), and `AuditTrail.record` decides both ends against
 > the decision's own `decided_at`.
 
 > **Normative — `standing(goal)` returns the `ESTABLISHED` rows of that goal and nothing
-> else**, live **and** lapsed, each carrying its own `expires_at` so a caller reads liveness
-> from the row. It never returns a `PROPOSED` row, so the listing §11 fixes never renders a
+> else**, live **and** lapsed. **It reports no liveness and carries no evaluation instant**,
+> because `Authorization`'s field list is closed and a result type wrapping one would be a
+> second carrier for a fact the row already determines: each row carries its own `expires_at`,
+> and **whether it has passed is the caller's comparison against one reading of the injected
+> clock** (ADR-0026). The engine takes that reading when it assembles the listing and hands the
+> surface the answer as data, which is ADR-0042 §6's division — an adapter reads no store and
+> holds no clock. It never returns a `PROPOSED` row, so the listing §11 fixes never renders a
 > question the user has not answered as an authority they hold; and it does return a lapsed
 > one, so a user can see and revoke what they once authorised — which is ADR-0193 §9's own
 > reason for keeping an expired grant visible and revocable, one store over, and it is why the
@@ -1632,8 +1648,9 @@ check are each consumed as written, and §13 and §14 state where.
 > 33. **Export, enumeration and erasure.** `export` returns rows of every disposition **with
 >     each member's basis whole** — act, span and resolution; `standing(goal)` returns the
 >     `ESTABLISHED` rows of that goal, **live and lapsed**, never a `PROPOSED` one and never
->     another goal's; `clear` returns the count and leaves every recorded `ALLOW` readable as
->     what it was.
+>     another goal's, and **returns the same rows immediately before and immediately after an
+>     `expires_at`**, the difference being the caller's comparison and not the store's; `clear`
+>     returns the count and leaves every recorded `ALLOW` readable as what it was.
 > 34. **Each `ResolutionRule` admits its own argument shape and refuses the other two** —
 >     `AS_STATED` with either argument, `DATE_FROM_CONTEXT` missing `now` or `timezone`,
 >     `FROM_SHOWN_RECORD` missing `record` — each refused at construction.
@@ -1650,13 +1667,15 @@ check are each consumed as written, and §13 and §14 state where.
 >     succeeds under compare-and-swap; every other move is **refused**, with one test per
 >     retired disposition and one for `PROPOSED → REVOKED`, `PROPOSED → SUPERSEDED` and
 >     `ESTABLISHED → DECLINED`/`EXPIRED`. A `PROPOSED` row is **never** live; a row read after
->     its `expires_at` while still `PROPOSED` is settled `EXPIRED` by that read; and an
+>     its `expires_at` while still `PROPOSED` is settled `EXPIRED` by a `covering` read and by
+>     the answer that names it, and by no other operation; and an
 >     `ESTABLISHED` row past its `expires_at` is **not live**, is **not** settled `EXPIRED`,
 >     and is still `REVOKED` by a withdrawal and `SUPERSEDED` by a renewal.
 > 38. **Every persisted state decodes.** Approve a proposal, persist, restart, and `resolve`,
->     `recent`, `standing` and `export` each return the row — an `ESTABLISHED` row still
->     carrying its `confirmation` is valid, and so are the `DECLINED`, `EXPIRED`, `REVOKED`
->     and `SUPERSEDED` rows, one round-trip test each. **`record` refuses to write a
+>     `recent` and `export` each return the row — an `ESTABLISHED` row still carrying its
+>     `confirmation` is valid, and so are the `DECLINED`, `EXPIRED`, `REVOKED` and
+>     `SUPERSEDED` rows, one round-trip test each; `standing` returns the `ESTABLISHED` one
+>     and none of the other four. **`record` refuses to write a
 >     `confirmation`-carrying row in any disposition but `PROPOSED`**, which is the write-path
 >     rule the validator deliberately does not state.
 > 39. **A confirmed widening.** A live row bounds GBP 60; *"make it up to eighty"* proposes a
