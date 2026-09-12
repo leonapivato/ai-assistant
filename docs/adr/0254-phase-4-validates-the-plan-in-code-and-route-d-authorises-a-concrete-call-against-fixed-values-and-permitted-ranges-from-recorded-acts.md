@@ -1,6 +1,6 @@
 # 254. Phase 4 validates the plan in code, and route (d) authorises a concrete call against fixed values and permitted ranges from recorded acts
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-12
 
 ## Context
