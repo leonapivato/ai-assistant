@@ -339,7 +339,9 @@ was settled about the step rather than by where in the plan it sat.
 > the `GoalAttempt` it is driving under**, which is the value ADR-0249 §12 already has
 > `orchestration` holding in memory from the instant the attempt is opened. **No stage fetches
 > the attempt to fill it**, `StepExecutor` gains **no `PlanStore` read it does not already have
-> and no collaborator** (ADR-0058), and no other parameter of either entry point moves.
+> and no collaborator** (ADR-0058), and no other parameter of either entry point moves. **The one
+> path on which `orchestration` has no attempt to supply is ADR-0052's recovered resume, and §5
+> states what it does there.**
 
 > **Normative — this is not the substitution hazard ADR-0037 §2 and ADR-0253 §6 close, and the
 > distinction is what the store's own refusal makes true.** Those clauses refuse a caller-supplied
@@ -503,6 +505,31 @@ restart could lose, a park could stale and a replan could point past the end of 
 > steps and not over positions, and **this decision adds no recovery path, no second store read
 > and no `Engine` member**. ADR-0052 §2's idempotence and its `_parked` reconciliation bind
 > unchanged.
+
+> **Normative — a recovered resume has no attempt in memory, so `orchestration` resolves one
+> before it claims, and a resume with none is refused rather than claimed without one.** ADR-0052
+> §3 rules that a park recovered from durable state has **no live turn** — *"context and retrieved
+> memories are ephemeral and were never persisted"* — so §3's `attempt_id` is not a value the
+> resuming path is holding. On that path alone, `orchestration` resolves it **once, before the
+> resume**, from values the plan store already holds: `get_execution` names the plan, the plan
+> names the goal, and `attempts_of(goal_id)` carries the attempt whose `execution_ids` names that
+> execution (ADR-0249 §12's append). **Where no attempt names it, the resume is refused with the
+> error class §3's conjunct raises, before any ruling is resolved and before anything is
+> claimed.**
+
+**Resolving it in `orchestration` is not the store-side derivation §3 refuses, and the difference
+is which of the two is the check.** §3 declines to have the **store** find the attempt because
+there the derivation *would be* the conjunct: a store that chose the attempt would be comparing a
+value against one it had just selected, and nothing would be left to refuse. Here the resolution
+is `orchestration`'s, taken once on the one path where the driver genuinely does not hold the
+value, and its result is then **checked** by the store's own conjunct against the goal and the
+state — so a wrong resolution is refused rather than obeyed, which is exactly the direction
+ADR-0037 §2 means by *"Naming the step removes the substitution rather than checking for it"*, with
+the naming and the checking in two components. **Refusing where none is found is the fail-closed
+direction**: ADR-0044 §3's recovery already returns `None` rather than raising for a binding it
+cannot answer, and a resume that could not name its attempt would otherwise be a claim §3 refuses
+anyway, one store round-trip and one authored resolution later — which on ADR-0036 §2's
+single-resolution rule is an authored resolution that cannot be taken back.
 
 > **Normative — #257, answered for the driver and deferred in its remaining half.** A step the
 > walk finds **`AWAITING_APPROVAL`** for which `AuditTrail.pending_confirmation(execution_id,
@@ -974,10 +1001,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
-3. **`UNMET_DEPENDENCY` gets its first producer**, parameterized over the three cases §2's skip
-   rule names: a `FAILED` producer, a `SKIPPED` producer, an unsatisfied `when`, and each of
-   ADR-0253 §6's six unresolvable-reference cases. Each asserts the step is `SKIPPED` with that
-   reason **at the moment the walk reached it** and that no request was built.
+3. **`UNMET_DEPENDENCY` gets its first producer**, parameterized over every case §2's skip rule
+   names — a `FAILED` producer and a `SKIPPED` producer for the first, an unsatisfied `when` for
+   the second, and each of ADR-0253 §6's **six** unresolvable-reference cases for the third, which
+   is nine inputs over three rules. Each asserts the step is `SKIPPED` with that reason **at the
+   moment the walk reached it** and that no request was built.
 4. **A result reference reaches the ruling as itself** — a two-step plan where step 2's
    `resolves` fills a parameter from step 1's output; the arm asserts the resolved value is in the
    `ActionRequest.parameters` **before `ActionPolicy.decide` is reached** (ADR-0148 §1) and in the
