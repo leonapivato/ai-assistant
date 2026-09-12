@@ -1703,9 +1703,16 @@ all three would be one thing to be wrong about.
 >
 > **It is composed by `orchestration` and no model writes it** (§15), which is §5's own division
 > — *"The reply is composed by `orchestration` from the typed value, and no model writes it"* —
-> and it carries **no identifier**: not the goal's, not the row's, not the grant's, exactly as
-> the confirmation's projection carries none. The row's `id` reaches the user through the
-> **listing** below, which is the revocation handle's one carrier.
+> and **the one identifier it carries is the row's own `id`**, the withdrawal handle, exactly as
+> the listing below carries it and for the listing's own stated reason: a surface that named an
+> act without naming what withdraws it would state an act and withhold its remedy. **It carries
+> no other identifier**: not the goal's, not the grant's, not a connection reference, not a
+> `SecretName` and not a `Settings` field.
+>
+> **The no-identifier rule below is the *confirmation's* and is not read onto this member.** That
+> rule is stated over a projection of a row the user has not yet established — there is nothing
+> to withdraw, so there is no handle to carry — which is why the two surfaces differ here and why
+> the difference is stated rather than left as an apparent contradiction.
 >
 > **No `CONFIRM` is drawn for a path-(iii) row**, so `Confirmation.authorization` does not arise
 > and §1's absence rule is not engaged. **An authority established without a question is
@@ -1714,8 +1721,10 @@ all three would be one thing to be wrong about.
 > prompt.
 
 > **Normative.** **The confirmation's projection names no identifier**, and this clause is
-> about that projection alone — the listing below carries the row's `id` as its revocation
-> handle and is governed by its own clause. Not the goal's id, not the authorization's id, not
+> about that projection alone — the listing below, and the announcement above, each carry the
+> row's `id` as its revocation handle and are governed by their own clauses. A confirmation is
+> about a row the user has not established, so there is nothing yet to withdraw and no handle to
+> carry. Not the goal's id, not the authorization's id, not
 > the connection reference, not a credential slot and not a `Settings` field.
 > `BoundAccount.reference` is *"never shown to the user"* (ADR-0148 §6, §8) and this decision
 > does not move that; ADR-0193 §11's bar on what an audit surface renders binds here entire;
