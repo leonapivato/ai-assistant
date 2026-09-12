@@ -196,7 +196,7 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > that already carries the state. An approval settles `ESTABLISHED`; a refusal settles `DECLINED`; an
 > answer arriving at or after `expires_at` settles `EXPIRED` and **establishes nothing**; a
 > user withdrawal settles `REVOKED`; and a superseding write settles the row it supersedes
-> `SUPERSEDED`. **There is no other mutation and no `update`**: a settlement moves one field
+> `SUPERSEDED` where that row still stands `ESTABLISHED` at that instant (below). **There is no other mutation and no `update`**: a settlement moves one field
 > and its instant, exactly as `ParkedRead`'s does, and the record's coverage, basis, account,
 > destinations and expiry are never edited.
 
@@ -247,11 +247,12 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 >   it is the only one on which the user is shown what they are being asked (§11). It **may**
 >   carry `supersedes`, naming **any `ESTABLISHED` row of the same `goal` and the same
 >   declaration `id`, live or expired**. **The proposal retires nothing**: the named row is
->   settled `SUPERSEDED` in the same write as this row's `ESTABLISHED`
->   settlement. **That is what renews an authority whose expiry has passed** as well as what
->   widens a live one: the predecessor is retired and the replacement established in one write,
->   so the uniqueness rule below is never momentarily false and no authority has to be cleared
->   out of the store by hand.
+>   settled `SUPERSEDED` in the same write as this row's `ESTABLISHED` settlement **where it
+>   still stands `ESTABLISHED` at that instant**, and is left exactly as it stands where it
+>   does not (the conditional-supersession clause below). **That is what renews an authority
+>   whose expiry has passed** as well as what widens a live one: the predecessor is retired and
+>   the replacement established in one write, so the uniqueness rule below is never momentarily
+>   false and no authority has to be cleared out of the store by hand.
 > - **(ii) A correcting instruction.** A later recorded turn of the same goal whose span names
 >   an argument a **live** row of that goal already carries a member for — live, because a
 >   correction transcribes the predecessor's `expires_at` and correcting an authority that has
@@ -346,6 +347,38 @@ attempt (A2 and A3, by ADR-0249 §5). §19 lists what it declines, each with wha
 > fail-closed direction, and the one that refuses to resurrect a broader authority the user has
 > already moved on from. Both rows stay in the store, both appear in `export`, and neither is
 > deleted but by `clear`.
+
+> **Normative — the supersession is conditional on the named row still standing `ESTABLISHED`,
+> and the condition is read at the instant of the settlement rather than at the proposal.** A
+> path-(i) row's `supersedes` states **what approving it would replace**, and between the
+> proposal and the answer the named row may leave `ESTABLISHED` by an act of the user's own — a
+> revocation (§11) — or by a third row's supersession. So `settle` reads that row **inside the
+> same indivisible step** and takes one of exactly two arms:
+>
+> - **the named row still stands `ESTABLISHED`** — it is settled `SUPERSEDED` in the same write
+>   as this row's `ESTABLISHED` settlement, which is §5's *"in one write"* unchanged;
+> - **the named row has already left `ESTABLISHED`** — this row is settled `ESTABLISHED` all
+>   the same, and **the named row is left exactly as it stands**, in whatever retired
+>   disposition it reached.
+>
+> **The second arm writes nothing to the named row at all**, so no edge leaves a retired
+> disposition, the transition graph above is unamended, and `AuthorizationSettlement` gains no
+> member. **The grounds are that the approval is the user's later and more explicit act**, taken
+> with §11's full projection in front of them; that the uniqueness rule the supersession exists
+> to protect is already satisfied, since the named row is retired and no `ESTABLISHED` row of
+> that pair remains; and that refusing the approval instead would let an earlier revocation
+> **silently void the answer to a question still standing**, leaving the user with neither
+> authority after they approved one — the opposite of §5's supersede-at-the-act reasoning and
+> the opposite direction from §5's *"a refused widening is not a revocation of what the user
+> already authorised"*. **`WOULD_DUPLICATE` does not fire on this arm** for the same reason: no
+> other `ESTABLISHED` row of that goal and declaration id would remain.
+
+> **Normative — and where a *third* row of that pair does stand `ESTABLISHED`, the settlement
+> is refused.** A row established after the named one was revoked is a row this write's
+> `supersedes` does not name, so the settlement answers **`WOULD_DUPLICATE`**, nothing is
+> written, and the user is asked about the concrete call. That is §16's member doing exactly
+> what it exists for, and it is why the arm above is stated over *the named row* and never over
+> *the pair*.
 
 > **Normative — at most one `ESTABLISHED` row per goal and declaration `id`, enforced without a
 > clock.** `record` **refuses** a write that would leave two rows of one `goal` and one
@@ -707,7 +740,11 @@ the binding comparison cannot come apart.
 > live row in `supersedes`; approving it settles the new row `ESTABLISHED` and the old one
 > `SUPERSEDED` **in one write**, so the uniqueness rule (§1) is satisfied without a separate
 > retirement step and there is never an instant in which two rows of one goal and declaration
-> are both established. **Declining it settles the new row `DECLINED` and leaves the old one
+> are both established. **Where the named row has already left `ESTABLISHED` before the answer
+> — revoked by the user, or superseded by a third row — the approval still establishes the new
+> row and leaves the named one exactly as it stands** (§1's conditional-supersession clause),
+> because the user's approval is their later act and the uniqueness it protects is already
+> satisfied. **Declining it settles the new row `DECLINED` and leaves the old one
 > exactly as it was** — a refused widening is not a revocation of what the user already
 > authorised.
 
@@ -1048,7 +1085,7 @@ is not this one. §19 books it with what fires it.
 > field over.
 
 > **Normative — the trail asserts what it can see, and the policy asserts the rest.** What
-> remains outside the eight checks is **one** comparison and one join, and both are named. The
+> remains outside the eleven checks is **one** comparison and one join, and both are named. The
 > trail **cannot** re-take the per-argument comparison and no lane gives it a way to: a
 > `PermissionDecision` carries `parameters_digest` and **not** `parameters`, deliberately —
 > *"a durable record holding them verbatim would make the audit trail a second copy of the
@@ -1691,11 +1728,14 @@ all three would be one thing to be wrong about.
 >   writes are one indivisible step**, which is `ParkedReadStore.settle`'s own construction and
 >   `PlanStore`'s compare-and-swap argument (ADR-0014 §5): no caller reads a row, decides, and
 >   writes back. **A settlement to `ESTABLISHED` takes §1's uniqueness check and the
->   supersession inside that same step**: it succeeds only where no other `ESTABLISHED` row of
->   that goal and declaration id would remain, and where the row carries `supersedes` naming one
->   such row, that row is settled `SUPERSEDED` in the same write — which is what §5's *"in one
->   write"* means and why there is never an instant at which two rows of one pair are
->   established.
+>   supersession inside that same step**: where the row carries `supersedes` naming a row that
+>   **still stands `ESTABLISHED`**, that row is settled `SUPERSEDED` in the same write — which
+>   is what §5's *"in one write"* means and why there is never an instant at which two rows of
+>   one pair are established — and where the named row has already left `ESTABLISHED`, it is
+>   **left exactly as it stands** and this row is established all the same (§1). The uniqueness
+>   check is then taken over **what would remain after that supersession**: the settlement
+>   succeeds only where no other `ESTABLISHED` row of that goal and declaration id survives the
+>   step.
 > - `standing(goal: Identifier) -> tuple[Authorization, ...]`
 > - `recent(*, limit: int = DEFAULT_PAGE_SIZE) -> tuple[Authorization, ...]` — newest first, by
 >   `proposed_at` descending with ties broken by `id` ascending, which is
@@ -1704,7 +1744,7 @@ all three would be one thing to be wrong about.
 > - `export() -> tuple[Authorization, ...]`
 > - `clear() -> int` — the number of rows erased.
 
-> **Normative — `settle`'s three outcomes, and they are what `AuthorizationSettlement` is.**
+> **Normative — `settle`'s four outcomes, and they are what `AuthorizationSettlement` is.**
 > `core/types.py` gains **`AuthorizationSettlement`**, a `StrEnum` valued by lower-cased member
 > name and **closed at exactly four members**, total over what that indivisible step can answer:
 >
@@ -1719,7 +1759,9 @@ all three would be one thing to be wrong about.
 >   the store can honestly say.
 > - **`WOULD_DUPLICATE`** — the row stands at the edge's source and the move is to
 >   `ESTABLISHED`, but another `ESTABLISHED` row of that goal and declaration id would remain
->   and this row's `supersedes` does not name it. **This member exists because §1's uniqueness
+>   **after this step's own supersession** — that is, a row this write does not itself retire,
+>   because this row's `supersedes` does not name it or names a row that has already left
+>   `ESTABLISHED`. **This member exists because §1's uniqueness
 >   is a two-row rule and a settlement is where two rows can meet**: two proposals of one pair
 >   may each be recorded — neither write leaves two rows established, so neither is `record`'s
 >   to refuse — and approving both is where the invariant would break. Neither of the members
@@ -2055,15 +2097,15 @@ check are each consumed as written, and §13 and §14 state where.
 ### 20. The lane cut, and the arms this decision owes
 
 > **Normative — the cut, and it agrees with §16's roster member for member.** **Lane 1, the
-> contract triad and the policy.** `core/types.py`'s **eight** new types and **two** new fields
+> contract triad and the policy.** `core/types.py`'s **nine** new types and **two** new fields
 > — `PermissionRuling.authorised_goal` and `ActionRequest.goal`, both of which the policy reads
-> — `core/protocols.py`'s three Protocols, `core/errors.py`'s one class,
+> — `core/protocols.py`'s three Protocols, `core/errors.py`'s two classes,
 > `Settings.workflow_authorization_ttl`, the shared conformance suites, the canonical fakes in
 > `ai_assistant.testing`, the `SqliteGoalAuthorizationStore` in `permissions/`,
 > `ThresholdActionPolicy`'s **route (d) and §6's bar** on the one `live_for` read, and
 > `AuditTrail.record`'s route-(d) invariant. ADR-0137 §2's exception is what makes this one
 > change: the triad rides with the primary consumer whose demands shape the contract. The
-> **eight store signatures**, `AuthorizationSettlement`'s three outcomes and the two error
+> **eight store signatures**, `AuthorizationSettlement`'s four outcomes and the two error
 > classes (§16) are Lane 1's in full, and its conformance suites are what pin them.
 > **Lane 2, the proposal, the settlement and the recheck.** `orchestration` proposing the row
 > on §1's three conditions when a `CONFIRM` is recorded, settling it on the answer, writing a
@@ -2441,6 +2483,21 @@ check are each consumed as written, and §13 and §14 state where.
 >     `destinations` assertion is taken over a record whose destination set is the connected
 >     account**, which is the case `CanonicalDestination`'s account arm would have carried a
 >     `BoundAccount.reference` through.
+> 63. **A predecessor that leaves `ESTABLISHED` while the question stands** (§1's
+>     conditional-supersession clause). Establish A; record a path-(i) proposal B carrying
+>     `supersedes=A`; **revoke A**; then settle B `ESTABLISHED` before its `expires_at` →
+>     **`SETTLED`**, A is **still `REVOKED`** and was not written to, B stands `ESTABLISHED`,
+>     and `standing(goal)` returns **B alone**. The same with A **superseded by a third row C**
+>     instead of revoked, C then revoked → **`SETTLED`**, A still `SUPERSEDED` and C still
+>     `REVOKED`. **And where C still stands `ESTABLISHED`** when B is settled →
+>     **`WOULD_DUPLICATE`**, nothing is written, B stays `PROPOSED` and `standing(goal)` still
+>     returns exactly C. **Both orders of the race are defined**: run the revocation of A and
+>     the establishment of B concurrently, and either the revocation wins — `REVOKED` then
+>     `SETTLED`, by the first arm — or the establishment does, in which case the revocation
+>     answers **`NOT_AT_SOURCE`** because A is by then `SUPERSEDED`; **never two winners and
+>     never an interleaving that leaves two rows of that pair `ESTABLISHED`**. **A lane that
+>     refused the establishment here fails this arm**, as does one that answered `SETTLED`
+>     while moving A out of a retired disposition.
 
 ### 21. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
