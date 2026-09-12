@@ -34,7 +34,7 @@ from ai_assistant.core.types import (
     Idempotency,
     PlannerOutput,
     PlanStep,
-    ReadAsk,
+    ReadAskOutcome,
     Reversibility,
     RiskLevel,
     SkipReason,
@@ -282,7 +282,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         step = PlanStep(

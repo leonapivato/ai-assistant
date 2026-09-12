@@ -1171,7 +1171,7 @@ from ai_assistant.wire.errors import (
 #: browser enumeration does not move either and stands at thirty-one: ADR-0240 adds no
 #: Protocol, no method to the promoted ``AssistantEngine`` surface and no gateway
 #: route. The one Protocol it touches is ``Planner``, which is on neither surface —
-#: ``Planner.plan``'s new ``empty_reads`` keyword (§7) is an in-process argument the
+#: ``Planner.plan``'s then-new ``empty_reads`` keyword (§7) is an in-process argument the
 #: loop passes and no peer emits, so it is not a second ground for this bump.
 #:
 #: **No row is minted in ADR-0087 §2c's scalar table**: ``project`` already renders
@@ -1512,7 +1512,63 @@ from ai_assistant.wire.errors import (
 #: member, no existing frame's encoding changes, no :class:`FrameKind` is added, no codec
 #: entry is registered, and the error mapping is untouched — ADR-0249 mints no error
 #: class and removes none.
-PROTOCOL_VERSION: Final[int] = 38
+#:
+#: **39 since ADR-0251 §16**, and the ground is **one** value: ADR-0249's
+#: :class:`~ai_assistant.core.types.AttemptEffort` gains ``kind``, an
+#: ``AttemptKind | None`` defaulting to ``None`` (ADR-0251 §5). ``AttemptEffort`` rides
+#: :class:`~ai_assistant.core.types.GoalAttempt`, ``GoalAttempt`` is what the promoted
+#: surface's attempt-facing methods return, both models set ``extra="forbid"``, and
+#: ``wire/codec.py`` renders a model by ``model_dump()`` — so a hub at 39 emits a
+#: ``"kind"`` member on **every** attempt it sends and a client at 38 fails it with
+#: ``extra_forbidden``. That is ADR-0124 §9's second limb, "a change to a wire-carried
+#: ``core`` type that makes a value one peer emits invalid for the other, whether the
+#: change widens or narrows the type", and ADR-0178 §6 is the precedent for stating the
+#: bump in the deciding ADR rather than leaving the lane to discover it.
+#:
+#: **A defaulted member is still a shape change, and the default is what makes it
+#: total.** ``None`` means "the turn that opened this attempt declared no operation"
+#: (ADR-0251 §5), so a stored attempt written before this lane decodes without a
+#: migration — and that is a statement about the *store*, which is the reason the plan
+#: store's own ``schema_version`` does **not** move with this one.
+#:
+#: **``ReadOutcomeKind`` and ``ReadAskOutcome`` are not a second ground** (§3, §16).
+#: Both are minted here, and both exist only as an in-process argument to
+#: ``Planner.plan``: no wire-carried ``core`` type gains a field of either type, no
+#: frame carries one, and no peer emits one. ``Planner`` is on neither promoted surface,
+#: so its **BREAKING** signature change under golden rule 5 is not a wire ground either —
+#: the entry at 38 records the same of ``Planner`` and ``PlanStore``.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 38 and a peer at 39 refuse each other and say so.
+#:
+#: **No new class of content crosses.** ``AttemptKind`` is a two-member ``StrEnum``
+#: valued by lower-cased member name; it carries no figure, no allowance, no duration
+#: and no ``Settings`` field name, because ADR-0251 §5 puts the declarations in
+#: ``orchestration``'s own mapping and rules that "what crosses the seam is the kind,
+#: never a figure".
+#:
+#: **The promoted method set does not move and stands at fifty-eight**, and ADR-0177
+#: §1's browser enumeration does not move and stands at thirty-one: ADR-0251's L1 adds
+#: no method to the promoted ``AssistantEngine`` surface, removes none, and adds no
+#: gateway route.
+#:
+#: **One stored-record version moves and it is not one of this wire's.**
+#: ``PlanExport.schema_version`` goes 8 → 9, because that document carries
+#: ``tuple[GoalAttempt, ...]`` and every attempt in it now emits ``kind``; it is a
+#: **stored-record** version rather than a second wire ground — ``PlanExport`` crosses no
+#: frame and is emitted by no peer. The plan store's own ``schema_version`` stays at
+#: **2** and the parked-read store's at **3**: ADR-0249 §12 moved the first because a
+#: version 1 ``goals`` row "no longer decodes", and a version 2 ``attempts`` row decodes
+#: under this contract unchanged. ``ConversationExport.schema_version`` stays at **2**,
+#: ADR-0212 §8 is untouched, and no row is minted in ADR-0087 §2c's scalar table —
+#: ``project`` already renders every ``Enum`` as its ``value``.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0251's L1 mints no error class
+#: and removes none.
+PROTOCOL_VERSION: Final[int] = 39
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

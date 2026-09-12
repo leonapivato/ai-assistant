@@ -126,7 +126,7 @@ if TYPE_CHECKING:
         ParkedRead,
         PermissionDecision,
         ProposedUnderstanding,
-        ReadAsk,
+        ReadAskOutcome,
         SourceListing,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
@@ -1603,11 +1603,11 @@ class LearningLoop:
         # servicing failed carries out of here, and "an empty set renders no reply
         # line anywhere".
         hop_reached: tuple[str, ...] = ()
-        # ADR-0240 §7's carrier, empty until a servicing performs an empty structured
-        # read — which is what a turn's **first** call always receives, and what every
-        # turn that did not fire, whose servicing was declined and whose servicing
-        # failed carries into its second call too.
-        empty_reads: tuple[ReadAsk, ...] = ()
+        # ADR-0251 §3's carrier, empty until a servicing reaches an ask — which is
+        # what a turn's **first** call always receives, and what every turn that did
+        # not fire, whose servicing was declined and whose servicing failed carries
+        # into its second call too.
+        read_outcomes: tuple[ReadAskOutcome, ...] = ()
         # ADR-0240 §8's three facts, each on its own condition. The first two are
         # **accumulated over the turn** because ADR-0228 §7 keeps every servicing's
         # records in one growing fourth group; the third is replaced by each servicing
@@ -1669,11 +1669,11 @@ class LearningLoop:
             context=context,
             memories=memories,
             files=files,
-            # ADR-0240 §7: **always ``()`` on a turn's first call**, and passed
+            # ADR-0251 §3: **always ``()`` on a turn's first call**, and passed
             # explicitly rather than defaulted — the loop passes this parameter on
             # every call, exactly as it passes `files`, which is what makes the
-            # widening the compatibility break §7 flags it as.
-            empty_reads=(),
+            # widening the compatibility break §3 flags it as.
+            read_outcomes=(),
             audit=audit,
         )
         # ADR-0249 §7: the understanding this call proposed, resolved against the
@@ -1804,13 +1804,17 @@ class LearningLoop:
             # `dict.fromkeys` keeps the first arrival's place, exactly as the
             # servicer's own deduplication does.
             hop_reached = tuple(dict.fromkeys(hop_reached + carried.hop_reached))
-            # ADR-0240 §7: the asks of *this turn's* reads that came back empty, in
-            # servicing order. A turn makes at most two planner calls (ADR-0228 §3),
-            # so only the first servicing's can ever be read — accumulated rather
-            # than replaced anyway, because §7 states the carrier over the turn's
+            # ADR-0251 §3: one entry per ask *this turn* has serviced, in servicing
+            # order. A turn makes at most two planner calls (ADR-0228 §3), so on this
+            # lane only the first servicing's can ever be read — accumulated rather
+            # than replaced anyway, because §3 states the carrier over the turn's
             # reads and a sequence that quietly dropped one would be a different
-            # promise from the one the contract makes.
-            empty_reads += () if carried.empty_read is None else (carried.empty_read,)
+            # promise from the one the contract makes. **Classified at the servicing
+            # site**, by the component that holds the per-ask facts, and carried from
+            # there as data: nothing here re-derives an outcome, and a loop reading
+            # one off `serviced.new` would read a deduplicated-away read as an empty
+            # one exactly as ADR-0240 §6 warns.
+            read_outcomes += carried.read_outcomes
             # ADR-0249 §7, ADR-0231 §16: accumulated across the turn's servicings for
             # the same reason `memories` is — the supply grows and a later call's
             # `FROM_EVIDENCE` ground may name a record an *earlier* servicing minted,
@@ -1886,7 +1890,7 @@ class LearningLoop:
                 context=context,
                 memories=memories,
                 files=files,
-                empty_reads=empty_reads,
+                read_outcomes=read_outcomes,
                 audit=audit,
             )
             # §7, §8: the second call's understanding is recorded on the same terms as
@@ -2163,7 +2167,7 @@ class LearningLoop:
             memory_degraded=degraded or history_degraded,
         )
 
-    async def _planned(  # noqa: PLR0913 — the brief plus one keyword per thing the loop assembled for this call; ADR-0230 §3, ADR-0240 §7 and ADR-0249 §7 each add to it, and the audit record rides beside them
+    async def _planned(  # noqa: PLR0913 — the brief plus one keyword per thing the loop assembled for this call; ADR-0230 §3, ADR-0251 §3 and ADR-0249 §7 each add to it, and the audit record rides beside them
         self,
         goal: GoalBrief,
         *,
@@ -2171,7 +2175,7 @@ class LearningLoop:
         context: CurrentContext,
         memories: Sequence[MemoryRecord],
         files: Sequence[ShownFile],
-        empty_reads: Sequence[ReadAsk],
+        read_outcomes: Sequence[ReadAskOutcome],
         audit: TurnReadAudit,
     ) -> PlannerOutput:
         """Read the capability vocabulary, then plan over it (ADR-0211 §3).
@@ -2212,12 +2216,13 @@ class LearningLoop:
                 parameter on this side would let a call site forget it silently.
                 ``()`` where no fetcher is wired, which means no file is nameable on
                 this turn.
-            empty_reads: The asks of this turn's already-serviced reads that came back
-                empty (ADR-0240 §7). ``()`` on a turn's first call and on any second
-                call whose servicing established no emptiness — **required and
+            read_outcomes: One entry per ask this turn has already serviced, in
+                servicing order (ADR-0251 §3). ``()`` on a turn's first call and on any
+                second call whose servicing reached no ask — **required and
                 undefaulted here**, unlike on the contract and for ``files``' own
-                reason: §7 has the loop pass it on every call, and a defaulted
-                parameter on this side would let a call site forget it silently.
+                reason: ADR-0240 §7, which §3 widens rather than relaxes, has the loop
+                pass it on every call, and a defaulted parameter on this side would let
+                a call site forget it silently.
             audit: This turn's record, whose ``planner_calls`` this method advances.
                 **Counted here and nowhere else**, between the vocabulary read and the
                 call, which is what makes the field say what ADR-0228 §9 asks of it:
@@ -2249,7 +2254,7 @@ class LearningLoop:
             memories=memories,
             capabilities=capabilities,
             files=files,
-            empty_reads=empty_reads,
+            read_outcomes=read_outcomes,
             # ADR-0249 §10's carrier, empty on every call of this lane: no evidence
             # row exists to project a digest from, and `GoalEvidence` is A4's to mint.
             evidence=(),

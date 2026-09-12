@@ -78,13 +78,14 @@ BAND_PRECEDENCE: tuple[BeliefBand, ...] = (
 _FLOOR_PER_BAND: Final = 1
 
 
-async def assemble_by_band(
+async def assemble_by_band(  # noqa: PLR0913 — the store, the query, the budget, the kind filter and one observer per fact a caller cannot otherwise see: ADR-0226 §9's per-read count and ADR-0251 §2's `capped`, both of which live on values that never leave this function
     store: MemoryStore,
     query: str,
     *,
     limit: int,
     kinds: Sequence[MemoryKind] | None = None,
     on_page: Callable[[int], None] | None = None,
+    on_capped: Callable[[], None] | None = None,
 ) -> list[MemoryRecord]:
     """Fill one budget of ``limit`` records band by band, highest precedence first.
 
@@ -219,6 +220,22 @@ async def assemble_by_band(
             decides — nothing here reads what it returns, and it is called before
             the band filter and the deduplication below, because the fact it carries
             is about the *read* and not about what the composition kept.
+        on_capped: Called, at most once per band, where that band's own
+            :class:`~ai_assistant.core.types.MemorySearchResult` came back
+            ``capped``, or ``None`` to observe nothing. **It is the same shape of
+            hook as** ``on_page`` **and for the same reason**: this composition is
+            several reads behind one call, so a caller cannot see any band's result
+            object and a fact stated on one would otherwise be unreachable
+            (ADR-0251 §2, which names ``capped`` as a ground for
+            :attr:`~ai_assistant.core.types.ReadOutcomeKind.TRUNCATED`).
+
+            **It observes and decides nothing here**, which keeps ADR-0128 §6's rule
+            exactly where it was: "what a consumer does with it" is still that
+            consumer's lane, and this assembler takes no policy from ``capped``, cuts
+            no read short on it and returns no differently for it. It carries no
+            count, because ADR-0128 §2 makes ``True`` "a refusal to certify and never
+            a claim that more exists" and a figure here would invite the second
+            reading.
 
     Returns:
         Up to ``limit`` records, ordered by band precedence and, within a band, by
@@ -276,12 +293,18 @@ async def assemble_by_band(
         found = await store.search(query, limit=request, kinds=wanted_kinds, bands=[band])
         if on_page is not None:
             on_page(len(found.records))
-        # ``found.capped`` is unwrapped and nothing more: ADR-0128 §6 leaves what a
-        # consumer does with it to that consumer's own lane, and this assembler
-        # takes no policy from it here. The band-scoped read it composes is already
-        # forbidden from being read as evidence that a band holds nothing more
-        # (ADR-0113 §5), which is a different rule about a different race and is
-        # unaffected either way.
+        # ``found.capped`` is *reported* and nothing more: ADR-0128 §6 still leaves
+        # what a consumer does with it to that consumer's own lane, and this
+        # assembler still takes no policy from it — it cuts no read short on it,
+        # allocates no differently for it and returns no differently for it. What
+        # ADR-0251 §2 adds is one caller that needs to see it, and the honest way to
+        # give it the fact is the observer ``on_page`` already established, because
+        # the result object it sits on never leaves this function. The band-scoped
+        # read this composes is already forbidden from being read as evidence that a
+        # band holds nothing more (ADR-0113 §5), which is a different rule about a
+        # different race and is unaffected either way.
+        if found.capped and on_capped is not None:
+            on_capped()
         page: list[MemoryRecord] = []
         for record in found.records:
             if record.id in seen:

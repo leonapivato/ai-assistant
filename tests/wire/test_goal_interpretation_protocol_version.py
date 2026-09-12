@@ -122,7 +122,10 @@ def test_the_stored_record_versions_moved_and_the_conversation_export_did_not() 
         _SCHEMA_VERSION as _PLAN_SCHEMA,
     )
 
-    assert PlanExport.model_fields["schema_version"].default == 8
+    assert PlanExport.model_fields["schema_version"].default >= 8, (
+        "ADR-0249 §12 moved it to 8; a later decision moving it again is not a violation "
+        "of this one, and the absolute figure has its home in tests/core/test_planning_types.py"
+    )
     assert _PLAN_SCHEMA == 2, "this store's first migration (ADR-0049 §1, ADR-0249 §12)"
     assert _PARKED_SCHEMA == 3
     assert ConversationExport.model_fields["schema_version"].default == 2

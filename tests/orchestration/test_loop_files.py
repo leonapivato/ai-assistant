@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     SemanticMemory,
@@ -271,7 +272,7 @@ class _RenderingPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Write everything down, then answer a plan that asks for nothing."""

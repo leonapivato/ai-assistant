@@ -47,7 +47,7 @@ from ai_assistant.core.types import (
     MemorySource,
     PlannerOutput,
     PlanStep,
-    ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     Role,
@@ -165,7 +165,7 @@ class _Script:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Answer this call from the script, recording what it was handed."""

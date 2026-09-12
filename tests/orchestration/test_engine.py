@@ -82,7 +82,7 @@ from ai_assistant.core.types import (
     ProvisioningState,
     QuestionState,
     QueueOutcome,
-    ReadAsk,
+    ReadAskOutcome,
     Reversibility,
     RiskLevel,
     SemanticMemory,
@@ -475,7 +475,7 @@ class OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         step = PlanStep(
@@ -512,7 +512,7 @@ class NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         self._calls += 1
@@ -1050,7 +1050,7 @@ async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
@@ -2381,7 +2381,7 @@ async def test_shutdown_drains_in_flight_work_before_closing() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             entered.set()
@@ -2429,7 +2429,7 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             entered.set()
@@ -2479,7 +2479,7 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             entered.set()
@@ -2539,7 +2539,7 @@ class _NeverFinishing:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         self.entered.set()
@@ -2621,7 +2621,7 @@ async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> Non
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             try:
@@ -2673,7 +2673,7 @@ async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             await release.wait()
@@ -3415,7 +3415,7 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             nonlocal seen
@@ -3520,7 +3520,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
             memories: Sequence[MemoryRecord] = (),
             capabilities: Sequence[str],
             files: Sequence[ShownFile] = (),
-            empty_reads: Sequence[ReadAsk] = (),
+            read_outcomes: Sequence[ReadAskOutcome] = (),
             evidence: Sequence[EvidenceDigest] = (),
         ) -> PlannerOutput:
             nonlocal seen
@@ -4496,7 +4496,7 @@ class RecordingPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         self.seen.append(tuple(memories))

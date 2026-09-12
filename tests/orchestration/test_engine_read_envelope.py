@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     PlannerOutput,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
     ReadRequest,
     Role,
@@ -151,7 +152,7 @@ class _AskingPlanner(NoStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         self.calls.append(tuple(memories))
@@ -187,7 +188,7 @@ class _AskingOneStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         produced = await super().plan(

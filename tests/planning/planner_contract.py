@@ -33,7 +33,9 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
     ReadAsk,
+    ReadAskOutcome,
     ReadKind,
+    ReadOutcomeKind,
     ReadRequest,
     ShownFile,
     StructuredAsk,
@@ -749,18 +751,23 @@ class PlannerContract:
 
         Nothing here fixes the parameter set for its own sake: what it refuses is a
         *widening*, and the names below are exactly the ones ADR-0014 §6, ADR-0211 §1,
-        ADR-0230 §3 and ADR-0240 §7 already push in.
+        ADR-0230 §3 and ADR-0251 §3 already push in.
 
-        **``empty_reads`` joined that set with ADR-0240 §7 and is not the widening
-        this refuses.** §17's clause is about a planner being told something from *the
-        far side of the seam* — whether a search account is connected, which sources
-        are reachable, how full the budget is. What §7 pushes in is the planner's
-        **own prior ask** handed back to it, carrying nothing the store said: no
-        record, no count, no identifier and no ``capped`` value. A planner reading it
-        learns what it already emitted and that nothing came back for it, and §7's own
-        clause bounds the rest — it "cannot say how many records anything held, how
-        much of the budget is gone, or how long the turn has left", so ADR-0226 §8's
-        fire rate is measuring the same judgement on every deployment.
+        **``read_outcomes`` joined that set with ADR-0251 §3, which replaced ADR-0240
+        §7's ``empty_reads`` in that term alone, and it is not the widening this
+        refuses.** §17's clause is about a planner being told something from *the far
+        side of the seam* — whether a search account is connected, which sources are
+        reachable, how full the budget is. What §3 pushes in is the planner's **own
+        prior ask** handed back to it beside one member of a closed vocabulary, carrying
+        nothing the store said: no record, no count, no identifier and no ``capped``
+        value. A planner reading it learns what it already emitted and what became of
+        it, and ADR-0240 §7's own clause bounds the rest — it "cannot say how many
+        records anything held, how much of the budget is gone, or how long the turn has
+        left" — while ADR-0251 §2's bar keeps the member itself free of a ground, a
+        provider name, a figure and a ``Settings`` field name. So ADR-0226 §8's fire
+        rate is measuring the same judgement on every deployment, and ADR-0228 §12's
+        clause holds entire: no round index, no count of rounds made or remaining, no
+        allowance and no stop reason reaches a planner's input.
 
         **``utterance`` and ``evidence`` joined the set with ADR-0249 §7 and §10, and
         neither is the widening this refuses either.** ``utterance`` is the turn's own
@@ -779,7 +786,7 @@ class PlannerContract:
             "memories",
             "capabilities",
             "files",
-            "empty_reads",
+            "read_outcomes",
             "evidence",
         }
         taken = set(inspect.signature(planner.plan).parameters)
@@ -789,15 +796,17 @@ class PlannerContract:
             "would condition the emission on something ADR-0231 §17 does not show it"
         )
 
-    # --- ADR-0240 §§2, 7: the fifth kind, and the widened input ----------------
-    # §12 obliges the implementing lane to extend this suite "for the widened input,
-    # so that every ``Planner`` implementation is held to it — the model-backed planner
-    # and the canonical fake alike, through the ``Test…Contract`` subclasses that
-    # already run it", on ADR-0226 §10's own reason: "a canonical fake updated without
-    # the suite is an unverified fake". Unlike ADR-0231's widening and like ADR-0230's,
-    # this **is** a compatibility break (§7, golden rule 5): the loop passes
-    # ``empty_reads`` on every call, so a ``plan`` declaring no such parameter raises
-    # ``TypeError``.
+    # --- ADR-0240 §2, ADR-0251 §3: the fifth kind, and the widened input -------
+    # ADR-0240 §12 obliged the implementing lane to extend this suite "for the widened
+    # input, so that every ``Planner`` implementation is held to it — the model-backed
+    # planner and the canonical fake alike, through the ``Test…Contract`` subclasses
+    # that already run it", on ADR-0226 §10's own reason: "a canonical fake updated
+    # without the suite is an unverified fake". ADR-0251 §16 carries that obligation
+    # onto the carrier that **replaces** ``empty_reads``, and the arms below move with
+    # it rather than standing beside a parameter that is gone. Unlike ADR-0231's
+    # widening and like ADR-0230's, this **is** a compatibility break (ADR-0251 §3,
+    # golden rule 5): the loop passes ``read_outcomes`` on every call, so a ``plan``
+    # declaring no such parameter raises ``TypeError``.
 
     @pytest.fixture
     def structured_asking_planner(self) -> Planner | None:
@@ -813,47 +822,55 @@ class PlannerContract:
         """
         return None
 
-    async def test_it_accepts_the_asks_that_came_back_empty(self, planner: Planner) -> None:
-        """ADR-0240 §7's widened input, at its weakest and most total form.
+    async def test_it_accepts_what_became_of_the_asks_it_made(self, planner: Planner) -> None:
+        """ADR-0251 §3's widened input, at its weakest and most total form.
 
         The parameter is additive and defaulted on the contract, and the loop passes it
         on **every** call — so what every conforming planner owes is to *accept* it and
         return a plan for the goal it was asked about. What an implementation makes of
-        the value is its own business: §7 rules in terms that "an implementation that
-        accepts it and ignores its value means exactly what it meant", and ADR-0211 §9
+        the value is its own business: ADR-0240 §7 rules in terms that "an
+        implementation that accepts it and ignores its value means exactly what it
+        meant", ADR-0251 §3 restates that clause over the wider carrier, and ADR-0211 §9
         item 2 forbids this suite asserting which envelope any planner returns.
 
         **Asserted with a non-empty value as well as by omission**, because the
         omission alone is satisfied by a signature that never sees one: a planner
-        handed the ask its own first plan emitted is the input §7 actually creates.
+        handed the ask its own first plan emitted is the input §3 actually creates.
+
+        **Every member of the vocabulary is driven, not one**, because a planner that
+        accepted the carrier and then branched on the member would fail on the member it
+        did not expect rather than on the one this arm happened to pick — and §2 closes
+        the vocabulary at seven precisely so that a consumer cannot meet some of it.
         """
-        empty = ReadAsk(
+        emitted = ReadAsk(
             kind=ReadKind.STRUCTURED_READ,
             structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
         )
-        plan = (
-            await planner.plan(
-                _goal(),
-                utterance=_REQUEST,
-                context=_context(),
-                memories=_supply() + _fourth_group(),
-                capabilities=_VOCABULARY,
-                empty_reads=(empty,),
-            )
-        ).plan
-        assert plan.goal_id == "g1"
+        for member in ReadOutcomeKind:
+            plan = (
+                await planner.plan(
+                    _goal(),
+                    utterance=_REQUEST,
+                    context=_context(),
+                    memories=_supply() + _fourth_group(),
+                    capabilities=_VOCABULARY,
+                    read_outcomes=(ReadAskOutcome(ask=emitted, outcome=member),),
+                )
+            ).plan
+            assert plan.goal_id == "g1", f"a conforming planner takes {member.value}"
 
-    async def test_the_carrier_is_optional_and_defaults_to_nothing_came_back_empty(
+    async def test_the_carrier_is_optional_and_defaults_to_no_read_serviced(
         self, planner: Planner
     ) -> None:
-        """§7: ``()`` is the semantically correct answer and never an error.
+        """ADR-0251 §3: ``()`` is the semantically correct answer and never an error.
 
         "On a turn's **first** planner call it is always ``()``, and ``()`` means **no
-        read of this turn came back empty** — which is the semantically correct answer
-        for the first call, for a turn that asked for nothing, for a servicing that
-        failed or was declined, and for a ``Planner`` that knows nothing of this
-        parameter." So a call omitting it entirely raises nothing and drives no repair
-        round, exactly as an empty ``files`` or an empty vocabulary does.
+        read of this turn has been serviced** — which is the semantically correct answer
+        for the first call, for a turn that asked for nothing, for a servicing that was
+        declined or that the budget did not reach, and for a ``Planner`` that knows
+        nothing of this parameter." So a call omitting it entirely raises nothing and
+        drives no repair round, exactly as an empty ``files`` or an empty vocabulary
+        does.
         """
         plan = (
             await planner.plan(
@@ -873,25 +890,33 @@ class PlannerContract:
                 context=_context(),
                 memories=_supply(),
                 capabilities=_VOCABULARY,
-                empty_reads=(),
+                read_outcomes=(),
             )
         ).plan
         assert explicit.goal_id == "g2"
 
     async def test_the_carrier_is_declared_and_keyword_only(self, planner: Planner) -> None:
-        """§7: the compatibility break, asserted where an implementation can fail it.
+        """ADR-0251 §3: the compatibility break, asserted where an implementation fails it.
 
         "Every ``Planner`` implementation must be widened to declare the parameter",
         and the loop passes it by keyword on every call — so a ``plan`` whose
-        ``empty_reads`` is positional, or absent, is one the loop cannot call. This is
+        ``read_outcomes`` is positional, or absent, is one the loop cannot call. This is
         ADR-0230 §3's own arm for ``files``, taken again for the parameter that
-        joined the signature after it.
+        replaced ``empty_reads`` in the position it held.
+
+        **And ``empty_reads`` is asserted gone rather than left unmentioned** (§3).
+        Keeping both "would put one ask in two places with two spellings of its state,
+        and the first implementation to disagree with itself would be right in one of
+        them", so a planner still declaring the old name has not moved — it has added.
         """
         parameters = inspect.signature(planner.plan).parameters
-        assert "empty_reads" in parameters, "ADR-0240 §7's parameter is declared"
-        assert parameters["empty_reads"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["empty_reads"].default == (), (
-            "additive and defaulted: () means no read of this turn came back empty"
+        assert "read_outcomes" in parameters, "ADR-0251 §3's parameter is declared"
+        assert parameters["read_outcomes"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["read_outcomes"].default == (), (
+            "additive and defaulted: () means no read of this turn has been serviced"
+        )
+        assert "empty_reads" not in parameters, (
+            "ADR-0251 §3 replaces the parameter rather than standing a second one beside it"
         )
 
     async def test_a_structured_read_it_asks_for_carries_a_structure_and_no_other_argument(

@@ -6141,6 +6141,36 @@ class AttemptOutcome(StrEnum):
     nothing about whether the reply is correct."""
 
 
+class AttemptKind(StrEnum):
+    """Which allowance an attempt's ledger is measured against (ADR-0251 §5).
+
+    A **closed** enumeration of exactly **two** members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**.
+
+    **It is stamped once, by ``orchestration``, at the instant the attempt is
+    opened, from the ``ConversationalOperation`` of the opening turn** — and is
+    never re-stamped, never derived at read time and never taken from a later
+    turn's operation. An attempt opened by a ``converse`` turn keeps its allowance
+    when a ``converse_spoken`` turn later engages the same goal, and the reverse:
+    an allowance the user could halve by speaking is one nobody decided.
+
+    **What crosses a seam is the kind and never a figure** (§5). ADR-0228 §4's
+    construction applied one level up — "what crosses the seam is the operation's
+    identity rather than a duration" — so no caller and no field of any model here
+    carries a limit. Which allowance each member declares is ``orchestration``'s
+    own mapping, and the figures are **not** ``Settings`` values, deployment flags
+    or per-request parameters: ADR-0228 §3's non-configurability binds entire,
+    because "a plan count is a count of model calls, so a configurable one is a
+    configurable per-turn cost with no ceiling anyone reviewed".
+
+    **A member's absence from that mapping is fail-closed** (§5): an attempt kind
+    that declares no allowance does not iterate, whatever its audience.
+    """
+
+    CONVERSATIONAL = "conversational"
+    SPOKEN = "spoken"
+
+
 class AttemptEffort(BaseModel):
     """What one attempt has spent (ADR-0249 §5).
 
@@ -6149,14 +6179,28 @@ class AttemptEffort(BaseModel):
     **monotonically non-decreasing within an attempt**: no replan, branch, recovery
     or phase transition resets either, and no implementation subtracts from one.
 
-    **A3 fixes the allowances, the reserve and any further member** (§13). This type
-    fixes the ledger's owner — the attempt — and the two counters, and fixes no
-    figure.
+    **A3 fixes the allowances, the reserve and any further member** (§13), and
+    ADR-0251 §5 exercises that licence for **exactly one** further member,
+    :attr:`kind`. This type still fixes no figure: what it holds is which allowance
+    the two counters are measured against, never the allowance itself.
+
+    **The kind is on the ledger rather than on the attempt, and that is a
+    containment** (ADR-0251 §5). ADR-0249 §5 declares ``GoalAttempt``'s fields
+    *"exactly"* and grants a licence for *"any further member of ``AttemptEffort``"*
+    and for nothing else, so the licence that exists is the one taken; and it is the
+    better home on its own merits, because no component can then hold a consumed
+    figure without holding the declaration it is measured against.
 
     Attributes:
         planner_calls: How many ``Planner.plan`` calls this attempt has made.
         working: The attempt's accumulated **working** intervals, **excluding every
             interval spent waiting for the user**.
+        kind: Which allowance this attempt's consumed figures are measured against
+            (ADR-0251 §5), stamped once by ``orchestration`` at the instant the
+            attempt was opened. ``None`` means **the turn that opened this attempt
+            declared no operation**, and it is the default a row written before
+            ADR-0251 decodes to — which is the honest reading of a record whose
+            writer named no operation, and never a kind inferred at read time.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -6164,6 +6208,9 @@ class AttemptEffort(BaseModel):
     planner_calls: int = Field(default=0, ge=0, description="Planner calls this attempt made.")
     working: timedelta = Field(
         default=timedelta(0), ge=timedelta(0), description="Accumulated working time."
+    )
+    kind: AttemptKind | None = Field(
+        default=None, description="Which allowance this attempt is measured against (ADR-0251 §5)."
     )
 
 
@@ -7498,6 +7545,148 @@ class ReadAsk(BaseModel):
         if self.structure is not None:
             msg = "a citation_hop ask must not carry a structure"
             raise ValueError(msg)
+
+
+class ReadOutcomeKind(StrEnum):
+    """What became of one serviced ask, as the planner is told it (ADR-0251 §2).
+
+    A **closed** enumeration of exactly **seven** members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**, and no
+    implementation, setting or later lane adds an eighth without the ADR that
+    decides it (ADR-0221 §5's pattern).
+
+    **The seven are disjoint and exhaustive over the asks a servicing reached**, and
+    each states what became of **one ask** rather than what a whole servicing did.
+    An ask the servicing did **not** reach earns no member at all: a request never
+    put, a budget that did not reach it, and a servicing whose stage did not run to
+    its end are each the classifier's no-entry case, which is why this enumeration
+    has no ``NOT_ASKED`` and never gains one.
+
+    **No member carries a message, a ground, a provider name, a query, a
+    destination, a monetary figure, a duration, a count or a ``Settings`` field
+    name**, and no statement rendered for one carries any of them (§2). ADR-0242
+    §9's bar binds this vocabulary as it binds ``SearchNotServiced``, and for the
+    same reason: it states **what became of the ask** and never **why** a source
+    ruled the way it did.
+
+    **This enumeration is in ``core`` where ``StopReason`` is not**, and ADR-0231
+    §13's own test decides it: ``StopReason`` "crosses no subsystem boundary, being
+    the servicer's own account", where this is carried across the ``Planner.plan``
+    seam into ``planning`` and is therefore public data between subsystems.
+
+    **It is not the same thing as** :class:`ReadOutcome` (ADR-0185 §1), which
+    records how one *gated source read* ended for the permission trail. That one is
+    a fact about an authorisation; this one is a fact about an ask the planner
+    itself composed, and neither is derivable from the other.
+    """
+
+    RETURNED_RECORDS = "returned_records"
+    """The servicing completed and added **at least one record the supply did not
+    already hold**, counted after ADR-0226 §7's deduplication."""
+
+    EMPTY = "empty"
+    """The servicing completed and the source returned **no record at all**.
+
+    An empty structured read in ADR-0240 §6's sense is this member; so is a
+    ``WEB_SEARCH`` whose provider answered with nothing
+    (:attr:`SearchRefusal.NO_RESULT`), and so is a ``SIGHTED_QUERY`` the store
+    matched nothing for."""
+
+    DUPLICATE = "duplicate"
+    """The servicing completed and returned records, and **every one of them was
+    already in the supply**.
+
+    Precisely the shape ADR-0228 §2(e) calls "a servicing whose every record was
+    deduplicated out", and ADR-0240 §6's clause that such a read is **not** empty
+    binds verbatim: "the store returned records, and a planner told otherwise would
+    broaden away from records already in front of it"."""
+
+    TRUNCATED = "truncated"
+    """The source answered and **did not certify that the answer was complete**.
+
+    ADR-0226 §6's budget of ten cut a kind's yield, or ``MemorySearchResult.capped``
+    was ``True`` (ADR-0128 §2), or a structured read's own window ceiling bound it.
+    **It says that completeness was not certified and never that more records
+    exist**: ADR-0128 §2 is explicit about its own half of that — ``True`` on a
+    short result "is a refusal to certify and never a claim that more exists" — so a
+    member asserting more existed would be a false statement the planner could act
+    on. Records may or may not have reached the supply, and whether the round was
+    productive is decided by whether any did and never by this member."""
+
+    REFUSED = "refused"
+    """The source **decided** not to answer, on a ground it owns.
+
+    Every ruling, spend, composition, configuration and attestation member of the
+    search disposition vocabulary, every such member of :class:`SearchRefusal`
+    (``SPEND_REFUSED``, ``PROVIDER_REFUSED``, ``UNATTESTED``), and
+    :attr:`FetchRefusal.NOT_FOUND`, :attr:`FetchRefusal.NOT_A_FILE` and
+    :attr:`FetchRefusal.TOO_LARGE`. A servicing declined under ADR-0226 §5's channel
+    scoping is **not** this member and is not any member: nothing about one ask was
+    decided, because the whole request was never put."""
+
+    FAILED = "failed"
+    """The servicing **completed and the source's answer was a failure**.
+
+    :attr:`SearchRefusal.TRANSPORT_FAILED` and
+    :attr:`SearchRefusal.RESPONSE_TOO_LARGE`, the search disposition vocabulary's
+    failure members, and :attr:`FetchRefusal.UNREADABLE` and
+    :attr:`FetchRefusal.EXTRACTION_FAILED`. **A source failure is not a servicing
+    failure**, and the two are kept apart deliberately: ADR-0231 §17 rules that
+    "Every member is returned and none is raised", so a transport that fell over is
+    a *completed* servicing carrying a typed non-yield. The first is this member;
+    the second yields **no outcome entry at all**."""
+
+    EXPIRED = "expired"
+    """A **deadline** passed: :attr:`SearchRefusal.DEADLINE_EXPIRED` and the search
+    disposition vocabulary's own expiry member.
+
+    **Its own member and never folded into** :attr:`FAILED` (§2). ADR-0241 §4 made
+    an expiry *an outcome of its own* rather than a failure, and this vocabulary
+    keeps that distinction at the seam where it can be acted on: a deadline that
+    passed says the source may well answer if asked with more room, where a
+    transport that failed says nothing of the kind."""
+
+
+class ReadAskOutcome(BaseModel):
+    """One ask this turn serviced, and what became of it (ADR-0251 §3).
+
+    **The name is this lane's and the ADR's is** ``ReadOutcome`` (issue #2281).
+    ADR-0251 §3 mints a model of that name, which ADR-0185 §1 has held since for the
+    permission trail's own record of how a gated read ended; the two are different
+    facts about different things, so this one is spelled out in full rather than
+    shadowing or overloading the other. Nothing else of §3 moves: the field names,
+    their types, the ``extra="forbid"`` and the parameter this rides on are the
+    ADR's as written.
+
+    **Exactly two fields, and it carries nothing else** (§3). :attr:`ask` is the
+    frozen ask the planner itself emitted, carried back **byte for byte**, and
+    :attr:`outcome` is one member of a closed vocabulary.
+
+    **Nothing the source said crosses on it** (ADR-0240 §7, restated over the wider
+    carrier): "No record, no count, no identifier, no instant of the read, no
+    ``capped`` value and no value of any kind that the store returned or computed."
+    The only content it carries is the planner's own prior composition and one
+    member of :class:`ReadOutcomeKind`.
+
+    **The ask is never edited on the way** (§7 again, verbatim): "No implementation
+    widens a window, drops an axis, rewrites a label or composes a suggested ask to
+    put in its place." What a later round receives is what an earlier round emitted,
+    and the ask the later round makes is its own composition.
+
+    **It mints nothing durable** (§3). No ``PlanStore`` member, no store column and
+    no other field is added for it: it is an in-process argument built from one
+    turn's own servicings and discarded with the turn. What spans an attempt is the
+    ledger (:class:`AttemptEffort`), which ADR-0249 §5 made durable.
+
+    Attributes:
+        ask: The ask the planner emitted, carried back unaltered.
+        outcome: What became of it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ask: ReadAsk = Field(description="The ask the planner emitted, carried back byte for byte.")
+    outcome: ReadOutcomeKind = Field(description="What became of it (ADR-0251 §2).")
 
 
 class ReadRequest(BaseModel):
@@ -8941,7 +9130,18 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 8 because this document gained ``attempts`` and
+    **``schema_version`` is 9 because ``AttemptEffort`` gained ``kind``** (ADR-0251
+    §5, §16). This document carries ``tuple[GoalAttempt, ...]``, every one of which
+    carries an ``AttemptEffort``, and ``model_dump()`` emits the new member on
+    **every** attempt a document carries — refused by an older reader's
+    ``extra="forbid"`` exactly as ``targets_revision`` is. It reaches every document
+    carrying an attempt at all, which is the wider of the two populations the entry
+    below distinguishes, and it is the **only** ground for this move: ADR-0251 §3's
+    ``ReadAskOutcome`` and its ``ReadOutcomeKind`` are in-process arguments to
+    ``Planner.plan`` that no field of this document carries, so neither is a second
+    ground, and ``GoalAttempt``'s own field enumeration is untouched (§16).
+
+    **It was 8 because this document gained ``attempts`` and
     ``ActionPlan`` gained ``targets_revision``** (ADR-0249 §11, §12). Both are shape
     changes to every document that carries a plan or an attempt, and either would
     oblige the move on its own: ``tuple[GoalAttempt, ...]`` is a member an earlier
@@ -9013,12 +9213,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[8] = Field(
-        default=8,
+    schema_version: Literal[9] = Field(
+        default=9,
         description=(
-            "Shape of this export, pinned to exactly 8 (ADR-0039 §10, ADR-0249 §11): an "
+            "Shape of this export, pinned to exactly 9 (ADR-0039 §10, ADR-0251 §16): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[8]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[9]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

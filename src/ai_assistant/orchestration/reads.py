@@ -95,6 +95,7 @@ from ai_assistant.core.types import (
     CarriedProvenance,
     DestinationTrust,
     EgressBinding,
+    FetchRefusal,
     MemoryKind,
     ParkedRead,
     ParkedReadDisposition,
@@ -102,7 +103,9 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PlacementReach,
     QueryRefusal,
+    ReadAskOutcome,
     ReadKind,
+    ReadOutcomeKind,
     SearchNotServiced,
     SearchRefusal,
     SearchSupply,
@@ -132,7 +135,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionPlan,
         BoundEgressCall,
-        FetchRefusal,
         FrozenJsonMapping,
         GoalBrief,
         MemoryRecord,
@@ -593,6 +595,327 @@ class StructuredOutcome(StrEnum):
     did with them (ADR-0240 §6, §13 item 7)."""
 
 
+#: Every typed non-yield a source of this system can produce, as one annotation
+#: (ADR-0251 §2). Four vocabularies: two ``orchestration``'s own and two ``core``'s.
+_NonYield = SearchDisposition | SearchRefusal | FetchRefusal | StructuredOutcome
+
+
+class _NonYieldClass(StrEnum):
+    """Which of ADR-0251 §2's precedence limbs one typed non-yield falls under.
+
+    **Five limbs and not four**, because "the source answered" is a limb of its own:
+    §2's precedence puts the non-yield's class ahead of the counts (limbs 2, 3 and 4)
+    and the counts ahead of nothing (limbs 5, 6, 7 and 8), so a value saying *the
+    source answered and here is what it returned* has to be distinguishable from a
+    value saying *there is no non-yield to read*. Both send the classifier to the
+    counts, and neither is a fallback: every member of every one of the four
+    vocabularies is placed in :data:`_NON_YIELD_CLASSES` by name.
+    """
+
+    UNREACHED = "unreached"
+    """§2's precedence case 1: the ask was not put, or the budget did not reach it.
+
+    **No entry at all**, and never a member of
+    :class:`~ai_assistant.core.types.ReadOutcomeKind`: ADR-0240 §7's clause binds
+    verbatim — "A read the budget did not reach is not in it" — and telling a planner
+    ``EMPTY`` about a read nobody made would be a statement about a source that was
+    never asked."""
+
+    ANSWERED = "answered"
+    """The source answered; §2's limbs 5 to 8 decide from the counts alone."""
+
+    EXPIRED = "expired"
+    """§2's precedence case 2: a deadline passed (ADR-0241 §4)."""
+
+    FAILED = "failed"
+    """§2's precedence case 3: the servicing completed and the answer was a failure."""
+
+    REFUSED = "refused"
+    """§2's precedence case 4: the source decided not to answer, on a ground it owns."""
+
+
+#: ADR-0251 §2's class per typed non-yield, **stated member by member and never
+#: derived from a name, a prefix or a substring**. It is the whole of the enum-facing
+#: half of the classifier, and the classifier itself reads no vocabulary but this
+#: mapping — so a member added to any of the four without a class here fails at import
+#: rather than falling through to a default, which is §2's "no default branch and no
+#: fallback member" held mechanically rather than by review.
+#:
+#: **``SearchRefusal.RESPONSE_TOO_LARGE`` is a failure and
+#: ``SearchDisposition.RESPONSE_TOO_LARGE`` is read the same way**, as are the two
+#: spellings of ``PROVIDER_REFUSED``: §2 enumerates the first of each pair by name and
+#: describes the class of the second — the disposition vocabulary's ruling, spend,
+#: composition, configuration and attestation members are ``REFUSED`` and its failure
+#: members are ``FAILED`` — and a value meaning one thing under two spellings must not
+#: reach a planner under two members.
+#:
+#: **``SearchRefusal.NO_RESULT`` is ``ANSWERED`` and not ``EMPTY`` here.** §2 puts a
+#: provider that answered with nothing under ``EMPTY``, and that is exactly what the
+#: counts then say: this mapping's job is the non-yield's *class*, and a member that
+#: says the source answered hands the decision to limbs 5 to 8 rather than
+#: short-circuiting them. ``ServicedRead.disposition`` never carries it anyway — a
+#: search that reached the provider and found nothing resolves to no disposition at
+#: all — so the entry is what makes the table total rather than a live branch.
+_NON_YIELD_CLASSES: Final[Mapping[_NonYield, _NonYieldClass]] = MappingProxyType(
+    {
+        # --- SearchDisposition (ADR-0231 §13, seventeen members) ----------------
+        SearchDisposition.NOT_CONFIGURED: _NonYieldClass.REFUSED,
+        SearchDisposition.NO_BUDGET: _NonYieldClass.UNREACHED,
+        SearchDisposition.COMPOSER_DECLINED: _NonYieldClass.REFUSED,
+        SearchDisposition.COMPOSER_UNAVAILABLE: _NonYieldClass.REFUSED,
+        SearchDisposition.COMPOSER_MALFORMED: _NonYieldClass.REFUSED,
+        SearchDisposition.COMPOSER_TOO_LONG: _NonYieldClass.REFUSED,
+        SearchDisposition.BINDING_FAILED: _NonYieldClass.FAILED,
+        SearchDisposition.RULING_CONFIRM: _NonYieldClass.REFUSED,
+        SearchDisposition.RULING_DENY: _NonYieldClass.REFUSED,
+        SearchDisposition.RULING_UNAVAILABLE: _NonYieldClass.REFUSED,
+        SearchDisposition.SPEND_REFUSED: _NonYieldClass.REFUSED,
+        SearchDisposition.TRANSPORT_FAILED: _NonYieldClass.FAILED,
+        SearchDisposition.DEADLINE_EXPIRED: _NonYieldClass.EXPIRED,
+        SearchDisposition.PROVIDER_REFUSED: _NonYieldClass.REFUSED,
+        SearchDisposition.RESPONSE_TOO_LARGE: _NonYieldClass.FAILED,
+        SearchDisposition.UNATTESTED: _NonYieldClass.REFUSED,
+        SearchDisposition.SEARCH_FAILED: _NonYieldClass.FAILED,
+        # --- SearchRefusal (ADR-0231 §17, ADR-0241 §4, seven members) -----------
+        SearchRefusal.SPEND_REFUSED: _NonYieldClass.REFUSED,
+        SearchRefusal.TRANSPORT_FAILED: _NonYieldClass.FAILED,
+        SearchRefusal.DEADLINE_EXPIRED: _NonYieldClass.EXPIRED,
+        SearchRefusal.PROVIDER_REFUSED: _NonYieldClass.REFUSED,
+        SearchRefusal.RESPONSE_TOO_LARGE: _NonYieldClass.FAILED,
+        SearchRefusal.UNATTESTED: _NonYieldClass.REFUSED,
+        SearchRefusal.NO_RESULT: _NonYieldClass.ANSWERED,
+        # --- FetchRefusal (ADR-0230 §5, five members) ---------------------------
+        FetchRefusal.NOT_FOUND: _NonYieldClass.REFUSED,
+        FetchRefusal.NOT_A_FILE: _NonYieldClass.REFUSED,
+        FetchRefusal.UNREADABLE: _NonYieldClass.FAILED,
+        FetchRefusal.TOO_LARGE: _NonYieldClass.REFUSED,
+        FetchRefusal.EXTRACTION_FAILED: _NonYieldClass.FAILED,
+        # --- StructuredOutcome (ADR-0240 §10, five members) ---------------------
+        StructuredOutcome.NOT_ASKED: _NonYieldClass.UNREACHED,
+        StructuredOutcome.NO_SEPARATOR: _NonYieldClass.UNREACHED,
+        StructuredOutcome.NO_SLOT: _NonYieldClass.UNREACHED,
+        StructuredOutcome.RETURNED_NOTHING: _NonYieldClass.ANSWERED,
+        StructuredOutcome.RETURNED_RECORDS: _NonYieldClass.ANSWERED,
+    }
+)
+
+
+#: The four vocabularies :data:`_NON_YIELD_CLASSES` must be total over, named once so
+#: the import-time check and the test that pins it cannot disagree about the set.
+_NON_YIELD_VOCABULARIES: Final = (
+    SearchDisposition,
+    SearchRefusal,
+    FetchRefusal,
+    StructuredOutcome,
+)
+
+_unplaced = sorted(
+    f"{vocabulary.__name__}.{member.name}"
+    for vocabulary in _NON_YIELD_VOCABULARIES
+    for member in vocabulary
+    if member not in _NON_YIELD_CLASSES
+)
+if _unplaced:  # pragma: no cover — an unplaceable member is a build-time defect
+    _message = (
+        "every typed non-yield is placed in _NON_YIELD_CLASSES by name (ADR-0251 §2's "
+        f"'no default branch and no fallback member'); unplaced: {', '.join(_unplaced)}"
+    )
+    raise RuntimeError(_message)
+del _unplaced
+
+
+@dataclass(frozen=True, slots=True)
+class AskFacts:
+    """The four facts ADR-0251 §2's classifier decides one ask's outcome from.
+
+    **Four facts and not an enum-to-enum table**, which is the clause this type
+    exists to hold: "no source enumeration determines the answer on its own —
+    ``StructuredOutcome.RETURNED_RECORDS`` describes both a read that added records
+    and one whose every record deduplicated out, and a ``MemorySearchResult`` can be
+    ``capped`` while still admitting records."
+
+    **Recorded per ask, by the servicing, as each ask completes** — never recomputed
+    downstream and never derived from :class:`ServicedRead`, whose counts are stated
+    over the whole servicing rather than per ask.
+
+    **Fact 1's first limb is answered by not building one of these.** "Whether the
+    servicing's stage ran to its end" has two halves: a stage that did not complete
+    reaches no construction site at all, and ADR-0226 §5's all-or-nothing degradation
+    discards the facts the asks before it had already produced — so a servicing that
+    failed or was partial carries **no** entry, which is §2's precedence case 1
+    exactly. What :attr:`reached` holds is the same case's *per-ask* half: an ask that
+    was emitted and put to no source, which today is a ``LOCAL_FILE`` label that
+    resolved to nothing and a ``CITATION_HOP`` whose every label did.
+
+    Attributes:
+        ask: The ask the planner emitted, carried unaltered (ADR-0251 §3).
+        reached: Whether this ask was put to a source at all.
+        non_yield: The source's typed non-yield, where it produced one, in whichever
+            of the four vocabularies that source speaks; ``None`` where it produced
+            none.
+        returned: How many records the ask returned, **before** ADR-0226 §7's
+            deduplication.
+        admitted: How many it admitted, **after** it.
+        certified: Whether the source certified that the answer was complete. ``False``
+            where ADR-0226 §6's budget cut this kind's yield, where
+            ``MemorySearchResult.capped`` was ``True`` (ADR-0128 §2), or where a
+            structured read's own window ceiling bound it.
+    """
+
+    ask: ReadAsk
+    reached: bool
+    non_yield: _NonYield | None
+    returned: int
+    admitted: int
+    certified: bool
+
+
+def classify_read_outcome(facts: AskFacts) -> ReadOutcomeKind | None:  # noqa: PLR0911 — ADR-0251 §2's precedence is eight numbered limbs evaluated in order "with no default branch and no fallback member", so one exit per limb is the decision rather than a shape to fold
+    """Decide what became of one ask, or that it earns no entry (ADR-0251 §2).
+
+    **§2's precedence, in §2's order, with no default branch and no fallback
+    member.** 1 no entry at all; 2 ``EXPIRED``; 3 ``FAILED``; 4 ``REFUSED``; 5
+    ``EMPTY`` where the source returned no record at all before deduplication; 6
+    ``DUPLICATE`` where it returned records and admitted none after it; 7
+    ``RETURNED_RECORDS`` where it admitted at least one; and 8 ``TRUNCATED``
+    displacing 5, 6 and 7 — **and only those** — where completeness was not
+    certified.
+
+    **8 displaces only 5, 6 and 7, which is why it is tested after 1 to 4 and before
+    them.** A cut, capped or ceiling-bound answer is ``TRUNCATED`` whether it admitted
+    records, admitted only duplicates or admitted none; a refused or expired one is
+    not, because those sources answered about the *ask* rather than about the yield.
+
+    **``Servicing`` is not an input**, and deliberately: it is the stage's disposition
+    for the whole request rather than an answer about one ask, so
+    ``Servicing.DECLINED`` lands in case 1 by the caller never reaching this function
+    and ``Servicing.SERVICED`` says nothing about any individual ask.
+
+    **It reads no vocabulary but** :data:`_NON_YIELD_CLASSES`, so a member added to
+    any source enumeration without a class is a build-time failure rather than a
+    silent fifth outcome.
+
+    Args:
+        facts: The four facts, recorded by the servicing for this one ask.
+
+    Returns:
+        The member this ask reached, or ``None`` where §2's case 1 says it earns no
+        entry in the planner's carrier at all.
+    """
+    if not facts.reached:
+        return None
+    classified = (
+        _NonYieldClass.ANSWERED if facts.non_yield is None else _NON_YIELD_CLASSES[facts.non_yield]
+    )
+    match classified:
+        case _NonYieldClass.UNREACHED:
+            return None
+        case _NonYieldClass.EXPIRED:
+            return ReadOutcomeKind.EXPIRED
+        case _NonYieldClass.FAILED:
+            return ReadOutcomeKind.FAILED
+        case _NonYieldClass.REFUSED:
+            return ReadOutcomeKind.REFUSED
+        case _NonYieldClass.ANSWERED:
+            pass
+    if not facts.certified:
+        return ReadOutcomeKind.TRUNCATED
+    if facts.returned == 0:
+        return ReadOutcomeKind.EMPTY
+    if facts.admitted == 0:
+        return ReadOutcomeKind.DUPLICATE
+    return ReadOutcomeKind.RETURNED_RECORDS
+
+
+@dataclass(slots=True)
+class _AskLedger:
+    """ADR-0251 §2's four facts, recorded one ask at a time as a servicing runs.
+
+    **The deltas are taken since the previous note rather than from a mark the
+    caller keeps**, and that is exact rather than approximate: ADR-0226 §1 admits at
+    most one ask of each kind per request, §6 services them in a fixed order, every
+    admission a servicing makes is made by the ask being serviced at that moment, and
+    an ask the request did not carry makes none — so the counters cannot move between
+    two notes on account of anything but the ask the later note is for. It also
+    removes the failure a caller-held mark invites, which is reading one counter
+    before a kind and the other after it and reporting one ask's admissions against a
+    neighbour's returns.
+
+    **The truncation test is here rather than at each site**, because ADR-0226 §6's
+    cut is recorded per kind in one list and the test is the same sentence for all
+    five. A source that has its *own* reason to leave completeness uncertified — the
+    store's candidate ceiling (ADR-0128 §2) — passes it as ``certified=False``, and
+    the two grounds are ANDed: either one alone is enough to make the answer
+    uncertified.
+
+    **Nothing is classified here.** This records facts; :func:`classify_read_outcome`
+    decides, and only on the success path — a servicing that failed or was partial
+    leaves this ledger holding the facts of the asks it had already put and nobody
+    reads them, which is ADR-0226 §5's all-or-nothing posture and §2's precedence
+    case 1.
+
+    Attributes:
+        union: The turn's union under construction, whose two counters the per-ask
+            figures are differenced from.
+        truncated: The servicing's truncation list, read by :meth:`note`.
+        facts: One record per ask noted, in servicing order.
+    """
+
+    union: _Union
+    truncated: list[ReadKind]
+    facts: list[AskFacts] = field(default_factory=list)
+    _returned: int = 0
+    _admitted: int = 0
+
+    def note(
+        self, ask: ReadAsk, *, reached: bool, non_yield: _NonYield | None, certified: bool = True
+    ) -> None:
+        """Record what became of one ask, and advance the mark.
+
+        Args:
+            ask: The ask the planner emitted, carried unaltered.
+            reached: Whether it was put to a source at all (ADR-0226 §3's silently
+                discarded label is the case this is ``False`` for).
+            non_yield: The source's typed non-yield, or ``None`` where it produced
+                none.
+            certified: Whether the source certified completeness on a ground of its
+                own, ANDed here with ADR-0226 §6's budget cut for this kind.
+        """
+        returned, admitted = self.union.returned, len(self.union.admitted)
+        self.facts.append(
+            AskFacts(
+                ask=ask,
+                reached=reached,
+                non_yield=non_yield,
+                returned=returned - self._returned,
+                admitted=admitted - self._admitted,
+                certified=certified and ask.kind not in self.truncated,
+            )
+        )
+        self._returned, self._admitted = returned, admitted
+
+
+def classified_reads(facts: Sequence[AskFacts]) -> tuple[ReadAskOutcome, ...]:
+    """ADR-0251 §3's carrier for one servicing, in servicing order.
+
+    **Exactly one entry per ask the servicing reached, and every ask it reached has
+    one** (§2). An ask :func:`classify_read_outcome` returns ``None`` for contributes
+    nothing, which is the whole of how case 1 reaches the carrier.
+
+    Args:
+        facts: One record per ask this servicing emitted, in the order §6 services
+            the kinds in.
+
+    Returns:
+        The outcomes, each carrying the planner's own ask byte for byte.
+    """
+    return tuple(
+        ReadAskOutcome(ask=one.ask, outcome=outcome)
+        for one in facts
+        if (outcome := classify_read_outcome(one)) is not None
+    )
+
+
 def admitted_fourth_group(
     records: Sequence[MemoryRecord], *, held: Collection[str]
 ) -> tuple[MemoryRecord, ...]:
@@ -922,6 +1245,46 @@ class ServicedRead:
     truncated_kinds: tuple[ReadKind, ...] = ()
     failed: bool = False
     failed_after_read_returned: bool = False
+
+
+@dataclass(slots=True)
+class _Capped:
+    """Whether any read behind one ask refused to certify that its answer was whole.
+
+    ADR-0251 §2's fourth fact, threaded into
+    :func:`~ai_assistant.orchestration.retrieval.assemble_by_band` as its ``capped``
+    observer for :class:`_Reads`' reason: a sighted query is several store calls
+    behind one call, and the :class:`~ai_assistant.core.types.MemorySearchResult`
+    each of them returned never leaves that function. **Sticky and never cleared** —
+    one band that refused to certify is enough, exactly as ADR-0128 §2 states the
+    value over one read.
+    """
+
+    seen: bool = False
+
+    def note(self) -> None:
+        """Record that one read came back ``capped``."""
+        self.seen = True
+
+
+@dataclass(frozen=True, slots=True)
+class _Structured:
+    """What one ``STRUCTURED_READ`` ask reached, in the three facts its callers need.
+
+    Attributes:
+        outcome: Which of ADR-0240 §10's five states the ask reached.
+        empty: ADR-0240 §6's fact — whether the read ran and returned no record at
+            all, which is the only shape §7's carrier admitted before ADR-0251.
+        capped: ADR-0251 §2's fourth fact for this kind — whether the store's own
+            candidate ceiling bound the read (ADR-0128 §2). **Separate from the
+            budget cut**, which the servicing records in its truncation list: they
+            are two different sources of the same uncertainty and either one alone
+            leaves completeness uncertified.
+    """
+
+    outcome: StructuredOutcome
+    empty: bool
+    capped: bool = False
 
 
 @dataclass(slots=True)
@@ -1292,6 +1655,14 @@ class ServicedCarriers:
         hop_reached: ADR-0227 §3's carrier — the **distinct** ids of the records this
             servicing's citation hop reached that the supply holds after it, in
             ADR-0229 §3's order.
+        read_outcomes: ADR-0251 §3's carrier — one
+            :class:`~ai_assistant.core.types.ReadAskOutcome` per ask **this
+            servicing reached**, in the order ADR-0226 §6 services the kinds in, each
+            carrying the planner's own ask byte for byte beside the member
+            :func:`classify_read_outcome` reached for it. An ask the servicing did not
+            reach earns no entry, and a servicing that failed or was partial carries
+            **none at all** — ADR-0226 §5's all-or-nothing posture, which is §2's
+            precedence case 1 for every ask the stage had already put.
         empty_read: ADR-0240 §7's carrier — the ``STRUCTURED_READ`` ask this
             servicing performed that returned **no record at all**, carried back byte
             for byte as the planner emitted it, or ``None``. A read the budget did not
@@ -1347,6 +1718,7 @@ class ServicedCarriers:
 
     hop_reached: tuple[str, ...] = ()
     minted: tuple[str, ...] = ()
+    read_outcomes: tuple[ReadAskOutcome, ...] = ()
     empty_read: ReadAsk | None = None
     structured_ran: bool = False
     label_filtered: bool = False
@@ -2426,7 +2798,7 @@ def _degraded(refused_by: str) -> None:
     _log.warning("read_request_degraded", stage="service_read_request", refused_by=refused_by)
 
 
-async def service_read_request(  # noqa: PLR0913 — the store, the emission, and one parameter per thing a kind is serviced against, and one statement per kind serviced plus ADR-0238 §8's fold after each admission; §7 admits one site and this is it
+async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emission, and one parameter per thing a kind is serviced against, and one statement per kind serviced plus ADR-0238 §8's fold after each admission and ADR-0251 §2's one recorded fact per kind; §7 admits one site and this is it
     store: MemoryStore,
     request: ReadRequest,
     *,
@@ -2674,6 +3046,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     hop = _ask_of(request, ReadKind.CITATION_HOP)
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     local_file = _ask_of(request, ReadKind.LOCAL_FILE)
+    web = _ask_of(request, ReadKind.WEB_SEARCH)
     structured = _ask_of(request, ReadKind.STRUCTURED_READ)
     # `ReadAsk`'s validator makes a `STRUCTURED_READ` ask's `structure` non-``None``
     # (ADR-0240 §2), read here as the guarantee it is rather than restated as a
@@ -2689,6 +3062,17 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     statement = None if query is None else query.query
     named = None if local_file is None else local_file.entry
     truncated: list[ReadKind] = []
+    # ADR-0251 §2's four facts, one record per ask, noted **as each ask completes**
+    # and in the order ADR-0226 §6 services the kinds in. Declared outside the `try`
+    # so that a stage which did not run to its end leaves it where it stood — the
+    # facts it holds are then never classified, because `carried` is only built on
+    # the success path, which is §2's precedence case 1 for every ask that stage had
+    # already put and is ADR-0226 §5's all-or-nothing posture reaching this carrier
+    # exactly as it reaches the records.
+    ledger = _AskLedger(union, truncated)
+    # §2's fourth fact for the sighted query, whose per-band results never leave
+    # `assemble_by_band` (see :class:`_Capped`).
+    capped = _Capped()
     unresolved = 0
     refusal: FetchRefusal | None = None
     # Assigned before the `try`, because ADR-0231 §13's field rides on the failing
@@ -2705,7 +3089,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
     counts = _SearchCounts()
 
     try:
-        if named is not None:
+        if local_file is not None and named is not None:
             # ADR-0230 §7: **first**, ahead of the hop, because this kind is capped
             # at one record and the hop at two labels — "at one slot, the cheapest
             # precedence position this corpus has ever had to argue for".
@@ -2713,6 +3097,12 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                 named, fetcher, listing, union=union, reads=reads
             )
             unresolved += missed
+            # ADR-0226 §3: a label outside the shown set "resolves to nothing …
+            # discarded silently", and nothing reached the fetcher — so no source
+            # decided anything about this ask and it earns no carrier entry. Telling
+            # a planner the file came back `EMPTY` would be a statement about a
+            # fetcher that was never called.
+            ledger.note(local_file, reached=missed == 0, non_yield=refusal)
         # ADR-0231 §11: **second**, after the one-record local file and ahead of the
         # hop and the query. ADR-0226 §6's decision is applied and not moved — the
         # capped read ahead of the uncapped one — and sorting the four kinds by their
@@ -2728,7 +3118,7 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
         # is (:func:`_serviced_search`).
         searched = await _serviced_search(
             search,
-            _ask_of(request, ReadKind.WEB_SEARCH),
+            web,
             utterance,
             union=union,
             supply=supply,
@@ -2739,6 +3129,12 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             goal=goal,
             plan=plan,
         )
+        if web is not None:
+            # ADR-0231 §13 leaves the disposition empty where the search yielded and
+            # where it reached the provider and found nothing, so a `None` here sends
+            # §2's precedence to the counts — which is where `NO_RESULT` belongs and
+            # where a search whose every record deduplicated out belongs too.
+            ledger.note(web, reached=True, non_yield=searched.disposition)
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
             # **Accumulated and never assigned** (ADR-0230 §9). The count is one
@@ -2757,12 +3153,18 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
             # budget and moves no field of §9's record.
             if union.admit(reach.evidence):
                 truncated.append(ReadKind.CITATION_HOP)
+            # A hop whose every label resolved to nothing made no store call at all
+            # (:func:`_hop_records` returns before one), so no source answered it —
+            # ADR-0226 §3's silent discard, which the audit counts as an unresolved
+            # label and which §2 leaves out of the carrier. A hop that resolved one
+            # of two labels **did** read, and what it read is what the counts report.
+            ledger.note(hop, reached=reach.unresolved < len(hop.labels), non_yield=None)
         if structured is not None and structured.structure is not None:
             # ADR-0240 §5: **fourth**, after the hop and ahead of the query — the
             # position ADR-0226 §6's own rule reaches for a kind with no cap of its
             # own, since the sighted query is the read that "fills what remains" and
             # there can only be one of those.
-            outcome, empty = await _serviced_structured(
+            read = await _serviced_structured(
                 store,
                 structured.structure,
                 structured.query,
@@ -2771,16 +3173,29 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                 reads=reads,
                 truncated=truncated,
             )
+            outcome, empty = read.outcome, read.empty
+            # §2's three no-entry states for this kind — `NOT_ASKED`, `NO_SEPARATOR`
+            # and `NO_SLOT` — are carried as the non-yield they are and classified by
+            # the one table, rather than tested a second time here. `capped` is the
+            # store's own candidate ceiling (ADR-0128 §2), the second of §2's two
+            # independent grounds for leaving completeness uncertified.
+            ledger.note(structured, reached=True, non_yield=read.outcome, certified=not read.capped)
             # ADR-0240 §7: the ask **the planner emitted**, byte for byte, and only
             # where the read ran and returned nothing. The other four outcomes
             # establish nothing about the store, so none of them reaches this
             # carrier.
             empty_read = structured if empty else None
-        if statement is not None:
+        if query is not None and statement is not None:
             # ADR-0226 §6: **last**, because it is the read that "fills what
             # remains" — the one uncapped kind, and the position ADR-0240 §5 sorts
             # the structured read just above.
-            await _serviced_query(store, statement, union=union, reads=reads, truncated=truncated)
+            await _serviced_query(
+                store, statement, union=union, reads=reads, capped=capped, truncated=truncated
+            )
+            # ADR-0226 §6's cut is the ledger's own test; `capped.seen` is the second
+            # ground (ADR-0128 §2), observed rather than read because this kind is
+            # several store calls behind one call.
+            ledger.note(query, reached=True, non_yield=None, certified=not capped.seen)
         completed = ServicedRead(
             kinds=tuple(ask.kind for ask in request.asks),
             records=tuple(union.admitted),
@@ -2827,6 +3242,11 @@ async def service_read_request(  # noqa: PLR0913 — the store, the emission, an
                 if identifier in union.held
             ),
             empty_read=empty_read,
+            # ADR-0251 §3's carrier, classified **on the success path alone** — a
+            # servicing that failed or was partial carries none, which is §2's
+            # precedence case 1 and ADR-0226 §5's all-or-nothing posture reaching
+            # this carrier exactly as it reaches the records and the counts.
+            read_outcomes=classified_reads(ledger.facts),
             # ADR-0240 §8 keys the emptiness fact on the turn's last **structured
             # read**, not on its last servicing, so the loop needs to know whether this
             # servicing performed one at all — a servicing whose request carried none,
@@ -3263,12 +3683,13 @@ async def _serviced_file(
     return outcome.refusal, 0
 
 
-async def _serviced_query(
+async def _serviced_query(  # noqa: PLR0913 — the store, the query, and one parameter per thing this kind is serviced against: ADR-0226 §6's one budget, §9's read observer, ADR-0251 §2's capped observer and §6's truncation record
     store: MemoryStore,
     statement: str,
     *,
     union: _Union,
     reads: _Reads,
+    capped: _Capped,
     truncated: list[ReadKind],
 ) -> None:
     """Service one ``SIGHTED_QUERY`` ask into the union (ADR-0226 §2, §6).
@@ -3291,6 +3712,11 @@ async def _serviced_query(
         union: The turn's union. Its ``remaining`` is this read's ``limit``.
         reads: ADR-0226 §9's second failure field's observer, threaded in as the page
             observer because one query is several store calls behind one call.
+        capped: ADR-0251 §2's fourth fact for this kind, threaded in as the ``capped``
+            observer for the identical reason — the per-band
+            :class:`~ai_assistant.core.types.MemorySearchResult` never leaves
+            ``assemble_by_band``, and a band that refused to certify its answer is one
+            this ask's completeness cannot be claimed over.
         truncated: The servicing's truncation list, appended to in servicing order.
 
     Raises:
@@ -3302,7 +3728,12 @@ async def _serviced_query(
         []
         if allowed <= 0
         else await assemble_by_band(
-            store, statement, limit=allowed, kinds=BELIEF_KINDS, on_page=reads.note
+            store,
+            statement,
+            limit=allowed,
+            kinds=BELIEF_KINDS,
+            on_page=reads.note,
+            on_capped=capped.note,
         )
     )
     union.admit(found)
@@ -3366,7 +3797,7 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
     supply: Sequence[MemoryRecord],
     reads: _Reads,
     truncated: list[ReadKind],
-) -> tuple[StructuredOutcome, bool]:
+) -> _Structured:
     """Service one ``STRUCTURED_READ`` ask into the union (ADR-0240 §4, §5, §6).
 
     **Two conditions are tested before any store call, and the separator wins where
@@ -3417,9 +3848,11 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
         truncated: The servicing's truncation list, appended to in servicing order.
 
     Returns:
-        The state this ask reached, and whether the store call returned no record at
-        all — §6's *empty structured read*, which is ``False`` on every path that made
-        no store call.
+        :class:`_Structured`: the state this ask reached, whether the store call
+        returned no record at all — §6's *empty structured read*, which is ``False`` on
+        every path that made no store call — and whether the store's own candidate
+        ceiling bound the read (ADR-0128 §2, ADR-0251 §2), which is ``False`` on those
+        same paths for the same reason.
 
     Raises:
         MemoryStoreError: Propagated from the store, to ADR-0226 §5's one degradation
@@ -3430,10 +3863,10 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
         # **before** the read, so nothing is discarded and ADR-0226 §7's
         # discards-nothing-by-class clause is not approached. §10 records this in
         # preference to the slot outcome where both hold.
-        return StructuredOutcome.NO_SEPARATOR, False
+        return _Structured(StructuredOutcome.NO_SEPARATOR, False)
     limit = union.remaining
     if limit <= 0:
-        return StructuredOutcome.NO_SLOT, False
+        return _Structured(StructuredOutcome.NO_SLOT, False)
     # The four axes are passed from the ask unchanged — `None` for `None`, and the
     # values given otherwise (ADR-0240 §2) — written out at both call sites rather
     # than unpacked from a mapping, so `mypy` checks each against ADR-0237 §1's own
@@ -3469,9 +3902,14 @@ async def _serviced_structured(  # noqa: PLR0913 — the store, the ask's two ha
     # unchanged.
     if limit < READ_BUDGET and len(found) == limit:
         truncated.append(ReadKind.STRUCTURED_READ)
+    # ADR-0251 §2's fourth fact, read off the store's own answer rather than
+    # inferred from the yield. It is orthogonal to the budget cut above — a read
+    # given the whole budget can still come back ``capped`` — and to the yield: a
+    # ``capped`` read that admitted records is still one whose completeness was not
+    # certified.
     if not found:
-        return StructuredOutcome.RETURNED_NOTHING, True
-    return StructuredOutcome.RETURNED_RECORDS, False
+        return _Structured(StructuredOutcome.RETURNED_NOTHING, True, result.capped)
+    return _Structured(StructuredOutcome.RETURNED_RECORDS, False, result.capped)
 
 
 def resolve_label(label: str, supply: Sequence[MemoryRecord]) -> MemoryRecord | None:

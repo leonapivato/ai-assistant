@@ -32,7 +32,7 @@ from ai_assistant.core.types import (
     Message,
     PlannerOutput,
     PlanStep,
-    ReadAsk,
+    ReadAskOutcome,
     Role,
     StepStatus,
 )
@@ -93,7 +93,7 @@ class _TwoStepPlanner(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         first = await super().plan(
@@ -159,7 +159,7 @@ class _NoStep(OneStepPlanner):
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         built = await super().plan(

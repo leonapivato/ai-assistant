@@ -90,7 +90,7 @@ from ai_assistant.core.types import (
     PlannerOutput,
     PlanStep,
     Provenance,
-    ReadAsk,
+    ReadAskOutcome,
     Reversibility,
     RiskLevel,
     Role,
@@ -277,7 +277,7 @@ class _OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Return a one-step plan for the goal."""
@@ -308,7 +308,7 @@ class _NoStepPlanner:
         memories: Sequence[MemoryRecord] = (),
         capabilities: Sequence[str],
         files: Sequence[ShownFile] = (),
-        empty_reads: Sequence[ReadAsk] = (),
+        read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Return an empty plan for the goal."""
