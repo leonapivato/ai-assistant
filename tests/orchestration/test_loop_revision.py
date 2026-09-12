@@ -42,6 +42,7 @@ from test_loop_reads import (
 from ai_assistant.core.errors import MemoryStoreError, PlanningError, ToolError
 from ai_assistant.core.types import (
     ActionPlan,
+    AttemptKind,
     EvidenceDigest,
     GoalBrief,
     MemorySource,
@@ -343,7 +344,7 @@ async def test_the_budget_stops_the_turn_and_the_reply_says_so() -> None:
     ("elapsed", "calls", "stop"),
     [
         (timedelta(seconds=20), 1, StopReason.BUDGET_REACHED),
-        (timedelta(seconds=20, microseconds=-1), 2, StopReason.BOUND_REACHED),
+        (timedelta(seconds=20, microseconds=-1), 2, StopReason.SETTLED),
     ],
     ids=["exactly-at-the-budget", "one-tick-below-it"],
 )
@@ -359,9 +360,15 @@ async def test_the_boundary_instant_is_spent_not_available(
     spending a model call the other refuses, with a different reply, a different cost
     and a different audit record", and an injected clock makes equality an ordinary
     case in a test rather than a measure-zero curiosity.
+
+    **The planner settles on its second call**, so what each arm asserts is the
+    boundary and nothing downstream of it: at exactly the budget no further call is
+    admitted, and one tick below it exactly one is. ADR-0251 §4 keeps this gate
+    entire and unre-keyed — it measures one user's wait — and a script that went on
+    asking would have the arm read a later guard's figure instead of this one's.
     """
     memory = await _seeded()
-    planner = _Script(requests=[_hop("M1")])
+    planner = _Script(requests=[_hop("M1"), None])
 
     with structlog.testing.capture_logs() as captured:
         await _revising(memory, planner, now=_Elapsed(elapsed))
@@ -427,18 +434,22 @@ async def test_the_budget_runs_from_the_turns_entry_and_not_from_the_first_plan(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_servicing_that_adds_nothing_does_not_revise() -> None:
-    """§2(e): a byte-identical supply is not a second question.
+async def test_a_servicing_that_adds_nothing_admits_one_more_round_and_not_two() -> None:
+    """ADR-0251 §4: (e) is dissolved, and §7's run test is what takes its place.
 
-    "A servicing whose every record was deduplicated out leaves the supply
-    byte-identical, and a planner called twice over one input is being asked the same
-    question twice at the price of a model round trip." The hop names a belief whose
-    evidence is a record the supply already holds, so every returned record
-    deduplicates away.
+    ADR-0228 §2(e) stopped the turn on the **first** servicing that added nothing:
+    "a planner called twice over one input is being asked the same question twice at
+    the price of a model round trip". §4 dissolves it because §3's carrier means the
+    further call is never over one input — it is over the same supply **plus** a
+    statement of what each ask returned — and §7 takes back what (e) also bought, one
+    round later: "one unproductive round is admissible, two consecutive ones stop the
+    attempt".
 
-    **And the condition is not merely thrift** (§2). §9's iteration rate would count
-    a turn that learned nothing as a turn that looked again, so making the condition
-    the arrival of new material is what keeps the number honest.
+    So the hop that deduplicates entirely away buys the planner exactly one more
+    round to take #2169's "justified alternative" with, and the turn stops at the
+    second consecutive one with ``UNPRODUCTIVE`` — well inside the planner-call
+    allowance, which is #2170's "a repeated-result task stops before blindly
+    exhausting the maximum".
     """
     memory = _Journal()
     await memory.add(_belief("belief-1", "the lease question", evidence=("belief-2",)))
@@ -450,14 +461,16 @@ async def test_a_servicing_that_adds_nothing_does_not_revise() -> None:
     with structlog.testing.capture_logs() as captured:
         responded = await _revising(memory, planner)
 
-    assert len(planner.calls) == 1
-    assert len(memory.keyed) == 1, "no second store read"
+    assert len(planner.calls) == 2, "one further round, and the second run stops it"
     supplied = _ids(responded.turn.memories)
-    assert supplied == ["belief-1", "belief-2"], "the supply is what one servicing left"
+    assert supplied == ["belief-1", "belief-2"], "and neither servicing added anything"
     record = _record(captured)
-    assert record["stop"] == StopReason.NOT_ITERATED.value
-    assert record["servicings"][0]["new"] == 0
+    assert record["stop"] == StopReason.UNPRODUCTIVE.value
+    assert [entry["new"] for entry in record["servicings"]] == [0, 0]
     assert record["servicings"][0]["deduplicated"] == 1
+    assert record["attempt_planner_calls"] < record["attempt_allowance"], (
+        "#2170: stopped before blindly exhausting the maximum"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -661,11 +674,11 @@ async def test_the_label_space_is_the_sequence_passed_on_that_call() -> None:
     await memory.add(_belief("belief-2", "the lease renewal", evidence=("episode-2",)))
     await memory.add(_episode("episode-1", "Ada: the flat was on Rua da Boavista."))
     await memory.add(_episode("episode-2", "Ada: the renewal is in March."))
-    planner = _Script(requests=[_hop("M1"), _hop("M3")])
+    planner = _Script(requests=[_hop("M1"), _hop("M3"), None])
 
     responded = await _revising(memory, planner)
 
-    first, second = (supply for supply, _ in planner.calls)
+    first, second, _settling = (supply for supply, _ in planner.calls)
     assert _ids(first) == ["belief-1", "belief-2"], "three groups, and M3 names nothing"
     assert _ids(second) == ["belief-1", "belief-2", "episode-1"], "M3 is the hop's own yield"
     # The second call's `M3` resolved to `episode-1`, whose evidence is empty, so the
@@ -710,15 +723,15 @@ async def test_the_second_level_is_reached_only_through_a_fresh_emission() -> No
     # follow and the second may — once the second plan names it.
     memory._records["level-1"] = _belief("level-1", "Ada: ask the agent.", evidence=("level-2",))
     await memory.add(_episode("level-2", "Ada: the agent is Marta."))
-    planner = _Script(requests=[_hop("M1"), _hop("M2")])
+    planner = _Script(requests=[_hop("M1"), _hop("M2"), None])
 
     responded = await _revising(memory, planner)
 
-    first, second = (supply for supply, _ in planner.calls)
+    first, second, _settling = (supply for supply, _ in planner.calls)
     assert _ids(first) == ["belief-1"], "one level: the supply before any servicing"
     assert _ids(second) == ["belief-1", "level-1"], "the first level and no more"
     assert _ids(responded.turn.memories) == ["belief-1", "level-1", "level-2"]
-    assert len(planner.calls) == 2, "the second level cost a second emission"
+    assert len(planner.calls) == 3, "the second level cost a second emission"
 
 
 # --------------------------------------------------------------------------- #
@@ -745,7 +758,7 @@ async def test_the_supply_is_monotone_and_the_fourth_group_is_one_group() -> Non
     await memory.add(_belief("belief-1", "the lease question", evidence=("first-1",)))
     await memory.add(_episode("first-1", "Ada: the flat was on Rua da Boavista."))
     await memory.add(_belief("second-1", "the deposit was four hundred", evidence=()))
-    planner = _Script(requests=[_hop("M1"), _query("the deposit")])
+    planner = _Script(requests=[_hop("M1"), _query("the deposit"), None])
 
     responded = await _revising(memory, planner)
 
@@ -753,7 +766,7 @@ async def test_the_supply_is_monotone_and_the_fourth_group_is_one_group() -> Non
     supplied = responded.turn.memories
     assert supplied[: len(planning_saw)] == planning_saw, "the earlier groups are untouched"
     assert _ids(supplied) == ["belief-1", "first-1", "second-1"], "one appended run, in order"
-    assert len(planner.calls) == 2
+    assert len(planner.calls) == 3, "two servicings, and a third call that settled"
 
 
 async def test_a_record_both_servicings_reach_appears_once_at_its_first_place() -> None:
@@ -800,13 +813,13 @@ async def test_each_servicing_draws_its_own_budget_of_ten() -> None:
     for ordinal in range(READ_BUDGET):
         await memory.add(_belief(f"paperwork-{ordinal}", f"paperwork item {ordinal}"))
         await memory.add(_belief(f"inventory-{ordinal}", f"inventory item {ordinal}"))
-    planner = _Script(requests=[_query("paperwork"), _query("inventory")])
+    planner = _Script(requests=[_query("paperwork"), _query("inventory"), None])
 
     with structlog.testing.capture_logs() as captured:
         responded = await _revising(memory, planner)
 
     record = _record(captured)
-    assert record["planner_calls"] == 2
+    assert record["planner_calls"] == 3, "two servicings, and a third call that settled"
     assert [entry["new"] for entry in record["servicings"]] == [READ_BUDGET, READ_BUDGET]
     fourth = _ids(responded.turn.memories)[len(planner.calls[0][0]) :]
     assert len(fourth) == 2 * READ_BUDGET, "at most twenty, and one appended run"
@@ -827,7 +840,7 @@ async def test_the_hop_carrier_accumulates_across_both_servicings() -> None:
     await memory.add(_belief("belief-2", "the lease renewal", evidence=("second-1",)))
     await memory.add(_episode("first-1", "Ada: where was the flat?", outcome="On Rua da Boavista."))
     await memory.add(_episode("second-1", "Ada: when is the renewal?", outcome="In March."))
-    planner = _Script(requests=[_hop("M1"), _hop("M2")])
+    planner = _Script(requests=[_hop("M1"), _hop("M2"), None])
 
     responded = await _revising(memory, planner)
 
@@ -857,7 +870,7 @@ async def test_the_audit_accounts_per_emission_and_the_fire_rate_keeps_its_meani
     await memory.add(_belief("belief-1", "the lease question", evidence=("first-1",)))
     await memory.add(_episode("first-1", "Ada: the flat was on Rua da Boavista."))
     await memory.add(_belief("second-1", "the deposit was four hundred"))
-    planner = _Script(requests=[_hop("M1"), _query("the deposit")])
+    planner = _Script(requests=[_hop("M1"), _query("the deposit"), None])
 
     with structlog.testing.capture_logs() as captured:
         await _revising(memory, planner)
@@ -865,13 +878,19 @@ async def test_the_audit_accounts_per_emission_and_the_fire_rate_keeps_its_meani
     assert len(_records(captured)) == 1, "one record per turn, however many emissions"
     record = _record(captured)
     assert record["trigger"] == TriggerOutcome.FIRED.value
-    assert record["planner_calls"] == 2
-    assert record["stop"] == StopReason.BOUND_REACHED.value
+    assert record["planner_calls"] == 3
+    assert record["stop"] == StopReason.SETTLED.value
     assert len(record["servicings"]) == 2
     assert [entry["kinds"] for entry in record["servicings"]] == [
         (ReadKind.CITATION_HOP.value,),
         (ReadKind.SIGHTED_QUERY.value,),
     ]
+    # ADR-0251 §7's three turn-level additions, on the same record under the same key
+    # at the same emission point: the attempt's kind, its consumed calls and what its
+    # kind declares. The stop distribution is unreadable without them.
+    assert record["attempt_kind"] == AttemptKind.CONVERSATIONAL.value
+    assert record["attempt_planner_calls"] == 3
+    assert record["attempt_allowance"] == 4
 
 
 async def test_a_turn_whose_second_planner_call_raises_still_says_it_fired() -> None:
@@ -970,7 +989,7 @@ async def test_the_audit_still_copies_nothing_under_iteration() -> None:
     await memory.add(_belief("belief-1", "the lease question", evidence=("first-1",)))
     await memory.add(_episode("first-1", "Ada: quinoa-flavoured stroopwafel."))
     await memory.add(_belief("second-1", "marmalade zeppelin bookkeeping"))
-    planner = _Script(requests=[_hop("M1"), _query("marmalade zeppelin")])
+    planner = _Script(requests=[_hop("M1"), _query("marmalade zeppelin"), None])
 
     with structlog.testing.capture_logs() as captured:
         responded = await _revising(memory, planner)
@@ -979,7 +998,7 @@ async def test_the_audit_still_copies_nothing_under_iteration() -> None:
     assert "marmalade" not in rendered, "neither iteration's query is copied"
     assert "stroopwafel" not in rendered, "no returned record's content is copied"
     assert "M1" not in rendered, "the labels either call named are not copied"
-    assert len(responded.plans) == 2
+    assert len(responded.plans) == 3
     for plan in responded.plans:
         assert plan.id not in rendered, "no plan identifier, the superseded plan's included"
 
@@ -1106,6 +1125,10 @@ async def test_a_first_plan_carrying_a_resolvable_id_persists_none() -> None:
         "planner_calls",
         "stop",
         "servicings",
+        # ADR-0251 §7's three, and no fourth: the discard is still uncounted.
+        "attempt_kind",
+        "attempt_planner_calls",
+        "attempt_allowance",
     }, "no count of the discard"
 
 
@@ -1135,34 +1158,49 @@ async def test_no_plan_identifier_appears_in_any_prompt_the_turn_assembles() -> 
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_bound_stops_a_planner_that_asks_on_every_call() -> None:
-    """§3: exactly two calls, both emissions serviced, and §10's fact.
+async def test_the_allowance_stops_a_planner_that_asks_on_every_call() -> None:
+    """ADR-0251 §4(f'): the attempt's allowance, and ADR-0228 §3's kept clauses.
 
-    "The second plan's request, where it carries one, **is serviced** under ADR-0226
-    §5, §6 and §7 exactly as the first plan's is — and no third planner call follows
-    it. Its yield reaches the reply and no plan, which is precisely milestone 27's
-    own shape." Servicing it rather than suppressing it "costs no model call — the
-    emission already exists — and discarding it would throw away a read the planner
-    asked for on a turn where the system had already decided to spend".
+    §3's *"A turn makes at most two calls"* becomes a per-**attempt** admission
+    threshold, so a planner asking productively on every call iterates until the
+    ledger reaches the declared four. What §3 keeps binds unchanged over the wider
+    sequence: "The last plan's request, where it carries one, **is serviced** under
+    ADR-0226 §5, §6 and §7 exactly as the first plan's is" — so the fourth emission is
+    serviced and no fifth planner call follows it, its yield reaching the reply and no
+    plan. Servicing it rather than suppressing it "costs no model call — the emission
+    already exists — and discarding it would throw away a read the planner asked for
+    on a turn where the system had already decided to spend".
+
+    **Each round is productive**, which is what keeps §7's run test out of the way and
+    leaves the count the thing that stops the turn: four disjoint queries over four
+    disjoint seeds.
     """
     memory = _Journal()
     await memory.add(_belief("belief-1", "the lease question", evidence=("first-1",)))
     await memory.add(_episode("first-1", "Ada: the flat was on Rua da Boavista."))
-    await memory.add(_belief("second-1", "the deposit was four hundred"))
-    planner = _Script(requests=[_hop("M1"), _query("the deposit")])
+    for term in ("deposit", "inventory", "paperwork"):
+        await memory.add(_belief(f"{term}-1", f"the {term} was settled"))
+    planner = _Script(
+        requests=[_hop("M1"), _query("deposit"), _query("inventory"), _query("paperwork")]
+    )
 
     with structlog.testing.capture_logs() as captured:
         responded = await _revising(memory, planner)
 
-    assert len(planner.calls) == 2, "and no third"
+    assert len(planner.calls) == 4, "and no fifth"
     record = _record(captured)
-    assert len(record["servicings"]) == 2, "both emissions serviced"
+    assert len(record["servicings"]) == 4, "every emission serviced, the last included"
     assert record["stop"] == StopReason.BOUND_REACHED.value
+    assert record["attempt_planner_calls"] == record["attempt_allowance"] == 4
     assert responded.stopped_while_asking is True
     assert "stopped before you could" in await _system_prompt_over(responded)
-    assert _ids(responded.turn.memories) == ["belief-1", "first-1", "second-1"], (
-        "the second servicing's yield reaches the reply and no plan"
-    )
+    assert _ids(responded.turn.memories) == [
+        "belief-1",
+        "first-1",
+        "deposit-1",
+        "inventory-1",
+        "paperwork-1",
+    ], "the last servicing's yield reaches the reply and no plan"
 
 
 # --------------------------------------------------------------------------- #

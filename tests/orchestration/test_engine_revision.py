@@ -127,9 +127,14 @@ class _DependentPlanner:
 class _AlwaysAsking:
     """A planner emitting a request on **every** call, with a step on each plan.
 
-    §13 item 2's subject, and item 12's: the bound stops it at two, and the plan it
-    replaced must drive nothing even though that plan names a side-effecting
-    capability.
+    §13 item 2's subject, and item 12's: a guard stops it, and every plan it replaced
+    must drive nothing even though those plans name a side-effecting capability.
+
+    **What stops it is no longer a count of calls** (ADR-0251 §4). ADR-0228 §3's bound
+    of two moved to the attempt's allowance of four, and the hop this planner re-emits
+    reaches the same record every round — so the first round is productive and the two
+    after it admit nothing, which is §7's unproductive run. Three calls, three
+    servicings, and the third plan is the one driven.
     """
 
     def __init__(self, *, capability: str = CAPABILITY) -> None:
@@ -260,14 +265,16 @@ async def test_a_steps_parameters_are_filled_from_what_the_read_returned() -> No
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_bound_is_reached_and_the_reply_says_so() -> None:
-    """§3's bound at the engine, with §10's fact in the assembled prompt.
+async def test_the_investigation_stops_and_the_reply_says_so() -> None:
+    """A guard at the engine, with ADR-0228 §10's fact in the assembled prompt.
 
-    A planner that emits a request on every call: exactly two planner calls, both
-    emissions serviced, the **second** plan driven, the audit recording **bound
-    reached**, and the composing stage given §10's fact — asserted through the
-    production renderer over the assembled prompt, per ADR-0227 §7's fidelity rule,
-    and not through a fake that cannot fail to carry it.
+    A planner that emits a request on every call: three planner calls, every emission
+    serviced, the **last** plan driven, the audit recording ADR-0251 §7's
+    ``UNPRODUCTIVE`` — the run test, two rounds after the first productive one, and
+    well inside the allowance — and the composing stage given §10's fact, which §7
+    widens the trigger for to exactly this stop. Asserted through the production
+    renderer over the assembled prompt, per ADR-0227 §7's fidelity rule, and not
+    through a fake that cannot fail to carry it.
     """
     composing, model = _recorder()
     planner = _AlwaysAsking()
@@ -278,12 +285,15 @@ async def test_the_bound_is_reached_and_the_reply_says_so() -> None:
     with structlog.testing.capture_logs() as captured:
         outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert len(planner.calls) == 2, "and no third"
+    assert len(planner.calls) == 3, "and no fourth"
     record = _record(captured)
-    assert len(record["servicings"]) == 2, "both emissions serviced"
-    assert record["stop"] == StopReason.BOUND_REACHED.value
+    assert len(record["servicings"]) == 3, "every emission serviced"
+    assert record["stop"] == StopReason.UNPRODUCTIVE.value
+    assert record["attempt_planner_calls"] < record["attempt_allowance"], (
+        "the run test fired before the allowance did"
+    )
     assert outcome.turn is not None
-    assert outcome.turn.plan.steps[0].id == "step-2", "the second plan is the one driven"
+    assert outcome.turn.plan.steps[0].id == "step-3", "the last plan is the one driven"
 
     [call] = model.calls
     system = next(one.content for one in call.messages if one.role is Role.SYSTEM)
@@ -360,14 +370,14 @@ async def test_the_superseded_plan_drives_nothing() -> None:
 
     outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert len(planner.calls) == 2
+    assert len(planner.calls) == 3
     executions = await harness.plans.active_executions()
-    assert len(executions) <= 1, "one execution at most, and never the superseded plan's"
-    first, revision = _plans_of(harness)
+    assert len(executions) <= 1, "one execution at most, and never a superseded plan's"
+    *superseded, last = _plans_of(harness)
     for execution in await harness.plans.active_executions():
-        assert execution.plan_id != first.id
+        assert all(execution.plan_id != plan.id for plan in superseded)
     assert outcome.turn is not None
-    assert outcome.turn.plan.id == revision.id
+    assert outcome.turn.plan.id == last.id
     # Keyed on the step id rather than on the tool, because what §5 forbids is the
     # *superseded plan's own step* reaching anything: both plans here name the same
     # side-effecting capability, and only their step ids tell them apart.
@@ -512,7 +522,7 @@ async def test_a_save_plan_that_raises_mid_sequence_loses_the_turn_and_not_an_ac
     assert await harness.plans.active_executions() == [], "no execution was opened"
     assert harness.invoker.invocations == [], "no step ran"
     assert len(harness.engine._reserved) == 0, "no capacity slot is still spent"
-    assert _record(captured)["stop"] == StopReason.BOUND_REACHED.value, "one record, emitted once"
+    assert _record(captured)["stop"] == StopReason.UNPRODUCTIVE.value, "one record, emitted once"
 
 
 async def test_a_withheld_record_arriving_in_the_first_servicing_sets_the_captured_value() -> None:

@@ -41,7 +41,7 @@ from test_loop_search import (
     _ASK,
     _RESULT,
     _REVISING,
-    ActionPlanFor,
+    SettlesAfter,
     _belief,
     _binder,
     _bounded,
@@ -612,11 +612,14 @@ async def _separated() -> FakeMemoryStore:
 
 
 def _revising_planner() -> Any:
-    """A planner that asks for a search on **both** of the turn's calls (ADR-0228 §2)."""
-    return FakePlanner(
-        now=_clock,
-        read_request=_search_beside_an_empty_structured_read(),
-        revision=ActionPlanFor(read_request=_search()),
+    """A planner that asks for a search on two rounds and then settles (ADR-0251 §4).
+
+    Two rounds is what these cases are about, and under §4 that is the planner's own
+    judgement rather than a bound: (e) is dissolved and the count is the attempt's, so
+    a planner that went on asking would be called until §7's run test refused it.
+    """
+    return SettlesAfter(
+        FakePlanner(now=_clock, read_request=_search_beside_an_empty_structured_read())
     )
 
 

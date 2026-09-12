@@ -8,13 +8,13 @@ was actually handed. §17 is explicit that "no arm is discharged by a unit test 
 helper in isolation", so every member below is driven from a **real source vocabulary
 value** rather than from a constructed ``ReadAskOutcome``.
 
-**The companion ask is not scaffolding, it is the reason these arms are honest.** L1
-changes no behaviour: ADR-0228 §3's bound is still two and §2's conditions still decide
-whether a second call happens at all. A turn whose only ask was refused makes **one**
-planner call, so nothing observes its carrier — which is exactly right, and which means
-an arm about a refusal has to pair it with an ask that satisfies §2(e) on its own. The
-pairing also buys the arm §3 asks for directly: one servicing, several asks, one entry
-each, in servicing order.
+**The companion ask is not scaffolding, it is the reason these arms are honest.** §4's
+conditions decide whether a further call happens at all, and an arm asserting what the
+planner was **handed** needs a further call to hand it to. The pairing also buys the arm
+§3 asks for directly: one servicing, several asks, one entry each, in servicing order.
+It is kept now that L2 has dissolved (e), because what it makes each arm assert is
+unchanged and because the run test (§7) still stops a turn whose every ask admitted
+nothing — two rounds on, rather than one.
 
 The classifier's **totality** — §2's precedence over combinations of the four facts
 rather than over enum membership — is asserted in the last section, over the one
@@ -26,8 +26,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import fields
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -46,9 +45,11 @@ from test_loop_search import (
     _servicer,
 )
 
-from ai_assistant import orchestration
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
+    AttemptEffort,
+    AttemptKind,
     EpisodicMemory,
     MemorySearchResult,
     MemorySource,
@@ -65,7 +66,11 @@ from ai_assistant.core.types import (
     TimeWindow,
 )
 from ai_assistant.orchestration.disclosure import UnboundedAudienceSupply
-from ai_assistant.orchestration.loop import ConversationalOperation
+from ai_assistant.orchestration.loop import (
+    _ALLOWANCES,
+    _PLANNER_CALL_ALLOWANCE,
+    ConversationalOperation,
+)
 from ai_assistant.orchestration.reads import (
     _NON_YIELD_CLASSES,
     _NON_YIELD_VOCABULARIES,
@@ -579,26 +584,26 @@ def test_the_two_spellings_of_one_provider_fact_reach_one_member() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# §16: "No behaviour changes in L1"                                            #
+# §16: what L1 declined to do, now that L2 has done it                         #
 # --------------------------------------------------------------------------- #
 
 
-async def test_the_bound_is_still_two_over_a_turn_whose_every_round_was_productive() -> None:
-    """§16: "the bound is still two", asserted where a raised one would show.
+async def test_the_allowance_is_four_over_a_turn_whose_every_round_was_productive() -> None:
+    """§5's allowance, asserted where L1's pin of ADR-0228 §3's two used to sit.
 
-    A turn whose first servicing minted a record and whose second plan asks for another
-    search satisfies every one of ADR-0228 §2's conditions on its second call as well —
-    and still stops, because §3's count is unchanged until L2 moves it. What the audit
-    records is ``BOUND_REACHED``, which is §3's own stopped-at-the-bound rule.
+    A turn whose every servicing mints a record satisfies every one of §4's conditions
+    on each further call, so it iterates until the **attempt's** planner-call allowance
+    refuses one: four calls, three servicings planned over, and ``BOUND_REACHED`` —
+    which keeps ADR-0228 §3's own stopped-at-the-bound rule and moves only its subject.
     """
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_belief("belief-1", "the bell tower is in Porto"))
     searching = ReadRequest(asks=(ReadAsk(kind=ReadKind.WEB_SEARCH),))
-    planner = FakePlanner(
-        now=_clock,
-        read_request=searching,
-        revision=ActionPlanFor(read_request=searching),
-    )
+    # **No scripted revision**: this fake answers every call after the first with the
+    # same plan under a fresh id, which is what a planner that goes on asking looks
+    # like. A scripted revision names one turn's *second* call and cannot say what its
+    # third or fourth returns (ADR-0228 §3's shape, which §4 widens).
+    planner = FakePlanner(now=_clock, read_request=searching)
 
     with structlog.testing.capture_logs() as captured:
         await _loop(
@@ -609,46 +614,75 @@ async def test_the_bound_is_still_two_over_a_turn_whose_every_round_was_producti
             ),
         ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
 
-    assert len(planner.calls) == 2, "ADR-0228 §3's two, unmoved by L1"
+    assert len(planner.calls) == _PLANNER_CALL_ALLOWANCE, "§5's allowance, and §4(f')"
     assert _record(captured)["stop"] == StopReason.BOUND_REACHED.value
 
 
-def test_no_stop_reason_is_added_and_the_vocabulary_still_holds_five() -> None:
-    """§16: "no progress test runs and no stop reason is added".
+def test_the_stop_vocabulary_holds_seven_and_every_earlier_member_kept_its_value() -> None:
+    """§7: ``StopReason`` "gains two members and closes at seven".
 
-    ADR-0251 §7 mints two further members and §15 records the closure moving from five to
-    seven — **in L2**. A lane that added one here would be shipping half of §7 without
-    the fold that produces it, so the count is pinned as five until that lane lands.
+    This supersedes ADR-0228 §9's closure at five **in that count alone**: "Every
+    existing member keeps its name, its value and its meaning", ``NOT_ITERATED`` stays
+    the default, ``BOUND_REACHED`` keeps its name and its value while its subject
+    becomes the attempt's allowance, and ``BUDGET_REACHED`` stays ADR-0228 §4's per-turn
+    budget. Asserted as the whole list in order, which is what makes a **rename** fail
+    here as loudly as an addition.
     """
     assert [member.value for member in StopReason] == [
         "not_iterated",
         "settled",
         "bound_reached",
         "budget_reached",
+        "working_allowance_reached",
+        "unproductive",
         "planning_failed",
     ]
 
 
-def test_no_allowance_is_declared_and_no_kind_is_stamped_by_this_lane() -> None:
-    """§16: "no allowance is declared, no attempt kind is stamped".
+def test_membership_of_the_allowance_mapping_is_the_declaration() -> None:
+    """§5: the declarations live in one mapping keyed on ``AttemptKind``.
 
-    ADR-0251 §5 puts the declarations in one mapping keyed on ``AttemptKind`` and the
-    stamp at the instant an attempt is opened — both L2's. Asserted as an **absence over
-    the orchestration package**, because that is the only shape a "not yet" claim can
-    take: no module under ``orchestration`` names ``AttemptKind`` at all, so nothing
-    reads a figure off one and nothing writes one onto a ledger.
+    "**Membership is the declaration**", read with a ``None`` default and "never as a
+    branch with a figure at the end of it" — ADR-0228 §2(a)'s rule one level up: "no
+    implementation reads an absent declaration as a default, as
+    unknown-and-therefore-permitted, or as a case to decide at run time from anything
+    other than a declaration".
+
+    So ``CONVERSATIONAL`` declares four planner calls, PT3M of working time and a PT30S
+    reserve — making its investigation gate PT2M30S — and **``SPOKEN``'s absence from
+    the mapping is itself a decision**. The behavioural half is
+    ``test_loop_investigation``'s: an unpriced kind makes exactly one planner call per
+    turn.
     """
-    package = Path(orchestration.__file__).parent
-    naming = sorted(
-        path.name
-        for path in package.rglob("*.py")
-        if "AttemptKind" in path.read_text(encoding="utf-8")
-    )
+    assert set(_ALLOWANCES) == {AttemptKind.CONVERSATIONAL}, "SPOKEN declares none"
+    declared = _ALLOWANCES[AttemptKind.CONVERSATIONAL]
 
-    assert naming == [], (
-        "§5's declaration mapping and its stamping site are L2's; L1 mints the "
-        f"vocabulary and reads it nowhere (found in {naming})"
-    )
+    assert declared.planner_calls == 4
+    assert declared.working == timedelta(minutes=3)
+    assert declared.reserve == timedelta(seconds=30)
+    assert declared.investigation_share == timedelta(minutes=2, seconds=30)
+
+
+def test_no_allowance_figure_is_a_setting_or_crosses_a_seam() -> None:
+    """§5: the figures are not ``Settings`` values, flags or per-request parameters.
+
+    ADR-0228 §3's non-configurability binds entire — "a plan count is a count of model
+    calls, so a configurable one is a configurable per-turn cost with no ceiling anyone
+    reviewed" — and §5 adds that "**what crosses the seam is the kind, never a
+    figure**": no caller and no field of any ``core`` model carries a limit, because "a
+    ``timedelta`` or an ``int`` limit stored beside the consumed figure would be a
+    figure a caller can contradict".
+
+    Asserted where either would show: no ``Settings`` field names one, and
+    ``AttemptEffort`` carries the two consumed figures and the **kind** and nothing
+    else.
+    """
+    assert not [
+        name
+        for name in Settings.model_fields
+        if "planner_call" in name or "investigation" in name or "working_allowance" in name
+    ], "no deployment names a figure ADR-0228 §3 makes non-configurable"
+    assert list(AttemptEffort.model_fields) == ["planner_calls", "working", "kind"]
 
 
 # --------------------------------------------------------------------------- #
@@ -679,15 +713,14 @@ def test_the_carrier_reaches_no_durable_record_and_no_store_member() -> None:
     assert "read_outcome" not in signatures
 
 
-def test_the_audit_record_gained_no_field_for_the_classifier() -> None:
-    """§16: "no behaviour changes in L1", read against ADR-0226 §9's own record.
+def test_the_audit_gained_exactly_the_outcome_sequence_for_the_classifier() -> None:
+    """§7: the record gains the ``ReadOutcomeKind`` of each servicing, and nothing else.
 
-    ADR-0251 §17 arm 24 gives the audit a per-servicing ``ReadOutcomeKind`` sequence —
-    **in L2**, with the attempt's kind, its consumed calls and its declared allowance
-    beside it. This lane records the classifier's four facts in memory, classifies them
-    at the servicing site and hands the result to the planner, and it widens the Tier 2
-    event by nothing at all: a lane that added the sequence here would ship half of arm
-    24 without the figures that make it readable.
+    ADR-0226 §9's record is "**extended again and not replaced**": its per-servicing
+    sequence keeps every field's meaning and gains exactly one — the members, in
+    servicing order, with the asks left behind. The turn-level additions and the
+    no-copy rule are ``test_loop_investigation``'s arms; what is pinned here is that the
+    per-servicing enumeration grew by one field and by one field only.
     """
     assert [field.name for field in fields(ServicedRead)] == [
         "kinds",
@@ -706,6 +739,7 @@ def test_the_audit_record_gained_no_field_for_the_classifier() -> None:
         "truncated_kinds",
         "failed",
         "failed_after_read_returned",
+        "outcomes",
     ]
 
 
