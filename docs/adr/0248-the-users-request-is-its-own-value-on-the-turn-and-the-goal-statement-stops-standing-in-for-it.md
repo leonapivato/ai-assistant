@@ -380,7 +380,7 @@ keeps §6's assertion true of the retrieved supply as well as of the record.
   members gain producers.
 - **Whether the resolution of a parked read should archive the parked question a second
   time at all.** ADR-0225 §1's first case covers it as written, and this decision preserves
-  exactly what the tree does; §11 files the question rather than answering it.
+  exactly what the tree does; §11 files the question as #2265 rather than answering it.
 
 ### 9. What the implementing lane owes, and why it is one lane
 
@@ -430,7 +430,7 @@ five expressions.
   `planner._render_request` receive.** Fired by A1.
 - **Whether `ParkedRead` keeps a whole `Goal`.** Fired by A1's projection decision.
 - **Whether the resolution of a parked read archives the parked question a second time.**
-  Filed as an issue against ADR-0225 §1 and ADR-0244 §8, and fired by the contract review
+  Filed as #2265 against ADR-0225 §1 and ADR-0244 §8, and fired by the contract review
   the owner booked on 2026-09-12 for ADR-0244 §3's conversation-wide park restriction.
   This decision changes neither the behaviour nor the reasoning; it preserves both.
 - **A modality, a source or a derivation on the request.** Fired by nothing here; ADR-0221
