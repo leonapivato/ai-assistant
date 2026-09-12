@@ -1321,12 +1321,27 @@ costs nothing and makes both testable in the shared conformance suite.
 
 > **Normative — within `record_evidence`'s one indivisible step the order is fixed: the
 > refusals, then the append, then the marks, then §13's elision.** A row named by `supersedes`
-> is checked against the history **as it stood before the call**, so a call can never be refused
-> because its own write displaced its operand, and the elision can never drop a row the same call
-> was marking. **The row being written is excluded from that write's elision candidates**, whatever
-> place §12's order gives it: a store that dropped the row it had just been told to persist would
-> return an id from `record_evidence` that resolves in nothing, and the oldest **other** row is
-> dropped instead.
+> is **validated** against the history **as it stood before the call** — is it this goal's, is it
+> `STANDING`, is it the row being written — so a call is never refused because its own write
+> displaced its own operand.
+>
+> **The elision then runs over the marked history by age alone, and a row this call has just
+> marked is an ordinary candidate for it.** The protection is the validation and nothing more:
+> a row that was `STANDING` when the call began and `SUPERSEDED` when the marks landed is, at the
+> moment the bound is applied, simply one of the goal's rows. **The one row the elision never
+> drops is the row being written**, whatever place §12's order gives it, because a store that
+> discarded the row it had just been told to persist would return an id from `record_evidence`
+> that resolves in nothing.
+
+**The two guarantees had to be separated because together they were unsatisfiable, and the case
+is reachable.** A goal may hold `MAX_GOAL_EVIDENCE` standing rows with identical support and one
+shared effective instant — limb 6's strictness is exactly what lets them accumulate without
+retiring each other — and one later answering row covering that support refreshes **all** of
+them. A rule protecting every row the call marks would then leave the write with no eligible
+candidate: retaining all of them breaks the bound, dropping any of them breaks the protection, and
+refusing the write breaks `record_evidence`'s own contract, which refuses only for the three
+reasons §12 lists. Scoping the protection to the appended row leaves exactly one rule the bound
+can always satisfy, and it is the rule with a caller's guarantee behind it.
 
 > **Normative — a `superseded_by` may name a row the bound has dropped, and that is admitted
 > and disclosed rather than denied.** §12's order is `(read_at, id)` and §8 limb 6 orders by the
@@ -1946,6 +1961,12 @@ it anticipates, not a contradiction of it.
 39. **The history's order is total and the bound reads it.** Two rows sharing a `read_at` to the
     microsecond are returned by `evidence_of` in `id` order by both conforming implementations, the
     `E` labels follow that order, and the elision drops the first of them (§12, §13).
+40. **A full history refreshed whole still writes, still marks and still elides.** A goal holding
+    `MAX_GOAL_EVIDENCE` standing rows with identical support and one shared effective instant,
+    written to with a later answering row covering that support and naming all of them in
+    `supersedes`, **succeeds**: every named row is marked `SUPERSEDED` with `superseded_by` set,
+    the new row is kept, the oldest row of the marked history is elided, `EvidenceHistory.elided`
+    advances by one, and the call is refused for none of §12's three reasons (§12, §13).
 
 ### 19. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
