@@ -8110,9 +8110,48 @@ class Engine:
             return
         await self._plans.open_attempt(opened.attempt)
 
-    async def _authorized_attempt(
-        self, state: ExecutionState, decision_id: str
-    ) -> OpenedAttempt | None:
+    async def _attempt_of(self, state: ExecutionState) -> OpenedAttempt | None:
+        """Find the attempt this execution belongs to, at the store's own version (§12).
+
+        **Found through the reference it already carries**, not guessed at: the execution
+        names its plan, the plan names its goal, and exactly one of that goal's attempts
+        holds this execution's id (§5, and §12's write-time closure, which is what makes
+        that reference resolve). Nothing is associated here and no attempt is opened, so
+        §13's deferral of *which user acts open an attempt* is untouched.
+
+        **Read immediately before each commit rather than carried across one.** A
+        resumption writes twice — the authorization boundary and the finishing commit —
+        with a tool call and a composing model call in between, and the version the first
+        write returned is not a thing worth carrying across those: §12 makes the read, the
+        comparison and the write of ``commit_attempt`` one indivisible step, so reading the
+        row the transition is computed against is how a transition is computed at all.
+        Reading again is also what lets the finishing commit record the facts a failed
+        boundary write did not (:meth:`_finished_attempt`).
+
+        Args:
+            state: The execution this resumption is about.
+
+        Returns:
+            The attempt as the store holds it, or ``None`` where none references this
+            execution — a park written by a turn that ended before §11's site, or a store
+            migrated from before this decision. Such a resumption moves nothing, exactly
+            as ADR-0244 §11's park whose goal the store never got is answered on what the
+            park itself carries.
+
+        Raises:
+            PlanningError: As the store raises it.
+        """
+        plan = await self._plans.get_plan(state.plan_id)
+        if plan is None:  # pragma: no cover — the execution and its plan were persisted together
+            return None
+        found = [
+            one
+            for one in await self._plans.attempts_of(plan.goal_id)
+            if state.id in one.execution_ids
+        ]
+        return None if not found else OpenedAttempt(attempt=found[0])
+
+    async def _authorized_attempt(self, state: ExecutionState, decision_id: str) -> None:
         """Move the resumed execution's attempt at the authorization boundary (§12).
 
         **After the first write, every change goes through ``commit_attempt``, in this
@@ -8150,13 +8189,10 @@ class Engine:
         authorisation was answered. A refusal is an answer; a raise before one is
         recorded is not.
 
-        **The attempt is found through the reference it already carries**, not guessed at:
-        the execution names its plan, the plan names its goal, and exactly one of that
-        goal's attempts holds this execution's id (§5, and §12's write-time closure, which
-        is what makes that reference resolve). A resumption whose attempt this store does
-        not hold — a park written by a turn that ended before §11's site, or a store
-        migrated from before this decision — moves nothing, exactly as ADR-0244 §11's park
-        whose goal the store never got is answered on what the park itself carries.
+        **The attempt is looked up here and not carried in** (:meth:`_attempt_of`), and
+        writing it is all this returns: a failure of this write is reported rather than
+        raised (``StepRunner.resume``'s own boundary), so nothing downstream may depend on
+        having received the moved row.
 
         Args:
             state: The execution this resumption is about, as the resolution read it.
@@ -8164,34 +8200,20 @@ class Engine:
                 recorded it — the same identifier
                 :attr:`~ai_assistant.core.types.StepExecution.approval_ref` will name.
 
-        Returns:
-            The attempt as the store now holds it, or ``None`` where none references this
-            execution.
-
         Raises:
-            PlanningError: As the store raises it. It propagates out of the runner
-                **before the step is claimed**, so nothing ran.
+            PlanningError: As the store raises it, into the runner's reporting boundary.
         """
-        plan = await self._plans.get_plan(state.plan_id)
-        if plan is None:  # pragma: no cover — the execution and its plan were persisted together
-            return None
-        found = [
-            one
-            for one in await self._plans.attempts_of(plan.goal_id)
-            if state.id in one.execution_ids
-        ]
-        if not found:
-            # No attempt references this execution: the park outlived a turn that never
-            # reached §11's site, or the store predates this decision. Nothing to move.
-            return None
+        found = await self._attempt_of(state)
+        if found is None:
+            return
         # §5, §6: the user has answered, so the attempt is no longer waiting on them —
         # whichever way they answered — and `EXECUTE` is the phase whose work the
         # resolution is about to do, vacuously where the answer was a refusal. §5's
         # "the authorizations it took" rides the same commit: the decision the
         # *resumption* recorded, which is a different id from the `CONFIRM` the parked
         # turn took and is appended rather than replacing it (§12).
-        return await self._move_attempt(
-            OpenedAttempt(attempt=found[0]),
+        await self._move_attempt(
+            found,
             to_phase=AttemptPhase.EXECUTE,
             to_state=AttemptState.RUNNING,
             add_authorization_id=decision_id,
@@ -8199,11 +8221,11 @@ class Engine:
 
     async def _finished_attempt(
         self,
-        held: OpenedAttempt | None,
         step: StepOutcome,
         composed: ComposedReply | None,
         *,
         since: datetime,
+        allowed_by: str | None,
     ) -> None:
         """Stamp ``VERIFY`` and end the resumed attempt where §5 admits it (§12).
 
@@ -8212,26 +8234,39 @@ class Engine:
         §5's three conjuncts hold (:meth:`_answered`). A refused confirmation is a
         condition that blocked, and **which ``AttemptOutcome`` it earns is A10's** (§13).
 
-        **Only ``VERIFY`` and the terminal fields are left to this commit**, because only
-        they depend on the answer. The phase, the state and the authorization reference
-        became true at the authorization boundary and were committed there, inside the
-        resolution's lock (:meth:`_resumed_attempt`) — so a cancellation between that
-        boundary and this commit loses a ledger interval and nothing else, rather than
-        losing the record of what allowed a step that has already run.
+        **The attempt is read here rather than carried from the boundary**
+        (:meth:`_attempt_of`), and that is what makes a failed boundary write recoverable
+        rather than permanent. A tool call and a composing model call stand between the
+        two commits, so a version carried across them buys nothing §12 does not already
+        give — and where the boundary's write did not land, this one finds the row exactly
+        as the boundary found it, and commits what is true now: ``VERIFY`` from wherever
+        the phase actually stands, the terminal fields, the ledger, and
+        ``add_authorization_id``, which §12 makes free to repeat because "an identifier
+        the tuple already holds is **ignored** rather than duplicated or refused". Nothing
+        is replayed and no failed transition is retried: one commit, of the facts that
+        hold when it runs.
 
         **The ledger counts this pass and not the wait** (§5): ``working`` "excludes every
         interval spent waiting for the user", and the park *is* that wait — so the
         interval measured here starts when this resumption began and never at the park.
+        It is computed from the row this method read, so it accumulates onto whatever the
+        boundary did or did not manage to record.
 
         Args:
-            held: The attempt as :meth:`_resumed_attempt` left it, or ``None``.
             step: The step this resumption drove.
             composed: What the composing stage produced, or ``None``.
             since: When this resumption's own work began.
+            allowed_by: The ruling this resumption recorded, or ``None`` where it reached
+                none at all — ADR-0152 §7's unbindable rebind, after which the
+                confirmation is still a standing question and nothing about the attempt
+                has become true. Nothing is written there.
 
         Raises:
             PlanningError: As the store raises it.
         """
+        if allowed_by is None:
+            return
+        held = await self._attempt_of(step.state)
         if held is None:
             return
         answered = self._answered(composed, step)
@@ -8242,6 +8277,7 @@ class Engine:
             outcome=AttemptOutcome.ANSWERED if answered else None,
             ended_at=self._clock() if answered else None,
             working=self._worked(held, since),
+            add_authorization_id=allowed_by,
         )
 
     def _worked(self, opened: OpenedAttempt | None, since: datetime) -> timedelta | None:
@@ -9882,11 +9918,11 @@ class Engine:
             park, routed = answered
             return await self._compose_and_capture_routed(park, routed)
         # ADR-0249 §12: the attempt leaves waiting inside the resolution, at the moment
-        # the answer is recorded and the step claimed under it, and the resolution hands
-        # back the attempt it moved — carrying `commit_attempt`'s own version forward, so
-        # the next transition is computed against the store's answer and not against a
-        # copy read before another caller could have touched it (:meth:`_resumed_attempt`).
-        parked, step, establishing, held = await self._resolve_park(
+        # the answer is recorded and the step claimed under it, and what comes back here
+        # is the ruling it was recorded under rather than the moved row — the finishing
+        # commit reads the attempt itself, which is what lets it record the facts a
+        # refused boundary write did not (:meth:`_finished_attempt`).
+        parked, step, establishing, allowed_by = await self._resolve_park(
             token,
             approved=approved,
             timeout=timeout,
@@ -9927,7 +9963,7 @@ class Engine:
         composed = await self._compose(parked.turn, step, deliveries={})
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
-        await self._finished_attempt(held, step, composed, since=resumed_from)
+        await self._finished_attempt(step, composed, since=resumed_from, allowed_by=allowed_by)
         return await self._capture_resumption(
             parked, step, composed, recipient_grant=recipient_grant
         )
@@ -10209,7 +10245,7 @@ class Engine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         remember_recipients_until: UtcInstant | None = None,
-    ) -> tuple[_Parked | None, StepOutcome, EstablishingAnswer | None, OpenedAttempt | None]:
+    ) -> tuple[_Parked | None, StepOutcome, EstablishingAnswer | None, str | None]:
         """Record the answer and drive it, or restate an answer already recorded.
 
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
@@ -10256,7 +10292,7 @@ class Engine:
             The parked entry this token named, what became of its step, — on a
             ``resume`` that collected an establishing act and reached a recorded
             answer — the pair that answer's grant is transcribed from (ADR-0235 §2),
-            and the attempt this resolution moved, at the version the store returned.
+            and the ruling this resolution recorded, or ``None`` where it reached none.
             The first is ``None`` beside the restated step where the token named a
             **settled** record, which is what tells :meth:`_resume` to stop: a
             restatement drives no runner, composes nothing and captures nothing.
@@ -10269,7 +10305,7 @@ class Engine:
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
                 raise PlanningError(msg)
-            held: OpenedAttempt | None = None
+            allowed_by: str | None = None
             resumed = state
 
             async def ruled(decision: PermissionDecision) -> None:
@@ -10282,9 +10318,14 @@ class Engine:
                 pending after — never moves an attempt that is still waiting. The
                 parking turn finished with this attempt before the park was published,
                 so this writer has the row to itself.
+
+                The decision's identity is kept **before** the write, so a write the
+                store refuses does not also lose what the step was allowed by: the
+                finishing commit records it instead (:meth:`_finished_attempt`).
                 """
-                nonlocal held
-                held = await self._authorized_attempt(resumed, decision.id)
+                nonlocal allowed_by
+                allowed_by = decision.id
+                await self._authorized_attempt(resumed, decision.id)
 
             disposition = await self._runner.resume(
                 state,
@@ -10322,7 +10363,7 @@ class Engine:
             # one. Advancing it here would stamp `EXECUTE` over a live question, and the
             # approval that then arrives would meet §6's monotonic phase rule and be
             # consumed without executing.
-            return parked, step, disposition.establishing, held
+            return parked, step, disposition.establishing, allowed_by
 
     def _retain(self, handle: str, settled: _Settled) -> None:
         """Record one answered binding under its handle, within §4's bound.
