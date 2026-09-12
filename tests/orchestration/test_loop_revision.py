@@ -54,7 +54,6 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.loop import (
-    _PLANNER_CALL_BOUND,
     _PLANNING_BUDGET,
     _PLANNING_BUDGETS,
     ConversationalOperation,
@@ -87,6 +86,12 @@ if TYPE_CHECKING:
 #: member that declares it rather than restated — so a case that reads as "exactly at
 #: the budget" cannot drift from the figure the loop actually enforces.
 _BUDGET: Final[timedelta] = _PLANNING_BUDGETS[ConversationalOperation.CONVERSE]
+
+#: The 1-based ordinal of a turn's **second** planner call, for the cases that steer
+#: the clock while one is in flight. A literal rather than ADR-0251 §5's allowance:
+#: what these cases mean is "the call after the first", which is a position in the
+#: script and not a figure any ADR fixed.
+_SECOND_CALL: Final = 2
 
 
 # --------------------------------------------------------------------------- #
@@ -380,7 +385,7 @@ async def test_a_planner_call_that_overruns_the_budget_is_not_abandoned() -> Non
 
     def _overruns(ordinal: int) -> None:
         """Push the clock far past the budget **while the second call is in flight**."""
-        if ordinal == _PLANNER_CALL_BOUND:
+        if ordinal == _SECOND_CALL:
             overrun.elapsed = timedelta(minutes=5)
 
     planner = _Script(requests=[_hop("M1"), None], steps=[(), (_step(),)], on_call=_overruns)
