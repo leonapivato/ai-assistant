@@ -321,8 +321,11 @@ async def test_respond_opens_a_user_asserted_goal_at_revision_one() -> None:
     assert result.goal.outcome == "book the flight"
     assert result.goal.outcome_ground is Ground.USER_STATED
 
-    goal = responded.goal
-    assert goal is not None
+    record = responded.goal
+    assert record is not None
+    assert record.opened, "ADR-0249 §3: this turn opened the goal, so save_goal is its route"
+    assert record.revisions == (), "and its revisions ride on the record itself (§12)"
+    goal = record.goal
     assert goal.id == "goal-1"
     assert goal.conversation_id == "c-1"
     assert goal.version == 0
