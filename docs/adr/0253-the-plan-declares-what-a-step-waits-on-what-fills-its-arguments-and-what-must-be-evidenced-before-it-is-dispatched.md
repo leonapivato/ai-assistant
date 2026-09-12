@@ -1,6 +1,6 @@
 # 253. The plan declares what a step waits on, what fills its arguments and what must be evidenced before it is dispatched, and an interpretation settles one proposition over one record
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md),
   in three narrowly stated scopes**, and §13 shows the working for all three.
   **§1's `GoalElement` field enumeration**, as ADR-0252 §1 already widened it — the model gains
