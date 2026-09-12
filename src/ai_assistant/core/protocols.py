@@ -4020,6 +4020,14 @@ class PlanStore(Protocol):
         §1's append-only interpretation and §12's compare-and-swap in one call — every
         later change to a goal goes through :meth:`record_interpretation`.
 
+        **ADR-0249 §2's bound is stated over *the write*, so this one takes it too.** A
+        goal whose sequence would exceed ``MAX_GOAL_INTERPRETATIONS`` is stored with
+        its **oldest** elements dropped and ``interpretation_elided`` advanced by the
+        number dropped; the **current** interpretation is never dropped, and the
+        elision is never silent (ADR-0086 §4). An implementation that applied the bound
+        only through :meth:`record_interpretation` would take at the door what the
+        ceiling forbids and enforce it on nothing.
+
         Raises:
             PlanningError: If the store already holds a goal under this ``id``.
         """
@@ -4058,9 +4066,13 @@ class PlanStore(Protocol):
         that ends before that site writes no attempt row, exactly as it writes no
         goal row and no plan row.
 
+        **The references an attempt arrives with resolve, or it is refused** — see
+        :meth:`commit_attempt`, which states the rule the two writes share.
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, or the store already
-                holds an attempt under this ``id``.
+            PlanningError: If ``goal_id`` names no stored goal, the store already holds
+                an attempt under this ``id``, or a ``plan_ids``/``execution_ids`` entry
+                is not one this attempt's goal holds.
         """
         ...
 
@@ -4096,13 +4108,26 @@ class PlanStore(Protocol):
         **The phase never moves backwards and no transition leaves a terminal state**
         (ADR-0249 §5, §6), and neither effort counter is ever reduced.
 
+        **An appended reference resolves under the attempt's own goal, or the write is
+        refused.** ``plan_ids`` and ``execution_ids`` are ``plan_id`` values referenced
+        by an included record, so ADR-0014 §5's closure — "every ``goal_id``/``plan_id``
+        referenced by an included record resolves within the same export" — reaches
+        them through ADR-0249 §11, and this is that promise **kept at write time rather
+        than repaired at read time**, which is the division ADR-0228 §5 already records
+        for ``supersedes``. Requiring the attempt's *own* goal rather than merely some
+        goal is what keeps the closure true across a deletion: :meth:`delete_goal`
+        cascades a goal's plans, executions and attempts together, so a reference so
+        confined cannot outlive its target. ``add_authorization_id`` carries no such
+        rule, because an authorization id is neither a ``goal_id`` nor a ``plan_id``.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from where the attempt
                 stands — a phase earlier than the one held, or any move out of a
                 terminal state.
-            PlanningError: If the attempt does not exist, or the resulting record is
-                not a shape ADR-0249 §5 admits.
+            PlanningError: If the attempt does not exist, an appended plan or execution
+                is not one this attempt's goal holds, or the resulting record is not a
+                shape ADR-0249 §5 admits.
         """
         ...
 
