@@ -214,12 +214,22 @@ them"*.
 `utterance` required on an `OPEN` park would make every park written before the field
 existed fail to decode, so `get`, `open_park` and `outstanding` would raise on it and a
 question the user was asked would become unanswerable, against ADR-0244 §15's normative
-*"**A park survives a restart and is offered again**"*. Back-filling the column would
-require reconstructing the user's sentence from a rendering, which is precisely what
-ADR-0225 §1 refuses. The fallback is exact for **every** row it can ever fire on rather
-than merely for a while, it fires only on rows a bounded `expires_at` retires, it is stated
-in one place, and it hands A1 no obligation — which is the point of establishing it here
-rather than leaving the case to the lane that changes the goal's meaning.
+*"**A park survives a restart and is offered again**"*.
+
+**Back-filling the column is the real alternative, and the tradeoff is a write against a
+branch.** It would work, and it needs no rendering parsed: §3's own argument establishes
+that a legacy park's `Goal.statement` **is** the user's words, so the upgrade could copy
+that value across and every park would then carry an `utterance`. It is rejected on what it
+costs rather than on whether it could be done. A back-fill **rewrites stored Tier 1 content
+in rows the user is still being asked about**, which turns §9's upgrade from one that
+*"touches definitions and a marker, and no content"* into one that edits the record of what
+the user was asked — and the store's guarantee that a park's content is byte for byte what
+was recorded when the question was asked would then rest on upgrade code being correct and
+uninterrupted, rather than on nothing having written to the row at all. And it buys nothing
+a reader can see: the fallback reads the identical bytes, out of the identical row, with no
+write at all. What it costs instead is one compatibility branch, which §3 makes permanently
+exact rather than merely temporarily correct, which fires only on rows a bounded
+`expires_at` retires, which is stated in one place, and which hands A1 no obligation.
 
 ### 4. Capture, the archive and the exchange rendering take the user's words from the request
 
@@ -566,8 +576,11 @@ The rescue is only free while the two values are equal, and inside A1 they are n
 
 **Thread the request beside the turn everywhere, adding no field.** Rejected in §2: it
 admits a request paired with a turn it did not come from, at three consumers, with nothing
-able to detect it. It also does not avoid the wire bump it appears to avoid, because the
-parked-read path still needs a durable carrier.
+able to detect it. It is worth saying what it does *not* cost, so the argument is not read
+as stronger than it is: threading would genuinely avoid §7's `PROTOCOL_VERSION` move, since
+`ParkedRead` is in-process and its own field emits nothing to a peer. The bump is a real
+price this decision pays, and it is paid for the correctness §2 argues rather than because
+no alternative could avoid it.
 
 **Put the request on `Goal` as a second field.** Rejected in §2: it is false under A1's
 revision model, and it copies Tier 1 content into a store with no reason to hold it.
