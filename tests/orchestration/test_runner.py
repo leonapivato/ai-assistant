@@ -161,7 +161,7 @@ async def an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
         created_at=AT,
     )
     await store.save_goal(goal)
-    plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT)
+    plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await store.save_plan(plan)
     return await store.start_execution(plan.id)
 
@@ -185,7 +185,9 @@ async def a_two_step_execution(store: FakePlanStore) -> ExecutionState:
     )
     await store.save_goal(goal)
     neighbour = PlanStep(id=NEIGHBOUR, intent="send another", capability=CAPABILITY)
-    plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(plan_step(), neighbour), created_at=AT)
+    plan = ActionPlan(
+        id="p-1", goal_id=goal.id, steps=(plan_step(), neighbour), created_at=AT, targets_revision=1
+    )
     await store.save_plan(plan)
     return await store.start_execution(plan.id)
 
@@ -1368,7 +1370,9 @@ async def test_the_answered_action_cannot_drift_from_the_one_confirmed() -> None
 
     with pytest.raises(PlanningError, match="already exists and differs"):
         await harness.plans.save_plan(
-            ActionPlan(id="p-1", goal_id="g-1", steps=(rewritten,), created_at=AT)
+            ActionPlan(
+                id="p-1", goal_id="g-1", steps=(rewritten,), created_at=AT, targets_revision=1
+            )
         )
 
     result = await harness.runner.resume(
@@ -1910,6 +1914,7 @@ async def test_a_state_naming_another_execution_s_plan_does_not_redirect_the_ste
             goal_id="g-1",
             steps=(plan_step(capability="delete_everything"),),
             created_at=AT,
+            targets_revision=1,
         )
     )
     forged = state.model_copy(update={"plan_id": "p-2"})

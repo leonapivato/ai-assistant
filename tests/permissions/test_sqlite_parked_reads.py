@@ -26,13 +26,19 @@ import pytest
 from parked_reads_contract import AT, CONTENT, EXPIRES_AT, LATER, ParkedReadsContract, park
 
 from ai_assistant.core.errors import AssistantError
-from ai_assistant.core.types import ParkedRead, ParkedReadDisposition
+from ai_assistant.core.types import (
+    Ground,
+    MemorySource,
+    ParkedRead,
+    ParkedReadDisposition,
+)
 from ai_assistant.permissions.parked_reads import (
     _CREATE_TABLE,
     _INDEXES,
     _META_SCHEMA,
     _READ_SCHEMA_VERSION,
     _SETTLE_ONLY_V1,
+    _SETTLE_ONLY_V2,
     _WRITE_SCHEMA_VERSION,
     SqliteParkedReads,
     _sort_key,
@@ -92,7 +98,7 @@ def test_an_unlabelled_database_is_stamped_rather_than_migrated(path: Path) -> N
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "2",
+            "3",
         )
 
 
@@ -102,14 +108,14 @@ def test_a_database_labelled_with_a_schema_this_code_cannot_read_is_refused(path
 
     **A version this code can *upgrade* is a different case** and is admitted — see
     :func:`test_a_version_1_database_is_upgraded_and_its_legacy_park_stays_answerable`.
-    What is refused is a version it can neither read nor reach, which after ADR-0248 §9
-    means anything outside ``{1, 2}``.
+    What is refused is a version it can neither read nor reach, which after ADR-0249 §12
+    means anything outside ``{1, 2, 3}``.
     """
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '3')")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '4')")
 
-    with pytest.raises(AssistantError, match="schema_version=3"):
+    with pytest.raises(AssistantError, match="schema_version=4"):
         SqliteParkedReads(path=path)
 
 
@@ -198,32 +204,98 @@ def test_a_file_whose_settle_trigger_is_not_this_stores_is_refused(path: Path) -
 # --- ADR-0248 §9's schema upgrade, 1 → 2 --------------------------------------
 
 
-def _version_1_database(path: Path, *, parks: Sequence[ParkedRead] = ()) -> None:
+def _pre_decision_row(record: ParkedRead, *, source: MemorySource, utterance: bool) -> str:
+    """One park's JSON **as a release before ADR-0249 stored it**.
+
+    Its ``goal`` is a whole :class:`~ai_assistant.core.types.Goal` — an ``id``, a
+    ``statement``, a ``status``, a ``provenance`` and a ``created_at`` — and it carries no
+    ``goal_id`` column at all, because the field did not exist. ``provenance.source`` is
+    the value ADR-0249 §12's grounding rule reads, so it is a parameter here: both
+    branches of that rule have to be driven from **stored** rows.
+
+    ``utterance`` is dropped where ``utterance`` is ``False``, which is what a row written
+    before ADR-0248 holds: absent rather than present-and-null, so a decode that leaned on
+    an explicit ``null`` would pass here while failing on a real file.
+    """
+    legacy = json.loads(record.model_dump_json())
+    del legacy["goal_id"]
+    if not utterance:
+        del legacy["utterance"]
+    brief = legacy["goal"]
+    legacy["goal"] = {
+        "id": brief["goal_id"],
+        "statement": brief["outcome"],
+        "status": brief["status"],
+        "provenance": {
+            "source": source.value,
+            "confidence": 1.0,
+            "last_updated": record.parked_at.isoformat(),
+            "evidence": [],
+            "attestation": None,
+        },
+        "created_at": record.parked_at.isoformat(),
+        "deadline": brief["deadline"],
+    }
+    return json.dumps(legacy)
+
+
+def _version_1_database(
+    path: Path,
+    *,
+    parks: Sequence[ParkedRead] = (),
+    source: MemorySource = MemorySource.USER_ASSERTED,
+) -> None:
     """Build the database this store shipped **before** ADR-0248, and seed it.
 
-    The whole point of §10's upgrade arm is that "a fresh database seeded with legacy JSON
-    cannot stand in for it, because it is the **stored trigger definition** and not the row
-    that the object check refuses" — so this writes version 1's own table, indexes,
-    settlement trigger and marker, and never opens the current store to make them.
-
-    A seeded park is written **without an** ``utterance`` **key at all**, which is what a
-    row written by that release holds: the field did not exist, so it is absent rather than
-    present-and-null, and a decode that leaned on an explicit ``null`` would pass here
-    while failing on a real file.
+    The whole point of ADR-0248 §10's upgrade arm is that "a fresh database seeded with
+    legacy JSON cannot stand in for it, because it is the **stored trigger definition** and
+    not the row that the object check refuses" — so this writes version 1's own table,
+    indexes, settlement trigger and marker, and never opens the current store to make them.
+    ADR-0249 §16 item 16 makes the same demand of this store's next version.
     """
+    _seeded(path, "1", _SETTLE_ONLY_V1, parks=parks, source=source, utterance=False)
+
+
+def _version_2_database(
+    path: Path,
+    *,
+    parks: Sequence[ParkedRead] = (),
+    source: MemorySource = MemorySource.USER_ASSERTED,
+) -> None:
+    """Build the database ADR-0248 §9 left, and seed it (ADR-0249 §16 item 16).
+
+    Version 2's own settlement trigger, byte for byte as that release stored it, and rows
+    whose ``goal`` is a whole ``Goal`` and which carry no ``goal_id``. A park written by
+    that release **does** carry an ``utterance``, which is what distinguishes it from
+    version 1's.
+    """
+    _seeded(path, "2", _SETTLE_ONLY_V2, parks=parks, source=source, utterance=True)
+
+
+def _seeded(  # noqa: PLR0913 — the file, its marker, its trigger and the three facts a seeded row varies
+    path: Path,
+    version: str,
+    trigger: str,
+    *,
+    parks: Sequence[ParkedRead],
+    source: MemorySource,
+    utterance: bool,
+) -> None:
+    """Write one earlier version's objects and rows, without opening the store."""
     with sqlite3.connect(path) as conn:
         conn.execute(_META_SCHEMA)
-        conn.execute(_WRITE_SCHEMA_VERSION, ("1",))
+        conn.execute(_WRITE_SCHEMA_VERSION, (version,))
         conn.execute(_CREATE_TABLE)
         for statement in _INDEXES.values():
             conn.execute(statement)
-        conn.execute(_SETTLE_ONLY_V1)
+        conn.execute(trigger)
         for record in parks:
-            legacy = json.loads(record.model_dump_json())
-            del legacy["utterance"]
             conn.execute(
                 "INSERT INTO parked_reads(parked_at_us, data) VALUES (?, ?)",
-                (_sort_key(record.parked_at), json.dumps(legacy)),
+                (
+                    _sort_key(record.parked_at),
+                    _pre_decision_row(record, source=source, utterance=utterance),
+                ),
             )
 
 
@@ -263,15 +335,17 @@ async def test_a_version_1_database_is_upgraded_and_its_legacy_park_stays_answer
         store.close()
 
     with sqlite3.connect(path) as conn:
-        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("2",)
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("3",)
 
 
-async def test_the_upgrade_rewrites_no_row_and_reads_no_park(path: Path) -> None:
-    """ADR-0248 §9: "the upgrade touches definitions and a marker, and no content".
+async def test_the_upgrade_touches_the_goal_column_and_nothing_else(path: Path) -> None:
+    """ADR-0249 §12: the conversion reaches ``goal`` and ``goal_id``, and no other field.
 
-    The blob is compared byte for byte across the open, which is the assertion that no
-    back-fill, re-derivation, re-validation or re-serialisation happened to it — and the
-    park's own state is unmoved: ``OPEN`` before, ``OPEN`` after, same deadline.
+    ADR-0248 §9's upgrade touched "definitions and a marker, and no content"; this one
+    **does** read park content, "because its alternative is a park that cannot be decoded
+    at all". What it may not do is touch anything else — so every other key is compared
+    byte for byte across the open, the ``plan`` included, which §12 rules "is left byte
+    for byte as it is" and which decodes with ``targets_revision`` ``None``.
     """
     _version_1_database(path, parks=[park(utterance=None)])
     with sqlite3.connect(path) as conn:
@@ -281,8 +355,142 @@ async def test_the_upgrade_rewrites_no_row_and_reads_no_park(path: Path) -> None
 
     with sqlite3.connect(path) as conn:
         (after,) = conn.execute("SELECT data FROM parked_reads").fetchone()
-    assert after == before
-    assert "utterance" not in json.loads(after)
+
+    held, converted = json.loads(before), json.loads(after)
+    assert {key: value for key, value in converted.items() if key not in {"goal", "goal_id"}} == {
+        key: value for key, value in held.items() if key != "goal"
+    }, "the conversion reaches the goal column alone"
+    assert json.dumps(converted["plan"]) == json.dumps(held["plan"]), (
+        "a pre-decision park's stored plan is left byte for byte as it is (§12)"
+    )
+    assert "utterance" not in converted, "a row older than that field is not back-filled"
+    assert converted["goal_id"] == held["goal"]["id"]
+    assert converted["goal"] == {
+        "goal_id": held["goal"]["id"],
+        "outcome": held["goal"]["statement"],
+        "outcome_ground": Ground.USER_STATED.value,
+        "constraints": [],
+        "criteria": [],
+        "conditions": [],
+        "status": held["goal"]["status"],
+        "deadline": held["goal"]["deadline"],
+        "open_questions": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(MemorySource.USER_ASSERTED, Ground.USER_STATED, id="user-asserted"),
+        pytest.param(MemorySource.OBSERVED, Ground.INFERRED, id="observed"),
+        pytest.param(MemorySource.INFERRED, Ground.INFERRED, id="inferred"),
+        pytest.param(MemorySource.EXTERNAL, Ground.INFERRED, id="external"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("seed", "utterance"),
+    [
+        pytest.param(_version_1_database, False, id="from-1"),
+        pytest.param(_version_2_database, True, id="from-2"),
+    ],
+)
+async def test_a_pre_decision_park_upgrades_and_is_answered(
+    path: Path,
+    seed: Callable[..., None],
+    source: MemorySource,
+    expected: Ground,
+    *,
+    utterance: bool,
+) -> None:
+    """ADR-0249 §16 item 16, end to end and from a **stored** row.
+
+    A parked-read database carrying the store's pre-decision table, its indexes, its
+    settlement trigger and its marker, holding an unexpired ``OPEN`` park whose ``goal``
+    column is a pre-decision ``Goal`` and whose ``plan`` carries no ``targets_revision``,
+    is opened, upgraded, read back with a ``GoalBrief`` whose ``outcome`` is the stored
+    ``statement``, whose ``goal_id`` matches the record's new column, and whose
+    ``outcome_ground`` is ``USER_STATED`` where the stored ``provenance.source`` was
+    ``USER_ASSERTED`` and ``INFERRED`` where it was any other member — **both branches
+    driven from stored rows** — answered, and then settled with its ``goal_id`` still on
+    the record and its four content fields cleared.
+
+    "A fresh database seeded with converted JSON cannot stand in for it, on ADR-0248 §10's
+    own ground: it is the **stored** definition and not the row that the object check
+    refuses."
+    """
+    seed(
+        path,
+        parks=[park(utterance="what is that bell tower in Porto" if utterance else None)],
+        source=source,
+    )
+
+    store = SqliteParkedReads(path=path)
+    try:
+        held = await store.get("park-1")
+        assert held is not None
+        assert held.goal is not None
+        assert held.goal.outcome == "what is that bell tower in Porto"
+        assert held.goal.outcome_ground is expected
+        assert held.goal.goal_id == "goal-1"
+        assert held.goal_id == "goal-1", "the new column, filled from the stored goal's id"
+        assert held.goal.constraints == ()
+        assert held.goal.criteria == ()
+        assert held.goal.conditions == ()
+        assert held.goal.open_questions == ()
+        assert held.plan is not None
+        assert held.plan.targets_revision is None, "the stored plan is untouched (§12)"
+        assert held.disposition is ParkedReadDisposition.OPEN
+        assert [one.id for one in await store.outstanding()] == ["park-1"]
+
+        assert await store.settle("park-1", disposition=ParkedReadDisposition.APPROVED, at=LATER), (
+            "the question the user was asked is still answerable"
+        )
+        settled = await store.get("park-1")
+        assert settled is not None
+        assert all(getattr(settled, field) is None for field in CONTENT)
+        assert settled.goal_id == "goal-1", "settlement does not clear the identifier (§11)"
+
+        # A park written *after* the upgrade settles in the same run.
+        after = park(park_id="park-2", conversation_id="conv-2", decision_id="decision-2")
+        assert await store.park(after) is True
+        assert await store.settle("park-2", disposition=ParkedReadDisposition.DENIED, at=LATER)
+        fresh = await store.get("park-2")
+        assert fresh is not None
+        assert all(getattr(fresh, field) is None for field in CONTENT)
+        assert fresh.goal_id == after.goal_id
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("3",)
+
+
+async def test_a_converted_park_carrying_no_utterance_resumes_on_its_goals_outcome(
+    path: Path,
+) -> None:
+    """ADR-0249 §16 item 22, at this store's own seam.
+
+    ADR-0248 §3's fallback reads ``park.goal.outcome`` on a converted park, and §12's
+    conversion sets ``outcome`` from the stored ``statement`` — so the bytes the fallback
+    reads are the bytes the stored ``Goal.statement`` held. Asserted here over a **stored**
+    row, which is where the conversion could lose them; the engine's own reading of the
+    fallback is asserted where that site is.
+    """
+    _version_1_database(path, parks=[park(utterance=None)])
+    with sqlite3.connect(path) as conn:
+        stored_statement = json.loads(conn.execute("SELECT data FROM parked_reads").fetchone()[0])[
+            "goal"
+        ]["statement"]
+
+    store = SqliteParkedReads(path=path)
+    try:
+        held = await store.get("park-1")
+        assert held is not None
+        assert held.utterance is None, "a park older than the field, decoded rather than repaired"
+        assert held.goal is not None
+        assert held.goal.outcome == stored_statement
+    finally:
+        store.close()
 
 
 def test_a_version_1_database_whose_trigger_is_neither_definition_is_still_refused(
@@ -316,17 +524,18 @@ def test_a_version_1_database_whose_trigger_is_neither_definition_is_still_refus
 def test_a_current_database_is_opened_twice_without_a_second_upgrade(path: Path) -> None:
     """The idempotence half: an upgrade that ran once does not run again.
 
-    Version 2's trigger is not version 1's, so :meth:`_upgrade_settle_trigger` is not even
-    reached — the marker already reads 2. Asserted because an upgrade keyed on the trigger
-    alone rather than on the marker would drop and recreate on every open, which is a write
-    to a file this decision promises to leave alone.
+    The current trigger is neither version 1's nor version 2's, so
+    :meth:`_upgrade_settle_trigger` is not even reached — the marker already reads 3.
+    Asserted because an upgrade keyed on the trigger alone rather than on the marker would
+    drop and recreate on every open, which is a write to a file this decision promises to
+    leave alone.
     """
     SqliteParkedReads(path=path).close()
 
     SqliteParkedReads(path=path).close()
 
     with sqlite3.connect(path) as conn:
-        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("2",)
+        assert conn.execute(_READ_SCHEMA_VERSION).fetchone() == ("3",)
 
 
 # --- the three invariants, said to SQLite (ADR-0244 §3) ----------------------

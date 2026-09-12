@@ -101,6 +101,7 @@ class _DependentPlanner:
                     created_at=AT,
                     rationale="the address is not in front of me",
                     read_request=self._request,
+                    targets_revision=1,
                 )
             )
         return PlannerOutput(
@@ -117,6 +118,7 @@ class _DependentPlanner:
                 ),
                 created_at=AT,
                 rationale="the address arrived with the read",
+                targets_revision=1,
             )
         )
 
@@ -163,6 +165,7 @@ class _AlwaysAsking:
                 created_at=AT,
                 rationale=f"call {ordinal}",
                 read_request=_hop("M1"),
+                targets_revision=1,
             )
         )
 

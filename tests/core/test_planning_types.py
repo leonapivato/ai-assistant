@@ -18,15 +18,30 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     MAX_HOP_LABELS,
+    TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    AttemptOutcome,
+    AttemptPhase,
+    AttemptState,
+    BriefElement,
+    EvidenceDigest,
+    EvidenceStanding,
     ExecutionState,
     FrozenDict,
     Goal,
+    GoalAttempt,
+    GoalBrief,
     GoalDeletion,
+    GoalElement,
+    GoalInterpretation,
     GoalStatus,
+    Ground,
     MemorySource,
     PlanExport,
+    PlannerOutput,
     PlanStep,
+    ProposedElement,
+    ProposedUnderstanding,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -45,10 +60,26 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _PROV = Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN)
 
 
-def _goal(**overrides: object) -> Goal:
+def _goal(*, statement: str = "relocate to Lisbon in September", **overrides: object) -> Goal:
+    """A goal opened at revision 1 (ADR-0249 §3).
+
+    ``statement`` is taken as a keyword because it is no longer a field: it names the
+    single interpretation revision's ``outcome``, which the read-only projection
+    :attr:`~ai_assistant.core.types.Goal.statement` then answers with (§1).
+    """
     fields: dict[str, object] = {
         "id": "g1",
-        "statement": "relocate to Lisbon in September",
+        "conversation_id": "c1",
+        "interpretation": (
+            GoalInterpretation(
+                revision=1,
+                outcome=statement,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=statement,
+                recorded_at=_WHEN,
+                raised_by="t-1",
+            ),
+        ),
         "provenance": _PROV,
         "created_at": _WHEN,
     }
@@ -95,8 +126,87 @@ def test_goal_defaults_to_active() -> None:
 
 
 def test_goal_rejects_a_blank_statement() -> None:
-    with pytest.raises(ValidationError, match="must not be empty"):
+    """ADR-0249 §1: the non-blank refusal moves with the value it guards.
+
+    It is ``GoalInterpretation.outcome``'s :data:`NonBlankEncodableText` that refuses a
+    blank objective now — one type earlier than the validator ``Goal`` used to carry —
+    so "the refusal ``planning/sqlite_store.py`` argues for is preserved and is taken
+    one type earlier".
+    """
+    with pytest.raises(ValidationError):
         _goal(statement="   ")
+
+
+def test_a_goal_carries_at_least_one_interpretation() -> None:
+    """ADR-0249 §1, §3: "no goal is ever constructed with an empty interpretation"."""
+    with pytest.raises(ValidationError, match="at least one interpretation"):
+        _goal(interpretation=())
+
+
+def test_a_goals_revisions_step_by_exactly_one() -> None:
+    """ADR-0249 §1: oldest first, each one greater than the element before it."""
+    with pytest.raises(ValidationError, match="one greater"):
+        _goal(
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="first",
+                    outcome_ground=Ground.INFERRED,
+                    recorded_at=_WHEN,
+                    raised_by="t-1",
+                ),
+                GoalInterpretation(
+                    revision=3,
+                    outcome="third",
+                    outcome_ground=Ground.INFERRED,
+                    recorded_at=_WHEN,
+                    raised_by="t-3",
+                ),
+            )
+        )
+
+
+def test_the_statement_is_a_projection_and_not_a_stored_field() -> None:
+    """ADR-0249 §1: it has no setter, is not constructible, and is not in the dump.
+
+    And the goal **round-trips through construction from its own dump**, which is what
+    the projection being a property rather than a computed field buys: "a computed field
+    that serialised but could not be constructed from would break that round trip under
+    ``extra="forbid"``".
+    """
+    goal = _goal()
+
+    assert goal.statement == "relocate to Lisbon in September"
+    assert "statement" not in goal.model_dump()
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Goal.model_validate({**goal.model_dump(), "statement": "a second authority"})
+    assert Goal.model_validate(goal.model_dump()) == goal
+
+
+def test_the_statement_follows_the_current_revision() -> None:
+    """§1: the **last** element is the goal's current interpretation."""
+    goal = _goal(
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="the first reading",
+                outcome_ground=Ground.INFERRED,
+                recorded_at=_WHEN,
+                raised_by="t-1",
+            ),
+            GoalInterpretation(
+                revision=2,
+                outcome="the current reading",
+                outcome_ground=Ground.INFERRED,
+                recorded_at=_WHEN,
+                raised_by="t-2",
+            ),
+        )
+    )
+
+    assert goal.statement == "the current reading"
+    assert goal.revision == 2, "the revision a plan targets, and not the write version"
+    assert goal.version == 0, "which is a different value and is never read for it (§1)"
 
 
 def test_goal_refuses_naive_timestamps() -> None:
@@ -1502,3 +1612,288 @@ def test_every_other_kind_refuses_a_structure(kind: ReadKind, extra: dict[str, o
     """
     with pytest.raises(ValidationError, match="must not carry a structure"):
         ReadAsk(kind=kind, structure=StructuredAsk(window=_window()), **extra)  # type: ignore[arg-type]
+
+
+# --- ADR-0249 §9, §10: the two projections that cross the planning seam --------
+
+
+def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -> None:
+    """ADR-0249 §16 item 4(a), structural and over the projections alone.
+
+    "``GoalBrief`` and ``EvidenceDigest`` carry **no field in which a ground reference
+    could sit** — no ``evidence_id``, no record id, no evidence row id, no span —
+    asserted over the two types' declared field sets." That is the whole of the
+    structural claim, and it is deliberately **not** a claim about a prompt: the
+    ``utterance`` and the ``memories`` are also inputs to this seam, so a double that
+    rendered every input would print values ADR-0226 §3 already governs.
+
+    ``goal_id`` is the one identifier and is not a record identifier in ADR-0228 §8's
+    sense (§9): it names the *subject* of the call rather than a record in the labelled
+    supply, and it is rendered nowhere.
+    """
+    forbidden = {"evidence_id", "span", "record_id", "memory_id", "evidence_row_id", "address"}
+
+    assert set(GoalBrief.model_fields) & forbidden == set()
+    assert set(BriefElement.model_fields) == {"text", "ground"}
+    assert set(EvidenceDigest.model_fields) & forbidden == set()
+    assert set(EvidenceDigest.model_fields) == {
+        "requested",
+        "supported",
+        "read_at",
+        "as_of",
+        "verdict",
+        "standing",
+    }
+    assert set(GoalBrief.model_fields) == {
+        "goal_id",
+        "outcome",
+        "outcome_ground",
+        "constraints",
+        "criteria",
+        "conditions",
+        "status",
+        "deadline",
+        "open_questions",
+    }
+
+
+def test_an_element_free_brief_is_well_formed() -> None:
+    """ADR-0249 §16 item 13: a goal at revision 1 projects a brief with no elements.
+
+    "That is a well-formed brief rather than a degraded one. No implementation treats
+    an element-free brief as an error, a failure to understand, or a reason to ask a
+    question" (§9).
+    """
+    brief = GoalBrief.of(_goal())
+
+    assert (brief.constraints, brief.criteria, brief.conditions) == ((), (), ())
+    assert brief.open_questions == (), "ADR-0249's own lanes build no question"
+    assert brief.outcome == "relocate to Lisbon in September"
+    assert brief.outcome_ground is Ground.USER_STATED
+
+
+def test_a_stated_goal_and_an_inferred_one_never_project_alike() -> None:
+    """ADR-0249 §16 item 25's first half, on a goal carrying no elements at all.
+
+    ADR-0014 §1 requires that "a goal the system **inferred** must never be
+    indistinguishable from one the user **stated**", and §3 is why the *outcome's* own
+    ground carries it: "a goal may carry no elements at all — every goal does at
+    revision 1 — so a distinction carried only by element grounds would be no
+    distinction on exactly the goals where it matters most".
+    """
+    stated = GoalBrief.of(_goal())
+    inferred = GoalBrief.of(
+        _goal(
+            interpretation=(
+                GoalInterpretation(
+                    revision=1,
+                    outcome="relocate to Lisbon in September",
+                    outcome_ground=Ground.INFERRED,
+                    recorded_at=_WHEN,
+                    raised_by="t-1",
+                ),
+            )
+        )
+    )
+
+    assert stated.outcome == inferred.outcome
+    assert stated != inferred, "the same words, and never the same brief"
+
+
+def test_a_brief_is_projected_from_the_current_revision_alone() -> None:
+    """§9: never from an elided revision, a superseded one, or a union of several."""
+    goal = _goal(
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="the superseded reading",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="the superseded reading",
+                recorded_at=_WHEN,
+                raised_by="t-1",
+                constraints=(GoalElement(text="under a hundred", ground=Ground.INFERRED),),
+            ),
+            GoalInterpretation(
+                revision=2,
+                outcome="the current reading",
+                outcome_ground=Ground.INFERRED,
+                recorded_at=_WHEN,
+                raised_by="t-2",
+                criteria=(GoalElement(text="a booking exists", ground=Ground.INFERRED),),
+            ),
+        )
+    )
+
+    brief = GoalBrief.of(goal)
+
+    assert brief.outcome == "the current reading"
+    assert brief.outcome_ground is Ground.INFERRED
+    assert brief.constraints == (), "the superseded revision's element is not projected"
+    assert [one.text for one in brief.criteria] == ["a booking exists"]
+
+
+# --- ADR-0249 §1, §7: the ground and the argument travel together -------------
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param({"ground": Ground.FROM_EVIDENCE}, id="from-evidence-bare"),
+        pytest.param({"ground": Ground.FROM_EVIDENCE, "span": "a span"}, id="from-evidence-span"),
+        pytest.param({"ground": Ground.USER_STATED}, id="user-stated-bare"),
+        pytest.param({"ground": Ground.USER_STATED, "evidence_id": "m1"}, id="user-stated-id"),
+        pytest.param({"ground": Ground.INFERRED, "evidence_id": "m1"}, id="inferred-id"),
+        pytest.param({"ground": Ground.INFERRED, "span": "a span"}, id="inferred-span"),
+    ],
+)
+def test_a_goal_element_admits_exactly_three_shapes(shape: dict[str, object]) -> None:
+    """ADR-0249 §1: "a model validator refuses every shape but three".
+
+    "The type is what expresses the correspondence rather than a rule to remember,
+    which is the move ADR-0244 §2 makes for ``ParkedRead``'s content fields."
+    """
+    with pytest.raises(ValidationError, match="ADR-0249 §1"):
+        GoalElement(text="under a hundred", **shape)  # type: ignore[arg-type]
+
+
+def test_the_three_shapes_a_goal_element_admits_construct() -> None:
+    assert GoalElement(text="a", ground=Ground.FROM_EVIDENCE, evidence_id="m1").evidence_id == "m1"
+    assert GoalElement(text="a", ground=Ground.USER_STATED, span="a").span == "a"
+    assert GoalElement(text="a", ground=Ground.INFERRED).evidence_id is None
+
+
+def test_an_interpretation_admits_one_further_shape_than_an_element() -> None:
+    """§1: ``USER_STATED`` with neither argument, whose one origin is §12's migration.
+
+    A ``GoalElement`` does not admit it, and the difference is the whole of what §1's
+    "but for one further admitted shape" says: a migration converts a row that holds no
+    span of the request its statement came from, and §7's retention then carries that
+    absence forward.
+    """
+    migrated = GoalInterpretation(
+        revision=1,
+        outcome="relocate to Lisbon",
+        outcome_ground=Ground.USER_STATED,
+        recorded_at=_WHEN,
+    )
+    assert migrated.outcome_span is None
+    assert migrated.raised_by is None, "and a migrated revision names no turn (§3)"
+
+    with pytest.raises(ValidationError, match="ADR-0249 §1"):
+        GoalElement(text="relocate to Lisbon", ground=Ground.USER_STATED)
+
+
+def test_a_proposed_understanding_states_an_outcome_or_retains_one() -> None:
+    """ADR-0249 §7: exactly two shapes, so omitting the objective is unconstructible."""
+    retained = ProposedUnderstanding(retains_outcome=True)
+    assert retained.outcome is None
+
+    restated = ProposedUnderstanding(
+        outcome="the new reading", outcome_ground=Ground.USER_STATED, outcome_span="the new"
+    )
+    assert restated.retains_outcome is False
+
+    with pytest.raises(ValidationError, match="ADR-0249 §7"):
+        ProposedUnderstanding()
+    with pytest.raises(ValidationError, match="ADR-0249 §7"):
+        ProposedUnderstanding(retains_outcome=True, outcome="both at once")
+    with pytest.raises(ValidationError, match="ADR-0249 §7"):
+        ProposedUnderstanding(outcome="no ground")
+
+
+def test_a_proposed_element_is_new_or_retaining_and_never_both() -> None:
+    """§7: "a retaining element carries ``retains`` **and nothing else**"."""
+    assert ProposedElement(retains="C1").retains == "C1"
+    assert ProposedElement(text="a", ground=Ground.INFERRED).ground is Ground.INFERRED
+
+    with pytest.raises(ValidationError, match="ADR-0249 §7"):
+        ProposedElement(retains="C1", text="and a restatement")
+    with pytest.raises(ValidationError, match="ADR-0249 §7"):
+        ProposedElement(text="no ground")
+    with pytest.raises(ValidationError, match="ADR-0249 §1"):
+        ProposedElement(text="a", ground=Ground.FROM_EVIDENCE, span="not a label")
+
+
+def test_a_planner_output_proposes_nothing_by_default() -> None:
+    """§7: ``None`` is "the semantically correct answer for a planner that knows
+    nothing of this envelope", and is never read as an error."""
+    output = PlannerOutput(plan=ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN))
+
+    assert output.understanding is None
+    assert set(PlannerOutput.model_fields) == {"plan", "understanding"}
+
+
+# --- ADR-0249 §5, §6: the attempt ---------------------------------------------
+
+
+def test_an_attempt_carries_its_result_exactly_on_a_terminal_state() -> None:
+    """§5: "a model validator refuses every ``GoalAttempt`` but two shapes"."""
+    live = GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN)
+    assert (live.phase, live.state) == (AttemptPhase.UNDERSTAND, AttemptState.RUNNING)
+    assert live.effort.planner_calls == 0
+
+    ended = GoalAttempt(
+        id="a1",
+        goal_id="g1",
+        opened_at=_WHEN,
+        state=AttemptState.ENDED,
+        outcome=AttemptOutcome.ANSWERED,
+        ended_at=_WHEN,
+    )
+    assert ended.outcome is AttemptOutcome.ANSWERED
+
+    with pytest.raises(ValidationError, match="ADR-0249 §5"):
+        GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN, state=AttemptState.ENDED)
+    with pytest.raises(ValidationError, match="ADR-0249 §5"):
+        GoalAttempt(
+            id="a1", goal_id="g1", opened_at=_WHEN, outcome=AttemptOutcome.ANSWERED, ended_at=_WHEN
+        )
+
+
+def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> None:
+    """§5, §6: six phases in order, seven states with two terminal, six outcomes."""
+    assert [one.value for one in AttemptPhase] == [
+        "understand",
+        "investigate",
+        "plan",
+        "authorize",
+        "execute",
+        "verify",
+    ]
+    assert len(AttemptState) == 7
+    assert {AttemptState.CANCELLED, AttemptState.ENDED} == TERMINAL_ATTEMPT_STATES
+    assert len(AttemptOutcome) == 6
+    assert len(Ground) == 3
+    assert len(EvidenceStanding) == 3
+
+
+def test_an_attempt_carries_no_interpretation_and_no_element() -> None:
+    """§5: "the objective and its disposition are the goal's"."""
+    forbidden = {"outcome_ground", "interpretation", "constraints", "criteria", "conditions"}
+    assert set(GoalAttempt.model_fields) & forbidden == set()
+
+
+def test_the_export_closure_reaches_an_attempt() -> None:
+    """ADR-0249 §11, §16 item 11: a dangling attempt reference does not validate."""
+    goal = _goal()
+    attempt = GoalAttempt(id="a1", goal_id="gone", opened_at=_WHEN)
+    with pytest.raises(ValidationError, match="attempts whose goal is missing"):
+        PlanExport(exported_at=_WHEN, goals=(goal,), attempts=(attempt,))
+
+    with pytest.raises(ValidationError, match="attempts whose plan is missing"):
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            attempts=(GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN, plan_ids=("gone",)),),
+        )
+
+    assert (
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            attempts=(GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN),),
+        )
+        .attempts[0]
+        .id
+        == "a1"
+    )

@@ -88,7 +88,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, MutableMapping, Sequence
+    from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryStore, Planner
@@ -101,6 +101,25 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.loop import RespondedTurn
     from ai_assistant.testing.cancellation import LoopSuspension
+
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
+
 
 _NOW: Final = datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
 
@@ -487,7 +506,7 @@ def _loop(  # noqa: PLR0913 — the store, the planner, the two budgets, the reg
         # timing-sensitive: the loop reads this clock at entry and once immediately
         # before each additional planner call, and nowhere else.
         now=now,
-        id_factory=lambda: "goal-1",
+        id_factory=_goal_ids("goal"),
     )
 
 

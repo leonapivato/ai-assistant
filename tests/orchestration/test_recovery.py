@@ -179,6 +179,7 @@ async def an_execution(
             PlanStep(id=step_id, intent="send the note", capability=capability) for step_id in steps
         ),
         created_at=AT,
+        targets_revision=1,
     )
     await plans.save_plan(plan)
     return await plans.start_execution(plan.id)

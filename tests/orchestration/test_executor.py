@@ -238,6 +238,7 @@ async def a_claimed_execution(
         goal_id=goal.id,
         steps=(PlanStep(id=STEP, intent="send the note", capability=capability),),
         created_at=AT,
+        targets_revision=1,
     )
     await store.save_plan(plan)
     return await store.start_execution(plan.id)

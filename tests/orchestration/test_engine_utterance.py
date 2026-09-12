@@ -180,11 +180,16 @@ async def test_a_park_written_without_an_utterance_falls_back_to_its_goal_statem
     """§3's one fallback, at the only site in the system that may take it.
 
     A park predating ADR-0248 decodes with ``utterance`` ``None`` and stays answerable
-    (ADR-0244 §15). Its resolution then renders the parked ``Goal.statement``, which §3
+    (ADR-0244 §15). Its resolution then renders the parked goal's outcome, which §3
     proves **is** the user's own words for every such row: it was minted by ``_goal_from``
     from the user's stripped utterance, and a park written after this decision always
-    carries its own request, so the fallback can never reach a statement minted under
+    carries its own request, so the fallback can never reach an outcome minted under
     any other meaning.
+
+    **The accessor moved and the bytes did not** (ADR-0249 §12): a converted park carries
+    a ``GoalBrief``, which has no ``statement``, so the fallback reads
+    ``park.goal.outcome`` — "the value is the **same bytes**", and §3's "that reading is
+    exact for the whole life of the fallback" stays true.
 
     Reached by writing the park back without the field — which is the shape the store
     holds for a row written by an earlier release — rather than by editing the engine.
@@ -203,7 +208,7 @@ async def test_a_park_written_without_an_utterance_falls_back_to_its_goal_statem
 
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
     assert outcome.turn is not None
-    assert outcome.turn.utterance == _ASKED, "the parked Goal.statement, which is those words"
+    assert outcome.turn.utterance == _ASKED, "the parked goal's outcome, which is those words"
     assert (await _entries(wired.archive))[-1].asked == _ASKED
 
 
@@ -366,10 +371,11 @@ async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> N
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
     park = await _parked(wired)
+    assert park.goal is not None
     diverged = park.model_copy(
         update={
             "utterance": _SAID,
-            "goal": park.goal.model_copy(update={"statement": _INTERPRETED}),
+            "goal": park.goal.model_copy(update={"outcome": _INTERPRETED}),
         }
     )
     wired.parks._records[:] = [diverged]  # the row A1 produces: a park whose goal is a reading
@@ -379,7 +385,7 @@ async def test_a_park_carrying_its_own_request_is_never_read_off_its_goal() -> N
     )
 
     assert outcome.turn is not None
-    assert outcome.turn.goal.statement == _INTERPRETED, "the parked goal really did diverge"
+    assert outcome.turn.goal.outcome == _INTERPRETED, "the parked goal really did diverge"
     assert outcome.turn.utterance == _SAID, "the park's own request, not its goal statement"
     assert (await _entries(wired.archive))[-1].asked == _SAID
     assert _INTERPRETED not in (await _episodes(wired.memory))[-1].content

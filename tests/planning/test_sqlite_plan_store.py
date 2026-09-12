@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import sqlite3
@@ -19,13 +20,27 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from plan_store_contract import PlanStoreContract, _claim, _goal, _plan
+from plan_store_contract import (
+    PlanStoreContract,
+    _attempt,
+    _claim,
+    _goal,
+    _plan,
+    _revision,
+)
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import StepStatus, StepTransition
+from ai_assistant.core.errors import PlanningError, StaleExecutionError
+from ai_assistant.core.types import (
+    AttemptTransition,
+    GoalRevision,
+    Ground,
+    MemorySource,
+    StepStatus,
+    StepTransition,
+)
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.planning.sqlite_store import _run_to_completion
+from ai_assistant.planning.sqlite_store import _META_SCHEMA, _run_to_completion
 from ai_assistant.testing.cancellation import (
     ResourceLog,
     SuspendedMidWrite,
@@ -44,6 +59,10 @@ if TYPE_CHECKING:
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
+
+
+#: The instant a pre-ADR-0249 row this suite seeds was written at.
+_AT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _journal_mode(database: Path) -> int | None:
@@ -350,17 +369,20 @@ async def test_a_mutated_invalid_goal_is_refused_and_does_not_poison_reads(
     """An input tampered past its validators is rejected at the write, not on read.
 
     ``Goal`` is frozen (ADR-0068), but the validation-skipping ``__dict__`` bypass
-    survives (ADR-0018 §3), so a caller can still blank a goal's ``statement``
+    survives (ADR-0018 §3), so a caller can still empty a goal's ``interpretation``
     behind pydantic's back — the same bypass ``test_a_mutated_invalid_plan_is_refused``
-    uses. The store revalidates before persisting, so the write raises
-    ``PlanningError`` and nothing durable is written — the store cannot poison its
-    own later reads (round-4 review).
+    uses, and after ADR-0249 §1 the interpretation is where a goal's objective lives.
+    The store revalidates before persisting, so the write raises ``PlanningError``
+    and nothing durable is written — the store cannot poison its own later reads
+    (round-4 review).
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         tampered = _goal(goal_id="g-bad")
-        tampered.__dict__["statement"] = "   "  # blank once stripped — invalid, via the bypass
+        # An empty interpretation is the shape ADR-0249 §1 refuses outright: "no goal
+        # is ever constructed with an empty interpretation".
+        tampered.__dict__["interpretation"] = ()
 
         with pytest.raises(PlanningError):
             await store.save_goal(tampered)
@@ -513,7 +535,7 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="supports only version"):
+    with pytest.raises(PlanningError, match="this code reads version"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
     check = sqlite3.connect(path)
@@ -613,7 +635,18 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
 
     try:
         await recorded("save_goal (insert)", lambda: store.save_goal(_goal()))
-        await recorded("save_goal (update)", lambda: store.save_goal(_goal()))
+        await recorded(
+            "save_goal (refused: the id is already held)",
+            lambda: store.save_goal(_goal()),
+            closes="ROLLBACK",
+        )
+        await recorded("open_attempt", lambda: store.open_attempt(_attempt()))
+        await recorded(
+            "commit_attempt",
+            lambda: store.commit_attempt(
+                AttemptTransition(attempt_id="a1", expected_version=0, add_plan_id="p1")
+            ),
+        )
         await recorded("save_plan (insert)", lambda: store.save_plan(_plan()))
         await recorded("save_plan (idempotent re-save)", lambda: store.save_plan(_plan()))
         await recorded(
@@ -635,6 +668,23 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
                 to_status=StepStatus.SUCCEEDED,
                 expected_version=state.version + 1,
             )
+        )
+        # Taken **after** every claim above, because ADR-0249 §8 refuses a
+        # `→ RUNNING` claim on a plan that does not target the goal's current
+        # revision — recording a revision earlier would make the claim arms
+        # unreachable rather than exercise this one.
+        await recorded(
+            "record_interpretation",
+            lambda: store.record_interpretation(
+                GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
+            ),
+        )
+        await recorded(
+            "record_interpretation (refused: stale version)",
+            lambda: store.record_interpretation(
+                GoalRevision(goal_id="g1", interpretation=_revision(3), expected_version=0)
+            ),
+            closes="ROLLBACK",
         )
         await recorded("delete_goal (present)", lambda: store.delete_goal("g1"))
         await recorded("clear", store.clear)
@@ -680,17 +730,18 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="supports only version"):
+    with pytest.raises(PlanningError, match="this code reads version"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
 async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
-    """An older, unmigrated schema is refused too — v1 is the only supported one.
+    """A version this code has no migration for is refused, older or newer alike.
 
     Accepting ``schema_version = '0'`` and letting ``CREATE TABLE IF NOT EXISTS``
     leave an incompatible table would construct successfully and only fail on the
-    first query. There is no migration, so any version other than the current one
-    is a fault to report at open (ADR-0049 §1).
+    first query, so it is a fault to report at open (ADR-0049 §1). ADR-0249 §12
+    adds exactly **one** upgradable version — 1, this store's original shape — and
+    ``0`` is not it.
     """
     path = tmp_path / "plans.db"
     SqlitePlanStore(path=path, now=_fixed_now).close()
@@ -700,7 +751,7 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="supports only version"):
+    with pytest.raises(PlanningError, match="this code reads version"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
@@ -1968,3 +2019,186 @@ async def test_repeated_cancellation_does_not_consume_the_executor() -> None:
         release.set()
         await asyncio.gather(call, return_exceptions=True)
         executor.shutdown(wait=True)
+
+
+# --- ADR-0249 §12: this store's first migration, 1 → 2 ------------------------
+
+
+def _version_1_database(path: Path, *, source: MemorySource = MemorySource.USER_ASSERTED) -> None:
+    """Build the database this store shipped **before** ADR-0249, and seed it.
+
+    Written out here rather than produced by opening the current store, for ADR-0248
+    §10's reason applied to this store: it is the **stored** shape and not a converted
+    blob that the migration has to be able to read, so a fresh database seeded with
+    already-converted JSON would assert nothing. The ``goals`` row carries a
+    pre-decision :class:`~ai_assistant.core.types.Goal` — an ``id``, a ``statement``, a
+    ``status``, a ``provenance`` and a ``created_at`` — and the ``plans`` row carries no
+    ``targets_revision`` key at all, because the field did not exist.
+
+    ``provenance.source`` is a parameter because ADR-0249 §12's grounding rule reads
+    exactly that value, and both of its branches have to be driven from stored rows.
+    """
+    # A derived band must carry confidence below 1.0 (ADR-0072 §2), so the figure moves
+    # with the source rather than being pinned — what this arm varies is the *source*,
+    # which is the one value ADR-0249 §12's grounding rule reads.
+    goal: dict[str, object] = {
+        "id": "g1",
+        "statement": "relocate to Lisbon",
+        "status": "active",
+        "provenance": {
+            "source": source.value,
+            "confidence": 1.0 if source is MemorySource.USER_ASSERTED else 0.6,
+            "last_updated": _AT.isoformat(),
+            "evidence": [],
+            # An attested band must name what reported it and when (ADR-0073 §4), so the
+            # `EXTERNAL` row carries one. Nothing about it reaches the migration, which
+            # reads `provenance.source` and no other field.
+            "attestation": (
+                {"reported_by": "calendar", "reported_at": _AT.isoformat(), "extent": None}
+                if source is MemorySource.EXTERNAL
+                else None
+            ),
+        },
+        "created_at": _AT.isoformat(),
+        "deadline": None,
+    }
+    plan: dict[str, object] = {
+        "id": "p1",
+        "goal_id": "g1",
+        "steps": [{"id": "s1", "intent": "step 1", "capability": "send_email", "parameters": {}}],
+        "created_at": _AT.isoformat(),
+        "rationale": None,
+        "read_request": None,
+        "supersedes": None,
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(_META_SCHEMA)
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
+        # Version 1's record tables: `attempts` does not exist, because a store of that
+        # shape holds no attempt.
+        conn.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        conn.execute(
+            "CREATE TABLE plans(id TEXT PRIMARY KEY, "
+            "goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE executions(id TEXT PRIMARY KEY, "
+            "plan_id TEXT NOT NULL REFERENCES plans(id), version INTEGER NOT NULL, "
+            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
+        )
+        conn.execute("CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq)")
+        conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
+        conn.execute(
+            "INSERT INTO plans(id, goal_id, data) VALUES ('p1', 'g1', ?)", (json.dumps(plan),)
+        )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(MemorySource.USER_ASSERTED, Ground.USER_STATED, id="user-asserted"),
+        pytest.param(MemorySource.OBSERVED, Ground.INFERRED, id="observed"),
+        pytest.param(MemorySource.INFERRED, Ground.INFERRED, id="inferred"),
+        pytest.param(MemorySource.EXTERNAL, Ground.INFERRED, id="external"),
+    ],
+)
+async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
+    tmp_path: Path, source: MemorySource, expected: Ground
+) -> None:
+    """ADR-0249 §16 item 17, from a **stored** version 1 database.
+
+    Each goal reads back with exactly one interpretation whose ``outcome`` is its stored
+    ``statement``, whose ``outcome_ground`` is derived from the row's own
+    ``provenance.source`` with **no span** in either branch, and whose ``raised_by``,
+    ``conversation_id`` and ``last_engaged_at`` are **absent** — §12's "the migration
+    writes no value this system did not record, and the absences are the whole of how it
+    says so". ``attempts_of`` returns empty; each plan reads back with
+    ``targets_revision`` absent; ``export`` validates at the new ``schema_version``; and
+    ``delete_goal`` still cascades.
+    """
+    path = tmp_path / "plans.db"
+    _version_1_database(path, source=source)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        [revision] = goal.interpretation
+        assert revision.revision == 1
+        assert revision.outcome == "relocate to Lisbon"
+        assert goal.statement == "relocate to Lisbon", "the projection reads the stored bytes"
+        assert revision.outcome_ground is expected
+        assert revision.outcome_span is None, "the migration invents no span (§12)"
+        assert revision.outcome_evidence_id is None
+        assert (revision.constraints, revision.criteria, revision.conditions) == ((), (), ())
+        assert revision.recorded_at == _AT, "recorded_at is the row's own created_at"
+        assert revision.raised_by is None, "a migrated revision 1 carries no raised_by (§3)"
+        assert goal.conversation_id is None
+        assert goal.last_engaged_at is None
+        assert (goal.version, goal.interpretation_elided) == (0, 0)
+
+        assert await store.attempts_of("g1") == ()
+
+        plan = await store.get_plan("p1")
+        assert plan is not None
+        assert plan.targets_revision is None, "each plans row's targets_revision is absent"
+
+        export = await store.export()
+        assert export.schema_version == 8
+        assert [one.id for one in export.goals] == ["g1"]
+        assert export.attempts == ()
+
+        assert (await store.delete_goal("g1")).deleted
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "2",
+        )
+
+
+async def test_a_migrated_plan_is_not_driven(tmp_path: Path) -> None:
+    """ADR-0249 §8, over the rows §12's migration actually leaves behind.
+
+    "A migration that gives every stored plan an absent ``targets_revision`` while nothing
+    enforces the rule would leave an interval in which the existing claim path drives
+    exactly the plans §8 forbids" — so the refusal is driven by **resuming a pending
+    execution after the upgrade**, which is §16 item 26's own construction, rather than by
+    building the row by hand.
+    """
+    path = tmp_path / "plans.db"
+    _version_1_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        state = await store.start_execution("p1")
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(_claim(state))
+    finally:
+        store.close()
+
+
+async def test_the_migration_leaves_the_file_alone_where_a_row_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """A row this migration cannot read fails the open and rolls the whole thing back.
+
+    The transaction is the guarantee: the marker is moved last and inside it, so a file
+    that arrives unreadable is left "unupgraded, still labelled 1, and refusing to open
+    rather than half-migrated" (§12).
+    """
+    path = tmp_path / "plans.db"
+    _version_1_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goals SET data = '{\"id\": \"g1\"}' WHERE id = 'g1'")
+
+    with pytest.raises(PlanningError, match="this migration cannot read"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "1",
+        )

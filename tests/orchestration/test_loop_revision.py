@@ -1023,10 +1023,13 @@ async def test_on_a_turn_that_did_not_revise_nothing_moved() -> None:
 async def test_the_revision_differs_from_what_the_planner_returned_in_one_field() -> None:
     """§13 item 10's first arm, field by field against the planner's own return.
 
-    §5 narrows the prohibition to exactly one field: "``id``, ``goal_id``, ``steps``,
+    §5 narrowed the prohibition to exactly one field: "``id``, ``goal_id``, ``steps``,
     ``rationale`` and ``read_request`` are the planner's, ``supersedes`` is the
-    loop's, and there is no third case". So the plan the turn carries out differs
-    from the plan the planner returned in ``supersedes`` and in nothing else.
+    loop's, and there is no third case". ADR-0249 §8 makes that a **two**-field clause
+    "in the count alone" — ``targets_revision`` joins it under §5's identical
+    discipline — and §1's authored-at-the-seam enumeration is untouched, because it
+    names neither. So the plan the turn carries out differs from the plan the planner
+    returned in those two fields and in nothing else.
     """
     memory = await _seeded()
     planner = _Script(requests=[_hop("M1"), None], steps=[(), (_step(),)])
@@ -1036,8 +1039,9 @@ async def test_the_revision_differs_from_what_the_planner_returned_in_one_field(
     first, revision = responded.plans
     assert revision.supersedes == first.id
     assert first.supersedes is None, "the first plan replaced nothing"
+    assert revision.targets_revision == 1, "the goal's current revision, stamped once"
     for field in ActionPlan.model_fields:
-        if field == "supersedes":
+        if field in {"supersedes", "targets_revision"}:
             continue
         assert getattr(revision, field) == getattr(
             ActionPlan(

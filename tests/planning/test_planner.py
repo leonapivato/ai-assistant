@@ -67,6 +67,7 @@ from ai_assistant.planning.planner import (
     _extract_object,
     _ExtractionError,
     _render_record,
+    _render_request,
 )
 from ai_assistant.testing import FakeModelProvider
 
@@ -4103,3 +4104,60 @@ async def test_the_gate_is_computed_over_the_sequence_passed_on_that_call() -> N
     )
     assert '"participants"' not in opening, "no episode of the first call carried one"
     assert '"participants"' in revision, "the fourth group's episode opens the axis"
+
+
+# --- ADR-0249 §9, §11: what the brief renders, and what it cannot -------------
+
+
+async def test_a_stated_goal_and_an_inferred_one_render_differently() -> None:
+    """ADR-0249 §16 item 25, at the seam, on a goal carrying no elements at all.
+
+    ADR-0014 §1 requires that "a goal the system **inferred** must never be
+    indistinguishable from one the user **stated**", and §11 is why the *outcome's* own
+    ground is what carries it into the prompt: element grounds alone cannot, because a
+    goal at revision 1 has none. The prompts differ in that line and in nothing else.
+    """
+    stated = _render_request(_goal(), _context(), [])
+    inferred = _render_request(
+        GoalBrief.of(
+            _goal_record().model_copy(
+                update={
+                    "interpretation": (
+                        GoalInterpretation(
+                            revision=1,
+                            outcome=_REQUEST,
+                            outcome_ground=Ground.INFERRED,
+                            recorded_at=_WHEN,
+                            raised_by="t-1",
+                        ),
+                    )
+                }
+            )
+        ),
+        _context(),
+        [],
+    )
+
+    assert stated != inferred
+    assert "ground: user_stated" in stated
+    assert "ground: inferred" in inferred
+    assert _REQUEST in stated, "the same objective, both ways"
+    assert _REQUEST in inferred
+
+
+async def test_the_prompt_prints_no_identifier_and_no_goal_level_provenance() -> None:
+    """ADR-0249 §9, §11, and §16 item 4(b) over the production renderer.
+
+    §11 rules that ``_render_request`` prints the outcome's ``Ground`` and "**no
+    goal-level ``provenance`` object**"; §9 rules that it "prints **no identifier** —
+    not ``goal_id``, not an evidence id". Driven with a distinctive ``goal_id``, so a
+    renderer that printed it is caught by the string rather than by inspection.
+    """
+    distinctive = "goal-id-nothing-else-in-this-prompt-says"
+    brief = GoalBrief.of(_goal_record(distinctive))
+
+    prompt = _render_request(brief, _context(), [])
+
+    assert distinctive not in prompt
+    assert "provenance" not in prompt, "the goal-level Provenance object is printed nowhere"
+    assert "ground: user_stated" in prompt, "and per-value grounding goes in its place"

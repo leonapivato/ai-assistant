@@ -184,6 +184,25 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
 
+
+def _goal_ids(prefix: str) -> Callable[[], str]:
+    """Distinct identifiers, ``<prefix>-1`` first (ADR-0249 §12).
+
+    ``save_goal`` is the opening write alone since ADR-0249 §12, so a loop wired with a
+    *constant* factory would refuse its second turn: a goal per turn needs an id per
+    turn, which is what production's ``uuid4`` already gives it. The first value is
+    unchanged, so a single-turn case reads exactly what it read before.
+    """
+    count = 0
+
+    def factory() -> str:
+        nonlocal count
+        count += 1
+        return f"{prefix}-{count}"
+
+    return factory
+
+
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
 
@@ -819,7 +838,7 @@ class Harness:
             planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
             feedback=self.feedback,  # type: ignore[arg-type]
             now=lambda: AT,
-            id_factory=loop_id_factory if loop_id_factory is not None else lambda: "g-1",
+            id_factory=loop_id_factory if loop_id_factory is not None else _goal_ids("g"),
             # The same object the runner below resolves against (ADR-0211 §3):
             # a loop told one vocabulary while selection resolved against another
             # could plan a step the selecting registry never advertised.
@@ -3449,11 +3468,14 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
 
     # A third action is refused — backpressure — and nothing new is parked, and no
     # durable goal/plan is written for the refused turn (round 8: admission precedes
-    # persistence). The refused turn's goal would have been "g-3".
+    # persistence). Counted rather than named: ADR-0249 §12 makes `save_goal` the
+    # opening write alone, so the store holds exactly one goal per **admitted** turn
+    # and a third row would be the refused turn's.
+    before = len((await harness.plans.export()).goals)
     with pytest.raises(RuntimeError, match="awaiting an answer"):
         await engine.converse("send it", timeout=PATIENT)
     assert len(engine._parked) == 2
-    assert await harness.plans.get_goal("g-3") is None
+    assert len((await harness.plans.export()).goals) == before == 2
     assert await harness.plans.get_plan("g-3-plan") is None
 
     # Both outstanding confirmations are still answerable — nothing was stranded.
