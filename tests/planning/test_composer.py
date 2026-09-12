@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from query_composer_contract import (
     UTTERANCE,
     GatedComposition,
@@ -596,6 +598,67 @@ async def test_prose_carrying_no_object_at_all_is_still_one_call_and_malformed()
 
     assert outcome.refusal is QueryRefusal.MALFORMED
     assert model.call_count == 1
+
+
+async def test_a_recursion_error_from_the_decoder_is_a_miss_and_not_a_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0071's non-syntax miss, half one: ``RecursionError`` (#405's own case).
+
+    A pathologically nested payload raises ``RecursionError`` out of ``raw_decode``
+    rather than a ``JSONDecodeError``, so a catch narrowed to that class — or to
+    ``ValueError`` alone — would let it out of ``compose``, which ADR-0231 §3 forbids
+    for anything but ``CancelledError``. A scan that *stopped* on it would instead
+    discard the envelope standing behind it, so both directions are asserted.
+
+    **The exception is injected rather than provoked**, and that is deliberate: on
+    this interpreter ``raw_decode`` decodes 50,000 nested arrays without complaint and
+    needs roughly 200,000 — about 8 MB of C stack — before it raises, which is a
+    depth whose behaviour depends on the thread's stack size and so is exactly the
+    fixture that silently stops exercising the path it was written for.
+    """
+    original = json.JSONDecoder.raw_decode
+
+    def raising(self: json.JSONDecoder, s: str, idx: int = 0) -> tuple[Any, int]:
+        if s.startswith('{"deep"', idx):
+            msg = "stack overflow while decoding a JSON object"
+            raise RecursionError(msg)
+        return original(self, s, idx)
+
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", raising)
+    model = FakeModelProvider('{"deep": 1}\n{"query": "porto"}')
+    alone = FakeModelProvider('{"deep": 1}')
+
+    behind = await _over(model).compose(supply_of(UTTERANCE))
+    only = await _over(alone).compose(supply_of(UTTERANCE))
+
+    assert behind.query == "porto"
+    assert model.call_count == 1
+    assert only.refusal is QueryRefusal.MALFORMED
+    assert alone.call_count == 1
+
+
+async def test_an_over_limit_integer_is_a_miss_and_not_a_raise() -> None:
+    """ADR-0071's non-syntax miss, half two: the digit-limit ``ValueError``.
+
+    An over-limit integer literal raises a plain ``ValueError`` from ``raw_decode``,
+    not a ``JSONDecodeError``. The limit is **pinned** rather than read off the
+    ambient interpreter, which can have it disabled
+    (``sys.get_int_max_str_digits() == 0``) — under which the literal parses happily
+    and this path goes silently unexercised (#406).
+    """
+    with pinned_int_str_digits():
+        oversized = "1" * (sys.get_int_max_str_digits() + 100)
+        model = FakeModelProvider(f'{{"n": {oversized}}}\n{{"query": "porto"}}')
+        alone = FakeModelProvider(f'{{"n": {oversized}}}')
+
+        behind = await _over(model).compose(supply_of(UTTERANCE))
+        only = await _over(alone).compose(supply_of(UTTERANCE))
+
+    assert behind.query == "porto"
+    assert model.call_count == 1
+    assert only.refusal is QueryRefusal.MALFORMED
+    assert alone.call_count == 1
 
 
 # --- the bound (ADR-0231 §3, §5; §18 arm 13b) -------------------------------
