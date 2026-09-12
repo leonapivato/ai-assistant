@@ -8111,7 +8111,7 @@ class Engine:
         await self._plans.open_attempt(opened.attempt)
 
     async def _authorized_attempt(
-        self, state: ExecutionState, decision_id: str | None
+        self, state: ExecutionState, decision_id: str
     ) -> OpenedAttempt | None:
         """Move the resumed execution's attempt at the authorization boundary (§12).
 
@@ -8163,9 +8163,6 @@ class Engine:
             decision_id: The ruling the step is about to be claimed under, as the trail
                 recorded it — the same identifier
                 :attr:`~ai_assistant.core.types.StepExecution.approval_ref` will name.
-                ``None`` on the one resolution that reaches no ruling at all (ADR-0152
-                §7's unbindable rebind), where the phase still moves and there is simply
-                no authorization to name.
 
         Returns:
             The attempt as the store now holds it, or ``None`` where none references this
@@ -10317,16 +10314,14 @@ class Engine:
                     disposition=disposition.disposition,
                 ),
             )
-            if held is None:
-                # The resolution reached **no ruling at all**: ADR-0152 §7 refuses a
-                # rebind whose binding has moved *before* the resolving ruling is
-                # sought, so the boundary above was never crossed. The user answered
-                # all the same and this token is now settled, so the attempt leaves
-                # waiting on §6's own rule — "a phase whose work is vacuous is stamped
-                # and left in the same instant" — naming no authorization, because none
-                # was recorded. This is the resumption's mirror of the post-drive stamp
-                # :meth:`_run_turn` keeps for the same dispositions.
-                held = await self._authorized_attempt(state, None)
+            # **A resolution that reached no ruling moves nothing**, and ``held`` is
+            # ``None`` there. ADR-0152 §7 refuses an unbindable rebind *before* the
+            # resolving ruling is sought, so the step stays durably ``AWAITING_APPROVAL``
+            # and `pending_confirmations` offers the confirmation again once the binding
+            # is back — the answer was not taken, and the attempt is still waiting for
+            # one. Advancing it here would stamp `EXECUTE` over a live question, and the
+            # approval that then arrives would meet §6's monotonic phase rule and be
+            # consumed without executing.
             return parked, step, disposition.establishing, held
 
     def _retain(self, handle: str, settled: _Settled) -> None:

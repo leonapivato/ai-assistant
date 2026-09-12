@@ -901,17 +901,19 @@ async def test_a_replay_racing_a_resolution_does_not_move_the_attempt_twice() ->
     assert len(to_execute) == 1, "and the boundary was crossed once, not twice"
 
 
-async def test_a_resolution_that_reached_no_ruling_still_leaves_the_attempt_waiting_behind() -> (
-    None
-):
-    """§6: the resumption's mirror of the vacuous stamp the first-turn path keeps.
+async def test_a_resolution_that_reached_no_ruling_leaves_the_question_standing() -> None:
+    """§12, §6: no ruling, no move — and the confirmation is still a live question.
 
     ADR-0152 §7 refuses a resumed egress call whose binding has moved **before the
-    resolving ruling is sought**, so no answer is recorded and the authorization boundary
-    is never crossed. The token is settled all the same, so an attempt left at
-    ``AWAITING_AUTHORIZATION`` there would be waiting for an answer that can never arrive
-    and that nothing would repair — the failure the boundary's placement has to avoid on
-    *both* sides, not only on the side where a ruling exists.
+    resolving ruling is sought**, so no answer is recorded and the step stays durably
+    ``AWAITING_APPROVAL``. ``pending_confirmations`` therefore offers it again once the
+    binding is back, and it is answerable — so the attempt is still *waiting for an
+    authorisation*, and an implementation that advanced it there would stamp ``EXECUTE``
+    over a live question and leave §6's monotonic phase rule to refuse the approval when
+    it finally arrived, consuming it without executing.
+
+    Driven to that second answer rather than stopping at the refusal, because the refusal
+    alone cannot tell a correct record from one that has merely not been contradicted yet.
     """
     plans = _Recording()
     harness = Harness(tools=(confirmable(),), plans=plans)
@@ -919,34 +921,46 @@ async def test_a_resolution_that_reached_no_ruling_still_leaves_the_attempt_wait
     assert parked.step is not None
     assert parked.step.confirmation is not None
 
-    class _Unbindable:
-        """Wraps the runner, refusing every resume before any ruling is sought."""
+    class _UnbindableOnce:
+        """Wraps the runner, refusing the first resume before any ruling is sought."""
 
         def __init__(self, inner: Any) -> None:
             self._inner = inner
+            self._refused = False
 
-        async def resume(self, state: Any, step_id: str, **kwargs: Any) -> StepDisposition:
-            del step_id, kwargs
-            return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
+        async def resume(self, state: Any, step_id: str, **kwargs: Any) -> Any:
+            if not self._refused:
+                self._refused = True
+                return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
+            return await self._inner.resume(state, step_id, **kwargs)
 
         def __getattr__(self, name: str) -> Any:
             return getattr(self._inner, name)
 
-    harness.engine._runner = _Unbindable(harness.engine._runner)  # type: ignore[assignment]  # test double
+    harness.engine._runner = _UnbindableOnce(harness.engine._runner)  # type: ignore[assignment]  # test double
 
-    resumed = await harness.engine.resume(
+    refused = await harness.engine.resume(
         parked.step.confirmation.token, approved=True, timeout=PATIENT
     )
 
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.EGRESS_UNBINDABLE
+    assert refused.step is not None
+    assert refused.step.disposition is Disposition.EGRESS_UNBINDABLE
     (stored,) = plans.opened
-    attempt = await harness.plans.get_attempt(stored.id)
-    assert attempt is not None
-    assert attempt.state is AttemptState.RUNNING, "the user answered; the call could not run"
-    assert attempt.phase is AttemptPhase.VERIFY
-    assert attempt.authorization_ids == (), "and no ruling was recorded to name"
-    assert attempt.outcome is None, "nothing succeeded, so nothing is ANSWERED"
+    waiting = await harness.plans.get_attempt(stored.id)
+    assert waiting is not None
+    assert waiting.state is AttemptState.AWAITING_AUTHORIZATION, "no answer was recorded"
+    assert waiting.phase is AttemptPhase.AUTHORIZE, "and the phase did not move"
+
+    (offered,) = await harness.engine.pending_confirmations()
+    answered = await harness.engine.resume(offered.token, approved=True, timeout=PATIENT)
+
+    assert answered.step is not None
+    assert answered.step.disposition is Disposition.EXECUTED, "the approval still works"
+    ended = await harness.plans.get_attempt(stored.id)
+    assert ended is not None
+    assert ended.phase is AttemptPhase.VERIFY, "EXECUTE and VERIFY, in §6's order"
+    assert ended.state is not AttemptState.AWAITING_AUTHORIZATION, "it is no longer waiting"
+    assert len(ended.authorization_ids) == 1, "the one ruling that was ever recorded"
 
 
 async def test_the_park_is_published_only_after_the_attempt_says_it_is_waiting() -> None:
@@ -1029,3 +1043,49 @@ async def test_the_parking_turns_own_work_survives_the_resumption() -> None:
     assert ended is not None
     assert ended.effort.working > asked, "the resumption's interval is added to it"
     assert ended.state is AttemptState.ENDED
+
+
+async def test_a_failed_boundary_write_on_a_resumption_does_not_strand_the_approval() -> None:
+    """§12's bookkeeping may not destroy the act it describes (ADR-0235 §6's posture).
+
+    A confirmation is answerable once (ADR-0044 §2b), and by the time the boundary runs
+    the resolving ruling is already in the trail — so a failure propagating from there
+    would leave the approval spent, the step ``AWAITING_APPROVAL``, a retry refused as
+    already resolved and the binding absent from ``pending_confirmations``: an authorised
+    act with no route back. The observer is reported instead, on that path and no other.
+
+    ``StepRunner.run`` keeps the raise, and the difference is not arbitrary: nothing has
+    been answered there, the step is still ``PENDING``, and the whole turn is retryable,
+    so failing loudly costs a turn rather than an authorisation.
+    """
+
+    class _FailingOnTheBoundary(_Recording):
+        """Refuses exactly the resumption's ``EXECUTE`` write."""
+
+        async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
+            """Raise once, on the transition the boundary makes."""
+            if transition.to_phase is AttemptPhase.EXECUTE:
+                msg = "the plan store is unavailable"
+                raise PlanningError(msg)
+            return await super().commit_attempt(transition)
+
+    plans = _FailingOnTheBoundary()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED, "the approved act still ran"
+    claimed = resumed.step.state.step("step-1")
+    assert claimed is not None
+    assert claimed.status is StepStatus.SUCCEEDED
+    (stored,) = plans.opened
+    attempt = await harness.plans.get_attempt(stored.id)
+    assert attempt is not None
+    assert attempt.phase is AttemptPhase.AUTHORIZE, "the record the store refused is absent"
+    assert attempt.state is AttemptState.AWAITING_AUTHORIZATION, "and is not invented"
