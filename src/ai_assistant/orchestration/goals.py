@@ -361,7 +361,12 @@ def disambiguation_reply(disambiguation: GoalDisambiguation) -> str:
     Returns:
         The reply, which is non-blank because ``candidates`` is non-empty.
     """
-    quoted = [json.dumps(text) for text in disambiguation.candidates]
+    # **`ensure_ascii=False`**: this string is read by a person, not parsed by one. The
+    # quoting is here to put the statement in quotation marks and to escape a quote or a
+    # backslash inside it; escaping every non-ASCII character as well would render a
+    # goal the user stated in their own language as `\uXXXX` sequences, which is §5's
+    # deterministic clarification made unreadable by an encoding default.
+    quoted = [json.dumps(text, ensure_ascii=False) for text in disambiguation.candidates]
     if len(quoted) == 1:
         sentence = (
             f"I am not sure whether this continues something you already asked for: "

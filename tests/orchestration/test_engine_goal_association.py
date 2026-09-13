@@ -21,12 +21,17 @@ from ai_assistant import orchestration
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     AssociationVerdict,
+    AttemptEffort,
+    AttemptKind,
     AttemptPhase,
     AttemptState,
     EngagementDisposition,
     Goal,
     GoalAssociation,
+    GoalAttempt,
+    GoalElement,
     GoalInterpretation,
+    GoalQuestion,
     GoalQuestionDisposition,
     GoalStatus,
     Ground,
@@ -41,6 +46,7 @@ from ai_assistant.core.types import (
     TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.planning.planner import _render_request
 from ai_assistant.testing import (
     FakeConversationStore,
     FakeGoalAssociator,
@@ -591,6 +597,35 @@ async def test_two_labels_ask_rather_than_pick_and_the_undecided_outcome_is_well
     assert [goal.last_engaged_at for goal in fresh.goals] == [AT, AT], "§1: neither engaged"
 
 
+async def test_the_ask_renders_a_goal_stated_in_another_script_as_the_user_wrote_it() -> None:
+    """§5: the clarification is deterministic prose the **user** reads.
+
+    The outcome statements are quoted so that a statement carrying a quotation mark or a
+    backslash is unambiguous — not encoded. A goal the user stated in their own language
+    rendered as escape sequences is §5's question made unreadable by a default, and the
+    ask is *"composed by ``orchestration`` from the typed value"* rather than serialised.
+    """
+    harness = Harness(
+        planner=NoStepPlanner(), associator=_associating(AssociationVerdict.UNDECIDED)
+    )
+    conversation = (await harness.conversations.begin(None)).id
+    await _seed(
+        harness.plans,
+        _goal("goal-one", "日本旅行を予約する", conversation=conversation),
+        engaged_in=conversation,
+    )
+
+    outcome = await harness.engine.converse(
+        "make it Sunday", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert outcome.disambiguation is not None
+    assert outcome.disambiguation.candidates == ("日本旅行を予約する",)
+    assert outcome.reply is not None
+    assert "日本旅行を予約する" in outcome.reply, "the user reads their own words back"
+    assert "\\u" not in outcome.reply, "and never an escape sequence"
+
+
 async def test_the_ask_is_in_candidacy_order_whatever_order_the_labels_named() -> None:
     """§5: "``candidates`` holds exactly those goals' outcome statements, **in candidacy order**".
 
@@ -728,19 +763,63 @@ async def test_the_engagement_says_what_moved_and_a_continuation_says_nothing_mo
 async def test_a_spoken_turn_builds_no_candidacy_and_makes_no_associate_call() -> None:
     """§20 arms 14 and 15: nothing stored reaches a channel of unbounded audience.
 
-    "**No ``associate`` call is made**, no ``GoalCandidacy`` is constructed, the turn
-    opens a goal of its own" — and "no ``GoalEngagement`` carries ``RESUMED``,
-    ``REOPENED`` or ``CONTINUED``". The **same** conversation driven through ``converse``
-    makes the call, which is ADR-0203 §1's bounded-operation clause.
+    Arm 14's state entire: "A conversation holding two candidates — one carrying an
+    ``INFERRED`` outcome, one carrying a ``USER_STATED`` outcome, a stored
+    ``FROM_EVIDENCE`` constraint and an open question — driven through
+    ``converse_spoken``: **no ``associate`` call is made**, no ``GoalCandidacy`` is
+    constructed, the turn opens a goal of its own, and the prompt its planner receives
+    contains **no byte** of either candidate's outcome text, of the stored constraint's
+    text, or of the open question's text. Its brief carries this turn's request, no
+    elements and no ``open_questions``. The arm is asserted over the **production**
+    renderer and over the absence of the call, not over a filter."
+
+    And arm 15's half: "no ``GoalEngagement`` carries ``RESUMED``, ``REOPENED`` or
+    ``CONTINUED``". The **same** conversation driven through ``converse`` makes the call
+    over **both** candidates, which is ADR-0203 §1's bounded-operation clause.
     """
-    harness = Harness(
-        planner=NoStepPlanner(), associator=_associating(AssociationVerdict.CONTINUES)
-    )
+    planner = _Recording()
+    harness = Harness(planner=planner, associator=_associating(AssociationVerdict.CONTINUES))
     conversation = (await harness.conversations.begin(None)).id
     await _seed(
         harness.plans,
-        _goal("goal-campsite", "book a campsite", conversation=conversation),
+        _inferred_goal("goal-walk", "walk the pennine way", conversation=conversation),
         engaged_in=conversation,
+    )
+    campsite = await _seed(
+        harness.plans,
+        _goal_with_constraint(
+            "goal-campsite",
+            "book a campsite",
+            constraint="under fifty pounds a night",
+            conversation=conversation,
+        ),
+        engaged_in=conversation,
+    )
+    await harness.plans.open_attempt(
+        GoalAttempt(
+            id="attempt-campsite",
+            goal_id=campsite.id,
+            opened_at=AT,
+            effort=AttemptEffort(kind=AttemptKind.CONVERSATIONAL),
+        )
+    )
+    written = await harness.plans.record_question(
+        GoalQuestion(
+            id="question-standing",
+            goal_id=campsite.id,
+            attempt_id="attempt-campsite",
+            text="Which of the riverside pitches did you mean?",
+            about="a pitch by the river",
+            asked_at=AT,
+            expires_at=AT + timedelta(hours=72),
+        )
+    )
+    assert written, "the candidate holds an open question"
+    secrets = (
+        "walk the pennine way",
+        "book a campsite",
+        "under fifty pounds a night",
+        "Which of the riverside pitches did you mean?",
     )
 
     spoken = await harness.engine.converse_spoken(
@@ -752,12 +831,69 @@ async def test_a_spoken_turn_builds_no_candidacy_and_makes_no_associate_call() -
     assert spoken.outcome.disambiguation is None
     assert spoken.outcome.goal_engagement is not None
     assert spoken.outcome.goal_engagement.disposition is EngagementDisposition.OPENED
+    brief = planner.briefs[-1]
+    assert (brief.constraints, brief.criteria, brief.conditions) == ((), (), ()), (
+        "arm 14: the brief carries no elements"
+    )
+    assert brief.open_questions == (), "nor any open question"
+    rendered = planner.rendered()
+    for secret in secrets:
+        assert secret not in rendered, f"arm 14: no byte of {secret!r} reaches the prompt"
+    assert "what did I say I would do this week" in rendered, (
+        "and this turn's own request does — so the absences above are the filter working "
+        "rather than an empty render"
+    )
 
     await harness.engine.converse(
         "and a river pitch", timeout=PATIENT, conversation_id=conversation
     )
 
     assert harness.associator.call_count == 1, "ADR-0203 §1: a bounded operation runs over it all"
+    (candidacy,) = harness.associator.calls
+    named = {candidate.outcome for candidate in candidacy.candidates}
+    assert {"walk the pennine way", "book a campsite"} <= named, (
+        "over **both** candidates — the two the spoken turn was told nothing about"
+    )
+
+
+def _inferred_goal(goal_id: str, outcome: str, *, conversation: str) -> Goal:
+    """A goal whose outcome the system inferred rather than took from the user."""
+    goal = _goal(goal_id, outcome, conversation=conversation)
+    (interpretation,) = goal.interpretation
+    return goal.model_copy(
+        update={
+            "interpretation": (
+                interpretation.model_copy(
+                    update={"outcome_ground": Ground.INFERRED, "outcome_span": None}
+                ),
+            )
+        }
+    )
+
+
+def _goal_with_constraint(
+    goal_id: str, outcome: str, *, constraint: str, conversation: str
+) -> Goal:
+    """A goal carrying one stored ``FROM_EVIDENCE`` constraint."""
+    goal = _goal(goal_id, outcome, conversation=conversation)
+    (interpretation,) = goal.interpretation
+    return goal.model_copy(
+        update={
+            "interpretation": (
+                interpretation.model_copy(
+                    update={
+                        "constraints": (
+                            GoalElement(
+                                text=constraint,
+                                ground=Ground.FROM_EVIDENCE,
+                                evidence_id="evidence-nightly-rate",
+                            ),
+                        )
+                    }
+                ),
+            )
+        }
+    )
 
 
 def _spoken_audio() -> SpokenAudio:
@@ -1039,11 +1175,26 @@ class _Recording(_Asking):
     def __init__(self) -> None:
         super().__init__(None)
         self.briefs: list[Any] = []
+        self.fields: list[dict[str, Any]] = []
 
     async def plan(self, goal: Any, **fields: Any) -> Any:
-        """Record the brief, then plan as :class:`_Asking` does."""
+        """Record the brief and what came with it, then plan as :class:`_Asking` does."""
         self.briefs.append(goal)
+        self.fields.append(fields)
         return await super().plan(goal, **fields)
+
+    def rendered(self) -> str:
+        """The last call's prompt, through the **production** renderer (ADR-0249 §9)."""
+        fields = self.fields[-1]
+        return _render_request(
+            self.briefs[-1],
+            fields["context"],
+            fields.get("memories", ()),
+            fields.get("files", ()),
+            fields.get("read_outcomes", ()),
+            utterance=fields["utterance"],
+            evidence=fields.get("evidence", ()),
+        )
 
 
 async def test_a_crash_between_the_settle_and_the_revision_leaves_a_legible_state() -> None:
@@ -1055,13 +1206,22 @@ async def test_a_crash_between_the_settle_and_the_revision_leaves_a_legible_stat
     open, still a candidate, and the next turn associating to it resumes the attempt.
     **No start-up pass, sweep, reconciliation or repair runs.**"
     """
+    goals = iter(f"g-{n}" for n in range(1, 100))
     plans = _FailingRevision(now=lambda: AT)
+    conversations = FakeConversationStore(now=lambda: AT)
     planner = _Asking()
-    harness = Harness(planner=planner, plans=plans)
+    harness = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+    )
     paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
     assert paused.turn is not None
     assert paused.clarification is not None
     goal_id = paused.turn.goal.goal_id
+    conversation = paused.conversation_id
+    assert conversation is not None
     before = await plans.get_goal(goal_id)
     assert before is not None
     plans.fail = True
@@ -1070,6 +1230,7 @@ async def test_a_crash_between_the_settle_and_the_revision_leaves_a_legible_stat
         await harness.engine.converse(
             "the river one",
             timeout=PATIENT,
+            conversation_id=conversation,
             reference=TurnReference(question_id=paused.clarification.question_id),
         )
 
@@ -1083,6 +1244,33 @@ async def test_a_crash_between_the_settle_and_the_revision_leaves_a_legible_stat
     assert goal is not None
     assert goal.interpretation == before.interpretation, "and the interpretation is unchanged"
     assert goal.status is GoalStatus.ACTIVE, "the goal is still open and still a candidate"
+    # --- the restart, which runs no start-up pass and repairs nothing ---
+    plans.fail = False
+    planner.understanding = None
+    restarted = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+        associator=_associating(AssociationVerdict.CONTINUES),
+    )
+    assert await restarted.engine.pending_confirmations() == (), "no start-up pass runs"
+    unrepaired = await plans.get_question(paused.clarification.question_id)
+    assert unrepaired == settled, "nothing re-opened the question or rewrote its row"
+
+    next_turn = await restarted.engine.converse(
+        "carry on then", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert next_turn.goal_engagement is not None
+    assert next_turn.turn is not None
+    assert next_turn.turn.goal.goal_id == goal_id, "§11: the next turn associating to it"
+    (resumed,) = await plans.attempts_of(goal_id)
+    assert resumed.id == attempt.id, "the same attempt, and no new one was opened"
+    assert resumed.state is not AttemptState.AWAITING_CLARIFICATION, (
+        "§11: 'the next turn that associates to it resumes the attempt' — and the user's "
+        "recourse for the lost answer is to say it again"
+    )
 
 
 class _FailingRevision(FakePlanStore):
