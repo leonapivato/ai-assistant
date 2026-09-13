@@ -601,6 +601,13 @@ class Harness:
         self,
         *,
         planner: object | None = None,
+        # ADR-0250 §4's seam, so a case can script what the association decided. The
+        # default is `FRESH` — "the turn opens a new goal" — which is exactly what
+        # every turn did before ADR-0250 §19's M3, so a case that says nothing about
+        # association is unchanged by it. The **fake's** own default is `UNDECIDED`
+        # (§4's decline), which is right for a double and wrong for a harness whose
+        # cases are about something else.
+        associator: FakeGoalAssociator | None = None,
         context: FakeContextProvider | None = None,
         composing: ComposingStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
@@ -932,8 +939,13 @@ class Harness:
             search=search,
             clock=self.clock,
         )
+        self.associator = (
+            FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH))
+            if associator is None
+            else associator
+        )
         self.engine = Engine(
-            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
+            associator=self.associator,
             composing=self.composing,
             grant_operations=_grant_operations(),
             # The harness's **own** trail and policy, so the act this surface performs
