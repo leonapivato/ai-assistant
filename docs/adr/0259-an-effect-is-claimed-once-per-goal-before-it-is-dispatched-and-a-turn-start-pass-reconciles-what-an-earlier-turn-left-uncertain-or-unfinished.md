@@ -19,6 +19,18 @@
   rule and its local-residency, export-completeness and deletion obligations bind entire**, and
   **§§1-3, §6 and §7 are untouched**. §7's deferral of idempotency keys and `INDETERMINATE`
   resolution is **fired rather than replaced**, which earns no record (§13).
+- **Partially supersedes [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md),
+  in the identity §7's and §12's at-most-once obligation is stated over, and in nothing else.**
+  §7 rules that an effect *"[is] performed **at most once across every plan of that goal**"* and
+  §12 states the acceptance requirement over *"a plan whose step would perform **the same
+  effect**"*. §1 lands an identity over the **authorised call** and states that two calls meaning
+  one thing while spelling it differently carry two keys, so a reader holding only §7 reads its
+  obligation more widely than it now holds. **Every other clause of §7 and §12 binds entire** —
+  §7's keeps-everything-it-recorded rule, its extension of ADR-0228 §5's not-driven rule, its
+  sweep and that sweep's stated residual, its one-plan-per-walk rule and its
+  no-licence-to-repeat prohibition; §12's every other entry, both acceptance requirements' other
+  halves, and its firing conditions — and §10 books the canonical effect-input identity that
+  would close the difference.
 - **Partially supersedes [ADR-0037](0037-joining-selection-permission-and-execution.md),
   in steps 4 and 5 of §4's resume sequence alone**, and only where the binding already carries a
   recorded resolution. There `resume` takes neither step — it calls no `ActionPolicy.resolve` and
@@ -301,9 +313,12 @@ under the same binding is the same effect* — and where a user genuinely wants 
 
 ### 2. The effect claim: one indivisible write in the store, taken immediately before the step's claim
 
-> **Normative.** `PlanStore` gains **`claim_effect`**, taking `execution_id`, `step_id` and
-> `effect_key`, an **`EffectKey`** (§1), as keyword-only arguments and returning an
-> **`EffectClaim`**. The store resolves
+> **Normative.** `PlanStore` gains **`claim_effect`**, an **`async`** member — it is I/O-bound
+> like every other member of that Protocol — whose complete signature is
+> **`async def claim_effect(self, *, execution_id: str, step_id: str, effect_key: EffectKey) ->
+> EffectClaim`**, taking `execution_id` and `step_id` with the annotations
+> `PlanStore.commit_transition`'s neighbours already use for them and returning an
+> **`EffectClaim`** and nothing else. The store resolves
 > the goal itself, from the execution's plan's `goal_id`, and **no entry point of
 > `orchestration` gains a `goal_id` argument for it**. It keeps **at most one row per
 > `(goal_id, effect_key)`**, and that row names the `(execution_id, step_id)` currently holding
@@ -437,17 +452,22 @@ user"*. ADR-0029 §5 repeats the pair — *"Both remain resolvable by asking the
 reconciling with the tool, which is the explicit resolution ADR-0014 §4 requires"*. This section
 implements the **first** route and explains why the second is not taken here.
 
-> **Normative — a step is reconcilable exactly where ADR-0029 §5's own repeating-is-safe test
-> holds for it, and that test is reused rather than restated.** That section admits a repeat
-> where *"the tool is not `side_effecting`; or its `idempotency` is `NATURAL`; or it is `KEYED`
-> **and** the elapsed time since the first attempt of this call is strictly less than
-> `idempotency_window`"*. An `INDETERMINATE` step has a side-effecting tool by construction
-> (§1), so **an `INDETERMINATE` step is reconcilable if and only if the `ToolDefinition` recorded
-> for its committed `bound_tool` has `idempotency` `NATURAL`, or has `KEYED` with the elapsed
-> time between the step's `started_at` and the clock's reading strictly less than that
-> definition's `idempotency_window`.** **Every other `INDETERMINATE` step is uncheckable**, and
-> **no `ToolDefinition` field is added to say so** — `Idempotency` and `idempotency_window` are
-> that declaration already.
+> **Normative — a step is reconcilable exactly where the corpus admits a further call under its
+> decision today, which is `NATURAL` and nothing else.** **An `INDETERMINATE` step is
+> reconcilable if and only if the `ToolDefinition` recorded for its committed `bound_tool` has
+> `idempotency` `NATURAL`.** **Every other `INDETERMINATE` step is uncheckable** — the `KEYED`
+> case included, for the reason stated below and booked in §10 — and **no `ToolDefinition` field
+> is added to say so**: `Idempotency` is that declaration already.
+
+> **Normative — the `KEYED`-inside-its-window route is not taken, and no lane takes it on this
+> decision's authority.** `InvocationLedger.claim_invocation` refuses a further spendable claim
+> where **any** claim under that decision carries the outcome `INDETERMINATE` (ADR-0192 §1), and
+> an `INDETERMINATE` step is exactly a step whose ledger claim was completed that way — by the
+> seam on a deadline (ADR-0029 §4) or by the recovery scan (ADR-0192 §3). So a `KEYED`
+> reconciliation call **cannot reach the tool through `ToolInvoker.invoke`**, and **this decision
+> adds no second invocation seam, no reconciliation admission on `InvocationLedger` and no
+> parameter to any existing member**. **No implementation of this decision calls a `KEYED` tool
+> to reconcile a step**, and §10 carries the route with what fires it.
 
 > **Normative — the reconciliation call is the authorised call rebuilt from durable state, and
 > the rebuild is proved rather than trusted.** The `ActionRequest` is rebuilt the way
@@ -464,10 +484,11 @@ implements the **first** route and explains why the second is not taken here.
 > **Normative — it is a reconciliation and not a retry, and the distinction is the tool's own
 > declared guarantee.** ADR-0029 §5's exclusion binds verbatim and is **not relaxed**: an
 > `INDETERMINATE` outcome is never **auto-retried**. What this section performs is the route
-> ADR-0014 §4 names beside that exclusion, and it is available **only** where that decision's own
-> repeating-is-safe test holds — `NATURAL`, or `KEYED` inside the declared window with the same
-> key. **A lane that reads this as licence to re-call an `Idempotency.NONE` tool, or a `KEYED`
-> one past its window, has read the opposite of the rule.**
+> ADR-0014 §4 names beside that exclusion, and it is available **only** on the one declaration
+> under which ADR-0192 §1 spends no authorisation at all — `NATURAL`, whose authorisation that
+> section rules is **not spendable**, so *"no claim under it is ever refused on the ground that it
+> is spent"*. **A lane that reads this as licence to re-call an `Idempotency.NONE` or a `KEYED`
+> tool has read the opposite of the rule.**
 
 > **Normative — what its result writes, and what it does not.** Where the call returns a
 > successful `ToolResult`, the step is committed **`INDETERMINATE → SUCCEEDED`**, setting
@@ -499,26 +520,35 @@ implements the **first** route and explains why the second is not taken here.
 > ADR-0014 §4 names second is **booked, not refused** (§10), to the decision that gives it a
 > surface and states what `output` such a resolution carries.
 
-**The two declarations under which a repeat is provably not a second effect are the whole of the
-test, and they are the corpus's own two rather than this decision's.** `Idempotency.KEYED` is
-documented as *"A guarantee, not the presence of a parameter"*, and it *"additionally fixes the
-scope — the tool, identified by `ToolDefinition.id` — and the lifetime, via
-`ToolDefinition.idempotency_window`"*: inside that window, a call carrying the first call's key
-returns the first call's outcome, and where the first call never reached the tool it performs the
-effect **once**. `Idempotency.NATURAL` is the other, and ADR-0029 §4 states its property in the
-same breath as the classification this section's subject comes from — *"a `NATURAL` tool is
-idempotent by nature (ADR-0016 §4), so whether it acted does not change what a repeat does"*. In
-both cases the two possibilities are indistinguishable to us and **equivalent**, which is exactly
-the property R44 asks for — *"the effect's status established"* — and it is why only one new
-transition is needed rather than two.
+**`NATURAL` is the one declaration under which the corpus both makes a repeat harmless and lets
+the call happen, and the second half is what narrows this section.** ADR-0029 §4 states the first
+in the same breath as the classification this section's subject comes from — *"a `NATURAL` tool is
+idempotent by nature (ADR-0016 §4), so whether it acted does not change what a repeat does"* — so
+the call establishes the effect's status whether or not the first one landed, which is exactly
+what R44 asks for and why only one new transition is needed rather than two. The second half is
+`claim_invocation`'s: *"An **authorisation is spendable** when the decision's `ToolDefinition` is
+`side_effecting` and its `idempotency` is not `NATURAL`"*, and on a non-spendable one *"no claim
+under it is ever refused on the ground that it is spent"*. A `NATURAL` reconciliation therefore
+reaches the callable with no ledger change and no supersession.
 
-**A `NATURAL` step reaches this section only through a crash, and that is why it is in the test
-rather than outside it.** `ToolDefinition.interrupted_outcome` classifies an interrupted
-`NATURAL` call as `FAILED`, so a timeout or a cancellation never produces an `INDETERMINATE`
-`NATURAL` step. What does is the startup recovery scan (§6), which moves any step left `RUNNING`
-by a dead process to `INDETERMINATE` without consulting a declaration. Leaving `NATURAL` out of
-the reconcilable test would therefore strand exactly those steps — uncertain for ever, and blocked
-for ever by §1's key — for the sake of a caution the tool itself declared unnecessary.
+**`KEYED` has the first half and not the second, and that is a fact about ADR-0192 §1 rather than
+about the tool.** Inside its window a `KEYED` call carrying the first call's key returns the first
+call's outcome and performs the effect at most once, which is the better guarantee of the two. But
+`claim_invocation` admits a **further** claim only where *"**no** claim under it carries the
+outcome `SUCCEEDED` or `INDETERMINATE`"* and where *"the last claim … is completed `FAILED`"* —
+and an `INDETERMINATE` step is precisely a step whose ledger claim was completed `INDETERMINATE`.
+That floor was written for a **retry** and it catches a **reconciliation** with it. Lifting it is a
+change to a safety floor and belongs in a decision a reviewer reads as such, not in a limb of this
+one; §10 books it with what fires it, and until then a `KEYED` uncertain effect is uncheckable and
+un-repeatable, which is R45's requirement and not R44's.
+
+**A `NATURAL` step reaches this section only through a crash, and that is why it is in the test at
+all.** `ToolDefinition.interrupted_outcome` classifies an interrupted `NATURAL` call as `FAILED`,
+so a timeout or a cancellation never produces an `INDETERMINATE` `NATURAL` step. What does is the
+startup recovery scan (§6), which moves any step left `RUNNING` by a dead process to
+`INDETERMINATE` without consulting a declaration. Leaving `NATURAL` out would therefore strand
+exactly those steps — uncertain for ever, and blocked for ever by §1's key — for the sake of a
+caution the tool itself declared unnecessary.
 
 **Rebuilding the request rather than storing it is what makes a restart survivable, and the
 rebuild is checked rather than assumed.** `ActionRequest.parameters` is not durable: what a
@@ -793,10 +823,9 @@ and states why the resolution is nonetheless what makes the branch drivable agai
 > and `PlanExecution` refuses each with `PlanningError` as it does today.
 
 **One row rather than two is a consequence of §3's mechanism, not a gap in it.** A reconciliation
-that establishes *"the effect did not happen"* would want `INDETERMINATE → FAILED`. Under the two
-limbs §3 admits, that outcome does not arise: a `NATURAL` call, and a `KEYED` one inside its
-window, that meets no earlier effect **performs** it, so the two cases §3 calls equivalent both
-end at `SUCCEEDED`. The
+that establishes *"the effect did not happen"* would want `INDETERMINATE → FAILED`. Under the one
+route §3 admits, that outcome does not arise: a `NATURAL` call that meets no earlier effect
+**performs** it, so the two cases §3 calls equivalent both end at `SUCCEEDED`. The
 transition that would record a proven non-effect has **no producer**, and adding a row nothing
 writes would be the vocabulary-with-no-producer problem ADR-0249 §5 names. §10 carries it: the
 decision that takes a second reconciliation route is the decision that adds the row.
@@ -852,8 +881,10 @@ this decision now discharges the other half of.
 > **`PlanExport` gains exactly one field**, `effects`.
 
 > **Normative.** `EffectRecord` is a frozen model with `extra="forbid"` whose fields are exactly
-> **`goal_id`**, **`key`** (an `EffectKey`), **`execution_id`**, **`step_id`** and
-> **`claimed_at`**, a `UtcInstant` **read from the store's own injected clock at each write that
+> **`goal_id: Identifier`**, carrying the annotation `ActionPlan.goal_id` uses;
+> **`key: EffectKey`**; **`execution_id: DurableIdentifier`** and **`step_id: DurableIdentifier`**,
+> carrying the annotations `PermissionDecision.execution_id` and `PermissionDecision.step_id` use
+> for the same two values; and **`claimed_at`**, a `UtcInstant` **read from the store's own injected clock at each write that
 > lands** — so a first claim stamps it, a re-point after a `FAILED` or `SKIPPED` holder
 > **restamps** it at the new holder's instant, and every no-write outcome (`COMPLETED`,
 > `UNCERTAIN`, `HELD`, and the same-step `CLAIMED`) **leaves it exactly as it stands**. **No
@@ -926,11 +957,19 @@ property are the whole of it.
   a `SUCCEEDED` step carries an `output` its dependents read under ADR-0253 §2, and a user cannot
   supply one. **Fired by a decision that states what `output` such a resolution carries and where
   the user is asked** — which is the same surface A9 owns.
-- **A second reconciliation route** — a declared reconciliation read on `ToolDefinition`, or an
-  integration that can report an effect's status without performing it. **Not decided**, and §3
-  takes the one route the existing declarations already support. It would also be the producer of
-  the `INDETERMINATE → FAILED` row §7 declines to add. **Fired by a measured case in which a
-  `KEYED` window is too short, or by an integration that offers such a read.**
+- **Reconciling a `KEYED` step inside its `idempotency_window`.** **Not decided**, and §3 states
+  the blocker: `InvocationLedger.claim_invocation` admits a further claim only where *"**no**
+  claim under it carries the outcome `SUCCEEDED` or `INDETERMINATE`"* and the last is completed
+  `FAILED`, which is a floor written for a **retry** that catches a **reconciliation** with it.
+  Closing it needs either a reconciliation admission on that member or a widening of ADR-0192 §1's
+  further-claim enumeration, each a change to a safety floor and each carrying its own
+  supersession — **neither is taken here, and no lane adds either on this decision's authority**.
+  **Fired by a decision that takes one of the two**, which is also the decision that first makes
+  this system's best uncertain-effect guarantee reachable.
+- **A third reconciliation route** — a declared reconciliation read on `ToolDefinition`, or an
+  integration that can report an effect's status without performing it. **Not decided.** It would
+  also be the producer of the `INDETERMINATE → FAILED` row §7 declines to add. **Fired by an
+  integration that offers such a read.**
 - **What the user is told** about an uncertain effect, an `EFFECT_ALREADY_CLAIMED` disposition, a
   completed sweep or a replayed answer. **A9**, which is ADR-0249 §13's own division and ADR-0255
   §12's for the same class of question. §3 fixes that the record is preserved and *"told once"* is
@@ -1045,31 +1084,35 @@ property are the whole of it.
 9. An attempt left **`RUNNING`** beside an `INDETERMINATE` step is repaired to
    **`EFFECT_UNRESOLVED`** by the pass, and the startup scan is shown to have written no attempt
    state.
-10. A **`KEYED`**, in-window `INDETERMINATE` step is reconciled to **`SUCCEEDED`** under the
-    **same** derived idempotency key, over a request **rebuilt from stored plan and execution
-    state after a restart** and accepted by `PermissionDecision.authorises`, and the attempt
-    returns to **`RUNNING`**. **The arm asserts nothing about a later walk**: the reconciled step
-    belongs to the earlier execution, ADR-0255 §2 sends the later turn to plan again over a new
-    one (§7), and what that turn's plan meets is arms 1–3's subject.
-11. An **uncheckable** `INDETERMINATE` step — `Idempotency.NONE`, or `KEYED` past its window —
-    takes **no** reconciliation call, stays `INDETERMINATE`, keeps its attempt
-    `EFFECT_UNRESOLVED`, and its key answers `UNCERTAIN` to a later plan's claim. A
-    **side-effecting `NATURAL`** step left `INDETERMINATE` by the recovery scan **is** reconciled,
-    which is the limb §3 takes from ADR-0029 §5 and the one a reader is likeliest to drop.
+10. A side-effecting **`NATURAL`** step left `INDETERMINATE` by the recovery scan is reconciled
+    to **`SUCCEEDED`**, over a request **rebuilt from stored plan and execution state after a
+    restart** and accepted by `PermissionDecision.authorises`, and the attempt returns to
+    **`RUNNING`**. **The arm asserts nothing about a later walk**: the reconciled step belongs to
+    the earlier execution, ADR-0255 §2 sends the later turn to plan again over a new one (§7), and
+    what that turn's plan meets is arms 1–3's subject.
+11. **Every way a reconciliation does not resolve a step leaves it exactly as it stood**, in one
+    table: an `Idempotency.NONE` step and a **`KEYED`** step each take **no call at all**; a
+    `NATURAL` step whose `approval_ref` is absent, whose decision the trail cannot return, or
+    whose rebuilt request `PermissionDecision.authorises` rejects takes **no call**; and a
+    `NATURAL` step whose call returns a failure, a timeout or an `INDETERMINATE` of its own takes
+    **one**. In every row the step stays **`INDETERMINATE`**, `attempts` is **unchanged**, no
+    transition is committed, the attempt stays **`EFFECT_UNRESOLVED`**, the key answers
+    **`UNCERTAIN`** to a later plan's claim, and **no second call is made in that turn**.
 12. The pass touches **only the goal the turn engaged**: a second goal carrying the same three
     residuals is **unchanged** by the turn, and nothing runs for it until a turn engages it.
 
 > **Normative — no arm of this decision requires a real integration, a scheduler or a restart
 > loop.** Arms 1–3 and 10–11 are stated over a controlled `ToolInvoker` whose declaration and
 > returned outcome the arm fixes; arm 4 is stated over the store alone; arm 9's residual is
-> produced by a store failure the arm injects. **No arm requires a stopped walk to be
+> produced by a store failure the arm injects, and arm 11's rows are driven by a controlled trail
+> and invoker rather than by a real integration. **No arm requires a stopped walk to be
 > re-entered**, and none asserts that a dependent of a reconciled step runs — §7 adds no route to
 > one and ADR-0255 §2's closed list is what it leaves in place.
 
 ### 13. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly two documents are partially superseded — ADR-0014 in two scopes and ADR-0037 in one** —
-and the entries below show the working for those and for each other document a reader would expect
+**Exactly three documents are partially superseded — ADR-0014 in two scopes, ADR-0255 in one and
+ADR-0037 in one** — and the entries below show the working for those and for each other document a reader would expect
 to be superseded and is not. ADR-0082 §1's test is applied to each earlier ADR's **text**: would a
 reader holding only it now act differently, or read one of its clauses more widely than it holds?
 
@@ -1121,10 +1164,28 @@ its execution-and-step check and the reason it gives for checking the *stored* e
 *"the turn never answers on the user's behalf"* rule, and §6's *"This object disposes of one step,
 once"* and `PENDING`-only entry.
 
-**ADR-0255 — relied on entire and not superseded, and the working is that its own clauses name
-this lane.** A reader would expect records on §6, §7 and §12, because this decision writes
-`EFFECT_UNRESOLVED` from a later turn and completes a sweep those sections leave residual. It gets
-none. §6's prohibition reads *"no lane … retries the attempt write from a later turn **on its own
+**ADR-0255 §7 and §12 — partially superseded in the identity their at-most-once obligation is
+stated over, and the scope is on this document's `Status` line.** §7 rules that *"an effect a
+`SUCCEEDED` and verified step produced, and an effect an `INDETERMINATE` step may have produced,
+are each performed **at most once across every plan of that goal**"*, and §12 states the acceptance
+requirement over *"a plan whose step would perform **the same effect**"*. §1 lands an identity over
+the **authorised call** — the tool, the digest of the supplied arguments, and the binding's reach —
+and states in terms that two calls meaning one thing while spelling it differently carry two keys
+and the second is dispatched. **A reader holding only ADR-0255 §7 therefore reads its obligation
+more widely than it now holds**: they expect A8's mechanism to make the *effect* at most once and
+get one that makes the *authorised call* at most once. That is ADR-0070 §1's test met, and
+**partial** in ADR-0070 §3's sense — the scope is the identity, and nothing else. **Every other
+clause of §7 and §12 binds entire**: §7's keeps-everything-it-recorded rule, its extension of
+ADR-0228 §5's not-driven rule, its sweep and the sweep's stated residual, its one-plan-per-walk
+rule and its no-licence-to-repeat prohibition; §12's every other entry, its two acceptance
+requirements' *other* halves — the modifying-and-fresh demonstration, the paired `INDETERMINATE`
+case, and the resolved-but-unapplied answer entire — and its firing conditions. §10 books the
+canonical effect-input identity that would close the difference, with what fires it.
+
+**Every other clause of ADR-0255 is relied on and not superseded, and the working is that its own
+clauses name this lane.** A reader would expect records on §6 and on §12's residual entries,
+because this decision writes `EFFECT_UNRESOLVED` from a later turn and completes a sweep those
+sections leave residual. They get none. §6's prohibition reads *"no lane … retries the attempt write from a later turn **on its own
 authority**"* and its next clause reads *"repairing that residual is **A8's**"*; §7's reads *"No
 lane retries the sweep, resumes it from a later turn"* and its next clause reads *"A8's
 reconciliation … is the **only one** that may complete a sweep"*. **A reader holding only ADR-0255
@@ -1132,10 +1193,20 @@ therefore reads exactly what this decision does** — that a named later lane co
 acts no differently. §12's entries are deferrals, fired, which ADR-0082 §1 makes a stacked
 addition. And §6's *"the driver is `EFFECT_UNRESOLVED`'s one producer, **for a step it drove**"*
 is scoped by its own trailing clause, which §6's very next paragraph confirms by handing the
-unwritten case to A8. **Every clause of ADR-0255 binds entire and is relied on**, §1's four
-evaluations and its no-parameter-mapping rule, §2's stop and skip rules, §3's claim conjuncts,
-§5's re-walk-from-the-first-position rule and its three re-evaluated predicates, §9's budget and
-§13's Q4 rule included.
+unwritten case to A8. **Every other clause of ADR-0255 binds entire and is relied on**, §1's four
+evaluations and its no-parameter-mapping rule, §2's stop rule and its closed re-entry list, §3's
+claim conjuncts, §5's re-walk-from-the-first-position rule and its three re-evaluated predicates,
+§9's budget and §13's Q4 rule included.
+
+**ADR-0192 §1 — relied on entire and not superseded, and §3's narrowing is what keeps it so.** A
+reader would expect a record, because §3 makes a call under a decision an act has already been
+claimed under. It gets none: §3 takes the **one** case that section's own spendability rule puts
+outside the ledger's refusals — *"An **authorisation is spendable** when the decision's
+`ToolDefinition` is `side_effecting` and its `idempotency` is not `NATURAL`"* — so a `NATURAL`
+reconciliation is admitted by ADR-0192 §1 as written, and **no clause here widens its
+further-claim enumeration, adds an admission, or changes any signature on `InvocationLedger`**.
+The `KEYED` route that *would* need one is declined and booked (§10), which is the alternative to
+superseding a safety floor inside a decision about something else.
 
 **ADR-0029 §5 — relied on entire and not superseded, and §3's reconciliation is not a relaxation
 of its retry rule.** A reader would expect a record, because §5 says an `INDETERMINATE` outcome is
@@ -1185,7 +1256,7 @@ ADR-0037's `Status` records**, each carrying its scope with no `ADR-NNNN` token 
 parentheses under ADR-0070 §4's extraction invariant and each accumulating beside the pairs those
 lines already carry, together with **the appended dated note each carries**, which ADR-0082 §1
 makes *"the invariant half of the record"*. That is the atomic pair ADR-0082 §7 permits while this
-decision stands `Proposed`, and it is why this PR touches **three** files.
+decision stands `Proposed`, and it is why this PR touches **four** files.
 
 ### 14. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1197,10 +1268,11 @@ one *yes* on a dispatch that never happened while the ruling sits durable and un
 That is ADR-0070 §1's test met, and a new ADR is the instrument — as it must be in any case, since
 `core/types.py` and `core/protocols.py` both change (golden rule 5, ADR-0015).
 
-**It is a partial supersession of exactly two documents in three scopes** (ADR-0070 §3) —
+**It is a partial supersession of exactly three documents in four scopes** (ADR-0070 §3) —
 ADR-0014 in §4's transition table **and** in §5's member enumeration, `PlanExport` shape and
-`delete_goal` cascade, and ADR-0037 in §4's resolution step — and §13 shows the working for each
-and for the five documents a reader would expect and that get no record. **Every other ADR it touches is
+`delete_goal` cascade; **ADR-0255** in the identity §7's and §12's at-most-once obligation is
+stated over; and ADR-0037 in §4's resolution step — and §13 shows the working for each and for the
+five documents a reader would expect and that get no record. **Every other ADR it touches is
 relied on**, and what it takes it takes by **firing deferrals** rather than by replacing clauses:
 ADR-0014 §7's, ADR-0255 §12's seven entries — two of which carry the acceptance requirements stated
 there — ADR-0059 §2's named later wave, and ADR-0253 §5's named mechanism.
@@ -1212,12 +1284,17 @@ row.** *"Has this goal already done this"* is answerable by a store lookup rathe
 planner's memory or a reviewer's attention, and it is answerable **at the one moment it matters**
 — after the arguments are concrete and authorised, and before the claim.
 
-**`INDETERMINATE` stops being a terminal sink for the declarations that make a repeat safe.**
-Where a tool declares `NATURAL`, or `KEYED` with a window that is still open, an uncertain effect
-is established on the goal's next turn — before that turn plans, so whatever it then plans and
-walks reads a settled record. Where neither holds, the uncertainty is preserved exactly as R45
-asks and — this is the new part — **cannot be repeated**, because the key that records it refuses
-every later claim.
+**`INDETERMINATE` stops being a terminal sink for the one declaration the corpus lets us call
+under.** Where a tool declares `NATURAL`, an uncertain effect is established on the goal's next
+turn — before that turn plans, so whatever it then plans and walks reads a settled record.
+Everywhere else, `KEYED` included, the uncertainty is preserved exactly as R45 asks and — this is
+the new part — **cannot be repeated**, because the key that records it refuses every later claim.
+
+**The `KEYED` case is the one this decision wanted and could not have, and saying so is part of
+it.** `KEYED` inside its window is the better guarantee of the two, and ADR-0192 §1's
+further-claim rule — written for a retry — refuses the call that would use it. Until a decision
+lifts that floor (§10), the system's best uncertain-effect story is available only where a tool
+declared it did not need one.
 
 **Two residuals ADR-0255 left durable are finished by the first turn that looks.** A part-way
 sweep and an attempt stranded `RUNNING` are both repaired by a pass that runs on the goal the user
