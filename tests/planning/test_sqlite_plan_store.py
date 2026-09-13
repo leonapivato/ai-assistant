@@ -1265,6 +1265,94 @@ async def test_evidence_of_a_goal_the_store_does_not_hold_is_empty_even_with_an_
         store.close()
 
 
+async def test_a_row_indexed_under_another_goal_is_that_goals_and_refuses_there(
+    tmp_path: Path,
+) -> None:
+    """The evidence index rule, in both of its consequences at once.
+
+    "The promoted columns are the index: a row is selected by its columns and, wherever
+    it is decoded, refused if its record disagrees with them, and a row is never selected
+    under a goal its columns do not name."
+
+    A row indexed under ``g2`` whose record names ``g1`` is therefore **not in g1's
+    history** — not filtered out of it, not lost from it, simply never selected there —
+    and it **does not hide**, because reading ``g2``, the goal its columns do name,
+    decodes it and refuses. Those are the two answers a store is allowed to give: a
+    sound file reads exactly right, and a tampered one reads refusing rather than quietly
+    short. Deciding ownership from the record instead would need a second index this
+    schema does not have and would make every history read a full-table decode.
+
+    Both halves are asserted together because either alone is consistent with the bug:
+    a store that silently dropped the row would pass the first, and one that scanned
+    every row on every read would pass the second.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.save_goal(_goal("g2"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
+    finally:
+        store.close()
+
+    # `ev1`'s record still names `g1`; its index entry is moved to `g2`.
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goal_evidence SET goal_id = 'g2' WHERE id = 'ev1'")
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        history = await store.evidence_of("g1")
+        assert [row.id for row in history.rows] == ["ev2"], "the row is not g1's under the rule"
+        assert history.elided == 0, "and nothing is reported as dropped, because nothing was"
+
+        with pytest.raises(PlanningError, match="record and columns disagree"):
+            await store.evidence_of("g2")
+    finally:
+        store.close()
+
+
+async def test_a_deletion_is_not_blocked_by_a_row_whose_record_is_not_an_object(
+    tmp_path: Path,
+) -> None:
+    """A blob that parses but is not an object is an unreadable record, not a crash.
+
+    The deletion scan reaches **every** row in the table, which is the whole reason it
+    reads the record's goal out of the JSON rather than through the model: an unrelated
+    invalid row must not block a user's ADR-0004 data-rights call behind a fault they
+    cannot clear. ``json.loads`` succeeds on ``'[]'``, ``'7'`` and ``'"x"'``, so a
+    ``.get`` on the result is an ``AttributeError`` — the exact failure the policy exists
+    to prevent, arriving through the branch that states it.
+
+    The row here is indexed under another goal, so it is untouched by this deletion and
+    stays for that goal's own read to refuse.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.save_goal(_goal("g2"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goal_evidence SET goal_id = 'g2', data = '[]' WHERE id = 'ev1'")
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        removed = await store.delete_goal("g1")
+
+        assert removed.deleted, "an unrelated unreadable row does not block the deletion"
+        assert removed.evidence_removed == 0
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (1,)
+    finally:
+        store.close()
+
+
 async def test_an_export_refuses_an_evidence_row_whose_goal_it_does_not_hold(
     tmp_path: Path,
 ) -> None:
