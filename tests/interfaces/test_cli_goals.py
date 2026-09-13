@@ -270,6 +270,24 @@ def test_the_listing_renders_the_engines_paused_and_derives_nothing(
     assert "waiting on you" not in screen
 
 
+def test_the_status_words_are_total_over_the_enumeration() -> None:
+    """A member with no words is a member rendered as its own identifier.
+
+    ``_GOAL_STATUS_WORDS`` is keyed by the members' **values** rather than by the
+    members, because ADR-0249 §16 item 7's guard —
+    ``tests/core/test_goal_status_has_no_producer.py`` — reads the shipped tree for the
+    *shapes* a producer can take, and it cannot tell a rendering map's key from one. A
+    presentation layer does not need to name the member to render it, ``GoalStatus``
+    being a ``StrEnum``; what it does need is to have words for every one, and that is
+    what this asserts, from ``core``'s own enumeration rather than from a list kept here.
+
+    This module is under ``tests/`` and names the members freely: the guard's scan is
+    over ``src/`` alone, which is where a producer would have to live.
+    """
+    assert set(cli._GOAL_STATUS_WORDS) == {member.value for member in GoalStatus}
+    assert all(cli._GOAL_STATUS_WORDS[member.value] for member in GoalStatus)
+
+
 def test_a_goal_no_turn_has_taken_up_says_so_rather_than_showing_a_blank(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:

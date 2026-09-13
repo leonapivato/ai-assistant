@@ -310,7 +310,6 @@ from ai_assistant.core.types import (
     GoalAbandonment,
     GoalDisambiguation,
     GoalEngagement,
-    GoalStatus,
     GoalSummary,
     GrantScope,
     LearnDecision,
@@ -4940,16 +4939,33 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
 #:
 #: ``GoalStatus`` is **not** one of the vocabularies ADR-0250 adds — ADR-0014 §1
 #: declares it and ADR-0249 §4 gives it its meanings — and two of its members have no
-#: producer anywhere in the tree today (ADR-0250 §20's arm 23 asserts exactly that).
-#: They are given words anyway, because what this map is for is that a member arriving
-#: from a hub is rendered rather than shown raw, and "no producer today" is not a
-#: property of the value this surface receives.
-_GOAL_STATUS_WORDS: Final[Mapping[GoalStatus, str]] = {
-    GoalStatus.ACTIVE: "open",
-    GoalStatus.ACHIEVED: "done",
-    GoalStatus.ABANDONED: "given up",
-    GoalStatus.BLOCKED: "blocked",
+#: producer anywhere in the tree today. They are given words anyway, because what this
+#: map is for is that a member arriving from a hub is rendered rather than shown raw,
+#: and "no producer today" is not a property of the value this surface receives.
+#:
+#: **Keyed by the members' values rather than by the members**, which is the browser's
+#: own shape one adapter over and is what ADR-0249 §16 item 7's guard asks of every file
+#: but the declaration: ``tests/core/test_goal_status_has_no_producer.py`` reads the tree
+#: for *shapes* rather than for one spelling, so that a producer written
+#: ``GoalStatus("achieved")`` or ``status="achieved"`` cannot slip past a scan keyed on
+#: the attribute. A rendering map is not a producer — nothing here writes a status, and
+#: what it is handed is a value some other layer decided — but a presentation layer has
+#: no need to name the member to render it, ``GoalStatus`` being a ``StrEnum``. So the
+#: keys are the values, the guard stays as strict as ADR-0249 §16 wants it, and
+#: ``test_the_status_words_are_total_over_the_enumeration`` is what keeps this total.
+_GOAL_STATUS_WORDS: Final[Mapping[str, str]] = {
+    "active": "open",
+    "achieved": "done",
+    "abandoned": "given up",
+    "blocked": "blocked",
 }
+
+#: What the listing says for a status it has no words for — the CLI's own
+#: ``GOAL_MEMBER_UNREADABLE``. Unreachable while the map above is total, and here so
+#: that a member added without its words is a sentence rather than a ``KeyError`` that
+#: takes the whole listing down: every other row of that page is still readable, and a
+#: listing that refused to render is a goal the owner can neither answer nor give up.
+_GOAL_STATUS_UNREADABLE: Final = "in a state this version has no words for"
 
 
 def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> None:
@@ -4998,7 +5014,8 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
         _print(f"\n  [bold cyan]{_safe(goal.id)}[/]")
         _print(f"  {_safe(goal.outcome)}")
         waiting = " — waiting on you" if goal.paused else ""
-        _print(f"  [dim]State:[/] {_GOAL_STATUS_WORDS[goal.status]}{waiting}")
+        said = _GOAL_STATUS_WORDS.get(goal.status.value, _GOAL_STATUS_UNREADABLE)
+        _print(f"  [dim]State:[/] {said}{waiting}")
         if goal.last_engaged_at is None:
             _print("  [dim]No turn has taken it up yet.[/]")
         else:
