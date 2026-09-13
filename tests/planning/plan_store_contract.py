@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
+    TERMINAL_ATTEMPT_STATES,
     ActionPlan,
     AttemptEffort,
     AttemptKind,
@@ -84,7 +85,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import ExecutionState
+    from ai_assistant.core.types import ExecutionState, StepExecution
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -800,6 +801,31 @@ class PlanStoreContract:
         await store.save_plan(_plan(steps=steps))
         return await _owned(store, await store.start_execution("p1"))
 
+    async def _step(
+        self, store: PlanStore, state: ExecutionState, step_id: str = "s1"
+    ) -> StepExecution:
+        """Read one step back out of durable state, which is where a refusal is checked."""
+        stored = await store.get_execution(state.id)
+        assert stored is not None
+        step = stored.step(step_id)
+        assert step is not None
+        return step
+
+    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
+        """Write ``attempt`` **beneath** ADR-0255 §3's refusals, as a legacy store holds it.
+
+        The one state this decision cannot reach through its own contract: an execution
+        two attempts of one goal name. Both attempt-writing members refuse it now, so a
+        subject implements this against its own storage — which is exactly what makes the
+        arm about a store *written before* the decision rather than one this code can
+        produce.
+
+        Args:
+            store: The subject under test.
+            attempt: The row to write as it stands, with no refusal applied.
+        """
+        raise NotImplementedError
+
     # --- goals and plans ------------------------------------------------
 
     async def test_saves_and_reads_back_a_goal(self, store: PlanStore) -> None:
@@ -1303,6 +1329,448 @@ class PlanStoreContract:
             )
 
         assert (await store.export()).attempts == (_attempt(),), "and nothing was written"
+
+    # --- ADR-0255 §3: the claim's two further conjuncts, and the ownership -----
+    # invariant that makes the first of them a binding rather than a coincidence.
+
+    async def test_a_claim_naming_an_attempt_the_store_does_not_hold_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 7's first limb, and its class (ADR-0255 §3).
+
+        An unknown attempt stays unknown however many times the caller re-reads, so the
+        refusal is a ``PlanningError`` that is **not** a ``StaleExecutionError`` — a
+        caller obeying the stale class's re-read-and-retry contract would loop against a
+        write that cannot land. ``StaleExecutionError`` **subclasses** ``PlanningError``,
+        so an arm asserting only the base class would be satisfied by the retryable one.
+        """
+        state = await self._started(store)
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.commit_transition(_claim(state, attempt_id="never-opened"))
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        assert (await self._step(store, state)).status is StepStatus.PENDING
+
+    async def test_a_claim_under_an_attempt_that_did_not_open_the_execution_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's binding arm: ``execution_ids`` is what decides it.
+
+        Execution E is opened under attempt A, A is committed ``ENDED``, and a second
+        attempt **B of the same goal** stands neither terminal nor paused. A claim for E
+        naming **B** satisfies every goal-level fact about B — same goal, live state,
+        current revision — and is refused anyway, because the binding is the execution's
+        membership and never the goal's. Without that, the cancellation of A would be
+        defeated by naming B (ADR-0255 §3).
+        """
+        state = await self._started(store)
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=0,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=_WHEN,
+            )
+        )
+        await store.open_attempt(_attempt("a2"))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.commit_transition(_claim(state, attempt_id="a2"))
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.revision == 1, "and the goal's revision did not move"
+        assert (await self._step(store, state)).status is StepStatus.PENDING
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            AttemptState.CANCELLED,
+            AttemptState.ENDED,
+            AttemptState.AWAITING_CLARIFICATION,
+            AttemptState.AWAITING_AUTHORIZATION,
+            AttemptState.BLOCKED,
+        ],
+    )
+    async def test_a_claim_under_a_terminal_or_paused_attempt_is_refused(
+        self, store: PlanStore, state: AttemptState
+    ) -> None:
+        """§15 arm 6's state-limb arms: **five** of ``AttemptState``'s seven members.
+
+        The two terminal members and the three ADR-0249 §5 derives *paused* from, because
+        *paused* is as disqualifying as *ended*: a store that accepted every non-terminal
+        state would let a step reach the tool under an attempt the system is reporting as
+        paused, in the one surface a user reads to find out whether anything is happening.
+        The paused limb raises the same non-stale class, and its ground is what a caller
+        can do rather than permanence — what lifts the pause is a **user act**, never a
+        re-read.
+        """
+        execution = await self._started(store)
+        terminal = state in TERMINAL_ATTEMPT_STATES
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=0,
+                to_state=state,
+                outcome=AttemptOutcome.ANSWERED if terminal else None,
+                ended_at=_WHEN if terminal else None,
+            )
+        )
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.commit_transition(_claim(execution))
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        assert (await self._step(store, execution)).status is StepStatus.PENDING
+
+    async def test_a_claim_under_an_attempt_holding_an_unresolved_effect_is_accepted(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's paired arm, and it is what stops the limb being a whitelist.
+
+        ``EFFECT_UNRESOLVED`` is neither terminal nor one of the three §5 derives
+        *paused* from, so a claim under it lands — which is the member's whole point
+        (ADR-0255 §6): an attempt holding an effect it cannot account for is neither
+        finished nor waiting on anybody. A ``RUNNING``-only rule would make §6's own
+        producer unreachable.
+        """
+        execution = await self._started(store)
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=0,
+                to_state=AttemptState.EFFECT_UNRESOLVED,
+            )
+        )
+
+        claimed = await store.commit_transition(_claim(execution))
+
+        step = claimed.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.RUNNING
+
+    async def test_a_stale_revision_claim_keeps_the_retryable_class(self, store: PlanStore) -> None:
+        """§15 arm 6's keep-the-two-questions-apart arm (ADR-0255 §3, ADR-0249 §8).
+
+        Reached through the same member, an attempt that satisfies every limb of the new
+        conjunct, and a goal whose revision has moved: the refusal is
+        ``StaleExecutionError`` still, because that comparison is against a value that
+        genuinely **moves** and re-reading is exactly what a caller should do. An
+        implementation cannot satisfy the set by making ``commit_transition`` raise one
+        class for everything.
+        """
+        state = await self._started(store)
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
+        )
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(_claim(state))
+
+    async def test_a_claim_on_a_plan_a_stored_plan_supersedes_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's successor arms (ADR-0255 §3), and what makes them independent.
+
+        A plan P2 carrying ``supersedes=P`` is saved while P's execution stands mid-run:
+        the next claim on P is refused on the non-stale class, **the goal's revision did
+        not move and the attempt is not terminal** — which is what makes this condition
+        redundant with neither of the others — and P's already ``SUCCEEDED`` step keeps
+        its output. A claim on **P2** is accepted, so the rule is *this plan has a
+        successor* and not *this goal has two plans*.
+        """
+        state = await self._started(store, steps=2)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                output={"sent": True},
+            )
+        )
+        await store.save_plan(_plan(plan_id="p2", supersedes="p1"))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.commit_transition(_claim(state, "s2"))
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.revision == 1, "the goal's revision did not move"
+        attempt = await store.get_attempt("a1")
+        assert attempt is not None
+        assert attempt.state is AttemptState.RUNNING, "and the attempt is not terminal"
+        held = await store.get_execution(state.id)
+        assert held is not None
+        first = held.step("s1")
+        assert first is not None
+        assert first.status is StepStatus.SUCCEEDED
+        assert first.output == {"sent": True}, "the superseded plan's record is untouched"
+        second = held.step("s2")
+        assert second is not None
+        assert second.status is StepStatus.PENDING, "at its entry status, nothing invoked"
+
+    async def test_a_claim_on_the_successor_itself_is_accepted(self, store: PlanStore) -> None:
+        """The successor conjunct's paired arm: P2 is claimable (ADR-0255 §3)."""
+        await self._started(store)
+        await store.save_plan(_plan(plan_id="p2", supersedes="p1"))
+        successor = await _owned(store, await store.start_execution("p2"), attempt_id="a2")
+
+        claimed = await store.commit_transition(_claim(successor, attempt_id="a2"))
+
+        step = claimed.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.RUNNING
+
+    async def test_commit_attempt_refuses_an_execution_another_attempt_owns(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's bypass arm, on ``commit_attempt`` (ADR-0255 §3).
+
+        With E already carried by A, appending it to **B** is refused — so the state in
+        which E belongs to two attempts, under which a claim naming B would pass every
+        conjunct, **cannot be reached through the store**. ADR-0249 §12's append-only
+        rule is a different question and is untouched: a repeat of the same append on the
+        attempt that owns E is still ignored rather than duplicated or refused.
+        """
+        state = await self._started(store)
+        await store.open_attempt(_attempt("a2"))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.commit_attempt(
+                AttemptTransition(attempt_id="a2", expected_version=0, add_execution_id=state.id)
+            )
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        owner = await store.get_attempt("a1")
+        assert owner is not None
+        assert owner.execution_ids == (state.id,)
+
+        repeated = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1", expected_version=owner.version, add_execution_id=state.id
+            )
+        )
+        assert repeated.execution_ids == (state.id,), "the append is still idempotent"
+
+    async def test_open_attempt_refuses_an_execution_another_attempt_owns(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's bypass arm through the other door (ADR-0255 §3).
+
+        ``open_attempt`` takes a whole attempt and the tuple may arrive **non-empty**, so
+        a caller could otherwise reach the forbidden state without calling
+        ``commit_attempt`` at all — opening a live attempt that carries an ended
+        attempt's execution.
+        """
+        state = await self._started(store)
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.open_attempt(
+                GoalAttempt(id="a2", goal_id="g1", opened_at=_WHEN, execution_ids=(state.id,))
+            )
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        assert await store.get_attempt("a2") is None, "and nothing was written"
+
+    async def test_two_appends_of_one_execution_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's first indivisibility arm, on ADR-0249 §12's own construction.
+
+        The serial arms above cannot see the interleaving the rule is stated about: an
+        implementation that read, compared and then wrote across a suspension passes
+        every one of them while letting **both** appends land — reaching, through the
+        door this decision closes, exactly the legacy duplicate the arm below is reduced
+        to refusing. Both commands are dispatched before either completes, over an
+        execution **no attempt yet owns**.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        await store.open_attempt(_attempt("a1"))
+        await store.open_attempt(_attempt("a2"))
+        appends = [
+            AttemptTransition(attempt_id=attempt_id, expected_version=0, add_execution_id=state.id)
+            for attempt_id in ("a1", "a2")
+        ]
+
+        settled = await asyncio.gather(
+            *(store.commit_attempt(one) for one in appends), return_exceptions=True
+        )
+
+        won = [one for one in settled if isinstance(one, GoalAttempt)]
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(won) == 1, "exactly one attempt comes to own the execution"
+        assert len(lost) == 1, "and the other is refused rather than also landing"
+        assert isinstance(lost[0], PlanningError)
+        assert not isinstance(lost[0], StaleExecutionError)
+        owners = [one for one in await store.attempts_of("g1") if state.id in one.execution_ids]
+        assert [one.id for one in owners] == [won[0].id], "one owner, and it is the winner"
+
+    async def test_an_open_and_an_append_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's second indivisibility arm: the two members raced against each other.
+
+        ADR-0255 §3 states that **each** member decides exclusivity "in the same
+        indivisible step as its own write", so an implementation can get one right and
+        the other wrong — and a store whose ``open_attempt`` compared before a suspension
+        would let the tuple it carries land beside an append that also landed.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        await store.open_attempt(_attempt("a1"))
+
+        settled = await asyncio.gather(
+            store.commit_attempt(
+                AttemptTransition(attempt_id="a1", expected_version=0, add_execution_id=state.id)
+            ),
+            store.open_attempt(
+                GoalAttempt(id="a2", goal_id="g1", opened_at=_WHEN, execution_ids=(state.id,))
+            ),
+            return_exceptions=True,
+        )
+
+        lost = [one for one in settled if isinstance(one, BaseException)]
+        assert len(lost) == 1, "exactly one write lands"
+        assert isinstance(lost[0], PlanningError)
+        assert not isinstance(lost[0], StaleExecutionError)
+        owners = [one for one in await store.attempts_of("g1") if state.id in one.execution_ids]
+        assert len(owners) == 1, "and the execution is named by exactly one attempt"
+        assert await store.get_attempt("a2") is None or owners[0].id == "a2", (
+            "an attempt opened carrying an execution another attempt owns is not written"
+        )
+
+    async def test_a_successor_saved_against_a_claim_leaves_one_of_two_histories(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's two-writer arm for the successor conjunct (ADR-0255 §3).
+
+        **The assertion is over which write linearized first and not over the final
+        state**, because both records standing together is a *legitimate* outcome — the
+        claim that won, followed by the save — and §4's committed-claim rule is what makes
+        it one. So exactly one of two histories holds: the claim linearized **before** the
+        successor's persistence, in which case it lands and the save then lands too; or
+        the successor's persistence linearized first, in which case the claim is refused
+        on the non-stale class. **What no history may show is a claim that linearized
+        after the successor was persisted and nevertheless landed**, which is the only
+        state the conjunct forbids.
+
+        The order is read from the store's own completions rather than from the wall
+        clock: each of these writes is one indivisible step, so the order they finish in
+        is the order they linearized in. The serial arms above cannot see this
+        interleaving at all — an implementation that read the plan's successors, compared
+        and then wrote across a suspension passes every one of them while letting a claim
+        that lost dispatch anyway, which is the race §7's sweep cannot close from another
+        turn.
+        """
+        state = await self._started(store)
+        order: list[str] = []
+        refusals: list[BaseException] = []
+
+        async def saving() -> None:
+            await store.save_plan(_plan(plan_id="p2", supersedes="p1"))
+            order.append("save")
+
+        async def claiming() -> None:
+            try:
+                await store.commit_transition(_claim(state))
+            except PlanningError as refusal:
+                refusals.append(refusal)
+                order.append("refused")
+            else:
+                order.append("claim")
+
+        await asyncio.gather(saving(), claiming())
+
+        assert all(not isinstance(one, StaleExecutionError) for one in refusals)
+        assert len(refusals) == len([one for one in order if one == "refused"])
+
+        assert await store.get_plan("p2") is not None, "the successor is persisted either way"
+        assert len(order) == 2, "both writers finished"
+        step = (await self._step(store, state)).status
+        if order[0] == "save":
+            assert order[1] == "refused", "a claim after a persisted successor never lands"
+            assert step is StepStatus.PENDING, "so the step stands at its entry status"
+        else:
+            assert order == ["claim", "save"], "the claim won, and the save then landed"
+            assert step is StepStatus.RUNNING, "which is a legitimate history, not a breach"
+
+    async def test_a_legacy_duplicate_owner_refuses_the_claim_whichever_it_names(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 6's legacy arm (ADR-0255 §3), seeded beneath the refusals.
+
+        A store written **before** this decision could hold an execution two attempts
+        name, and the refusals above change no stored row — so what a reader does with one
+        is fixed here, and it is to refuse, **whichever attempt the claim names**. A
+        migration would have to choose which attempt owns it and nothing in the record
+        says, so it would invent an ownership nobody recorded; accepting either owner
+        would hand back the exact bypass the conjunct exists to close. No lane repairs,
+        rewrites or deletes such a row.
+
+        The seam is the subject's own (:meth:`seed_a_second_owner`), because reaching this
+        state through the contract is precisely what this decision makes impossible.
+        """
+        state = await self._started(store)
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=0,
+                to_state=AttemptState.CANCELLED,
+                outcome=AttemptOutcome.FAILED,
+                ended_at=_WHEN,
+            )
+        )
+        await self.seed_a_second_owner(
+            store,
+            GoalAttempt(id="a2", goal_id="g1", opened_at=_WHEN, execution_ids=(state.id,)),
+        )
+
+        for named in ("a1", "a2"):
+            with pytest.raises(PlanningError) as refusal:
+                await store.commit_transition(_claim(state, attempt_id=named))
+            assert not isinstance(refusal.value, StaleExecutionError)
+
+        assert (await self._step(store, state)).status is StepStatus.PENDING
+
+    async def test_the_absent_and_the_misplaced_attempt_are_unconstructible(
+        self, store: PlanStore
+    ) -> None:
+        """§15 arm 7's two constructions, asserted unconstructible rather than refused.
+
+        A ``→ RUNNING`` transition carrying **no** ``attempt_id`` does not validate, and
+        neither does an ``attempt_id`` on any other ``to_status`` — which is why neither
+        is a store limb: naming the absent case as one would be a rule no conforming
+        implementation could be shown to obey, and would put the boundary in two places.
+        """
+        state = await self._started(store)
+
+        with pytest.raises(ValidationError):
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.RUNNING,
+                expected_version=state.version,
+                bound_tool="smtp",
+                approval_ref="perm-1",
+            )
+        with pytest.raises(ValidationError):
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.AWAITING_APPROVAL,
+                expected_version=state.version,
+                bound_tool="smtp",
+                attempt_id="a1",
+            )
 
     async def test_save_goal_holds_an_oversized_history_to_the_bound(
         self, store: PlanStore

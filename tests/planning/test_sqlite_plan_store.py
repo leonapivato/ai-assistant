@@ -154,6 +154,26 @@ _SYNC_METHODS = {
 class TestSqlitePlanStoreContract(PlanStoreContract):
     """Runs SqlitePlanStore through the shared PlanStore conformance suite."""
 
+    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
+        """INSERT the row directly, beneath ADR-0255 §3's refusal on both members.
+
+        The shape a version 2 database written before that decision could carry: the
+        refusals bind on every write and change no stored row, so no migration is owed
+        and this is the only way the state is reachable at all.
+        """
+        assert isinstance(store, SqlitePlanStore)
+        # A pre-decision row, by construction: the public members refuse it now.
+        store._conn.execute(
+            "INSERT INTO attempts(id, goal_id, opened_at, data) VALUES (?, ?, ?, ?)",
+            (
+                attempt.id,
+                attempt.goal_id,
+                attempt.opened_at.isoformat(),
+                attempt.model_dump_json(),
+            ),
+        )
+        store._conn.commit()
+
     @pytest.fixture
     def store(self) -> Iterator[PlanStore]:
         realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
