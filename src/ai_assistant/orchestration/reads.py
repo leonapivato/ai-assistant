@@ -804,8 +804,11 @@ class AskFacts:
         non_yield: The source's typed non-yield, where it produced one, in whichever
             of the four vocabularies that source speaks; ``None`` where it produced
             none.
-        returned: How many records the ask returned, **before** ADR-0226 §7's
-            deduplication.
+        records: The records the ask returned, **before** ADR-0226 §7's deduplication
+            and before §6's budget, in the order the source produced them. ADR-0252 §3
+            composes one region of a ``GoalEvidence`` row's ``supported`` per member,
+            "from that record's own values and never from the ask", and §1 names the
+            store-resident ones on the row.
         admitted: How many it admitted, **after** it.
         certified: Whether the source certified that the answer was complete. ``False``
             where ADR-0226 §6's budget cut this kind's yield, where
@@ -816,9 +819,24 @@ class AskFacts:
     ask: ReadAsk
     reached: bool
     non_yield: _NonYield | None
-    returned: int
+    records: tuple[MemoryRecord, ...]
     admitted: int
     certified: bool
+
+    @property
+    def returned(self) -> int:
+        """How many records the ask returned, **before** ADR-0226 §7's deduplication.
+
+        **Derived and never stored beside the records**, because the two would be one
+        fact with two carriers and the first implementation to disagree with itself
+        would be right in one of them. ADR-0251 §2's classifier reads this; ADR-0252 §1
+        persists it on the row, where it is what discloses a ``records`` tuple
+        :data:`~ai_assistant.core.types.MAX_EVIDENCE_RECORDS` truncated.
+
+        Returns:
+            The count.
+        """
+        return len(self.records)
 
 
 def classify_read_outcome(facts: AskFacts) -> ReadOutcomeKind | None:  # noqa: PLR0911 — ADR-0251 §2's precedence is eight numbered limbs evaluated in order "with no default branch and no fallback member", so one exit per limb is the decision rather than a shape to fold
@@ -927,7 +945,7 @@ class _AskLedger:
         reached: bool,
         non_yield: _NonYield | None,
         certified: bool = True,
-        returned: int | None = None,
+        records: Sequence[MemoryRecord] | None = None,
     ) -> None:
         """Record what became of one ask, and advance the mark.
 
@@ -940,22 +958,32 @@ class _AskLedger:
                 none.
             certified: Whether the source certified completeness on a ground of its
                 own, ANDed here with ADR-0226 §6's budget cut for this kind.
-            returned: How many records the ask returned **before** deduplication, where
-                that is not what the union was offered. ``None`` — every kind but the
-                citation hop — takes the union's own delta. The hop is the exception
-                because ADR-0229 §2 deliberately withholds the *named* records from the
-                union: "a record named by a label is counted in none of the three", so
-                the union sees a hop's evidence alone and a hop that reached a live
-                record carrying no citations would otherwise look like a source that
-                returned nothing.
+            records: What the ask returned **before** deduplication, where that is not
+                what the union was offered. ``None`` — every kind but the citation hop —
+                takes the union's own delta. The hop is the exception because ADR-0229
+                §2 deliberately withholds the *named* records from the union: "a record
+                named by a label is counted in none of the three", so the union sees a
+                hop's evidence alone and a hop that reached a live record carrying no
+                citations would otherwise look like a source that returned nothing.
+
+                **It is a sequence where it was a count, and the count is now derived
+                from it** (ADR-0252 §3). What ADR-0251 §2's classifier needs is the
+                figure; what a ``GoalEvidence`` row's ``supported`` is composed from is
+                the records themselves, "one region per record the ask **returned**" —
+                so the records are recorded and :attr:`AskFacts.returned` reads their
+                length, rather than a producer keeping the two in step by hand.
         """
-        offered, admitted = self.union.returned, len(self.union.admitted)
+        offered, admitted = len(self.union.offered), len(self.union.admitted)
         self.facts.append(
             AskFacts(
                 ask=ask,
                 reached=reached,
                 non_yield=non_yield,
-                returned=offered - self._returned if returned is None else returned,
+                records=(
+                    tuple(self.union.offered[self._returned :])
+                    if records is None
+                    else tuple(records)
+                ),
                 admitted=admitted - self._admitted,
                 certified=certified and ask.kind not in self.truncated,
             )
@@ -963,22 +991,70 @@ class _AskLedger:
         self._returned, self._admitted = offered, admitted
 
 
-def classified_reads(facts: Sequence[AskFacts]) -> tuple[ReadAskOutcome, ...]:
+@dataclass(frozen=True, slots=True)
+class AskYield:
+    """One outcome entry, and what the ask it is for actually returned.
+
+    **One value where two sequences would have to be kept parallel.** ADR-0251 §3's
+    carrier tells the planner what became of an ask; ADR-0252 §14 has that same entry
+    produce **exactly one** ``GoalEvidence`` row, whose ``supported`` is composed from
+    the records the ask returned (§3) and whose two counts are ADR-0226 §9's. Those are
+    two consumers of one classification, so they travel together: a servicing that
+    returned a shorter records tuple than its outcome sequence is not constructible.
+
+    **The entry itself is derived and never stored**, on the rule that decides every
+    such pair in this module: two carriers for one fact leave the first implementation
+    to disagree with itself right in one of them. What is stored is the classification
+    (:attr:`outcome`) and the planner's own ask, which is all
+    :class:`~ai_assistant.core.types.ReadAskOutcome` carries.
+
+    Attributes:
+        ask: The ask the planner emitted, carried back **byte for byte** (ADR-0251 §3).
+        outcome: What :func:`classify_read_outcome` decided became of it (§2).
+        records: What the ask returned, **before** ADR-0226 §7's deduplication, in the
+            order the source produced them. Empty on every member whose source returned
+            no record at all.
+        admitted: How many of those the supply did not already hold, which is ADR-0226
+            §9's ``new`` and ADR-0252 §1's ``admitted``.
+    """
+
+    ask: ReadAsk
+    outcome: ReadOutcomeKind
+    records: tuple[MemoryRecord, ...]
+    admitted: int
+
+    @property
+    def entry(self) -> ReadAskOutcome:
+        """ADR-0251 §3's own entry for this ask.
+
+        Returns:
+            The frozen pair the planner's next call is handed.
+        """
+        return ReadAskOutcome(ask=self.ask, outcome=self.outcome)
+
+
+def classified_reads(facts: Sequence[AskFacts]) -> tuple[AskYield, ...]:
     """ADR-0251 §3's carrier for one servicing, in servicing order.
 
     **Exactly one entry per ask the servicing reached, and every ask it reached has
     one** (§2). An ask :func:`classify_read_outcome` returns ``None`` for contributes
     nothing, which is the whole of how case 1 reaches the carrier.
 
+    **One classification, two consumers** (ADR-0252 §14). The sequence the planner's
+    next call receives and the entries a ``GoalEvidence`` row is written per are the
+    same sequence, so classifying twice would be two authorities on what became of one
+    ask — which is why the records ride out on the same value rather than being paired
+    with it downstream.
+
     Args:
         facts: One record per ask this servicing emitted, in the order §6 services
             the kinds in.
 
     Returns:
-        The outcomes, each carrying the planner's own ask byte for byte.
+        The yields, each carrying the planner's own ask byte for byte.
     """
     return tuple(
-        ReadAskOutcome(ask=one.ask, outcome=outcome)
+        AskYield(ask=one.ask, outcome=outcome, records=one.records, admitted=one.admitted)
         for one in facts
         if (outcome := classify_read_outcome(one)) is not None
     )
@@ -1453,6 +1529,13 @@ class _Union:
     held: set[str]
     budget: int
     admitted: list[MemoryRecord] = field(default_factory=list)
+    #: Every record any kind offered, in the order it was offered — **before** §7's
+    #: deduplication and before §6's budget, so it is the sequence ADR-0252 §3 composes
+    #: one region per member of. It is kept beside :attr:`returned` rather than instead
+    #: of it: that counter is what a *record* of the servicing reports (ADR-0226 §9) and
+    #: this is what a *row* is composed from, and the two are the same length by
+    #: construction because :meth:`admit` advances both on the same line.
+    offered: list[MemoryRecord] = field(default_factory=list)
     returned: int = 0
     deduplicated: int = 0
 
@@ -1473,6 +1556,7 @@ class _Union:
         """
         truncated = False
         for record in candidates:
+            self.offered.append(record)
             self.returned += 1
             if record.id in self.held:
                 self.deduplicated += 1
@@ -1751,14 +1835,15 @@ class ServicedCarriers:
         hop_reached: ADR-0227 §3's carrier — the **distinct** ids of the records this
             servicing's citation hop reached that the supply holds after it, in
             ADR-0229 §3's order.
-        read_outcomes: ADR-0251 §3's carrier — one
-            :class:`~ai_assistant.core.types.ReadAskOutcome` per ask **this
-            servicing reached**, in the order ADR-0226 §6 services the kinds in, each
-            carrying the planner's own ask byte for byte beside the member
-            :func:`classify_read_outcome` reached for it. An ask the servicing did not
-            reach earns no entry, and a servicing that failed or was partial carries
-            **none at all** — ADR-0226 §5's all-or-nothing posture, which is §2's
-            precedence case 1 for every ask the stage had already put.
+        yields: ADR-0251 §3's carrier and ADR-0252 §14's production rule on one value —
+            one :class:`AskYield` per ask **this servicing reached**, in the order
+            ADR-0226 §6 services the kinds in, each carrying the planner's own ask byte
+            for byte beside the member :func:`classify_read_outcome` reached for it and
+            the records the ask returned. An ask the servicing did not reach earns no
+            entry, and a servicing that failed or was partial carries **none at all** —
+            ADR-0226 §5's all-or-nothing posture, which is §2's precedence case 1 for
+            every ask the stage had already put, and which ADR-0252 §14 restates as "a
+            servicing that did not complete produces none".
         empty_read: ADR-0240 §7's carrier — the ``STRUCTURED_READ`` ask this
             servicing performed that returned **no record at all**, carried back byte
             for byte as the planner emitted it, or ``None``. A read the budget did not
@@ -1814,7 +1899,7 @@ class ServicedCarriers:
 
     hop_reached: tuple[str, ...] = ()
     minted: tuple[str, ...] = ()
-    read_outcomes: tuple[ReadAskOutcome, ...] = ()
+    yields: tuple[AskYield, ...] = ()
     empty_read: ReadAsk | None = None
     structured_ran: bool = False
     label_filtered: bool = False
@@ -3274,7 +3359,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
                 # made" and this one was.
                 reached=reach.read,
                 non_yield=None,
-                returned=len(reach.expansion),
+                records=reach.expansion,
             )
         if structured is not None and structured.structure is not None:
             # ADR-0240 §5: **fourth**, after the hop and ahead of the query — the
@@ -3379,7 +3464,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # servicing that failed or was partial carries none, which is §2's
             # precedence case 1 and ADR-0226 §5's all-or-nothing posture reaching
             # this carrier exactly as it reaches the records and the counts.
-            read_outcomes=classified,
+            yields=classified,
             # ADR-0240 §8 keys the emptiness fact on the turn's last **structured
             # read**, not on its last servicing, so the loop needs to know whether this
             # servicing performed one at all — a servicing whose request carried none,

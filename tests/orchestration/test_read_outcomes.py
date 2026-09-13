@@ -421,12 +421,20 @@ def _facts(
     admitted: int = 0,
     certified: bool = True,
 ) -> AskFacts:
-    """One ask's four facts, defaulted to a completed read that returned nothing."""
+    """One ask's four facts, defaulted to a completed read that returned nothing.
+
+    ``returned`` is spelled as a count here and carried on the value as the records
+    themselves (ADR-0252 §3): the classifier reads the figure, which ``AskFacts``
+    derives from the sequence, so a helper that kept the two apart would let a test
+    assert a classification over a count no records back.
+    """
     return AskFacts(
         ask=_query_ask(),
         reached=reached,
         non_yield=non_yield,  # type: ignore[arg-type]
-        returned=returned,
+        records=tuple(
+            _citing(f"returned-{one}", "a returned record", evidence=()) for one in range(returned)
+        ),
         admitted=admitted,
         certified=certified,
     )

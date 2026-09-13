@@ -136,6 +136,7 @@ from ai_assistant.core.types import (
     GoalAttempt,
     GoalDisambiguation,
     GoalEngagement,
+    GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
     GoalRevision,
@@ -196,6 +197,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     notification_is_speakable,
 )
+from ai_assistant.orchestration.evidence import refresh_set
 from ai_assistant.orchestration.goals import (
     GoalFacts,
     RaisedSubject,
@@ -8672,6 +8674,45 @@ class Engine:
             recorded=record.revisions,
         )
 
+    async def _record_evidence(self, rows: Sequence[GoalEvidence]) -> None:
+        """Write this turn's evidence rows, each with the set it refreshes (ADR-0252).
+
+        **The loop composes and this writes**, which is ADR-0249 §11's site and
+        ADR-0252 §14's writer clause together: every value of a row is
+        ``orchestration``'s, written from the injected clock, the injected id factory,
+        the typed outcomes of a servicing and the values a store returned — and the loop
+        holds no ``PlanStore``, so the write is here, after the goal
+        (:meth:`_save_goal`), the plans and the attempt. ``record_evidence`` refuses a
+        row whose ``goal_id`` the store does not hold, and a row names the attempt that
+        recorded it, so it follows both.
+
+        **The refresh set is computed per row against the history the store holds at
+        that write, and the predicate is stated once**
+        (:func:`~ai_assistant.orchestration.evidence.refresh_set`). §12 puts the
+        predicate in ``orchestration`` and the atomicity in the store — "a store that
+        evaluated the refresh test would be a second place the rule lives" — and it puts
+        the two acts in one indivisible step: the row is appended and every row it
+        refreshes is marked ``SUPERSEDED`` with ``superseded_by`` set, in one write.
+
+        **The history is re-read per row rather than modelled**, and that is the whole
+        reason this loop is a loop. A write applies its marks and then §13's elision,
+        which drops by age and may drop a row an *earlier* row of this same turn
+        refreshed — so a set computed once, against the history as it stood before the
+        turn's first write, could name a row the store no longer holds as ``STANDING``
+        and ``record_evidence`` would refuse the **whole call**. Reading again is exact
+        and restates §13 nowhere: the store stays the one authority on which rows it
+        holds, and this asks it.
+
+        Args:
+            rows: The rows the loop composed, in the order it composed them.
+
+        Raises:
+            PlanningError: As ``record_evidence`` raises it.
+        """
+        for row in rows:
+            history = await self._plans.evidence_of(row.goal_id)
+            await self._plans.record_evidence(row, supersedes=refresh_set(row, history.rows))
+
     async def _persist_attempt(
         self,
         opened: OpenedAttempt | None,
@@ -10000,6 +10041,15 @@ class Engine:
             # §8: the one text `GoalBrief.open_questions` ever carries, read from the
             # store here because the loop holds none (ADR-0249 §11).
             open_question=association.open_question,
+            # ADR-0252 §11: this goal's evidence rows, read here for the reason
+            # `open_question` is read here — the loop holds no `PlanStore` (ADR-0249
+            # §11) and acquires none for it. `()` on a turn that opens its goal, which
+            # has no history to hold and no row for an `E` label to name.
+            evidence=(
+                ()
+                if association.goal is None
+                else (await self._plans.evidence_of(association.goal.id)).rows
+            ),
             charge=None if association.attempt is None else charge,
         )
         # ADR-0249 §5's ledger: when this pass's **remaining** work began. The turn
@@ -10115,6 +10165,9 @@ class Engine:
             attempt = await self._persist_attempt(
                 attempt, association=association, plans=plans, charged=charged
             )
+            # ADR-0252 §14: one row per outcome entry this turn's servicings produced,
+            # written after the goal the row names and the attempt that recorded it.
+            await self._record_evidence(responded.evidence)
             clarification = await self._raise(
                 raised, record=goal_record, opened=attempt, instants=instants
             )
@@ -10240,6 +10293,10 @@ class Engine:
             attempt = await self._persist_attempt(
                 attempt, association=association, plans=plans, charged=charged
             )
+            # ADR-0252 §14, as on the undriven branch: one row per outcome entry, and
+            # written before anything is driven — a step that acts must not be able to
+            # leave the record of what its turn read unwritten.
+            await self._record_evidence(responded.evidence)
             # ADR-0249 §6: `AUTHORIZE` is stamped before the step is driven, because the
             # permission decision the runner takes is that phase's work — and it is
             # stamped whether or not a decision is reached, since §6 makes the six
