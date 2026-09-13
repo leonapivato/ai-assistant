@@ -127,13 +127,14 @@ over "one more way to fail to resolve" rather than a second check here.
 from __future__ import annotations
 
 import json
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, NamedTuple, assert_never
 
 import structlog
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
@@ -1204,13 +1205,13 @@ Name a step by its 1-based position in your own `steps` list — the first is 1,
 the second is 2 — never by an id, and only ever a step EARLIER than the one \
 naming it:
 
- {"intent": "<as above>", "capability": "<as above>", "parameters": {},
-  "after": [1],
-  "resolves": [{"parameter": "<argument of THIS step this fills>",
-                "source": {"step": 1, "field": "<key of that step's output>"}}],
-  "verifies": {"kind": "field_present", "field": "<key of THIS step's output>"},
-  "evidence_recency": "PT15M",
-  "when": [{"about": "D1", "basis": "interpretation", "requires": "qualifies"}]}
+  {"intent": "<as above>", "capability": "<as above>", "parameters": {},
+   "after": [1],
+   "resolves": [{"parameter": "<argument of THIS step this fills>",
+                 "source": {"step": 1, "field": "<key of that step's output>"}}],
+   "verifies": {"kind": "field_present", "field": "<key of THIS step's output>"},
+   "evidence_recency": "PT15M",
+   "when": [{"about": "D1", "basis": "interpretation", "requires": "qualifies"}]}
 
 `after` is the steps this one waits on: it runs only once each of them has \
 succeeded. Leave it out where the step waits on nothing — an omitted `after` \
@@ -1675,6 +1676,10 @@ class ModelBackedPlanner:
         # Deep, so nothing nested stays shared with the caller's instance; a
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
+        # ADR-0253 §9: this module rendered the ``M`` labels, so this module resolves
+        # them, "against the very sequence it was passed on that call" — read once,
+        # before the first ``await``, exactly as the prompt's copy of it is.
+        supply = tuple(memories)
         shown = tuple(files)
         asked = tuple(read_outcomes)
         # ADR-0240 §9's gate, computed over the sequence this call was passed and read
@@ -1707,7 +1712,7 @@ class ModelBackedPlanner:
         for _ in range(self._max_attempts):
             reply = await self._model.complete(conversation)
             try:
-                return self._build_output(reply.content, snapshot)
+                return self._build_output(reply.content, snapshot, supply)
             except _ExtractionError as exc:
                 last_error = exc
                 conversation.append(reply)
@@ -1725,7 +1730,9 @@ class ModelBackedPlanner:
         msg = f"the model did not return a usable plan for goal {snapshot.goal_id}: {last_error}"
         raise PlanningError(msg)
 
-    def _build_output(self, content: str, goal: GoalBrief) -> PlannerOutput:
+    def _build_output(
+        self, content: str, goal: GoalBrief, memories: Sequence[MemoryRecord]
+    ) -> PlannerOutput:
         """Extract one model reply into a frozen plan and what it understood.
 
         A **decline** — an empty ``steps`` list carrying the ``no_capability_needed``
@@ -1761,6 +1768,23 @@ class ModelBackedPlanner:
         ADR-0047 §4's own specific verdict — no ``steps`` list, an empty plan — rather
         than a complaint about a member of a shape it never sent.
 
+        **ADR-0253 §8's ``interpretations`` is read the same explicit way** and for
+        the same reason one level out: an ``id``, a ``verdict`` or a ``when`` a model
+        wrote on one reaches nothing, because the payload
+        :meth:`_plan_interpretations` builds carries four keys and the id in it is the
+        factory's. The two orderings that matter are ADR-0253's own: the steps are
+        read first, so every ordinal an interpretation's ``reads`` may name has an id
+        by the time it is resolved; and the plan is validated last, so §8's ordering
+        rule between a condition and its producing step is checked over the whole
+        value rather than over a half-built one.
+
+        Args:
+            content: The reply to read.
+            goal: The brief this call snapshotted, for the plan's ``goal_id``.
+            memories: The sequence this call was handed, against which ADR-0253 §8's
+                ``M`` labels resolve — the very sequence :func:`_render_request`
+                printed them from (§9).
+
         Raises:
             _ExtractionError: If the text is not one of the two legal envelopes, the
                 constructed plan fails a ``core`` invariant, or the ``understanding``
@@ -1770,7 +1794,22 @@ class ModelBackedPlanner:
         raw_steps = _require_steps(envelope)
         rationale = _optional_rationale(envelope) if raw_steps else _require_rationale(envelope)
 
-        step_payloads = [self._step_payload(raw, index) for index, raw in enumerate(raw_steps)]
+        # **The ids accumulate as the steps are read**, and ADR-0253 §1's
+        # backwards-only rule is what makes that sufficient: an ``after`` or a
+        # ``resolves`` may only name a step strictly earlier than the one naming it,
+        # so every ordinal a step can write has already been minted for by the time
+        # that step is read. An ``interpretations`` ``reads`` may name any step, and
+        # it is read after the loop below has finished.
+        step_payloads: list[PlanStep] = []
+        for index, raw in enumerate(raw_steps):
+            step_payloads.append(
+                self._step_payload(
+                    raw,
+                    index,
+                    ids=[step.id for step in step_payloads],
+                    total=len(raw_steps),
+                )
+            )
         try:
             plan = ActionPlan.model_validate(
                 {
@@ -1780,6 +1819,11 @@ class ModelBackedPlanner:
                     "created_at": self._now(),
                     "rationale": rationale,
                     "read_request": _optional_read_request(envelope),
+                    "interpretations": self._plan_interpretations(
+                        envelope,
+                        ids=[step.id for step in step_payloads],
+                        memories=memories,
+                    ),
                 }
             )
         except ValidationError as exc:
@@ -1787,16 +1831,44 @@ class ModelBackedPlanner:
             raise _ExtractionError(msg) from exc
         return PlannerOutput(plan=plan, understanding=_optional_understanding(envelope))
 
-    def _step_payload(self, raw: object, index: int) -> PlanStep:
+    def _step_payload(self, raw: object, index: int, *, ids: Sequence[str], total: int) -> PlanStep:
         """Validate one raw step object into a ``PlanStep`` with a minted id.
+
+        **ADR-0253 §9's five keys are :func:`_step_shape`'s and each is optional.** A
+        step carrying none of them validates into exactly the ``PlanStep`` this
+        method built before that decision — ``depends_on``, ``resolves`` and ``when``
+        empty, ``verifies`` and ``evidence_recency`` absent — which is §12's "it
+        changes no behaviour of a plan that declares none of the new keys" held at
+        the one site that could break it.
+
+        **A model-supplied step id is refused rather than stepped over** (§1, §9).
+        "No step identifier is rendered to a model and none is accepted from one",
+        and the prompt has said so since ADR-0176 — so an envelope carrying one is a
+        reply that ignored an instruction about the one field the factory owns, and
+        silently discarding it would leave the model no signal that its dependency
+        spelling is not the one this seam reads.
+
+        Args:
+            raw: The step object the envelope carried.
+            index: Its 0-based position, for the refusal messages this method already
+                phrased that way.
+            ids: The ids minted for the steps **before** this one, in envelope order,
+                which is what an ``after`` or a ``resolves`` ordinal resolves against.
+                §1's backwards-only rule is what makes that sequence sufficient.
+            total: How many steps the envelope carries, for the out-of-range refusal.
 
         Raises:
             _ExtractionError: If the step is not an object with the required
-                fields, or fails a ``PlanStep`` invariant (e.g. a blank
-                capability, or non-serialisable parameters).
+                fields, carries an ``id``, names a step position §1 refuses, or
+                fails a ``PlanStep`` invariant (e.g. a blank capability, or
+                non-serialisable parameters).
         """
         if not isinstance(raw, dict):
             msg = f"step {index} is not a JSON object"
+            raise _ExtractionError(msg)
+
+        if "id" in raw:
+            msg = f"step {index} carries an 'id'; step ids are assigned downstream"
             raise _ExtractionError(msg)
 
         intent = raw.get("intent")
@@ -1813,18 +1885,520 @@ class ModelBackedPlanner:
             msg = f"step {index} has non-object 'parameters'"
             raise _ExtractionError(msg)
 
+        payload: dict[str, object] = {
+            "id": self._id_factory(),
+            "intent": intent,
+            "capability": capability,
+            "parameters": parameters,
+        } | _step_shape(raw, ids=ids, ordinal=index + 1, total=total)
+
         try:
-            return PlanStep.model_validate(
-                {
-                    "id": self._id_factory(),
-                    "intent": intent,
-                    "capability": capability,
-                    "parameters": parameters,
-                }
-            )
+            return PlanStep.model_validate(payload)
         except ValidationError as exc:
             msg = f"step {index} is not a valid PlanStep: {exc}"
             raise _ExtractionError(msg) from exc
+
+    def _plan_interpretations(
+        self,
+        envelope: dict[str, object],
+        *,
+        ids: Sequence[str],
+        memories: Sequence[MemoryRecord],
+    ) -> list[dict[str, object]]:
+        """ADR-0253 §8's ``interpretations``, read into validatable payloads.
+
+        **An interpretation is not a step** (§8): it is not selected against the
+        capability vocabulary, not resolved to a tool, not ruled on and never reaches
+        an ``ExecutionState``. What it is at this seam is four values — an id this
+        method mints, the condition label the loop will substitute, and exactly one
+        of a resolved record id and a resolved step-output reference.
+
+        **``settles`` crosses as the model wrote it**, for :func:`_step_conditions`'
+        reason: §9 gives the condition label to the loop, "once … and the planner
+        never does", and §8 adds that the validator compares an ``about`` with a
+        ``settles`` by equality with "both always in the same state" — so resolving
+        one of them here would put the two sides of that comparison out of step.
+
+        **``record`` and ``reads`` are each resolved, and neither is defaulted.**
+        ``PlanInterpretation`` requires exactly one of them, so an entry carrying
+        neither and one carrying both are each refused by the type; what this method
+        owes is that a label it does resolve is a label of the sequence this call
+        rendered (§8), and that a ``reads`` names a step of this envelope.
+
+        **Four keys and no more**, so an ``id``, a ``verdict``, a ``when`` or a
+        ``verifies`` a model wrote beside them reaches nothing — §8 gives an
+        interpretation no ``when`` and no ``verifies``, and "its eligibility is its
+        input's availability and nothing else".
+
+        Args:
+            envelope: The decoded model envelope.
+            ids: The ids minted for **every** step of this envelope, in order — a
+                ``reads`` may name any step of the plan, since the ordering rule §8
+                states is between a *condition* and a producing step and is
+                ``ActionPlan``'s to enforce.
+            memories: The sequence this call was handed and rendered.
+
+        Returns:
+            One payload per entry, in the order the model wrote them.
+
+        Raises:
+            _ExtractionError: If ``interpretations`` is present and is not a list of
+                objects, or an entry names a record or a step that this call did not
+                render.
+        """
+        if "interpretations" not in envelope:
+            return []
+        raw = envelope["interpretations"]
+        if not isinstance(raw, list):
+            msg = "'interpretations' is present but is not a list"
+            raise _ExtractionError(msg)
+        payloads: list[dict[str, object]] = []
+        for index, entry in enumerate(raw, start=1):
+            if not isinstance(entry, dict):
+                msg = f"interpretation {index} is not a JSON object"
+                raise _ExtractionError(msg)
+            record = entry.get("record")
+            reads = entry.get("reads")
+            payloads.append(
+                {
+                    "id": self._id_factory(),
+                    "settles": entry.get("settles"),
+                    "record": None if record is None else _resolved_record(record, memories),
+                    "reads": None
+                    if reads is None
+                    else _output_ref(
+                        reads,
+                        ids=ids,
+                        ceiling=len(ids),
+                        total=len(ids),
+                        what=f"interpretation {index}'s 'reads'",
+                    ),
+                }
+            )
+        return payloads
+
+
+#: ADR-0226 §3's record label, as this module renders it (:func:`_label`) and as
+#: :func:`_resolved_record` reads it back — the letter, then a 1-based ordinal in
+#: decimal with **no padding**, which the leading ``[1-9]`` is what refuses.
+#:
+#: **Nine digits, because a label is an index into one call's supply**, and a
+#: sequence that long is not one a prompt ever rendered; an unbounded pattern would
+#: let a model spend the parse on a number no sequence can reach.
+_MEMORY_LABEL: Final = re.compile(r"M[1-9][0-9]{0,8}")
+
+#: ADR-0253 §9's ``evidence_recency``, read as the one form that section admits.
+#:
+#: A ``TypeAdapter`` rather than the field's own coercion, and guarded by the
+#: ``"P"`` test at :func:`_iso_duration`, because pydantic reads a bare number as
+#: **seconds** and reads ``"1 day, 0:00:00"`` and ``"00:15:00"`` as durations too —
+#: so ``{"evidence_recency": 900}`` would become fifteen minutes by a route §9
+#: forbids in terms: "a value that is not one … is an extraction failure for that
+#: envelope rather than a figure rounded, clamped or defaulted into range".
+_DURATION: Final = TypeAdapter(timedelta)
+
+
+def _step_shape(
+    raw: dict[str, object], *, ids: Sequence[str], ordinal: int, total: int
+) -> dict[str, object]:
+    """ADR-0253 §9's five optional step keys, read into ``PlanStep`` payload entries.
+
+    **A key the envelope does not carry produces no entry**, so an absent one is
+    literally the field's own default rather than a value this function chose — which
+    is what §12's "it changes no behaviour of a plan that declares none of the new
+    keys" asks of the one site that reads them.
+
+    **A member written as ``null`` is refused where it takes a list and admitted where
+    the field itself takes ``None``.** ``after``, ``resolves`` and ``when`` are tuples
+    whose empty value is a *statement* — no dependency, no reference, no condition —
+    so a malformed member coerced into it would be §1's dropped edge arriving by
+    another route, which that section refuses in terms and for which
+    :func:`_proposed_elements` is this module's precedent. ``verifies`` and
+    ``evidence_recency`` are ``X | None`` fields on which ``None`` is the declared
+    value of *none declared* (§4, §5), so a model spelling it out has written a legal
+    value and is not sent to a repair round for saying so.
+
+    Args:
+        raw: The step object the envelope carried.
+        ids: The ids minted for the steps before this one, in envelope order.
+        ordinal: This step's own 1-based position.
+        total: How many steps the envelope carries.
+
+    Returns:
+        The entries to lay over the step's payload, which is empty for every step
+        that declares none of the five.
+
+    Raises:
+        _ExtractionError: For each refusal §§1, 4, 5, 6 and 9 state over these keys.
+    """
+    shape: dict[str, object] = {}
+    if "after" in raw:
+        shape["depends_on"] = _step_after(raw["after"], ids=ids, ordinal=ordinal, total=total)
+    if "resolves" in raw:
+        shape["resolves"] = _step_resolves(raw["resolves"], ids=ids, ordinal=ordinal, total=total)
+    if "when" in raw:
+        shape["when"] = _step_conditions(raw["when"], ordinal=ordinal)
+    if raw.get("verifies") is not None:
+        shape["verifies"] = _step_verifies(raw["verifies"], ordinal=ordinal)
+    if raw.get("evidence_recency") is not None:
+        shape["evidence_recency"] = _iso_duration(raw["evidence_recency"], ordinal=ordinal)
+    return shape
+
+
+def _step_ordinal(value: object, *, ceiling: int, total: int, what: str) -> int:
+    """One step ordinal, with ADR-0253 §1's five refusals (§6, §8, §9).
+
+    "Every value a model writes in any of them is an ordinal or a label of something
+    rendered or returned on that call" (§9), and the **step ordinal** — "a step's
+    1-based position in the envelope's own ``steps`` list" — is the space ``after``,
+    a ``resolves`` entry's producing step and an interpretation's ``reads`` all
+    index, "with §1's refusals binding all three".
+
+    **Each refusal is an extraction failure and never a dropped edge** (§1). A step's
+    dependency is "an edge of a graph the rest of the plan is stated over: dropping
+    it turns *book only after the cancellation succeeded* into *book*, which is not a
+    smaller plan but a different and more dangerous one" — so the envelope is refused
+    and ADR-0047 §6's existing repair round is what answers it.
+
+    ``bool`` is refused with the rest of the non-integers: it is an ``int`` in Python
+    and ``True`` would otherwise resolve to the first step.
+
+    Args:
+        value: What the model wrote at that position.
+        ceiling: The highest ordinal this site admits — the declaring step's own
+            ordinal minus one where the site is a dependency, so that "not strictly
+            less than the declaring step's own ordinal" is refused and a cycle has no
+            spelling (§1); ``total`` where the site is an interpretation's ``reads``,
+            which declares no step of its own.
+        total: How many steps the envelope carries, for the out-of-range refusal and
+            for the message.
+        what: Which site this is, for the repair turn.
+
+    Returns:
+        The ordinal, 1-based.
+
+    Raises:
+        _ExtractionError: For each of §1's refusals but the repeat, which is the
+            caller's because it is a property of a list rather than of one member.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = (
+            f"{what} is {value!r}: a step is named by its 1-based position in "
+            f"'steps', as an integer"
+        )
+        raise _ExtractionError(msg)
+    if value < 1:
+        msg = f"{what} is {value}: a step's position is 1 or more"
+        raise _ExtractionError(msg)
+    if value > total:
+        msg = f"{what} is {value}, and this reply carries {total} step(s)"
+        raise _ExtractionError(msg)
+    if value > ceiling:
+        msg = f"{what} is {value}: a step may only name a step earlier than itself"
+        raise _ExtractionError(msg)
+    return value
+
+
+def _output_ref(
+    raw: object, *, ids: Sequence[str], ceiling: int, total: int, what: str
+) -> dict[str, object]:
+    """One ``StepOutputRef`` payload, with its producing step resolved (§6).
+
+    "It is the one spelling of *a place in a producing step's output*" (§6), so this
+    is the one reader of that shape: a ``resolves`` entry's ``source`` and an
+    interpretation's ``reads`` are the same three values read the same way.
+
+    **The ordinal is resolved here and the ``field`` is not touched.** "The
+    implementation that mints the step ids resolves each ordinal to the id it minted
+    for the step at that position" (§1), and ``field`` is a key name whose depth is
+    one — "never a dotted expression, an index, a wildcard or a selector" (§6) — a
+    rule ``StepOutputRef`` states and this function does not restate. An absent
+    ``field`` means the whole output, which is the field's own default.
+
+    **Two keys and no more**, for :func:`_optional_understanding`'s reason: a value a
+    model wrote beside them reaches nothing, so no key it invents can survive into a
+    durable plan.
+
+    Args:
+        raw: What the envelope carried at that position.
+        ids: The ids minted for the steps this ordinal may name, in envelope order.
+        ceiling: The highest ordinal this site admits.
+        total: How many steps the envelope carries.
+        what: Which site this is, for the repair turn.
+
+    Returns:
+        A payload ``StepOutputRef`` can validate.
+
+    Raises:
+        _ExtractionError: If the reference is not an object, or its ``step`` is not
+            an ordinal this site admits.
+    """
+    if not isinstance(raw, dict):
+        msg = f"{what} is not a JSON object"
+        raise _ExtractionError(msg)
+    ordinal = _step_ordinal(raw.get("step"), ceiling=ceiling, total=total, what=f"{what}'s 'step'")
+    return {"step": ids[ordinal - 1], "field": raw.get("field")}
+
+
+def _step_after(raw: object, *, ids: Sequence[str], ordinal: int, total: int) -> list[str]:
+    """``after`` read into ADR-0253 §1's ``depends_on`` (§9).
+
+    The envelope's key is ``after`` and the field is ``depends_on``: the model names
+    positions, the ``PlanStep`` carries ids, and "no step identifier is rendered to a
+    model and none is accepted from one" is what the two spellings keep apart
+    (ADR-0228 §8).
+
+    **A repeat is refused here** rather than at ``ActionPlan``, which refuses it too:
+    §1 makes "repeats another ordinal of the same list" an extraction failure on the
+    envelope, and catching it before the ids are substituted is what lets the repair
+    turn name the position the model actually wrote.
+
+    Args:
+        raw: The ``after`` the step carried.
+        ids: The ids minted for every step of this envelope so far, in order.
+        ordinal: The declaring step's own 1-based position.
+        total: How many steps the envelope carries.
+
+    Returns:
+        The producing steps' ids, in the order the model named them.
+
+    Raises:
+        _ExtractionError: If ``after`` is not a list, or any member is not an ordinal
+            §1 admits, or two members are the same.
+    """
+    if not isinstance(raw, list):
+        msg = f"the step at position {ordinal} has an 'after' that is not a list of step positions"
+        raise _ExtractionError(msg)
+    seen: list[int] = []
+    for entry in raw:
+        wanted = _step_ordinal(
+            entry,
+            ceiling=ordinal - 1,
+            total=total,
+            what=f"an entry of the step at position {ordinal}'s 'after'",
+        )
+        if wanted in seen:
+            msg = f"the step at position {ordinal} names step {wanted} twice in 'after'"
+            raise _ExtractionError(msg)
+        seen.append(wanted)
+    return [ids[wanted - 1] for wanted in seen]
+
+
+def _step_resolves(
+    raw: object, *, ids: Sequence[str], ordinal: int, total: int
+) -> list[dict[str, object]]:
+    """``resolves`` read into ADR-0253 §6's ``ResultReference`` payloads.
+
+    **Two keys per entry and no more**, so a ``value``, a ``default`` or a
+    ``template`` a model wrote beside them reaches nothing — "there is no
+    substitution language" (§6), and the shape a model can emit is the shape the
+    engine resolves.
+
+    **The three refusals ``ActionPlan`` states are not restated here** (§6): a
+    ``source.step`` outside the declaring step's ``depends_on``, a ``parameter`` that
+    is already a key of that step's ``parameters``, and two references naming one
+    ``parameter`` each make the plan unconstructible, and the type is the authority on
+    all three. What this function owns is the ordinal, which the type cannot check
+    because by then it is an id.
+
+    Args:
+        raw: The ``resolves`` the step carried.
+        ids: The ids minted for every step of this envelope so far, in order.
+        ordinal: The declaring step's own 1-based position.
+        total: How many steps the envelope carries.
+
+    Returns:
+        One payload per entry, in the order the model wrote them.
+
+    Raises:
+        _ExtractionError: If ``resolves`` is not a list of objects, or an entry's
+            ``source`` is not a reference to an earlier step of this envelope.
+    """
+    if not isinstance(raw, list):
+        msg = f"the step at position {ordinal} has a 'resolves' that is not a list"
+        raise _ExtractionError(msg)
+    payloads: list[dict[str, object]] = []
+    for index, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            msg = (
+                f"entry {index} of the step at position {ordinal}'s 'resolves' is not a JSON object"
+            )
+            raise _ExtractionError(msg)
+        payloads.append(
+            {
+                "parameter": entry.get("parameter"),
+                "source": _output_ref(
+                    entry.get("source"),
+                    ids=ids,
+                    ceiling=ordinal - 1,
+                    total=total,
+                    what=f"entry {index} of the step at position {ordinal}'s 'resolves'",
+                ),
+            }
+        )
+    return payloads
+
+
+def _step_conditions(raw: object, *, ordinal: int) -> list[dict[str, object]]:
+    """``when`` read into ADR-0253 §5's ``StepCondition`` payloads.
+
+    **``about`` crosses as the model wrote it** and is not resolved here: §9 fixes
+    that "the loop resolves the label, once, and the planner never does", because the
+    element ids it resolves to are minted by ``orchestration`` a moment after this
+    call returns. A planner that resolved its own labels could not express a
+    condition on a proposition the same reply proposes, which §9 says is "the
+    ordinary shape of *book only if the forecast qualifies* rather than an exotic
+    one".
+
+    **Four keys and no more, and every vocabulary is the type's to police** (§9). A
+    ``basis``, a ``requires`` and a ``read_kind`` outside their enumerations are
+    extraction failures because ``StepCondition`` refuses them — "never coerced,
+    case-folded, aliased or repaired into a member" — and which of them each basis
+    admits is that model's validator rather than a rule restated here.
+
+    Args:
+        raw: The ``when`` the step carried.
+        ordinal: The declaring step's own 1-based position, for the repair turn.
+
+    Returns:
+        One payload per entry, in the order the model wrote them.
+
+    Raises:
+        _ExtractionError: If ``when`` is not a list of JSON objects.
+    """
+    if not isinstance(raw, list):
+        msg = f"the step at position {ordinal} has a 'when' that is not a list of conditions"
+        raise _ExtractionError(msg)
+    payloads: list[dict[str, object]] = []
+    for index, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            msg = f"entry {index} of the step at position {ordinal}'s 'when' is not a JSON object"
+            raise _ExtractionError(msg)
+        payloads.append(
+            {
+                "about": entry.get("about"),
+                "basis": entry.get("basis"),
+                "requires": entry.get("requires"),
+                "read_kind": entry.get("read_kind"),
+            }
+        )
+    return payloads
+
+
+def _step_verifies(raw: object, *, ordinal: int) -> dict[str, object]:
+    """``verifies`` read into ADR-0253 §4's ``StepVerification`` payload.
+
+    **Three keys and no more**, and which combination of them each ``kind`` takes is
+    ``StepVerification``'s own validator: "the kind and the arguments it takes travel
+    together or the value does not construct" (§4). An absent ``equals`` and an
+    explicit ``null`` are one state here, and deliberately: §4 rules that a
+    ``FIELD_EQUALS`` "may carry a JSON ``null`` only in the sense that ``null`` is
+    not a legal ``equals`` at all", so there is no second meaning for this function
+    to keep apart.
+
+    Args:
+        raw: The ``verifies`` the step carried.
+        ordinal: The declaring step's own 1-based position, for the repair turn.
+
+    Returns:
+        A payload ``StepVerification`` can validate.
+
+    Raises:
+        _ExtractionError: If ``verifies`` is not a JSON object.
+    """
+    if not isinstance(raw, dict):
+        msg = f"the step at position {ordinal} has a 'verifies' that is not a JSON object"
+        raise _ExtractionError(msg)
+    return {"kind": raw.get("kind"), "field": raw.get("field"), "equals": raw.get("equals")}
+
+
+def _iso_duration(value: object, *, ordinal: int) -> timedelta:
+    """``evidence_recency`` read as the ISO-8601 duration ADR-0253 §9 fixes.
+
+    "``evidence_recency`` crosses as an ISO-8601 duration string, and a value that is
+    not one, or that is not strictly positive, is an extraction failure for that
+    envelope rather than a figure rounded, clamped or defaulted into range."
+
+    **The form is decided here and the bound is the field's**, which is
+    :func:`_iso_instant`'s division one field over. The leading ``P`` is what carries
+    the form: pydantic reads a bare number as *seconds*, reads ``"00:15:00"`` and
+    ``"1 day, 0:00:00"`` as durations, and reads ``"-PT5M"`` as a negative one — so
+    ``{"evidence_recency": 900}`` would otherwise become fifteen minutes by a route
+    §9 refuses, and a negative would reach a field whose ``gt`` would then report a
+    bound rather than a form. What survives the test is judged by
+    ``PlanStep.evidence_recency``'s own ``gt=timedelta(0)``, so ``"PT0S"`` is refused
+    as the zero it is.
+
+    Args:
+        value: What the model wrote at ``evidence_recency``.
+        ordinal: The declaring step's own 1-based position, for the repair turn.
+
+    Returns:
+        The duration it names.
+
+    Raises:
+        _ExtractionError: If it is not an ISO-8601 duration string.
+    """
+    if not isinstance(value, str) or not value.startswith("P"):
+        msg = (
+            f"the step at position {ordinal} has an 'evidence_recency' of {value!r}: "
+            f"it is an ISO-8601 duration written as a string, such as 'PT15M'"
+        )
+        raise _ExtractionError(msg)
+    try:
+        return _DURATION.validate_python(value)
+    except ValidationError as exc:
+        msg = (
+            f"the step at position {ordinal} has an 'evidence_recency' of {value!r}, "
+            f"which is not a readable ISO-8601 duration: {exc}"
+        )
+        raise _ExtractionError(msg) from exc
+
+
+def _resolved_record(label: object, memories: Sequence[MemoryRecord]) -> str:
+    """One interpretation's ``record`` label, resolved against this call's supply.
+
+    ADR-0253 §8's scheme is ADR-0226 §3's unchanged — "a ``record`` crosses as a
+    label of the ``memories`` sequence rendered on that call … ``M`` followed by the
+    record's 1-based index" — and §9 puts the resolution here: "a step's ordinal and
+    an ``M`` label are resolved by the implementation that rendered them, against the
+    very sequence it was passed on that call". This module rendered them
+    (:func:`_label`), so this module reads them back, **against its own copy and
+    against nothing shared**: ADR-0226 §10 forbids any value crossing the two
+    packages other than the ``memories`` sequence and the plan, so the loop's
+    resolver and this one are two readings of one published scheme rather than one
+    private protocol.
+
+    **A label outside the shown range is an extraction failure** (§8), which is a
+    disposal this label space does not otherwise take: ADR-0226 §3 has an invented
+    ``read_request`` label resolve to nothing and cost the turn one read. Here it is
+    the input of an interpretation the plan will be validated around, so §8 puts it
+    "on §1's footing" — refused, and answered by the repair round.
+
+    Args:
+        label: What the envelope carried at ``record``.
+        memories: The sequence this call was handed and rendered.
+
+    Returns:
+        The record's identifier.
+
+    Raises:
+        _ExtractionError: If the value is not a label of this call's supply.
+    """
+    if not isinstance(label, str) or _MEMORY_LABEL.fullmatch(label) is None:
+        msg = (
+            f"an interpretation's 'record' is {label!r}: it is a memory label "
+            f"printed in the request, such as 'M2'"
+        )
+        raise _ExtractionError(msg)
+    ordinal = int(label[1:])
+    if ordinal > len(memories):
+        msg = (
+            f"an interpretation names record {label}, and this request printed "
+            f"{len(memories)} memor{'y' if len(memories) == 1 else 'ies'}"
+        )
+        raise _ExtractionError(msg)
+    return memories[ordinal - 1].id
 
 
 def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstanding | None:
@@ -1979,13 +2553,22 @@ def _proposed_question(entry: object) -> object:
 def _proposed_elements(understanding: dict[str, object], member: str) -> list[dict[str, object]]:
     """One of ADR-0249 §7's three element tuples, read into validatable payloads.
 
-    Each entry becomes an explicit **five**-key mapping — ``text``, ``ground``,
-    ``evidence_label``, ``span``, ``retains`` — for :func:`_optional_understanding`'s
-    reason: a key this function does not read reaches nothing, so a ground
-    *reference* a model wrote beside its label is discarded structurally. Which of
-    §7's four shapes the five keys make is
+    Each entry becomes an explicit **nine**-key mapping — ``text``, ``ground``,
+    ``evidence_label``, ``span``, ``retains`` and ADR-0253 §7's four applicability
+    axes — for :func:`_optional_understanding`'s reason: a key this function does not
+    read reaches nothing, so a ground *reference* a model wrote beside its label is
+    discarded structurally. Which of §7's four shapes those keys make is
     :class:`~ai_assistant.core.types.ProposedElement`'s to decide and is not
-    anticipated here.
+    anticipated here — including that a **retaining** element carries ``retains``
+    alone and none of the four axes (ADR-0253 §7).
+
+    **The four axes are read because "the planner proposes the applicability and
+    ``orchestration`` records it"** (ADR-0253 §7). They are the operands ADR-0252 §9's
+    invalidation predicate compares and the region ADR-0252 §6 test 1 requires a row
+    to cover, and an element that proposes none is a legal element imposing no
+    coverage requirement. The three sequence axes cross as written and the window is
+    composed by :func:`_proposed_window`, which is where §7's malformed-versus-absent
+    distinction is kept.
 
     **An absent member and an explicit ``null`` are different replies, and this reads
     the mapping rather than the value in order to tell them apart.** An absent member
@@ -2026,9 +2609,65 @@ def _proposed_elements(understanding: dict[str, object], member: str) -> list[di
                 "evidence_label": entry.get("evidence_label"),
                 "span": entry.get("span"),
                 "retains": entry.get("retains"),
+                "window": _proposed_window(entry, member=member, index=index),
+                "participants": entry.get("participants"),
+                "topics": entry.get("topics"),
+                "about_person": entry.get("about_person"),
             }
         )
     return payloads
+
+
+def _proposed_window(entry: dict[str, object], *, member: str, index: int) -> TimeWindow | None:
+    """ADR-0253 §7's window axis of one proposed element, or ``None``.
+
+    **Absent means the axis is not applied and present means it must compose**, which
+    is :func:`_structured_window`'s own division and §7's ruling word for word:
+    "declaring nothing and declaring something malformed are two different states, and
+    only the first records an absent applicability". A window "with both ends unset,
+    or … whose ``end`` is not strictly after its ``start``" is an extraction failure,
+    never an element recorded with no applicability — because that recording would
+    *widen* every condition later written against the element, and §7 names the cost:
+    "a reversed pair of instants would enable a dispatch the correct pair forbids".
+
+    **The instants are read as ISO-8601 and not left to the field's coercion**, which
+    is :func:`_iso_instant`'s argument unchanged: ``UtcInstant`` is annotated
+    ``datetime``, and pydantic reads ``"20260301"`` as a Unix timestamp in 1970 — an
+    interval the planner did not propose, which would then be the applicability a
+    durable element carries.
+
+    The three **sequence** axes need no function of their own: ``ProposedElement``
+    annotates each as a tuple whose members are non-blank, and L1's validator already
+    refuses an empty one — "an axis that does not compose an ``EvidenceApplicability``
+    is an extraction failure rather than an element with no applicability" — so
+    handing each value over as written is the type answering §7 rather than this
+    module answering it a second time.
+
+    Args:
+        entry: The element object the envelope carried.
+        member: Which of the three tuples it sits in, for the repair turn.
+        index: Its 0-based position in that tuple, for the repair turn.
+
+    Returns:
+        The interval the element proposes, or ``None`` where it proposes none.
+
+    Raises:
+        _ExtractionError: If ``window`` is present and does not compose one.
+    """
+    if entry.get("window") is None:
+        return None
+    raw = entry["window"]
+    where = f"'understanding.{member}[{index}]'"
+    if not isinstance(raw, dict):
+        msg = f"{where} has a 'window' that is not a JSON object"
+        raise _ExtractionError(msg, understanding=True)
+    try:
+        return TimeWindow.model_validate(
+            {end: _iso_instant(value) for end, value in raw.items() if end in ("start", "end")}
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        msg = f"{where} has a 'window' that is not a usable interval: {exc}"
+        raise _ExtractionError(msg, understanding=True) from exc
 
 
 def _optional_read_request(envelope: dict[str, object]) -> ReadRequest | None:
