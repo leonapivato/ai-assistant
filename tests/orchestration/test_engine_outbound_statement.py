@@ -24,7 +24,21 @@ from __future__ import annotations
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final, final
 
-from test_engine import AT, PATIENT, Harness
+from test_converse_spoken import _MP4, _recording
+from test_engine import (
+    AT,
+    EGRESS_SCHEMA,
+    PATIENT,
+    Harness,
+    OneStepPlanner,
+    bound_binder,
+)
+from test_engine import (
+    egress_confirmable as _egress_confirmable,
+)
+from test_engine import (
+    tool as _tool,
+)
 from test_engine_parked_reads import _ASKED, _Clock, _parked
 from test_engine_read_envelope import _AskingPlanner
 from test_engine_routing import _UTTERANCE as _ROUTED_PARK_UTTERANCE
@@ -38,6 +52,7 @@ from test_loop_search import (
 )
 
 from ai_assistant.core.types import (
+    Disposition,
     OutboundDestination,
     OutboundReach,
     ReadAnswerOutcome,
@@ -57,6 +72,7 @@ from ai_assistant.testing import (
     FakeParkedReads,
     FakeQueryComposer,
     FakeRecipientGrantStore,
+    FakeSpeechTranscriber,
     FakeStreamingCompleter,
     FakeWebSearcher,
     StreamAttempt,
@@ -83,13 +99,16 @@ _DENIAL: Final = "nothing was searched just now"
 class _Wired:
     """An engine over shared stores, with a search this deployment is configured for."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one knob per thing a case varies about the deployment: what the provider answers, whether a park can be written, whether the search is configured, the composing model, the planner and the tools; each is one fact and none is derivable from another
         self,
         *,
         results: Sequence[str] = ("a result about the bell tower",),
         parked: bool = False,
         configured: bool = True,
         model: FakeModelProvider | None = None,
+        planner: Any = None,
+        tools: tuple[Any, ...] = (),
+        one_id: bool = False,
     ) -> None:
         """Wire the real pipeline, optionally over a store that can hold a park.
 
@@ -105,12 +124,22 @@ class _Wired:
         clock = _Clock()
         grants = FakeRecipientGrantStore(now=clock)
         self.trail = FakeAuditTrail(recipient_grants=grants)
-        self.searcher = FakeWebSearcher(results=tuple(results))
+        # ``one_id`` mints every record of a response under **one** identifier, which is
+        # the shape §13 item 4 asks for: "two of them under one id, so ``records`` is
+        # what ``admitted_fourth_group`` admitted at the resume's own site and not what
+        # the call returned". ``SearchOutcome`` constrains neither identifier uniqueness
+        # nor record count (§4), so this is the seam's own latitude and not a state
+        # argued unreachable from the shipped searcher.
+        self.searcher = FakeWebSearcher(
+            results=tuple(results), id_factory=(lambda: "minted-1") if one_id else None
+        )
         self.parks = FakeParkedReads() if parked else None
         self.model = model
         harness = Harness(
             memory=FakeMemoryStore(now=clock),
-            planner=_AskingPlanner(_search(), rounds=1),
+            planner=_AskingPlanner(_search(), rounds=1) if planner is None else planner,
+            tools=tools,
+            binder=bound_binder(tools[0]) if tools else None,
             now=clock,
             search=SearchServicer(
                 composer=FakeQueryComposer(),
@@ -244,7 +273,16 @@ async def test_an_approved_park_carries_the_contact_its_dispatch_established() -
     together — "on ADR-0244 §7's resume the first two are two different sites and the
     engine is where they are brought together; no site recomputes another's fact".
     """
-    wired = _Wired(parked=True, configured=False)
+    wired = _Wired(
+        parked=True,
+        configured=False,
+        # **Two records under one id**, so the count discriminates: a lane reporting
+        # ``len(AnsweredRead.records)`` — what the *call* returned — reads ``2`` here,
+        # and only the resume's own admission reads ``1``. ADR-0226 §7's deduplication
+        # is over the whole union, which ``admitted_fourth_group`` states in terms.
+        results=("the bell tower is the Clérigos", "and it was finished in 1763"),
+        one_id=True,
+    )
     parked = await wired.engine.converse(_ASKED, timeout=PATIENT)
     assert parked.read_confirmation is not None
     assert parked.outbound_statement is not None
@@ -258,12 +296,15 @@ async def test_an_approved_park_carries_the_contact_its_dispatch_established() -
     )
 
     assert outcome.read_answer is ReadAnswerOutcome.DISPATCHED
+    assert len(wired.searcher.searched) == 1, "the resume's one call (ADR-0244 §7)"
     statement = _statement(outcome)
     assert statement.reach is OutboundReach.REACHED
     assert statement.destinations == (OutboundDestination.SEARCH_PROVIDER,)
-    assert statement.records == 1, "what the resume's own admission took in"
+    assert statement.records == 1, (
+        "the call returned two records under one id and the supply admitted one — a "
+        "lane reporting what the call returned reads 2 and fails here (ADR-0264 §4)"
+    )
     assert outcome.turn is not None
-    assert len(outcome.turn.memories) >= statement.records
 
 
 async def test_an_approved_park_whose_call_found_nothing_carries_a_contact_with_zero() -> None:
@@ -446,3 +487,225 @@ async def test_the_streaming_routed_pass_carries_it_on_the_terminal_outcome() ->
     assert statement.reach is OutboundReach.NOT_REACHED
     assert statement.destinations == ()
     assert statement.records == 0
+
+
+# --- §13 item 8 through the engine: the drive's fact, forwarded ---------------
+
+
+@final
+class _SearchingOneStepPlanner(OneStepPlanner):
+    """``OneStepPlanner`` that asks for a search on its **first** call of a turn.
+
+    §13 item 8's fold needs one turn that both reached the provider and drove a send,
+    and no planner in this tree produces that shape: ``OneStepPlanner`` drives a step
+    and asks for nothing, ``_AskingPlanner`` asks and drives nothing. Subclassed rather
+    than written out, so the plan is the one every other engine case is built on and the
+    two differ by ADR-0226 §4's one additive field.
+    """
+
+    def __init__(self, request: Any, **knobs: Any) -> None:
+        """Plan one step, and ask for ``request`` on the turn's opening call."""
+        super().__init__(**knobs)
+        self._request = request
+
+    async def plan(self, goal: Any, **knobs: Any) -> Any:
+        """Plan as the base does, with the read request on the first call of the turn."""
+        produced = await super().plan(goal, **knobs)
+        if knobs.get("read_outcomes"):
+            return produced
+        return produced.model_copy(
+            update={"plan": produced.plan.model_copy(update={"read_request": self._request})}
+        )
+
+
+def _egress_tool() -> Any:
+    """An egress declaration ``FakeActionPolicy`` allows outright.
+
+    ``discloses`` is empty, so the fake policy reaches ``ALLOW`` rather than the
+    ``CONFIRM`` ADR-0148 §8's second clause draws for a disclosing tool — which is what
+    makes the step *driven* rather than parked, and a parked step drives nothing.
+    """
+    return _tool("smtp", parameters_schema=EGRESS_SCHEMA)
+
+
+async def test_a_driven_egress_step_makes_the_turn_indeterminate_through_the_engine() -> None:
+    """§13 item 8's fold, at the engine — "the arm asserts each of those three turns".
+
+    A turn whose only outbound act was a send the executor reached the callable for
+    carries ``INDETERMINATE`` with ``destinations`` empty: §3 refuses the **contact**
+    and §2 equally refuses the **denial**, "because a turn that emailed somebody and was
+    told it reached nothing would be misled as badly as #2365's was".
+
+    **Asserted here and not only over the assembly**, because
+    :func:`~ai_assistant.orchestration.reads.outbound_statement` called with constructed
+    inputs cannot detect the engine dropping ``StepDisposition.outbound`` on the way to
+    it — which is the one wire between the stage that computes the fact and the value a
+    surface renders.
+    """
+    definition = _egress_tool()
+    harness = Harness(
+        memory=FakeMemoryStore(now=lambda: AT),
+        tools=(definition,),
+        binder=bound_binder(definition),
+    )
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.EXECUTED
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.INDETERMINATE
+    assert statement.destinations == (), "no class is named on a send's account (ADR-0264 §3)"
+    assert statement.records == 0
+
+
+async def test_a_turn_whose_step_was_not_an_outbound_act_reaches_nothing() -> None:
+    """§3: "A driven step establishes none, whatever its binding".
+
+    A non-egress call is not an outbound act at all, so it contributes nothing however
+    it ran and the turn answers ``NOT_REACHED`` on its own account — which is the
+    ``None`` branch of the same wire the arm above exercises, and the one a lane that
+    minted ``INDETERMINATE`` from ``Disposition.EXECUTED`` alone would get wrong.
+    """
+    harness = Harness(memory=FakeMemoryStore(now=lambda: AT), tools=(_tool(),))
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.EXECUTED
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.NOT_REACHED
+
+
+async def test_a_turn_that_searched_and_planned_a_send_parks_it_and_stays_reached() -> None:
+    """§2's fold at the engine, in the shape the pipeline actually reaches.
+
+    **A turn cannot both reach the provider and drive a send, and that is the
+    pipeline's own floor rather than a fixture's limit.** The search's minted record is
+    in the turn's supply when the step is bound, so the request carries
+    ``planned_with_external_content`` — and ADR-0181 §5's disclosure floor makes every
+    policy in this tree rule ``CONFIRM`` on it. So the step parks, contributes nothing,
+    and what the turn carries is its search's own contact.
+
+    That is the ``search=`` wire and the fold's identity element asserted together;
+    the ``egress=`` wire is asserted by the send-only turn above, which carries
+    ``INDETERMINATE`` to the outcome, and the **combination** — ``REACHED`` outranking a
+    reached callable's ``INDETERMINATE``, with the class still the search's — is
+    asserted over §6's own assembly in ``test_runner_outbound.py``, because no pass of
+    this pipeline produces it.
+    """
+    definition = _egress_tool()
+    wired = _Wired(planner=_SearchingOneStepPlanner(_search()), tools=(definition,))
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert wired.searcher.searched, "the turn reached the provider"
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION, (
+        "ADR-0181 §5's floor: a send planned over searched content is confirmed"
+    )
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.REACHED
+    assert statement.destinations == (OutboundDestination.SEARCH_PROVIDER,)
+    assert statement.records >= 1
+
+
+# --- §13 item 10's carrying half: a pass that composed no reply ---------------
+
+
+async def test_a_turn_that_reached_and_then_parked_its_step_carries_the_statement() -> None:
+    """§13 item 10's carrying half, and §6's no-fragment case, on one turn.
+
+    §6: "ADR-0170 §4 requires no composition on a pass whose step parked for
+    confirmation … On it the member is carried and §7's statement is rendered exactly as
+    that section fixes, and there is no fragment because there is nothing to give one
+    to — which is not a degradation, because the reply the fragment guards does not
+    exist."
+
+    §7 then fixes the asymmetry this arm is about: ``REACHED`` "reports an **act this
+    system performed**, which the user is owed whether or not prose was written". So the
+    member is carried here with no reply beside it, which is the shape §13 item 10 says
+    a **surface** must render — and the shape it could never be handed if this lane
+    nulled the member wherever composition produced nothing.
+    """
+    definition = _egress_confirmable()
+    wired = _Wired(planner=_SearchingOneStepPlanner(_search()), tools=(definition,))
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.confirmation is not None, "the step parked for confirmation"
+    assert outcome.reply is None, "ADR-0170 §4's first shape: no answer is owed"
+    assert outcome.reply_degraded is False, "and composing one did not fail — none was tried"
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.REACHED, "the search still reached the provider"
+    assert statement.destinations == (OutboundDestination.SEARCH_PROVIDER,)
+
+
+async def test_a_pass_whose_composition_degraded_still_carries_what_the_turn_did() -> None:
+    """§7's ``None`` rule does **not** reach a pass whose composition failed.
+
+    §7 makes the member ``None`` on "a **routed park** … and every other pass ADR-0170
+    §4 **composes nothing for** that established none", and §6 says which passes those
+    are in terms: "ADR-0170 §4 requires no composition on a pass whose step parked for
+    confirmation or whose ``turn`` is ``None``". A pass whose composition *failed*
+    reached the stage and is neither.
+
+    **Two further clauses settle it the same way.** §7 makes the outcome carry "the
+    value §6 computed, **by value, and never a second computation**", so deriving a
+    different value at the capture point from what the reply turned out to be is the one
+    thing that clause forbids — and the composing stage was handed the fragment for the
+    value this outcome carries, so a second derivation would leave the prompt and the
+    member disagreeing. And §13 item 10 states a failure mode for a **surface** — "one
+    that renders ``NOT_REACHED`` with no reply beside it fails it too" — which is only a
+    reachable failure if a pass with no reply can carry that member at all.
+
+    So the value is carried and the **rendering** asymmetry is the surface's rule, which
+    is where §11 puts it: every arm's assertions about a rendered statement are lane
+    2's.
+    """
+    wired = _Wired(results=(), model=FakeModelProvider(""))
+
+    outcome = await wired.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.reply is None
+    assert outcome.reply_degraded is True, "ADR-0170 §4's third shape, ADR-0173 §6's member"
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.REACHED, (
+        "the call reached the provider, and a model outage afterwards unmakes nothing"
+    )
+    assert statement.records == 0
+
+
+# --- §13 item 11's spoken half ------------------------------------------------
+
+
+async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> None:
+    """§13 item 11's spoken half: a carried member with no rendering there.
+
+    "The **spoken** one renders none, because ADR-0200 §4 makes ``spoken`` the rendering
+    of ``outcome.reply`` and of nothing else and §7 adds nothing to ``SpokenTurn`` — so
+    the arm asserts a carried member with no rendering there, which is this decision's
+    stated spoken cost and not a lane's omission."
+
+    §7 books that cost in terms: "**What is therefore not available on the spoken
+    surface is this decision's guarantee**, and that is a stated cost rather than a gap
+    (§12) … **This decision's title is bounded by that**: a reply cannot deny a contact
+    **on a surface that renders the statement**, and the spoken one does not."
+    """
+    harness = _routed_harness(
+        router=_names(RoutableOperation.RECENT_READS),
+        composing=_composing(FakeModelProvider("I looked at what has been read.")),
+        memory=FakeMemoryStore(now=lambda: AT),
+        transcriber=FakeSpeechTranscriber(transcripts=["what have you read lately"]),
+    )
+
+    spoken = await harness.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None, "a spoken pass that routed still returns an outcome"
+    assert spoken.outcome.routed is not None, "the route was taken on the spoken pass too"
+    statement = _statement(spoken.outcome)
+    assert statement.reach is OutboundReach.NOT_REACHED
+    assert not any(field.startswith("outbound") for field in type(spoken).model_fields), (
+        "ADR-0200 §4: SpokenTurn gains nothing, so the guarantee does not reach the ear"
+    )

@@ -296,23 +296,23 @@ def test_no_egress_outcome_overrides_the_turns_own_answer() -> None:
     reached."
     """
     unreached = outbound_statement(
-        search=OutboundReach.REACHED, egress=None, records=1, composed=True
+        search=OutboundReach.REACHED, egress=None, records=1, composes=True
     )
     assert unreached is not None
     assert unreached.reach is OutboundReach.REACHED
 
     beside_undetermined = outbound_statement(
-        search=OutboundReach.INDETERMINATE, egress=None, records=0, composed=True
+        search=OutboundReach.INDETERMINATE, egress=None, records=0, composes=True
     )
     assert beside_undetermined is not None
     assert beside_undetermined.reach is OutboundReach.INDETERMINATE
 
-    alone = outbound_statement(search=None, egress=None, records=0, composed=True)
+    alone = outbound_statement(search=None, egress=None, records=0, composes=True)
     assert alone is not None
     assert alone.reach is OutboundReach.NOT_REACHED
 
     reached_callable = outbound_statement(
-        search=OutboundReach.REACHED, egress=OutboundReach.INDETERMINATE, records=1, composed=True
+        search=OutboundReach.REACHED, egress=OutboundReach.INDETERMINATE, records=1, composes=True
     )
     assert reached_callable is not None
     assert reached_callable.reach is OutboundReach.REACHED
@@ -321,7 +321,7 @@ def test_no_egress_outcome_overrides_the_turns_own_answer() -> None:
     )
 
     send_alone = outbound_statement(
-        search=None, egress=OutboundReach.INDETERMINATE, records=0, composed=True
+        search=None, egress=OutboundReach.INDETERMINATE, records=0, composes=True
     )
     assert send_alone is not None
     assert send_alone.reach is OutboundReach.INDETERMINATE

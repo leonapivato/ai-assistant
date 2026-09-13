@@ -30,6 +30,8 @@ import structlog
 from test_closed_loop import _chosen_footing
 from test_loop_search import (
     _ASK,
+    _CONFIGURED_SEARCH,
+    _NOW,
     _RESULT,
     _REVISING,
     SettlesAfter,
@@ -50,6 +52,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     OutboundDestination,
     OutboundReach,
+    PermissionOutcome,
     ReadAsk,
     ReadKind,
     ReadRequest,
@@ -73,6 +76,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeModelProvider,
     FakePlanner,
+    FakeRecipientGrants,
     FakeStreamingCompleter,
     FakeWebSearcher,
 )
@@ -233,7 +237,7 @@ async def _prompt(responded: RespondedTurn) -> str:
             search=responded.outbound_reach,
             egress=None,
             records=responded.outbound_records,
-            composed=True,
+            composes=True,
         ),
     )
     [call] = model.calls
@@ -246,7 +250,7 @@ def _assembled(responded: RespondedTurn) -> Any:
         search=responded.outbound_reach,
         egress=None,
         records=responded.outbound_records,
-        composed=True,
+        composes=True,
     )
 
 
@@ -375,7 +379,7 @@ def test_a_turn_that_contributed_nothing_and_composed_carries_not_reached() -> N
     "It is likewise not ``None`` on an ordinary turn that reached nothing … which is the
     value #2365 needed and did not have."
     """
-    statement = outbound_statement(search=None, egress=None, records=0, composed=True)
+    statement = outbound_statement(search=None, egress=None, records=0, composes=True)
 
     assert statement is not None
     assert statement.reach is OutboundReach.NOT_REACHED
@@ -389,10 +393,10 @@ def test_a_pass_that_neither_reached_nor_composed_carries_nothing() -> None:
     "``outbound_statement`` is ``None`` on exactly the passes that **neither established
     a contact nor composed a reply**."
     """
-    assert outbound_statement(search=None, egress=None, records=0, composed=False) is None
+    assert outbound_statement(search=None, egress=None, records=0, composes=False) is None
     assert (
         outbound_statement(
-            search=None, egress=OutboundReach.INDETERMINATE, records=0, composed=False
+            search=None, egress=OutboundReach.INDETERMINATE, records=0, composes=False
         )
         is None
     ), "an INDETERMINATE send established no contact, so a pass composing none carries nothing"
@@ -406,7 +410,7 @@ def test_a_pass_that_reached_carries_the_statement_though_it_composed_nothing() 
     performed**, which the user is owed whether or not prose was written".
     """
     statement = outbound_statement(
-        search=OutboundReach.REACHED, egress=None, records=2, composed=False
+        search=OutboundReach.REACHED, egress=None, records=2, composes=False
     )
 
     assert statement is not None
@@ -425,7 +429,7 @@ def test_a_send_can_make_the_turn_indeterminate_and_can_never_name_a_class() -> 
     ``destinations`` empty — the statement saying this system cannot tell".
     """
     statement = outbound_statement(
-        search=None, egress=OutboundReach.INDETERMINATE, records=0, composed=True
+        search=None, egress=OutboundReach.INDETERMINATE, records=0, composes=True
     )
 
     assert statement is not None
@@ -441,7 +445,7 @@ def test_a_search_contact_names_its_class_even_beside_a_driven_send() -> None:
     a rule to remember.
     """
     statement = outbound_statement(
-        search=OutboundReach.REACHED, egress=OutboundReach.INDETERMINATE, records=1, composed=True
+        search=OutboundReach.REACHED, egress=OutboundReach.INDETERMINATE, records=1, composes=True
     )
 
     assert statement is not None
@@ -826,3 +830,263 @@ async def test_a_turn_that_asked_for_no_search_reaches_nothing_and_says_so() -> 
     assert statement.destinations == ()
     assert statement.records == 0
     assert _NOT_REACHED_FRAGMENT in await _prompt(responded)
+
+
+# --- §13 item 5's remaining halves: both orders, and what a later servicing leaves ---
+
+
+@final
+class _YieldingCounts:
+    """A searcher answering with ``counts[n]`` **distinct** records on its ``n``-th call.
+
+    §13 item 5 asks for two servicings "that both admit records, **in both encounter
+    orders**", and a searcher handing back the same one twice cannot show an order at
+    all: ADR-0226 §7 deduplicates the second arrival out, so both orders read ``1``
+    whatever the fold does. Distinct counts per call are the smallest thing that makes
+    the sum discriminate — a lane carrying the *later* servicing's figure reads ``2``
+    on one order and ``1`` on the other, and a lane summing reads ``3`` on both.
+    """
+
+    def __init__(self, inner: Any, counts: Sequence[int]) -> None:
+        """Answer the ``n``-th call with ``counts[n]`` records of its own."""
+        self._inner = inner
+        self._counts = tuple(counts)
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return str(self._inner.name)
+
+    async def request(self, query: str, /) -> Any:
+        """Propose the search exactly as the searcher this wraps proposes it."""
+        return await self._inner.request(query)
+
+    async def search(self, call: ToolCall, /, *, timeout: Any = None) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Answer as the fake does, with this call's own count of distinct records."""
+        outcome = await self._inner.search(call, timeout=timeout)
+        wanted = self._counts[min(self.calls, len(self._counts) - 1)]
+        self.calls += 1
+        [template] = outcome.records[:1] or [None]
+        assert template is not None, "the inner fake answered with no record to shape"
+        shaped: SearchOutcome = outcome.model_copy(
+            update={
+                "records": tuple(
+                    template.model_copy(
+                        update={
+                            "id": f"minted-{self.calls}-{ordinal}",
+                            "content": f"{template.content} ({self.calls}.{ordinal})",
+                        }
+                    )
+                    for ordinal in range(wanted)
+                )
+            }
+        )
+        return shaped
+
+
+@final
+class _DenyingFrom:
+    """A policy that rules as the production one does until its ``nth`` call, then ``DENY``.
+
+    §13 item 5's "a later servicing that refuses before the send (``RULING_DENY``)"
+    needs the **second** ruling to be the refused one, which no threshold can express:
+    the two requests of one turn are alike in risk, reversibility, cost and binding.
+    So the ordinal is the knob, and everything else is the production policy's own
+    reasoning over the deployment's own configuration.
+    """
+
+    def __init__(self, inner: ThresholdActionPolicy, *, nth: int) -> None:
+        """Deny from the ``nth`` ruling of this policy's life."""
+        self._inner = inner
+        self._nth = nth
+        self.calls = 0
+
+    async def resolve(self, confirmed: Any, *, approved: bool) -> Any:
+        """Resolve as the production policy does — no case here answers a confirmation."""
+        return await self._inner.resolve(confirmed, approved=approved)
+
+    async def decide(self, request: Any) -> Any:
+        """Rule as the production policy does, or deny once the ordinal is reached."""
+        from ai_assistant.core.types import PermissionRuling  # noqa: PLC0415 — the returned value
+
+        self.calls += 1
+        if self.calls >= self._nth:
+            return PermissionRuling(
+                outcome=PermissionOutcome.DENY, reason="the operator's own threshold refused it"
+            )
+        return await self._inner.decide(request)
+
+
+@pytest.mark.parametrize(("counts", "expected"), [((1, 2), 3), ((2, 1), 3)])
+async def test_two_servicings_sum_their_counts_in_either_encounter_order(
+    counts: tuple[int, int], expected: int
+) -> None:
+    """§13 item 5, **both encounter orders**: ``records`` is the sum either way.
+
+    "A turn with two search servicings that both admit records, **in both encounter
+    orders**, where ``records`` is the **sum** of what the two admitted — §4 counts one
+    population over the turn."
+
+    The counts differ between the servicings precisely so the orders are
+    distinguishable: a lane carrying the later servicing's figure reads ``2`` on one
+    order and ``1`` on the other, and a lane carrying the earlier one reads them the
+    other way round. Only a fold that accumulates reads ``3`` on both.
+    """
+    turns = _loop(
+        planner=SettlesAfter(FakePlanner(now=_clock, read_request=_search())),
+        search=_servicer(
+            searcher=_YieldingCounts(_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), counts),
+            granted=True,
+        ),
+        memory=await _separated(),
+        footing=_chosen_footing(),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await turns.respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    assert len(_serviced_all(captured)) == 2
+    assert responded.outbound_reach is OutboundReach.REACHED
+    assert responded.outbound_records == expected, "one population over the turn (ADR-0264 §4)"
+    assert _assembled(responded).destinations == (OutboundDestination.SEARCH_PROVIDER,), (
+        "the class is carried once whichever order the servicings ran in"
+    )
+
+
+async def test_a_later_ruling_deny_leaves_the_contact_and_the_count_standing() -> None:
+    """§13 item 5: "A later servicing that refuses before the send (``RULING_DENY``) …
+
+    … leave[s] the contact and the count standing" (§6). ``RULING_DENY`` is §2's third
+    group — a stage before the send — so it contributes ``NOT_REACHED``, which the fold
+    must not let outrank the first servicing's contact. A last-writer-wins assembly
+    reports this turn as having reached nothing while its own first call reached the
+    provider, which is the defect §6's accumulate-never-replace clause names.
+    """
+    policy = _DenyingFrom(
+        ThresholdActionPolicy(
+            grants=FakeRecipientGrants([], now=lambda: _NOW), configured_search=_CONFIGURED_SEARCH
+        ),
+        nth=2,
+    )
+    turns = _loop(
+        planner=SettlesAfter(FakePlanner(now=_clock, read_request=_search())),
+        search=_servicer(
+            searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), policy=policy
+        ),
+        memory=await _separated(),
+        footing=_chosen_footing(),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await turns.respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    assert [one["disposition"] for one in _serviced_all(captured)] == [
+        None,
+        SearchDisposition.RULING_DENY.value,
+    ]
+    assert responded.outbound_reach is OutboundReach.REACHED, "the first call's contact stands"
+    assert responded.outbound_records == 1, "and the count it admitted is not reset"
+    assert responded.search_not_serviced is SearchNotServiced.DECLINED, (
+        "ADR-0242 §6's member rides beside it, neither read off the other (ADR-0264 §8)"
+    )
+
+
+async def test_a_later_servicing_that_failed_after_a_response_leaves_them_standing() -> None:
+    """§13 item 5: "and one that fails after a response, each leave the contact … standing".
+
+    The second servicing's search is answered and its later sighted query then raises,
+    so ADR-0226 §5 discards everything that servicing fetched — "a failed servicing
+    zeroes its counts". What it does **not** discard is the *first* servicing's
+    admission, and what it does not unmake is either call's contact: §2's "nothing that
+    happens to the enclosing servicing afterwards unmakes it", accumulated by §6's fold.
+    """
+    store = _FailSearchFrom(nth=7)
+    await store.add(_belief("belief-0", "we talked about Porto last week"))
+    turns = _loop(
+        planner=SettlesAfter(
+            FakePlanner(now=_clock, read_request=_search_and_query("bell tower Porto"))
+        ),
+        search=_servicer(
+            searcher=_RefiningSearcher(_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+            granted=True,
+        ),
+        memory=store,
+        footing=_chosen_footing(),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await turns.respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    servicings = _serviced_all(captured)
+    assert len(servicings) == 2
+    assert servicings[0]["failed"] is False
+    assert servicings[1]["failed"] is True, "the second raised after its search was answered"
+    assert responded.outbound_reach is OutboundReach.REACHED
+    assert responded.outbound_records == 1, (
+        "the first servicing's admission stands; the failed one contributed its own zero"
+    )
+
+
+async def test_the_composing_stage_is_given_one_fragment_however_many_servicings_ran() -> None:
+    """§13 item 5's last clause: "§6's one fragment is given once".
+
+    §6 gives the composing stage "**one fixed fragment per** ``OutboundReach`` member",
+    and the value is "assembled **once per turn**" — so a turn that serviced twice is
+    told the fact once, not once per servicing. A lane appending per carrier would put
+    the sentence in the prompt twice and leave a model reading two reaches.
+    """
+    turns = _loop(
+        planner=SettlesAfter(FakePlanner(now=_clock, read_request=_search())),
+        search=_servicer(
+            searcher=_RefiningSearcher(_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+            granted=True,
+        ),
+        memory=await _separated(),
+        footing=_chosen_footing(),
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await turns.respond(_ASK, narrow=_bounded(), operation=_REVISING)
+
+    assert len(_serviced_all(captured)) == 2
+    assert (await _prompt(responded)).count(_REACHED_FRAGMENT) == 1
+
+
+# --- §13 item 7's second shape: UNATTESTED before the same later failure -------
+
+
+async def test_a_servicing_recording_unattested_before_a_later_failure_carries_both() -> None:
+    """§13 item 7's second shape, and it is the pair §8 says ride together.
+
+    "One whose search recorded **``UNATTESTED``** before the same later failure: it
+    carries the contact **and** ``search_not_serviced`` ``UNAVAILABLE`` (§8)."
+
+    Both carriers ride out of the failing servicing for the same reason — §7's fold is
+    performed on every path out of the body, so the disposition's member and this
+    decision's contact survive the degradation together. A lane that carried one and
+    dropped the other would either tell the user a lookup produced nothing usable while
+    saying the turn reached nothing, or the reverse.
+    """
+    store = _FailSearchFrom(nth=4)
+    await store.add(_belief("belief-0", "a thing already known"))
+    turns = _loop(
+        planner=FakePlanner(now=_clock, read_request=_search_and_query("bell tower Porto")),
+        search=_servicer(
+            searcher=_CostedSearcher(
+                FakeWebSearcher(refusals={DEFAULT_COMPOSED_QUERY: SearchRefusal.UNATTESTED})
+            ),
+            granted=True,
+        ),
+        memory=store,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await turns.respond(_ASK, narrow=_bounded())
+
+    [serviced] = _serviced_all(captured)
+    assert serviced["failed"] is True
+    assert serviced["disposition"] == SearchDisposition.UNATTESTED.value
+    assert responded.outbound_reach is OutboundReach.REACHED, "the response had already arrived"
+    assert responded.outbound_records == 0, "and ADR-0226 §5 discarded what the servicing held"
+    assert responded.search_not_serviced is SearchNotServiced.UNAVAILABLE
