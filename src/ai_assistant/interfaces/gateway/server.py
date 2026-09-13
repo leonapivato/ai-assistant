@@ -154,6 +154,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    Clarification,
     ClassReach,
     Confirmation,
     ConfirmationDestination,
@@ -169,6 +170,9 @@ from ai_assistant.core.types import (
     EgressSpan,
     Evidence,
     FrozenJson,
+    GoalDisambiguation,
+    GoalEngagement,
+    GoalSummary,
     GrantableSource,
     GrantScope,
     HeldNotification,
@@ -195,6 +199,7 @@ from ai_assistant.core.types import (
     StepOutcome,
     SuccessorLink,
     TurnOutcome,
+    TurnReference,
     Warrant,
     routed_listing_arm,
     secret_value,
@@ -407,6 +412,27 @@ _RESUME_PATH: Final = "/confirmation/resume"
 #: reason — the path names the thing acted on and then the act.
 _CANCEL_READ_PATH: Final = "/confirmation/cancel-read"
 
+#: ADR-0250 §15's goal surface. **Three paths for the three operations that decision
+#: promotes** — ``goals``, ``withdraw_clarification`` and ``abandon_goal`` — which
+#: ADR-0177 §1's closed enumeration gains in that ADR's own ``- Status:`` line, the
+#: route §1's third clause fixes and ADR-0200's precedent for taking it.
+#:
+#: **Answering a clarification is not a fourth path**, and that is ADR-0250 §11's own
+#: construction rather than an economy here: "answering is a turn and not an operation
+#: of its own, and that is the whole reason ``converse`` gains a keyword rather than the
+#: surface gaining a fifth verb". So a browser answers by posting :data:`_ASK_PATH` or
+#: :data:`_ASK_STREAM_PATH` with a ``reference``, and takes a goal up from another
+#: conversation the same way (§13) — the one route to a cross-conversation resumption.
+#:
+#: **The verb comes last for** :data:`_CANCEL_READ_PATH`'s **reason**: the path names
+#: the thing acted on and then the act, so a later act on the same record kind cannot be
+#: reached by guessing this one. And the listing is its own path rather than an empty
+#: answer of either act, because the door classifies "from its method and path alone"
+#: (ADR-0168 §6).
+_GOALS_PATH: Final = "/goals"
+_WITHDRAW_CLARIFICATION_PATH: Final = "/clarification/withdraw"
+_ABANDON_GOAL_PATH: Final = "/goal/abandon"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -473,6 +499,9 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CONFIRMATIONS_PATH): "pending_confirmations",
     ("POST", _RESUME_PATH): "resume",
     ("POST", _CANCEL_READ_PATH): "cancel_read",
+    ("POST", _GOALS_PATH): "goals",
+    ("POST", _WITHDRAW_CLARIFICATION_PATH): "withdraw_clarification",
+    ("POST", _ABANDON_GOAL_PATH): "abandon_goal",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1126,6 +1155,9 @@ class Gateway:
             _CONFIRMATIONS_PATH: self._pending_confirmations,
             _RESUME_PATH: self._resume,
             _CANCEL_READ_PATH: self._cancel_read,
+            _GOALS_PATH: self._goals,
+            _WITHDRAW_CLARIFICATION_PATH: self._withdraw_clarification,
+            _ABANDON_GOAL_PATH: self._abandon_goal,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -2257,6 +2289,14 @@ class Gateway:
         The budget is the gateway's own and no browser value reaches it: a turn budget
         is the **caller's** (ADR-0029 §4), which ADR-0177 §1 makes one of exactly two
         members of the one class of argument this adapter supplies of itself.
+
+        **``reference`` is the browser's own argument and is relayed whole** (ADR-0250
+        §11). It is how this surface answers a clarification and how it takes a goal up
+        from another conversation (§13), and it is a keyword on the turn rather than an
+        operation of its own — so nothing is composed here out of two calls. This
+        gateway resolves no part of it: "it is resolved by ``orchestration`` against
+        records this system holds", and what became of it comes back on the outcome as
+        a ``ReferenceOutcome``.
         """
         payload = _payload(request)
         outcome = await self._relayed(
@@ -2265,6 +2305,7 @@ class Gateway:
                 _required_string(payload, "utterance"),
                 timeout=_TURN_BUDGET,
                 conversation_id=_optional_string(payload, "conversation_id"),
+                reference=_reference(payload),
             )
         )
         return _rendered({"outcome": _outcome_view(outcome)})
@@ -2343,17 +2384,28 @@ class Gateway:
         payload = _payload(request)
         utterance = _required_string(payload, "utterance")
         conversation = _optional_string(payload, "conversation_id")
+        reference = _reference(payload)
         if not self._take_hub_slot():
             return _ceiling()
         return _Streamed(
             handle=handle,
             head=StreamHead(content_type=streams.MEDIA_TYPE),
-            body=partial(self._pump_answer, utterance=utterance, conversation=conversation),
+            body=partial(
+                self._pump_answer,
+                utterance=utterance,
+                conversation=conversation,
+                reference=reference,
+            ),
             release=self._give_hub_slot,
         )
 
     async def _pump_answer(
-        self, writer: asyncio.StreamWriter, *, utterance: str, conversation: str | None
+        self,
+        writer: asyncio.StreamWriter,
+        *,
+        utterance: str,
+        conversation: str | None,
+        reference: TurnReference | None,
     ) -> None:
         """Drive ``converse_streaming`` onto the stream (ADR-0175 §3).
 
@@ -2366,6 +2418,12 @@ class Gateway:
         exhaustion. A lane consuming this with a bare ``async for`` and a ``break``
         leaks a turn's resources on the most common path this surface has.
 
+        **The reference is relayed to the streaming twin unchanged** (ADR-0250 §11,
+        ADR-0173): ``converse_streaming`` takes "exactly ``converse``'s arguments in
+        exactly its" order, so answering a clarification streams like any other turn.
+        It is read in :meth:`_ask_streaming` **before** the hub slot is taken, so a
+        malformed one is refused without a slot ever being held.
+
         **A stream that ends without a terminal value is a transport failure and is
         left as one** (§2). The contract yields exactly one ``TurnOutcome`` unless it
         raises, so there is no third ending to invent a value for: a body that stops
@@ -2374,7 +2432,10 @@ class Gateway:
         """
         try:
             answering = self._engine.converse_streaming(
-                utterance, timeout=_TURN_BUDGET, conversation_id=conversation
+                utterance,
+                timeout=_TURN_BUDGET,
+                conversation_id=conversation,
+                reference=reference,
             )
             async with closing_stream(answering) as pieces:
                 async for produced in pieces:
@@ -2852,6 +2913,95 @@ class Gateway:
             partial(self._engine.cancel_read, _token(_payload(request)))
         )
         return _rendered({"cancellation": cancelled.value})
+
+    # --- ADR-0250 §15: the goal surface -----------------------------------
+    #
+    # **Relay and render, and nothing more** (golden rule 3, ADR-0042 §6). ADR-0250 §15
+    # is explicit at this seam: "no adapter reads a store, joins a row, computes a
+    # member or composes a reply … ``interfaces/`` gains no read of a ``Goal``, a
+    # ``GoalAttempt``, a ``GoalQuestion``, a ``GoalCandidates`` or a ``PlanStore``".
+    # ``paused`` in particular is computed by the **engine**, "so that two surfaces
+    # cannot render it differently", and nothing below derives it.
+    #
+    # **Neither act rules on anything**, on :meth:`_cancel_read`'s clause: a withdrawal
+    # "records no answer, revises no interpretation and engages no goal", and an
+    # abandonment "does not move the attempt's state, does not write an
+    # ``AttemptOutcome``, does not end an execution and does not cancel anything in
+    # flight". Each answers one member of a closed vocabulary, and the page renders one
+    # fixed statement for it.
+
+    async def _goals(self, request: Request) -> Response:
+        """List what the user has outstanding, most recently engaged first.
+
+        ADR-0250 §15's listing, "from which a user learns what is outstanding and
+        obtains the references §11 and §13 take". Paged on ADR-0085 §3's convention and
+        **answering no total count**, on ADR-0074 §2's ground — so nothing here counts,
+        and a front end asks for the next page to find out whether there is more.
+
+        Args:
+            request: The admitted request, carrying optional ``limit`` and ``offset``.
+
+        Returns:
+            The page, each summary with the open question where one stands.
+        """
+        payload = _payload(request)
+        listed = await self._relayed(
+            partial(
+                self._engine.goals,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
+        return _rendered({"goals": [_goal_summary_view(one) for one in listed]})
+
+    async def _withdraw_clarification(self, request: Request) -> Response:
+        """Take one clarification back without answering it (ADR-0250 §12).
+
+        **The browser supplies the question's id and nothing else**: §12 gives the
+        operation "no reason, no free text and no deadline", and this gateway adds none
+        of the three.
+
+        **This is not an answer and this adapter does not present it as one.** A
+        withdrawal "records no answer, revises no interpretation and engages no goal",
+        on ADR-0244 §11's distinction between a denial and a cancellation, and the page
+        renders one fixed statement for the member that comes back.
+
+        Args:
+            request: The admitted request, carrying ``question_id``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.ClarificationWithdrawal`'s two
+            states the act reached, as its own value. An unknown id is
+            ``NOTHING_TO_WITHDRAW`` and never a raise.
+        """
+        withdrawn = await self._relayed(
+            partial(
+                self._engine.withdraw_clarification,
+                _required_string(_payload(request), "question_id"),
+            )
+        )
+        return _rendered({"withdrawal": withdrawn.value})
+
+    async def _abandon_goal(self, request: Request) -> Response:
+        """Give one goal up, so nothing more is planned for it (ADR-0250 §12).
+
+        The one operation in this system that writes
+        :attr:`~ai_assistant.core.types.GoalStatus.ABANDONED`, and this adapter is a
+        conveyor of that act rather than a second producer of it: no expiry, no
+        silence, no timeout and no inference of the gateway's writes it either.
+
+        Args:
+            request: The admitted request, carrying ``goal_id``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.GoalAbandonment`'s three states
+            the act reached, as its own value. An unknown id is ``NO_SUCH_GOAL`` and
+            never a raise.
+        """
+        abandoned = await self._relayed(
+            partial(self._engine.abandon_goal, _required_string(_payload(request), "goal_id"))
+        )
+        return _rendered({"abandonment": abandoned.value})
 
     # --- ADR-0177 §10: the notification review surface --------------------
     #
@@ -3866,6 +4016,52 @@ def _token(payload: Mapping[str, Any]) -> ContinuationToken:
         raise _malformed() from exc
 
 
+def _reference(payload: Mapping[str, Any]) -> TurnReference | None:
+    """One turn's reference, or its absence (ADR-0250 §11).
+
+    **Absent is a shape and not a default.** A turn carrying no reference is the
+    ordinary turn and ``converse``'s keyword defaults to ``None`` for that reason, so
+    an absent or ``null`` member is read as the absence it is — :func:`_optional_string`'s
+    posture, one level in.
+
+    **The two shapes the type admits are the two shapes this reads** (§11): "a
+    ``question_id`` and no ``goal_id``, or a ``goal_id`` and no ``question_id``". The
+    model validator is the authority and this does not restate it — the object is
+    handed to :class:`~ai_assistant.core.types.TurnReference` and a shape it refuses is
+    a malformed request, which is where the page and the gateway disagreeing about a
+    shape belongs. Refusing it *here* rather than letting a ``ValidationError`` escape
+    is what keeps the boundary's refusals one kind.
+
+    **Nothing about it is resolved, defaulted or composed here.** ADR-0177 §1 makes
+    every argument but the deadline the browser's own, and §11 puts the resolution in
+    ``orchestration`` — "a reference is never rendered to a model and never accepted
+    from one" — so this gateway reads two strings and builds the value the surface
+    declares.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The reference, or ``None`` where the member is absent or null.
+
+    Raises:
+        _Refused: If the member is present and is not an object naming exactly one of
+            the two records.
+    """
+    value = payload.get("reference")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _malformed()
+    try:
+        return TurnReference(
+            question_id=_optional_string(value, "question_id"),
+            goal_id=_optional_string(value, "goal_id"),
+        )
+    except ValidationError:
+        raise _malformed() from None
+
+
 def _payload(request: Request) -> Mapping[str, Any]:
     """The request's JSON object, or an empty mapping where there is not one.
 
@@ -4231,6 +4427,22 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     instead is the reply the servicing composed and the question itself, which
     ``read_confirmation`` now puts on the screen. Issue #2237 carries the browser's own
     lane for the vocabulary.
+
+    **ADR-0250's four members all cross, and each is rendered on its own** (§5). "No
+    member is derived from another and a client renders each on its own", and the four
+    come apart in cases that actually occur: a turn raises a ``clarification`` on a goal
+    it also engaged; a turn whose ``reference`` named nothing still associates, and may
+    come back undecided, where there is no engagement to hang the reference on; and a
+    ``disambiguation`` exists only on a turn that engaged nothing at all. So there is no
+    nesting here and no member is suppressed on account of another.
+
+    **This is where the deferral above ends for these vocabularies and not for that
+    one.** ADR-0250 §15 places the browser by name — "the command line and the browser
+    both implement this decision", each rendering a raised clarification, the listing,
+    the answer with its reference and the two acts — and its last clause makes a member
+    given but not rendered a section not implemented rather than a degradation. That
+    says nothing about ``search_not_serviced``, whose own deferral is untouched and
+    whose lane is still #2237.
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -4251,6 +4463,103 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
             else _confirmation_view(outcome.read_confirmation)
         ),
         "read_answer": None if outcome.read_answer is None else outcome.read_answer.value,
+        "goal_engagement": (
+            None if outcome.goal_engagement is None else _engagement_view(outcome.goal_engagement)
+        ),
+        "clarification": (
+            None if outcome.clarification is None else _clarification_view(outcome.clarification)
+        ),
+        "reference": None if outcome.reference is None else outcome.reference.value,
+        "disambiguation": (
+            None if outcome.disambiguation is None else _disambiguation_view(outcome.disambiguation)
+        ),
+    }
+
+
+def _engagement_view(engagement: GoalEngagement) -> dict[str, Any]:
+    """Translate what this turn did with its goal (ADR-0250 §5).
+
+    **Every field, because a client "renders them together or not at all"** — the
+    disposition, the outcome statement, whether a revision happened and what changed
+    "are all *what this turn did with the goal it engaged*, and each is meaningless
+    without the others". The enumeration is :func:`_outcome_view`'s own discipline: what
+    may appear on the page is decided here.
+
+    **It carries no goal id, no attempt id, no revision number, no label, no ground and
+    no instant** — the type carries none of them, so there is none to drop.
+    """
+    return {
+        "disposition": engagement.disposition.value,
+        "outcome": engagement.outcome,
+        "revised": engagement.revised,
+        "outcome_changed": engagement.outcome_changed,
+        "added": list(engagement.added),
+        "removed": list(engagement.removed),
+    }
+
+
+def _clarification_view(clarification: Clarification) -> dict[str, Any]:
+    """Translate the question this turn raised (ADR-0250 §10).
+
+    **The id crosses because the answer act takes it** (§15): "a surface that showed a
+    question but no way to name it would have put a question the user cannot answer",
+    and the alternative — a handle re-minted at this layer — "is ADR-0052 §1's
+    machinery bought for a record that is already durable". It is the one identifier
+    this decision's surfaces render.
+
+    The text crosses verbatim and is neutralised **on the page**, by being inserted as
+    text and never as markup (ADR-0168 §6) — this adapter's half of ADR-0170 §8, the
+    same value a plan's rationale already crosses under.
+    """
+    return {
+        "question_id": clarification.question_id,
+        "text": clarification.text,
+        "expires_at": clarification.expires_at.isoformat(),
+    }
+
+
+def _disambiguation_view(disambiguation: GoalDisambiguation) -> dict[str, Any]:
+    """Translate the goals an undecided turn is asking between (ADR-0250 §5).
+
+    **Outcome statements and a count, and no identifier**: the type "carries no
+    identifier, no label, no status and no instant", because "a label is meaningless
+    outside the call that rendered it" and the user answers in words on the next turn
+    or by a reference.
+
+    The candidacy order is the engine's and is not re-ordered here.
+    """
+    return {
+        "candidates": list(disambiguation.candidates),
+        "elided": disambiguation.elided,
+    }
+
+
+def _goal_summary_view(summary: GoalSummary) -> dict[str, Any]:
+    """Translate one goal as the listing shows it (ADR-0250 §15).
+
+    **``paused`` is carried and never derived.** It is "computed and never stored", by
+    ADR-0249 §5's definition, and "the engine computes it, so that two surfaces cannot
+    render it differently — and no adapter derives it". So this copies the boolean it
+    was handed and compares no status against any attempt state.
+
+    **The id crosses because the resume act takes it** (§13): the cross-conversation
+    resumption is "a ``TurnReference`` carrying a ``goal_id``, performed from a surface
+    listing the user was shown (§15)", and there is no other route to one.
+
+    **It carries no attempt id, no revision number, no element, no ground, no evidence
+    reference and no plan** — the type carries none, so there is none to drop.
+    """
+    return {
+        "id": summary.id,
+        "outcome": summary.outcome,
+        "status": summary.status.value,
+        "paused": summary.paused,
+        "last_engaged_at": (
+            None if summary.last_engaged_at is None else summary.last_engaged_at.isoformat()
+        ),
+        "clarification": (
+            None if summary.clarification is None else _clarification_view(summary.clarification)
+        ),
     }
 
 
