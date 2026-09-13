@@ -97,6 +97,7 @@ from ai_assistant.permissions import (
     ConfiguredSearchDestination,
     SqliteAuditTrail,
     SqliteDestinationTrustStore,
+    SqliteGoalAuthorizationStore,
     SqliteParkedReads,
     SqliteRecipientGrantStore,
     SqliteRoutingTrail,
@@ -786,6 +787,29 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             max_outstanding=settings.recipient_grant_max_outstanding,
         )
         opened.append(recipient_grants.close)
+        # ADR-0254's goal authorizations — the second standing egress source, told
+        # apart from the first by §6's own discriminator and kept in its own file
+        # for ADR-0193 §6's stated reason: one store holding two kinds of record
+        # with two covering rules would have one ``covering`` member choosing
+        # between them.
+        #
+        # **One object, passed three times**, exactly as the grants above are and
+        # for the same reason (ADR-0254 §16's three faces): as a
+        # ``GoalAuthorizations`` to the policy, which can name only ``live_for``;
+        # as an ``AuthorizationResolution`` to the trail, which can name only
+        # ``resolve``; and whole to ``StepRunner``, which is ADR-0254 §15's single
+        # writer — *"An `Authorization` is written and settled by `orchestration`
+        # and by nothing else"*. Structural typing narrows each consumer at its own
+        # annotation rather than here.
+        #
+        # **Route (d) is unreachable without this line.** ``ThresholdActionPolicy``
+        # has accepted the seam since the contract landed, and a policy constructed
+        # without one takes no standing route from an authorization at all
+        # (ADR-0254 §6) — so the whole route shipped dead until it was passed.
+        goal_authorizations = SqliteGoalAuthorizationStore(
+            path=directory / "goal_authorizations.db"
+        )
+        opened.append(goal_authorizations.close)
         # **ADR-0238 §1's destination-trust store, constructed here and wired
         # nowhere yet.** §14 makes this root "the only place the concrete store is
         # constructed", and the servicing site that reads it is the consumer lane's
@@ -848,6 +872,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         trail = SqliteAuditTrail(
             path=directory / "audit.db",
             recipient_grants=recipient_grants,
+            # ADR-0254 §7's route-(d) invariant is taken over the row the pointer
+            # resolves to, so the trail needs the **same** store the policy ruled
+            # against. Left to the store's default it would hold nothing and refuse
+            # every route-(d) ``ALLOW`` the policy authored at ``record`` — a system
+            # that prompts, forgets and prompts again, with nothing failing, which
+            # is the hazard ADR-0193 §1 names one seam over.
+            authorizations=goal_authorizations,
             # **The clock is injected here**, which ADR-0194 §5 names alongside the
             # five settings as this root's own obligation. Left to the store's
             # default it would be a clock this layer neither chose nor could
@@ -1405,6 +1436,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # all, and the establishing act ADR-0235 decides is now implemented
             # below — so a ruling here may source a grant a user actually made.
             grants=recipient_grants,
+            # ADR-0254 §6's route (d) and its bar, on the one ``live_for`` read.
+            authorizations=goal_authorizations,
             # **The configured search destination, which makes route (c) reachable**
             # (ADR-0247 §2, §11's lane 1): the connection reference and the canonical
             # destination set, as two values and never a `Settings` object — a policy
@@ -1656,6 +1689,11 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # A parked confirmation's lifetime is a deployment value (#310); ``None``
             # (the default) keeps the pre-#243 behaviour of no lifetime.
             confirmation_ttl=settings.confirmation_ttl,
+            # ADR-0254 §15's single writer of an ``Authorization``, and the one
+            # deployment value ADR-0256 §1's third rung reads. ``Settings`` gains
+            # no authorization field for it (ADR-0256 §2).
+            authorizations=goal_authorizations,
+            episode_retention=settings.episode_retention,
             # ADR-0144 §4's preference sequence, supplied here because that is
             # where the ADR puts it — an operator's surface, not a user's
             # (:data:`TOOL_PREFERENCE`, #1101).
@@ -2233,6 +2271,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # build-failure cleanup list above and not here, so a build that
                 # *failed* closed it and one that *succeeded* never did (#1903).
                 _as_async(recipient_grants.close),
+                # And the goal authorizations immediately after them, for the same
+                # ordering reason one store over: the trail resolves a decision's
+                # route-(d) ``authorised_by`` against this store on its own write
+                # path, and ADR-0254 §16 makes a store it cannot read a **fault**
+                # that takes §6's bar rather than an absence. Closed the other way
+                # round, the last records of a shutdown would meet an authorization
+                # store already gone and fail closed onto an ``AuthorizationError``.
+                #
+                # It is a Tier 1 store like the rest and joins the same ordered
+                # shutdown (ADR-0083 ruling 4, ADR-0042 §2, ADR-0254 §16).
+                # Registering it on the build-failure cleanup list alone would close
+                # it when the build *failed* and never when it succeeded, which is
+                # #1903 exactly — and here it would leave a `-wal` holding the
+                # coverage spans of the user's own recorded acts behind.
+                _as_async(goal_authorizations.close),
                 # And the destination-trust store beside it: a Tier 1 store like the
                 # rest, joining the same ordered shutdown (ADR-0083 ruling 4, ADR-0042
                 # §2, ADR-0238 §1). Registering it on the build-failure cleanup list

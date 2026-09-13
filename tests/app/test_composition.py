@@ -58,7 +58,10 @@ from ai_assistant.core.errors import (
     TranscriptArchiveError,
 )
 from ai_assistant.core.protocols import (
+    AuthorizationResolution,
     ConnectionPurger,
+    GoalAuthorizations,
+    GoalAuthorizationStore,
     InvocationLedger,
     RecipientGrantResolution,
     RecipientGrants,
@@ -112,6 +115,7 @@ from ai_assistant.orchestration.upcoming import (
 )
 from ai_assistant.permissions import (
     SqliteAuditTrail,
+    SqliteGoalAuthorizationStore,
     SqliteRecipientGrantStore,
     SqliteRoutingTrail,
     SqliteSourceReadTrail,
@@ -679,12 +683,13 @@ def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
     constructor parameter** (#239), and a seam in the dict would make each of
     them fail whenever an unrelated dependency was added — the brittleness that
     turns a mapping test into a roster test nobody meant to write.
-    :func:`_policy_grant_seam` is where the seam itself is asserted, once, and
+    :func:`_policy_grant_seam` is where the seam itself is asserted, once,
     :func:`_policy_configured_search` is where ADR-0247 §2's configured search
     destination is — the second dependency this list exists to keep out of a
-    mapping test.
+    mapping test — and :func:`_policy_authorization_seam` is ADR-0254 §6's, the
+    third.
     """
-    lifted = {"grants", "configured_search"}
+    lifted = {"grants", "configured_search", "authorizations"}
     return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
 
 
@@ -721,6 +726,18 @@ def _trail_grant_seam(calls: list[dict[str, object]]) -> object:
     """The one ``recipient_grants`` argument the builder constructed the trail with."""
     assert len(calls) == 1, calls
     return calls[0]["recipient_grants"]
+
+
+def _policy_authorization_seam(calls: list[dict[str, object]]) -> object:
+    """The one ``authorizations`` argument the builder constructed the policy with."""
+    assert len(calls) == 1, calls
+    return calls[0]["authorizations"]
+
+
+def _trail_authorization_seam(calls: list[dict[str, object]]) -> object:
+    """The one ``authorizations`` argument the builder constructed the trail with."""
+    assert len(calls) == 1, calls
+    return calls[0]["authorizations"]
 
 
 async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
@@ -800,6 +817,39 @@ async def test_build_engine_gives_the_policy_the_recipient_grant_query_face(
         assert isinstance(seam, RecipientGrants)
         assert isinstance(seam, RecipientGrantResolution)
         assert _trail_grant_seam(trail_calls) is seam
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_policy_and_the_trail_one_authorization_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0254 §16's three faces are one object, and route (d) needs both of them.
+
+    **Route (d) is unreachable without the policy's half.** ``ThresholdActionPolicy``
+    takes ``authorizations`` with a default, and a policy constructed without one
+    *"takes no standing route at all"* from an authorization (§6) — so the whole
+    route ships dead unless this argument is passed. The same is true one component
+    over and in the worse direction: ``SqliteAuditTrail`` substitutes a resolution
+    holding nothing, and §7's route-(d) invariant then **refuses** every ``ALLOW``
+    the policy authored, which is a system that prompts, forgets and prompts again
+    with nothing failing.
+
+    Asserted as the **same object**, not merely as two of the right shape, for
+    ``_policy_grant_seam``'s own reason one store over: two stores over two files
+    would each hold half the state, and a row this stage proposed through one would
+    be invisible to the other's ``resolve``. What closes that is identity, here.
+    """
+    calls = _spy_on_policy(monkeypatch)
+    trail_calls = _spy_on_trail(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        seam = _policy_authorization_seam(calls)
+        assert isinstance(seam, SqliteGoalAuthorizationStore)
+        assert isinstance(seam, GoalAuthorizations)
+        assert isinstance(seam, AuthorizationResolution)
+        assert isinstance(seam, GoalAuthorizationStore)
+        assert _trail_authorization_seam(trail_calls) is seam
     finally:
         await engine.aclose()
 
@@ -1797,6 +1847,15 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # of trust". Joining them in one file would be the first step toward
             # joining them in one answer.
             "destination_trust.db",
+            # ADR-0254 §16's goal authorizations, the sixteenth and the fifteenth
+            # that is Tier 1: a row carries the user's own words — every coverage
+            # member's basis names a recorded turn and the span inside it — beside
+            # the declaration, the connected account and the destination set the
+            # authority is about. **A separate file from ``recipient_grants.db``**
+            # for ADR-0193 §6's own reason: one store holding two kinds of record
+            # with two covering rules would have one ``covering`` member choosing
+            # between them, and §6 forecloses the cheap answer in terms.
+            "goal_authorizations.db",
             "grants.db",
             "memory.db",
             "notifications.db",
