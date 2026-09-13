@@ -1989,7 +1989,7 @@ class SqlitePlanStore:
             held = conn.execute(
                 "SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)
             ).fetchone()
-        return rows, int(held[0]) if held is not None else 0
+        return rows, _elided_count(str(self._path), goal_id, held[0]) if held is not None else 0
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -2575,7 +2575,7 @@ class SqlitePlanStore:
             ).fetchall():
                 by_goal[str(row[0])].append(str(row[1]))
             elided = {
-                str(r[0]): int(r[1])
+                str(r[0]): _elided_count(str(self._path), str(r[0]), r[1])
                 for r in conn.execute("SELECT id, evidence_elided FROM goals").fetchall()
             }
             evidence = [(goal_id, rows, elided[goal_id]) for goal_id, rows in by_goal.items()]
@@ -2862,6 +2862,55 @@ def _revalidated_evidence(evidence: GoalEvidence) -> GoalEvidence:
     except ValidationError as exc:
         msg = f"evidence row {evidence.id!r} is not a valid record: {exc}"
         raise PlanningError(msg) from exc
+
+
+def _elided_count(path: str, goal_id: str, raw: Any) -> int:
+    """Read a stored elision count, translating corruption to ``PlanningError``.
+
+    :meth:`SqlitePlanStore._meta_int`'s reasoning over ADR-0252 §13's per-goal counter:
+    ``INTEGER`` is an **affinity** and not a constraint, so SQLite stores whatever a
+    writer outside this code put there, and ``CREATE TABLE IF NOT EXISTS`` accepts a
+    pre-existing ``goals`` this store did not shape. A text value would leave ``int()``
+    as a raw ``ValueError`` and a negative one would leave
+    :class:`~ai_assistant.core.types.EvidenceHistory` as a raw ``ValidationError`` —
+    each a hole in the boundary every other stored value is read through
+    (:func:`_decode_goal` and its siblings).
+
+    **A negative count is refused rather than clamped**, which is ADR-0086 §4's
+    direction: the count is the whole of what makes §13's elision non-silent, so a
+    store that quietly read a corrupt one as zero would answer *nothing was ever
+    dropped* — "a *false* answer to the one question the provenance display exists to
+    answer".
+
+    Args:
+        path: The store's own path, for the message.
+        goal_id: The goal whose counter it is.
+        raw: The value the column held.
+
+    Returns:
+        The count.
+
+    Raises:
+        PlanningError: If the stored value is not a non-negative integer.
+    """
+    msg = (
+        f"the plan store at {path!r} holds a non-numeric evidence elision count for "
+        f"goal {goal_id} ({raw!r}); the store is corrupt"
+    )
+    if isinstance(raw, bool) or not isinstance(raw, str | int):
+        raise PlanningError(msg)
+    try:
+        count = int(raw)
+    except ValueError as exc:
+        raise PlanningError(msg) from exc
+    if count < 0:
+        negative = (
+            f"the plan store at {path!r} holds a negative evidence elision count for "
+            f"goal {goal_id} ({raw!r}); a count of what a history has dropped never "
+            f"decreases (ADR-0252 §13)"
+        )
+        raise PlanningError(negative)
+    return count
 
 
 def _decode_evidence(data: str) -> GoalEvidence:

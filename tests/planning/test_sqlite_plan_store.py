@@ -978,6 +978,44 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
+@pytest.mark.parametrize("corrupt", ["bad", -1], ids=["non-numeric", "negative"])
+@pytest.mark.parametrize("read", ["evidence_of", "export"], ids=["evidence_of", "export"])
+async def test_a_corrupt_elision_count_is_a_planning_error(
+    tmp_path: Path, corrupt: object, read: str
+) -> None:
+    """A tampered ADR-0252 §13 counter is refused, not leaked (ADR-0049 §1).
+
+    ``INTEGER`` is an **affinity** and not a constraint, so SQLite stores whatever an
+    outside writer puts in the column, and every other stored value in this store is
+    read through a boundary that turns corruption into ``PlanningError`` rather than a
+    raw ``ValueError`` or ``ValidationError``. **Both** read paths are driven, because
+    they decode the counter separately and a fix applied to one would leave the other
+    open.
+
+    **A negative count is refused rather than clamped.** The count is the whole of what
+    makes §13's elision non-silent, so reading a corrupt one as zero would answer
+    *nothing was ever dropped* — ADR-0086 §4's "a *false* answer to the one question the
+    provenance display exists to answer".
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (corrupt,))
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    reading = store.evidence_of("g1") if read == "evidence_of" else store.export()
+    try:
+        with pytest.raises(PlanningError, match="elision count"):
+            await reading
+    finally:
+        store.close()
+
+
 async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) -> None:
     """A corrupt/tampered meta value is refused as PlanningError, not a raw ValueError.
 
