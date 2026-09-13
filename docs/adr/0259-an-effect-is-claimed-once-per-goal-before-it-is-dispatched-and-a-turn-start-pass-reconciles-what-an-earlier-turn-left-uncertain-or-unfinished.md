@@ -456,9 +456,10 @@ intended action, the same tool called with the same concrete arguments under the
 > `bound_tool`, a `started_at` and `attempts >= 1`, and a satisfied step has none of them: nothing ran under it. So
 > `core/types.py` gains **`satisfied_by_execution`** and **`satisfied_by_step`**, both `DurableIdentifier | None` defaulting
 > to `None`, **non-`None` together and only on a `SUCCEEDED` step reached by this clause**, naming the holder whose act it
-> was. **The claim marks are then not required of such a step and stay `None`** — `attempts` stays `0` and `started_at` stays
-> `None` — because the correlation ADR-0004 §7 wants is to the act that happened, and these two fields carry it to the step
-> that did happen. **A `SUCCEEDED` step carrying neither is unchanged and still requires all four.** ADR-0014 §3's *"what
+> was. **The claim marks are then not required and none is present** — `attempts` stays `0`, `started_at` and
+> `approval_ref` stay `None`, and **`bound_tool` is cleared by the commit**, since an `AWAITING_APPROVAL` source carries
+> one from its park and a satisfied step made no call with it. The correlation ADR-0004 §7 wants is to the act that
+> happened, which these two fields carry. **A `SUCCEEDED` step carrying neither is unchanged and still requires all four.** ADR-0014 §3's *"what
 > actually happened"* reading is **honoured rather than bent**: the record says the work was done elsewhere in this goal and
 > names where, instead of claiming a tool call this step never made. §13 carries the record that scope owes.
 
@@ -1111,17 +1112,17 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > equals `satisfied_by_key`**, and the **stored source status is `PENDING` or `AWAITING_APPROVAL`** — §2's two entry
 > statuses and the two rows §4's table gains for this route, so a **`RUNNING` or `INDETERMINATE` source is refused** and no
 > row carries execution marks and satisfaction marks together. It refuses on the **non-stale `PlanningError`** ADR-0255 §3
-> fixes for its own conjuncts, for that section's own reason: no re-read makes another goal's execution this goal's, nor
-> one key another, nor a run that happened one that did not. **The fourth limb closes the same-action, different-arguments
-> case** — the Sunday request against a Saturday booking, which §2 forbids and arm 14 asserted only at the stage.
+> fixes for its own conjuncts, and for that section's reason: no re-read makes one goal's execution another's, one key
+> another, or a run that happened one that did not. **The fourth limb closes the same-action, different-arguments
+> case** the Sunday booking makes, which §2 forbids and arm 14 asserted only at the stage.
 
 > **Normative — and on a satisfaction the store writes `output` and `finished_at` itself.** It copies `output` from the
-> **holder row it has just verified** and stamps `finished_at` from its own injected clock; the transition carries neither
-> and the validator refuses one that does. **A value the caller never supplies cannot be mis-stated**, which is why §2's
-> copy-the-holder's-output rule needs no further limb, and it is **not the derivation refused next**: that is the store
-> deciding *which* commits are satisfactions, a question the trio answers and the store never asks. **So every value a
-> satisfaction lands is verified against a store row or written by the store**, and §2's reuse identity is **mechanical
-> rather than advisory** in all three of its directions. **The satisfaction itself is never derived** — that would need the
+> **holder row it has just verified**, stamps `finished_at` from its own clock and **clears `bound_tool`**, which an
+> `AWAITING_APPROVAL` source carries and a satisfied step must not; **the transition carries none of the three, and the
+> validator refuses one that does**. **A value the caller never supplies cannot be mis-stated**, which is why §2's
+> copy-the-holder's-output rule needs no further limb. **So every value a satisfaction lands is verified against a store
+> row or written by the store**, and §2's reuse identity is **mechanical rather than advisory** in all three of its
+> directions. **The satisfaction itself is never derived** — a different thing, and that would need the
 > store to know which commits are satisfactions and to hold the `ToolCall` the key comes from, neither of which is its.
 > **This reopens ADR-0255 §11's *"Nothing else"* closure in that one scope** (§13).
 
@@ -1231,10 +1232,9 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   §12's for the same class of question. §3 fixes that the record is preserved and *"told once"* is
   a property of the report; this decision fixes no reply, no phrasing and no channel. **Fired by
   this ADR landing.**
-- **A dedicated `satisfy_step` store member.** **Not decided.** Satisfaction is committed above as a `StepTransition` the
-  store validates in five limbs; a member taking the execution, step, expected version and trio would make the invalid
-  states **unrepresentable** rather than refused, drop all three fields from `StepTransition` and **retire this decision's
-  ADR-0255 §11 scope**. **Fired by** a finding that the five limbs still admit a satisfaction §2 forbids.
+- **A dedicated `satisfy_step` store member.** **Not decided.** A member taking the execution, step, expected version and
+  trio would make the invalid states **unrepresentable** rather than refused, drop all three fields from `StepTransition`
+  and **retire this decision's ADR-0255 §11 scope**. **Fired by** a finding that the five limbs still admit a satisfaction.
 - **A canonical effect-input identity** — one that would recognise two authorised calls whose
   arguments mean the same thing while differing in spelling, so that `alice@Example.com` in one
   plan and `alice@example.com` in the next carried one key rather than two. **Not decided**, and
@@ -1323,7 +1323,7 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   `EffectOutcome`, `EffectRecord` with its seven fields and `ToolCall.effect_key`, `Disposition`'s **two** members and
   `PlanExport`'s `effects` field with its `schema_version` move, `TurnOutcome.satisfied_from_earlier` and
   `StepTransition`'s three satisfaction fields with their validator, and `commit_transition`'s persistence of the two
-  identifiers and its four-limbed satisfaction claim condition (§9);
+  identifiers and its five-limbed satisfaction claim condition (§9);
   `core/protocols.py`'s
   `claim_effect`; `planning`'s
   `PlanExecution` transition-table row (§7) and the `PlanStore` implementation with its schema
@@ -1400,10 +1400,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    path, because a stale revision surviving a re-point hands §10's modify-before-replace decision a false account; the
    **refusal** paths — an unknown `execution_id`, a `step_id` that is not a step of that execution, and a `step_id`
    whose stored step carries **no `intended_action`** — each raising `PlanningError` with **no row written**; the
-   **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying `satisfied_by_execution` and
-   `satisfied_by_step` persists **both exactly as given** onto the committed `StepExecution`, leaving `attempts`,
-   `started_at`, `approval_ref` and `bound_tool` untouched — the validator's own refusals sitting in `core`'s
-   construction table (§9) — **and the claim condition's six refusals**: a trio naming **another goal's** execution, a
+   **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying the two identifiers persists **both exactly as
+   given** onto the committed `StepExecution` with `attempts` at `0` and `started_at`, `approval_ref` and **`bound_tool`
+   all `None`** — the last **cleared**, asserted from an `AWAITING_APPROVAL` source that carried one — the validator's own
+   refusals sitting in `core`'s construction table (§9) — **and the claim condition's six refusals**: a trio naming **another goal's** execution, a
    step **not of** that execution, a step **not standing `SUCCEEDED`**, one the goal's **effect row does not name as
    holder**, one whose **`satisfied_by_key` is not the row's key** — the Sunday case at the store — and one whose **stored
    source status is `RUNNING` or `INDETERMINATE`**, each raising the **non-stale `PlanningError`** with **no write**, and
