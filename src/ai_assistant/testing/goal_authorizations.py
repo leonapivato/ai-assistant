@@ -433,6 +433,15 @@ _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]
 }
 
 
+#: The two moves that are an **answer** to the question a proposal put, and the only
+#: ones on which ``settle`` performs ADR-0254 §1's expiry settlement — arm 37's *"by
+#: no other operation"*. See
+#: :data:`~ai_assistant.permissions.goal_authorizations._ANSWERS`.
+_ANSWERS: Final[frozenset[AuthorizationDisposition]] = frozenset(
+    {AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.DECLINED}
+)
+
+
 def _narrows(  # noqa: PLR0911 — one return per refusal, and each names a different widening
     later: ValueBound, earlier: ValueBound
 ) -> bool:
@@ -575,11 +584,23 @@ class _AuthorizationLog:
     def _check_write_path(row: Authorization) -> None:
         """Refuse a row written in a disposition its path does not admit (§1, §16).
 
+        **And the origin a path determines is the one the row must carry**, because
+        ``origin`` is what route (d) reads to decide whether to re-take the recipient
+        authority an opening act rested on (§1, §6) — *"read off the row, with no
+        store read and no walk back through a chain"*. Two of the three paths
+        determine it outright: a row naming a ``confirmation`` is path (i) and is
+        ``CONFIRMED``, *"because the destination set is named in the question the
+        user answers"*; a row naming neither pointer is path (iii) and is
+        ``OPENING_ACT``. The third — a correction — **transcribes** it, which
+        :meth:`_check_correction` is what holds.
+
         Raises:
             InvalidAuthorizationError: If a row carrying ``confirmation`` is written
-                in any disposition but ``PROPOSED``, or one carrying it unset in any
-                disposition but ``ESTABLISHED`` or with ``settled_at`` unequal to
-                ``proposed_at``.
+                in any disposition but ``PROPOSED`` or with an origin other than
+                ``CONFIRMED``; if a row carrying neither pointer carries an origin
+                other than ``OPENING_ACT``; or if a row carrying ``confirmation``
+                unset is written in any disposition but ``ESTABLISHED`` or with
+                ``settled_at`` unequal to ``proposed_at``.
         """
         if row.confirmation is not None:
             if row.disposition is not AuthorizationDisposition.PROPOSED:
@@ -589,7 +610,29 @@ class _AuthorizationLog:
                     f"it was written {row.disposition} (ADR-0254 §1)"
                 )
                 raise InvalidAuthorizationError(msg)
+            if row.origin is not AuthorizationOrigin.CONFIRMED:
+                msg = (
+                    f"authorization {row.id!r} names a confirmation, so its origin is "
+                    f"CONFIRMED — the destination set is named in the question the user "
+                    f"answers — and it was written {row.origin} (ADR-0254 §1)"
+                )
+                raise InvalidAuthorizationError(msg)
             return
+        if row.supersedes is None and row.origin is not AuthorizationOrigin.OPENING_ACT:
+            # **The one row shape whose origin is fully determined by its pointers**,
+            # and the one whose origin route (d) reads to decide whether to re-take
+            # the recipient authority it rested on (§1, §6). A path-(iii) row marked
+            # CONFIRMED would let route (d) carry an opening act **alone**, with the
+            # grant seam consulted zero times — which is the failure arm 70 names:
+            # "a lane that wrote an opening-act row and then let route (d) carry it
+            # alone fails this arm". Every other origin is either determined here or
+            # transcribed from the row a correction supersedes.
+            msg = (
+                f"authorization {row.id!r} names neither a confirmation nor a row it "
+                f"supersedes, so it records an opening act and its origin is "
+                f"OPENING_ACT; it was written {row.origin} (ADR-0254 §1)"
+            )
+            raise InvalidAuthorizationError(msg)
         if row.disposition is not AuthorizationDisposition.ESTABLISHED:
             msg = (
                 f"authorization {row.id!r} names no confirmation, so it records an act "
@@ -725,14 +768,10 @@ class _AuthorizationLog:
         found = next((one for one in self._records if one.id == authorization_id), None)
         if found is None:
             return AuthorizationSettlement.NO_SUCH_AUTHORIZATION
-        # The expiry settlement is taken **first** (ADR-0254 §1), and is skipped only
-        # where the caller asked for exactly that move: there the two coincide and the
-        # ordinary edge takes it.
-        held = (
-            found
-            if to is AuthorizationDisposition.EXPIRED
-            else self._expired_first(found, settled_at)
-        )
+        # The expiry settlement is taken **first**, and only where this call is an
+        # **answer** (:data:`_ANSWERS`): arm 37 confines it to "a ``live_for`` read
+        # and the answer that names it, **and by no other operation**".
+        held = self._expired_first(found, settled_at) if to in _ANSWERS else found
         if to not in _EDGES.get(held.disposition, frozenset()):
             return AuthorizationSettlement.NOT_AT_SOURCE
         if to is not AuthorizationDisposition.ESTABLISHED:

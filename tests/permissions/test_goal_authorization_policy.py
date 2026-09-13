@@ -12,7 +12,7 @@ The arm numbers below are ADR-0254 §20's.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -1397,3 +1397,109 @@ class TestTheBarAndTheConfiguredProvider:
         )
         ruling = await gate.decide(request(search_binding(), tool=asked, query="campsites"))
         assert ruling.outcome is PermissionOutcome.ALLOW
+
+
+class TestACivilDateThatHasNoStartInTheBoundsZone:
+    """§4: *"A calendar date denotes the **start of that day in the bound's own
+    ``timezone``**"* — and a day that has no start denotes no instant.
+
+    A zone can skip a whole calendar day: Samoa skipped **30 December 2011** when it
+    crossed the date line, so no instant exists whose local date in
+    ``Pacific/Apia`` is that day. ``datetime.combine`` answers such a date with an
+    instant all the same, resolving the gap by PEP 495's rule — and that instant
+    belongs to a **different** local day, so a bound containing it would cover a
+    request whose date the user could not have meant. §4's reading is total and
+    *"every failure of it is a refusal to cover"*.
+    """
+
+    @staticmethod
+    def _gate(*, starts_at: datetime, ends_at: datetime) -> ThresholdActionPolicy:
+        """A policy over a record whose ``PERIOD`` bound spans the 2011 dates.
+
+        The **row's** own instants stay at this module's defaults: a bound's
+        interval is what a *date argument* is read against and has nothing to do
+        with the record's own liveness, so moving the row into 2011 would have
+        tested the clock rather than the reading.
+        """
+        return policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(
+                            starts_at=starts_at, ends_at=ends_at, timezone="Pacific/Apia"
+                        ),
+                    ),
+                )
+            )
+        )[0]
+
+    async def test_a_skipped_civil_date_is_not_covered(self) -> None:
+        """The fabricated instant — ``2011-12-30T00:00-10:00`` — falls inside a bound
+        spanning that day in UTC, so a reading that kept it would ``ALLOW``."""
+        gate = self._gate(
+            starts_at=datetime(2011, 12, 30, tzinfo=UTC),
+            ends_at=datetime(2011, 12, 31, tzinfo=UTC),
+        )
+        ruling = await gate.decide(request(binding(SITE), stay_from="2011-12-30"))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+    @pytest.mark.parametrize("stay_from", ["2011-12-29", "2011-12-31"])
+    async def test_the_days_either_side_are_read_exactly_as_before(self, stay_from: str) -> None:
+        """The round trip is the whole test, so an ordinary date is untouched by it.
+
+        Stated beside the arm above because a lane that refused every date in a zone
+        with any transition would have made the calendar-date arm unusable rather
+        than fail-closed.
+        """
+        gate = self._gate(
+            starts_at=datetime(2011, 12, 28, tzinfo=UTC),
+            ends_at=datetime(2012, 1, 2, tzinfo=UTC),
+        )
+        ruling = await gate.decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.ALLOW
+
+
+class TestRfc3339sUnknownLocalOffsetSpelling:
+    """``-00:00`` denotes the same **instant** as ``+00:00``, and §4 compares instants.
+
+    RFC 3339 §4.3 is explicit about what that spelling means: *"If the time in UTC
+    is known, but the offset to local time is unknown, this can be represented with
+    an offset of '-00:00'."* What is unknown is the **local offset**, not the
+    instant — and ADR-0254 §4's ``PERIOD`` reading is stated over *"the instant it
+    denotes"*, with the zone reaching only the **calendar-date** arm.
+
+    So a value spelled this way is not the unproven comparison §4 refuses; it is an
+    RFC 3339 date-time carrying an offset whose instant is determinate. Pinned
+    rather than left implicit, because an adversarial round read it the other way
+    and the reading is worth being deliberate about.
+    """
+
+    async def test_an_unknown_local_offset_is_read_as_the_instant_it_denotes(
+        self,
+    ) -> None:
+        """Inside the bound → covered; outside it → not, on the instant alone."""
+        gate, _, _ = policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(starts_at=AT, ends_at=AT + timedelta(hours=1)),
+                    ),
+                )
+            )
+        )
+        inside = await gate.decide(request(binding(SITE), stay_from="2026-09-13T09:30:00-00:00"))
+        assert inside.outcome is PermissionOutcome.ALLOW
+        gate, _, _ = policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(starts_at=AT, ends_at=AT + timedelta(hours=1)),
+                    ),
+                )
+            )
+        )
+        outside = await gate.decide(request(binding(SITE), stay_from="2026-09-13T11:30:00-00:00"))
+        assert outside.outcome is PermissionOutcome.CONFIRM
