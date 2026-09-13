@@ -895,6 +895,104 @@ async def test_a_replay_racing_a_resolution_does_not_move_the_attempt_twice() ->
     assert len(to_execute) == 1, "and the boundary was crossed once, not twice"
 
 
+@pytest.mark.parametrize("approved", [True, False])
+async def test_a_recovered_park_no_attempt_owns_resolves_nothing(*, approved: bool) -> None:
+    """ADR-0255 §5's first limb, on **either** answer, before any ruling is resolved.
+
+    A park recovered from durable state has no live turn (ADR-0052 §3), so
+    ``orchestration`` resolves the attempt from the store — and *"where no attempt names
+    it … the resume is refused, before any ruling is resolved and before anything is
+    claimed"*. Refusing there rather than at the store's own conjunct is what keeps the
+    answer: ADR-0036 §2's unique index and ADR-0044 §2(b)'s per-binding rule make a
+    resolution **single-use**, so a refusal one authored resolution later would spend the
+    one answer the binding admits and strand the step exactly as #257 describes.
+
+    **The declining answer is refused too**, and §5's never-gated clause does not reach
+    it: that clause is stated of the three dispatch predicates a walk re-evaluates — the
+    dependency rule, ``when`` and ``resolves`` — and this is not one of them. It is the
+    question of which record the act belongs to, which a *no* answers no better than a
+    *yes*, and a denial recorded against a park nothing owns is a disposition written
+    into a record with no attempt to account for it.
+
+    The state is the one a store written before ADR-0255 §3 can hold, or one ADR-0249
+    §12's migration left: reachable here only by writing the row, because every public
+    member that could produce it now refuses.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    (stored,) = plans.opened
+    # A pre-decision row, by construction: `commit_attempt` never removes a reference.
+    held = await harness.plans.get_attempt(stored.id)
+    assert held is not None
+    plans._attempts[stored.id] = held.model_copy(update={"execution_ids": ()})
+
+    with pytest.raises(PlanningError, match="cannot name exactly one attempt"):
+        await harness.engine.resume(
+            parked.step.confirmation.token, approved=approved, timeout=PATIENT
+        )
+
+    assert harness.invoker.invocations == [], "nothing was invoked"
+    assert [one for one in await harness.trail.export() if one.resolves is not None] == [], (
+        "and no ruling was resolved, so the one answer the binding admits is unspent"
+    )
+    execution = await harness.plans.get_execution(parked.step.state.id)
+    assert execution is not None
+    step = execution.step("step-1")
+    assert step is not None
+    assert step.status is StepStatus.AWAITING_APPROVAL, "the step stands where it stood"
+    assert len(await harness.engine.pending_confirmations()) == 1, (
+        "and the question is still enumerable, so it is still answerable"
+    )
+
+
+@pytest.mark.parametrize("approved", [True, False])
+async def test_a_recovered_park_two_attempts_own_resolves_nothing(*, approved: bool) -> None:
+    """ADR-0255 §5's second limb: the ambiguous ownership §3 describes.
+
+    *"Where no attempt names it, **and where more than one does** — the legacy state §3
+    describes — the resume is refused."* §3's exclusivity makes that state unreachable
+    through either attempt-writing member, so it survives only in a store written before
+    the decision — and **no lane resolves it by picking the live one, the newest one or
+    any one**: the append order is not retained and the tuples carry no instant, so a
+    choice would invent an ownership nobody recorded.
+
+    The refusal is the engine's and it is taken first; the store's own conjunct refuses
+    the same state from the other side, one authored resolution later, which is the
+    answer this arm exists to keep.
+    """
+    plans = _Recording()
+    harness = Harness(tools=(confirmable(),), plans=plans)
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    (stored,) = plans.opened
+    # A pre-decision row again: `open_attempt` and `commit_attempt` both refuse it now.
+    plans._attempts["a-second"] = GoalAttempt(
+        id="a-second",
+        goal_id=stored.goal_id,
+        opened_at=AT,
+        execution_ids=(parked.step.state.id,),
+    )
+
+    with pytest.raises(PlanningError, match="cannot name exactly one attempt"):
+        await harness.engine.resume(
+            parked.step.confirmation.token, approved=approved, timeout=PATIENT
+        )
+
+    assert harness.invoker.invocations == [], "nothing was invoked"
+    assert [one for one in await harness.trail.export() if one.resolves is not None] == [], (
+        "and no ruling was resolved"
+    )
+    execution = await harness.plans.get_execution(parked.step.state.id)
+    assert execution is not None
+    step = execution.step("step-1")
+    assert step is not None
+    assert step.status is StepStatus.AWAITING_APPROVAL
+
+
 async def test_a_resolution_that_reached_no_ruling_leaves_the_question_standing() -> None:
     """§12, §6: no ruling, no move — and the confirmation is still a live question.
 

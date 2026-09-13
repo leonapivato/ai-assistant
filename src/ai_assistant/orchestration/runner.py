@@ -732,7 +732,7 @@ class StepRunner:
         step_id: str,
         *,
         confirmation_id: str | None = None,
-        attempt_id: str | None,
+        attempt_id: str,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         remember_recipients_until: datetime | None = None,
@@ -776,13 +776,14 @@ class StepRunner:
                 so a reloaded step has none, and the confirmation is recovered
                 from the trail by its ``(execution_id, step_id)`` binding instead
                 (:meth:`_confirmation_for`, ADR-0044 §3).
-            attempt_id: The attempt the resumed claim is made under (ADR-0255 §3),
-                as :meth:`run` takes it — and ``None`` where ``orchestration`` holds
-                no attempt for this execution, which ADR-0255 §5 rules is a resume
-                **refused** rather than one claimed without one. The refusal is taken
-                here on the approving answer alone: a denial is never gated on it,
-                because "a refusal to act needs no evidence" (§5), and a denial makes
-                no claim.
+            attempt_id: The attempt the resumed claim is made under (ADR-0255 §3), as
+                :meth:`run` takes it. On the resuming path the caller resolves it from
+                the store before calling — a recovered park has no attempt in memory
+                (ADR-0052 §3) — and **a park no single attempt owns never reaches here
+                at all**: ADR-0255 §5 refuses such a resume "before any ruling is
+                resolved and before anything is claimed", which is a refusal this
+                method cannot make late enough to be worth anything, the ruling being
+                single-use (ADR-0036 §2).
             approved: The human's answer. Only ``True`` is consent, and the
                 policy — not this object — is what turns it into a ruling
                 (ADR-0021 §3, ADR-0036 §1).
@@ -925,11 +926,6 @@ class StepRunner:
             _log.info("egress_unbindable_on_resume", step_id=step.id, tool_id=confirmed.tool.id)
             return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
         request = _requested(confirmed.tool, step, state, bound)
-        if approved:
-            # ADR-0255 §5: a resume that cannot name its attempt is refused "before any
-            # ruling is resolved and before anything is claimed", and on the approving
-            # answer alone — a denial claims nothing, and §5 gates no refusal on it.
-            self._claimed_under(state, attempt_id)
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
@@ -952,17 +948,8 @@ class StepRunner:
         # step, and a record that cannot be kept must not destroy the act it describes.
         await _reported_ruling(on_ruled, decision, step_id=step.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
-            # Asked again rather than narrowed by an assertion: the call above runs on
-            # every approving answer and ADR-0021 §3 makes only ``True`` consent, so on
-            # a conforming policy this cannot refuse — and a policy that ruled otherwise
-            # must still not reach a claim it cannot name an attempt for.
             disposition = await self._execute(
-                state,
-                step,
-                request,
-                decision,
-                attempt_id=self._claimed_under(state, attempt_id),
-                timeout=timeout,
+                state, step, request, decision, attempt_id=attempt_id, timeout=timeout
             )
         else:
             disposition = await self._deny(state, step, decision, confirmed.tool)
@@ -976,36 +963,6 @@ class StepRunner:
         return replace(
             disposition, establishing=EstablishingAnswer(confirmed=confirmed, answer=decision)
         )
-
-    @staticmethod
-    def _claimed_under(state: ExecutionState, attempt_id: str | None) -> str:
-        """Return the attempt a resumed claim is made under, or refuse (ADR-0255 §5).
-
-        *"Where no attempt names it … the resume is refused, before any ruling is
-        resolved and before anything is claimed."* The claim would be refused by the
-        store's own conjunct anyway — one store round-trip and one **authored
-        resolution** later, which on ADR-0036 §2's single-resolution rule is an answer
-        nobody can take back. Spending nothing is the fail-closed direction, and it is
-        ADR-0044 §3's own posture for a binding recovery cannot answer.
-
-        Args:
-            state: The execution being resumed, named in the refusal.
-            attempt_id: The attempt the caller resolved, or ``None`` where it holds
-                none.
-
-        Returns:
-            The attempt id, unchanged.
-
-        Raises:
-            PlanningError: If it is ``None``.
-        """
-        if attempt_id is None:
-            msg = (
-                f"no attempt names execution {state.id!r}, so its step cannot be claimed: "
-                f"a resume that cannot name its attempt resolves nothing (ADR-0255 §3, §5)"
-            )
-            raise PlanningError(msg)
-        return attempt_id
 
     def _check_establishable(self, confirmed: PermissionDecision) -> None:
         """Refuse an establishing act on a binding it may not ride (ADR-0235 §2).

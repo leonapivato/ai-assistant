@@ -9632,15 +9632,82 @@ class Engine:
         Raises:
             PlanningError: As the store raises it.
         """
+        found = await self._attempts_owning(state)
+        return None if not found else OpenedAttempt(attempt=found[0])
+
+    async def _attempts_owning(self, state: ExecutionState) -> list[GoalAttempt]:
+        """Every attempt of this execution's goal whose ``execution_ids`` names it (§12).
+
+        The reference the execution already carries, followed rather than guessed at:
+        the execution names its plan, the plan names its goal, and ADR-0255 §3 makes
+        **at most one** of that goal's attempts hold this execution's id. More than one
+        is reachable only in a store written before that decision, and what each caller
+        does with that is its own (:meth:`_owning_attempt`, :meth:`_attempt_of`).
+
+        Args:
+            state: The execution to resolve the owner of.
+
+        Returns:
+            The attempts naming it, in ``attempts_of``'s own order.
+
+        Raises:
+            PlanningError: As the store raises it.
+        """
         plan = await self._plans.get_plan(state.plan_id)
         if plan is None:  # pragma: no cover — the execution and its plan were persisted together
-            return None
-        found = [
+            return []
+        return [
             one
             for one in await self._plans.attempts_of(plan.goal_id)
             if state.id in one.execution_ids
         ]
-        return None if not found else OpenedAttempt(attempt=found[0])
+
+    async def _owning_attempt(self, state: ExecutionState) -> GoalAttempt:
+        """Resolve the attempt a resumed claim is made under, or refuse (ADR-0255 §5).
+
+        **A recovered park has no attempt in memory** — ADR-0052 §3 rules that such a
+        park has no live turn, "context and retrieved memories are ephemeral and were
+        never persisted" — so §3's ``attempt_id`` is resolved here, **once, before the
+        resume**, from values the plan store already holds.
+
+        **Where no attempt names it, and where more than one does — the legacy state §3
+        describes — the resume is refused, before any ruling is resolved and before
+        anything is claimed.** Both limbs, and on **either** answer: §5's
+        never-gated-on-a-predicate rule is stated of the three dispatch predicates a
+        walk re-evaluates, and this is not one of them — it is the question of *which
+        record the act belongs to*, which a denial answers no better than an approval.
+        Refusing late would cost an **authored resolution** that ADR-0036 §2's unique
+        index makes single-use, so the fail-closed direction is to spend nothing.
+
+        **This is not the store-side derivation §3 refuses**, and the difference is
+        which of the two is the check: there the derivation *would be* the conjunct,
+        with the store comparing a value against one it had just selected. Here the
+        resolution is ``orchestration``'s, taken on the one path where it genuinely
+        does not hold the value, and its result is then **checked** by the store's own
+        conjunct against the goal and the state — so a wrong resolution is refused
+        rather than obeyed.
+
+        Args:
+            state: The execution being resumed.
+
+        Returns:
+            The one attempt that owns it.
+
+        Raises:
+            PlanningError: Where no attempt names this execution, or more than one
+                does. Raised before any ruling is resolved and before anything is
+                claimed.
+        """
+        owners = await self._attempts_owning(state)
+        if len(owners) != 1:
+            named = ", ".join(sorted(one.id for one in owners)) or "no attempt"
+            msg = (
+                f"execution {state.id!r} is named by {len(owners)} attempts of its goal "
+                f"({named}), so its step cannot be claimed: a resume that cannot name "
+                f"exactly one attempt resolves nothing (ADR-0255 §3, §5)"
+            )
+            raise PlanningError(msg)
+        return owners[0]
 
     async def _authorized_attempt(self, state: ExecutionState, decision_id: str) -> None:
         """Move the resumed execution's attempt at the authorization boundary (§12).
@@ -11995,6 +12062,10 @@ class Engine:
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
                 raise PlanningError(msg)
+            # ADR-0255 §5: the attempt this resumption claims under is resolved from
+            # the store **before** anything else happens here, and a park no single
+            # attempt owns is refused with no ruling resolved and nothing written.
+            owner = await self._owning_attempt(state)
             # ADR-0250 §1's fourth engaging act — "a resumed step of that goal …
             # whose execution's plan carries that `goal_id`" — taken **before** the
             # runner is entered, so a lost compare-and-swap refuses a resumption that
@@ -12024,18 +12095,11 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
-            # ADR-0255 §3, §5: the resuming path holds no attempt in memory — a park
-            # recovered from durable state has no live turn (ADR-0052 §3) — so it is
-            # resolved once, here, from values the store already holds, and the runner
-            # refuses an approving resume that names none. The resolution is
-            # `orchestration`'s and the **check** is the store's, which is what keeps
-            # it clear of §3's refusal of a store-side derivation.
-            owner = await self._attempt_of(state)
             disposition = await self._runner.resume(
                 state,
                 parked.step_id,
                 confirmation_id=parked.confirmation_id,
-                attempt_id=None if owner is None else owner.attempt.id,
+                attempt_id=owner.id,
                 approved=approved,
                 timeout=timeout,
                 remember_recipients_until=remember_recipients_until,
