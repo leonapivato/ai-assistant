@@ -19957,6 +19957,56 @@ class TurnOutcome(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _a_clarification_belongs_to_a_turn_that_planned(self) -> TurnOutcome:
+        """ADR-0250 §10: :attr:`clarification` carries the question **this turn raised**.
+
+        **Stated once over every shape rather than shape by shape**, because the ground
+        is one fact and not three. §6's first condition for putting a question is that
+        "the planner reported the interpretation ambiguous — it returned a
+        ``ProposedQuestion`` (§7) **on this call**", so a pass that made no
+        ``Planner.plan`` call has nothing to carry. All three shapes on which
+        :attr:`turn` is ``None`` are exactly such passes:
+
+        * a **recovered park**, where "context and retrieved memories are ephemeral and
+          were never persisted" (ADR-0170 §4, ADR-0052 §3);
+        * a **routed pass**, which "mints no goal, assembles no context and makes no
+          plan" (ADR-0197 §8); and
+        * an **undecided turn**, which takes "no relevance read, no episodic supplement
+          and no ``Planner.plan`` call, because association precedes all three"
+          (ADR-0250 §3) — and which in any case has no goal to bind a question to,
+          since "a turn that could not find a goal has none to bind one to".
+
+        **And a turn that raised one drove nothing**, which is §10's other half in
+        terms: "A turn that raised a question drives no step of its plan and produces
+        no effect … it is not driven, no execution is started, and no ``ToolCall`` is
+        constructed." So a clarification beside a driven step is an outcome describing
+        a turn that both declined to act and acted.
+
+        Raises:
+            ValueError: If a clarification is carried by a pass that could not have
+                raised one.
+        """
+        if self.clarification is None:
+            return self
+        if self.turn is None:
+            msg = (
+                "this pass raised no question, so the outcome must carry no "
+                "clarification: it produced no TurnResult, which means it made no "
+                "Planner.plan call — a recovered park persisted nothing to plan from, a "
+                "routed pass ends the pipeline before planning, and an undecided turn "
+                "has no goal to bind a question to (ADR-0250 §6, §10)"
+            )
+            raise ValueError(msg)
+        if self.step is not None:
+            msg = (
+                "a turn that raised a question drives no step of its plan and produces "
+                "no effect, so this outcome carries a clarification or a driven step "
+                "and never both: the plan is persisted and not driven (ADR-0250 §10)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _reply_matches_the_shape_of_the_pass(self) -> TurnOutcome:
         """State ADR-0170 §4's invariants, as ADR-0173 §6 widened them, both ways.
 
@@ -20103,15 +20153,6 @@ class TurnOutcome(BaseModel):
                 "goal_engagement: no implementation constructs one in order to carry a "
                 "reference outcome, because that value asserts a goal was engaged "
                 "(ADR-0250 §5, §11)"
-            )
-            raise ValueError(msg)
-        if self.clarification is not None:
-            msg = (
-                "an undecided turn raised no question, so this outcome must carry no "
-                "clarification: a GoalQuestion is bound to a goal and a turn that could "
-                "not find a goal has none to bind one to — and the turn made no "
-                "Planner.plan call, so no ProposedQuestion was reported to it at all "
-                "(ADR-0250 §3, §6, §10)"
             )
             raise ValueError(msg)
         if self.reference is not None and self.reference is not ReferenceOutcome.UNKNOWN:

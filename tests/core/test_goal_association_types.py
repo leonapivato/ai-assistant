@@ -25,16 +25,19 @@ from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
+    ActionPlan,
     AssociationVerdict,
     CandidateGoal,
     Clarification,
     ClarificationWithdrawal,
+    CurrentContext,
     Disposition,
     EngagementDisposition,
     ExecutionState,
     Goal,
     GoalAbandonment,
     GoalAssociation,
+    GoalBrief,
     GoalCandidacy,
     GoalCandidates,
     GoalDisambiguation,
@@ -56,8 +59,10 @@ from ai_assistant.core.types import (
     RouteOutcome,
     StepExecution,
     StepOutcome,
+    TimeOfDay,
     TurnOutcome,
     TurnReference,
+    TurnResult,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -67,6 +72,23 @@ _PROV = Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updat
 #: The repository root, for the one case that reads the shipped tree rather than a
 #: value (§20 arm 23's half this lane can decide).
 _SRC: Final = Path(__file__).resolve().parents[2] / "src"
+
+#: A real turn result, for the one case that needs a pass which actually planned —
+#: every other case here is about a pass that did not, where ``turn`` is ``None``.
+_PLANNED = TurnResult(
+    utterance="book it",
+    goal=GoalBrief(
+        goal_id="g1",
+        outcome="book a campsite",
+        outcome_ground=Ground.USER_STATED,
+        status=GoalStatus.ACTIVE,
+    ),
+    context=CurrentContext(
+        now=_WHEN, time_of_day=TimeOfDay.MORNING, within_working_hours=True, is_weekend=False
+    ),
+    memories=(),
+    plan=ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN, targets_revision=1),
+)
 
 #: A driven step, for the one case that asserts an undecided turn carries none.
 _DROVE = StepOutcome(
@@ -436,7 +458,7 @@ def test_the_undecided_shape_is_admitted_and_is_the_only_one_carrying_a_disambig
                     question_id="q1", text="which campsite?", expires_at=_LATER
                 )
             },
-            "raised no question",
+            "raised no question",  # the cross-cutting rule, not the undecided branch
         ),
         ({"reference": ReferenceOutcome.ANSWERED}, "unreachable here"),
         ({"reference": ReferenceOutcome.EXPIRED}, "unreachable here"),
@@ -496,6 +518,70 @@ def test_an_undecided_turn_may_report_that_the_handle_it_was_given_resolved_to_n
 
     assert asking.reference is ReferenceOutcome.UNKNOWN
     assert asking.goal_engagement is None, "and no engagement was constructed to hold it"
+
+
+def test_no_pass_that_made_no_plan_can_carry_a_clarification() -> None:
+    """§10, over **all three** shapes on which ``turn`` is ``None``.
+
+    The ground is one fact rather than three: §6's first condition for putting a
+    question is that the planner reported the ambiguity "on this call", and none of the
+    three passes below makes a ``Planner.plan`` call at all — a recovered park persisted
+    nothing to plan from, a routed pass ends the pipeline before planning, and an
+    undecided turn takes no planner call because association precedes it.
+
+    Driven as one case over the three because the rule is stated once. Fixing this
+    shape by shape is what let the same class of gap survive two earlier rounds: the
+    validator excluded the combination that had been pointed at and admitted the next
+    one along.
+    """
+    clarification = Clarification(question_id="q1", text="which campsite?", expires_at=_LATER)
+    routed = RoutedOperation(operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED)
+
+    shapes: list[dict[str, object]] = [
+        {"turn": None, "step": None},  # a recovered park
+        {"turn": None, "routed": routed, "reply": "I forgot it."},  # a routed pass
+        {
+            "turn": None,
+            "step": None,
+            "reply": "Which of those did you mean?",
+            "disambiguation": GoalDisambiguation(candidates=("book a campsite",)),
+        },  # an undecided turn
+    ]
+    for shape in shapes:
+        with pytest.raises(ValidationError, match="raised no question"):
+            TurnOutcome(**(shape | {"clarification": clarification}))  # type: ignore[arg-type]
+        assert TurnOutcome(**shape).clarification is None, (  # type: ignore[arg-type]
+            "and the same shape without one is admitted exactly as before"
+        )
+
+
+def test_a_turn_that_raised_a_question_drove_no_step() -> None:
+    """§10's other half: "drives no step of its plan and produces no effect".
+
+    "The plan is persisted exactly as ADR-0228 §5 and ADR-0249 §11 already have it
+    persisted; it is not driven, no execution is started, and no ``ToolCall`` is
+    constructed." So an outcome carrying both a clarification and a driven step is
+    describing a turn that declined to act and acted.
+    """
+    clarification = Clarification(question_id="q1", text="which campsite?", expires_at=_LATER)
+
+    with pytest.raises(ValidationError, match="never both"):
+        TurnOutcome(
+            turn=_PLANNED,
+            step=_DROVE,
+            reply="Booked it.",
+            clarification=clarification,
+        )
+
+    assert (
+        TurnOutcome(
+            turn=_PLANNED,
+            step=None,
+            reply="Which campsite did you mean?",
+            clarification=clarification,
+        ).clarification
+        is clarification
+    ), "and a turn that planned and drove nothing carries one"
 
 
 def test_a_routed_pass_carries_no_engagement_either() -> None:
