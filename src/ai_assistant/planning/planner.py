@@ -1123,6 +1123,16 @@ that memory's label, `M1`, `M2`, …, or that read's label, `E1`, `E2`, …, in 
 - `inferred` — neither: you judged it yourself, and there is nothing to point at. \
 Send no `span` and no `evidence_label` with it.
 
+A NEW element may also say what it is about MECHANICALLY, so that evidence read \
+about something else cannot later be read as settling it. Send any of `window` — \
+`{"start": "<ISO-8601 instant>", "end": "<ISO-8601 instant>"}`, and either end \
+may be left out — `participants`, `topics` and `about_person`, each a non-empty \
+list of strings. Send none of them where the element is about no particular \
+interval, person or subject, which is the ordinary case. Do NOT send an empty \
+list, a `window` carrying neither end, or an `end` that is not after its `start`: \
+each of those is refused outright rather than read as "about nothing at all". A \
+retaining element carries `retains` alone and none of these.
+
 The objective itself is either kept or restated, and one of the two is always \
 required. Where this turn does not change what the goal is for, send \
 `"retains_outcome": true` and nothing else about it. Where it does, leave \
@@ -1143,6 +1153,128 @@ next message — those are for `retains` alone. Count your own `constraints` as 
 Where the question is about the objective itself, send `"about": null` or leave \
 `about` out. A question about something you are sending no element for is \
 dropped, so name the element it is about."""
+
+
+#: ADR-0253 §9's five step keys and its envelope member, asked for in the prompt.
+#:
+#: **It describes the PLAN shape alone, so it sits below the shapes and their two
+#: worked-through directions** — a reader meeting a fifth key of a step before being
+#: told what a step is has been given an addition to a shape they have not seen. It
+#: sits **below** :data:`_UNDERSTANDING_GUIDANCE` for a second reason that is
+#: load-bearing rather than aesthetic: §9 makes a condition label index the
+#: ``conditions`` of *the reply's own* ``understanding`` where one is returned, so the
+#: last paragraph here names a list the block above has just introduced and could not
+#: be read before it. And it sits **above** the read-request family, which
+#: :func:`_system_prompt` records as one connected description of one member that
+#: nothing may be inserted into.
+#:
+#: **Every value a model writes in any of these is an ordinal or a label** (§9), and
+#: the prompt says so at each site rather than once: a step is named by its 1-based
+#: position in the envelope's own ``steps`` list, a record by its ``M`` label, a
+#: condition by its ``D`` label. "No identifier of any kind is rendered to the model
+#: and none is accepted from it" (ADR-0228 §8), which is why the block ends by telling
+#: a model not to send an interpretation id, exactly as :data:`_PROMPT_CLOSING` already
+#: does for a step id.
+#:
+#: **Every member of every vocabulary is spelled out**, because §9 has each of them
+#: extracted strictly — "a value outside it is an extraction failure for that envelope
+#: and is never coerced, case-folded, aliased or repaired into a member". A prompt that
+#: named a vocabulary without listing it would invite exactly the near-miss spellings
+#: that then cost a repair round, which is ADR-0176 §1's own reason for spelling the
+#: decline marker as "the JSON boolean true and nothing else".
+#:
+#: **Both cases of the sequence in force are stated** (§9). Stating only the brief's
+#: labels "would make a condition on a proposition the same reply introduces unnameable
+#: in practice", and stating only the reply's own positions "would make every ordinary
+#: follow-up turn's label wrong" — so the last paragraph states which sequence is in
+#: force by which of the two the reply is sending.
+#:
+#: **The omissions are stated as strongly as the shapes.** An absent ``after`` does not
+#: mean "after the previous step" (§1), an absent ``verifies`` imposes no predicate
+#: (§4) and an absent ``evidence_recency`` imposes no freshness (§5) — each is a
+#: default a model would otherwise be free to guess at, and §4's own argument is that
+#: "an invented predicate is worse than none".
+_PLAN_SHAPE_GUIDANCE = """\
+In a PLAN, a step may also declare what it waits on, what fills its arguments, \
+what its own output must carry, and what must already be established about this \
+goal before it runs. All five keys are optional and most steps carry none: a step \
+declaring none of them is exactly the step this assistant has always written.
+
+Name a step by its 1-based position in your own `steps` list — the first is 1, \
+the second is 2 — never by an id, and only ever a step EARLIER than the one \
+naming it:
+
+ {"intent": "<as above>", "capability": "<as above>", "parameters": {},
+  "after": [1],
+  "resolves": [{"parameter": "<argument of THIS step this fills>",
+                "source": {"step": 1, "field": "<key of that step's output>"}}],
+  "verifies": {"kind": "field_present", "field": "<key of THIS step's output>"},
+  "evidence_recency": "PT15M",
+  "when": [{"about": "D1", "basis": "interpretation", "requires": "qualifies"}]}
+
+`after` is the steps this one waits on: it runs only once each of them has \
+succeeded. Leave it out where the step waits on nothing — an omitted `after` \
+does NOT mean "after the previous step", and two steps that may be done in \
+either order say so by naming nothing.
+
+`resolves` fills one of this step's own arguments from an earlier step's output, \
+so you never have to guess a value that step has not produced yet. Every step it \
+names must also be in `after`; no `parameter` may already be a key of this step's \
+`parameters`; and two of them may not fill the same `parameter`. `field` names \
+ONE key of that output and never a path — no dots, no indices, no wildcards — \
+and leaving it out takes the whole output.
+
+`verifies` is one mechanical check over THIS step's own output. `kind` is exactly \
+one of:
+- `output_present` — the step returned something at all. Send no `field` and no \
+`equals`.
+- `field_present` — the output is a JSON object carrying `field`, whose value is \
+not null. Send `field` and no `equals`.
+- `field_equals` — `field_present` holds AND that key's value equals `equals` \
+exactly, with no folding of case, number or type. Send both `field` and `equals`.
+A step declaring no `verifies` is checked for nothing beyond having succeeded. \
+Do not invent a predicate about a shape you have not been shown.
+
+`when` is what must already be established about this goal for the step to run. \
+EVERY entry must hold; there is no "or", no "not" and no nesting, and two steps \
+about two different conditions are not alternatives. Each entry is:
+- `about` — which condition of this goal it is about, as a label (last paragraph \
+below).
+- `basis` — exactly one of `read_outcome`, meaning something already read for \
+this goal answered it, or `interpretation`, meaning one of the `interpretations` \
+below settled it.
+- `requires` — on the `interpretation` basis ONLY, and required there: exactly \
+one of `qualifies` or `does_not_qualify`. Never `inconclusive`, which is the \
+verdict that settles nothing, and never sent at all on the `read_outcome` basis.
+- `read_kind` — on the `read_outcome` basis ONLY, where it is optional: exactly \
+one of `sighted_query`, `citation_hop`, `local_file`, `web_search` or \
+`structured_read`. Never sent on the `interpretation` basis.
+
+`evidence_recency` says how fresh that evidence must be, as an ISO-8601 duration \
+string — `PT15M`, `PT2H`, `P1D` — and applies to every entry of that step's \
+`when`. Leave it out to require no particular freshness, which is the ordinary \
+case. Do not send a number, a zero duration or a negative one.
+
+Beside `steps`, a PLAN may carry `interpretations` — at most FOUR — each reading \
+ONE thing and settling ONE condition of this goal:
+
+ "interpretations": [{"settles": "D1", "record": "M2"},
+                     {"settles": "D2", "reads": {"step": 1, "field": "summary"}}]
+
+Each entry sends exactly one of `record` — a memory label printed in the next \
+message — and `reads` — the output of a step of this same plan, named by its \
+position and an optional `field` under the same one-key rule as above. Never \
+both, and never neither. Two interpretations may not settle the same condition. \
+Any step whose `when` reads an interpretation's verdict must come AFTER the step \
+that interpretation reads. Do not include interpretation ids; they are assigned \
+downstream.
+
+A condition label names a condition of this goal AS THIS REPLY LEAVES IT. Where \
+you are sending no `understanding`, it is a label printed under "What this goal \
+depends on" in the next message — `D1`, `D2`, and so on. Where you ARE sending an \
+`understanding`, it is instead the 1-based position within that reply's own \
+`conditions` list — `D1` for the first one you wrote, `D2` for the second — \
+retained and new elements alike, in the order you wrote them."""
 
 
 def _system_prompt(
@@ -1177,6 +1309,15 @@ def _system_prompt(
     :data:`_ACT_RECORD_GUIDANCE` sits below that block again, because it is a
     condition on the read the block has just described and says nothing a reader
     who has not met `labels` yet could use (#1929).
+
+    :data:`_PLAN_SHAPE_GUIDANCE` sits **between** the understanding block and that
+    run, which is the one position ADR-0253 §9 leaves open. It extends the PLAN
+    shape alone, so it is read after the choice between the two shapes has been
+    made and after both worked-through directions; its closing paragraph names the
+    ``conditions`` list of *the reply's own* ``understanding``, which is the
+    sequence §9 puts in force where one is returned, so it cannot precede the block
+    that introduces that member; and it goes above the read-request family rather
+    than inside it, because that family is the connected run named above.
 
     **It is stated unconditionally, where the vocabulary is not.** ADR-0211 §6
     makes the empty vocabulary a case the prompt must speak to, because a list that
@@ -1246,6 +1387,8 @@ def _system_prompt(
         _PROMPT_CLOSING,
         "",
         _UNDERSTANDING_GUIDANCE,
+        "",
+        _PLAN_SHAPE_GUIDANCE,
         "",
         _READ_REQUEST_GUIDANCE,
         "",
