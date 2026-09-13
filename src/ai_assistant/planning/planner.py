@@ -86,7 +86,9 @@ value's ground **kind** and never a reference (§9) — the turn's own ``utteran
 because the goal statement no longer carries it; the constraints, the success
 criteria and the conditions under headings of their own, each labelled ``C``\ *n*,
 ``S``\ *n*, ``D``\ *n* (:func:`_brief_label`) and carrying its ground kind; the
-digest under its own. **It prints no identifier of any kind** — not ``goal_id``,
+digest under its own, each row labelled ``E``\ *n* (:func:`_evidence_label`) so that
+ADR-0252 §10's grounding on an evidence row has a form to name it in.
+**It prints no identifier of any kind** — not ``goal_id``,
 not an evidence id, not a ground reference — which §9 makes a property of the
 projections rather than a rule this renderer is trusted to keep, and which this
 module then holds anyway because it is the renderer §9 names.
@@ -113,10 +115,13 @@ goal now is, asked for in :data:`_UNDERSTANDING_GUIDANCE` and read back by
 
 **This module proposes and resolves nothing.** A ``retains`` label, an
 ``evidence_label`` and a ``span`` cross the seam as the model wrote them;
-``orchestration`` resolves each against the brief and the supply *it* holds, drops
-what does not resolve, and stamps the revision (§7). Nothing here filters a label
-against the brief, for the reason :func:`_optional_read_request` states for the
-``M`` labels it also leaves alone.
+``orchestration`` resolves each against the brief, the supply and the digest
+sequence *it* holds, drops what does not resolve, and stamps the revision (§7,
+ADR-0252 §10). Nothing here filters a label against the brief, for the reason
+:func:`_optional_read_request` states for the ``M`` labels it also leaves alone —
+and that reaches the ``E`` labels unchanged: an ``E0``, a padded ``E02`` and a bare
+``E`` cross as written and are dropped at the loop, which is §7's disposal binding
+over "one more way to fail to resolve" rather than a second check here.
 """
 
 from __future__ import annotations
@@ -232,12 +237,17 @@ _CONDITIONS_HEADING: Final = "What this goal depends on, labelled D1, D2, …:"
 
 #: The heading ADR-0249 §10's evidence digest is printed under.
 #:
-#: **The bullets carry no label**, and that absence is deliberate rather than an
-#: omission. A ``FROM_EVIDENCE`` ground names a record of *this call's* ``memories``
-#: by its ``M`` label (§7), and nothing else; giving the digest a label space of its
-#: own would invite a planner to ground an element on a digest, which resolves to
-#: nothing at the loop and would fill ADR-0226 §9's dropped-label population with
-#: emissions this prompt asked for.
+#: **The bullets carry an ``E`` label since ADR-0252 §10**, and the absence they used
+#: to carry was correct for exactly as long as the loop resolved nothing but ``M``.
+#: §10 mints a fourth label space over ``Planner.plan``'s ``evidence`` and rules that
+#: ``ProposedElement.evidence_label`` "carries either an ``M`` label or an ``E``
+#: label"; a digest a planner can see and cannot name is the half-seam #2334 records,
+#: where ``GoalElement.evidence_row_id`` is stampable and no production planner can
+#: emit a label that reaches it. So the bullets are labelled
+#: (:func:`_evidence_label`), the guidance names the form
+#: (:data:`_UNDERSTANDING_GUIDANCE`), and what fills ADR-0226 §9's dropped-label
+#: population now is a label naming a digest this call did **not** print — which is
+#: the ordinary out-of-range case and not one this prompt asked for.
 _EVIDENCE_HEADING: Final = "What has already been read for this goal:"
 
 #: The heading the chronological conversation tail is printed under (ADR-0074 §5).
@@ -1008,11 +1018,30 @@ _STRUCTURED_AXES: Final[tuple[str, ...]] = ("participants", "topics", "about_per
 #: reason rather than only the rule.
 #:
 #: **The three grounds are stated as what the planner can show for the value**, not as
-#: a taxonomy: the user's own words (and which characters they are), a memory of the
-#: block below (and which label it is), or the planner's own judgement with nothing to
-#: show. ADR-0014 §1 requires that a stated value never be indistinguishable from an
-#: inferred one, and this is the only place in the system where that distinction is
-#: originated rather than copied.
+#: a taxonomy: the user's own words (and which characters they are), something already
+#: read (and which label it is), or the planner's own judgement with nothing to show.
+#: ADR-0014 §1 requires that a stated value never be indistinguishable from an inferred
+#: one, and this is the only place in the system where that distinction is originated
+#: rather than copied.
+#:
+#: **``from_evidence`` names two label spaces on one field, and the prefix is the whole
+#: of the difference** (ADR-0252 §10). ``evidence_label`` "carries either an ``M``
+#: label or an ``E`` label, and the prefix is the whole of what decides which sequence
+#: ``orchestration`` resolves it against: ``M`` against the ``memories`` passed on that
+#: call, ``E`` against the ``evidence`` passed on that call". So the bullet names both
+#: forms and the block asks for no second field — a second field "would let a planner
+#: emit both and the loop choose, which is the *two carriers for one fact* defect", and
+#: :class:`~ai_assistant.core.types.ProposedElement` accordingly gains none.
+#:
+#: **Both forms are named unconditionally, for the reason :func:`_system_turn` gives
+#: for the supply.** An empty ``evidence`` sequence changes no shape — it means no
+#: ``E`` label is printed below, and ADR-0226 §3's rule that a planner names only a
+#: label actually printed already says what that leaves nameable, without this block
+#: taking a condition to say it twice. That is exactly the ``M`` case, which this
+#: prompt has always stated on calls with no memories at all, and it is *not*
+#: :data:`_LOCAL_FILE_GUIDANCE`'s case: that block is conditional because it describes
+#: a whole request **member** that an empty listing makes unaskable, where this one
+#: describes a value of a field a ``from_evidence`` ground carries either way.
 #:
 #: **An element-free goal is ordinary** (§9, ADR-0249 §16 item 13): "no implementation
 #: treats an element-free brief as an error, a failure to understand, or a reason to
@@ -1087,8 +1116,10 @@ from the same heading you found it under.
 Every NEW element carries `text` and a `ground`, which is exactly one of:
 - `user_stated` — the user said it on THIS turn. Put the stretch of their request \
 that says so in `span`, copied character for character out of the text above.
-- `from_evidence` — one of the memories in the next message establishes it. Put \
-that memory's label, `M1`, `M2`, …, in `evidence_label`.
+- `from_evidence` — something already in front of you establishes it: one of the \
+memories in the next message, or one of the reads already taken for this goal. Put \
+that memory's label, `M1`, `M2`, …, or that read's label, `E1`, `E2`, …, in \
+`evidence_label`.
 - `inferred` — neither: you judged it yourself, and there is nothing to point at. \
 Send no `span` and no `evidence_label` with it.
 
@@ -1687,9 +1718,21 @@ def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstandin
 
     **Nothing here resolves a label or a span** (§7). A ``retains``, an
     ``evidence_label`` and a ``span`` cross as the model wrote them; ``orchestration``
-    resolves each against its own copy of the brief and the supply and drops what does
-    not resolve, and a planner that filtered its own out-of-range labels would empty
-    ADR-0226 §9's audit of the population it exists to count.
+    resolves each against its own copy of the brief, the supply and this call's
+    ``evidence`` and drops what does not resolve, and a planner that filtered its own
+    out-of-range labels would empty ADR-0226 §9's audit of the population it exists to
+    count.
+
+    **ADR-0252 §10 widens what an ``evidence_label`` may say and adds no check here.**
+    The field carries "either an ``M`` label or an ``E`` label", and which sequence the
+    prefix selects is the loop's to read; an ``E`` naming an ordinal below 1 or beyond
+    the sequence's length, a padded one, a bare ``E`` and a form of neither space each
+    "resolve to nothing" and the element is "dropped silently" there — §7's disposal
+    "binding unchanged over one more way to fail to resolve". A check here would be a
+    **second** resolver of one label space, which §10 forbids in terms — "both sides
+    derive it from the sequence they hold and neither consults the other" — and it
+    would either duplicate the loop's disposal or disagree with it, with no test in
+    either package catching the disagreement.
 
     Args:
         envelope: The decoded model envelope, plan-shaped or decline-shaped.
@@ -2421,9 +2464,13 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     handed to it anyway, ``goal_id``, which it renders nowhere.
 
     **The evidence digest is printed below the material and above ADR-0251 §3's
-    carrier** (ADR-0249 §10). It is not a group of ``memories`` and carries no label: a
-    ``FROM_EVIDENCE`` ground names an ``M`` label of this call's supply and nothing
-    else, so a digest label would invite a ground that resolves to nothing. An absent
+    carrier** (ADR-0249 §10), each row labelled ``E1``, ``E2``, … by its position in
+    the sequence this call was handed (ADR-0252 §10, :func:`_evidence_label`). It is
+    not a group of ``memories`` and its labels are not ``M`` labels: §10 makes the
+    prefix "the whole of what decides which sequence ``orchestration`` resolves it
+    against", so the two spaces are mutually exclusive at the value and a heading of
+    its own is what makes which one a planner is reading legible —
+    :data:`_FILES_HEADING`'s argument over a third sequence. An absent
     ``supported`` is printed **as an absence with its consequence stated**, not
     omitted — §10 rules that "an absent ``supported`` supports nothing", and a line
     that simply disappeared would leave a planner to read the verdict as supporting
@@ -2648,12 +2695,32 @@ def _render_brief_elements(goal: GoalBrief) -> list[str]:
 def _render_evidence(evidence: Sequence[EvidenceDigest]) -> list[str]:
     """ADR-0249 §10's digest of what has already been read for this goal.
 
-    **No label and no identifier** (§10). An :class:`EvidenceDigest` carries no
-    evidence row id, no memory id, no snippet, no title and no address — the namer
-    rule is a property of the type — and this function adds no label space of its
-    own, because the only ground that names anything names an ``M`` label of *this*
-    call's ``memories`` (§7). A digest a planner could name would be a ground that
-    resolves to nothing at the loop.
+    **A label and still no identifier** (ADR-0252 §10, ADR-0249 §10). An
+    :class:`EvidenceDigest` carries no evidence row id, no memory id, no snippet, no
+    title and no address — the namer rule is a property of the type, and ADR-0252 §10
+    binds it over the row as well: "a row id is stamped by ``orchestration`` and never
+    parsed out of model output". What this function adds is an **ordinal**, which is
+    the opposite of an identifier: ``E`` followed by the digest's 1-based position in
+    the sequence this call was handed (:func:`_evidence_label`), derived rather than
+    told, meaningful only within this call, and resolved by the loop against its own
+    copy of the same ordered value.
+
+    **The label is what makes ADR-0252 §10's grounding reachable at all.** Until that
+    decision the block was deliberately unlabelled, because the only ground that named
+    anything named an ``M`` label of this call's ``memories`` (ADR-0249 §7) and a
+    nameable digest would have invited a ground that resolved to nothing. §10 gives the
+    label a destination — ``GoalElement.evidence_row_id``, stamped by the loop from the
+    row **it itself labelled** — so the reasoning inverts: an unlabelled block is now a
+    row the planner can read and cannot cite, which is the half-built seam #2334
+    records.
+
+    **Nothing else about the rendering is this function's** (ADR-0252 §11). The
+    digest's ``requested`` and ``supported`` arrive already rendered by
+    ``orchestration``, deterministically and region by region; this side prints the
+    values it is handed, quotes them, and adds no identifier, no standing of its own
+    and no judgement of sufficiency — §11's "the planner is not told which rows satisfy
+    anything", which is ADR-0251 §3's "the planner is still not told which round it is
+    on" one level over.
 
     **An absent ``supported`` is stated rather than omitted**, which is the one place
     this block departs from the absent-facet posture the rest of this prompt takes
@@ -2685,13 +2752,16 @@ def _render_evidence(evidence: Sequence[EvidenceDigest]) -> list[str]:
     if not evidence:
         return []
     lines = ["", _EVIDENCE_HEADING]
-    for digest in evidence:
+    for ordinal, digest in enumerate(evidence, start=1):
         asked = (
             _quoted_span(digest.requested)
             if digest.requested is not None
             else "something this record does not name"
         )
-        lines.append(f"  - asked for {asked}, read at {digest.read_at.isoformat()}")
+        lines.append(
+            f"  - {_evidence_label(ordinal)} asked for {asked}, "
+            f"read at {digest.read_at.isoformat()}"
+        )
         if digest.as_of is not None:
             lines.append(f"    speaking for: {digest.as_of.isoformat()}")
         lines.append(
@@ -3246,6 +3316,44 @@ def _file_label(ordinal: int) -> str:
         The label, e.g. ``"F3"``.
     """
     return f"F{ordinal}"
+
+
+def _evidence_label(ordinal: int) -> str:
+    """ADR-0252 §10's label for the digest at 1-based ``ordinal`` of ``evidence``.
+
+    "The label of the digest at 1-based index *n* of ``Planner.plan``'s ``evidence``
+    sequence is the ASCII string ``E`` followed by *n* in decimal with no padding.
+    That is the whole of the scheme, it is the same on both sides of the seam, both
+    sides derive it from the sequence they hold and neither consults the other, and no
+    label survives the call that rendered it."
+
+    **A fourth label space and not a widening of a third** (§10). ``E`` indexes this
+    call's ``evidence`` where :func:`_label`'s ``M`` indexes its ``memories``, and the
+    prefix is "the whole of what decides which sequence ``orchestration`` resolves it
+    against". The two ride one field — ``ProposedElement.evidence_label`` — because a
+    second field "would let a planner emit both and the loop choose, which is the *two
+    carriers for one fact* defect"; the prefix is what keeps them mutually exclusive at
+    the value, which is :func:`_file_label`'s own argument one sequence over.
+
+    **Derived from position and never from a digest's content**, which is what makes it
+    non-forgeable in ADR-0098 §2's sense: the ordinal is this renderer's own count, and
+    the digest's three free-text members are quoted by :func:`_quoted_span`, so no
+    digest can write a line claiming a label — or a second digest's label — of its
+    choosing. The rendering those members carry is ``orchestration``'s (§11) and this
+    function adds the only thing this side adds to it.
+
+    **So this function is not imported by ``orchestration`` and must not become
+    shared** (§10, :func:`_label`'s clause). The loop parses *n* out of a returned
+    label and indexes the very sequence it passed on this call; nothing crosses the two
+    packages but that sequence and the ``ActionPlan`` that already did.
+
+    Args:
+        ordinal: The digest's 1-based position in this call's ``evidence``.
+
+    Returns:
+        The label, e.g. ``"E2"``.
+    """
+    return f"E{ordinal}"
 
 
 def _render_files(files: Sequence[ShownFile]) -> list[str]:
