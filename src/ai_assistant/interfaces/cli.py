@@ -5127,8 +5127,11 @@ def _render_goal_question(clarification: Clarification | None) -> None:
     whose question expired is still paused and still resumable … no lane reads an
     expiry as a refusal, an abandonment, a denial or a decision of any kind", and §11
     adds that an answer arriving late "reopens the work rather than vanishing". So the
-    line says when the question stops being answerable and says nothing about the work
-    stopping with it.
+    line says when the question stops being answerable, and then says the other half
+    **outright** rather than leaving it to be inferred from silence: a bare deadline is
+    read as *answer by then or this is lost*, which is the reading §12 forbids, and the
+    browser's twin of this line has always denied it in terms. Saying it on one surface
+    and not the other is what the round-9 parity sweep was for.
 
     **Both acts are offered, because a user told only how to answer has not been told
     everything they can do** — ADR-0244 §13's clause one record kind over, and §12's
@@ -5140,7 +5143,10 @@ def _render_goal_question(clarification: Clarification | None) -> None:
     if clarification is None:
         return
     _print(f"  [bold]Waiting on:[/] {_safe(clarification.text)}")
-    _print(f"  [dim]Answerable until {_when(clarification.expires_at)}.[/]")
+    _print(
+        f"  [dim]Answerable until {_when(clarification.expires_at)}. A late answer is not "
+        "lost: the work stays open and what you say goes to it.[/]"
+    )
     # **Through the copyable-command path and not through `_safe` alone** (#984, #1013,
     # #1023; adversarial review, round 6, `major`). `Identifier` requires encodability
     # and nothing more, so a question id carrying an interior space renders a line that
@@ -7680,7 +7686,22 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         plan = turn.plan
         if plan.rationale:
             _print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
-        if not plan.steps:
+        # **And not a turn that could not act yet** (ADR-0250 §10, §5), which is the
+        # browser's guard on this same notice and is stated here for its reason. §10
+        # admits the shape exactly — a turn whose planner raised a question "drives no
+        # step of its plan and produces no effect" — so an empty plan is the *ordinary*
+        # case for a clarification turn rather than an edge of it, and "No action was
+        # needed." under a question the owner is being asked to answer is the opposite
+        # of what the four lines above it just said: action was needed, and it is
+        # waiting on an answer. Adversarial review, round 9, ``major``.
+        #
+        # **``disambiguation`` is belt-and-braces here and is kept anyway.** §5 gives an
+        # undecided turn no turn at all, so the enclosing ``turn is not None`` already
+        # suppresses the notice on one — but that is a property of a value this function
+        # is *handed*, not one the type enforces, and the browser declined to depend on
+        # it silently. Depending on it silently at one surface and not the other is how
+        # rounds 7, 8 and 9 each happened.
+        if not plan.steps and outcome.clarification is None and outcome.disambiguation is None:
             _print("[dim]No action was needed.[/]")
         for index, planned in enumerate(plan.steps, start=1):
             _print(f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]")

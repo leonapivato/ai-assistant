@@ -967,6 +967,45 @@ def test_a_raised_clarification_appears_in_the_exchange_that_raised_it(
     assert f"--answering {QUESTION_ID}" in screen
     assert f"assistant withdraw-clarification {QUESTION_ID}" in screen
     assert "Answerable until 2026-01-08 11:00 UTC" in screen
+    # **And the half a bare deadline leaves to inference** (ADR-0250 §12, §11), which the
+    # browser's twin of this line has always said outright: an expiry is never a refusal,
+    # and a late answer "reopens the work rather than vanishing". Round 9's parity sweep.
+    assert "A late answer is not lost" in screen
+    assert "the work stays open" in screen
+
+
+def test_a_raised_clarification_is_not_reported_as_needing_no_action(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """The contradiction the browser's twin already closed, at this surface.
+
+    ADR-0250 §10 admits the shape exactly — a turn whose planner raised a question
+    "drives no step of its plan and produces no effect" — so an empty plan is the
+    **ordinary** case for a clarification turn rather than an edge of it, and this turn's
+    ``TURN`` carries no steps for that reason. "No action was needed." under a question
+    the owner is being asked to answer is the opposite of what the lines above it say:
+    action was needed, and it is waiting on an answer.
+
+    ``test_bundle.py``'s
+    ``test_an_undecided_turn_and_a_raised_question_are_not_reported_as_needing_no_action``
+    is this arm on the page, and it passed while this surface had no guard at all.
+    Adversarial review, round 9, ``major``.
+    """
+    _drive(
+        monkeypatch,
+        TurnOutcome(
+            turn=TURN,
+            conversation_id="c-1",
+            reply="Which one did you mean?",
+            goal_engagement=_engagement(EngagementDisposition.OPENED),
+            clarification=_clarification(),
+        ),
+        ["ask", "book the usual campsite"],
+    )
+
+    screen = _flat(output.getvalue())
+    assert QUESTION in screen
+    assert "No action was needed." not in screen
 
 
 def test_an_undecided_turn_is_not_reported_as_needing_no_action(
