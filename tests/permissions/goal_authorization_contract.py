@@ -1413,3 +1413,116 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(established(id="a1"))
         with pytest.raises(AuthorizationError):
             await store.record(established(id="a2"))
+
+    # --- settle: the late answer (ADR-0254 §1, §12) ------------------------
+
+    async def test_an_answer_arriving_at_or_after_expires_at_establishes_nothing(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§12, §1: *"an expired proposal is refused as an establishment at all"*.
+
+        ``settle`` is the second of §1's exactly two settling operations — *"a
+        ``live_for`` read, and **the answer that names it**"* (arm 37) — so the
+        expiry settlement is taken first and the requested edge is then evaluated
+        from where the row stands. A late approval therefore lands the row
+        ``EXPIRED`` and is answered ``NOT_AT_SOURCE``, because the row genuinely does
+        not stand at ``PROPOSED`` by the time that edge is considered.
+
+        **Answering ``SETTLED`` would tell the caller an authority came into being
+        that §12 says did not**, which is the one direction this must not fail in.
+        """
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=EXPIRES)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+        held = await store.resolve("a1")
+        assert held is not None
+        assert (held.disposition, held.settled_at) == (
+            AuthorizationDisposition.EXPIRED,
+            EXPIRES,
+        )
+        assert await store.standing(GOAL) == ()
+
+    async def test_an_answer_strictly_before_expires_at_still_establishes(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: the boundary is *at or after*, so the instant before it is an answer.
+
+        Stated beside the arm above because a lane that compared with ``<`` would
+        pass that one and refuse every ordinary approval taken at the deadline's own
+        microsecond.
+        """
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle(
+                "a1",
+                to=AuthorizationDisposition.ESTABLISHED,
+                settled_at=EXPIRES - timedelta(microseconds=1),
+            )
+            is AuthorizationSettlement.SETTLED
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    async def test_a_late_refusal_is_also_the_answer_that_names_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 37 states the rule over *"the answer that names it"*, not over an
+        approval alone: a refusal arriving after the deadline is as much an answer to
+        a question that has lapsed."""
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.DECLINED, settled_at=EXPIRES)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+        held = await store.resolve("a1")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.EXPIRED
+
+    async def test_a_caller_asking_for_expired_late_is_answered_settled(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Where the expiry settlement and the requested move coincide, the step has
+        taken the edge the caller asked for and says so."""
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.EXPIRED, settled_at=EXPIRES)
+            is AuthorizationSettlement.SETTLED
+        )
+
+    async def test_the_late_answer_rule_reads_no_clock(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """§16, ADR-0021 §3: ``settled_at`` is the caller's instant and ``expires_at``
+        is the row's, so this is a comparison of two **recorded values**.
+
+        A clock moved far past the row's expiry changes nothing about a settlement
+        taken with an instant inside it.
+        """
+        await store.record(authorization(id="a1"))
+        clock.reset()
+        clock.set(EXPIRES + timedelta(days=30))
+        clock.advance_by()
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+        assert clock.readings == 0
+
+    async def test_a_lapsed_established_row_is_untouched_by_this_rule(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: an ``ESTABLISHED`` row past its ``expires_at`` is **not** settled
+        ``EXPIRED`` — *"that member is the answer a question never got, and re-using
+        it for a lapsed authority would make the two indistinguishable in a
+        listing"* — and is still ``REVOKED`` by a withdrawal."""
+        await store.record(established(id="a1"))
+        assert (
+            await store.settle(
+                "a1", to=AuthorizationDisposition.REVOKED, settled_at=EXPIRES + timedelta(days=1)
+            )
+            is AuthorizationSettlement.SETTLED
+        )
+        held = await store.resolve("a1")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.REVOKED

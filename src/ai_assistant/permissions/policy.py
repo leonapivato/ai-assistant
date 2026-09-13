@@ -32,7 +32,7 @@ without standing anything up.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 
@@ -48,7 +48,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     SpanCoverage,
 )
-from ai_assistant.permissions._coverage import covers, covers_arguments
+from ai_assistant.permissions._coverage import account_of, covers, uncovered
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -239,6 +239,32 @@ def _planned_with_external_content(request: ActionRequest) -> bool:
     """
     binding = request.egress_binding
     return binding is not None and binding.planned_with_external_content
+
+
+class _Authority(NamedTuple):
+    """What the one ``live_for`` read settled about ADR-0254 §6's bar.
+
+    Three values because §6 asks three questions of one read and a ``bool`` answers
+    only the first: whether a standing route may be taken at all, which row route
+    (d) would then be decided from, and — where the bar fired on **coverage** rather
+    than on a fault — §4's account of which of its three failures it was.
+    """
+
+    barred: bool
+    """Whether ADR-0254 §6's bar fires, so no standing route is taken at all."""
+
+    record: Authorization | None
+    """The live row the seam returned, or ``None``.
+
+    ``None`` covers three different facts and route (d) treats them alike: the seam
+    was not read (no goal, or no seam), it answered ``None``, or it faulted."""
+
+    account: str | None
+    """§4's account of the coverage failure, where the bar fired on one.
+
+    ``None`` on a **fault**, because there is no coverage failure to describe and
+    *"a store fault is an operator's fact and not something to put in front of
+    someone deciding about a call"*."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,16 +678,35 @@ class ThresholdActionPolicy:
         if self._only_the_disclosure_floor(
             request, fired, outcome=outcome, external=external, at_configured=at_configured
         ):
-            standing = await self._standing_allow(
-                request, at_configured=at_configured, external=external
-            )
-            if standing is not None:
-                return standing
+            barred, record, account = await self._authority(request)
+            if not barred:
+                standing = await self._standing_allow(
+                    request, record, at_configured=at_configured, external=external
+                )
+                if standing is not None:
+                    return standing
+            elif account is not None:
+                # **ADR-0254 §4's account of why coverage failed**, added to the
+                # grounds the table already reached rather than replacing them: the
+                # disclosure floor is still what stands in the way, and the bar is
+                # why no standing route relieved it. The outcome is already
+                # ``CONFIRM`` — ``_only_the_disclosure_floor`` is what admitted this
+                # branch — so appending a ``CONFIRM`` ground moves nothing but the
+                # sentence the user reads. **It quotes no value, no bound, no record
+                # id and no digest**, and names a key only where the declaration's
+                # own schema names it (:func:`~ai_assistant.permissions._coverage.
+                # account_of`).
+                grounds.append((PermissionOutcome.CONFIRM, account))
         reasons = [reason for ruled, reason in grounds if ruled is outcome]
         return PermissionRuling(outcome=outcome, reason="; ".join(reasons))
 
     async def _standing_allow(
-        self, request: ActionRequest, *, at_configured: EgressBinding | None, external: bool
+        self,
+        request: ActionRequest,
+        record: Authorization | None,
+        *,
+        at_configured: EgressBinding | None,
+        external: bool,
     ) -> PermissionRuling | None:
         """The standing ``ALLOW`` this request earns, or ``None`` for none.
 
@@ -688,27 +733,26 @@ class ThresholdActionPolicy:
         and better-evidenced authority records more and asserts less. **Neither
         route is made reachable or unreachable by the order.**
 
+        **It is reached only where the bar did not fire.** *"Where the bar fires, no
+        route answers"* and the recipient-grant seam is consulted **zero** times,
+        which :meth:`decide` keeps by not calling this at all — the ruling there is
+        the one the table reached with no standing route, which is what §13 and §14
+        require of a changed argument outside coverage, what §5 promises of a
+        widening the store refused, and what §9's third clause promises of *"an
+        argument no member names"*.
+
         Args:
             request: The action being ruled on, already past
                 :meth:`_only_the_disclosure_floor`.
+            record: The row the one ``live_for`` read returned, or ``None``.
             at_configured: The binding where ADR-0247 §2's derived fact holds of it,
                 and ``None`` otherwise.
             external: Whether the binding records that the call was planned over
                 external content.
 
         Returns:
-            The ``ALLOW`` a standing route earned, or ``None`` where none did —
-            which includes every case in which the bar fired.
+            The ``ALLOW`` a standing route earned, or ``None`` where none did.
         """
-        barred, record = await self._authority(request)
-        if barred:
-            # **ADR-0254 §6's bar.** Route (c) does not answer, the recipient-grant
-            # seam is consulted **zero** times, route (d) does not cover, and the
-            # ruling is the one the table reached with no standing route — which is
-            # what §13 and §14 require of a changed argument outside coverage, what
-            # §5 promises of a widening the store refused, and what §9's third
-            # clause promises of "an argument no member names".
-            return None
         if at_configured is not None:
             # **Route (c), taken before the grant seam is consulted** (ADR-0247
             # §2): where both routes would be reachable for one request this
@@ -774,7 +818,7 @@ class ThresholdActionPolicy:
             )
         return None
 
-    async def _authority(self, request: ActionRequest) -> tuple[bool, Authorization | None]:
+    async def _authority(self, request: ActionRequest) -> _Authority:
         """The one ``live_for`` read, and whether ADR-0254 §6's bar fires on it.
 
         **Where the bar reads, and it is the same read route (d) takes** (§6). The
@@ -830,14 +874,21 @@ class ThresholdActionPolicy:
         Args:
             request: The action being ruled on.
 
+        **A fault carries no account** (§4, §16). *"A store fault is an operator's
+        fact and not something to put in front of someone deciding about a call"*,
+        so the reason the user sees is the one the table reached and nothing is
+        added to it — there is no coverage failure to describe, and describing the
+        fault would put an operator's fact in the prompt.
+
         Returns:
-            Whether the bar fires, and the live row the seam returned — ``None``
-            where the seam was not read at all, where it answered ``None``, or
-            where it faulted.
+            Whether the bar fires; the live row the seam returned — ``None`` where
+            the seam was not read at all, where it answered ``None``, or where it
+            faulted; and ADR-0254 §4's account of the coverage failure where the bar
+            fired on one.
         """
         goal = request.goal
         if goal is None or self._authorizations is None:
-            return False, None
+            return _Authority(barred=False, record=None, account=None)
         tool_id = request.tool.id
         try:
             record = await self._authorizations.live_for(goal, tool_id)
@@ -849,10 +900,13 @@ class ThresholdActionPolicy:
                 refused_by=type(exc).__name__,
                 reason=_AUTHORIZATION_SEAM_UNREADABLE,
             )
-            return True, None
-        if record is not None and not covers_arguments(record, request):
-            return True, None
-        return False, record
+            return _Authority(barred=True, record=None, account=None)
+        if record is None:
+            return _Authority(barred=False, record=None, account=None)
+        defects = uncovered(record, request)
+        if defects:
+            return _Authority(barred=True, record=record, account=account_of(defects, request.tool))
+        return _Authority(barred=False, record=record, account=None)
 
     @staticmethod
     def _covers_in_full(request: ActionRequest, record: Authorization | None) -> bool:

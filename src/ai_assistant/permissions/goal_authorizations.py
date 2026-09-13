@@ -996,7 +996,17 @@ class SqliteGoalAuthorizationStore:
             found = conn.execute(_BY_ID, (authorization_id,)).fetchone()
             if found is None:
                 return AuthorizationSettlement.NO_SUCH_AUTHORIZATION
-            held = _decode(str(found[0]))
+            stored = _decode(str(found[0]))
+            # The expiry settlement is taken **first** by any operation that reads a
+            # lapsed proposal (ADR-0254 §1), and is skipped only where the caller
+            # asked for exactly that move: there the two coincide, the ordinary edge
+            # takes it, and the step answers ``SETTLED`` about the settlement it
+            # actually performed.
+            held = (
+                stored
+                if to is AuthorizationDisposition.EXPIRED
+                else self._expired_first(conn, stored, settled_at)
+            )
             if to not in _EDGES.get(held.disposition, frozenset()):
                 # **One member and not four** (ADR-0254 §16): a PROPOSED row asked for
                 # an edge that leaves ESTABLISHED, a retired row asked for anything, a
@@ -1009,6 +1019,59 @@ class SqliteGoalAuthorizationStore:
                 self._write_settlement(conn, held, to=to, settled_at=settled_at)
                 return AuthorizationSettlement.SETTLED
             return self._establish(conn, held, settled_at=settled_at)
+
+    def _expired_first(
+        self, conn: sqlite3.Connection, held: Authorization, settled_at: datetime
+    ) -> Authorization:
+        """Settle a lapsed proposal ``EXPIRED`` before the requested edge is evaluated.
+
+        **``settle`` is the second of ADR-0254 §1's exactly two settling
+        operations** — *"a ``live_for`` read, and **the answer that names it**"* —
+        and this is that clause. *"An answer arriving at or after ``expires_at``
+        settles ``EXPIRED`` and **establishes nothing**"*, because *"an expired
+        proposal is refused as an establishment at all"*.
+
+        **The expiry settlement is taken first, and the caller's requested move is
+        then evaluated from where the row stands.** So an approval that arrives late
+        lands the row ``EXPIRED`` and is answered
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NOT_AT_SOURCE` — the
+        row genuinely does not stand at ``PROPOSED`` by the time that edge is
+        considered, which is the honest member and the safe one. Answering
+        ``SETTLED`` would tell the caller an authority came into being that §12 says
+        did not; and the ordering is not an invention, it is *"the first operation
+        that reads it"* read literally.
+
+        **A late answer of any kind takes it**, not an approval alone: arm 37 states
+        the rule over *"the answer that names it"*, and a refusal arriving after the
+        deadline is as much an answer to a question that has lapsed as an approval
+        is. Where the caller asked for ``EXPIRED`` the two coincide and the step
+        answers ``SETTLED``.
+
+        **It reads no clock**: ``settled_at`` is the caller's instant and
+        ``expires_at`` is the row's, so this is a comparison of two recorded values
+        exactly as every other rule on this write path is (ADR-0021 §3).
+
+        Args:
+            conn: The open transaction.
+            held: The row as the store holds it.
+            settled_at: The instant the caller took the settlement at.
+
+        Returns:
+            The row as it stands once any owed expiry settlement has been taken.
+        """
+        if held.disposition is not AuthorizationDisposition.PROPOSED:
+            return held
+        if held.expires_at > settled_at:
+            return held
+        self._write_settlement(
+            conn, held, to=AuthorizationDisposition.EXPIRED, settled_at=settled_at
+        )
+        return held.model_copy(
+            update={
+                "disposition": AuthorizationDisposition.EXPIRED,
+                "settled_at": settled_at,
+            }
+        )
 
     def _establish(
         self, conn: sqlite3.Connection, held: Authorization, *, settled_at: datetime
