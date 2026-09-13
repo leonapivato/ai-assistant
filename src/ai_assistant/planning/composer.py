@@ -167,6 +167,17 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: sentence claims only what the order really says, which is also the whole of the
 #: defect: the subject is this conversation's, not a note retrieved from another.
 #:
+#: **It is conditional, because the leading run can be empty.** On a first turn, and
+#: on a turn whose history read degraded, `recent` is empty while retrieval may still
+#: supply records — so the notes open with retrieved background, and a retrieved
+#: episode also begins "The user asked: …". Nothing in the supply distinguishes the
+#: two: `SearchSupply` carries no boundary and no origin, which is why the sentence
+#: says *if* any note records an earlier turn of this conversation rather than
+#: asserting one does. What it cannot do is make the case decidable; measured on a
+#: supply stripped of its own episode, this instruction and the one before it compose
+#: the same query on 8 of 8 samples, so the un-decidable case is left exactly where it
+#: already was and the honest statement is the whole of what is available here.
+#:
 #: Measured rather than assumed, against the two drives #2262 recorded failing and the
 #: four it recorded passing, replayed over the supplies a scratch hub actually built
 #: for them: the shape that composed a query about another conversation's subject on
@@ -200,10 +211,10 @@ leaves implicit, a preference the query should respect. Use them only for that. 
 Do not search for a note, do not repeat one back, and do not carry a detail from \
 one into the query unless the request is asking about it.
 
-The notes are in the order this assistant selected them: any recording an earlier \
-turn of this same conversation come first, and everything after them is \
-background this assistant retrieved. So where the request leaves its subject \
-implicit — "that", "them", "more about it" — it refers to what was asked for in \
+The notes are in the order this assistant selected them. If any of them record \
+earlier turns of this same conversation, those come first, and everything after \
+them is background this assistant retrieved. So where the request leaves its \
+subject implicit — "that", "them", "more about it" — it refers to what was asked for in \
 those opening notes, and never to a want, a purchase or a plan a note further \
 down records, however close to the request it reads. Search for the thing that \
 was asked for; carry a further detail in beside it only where the detail narrows \
