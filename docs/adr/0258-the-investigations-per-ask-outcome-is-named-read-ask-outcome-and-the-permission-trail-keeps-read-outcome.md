@@ -221,7 +221,8 @@ decision came first is not.
 
 **Unwinding is not the remedy, and no text asks for it.** The other direction available on
 paper — revert `ReadAskOutcome` from `main`, merge this ADR, re-land the identical code — would
-revert a contract that has shipped (ADR-0251 §16 moved `PROTOCOL_VERSION` to 38 on it), across
+revert a contract that has shipped (ADR-0251 §16 moved `PROTOCOL_VERSION` **from 38 to 39** on
+it, and `wire/envelope.py` records 39 as ADR-0251's), across
 `core`, `orchestration`, `wire`, the CLI and the fakes, to arrive at a tree byte-identical to the
 one that exists. It buys no review that this ADR does not buy: what was never reviewed is one
 identifier, and it is what §1 reviews. ADR-0015 §5 does not require it, ADR-0070 does not
