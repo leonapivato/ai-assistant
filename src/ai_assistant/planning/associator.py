@@ -366,6 +366,17 @@ def _labels(proposed: object) -> tuple[str, ...] | None:
         value was present and could not be read as labels at all.
     """
     if proposed is None:
+        # An absent key and an explicit `null` are one answer — "no labels" — and this
+        # is deliberate rather than incidental. It is the reading this envelope's own
+        # neighbours already take: `_optional_understanding` reads an explicit
+        # `"understanding": null` as "the planner proposed no change" rather than as a
+        # malformed member, and ADR-0250 §7 fixes the same equivalence for a question's
+        # subject — "`None` means the question is about the outcome". A `null` here is
+        # *parsed*, not unread: JSON's spelling of an empty optional field is the one
+        # thing it can mean, so declining on it would buy a user-visible question for
+        # an answer that was perfectly clear, which §3's "the cost of asking is one
+        # sentence" prices as a loss rather than a saving. What §4 refuses is a guess
+        # over an answer that could *not* be read, and every such shape is below.
         return ()
     if not isinstance(proposed, list | tuple):
         # A bare string lands here rather than being read as a one-element list:
