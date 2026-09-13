@@ -998,8 +998,8 @@ that end an attempt rather than revise a goal.
 > sweep and by nothing here, **§6's override still forbids that sweep behind an `INDETERMINATE`
 > step**, and **a walk that had already run when the supersession was recorded is not undone** —
 > what this conjunct refuses is the **next** claim, which is what *"drives nothing further"*
-> says. A claim it refuses leaves its step **`PENDING` at its stored version** with nothing
-> invoked and the walk stopped, exactly as every other refused claim does.
+> says. A claim it refuses leaves its step **at the entry status the clause below fixes**, with
+> nothing invoked and the walk stopped, exactly as every other refused claim does.
 
 > **Normative — a refused claim leaves the step at its *entry* status, and there are exactly two
 > entry statuses.** A `→ RUNNING` claim is made from **`PENDING`**, by a walk, and from
@@ -1401,11 +1401,14 @@ reason §3 gives.
 > still owns the residual.
 
 > **Normative — the sweep is several writes, and what a sweep that stops part-way leaves is
-> stated rather than inherited.** Each `PENDING → SKIPPED`/`SUPERSEDED` is **its own
-> compare-and-swap** and `PlanStore` offers no multi-write commit (#257's own observation, §12),
-> so a sweep over two or more `PENDING` steps can land some and not the rest — a stale
-> `expected_version`, a store failure. **The residual is exactly what landed**: the steps swept
-> are durably `SKIPPED`/`SUPERSEDED`, the steps not swept stay durably `PENDING`, **nothing is
+> stated rather than inherited.** Each `→ SKIPPED`/`SUPERSEDED` is **its own compare-and-swap**
+> and `PlanStore` offers no multi-write commit (#257's own observation, §12), so a sweep over two
+> or more undisposed steps can land some and not the rest — a stale `expected_version`, a store
+> failure. **The residual is exactly what landed**: the steps swept are durably
+> `SKIPPED`/`SUPERSEDED`, and **the steps not swept stay at the status the sweep found them at —
+> `PENDING` or `AWAITING_APPROVAL`**, the two the sweep takes as sources. **An unswept
+> `AWAITING_APPROVAL` step keeps its live confirmation**, so the resume path and §3's
+> superseded-plan residual stay reachable on exactly this failure and on no other, **nothing is
 > undone, nothing is re-dispatched, no step is moved to any other status and no `SkipReason` is
 > rewritten**, and the turn fails as a turn whose store write raised already fails. **No lane
 > retries the sweep, resumes it from a later turn, or reads the mixed state as a plan still
@@ -2711,18 +2714,25 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 15. **Replan after partial execution preserves what happened** — a plan driven to its second
     step, superseded on a later turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's
     `output` are unchanged, the attempt's `execution_ids` names both executions, and the
-    superseded plan's still-`PENDING` steps are `SKIPPED`/`SUPERSEDED`. **The arm asserts
+    superseded plan's undisposed steps are `SKIPPED`/`SUPERSEDED`, **`PENDING` and
+    `AWAITING_APPROVAL` alike** (§7). **The arm asserts
     preservation and asserts nothing about a second dispatch**: whether the later plan's act
     happens at most once is §7's obligation, whose mechanism and whose demonstration are **A8's**
     (§12). **No arm of this decision requires a duplicate dispatch to be shown**, because no lane
-    of this decision can prevent one. **And two arms over the partial sweep** (§7): a superseded
-    plan with **two** still-`PENDING` steps where the first `PENDING → SKIPPED`/`SUPERSEDED`
-    commit lands and the second raises — once on a stale `expected_version`, once on a store
-    failure — asserting the exact residual, that the **first step stays `SKIPPED`/`SUPERSEDED`**,
-    the **second stays `PENDING`**, no step takes any other status and no `SkipReason` is
-    rewritten, the turn **fails**, nothing is re-dispatched, and the committed skip is **not lost
-    or retried**. They are what stop an implementation rolling the sweep back, sweeping again
-    from a later turn, or reading the mixed state as a plan still driving.
+    of this decision can prevent one. **And two arms over the partial sweep** (§7),
+    **parameterized over both source statuses**: a superseded plan with **two** undisposed steps
+    where the first `→ SKIPPED`/`SUPERSEDED` commit lands and the second raises — once on a stale
+    `expected_version`, once on a store failure — asserting the exact residual, that the **first
+    step stays `SKIPPED`/`SUPERSEDED`**, the **second stays at the status the sweep found it at**,
+    no step takes any other status and no `SkipReason` is rewritten, the turn **fails**, nothing
+    is re-dispatched, and the committed skip is **not lost or retried**. **The
+    `AWAITING_APPROVAL` case asserts the confirmation too**: the unswept parked step keeps a live
+    `AuditTrail.pending_confirmation`, so a later answer reaches `resume`, and the arm asserts the
+    §3 residual that follows — the ruling recorded, the claim refused by the successor conjunct,
+    the step still `AWAITING_APPROVAL`. Without it an implementation that raised on the parked
+    step would pass the `PENDING`-only arms while reopening the hazard §7's widened sweep exists
+    to close. They are what stop an implementation rolling the sweep back, sweeping again from a
+    later turn, or reading the mixed state as a plan still driving.
 16. **The deadline, decremented across steps and not replenished by a resume** — a three-step
     plan under a budget that two steps exhaust, **over a controlled monotonic source advanced by
     known intervals**: each `StepRunner.run` receives a remainder that is **strictly positive**
@@ -2779,12 +2789,23 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     `CancelledError` is raised from outside into each of the seams this decision opens — **an
     interpretation call** (§1), **a `StepRunner.run`** (§1), **the `commit_transition` claim**
     (§3), **the `resume` that answers a park** (§5), and **the `commit_attempt` that records
-    `EFFECT_UNRESOLVED`** (§6) — and each case asserts all four: the charging **`commit_attempt`
-    is reached** and `AttemptEffort.working` has **advanced by the interval consumed up to the
-    cancellation**; the `CancelledError` **propagates to the caller as the same instance**, not
-    converted to a value and not replaced by a failure of the accounting; **no later step is
-    dispatched, none is skipped and no row is written**; and the step stands at its **entry**
-    status (§3) — `PENDING` from a walk, `AWAITING_APPROVAL` from a resume. **What each arm
+    `EFFECT_UNRESOLVED`** (§6) — and **every** case asserts three things: the charging
+    **`commit_attempt` is reached**, and either **returns** — with `AttemptEffort.working`
+    **advanced by the interval consumed up to the cancellation** — or **raises**, in which case
+    §1's precedence binds and the ledger undercounts; the `CancelledError` **propagates to the
+    caller as the same instance**, not converted to a value and not replaced by a failure of the
+    accounting; and **no later step is dispatched and none is skipped**. **The entry-status
+    assertion is made at two of the five points and not at all of them**, because ADR-0060 §1
+    lets a cancelled write have committed or not: it is asserted where the cancellation is
+    delivered **before the seam's own write is dispatched** — into the **interpretation call**,
+    which claims nothing and writes no row, and into the **deadline gate** between two dispatches
+    (§9) — and the step then stands at its **entry** status (§3), `PENDING` from a walk and
+    `AWAITING_APPROVAL` from a resume. **At the other three — inside `commit_transition`, inside
+    `resume` past ADR-0037 §4's step 5, and inside §6's `commit_attempt` — the arm asserts the
+    permitted pair instead**: the write either landed or did not, and **both outcomes are
+    legal**, so what is asserted is that the durable state is one of the two and that no lane
+    reports the other. A stricter assertion would be one no implementation could satisfy, which is
+    the defect this replaces. **What each arm
     refutes is an implementation that catches `Exception`**: `CancelledError` is a
     `BaseException`, so such an implementation lets it past the accounting untouched, charges
     nothing, and passes every other arm of this list — none of which delivers one. **And the
@@ -2794,9 +2815,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     absorb it.
 18. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
 19. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
-    A9's and A10's guarantees are implemented and demonstrated **and the evidence-to-claim window
-    §1 states is closed** (§13, §12, issue #2309) — **four** conditions and not three, the fourth
-    being assigned to none of those three lanes.
+    A9's and A10's guarantees are implemented and demonstrated, **the evidence-to-claim window §1
+    states is closed** (§13, §12, issue #2309) **and the durable recovery of a resolved
+    confirmation whose claim was refused is implemented and demonstrated** (§3, §12, §13) —
+    **five** conditions and not three, the fourth assigned to none of those three lanes and the
+    fifth assigned to A8 but outside the reconciliation guarantee the gate names.
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
