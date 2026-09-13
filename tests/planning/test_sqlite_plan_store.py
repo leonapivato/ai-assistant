@@ -34,6 +34,7 @@ from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
+    ActionPlan,
     AttemptTransition,
     EvidenceApplicability,
     EvidenceBasis,
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
     EvidenceStanding,
     Goal,
     GoalAttempt,
+    GoalElement,
     GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
@@ -48,6 +50,7 @@ from ai_assistant.core.types import (
     GoalStatus,
     Ground,
     MemorySource,
+    PlanStep,
     ReadKind,
     StepStatus,
     StepTransition,
@@ -962,6 +965,89 @@ async def test_an_attempt_row_written_before_the_ledger_gained_its_kind_still_de
     assert decoded.effort.kind is None, (
         "ADR-0251 §5's default, and never a kind inferred at read time"
     )
+
+
+async def test_a_plan_and_an_element_written_before_the_graph_still_decode(
+    tmp_path: Path,
+) -> None:
+    """ADR-0253 §10, §14 arm 13: no migration is owed, and these are the rows saying so.
+
+    "Every new field is defaulted, so a stored plan written before this decision decodes
+    with ``depends_on`` empty, ``resolves`` empty, ``when`` empty, ``verifies`` absent,
+    ``evidence_recency`` absent and ``interpretations`` empty — which is exactly the
+    plan it was: no dependency, no reference, no condition, no verification and no
+    interpretation." And a stored ``GoalElement`` decodes with ``id`` and
+    ``applicability`` absent, which §7 makes a conforming value rather than a row to
+    repair — an element nothing can name is one no condition was ever written against.
+
+    So this store's ``schema_version`` stays at 4, on the same footing as ADR-0251's
+    entry above: ADR-0249 §12 moved it because a version 1 ``goals`` row "no longer
+    decodes", and every row here does.
+
+    **Seeded as the bytes a previous release would have written**, not by dumping the
+    current model and deleting keys: what is asserted is that the stored JSON of the
+    older shape is readable, so the older shape is what is written.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    held = _goal()
+    conditioned = held.interpretation[0].model_copy(
+        update={
+            "conditions": (
+                GoalElement(id="e1", text="the weather permits it", ground=Ground.INFERRED),
+            )
+        }
+    )
+    await store.save_goal(held.model_copy(update={"interpretation": (conditioned,)}))
+    await store.save_plan(
+        ActionPlan(
+            id="p1",
+            goal_id="g1",
+            steps=(PlanStep(id="s1", intent="book", capability="send_email"),),
+            created_at=_fixed_now(),
+            targets_revision=1,
+        )
+    )
+    store.close()
+
+    raw = sqlite3.connect(path)
+    [(stored_plan,)] = raw.execute("SELECT data FROM plans WHERE id = 'p1'").fetchall()
+    older_plan = json.loads(stored_plan)
+    older_plan.pop("interpretations")
+    for step in older_plan["steps"]:
+        for gained in ("depends_on", "resolves", "when", "verifies", "evidence_recency"):
+            step.pop(gained)
+    raw.execute("UPDATE plans SET data = ? WHERE id = 'p1'", (json.dumps(older_plan),))
+
+    [(stored_goal,)] = raw.execute("SELECT data FROM goals WHERE id = 'g1'").fetchall()
+    older_goal = json.loads(stored_goal)
+    for revision in older_goal["interpretation"]:
+        for element in revision["conditions"]:
+            element.pop("id")
+            element.pop("applicability")
+    raw.execute("UPDATE goals SET data = ? WHERE id = 'g1'", (json.dumps(older_goal),))
+    raw.commit()
+    raw.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        decoded = await reopened.get_plan("p1")
+        goal = await reopened.get_goal("g1")
+    finally:
+        reopened.close()
+
+    assert decoded is not None, "the older plan is read rather than refused"
+    assert decoded.interpretations == ()
+    step = decoded.steps[0]
+    assert (step.depends_on, step.resolves, step.when) == ((), (), ())
+    assert (step.verifies, step.evidence_recency) == (None, None)
+
+    assert goal is not None
+    element = goal.interpretation[0].conditions[0]
+    assert (element.id, element.applicability) == (None, None), (
+        "ADR-0253 §7's one route to None, and never a value minted at read time"
+    )
+    assert element.text == "the weather permits it", "and the element still says what it says"
 
 
 async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:

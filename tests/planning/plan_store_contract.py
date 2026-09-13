@@ -17,6 +17,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -55,18 +56,26 @@ from ai_assistant.core.types import (
     GoalRevision,
     GoalStatus,
     Ground,
+    InterpretationVerdict,
+    InterpretedOutput,
     MemorySource,
+    PlanInterpretation,
     PlanStep,
     Provenance,
     ReadAsk,
     ReadKind,
     ReadOutcomeKind,
     ReadRequest,
+    ResultReference,
     SkipReason,
+    StepCondition,
     StepFailure,
+    StepOutputRef,
     StepStatus,
     StepTransition,
+    StepVerification,
     ToolFailureKind,
+    VerificationKind,
 )
 from ai_assistant.testing.cancellation import settle
 
@@ -266,6 +275,50 @@ def _plan(  # noqa: PLR0913 — the plan's own fields, each a distinct thing an 
         created_at=_WHEN,
         read_request=read_request,
         supersedes=supersedes,
+        targets_revision=targets_revision,
+    )
+
+
+def _conditioned_goal(goal_id: str = "g1", *, element_id: str = "e1", revision: int = 1) -> Goal:
+    """A goal whose current revision carries one **condition** element with an ``id``.
+
+    ADR-0253 §9's ``save_plan`` conjunct is stated over exactly that set — "the ``id``
+    of a condition element of the interpretation that plan's ``targets_revision``
+    names" — so the arms below need a goal that has one, which :func:`_goal`
+    deliberately does not: a goal ADR-0249 §3 opens "carries no elements" at all.
+    """
+    held = _goal(goal_id)
+    conditioned = held.interpretation[0].model_copy(
+        update={
+            "revision": revision,
+            "conditions": (
+                GoalElement(
+                    id=element_id,
+                    text="the weather over the trip permits it",
+                    ground=Ground.INFERRED,
+                ),
+            ),
+        }
+    )
+    return held.model_copy(update={"interpretation": (conditioned,)})
+
+
+def _conditioned_plan(
+    plan_id: str = "p1", *, about: str = "e1", targets_revision: int = 1
+) -> ActionPlan:
+    """A plan whose one step carries one ``READ_OUTCOME`` condition about ``about``."""
+    return ActionPlan(
+        id=plan_id,
+        goal_id="g1",
+        steps=(
+            PlanStep(
+                id="s1",
+                intent="book it",
+                capability="send_email",
+                when=(StepCondition(about=about, basis=EvidenceBasis.READ_OUTCOME),),
+            ),
+        ),
+        created_at=_WHEN,
         targets_revision=targets_revision,
     )
 
@@ -1362,6 +1415,241 @@ class PlanStoreContract:
         )
         with pytest.raises(StaleExecutionError):
             await store.commit_transition(_claim(state))
+
+    # --- ADR-0253 §9: the condition-label window, closed at the store ------
+
+    async def test_save_plan_admits_a_condition_naming_an_element_of_the_revision(
+        self, store: PlanStore
+    ) -> None:
+        """§9's conjunct in the direction that must keep working.
+
+        A plan whose ``StepCondition.about`` is the ``id`` of a condition element of
+        the revision it targets is saved and reads back **with the condition intact** —
+        which is what makes the refusals below a window rather than a ban, and what
+        ADR-0253 §14 arm 20's paired arm calls "the one that matters" one seam over.
+        """
+        await store.save_goal(_conditioned_goal())
+        await store.save_plan(_conditioned_plan())
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert stored.steps[0].when[0].about == "e1"
+
+    async def test_save_plan_refuses_a_plan_still_carrying_a_condition_label(
+        self, store: PlanStore
+    ) -> None:
+        """§14 arm 7's paired store arm, and §14 arm 24 over this conformance suite.
+
+        A plan still carrying an unsubstituted ``about`` of ``"D1"`` is refused **even
+        where the goal holds an element whose ``id`` would otherwise have matched it**
+        — the collision ADR-0253 §7's grammar rule makes unreachable, because a
+        ``GoalElement`` whose ``id`` is ``"D1"`` is not constructible at all. So the
+        arm builds the nearest goal that *could* have collided, and the refusal is
+        still exact.
+
+        The error class is the one ADR-0249 §8 gives an unstamped ``targets_revision``
+        and ADR-0228 §5 an unresolvable ``supersedes``, "and for the same reason: the
+        unresolved state exists only between the planner's return and the loop's
+        substitution, and a window is closed at the store rather than trusted to close
+        itself".
+        """
+        with pytest.raises(ValidationError):
+            GoalElement(id="D1", text="the collision", ground=Ground.INFERRED)
+
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        with pytest.raises(PlanningError):
+            await store.save_plan(_conditioned_plan(about="D1"))
+        assert await store.get_plan("p1") is None
+
+    async def test_save_plan_refuses_an_about_naming_an_element_of_another_revision(
+        self, store: PlanStore
+    ) -> None:
+        """§9: the element must be one of **the revision the plan targets**.
+
+        The goal's revision 2 carries a differently-identified element, so a plan
+        targeting 2 and naming revision 1's element names nothing that revision holds
+        — which is the state §5 requires ``about`` to be free of, checked where the
+        store is the only place with a total order over writes.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        second = _revision(2).model_copy(
+            update={
+                "conditions": (
+                    GoalElement(id="e2", text="a different condition", ground=Ground.INFERRED),
+                )
+            }
+        )
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=second, expected_version=0)
+        )
+        with pytest.raises(PlanningError):
+            await store.save_plan(_conditioned_plan(about="e1", targets_revision=2))
+        assert await store.get_plan("p1") is None
+
+    async def test_save_plan_refuses_a_settles_the_targeted_revision_does_not_carry(
+        self, store: PlanStore
+    ) -> None:
+        """§9: the conjunct reaches ``PlanInterpretation.settles`` on the same terms.
+
+        "The loop takes each ``StepCondition.about`` **and each
+        ``PlanInterpretation.settles``** for its own", so a plan whose interpretation
+        still names a label is refused exactly as a step's condition is — and a plan
+        whose interpretation names a real element is saved.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        base = _conditioned_plan().model_copy(update={"steps": (_plan().steps[0],)})
+        with pytest.raises(PlanningError):
+            await store.save_plan(
+                base.model_copy(
+                    update={
+                        "interpretations": (PlanInterpretation(id="i1", settles="D1", record="m1"),)
+                    }
+                )
+            )
+        assert await store.get_plan("p1") is None
+
+        saved = base.model_copy(
+            update={"interpretations": (PlanInterpretation(id="i1", settles="e1", record="m1"),)}
+        )
+        await store.save_plan(saved)
+        read_back = await store.get_plan("p1")
+        assert read_back is not None
+        assert read_back.interpretations[0].settles == "e1"
+
+    async def test_a_plan_declaring_no_condition_is_not_checked_at_all(
+        self, store: PlanStore
+    ) -> None:
+        """§9, and ADR-0253 §12's "it changes no behaviour of a plan that declares none
+        of the new keys".
+
+        The goal here carries **no** condition element at all, so the resolvable set is
+        empty — and an ordinary plan still saves, because a plan naming nothing is not
+        checked. Without that clause every plan this system has ever written would
+        become unsaveable against a goal at revision 1, which ADR-0249 §9 says "carries
+        no elements".
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert (stored.steps[0].when, stored.interpretations) == ((), ())
+
+    async def test_a_plan_carrying_the_whole_of_the_new_shape_round_trips(
+        self, store: PlanStore
+    ) -> None:
+        """§10: what a conforming ``PlanStore`` must **round-trip**.
+
+        Every field ADR-0253 adds, through one store and back: a dependency, a
+        reference, a verification, a recency figure, a condition and an
+        output-backed interpretation. A store that dropped any of them would leave a
+        driver reading a plan the planner did not write, and ADR-0014 §2's "auditable
+        record of a decision" would be a record of a different one.
+        """
+        await store.save_goal(_conditioned_goal())
+        plan = ActionPlan(
+            id="p1",
+            goal_id="g1",
+            steps=(
+                PlanStep(id="s1", intent="refresh", capability="refresh_forecast"),
+                PlanStep(
+                    id="s2",
+                    intent="book",
+                    capability="send_email",
+                    depends_on=("s1",),
+                    resolves=(
+                        ResultReference(
+                            parameter="body", source=StepOutputRef(step="s1", field="summary")
+                        ),
+                    ),
+                    when=(
+                        StepCondition(
+                            about="e1",
+                            basis=EvidenceBasis.INTERPRETATION,
+                            requires=InterpretationVerdict.QUALIFIES,
+                        ),
+                    ),
+                    verifies=StepVerification(
+                        kind=VerificationKind.FIELD_EQUALS, field="status", equals="confirmed"
+                    ),
+                    evidence_recency=timedelta(minutes=15),
+                ),
+            ),
+            created_at=_WHEN,
+            targets_revision=1,
+            interpretations=(
+                PlanInterpretation(
+                    id="i1", settles="e1", reads=StepOutputRef(step="s1", field="summary")
+                ),
+            ),
+        )
+        await store.save_plan(plan)
+        assert await store.get_plan("p1") == plan
+
+    async def test_two_executions_of_one_plan_produce_two_distinguishable_rows(
+        self, store: PlanStore
+    ) -> None:
+        """§14 arm 9, and it is what ``(plan_id, step_id)`` alone could not satisfy.
+
+        ADR-0014 §5's ``start_execution`` mints a **new** ``ExecutionState`` per run, so
+        two executions of one plan can carry two different ``StepExecution.output``
+        values for one step. §8's reason for naming the execution is exactly that: a
+        pair of plan and step "names a *decision* and not a *value*, and a row built on
+        it could not say which output it read".
+
+        The arm runs one plan twice, returns a different output each time, and asserts
+        that the two rows' ``interpreted_output.execution_id`` differ **and** that each
+        resolves through ``get_execution`` to the output its verdict was formed over.
+        Composing such a row is ``orchestration``'s (§8) and A7's to perform, so the
+        rows here are constructed rather than produced — what is under test is that the
+        reference the type carries resolves, which is the property §8 mints it for.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        outputs = {}
+        for run, value in (("first", "cloudy"), ("second", "clear")):
+            state = await store.start_execution("p1")
+            state = await store.commit_transition(_claim(state))
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=state.version,
+                    output={"summary": value},
+                )
+            )
+            outputs[run] = (state.id, value)
+
+        assert outputs["first"][0] != outputs["second"][0]
+        for run, (execution_id, value) in outputs.items():
+            row = GoalEvidence(
+                id=f"ev-{run}",
+                goal_id="g1",
+                attempt_id="a1",
+                basis=EvidenceBasis.INTERPRETATION,
+                declaration="e1",
+                supported=(_REGION,),
+                supported_elided=0,
+                read_at=_WHEN,
+                returned=0,
+                admitted=0,
+                verdict=InterpretationVerdict.QUALIFIES.value,
+                standing=EvidenceStanding.STANDING,
+                interpreted_output=InterpretedOutput(
+                    execution_id=execution_id, step_id="s1", field="summary"
+                ),
+            )
+            await store.record_evidence(row)
+            named = row.interpreted_output
+            assert named is not None
+            execution = await store.get_execution(named.execution_id)
+            assert execution is not None
+            step = execution.step(named.step_id)
+            assert step is not None
+            assert isinstance(step.output, Mapping)
+            assert step.output[named.field or ""] == value
+            # The plan is derived and never copied (§8): `ExecutionState.plan_id`
+            # already names it, and a second carrier is ADR-0251 §3's defect.
+            assert execution.plan_id == "p1"
 
     # --- ADR-0250 §§1, 2, 9: engagement, status and the candidate set ------
 

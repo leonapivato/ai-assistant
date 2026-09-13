@@ -40,6 +40,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     GoalStatus,
     Ground,
+    InterpretationVerdict,
+    InterpretedOutput,
     MemorySource,
     PlanExport,
     PlannerOutput,
@@ -1966,6 +1968,55 @@ def test_the_export_refuses_two_evidence_rows_under_one_id() -> None:
             goals=(goal,),
             attempts=(attempt,),
             evidence=(EvidenceHistory(goal_id="g1", rows=(row, row)),),
+        )
+
+
+def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
+    """ADR-0253 §8, §14 arm 14's sibling: §5's closure rule **extended**, not changed.
+
+    "An export carrying a row whose ``interpreted_output`` names an execution it does
+    not carry does not validate", on the same terms ADR-0249 §12 extended §5 to
+    ``attempt_id`` and ADR-0250 to ``question_id``. ``PlanExport`` already carries
+    ``tuple[ExecutionState, ...]`` and gains **no member** for it.
+
+    **It is closed over where a row's ``attempt_id`` is not**, and the asymmetry is the
+    point: a row's ``attempt_id`` is one no conforming store may refuse at the write
+    (ADR-0252 §12), where an ``interpreted_output`` names an execution the plan store
+    holds and ``delete_goal`` cascades over — "a reference that resolves for exactly as
+    long as the row does", which is the property §8 mints the type for.
+    """
+    goal = _goal()
+    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
+    execution = ExecutionState(id="x1", plan_id="p1", steps=(), updated_at=_WHEN)
+    row = _evidence_row().model_copy(
+        update={
+            "basis": EvidenceBasis.INTERPRETATION,
+            "read_kind": None,
+            "declaration": "e1",
+            "records": (),
+            "returned": 0,
+            "admitted": 0,
+            "verdict": InterpretationVerdict.QUALIFIES.value,
+            "interpreted_output": InterpretedOutput(
+                execution_id="x1", step_id="s1", field="summary"
+            ),
+        }
+    )
+
+    document = PlanExport(
+        exported_at=_WHEN,
+        goals=(goal,),
+        plans=(plan,),
+        executions=(execution,),
+        evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
+    )
+    assert document.evidence[0].rows[0].interpreted_output == row.interpreted_output
+
+    with pytest.raises(ValidationError, match="interpreted execution is missing"):
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
         )
 
 

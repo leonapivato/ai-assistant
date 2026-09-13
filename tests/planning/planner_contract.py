@@ -16,14 +16,16 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import inspect
+import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     MAX_HOP_LABELS,
+    MAX_INTERPRETATION_STEPS,
     CurrentContext,
     EpisodicMemory,
     Goal,
@@ -47,6 +49,15 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import Planner
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: ADR-0253 §9's condition-label grammar, stated here rather than imported because
+#: ``core``'s own copy is the **disjointness** rule a ``GoalElement.id`` is held away
+#: from and is deliberately wider than the form a renderer produces. This is the form:
+#: "the ASCII string ``D`` followed by a 1-based ordinal in decimal with no padding",
+#: which is ADR-0249 §9's scheme unchanged. Spelled out rather than shared, for the
+#: reason this suite exists at all — a conformance suite that decided conformance by
+#: calling the code under test would report every implementation conformant.
+_CONDITION_LABEL: Final = re.compile(r"D[1-9][0-9]*")
 
 #: A vocabulary to drive the contract over — two plausible advertised names.
 #:
@@ -1047,6 +1058,82 @@ class PlannerContract:
             )
         ).plan
         assert plan.targets_revision is None
+
+    async def test_it_names_a_condition_element_by_label_and_never_by_id(
+        self, planner: Planner
+    ) -> None:
+        """ADR-0253 §9: those two fields are the loop's, on every plan a planner returns.
+
+        §10's writer clause makes ADR-0249 §8's two-field clause a **four**-field one:
+        "the fields another component sets on a plan are **exactly four**:
+        ``supersedes``, ``targets_revision``, and each ``StepCondition.about`` and
+        ``PlanInterpretation.settles``". A planner names a condition by the **label**
+        §9 fixes — "the ASCII string ``D`` followed by a 1-based ordinal in decimal with
+        no padding" — and the loop replaces it with the ``GoalElement.id`` it resolves
+        to, once, before any other component observes the plan.
+
+        It is here beside ``test_it_sets_no_supersedes`` and
+        ``test_it_stamps_no_targets_revision``, under §5's identical discipline — taken
+        by the loop, taken once, at the same moment. **A planner cannot return an id**:
+        "no identifier of any kind is rendered to a model and none is accepted from one"
+        (ADR-0228 §8), and a ``GoalBrief`` carries no element id for one to copy
+        (§10). So the arm asserts the positive form rather than a prohibition — every
+        such value a conforming planner returns matches the label grammar — which is
+        decidable without the goal the loop holds.
+
+        **A planner that declares neither is conforming and is the common case**: the
+        arm passes vacuously for one, which is ADR-0253 §12's "it changes no behaviour
+        of a plan that declares none of the new keys" read at this seam.
+        """
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
+        named = [condition.about for step in plan.steps for condition in step.when]
+        named += [interpretation.settles for interpretation in plan.interpretations]
+        for value in named:
+            assert _CONDITION_LABEL.fullmatch(value), (
+                f"{value!r} is not a condition label: a planner names an element by "
+                f"its D label and the loop substitutes the id (ADR-0253 §9)"
+            )
+
+    async def test_it_declares_no_more_interpretations_than_a_plan_may_carry(
+        self, planner: Planner
+    ) -> None:
+        """ADR-0253 §8's bound, held at the seam that emits one.
+
+        ``ActionPlan`` refuses a plan over :data:`MAX_INTERPRETATION_STEPS` at
+        construction, so a planner that returned one would raise rather than return —
+        which is what makes this arm a statement about a *conforming* implementation
+        rather than a second enforcement of the bound. "An interpretation is an ungated
+        model call that no permission stage rules on", so the count is a per-turn cost
+        and the ceiling is fixed in ``core`` rather than configured.
+
+        **And an interpretation is never a step**: ADR-0226 §4's reasoning is adopted
+        whole (§8), so no interpretation appears in ``steps`` and no step carries an
+        interpretation's id — the same seam-level assertion
+        ``test_a_read_it_asks_for_never_becomes_a_step`` makes for a ``ReadAsk``.
+        """
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
+        assert len(plan.interpretations) <= MAX_INTERPRETATION_STEPS
+        step_ids = {step.id for step in plan.steps}
+        for interpretation in plan.interpretations:
+            assert interpretation.id not in step_ids, (
+                "an interpretation is not a PlanStep and nothing drives it (ADR-0253 §8)"
+            )
 
     async def test_a_read_it_asks_for_never_becomes_a_step(
         self, asking_planner: Planner | None
