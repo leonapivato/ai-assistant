@@ -1366,11 +1366,12 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    told-once fact. **The committed row is asserted to carry the holder's own `execution_id` and `step_id` in
    `satisfied_by_execution` and `satisfied_by_step`**, read back from the store rather than from the stage's return. **The arm
    asserts the continuation and not only the non-dispatch**, because a stalled walk was the defect this route closes. **And
-   the aggregation is the same arm's second half**: a superseded plan whose **two** steps are each satisfied from a different
-   completed effect of the goal in **one** walk asserts `satisfied_from_earlier` as the **exact tuple of both ids, in walk
-   order** — not a set, not the last id alone, and not reversed — while a **later** turn over the same goal reports
-   **neither** again. An implementation that overwrote the accumulator at each satisfaction, deduplicated it through a set or
-   returned it reversed passes every other arm and still returns the wrong tuple.
+   the aggregation is the same arm's second half**: the **superseding** plan whose **two** steps are each satisfied, in
+   **one** walk, from two different completed effects held by the plan or plans it supersedes, asserts
+   `satisfied_from_earlier` as the **exact tuple of both ids, in walk order** — not a set, not the last id alone, and not
+   reversed — while a **later** turn over the same goal reports **neither** again. An implementation that overwrote the
+   accumulator at each satisfaction, deduplicated it through a set or returned it reversed passes every other arm and still
+   returns the wrong tuple.
 2. The same over a plan **produced afresh** rather than by modification, **and the same again from `AWAITING_APPROVAL`**: a
    resumed step whose replayed `ALLOW` meets a `COMPLETED` answer is committed `AWAITING_APPROVAL → SUCCEEDED` the same way,
    with no second permission record and its recorded ruling unspent. **And the refusals are a table in the same arm, one row
