@@ -215,6 +215,27 @@ _GOAL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
 #: reads have to agree about which columns they are reconciling.
 _EVIDENCE_COLUMNS: Final[str] = "SELECT id, goal_id, read_at, standing, data FROM goal_evidence"
 
+#: **The evidence index rule.** ADR-0252 §13 promotes ``id``, ``goal_id``, ``read_at`` and
+#: ``standing`` out of each row's blob, and this is the whole of what those columns mean.
+#: It is stated once, here, and **cited** wherever ``goal_evidence`` is touched — rather
+#: than argued again at each site, which is how two sites came to carry justifications
+#: that were individually plausible and jointly wrong (#2328's loop).
+#:
+#: What the rule buys is that each read is correct **and complete** without a second
+#: opinion about ownership. A row indexed under one goal whose record names another is
+#: not in the second goal's history *by construction*: it was never selected there. And
+#: it does not hide, because the moment the goal its columns **do** name is read, the
+#: row is decoded, its record is found to disagree, and the read refuses. So a sound file
+#: reads exactly right, and a tampered one reads refusing rather than quietly short — the
+#: two answers a store is allowed to give. Deciding ownership from the record instead
+#: would need a second index this schema does not have, and would make every history read
+#: a full-table decode.
+_EVIDENCE_INDEX_RULE: Final[str] = (
+    "the promoted columns are the index: a row is selected by its columns and, wherever "
+    "it is decoded, refused if its record disagrees with them, and a row is never "
+    "selected under a goal its columns do not name"
+)
+
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
     "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
@@ -1886,8 +1907,9 @@ class SqlitePlanStore:
         """Write one row, with its three columns beside the blob (§13).
 
         **The one writer of the columns, and it takes all of them from one validated
-        record**, which is why nothing this store wrote can disagree with itself: every
-        row :func:`_checked_evidence` refuses came from somewhere else.
+        record**, which is why nothing this store wrote can disagree with itself
+        (:data:`_EVIDENCE_INDEX_RULE`): every row :func:`_checked_evidence` refuses came
+        from somewhere else.
         """
         conn.execute(
             "INSERT INTO goal_evidence(id, goal_id, read_at, standing, data) "
@@ -1936,7 +1958,8 @@ class SqlitePlanStore:
         """The stored row under that id, inside an open transaction.
 
         **The decoded record is checked against the row's own promoted columns**
-        (:func:`_checked_evidence`), and on this path that is what makes it safe to key
+        (:data:`_EVIDENCE_INDEX_RULE`, enforced by :func:`_checked_evidence`), and on this
+        path that is what makes it safe to key
         a write off: every refusal §12 states is evaluated over the columns, so a
         disagreement would make the validated row and the marked row two different
         things — the one failure a marking write must not have.
@@ -1974,7 +1997,8 @@ class SqlitePlanStore:
         goal — which includes one this store does not hold at all — a row that is not
         ``STANDING``, and, on :meth:`record_evidence` alone, the row the call is
         writing. It reads the ``goal_id`` and ``standing`` **columns**, which is what
-        those columns are promoted for — but the row is **reconciled against its record**
+        those columns are promoted for (:data:`_EVIDENCE_INDEX_RULE`) — but the row is
+        **reconciled against its record**
         first (:func:`_checked_evidence`), so the refusals and the mark that follows them
         are decided over the same values. Reading the columns alone would cost no decode
         and would be the one place that saving is not available: §12's refusals are the
@@ -2046,7 +2070,7 @@ class SqlitePlanStore:
         if excess <= 0:
             return
         # **Every candidate is reconciled with its record before one of them is
-        # destroyed** (:func:`_checked_evidence`). §13 drops the **oldest** row and the
+        # destroyed** (:data:`_EVIDENCE_INDEX_RULE`). §13 drops the **oldest** row and the
         # order is the promoted ``read_at``'s, so a column the record contradicts would
         # choose a different victim — and unlike a read, this one **commits**: the row
         # is gone before any later read can report the disagreement. Reconciling first
@@ -2097,7 +2121,7 @@ class SqlitePlanStore:
         """Return the evidence row under that id, or ``None`` (ADR-0252 §12).
 
         The row is read with the columns promoted beside it and reconciled against them
-        (:func:`_checked_evidence`), rather than through :meth:`_read_one`'s blob-only
+        (:data:`_EVIDENCE_INDEX_RULE`), rather than through :meth:`_read_one`'s blob-only
         read: a row keyed ``ev1`` whose record calls itself ``ev2`` would otherwise be
         returned, under the id the caller asked for, as a row naming a different one.
         """
@@ -2116,6 +2140,15 @@ class SqlitePlanStore:
         goal, but whose column names another, survives the deletion and is reported as
         nothing removed. That is the user's data, still in the store, after the store
         said it was gone.
+
+        **This is the one deliberate departure from** :data:`_EVIDENCE_INDEX_RULE`, and
+        it is a departure only from that rule's *selection* clause, which governs what a
+        goal's **history** contains. A cascade is not a history: it is the user's
+        ADR-0004 data-rights act, and the question it asks is not *which rows does this
+        goal's history hold* but *which rows claim this goal*. Under the rule alone a row
+        indexed elsewhere is not this goal's and would be left — correct for a read,
+        and for a deletion it leaves a record naming the deleted goal sitting in the file
+        after the store has said it is gone.
 
         So both answers are consulted, and they resolve asymmetrically because the two
         errors are not symmetrical:
@@ -2149,10 +2182,17 @@ class SqlitePlanStore:
         """
         doomed: list[str] = []
         for row in conn.execute("SELECT id, goal_id, data FROM goal_evidence").fetchall():
+            # A blob that parses but is not an object — `[]`, `7`, `"x"` — is as
+            # unreadable a *record* as one that does not parse at all, and this scan
+            # reaches every row in the table, so letting either one raise would be the
+            # unrelated invalid row blocking a deletion that this method exists to
+            # prevent. `.get` on a list is an `AttributeError`, which is why the shape is
+            # checked rather than assumed.
             try:
-                claimed = json.loads(str(row[2])).get("goal_id")
+                decoded = json.loads(str(row[2]))
             except json.JSONDecodeError:
-                claimed = None
+                decoded = None
+            claimed = decoded.get("goal_id") if isinstance(decoded, dict) else None
             if claimed == goal_id:
                 doomed.append(str(row[0]))
                 continue
@@ -2207,15 +2247,13 @@ class SqlitePlanStore:
             # this member is being held to its own stated answer.
             if conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
                 return [], 0
-            # The filter and the order are the **columns'**, and every row returned is
-            # reconciled against them (:func:`_checked_evidence`) — otherwise a
-            # disagreeing `read_at` would hand a caller §12's total order over values the
-            # rows themselves contradict, and §10's `E` label is an ordinal into exactly
-            # this sequence. A row whose promoted `goal_id` disagrees is not silently
-            # dropped from this answer: it is refused on the read of the goal its column
-            # names, `export` refuses it outright, and `delete_goal` takes it with the
-            # goal its record claims — so no read reports a history as complete while a
-            # row of it is unaccounted for.
+            # :data:`_EVIDENCE_INDEX_RULE`. The filter and the order are the
+            # **columns'**, and every row returned is reconciled against them
+            # (:func:`_checked_evidence`) — otherwise a disagreeing `read_at` would hand a
+            # caller §12's total order over values the rows themselves contradict, and
+            # §10's `E` label is an ordinal into exactly this sequence. A row indexed
+            # under another goal is **not this goal's history** under the rule, and it
+            # does not hide: reading the goal its columns name decodes it and refuses.
             rows: list[Sequence[Any]] = list(
                 conn.execute(
                     _EVIDENCE_COLUMNS + " WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
@@ -2803,7 +2841,8 @@ class SqlitePlanStore:
                 str(r[0]): [] for r in conn.execute("SELECT id FROM goals").fetchall()
             }
             for row in conn.execute(_EVIDENCE_COLUMNS + " ORDER BY read_at ASC, id ASC").fetchall():
-                # Reconciled **before** its promoted `goal_id` is used to group it, and
+                # :data:`_EVIDENCE_INDEX_RULE`, and the goal side of it: reconciled
+                # **before** its promoted `goal_id` is used to group it, and
                 # an orphan is refused rather than indexed with: the foreign key onto
                 # `goals` is enforced for this connection, so a row naming no goal can
                 # only come from a writer that turned it off, and `by_goal[...]` on it
@@ -3146,8 +3185,10 @@ def _decode_evidence(data: str) -> GoalEvidence:
 def _checked_evidence(path: str, row: Sequence[Any]) -> GoalEvidence:
     """Decode one evidence row and require it to agree with its own columns.
 
-    ``goal_evidence`` holds the record as a blob beside the ``id``, ``goal_id``,
-    ``read_at`` and ``standing`` columns ADR-0252 §13 promotes, and ``CREATE TABLE IF
+    **The enforcement point of** :data:`_EVIDENCE_INDEX_RULE`, which every site below
+    cites rather than restates. ``goal_evidence`` holds the record as a blob beside the
+    ``id``, ``goal_id``, ``read_at`` and ``standing`` columns ADR-0252 §13 promotes, and
+    ``CREATE TABLE IF
     NOT EXISTS`` is a no-op against a pre-existing table an outside writer shaped
     (#373), so the two can disagree. **Every query that reads a row reads all five and
     comes through here**, because each of the two things the columns are used for
@@ -3187,7 +3228,7 @@ def _checked_evidence(path: str, row: Sequence[Any]) -> GoalEvidence:
         msg = (
             f"the plan store at {path!r} holds an evidence row whose record and columns "
             f"disagree (row {expected[0]}: columns say {expected!r}, the record says "
-            f"{held!r}); the store is corrupt"
+            f"{held!r}); {_EVIDENCE_INDEX_RULE}, so the store is corrupt"
         )
         raise PlanningError(msg)
     return stored
