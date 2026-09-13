@@ -150,6 +150,20 @@
         -->
         <p class="hint" id="resumed" hidden></p>
         <!--
+          What this next turn is about, where the owner has pointed at one (ADR-0250
+          §11, §13). Answering a clarification and taking a goal up from another
+          conversation are the same thing here — a `reference` beside the request —
+          because answering "is a turn and not an operation of its own, and that is the
+          whole reason `converse` gains a keyword rather than the surface gaining a
+          fifth verb".
+
+          It is shown only while one is set, and it carries its own way out, because a
+          reference left attached to a turn the owner has since changed their mind
+          about would answer a question they no longer meant to answer.
+        -->
+        <p class="hint" id="referencing" hidden></p>
+        <button type="button" id="clear-reference" hidden>Never mind that one</button>
+        <!--
           The way out of a thread, and the only one there was not (#1429, adversarial
           review round 3). Until this page kept a conversation across a reload, a
           reload *was* the way to start a fresh one; now the selection comes back, so
@@ -342,6 +356,15 @@
           <button type="button" id="history-button">Grant history</button>
           <button type="button" id="beliefs-button">Beliefs</button>
           <button type="button" id="questions-button">Questions</button>
+          <!--
+            ADR-0250 §15's listing, and it sits beside "Questions" rather than inside
+            it: §15 forbids presenting a goal's clarification and an ADR-0078 deferred
+            memory question "in the same list, the same command or the same
+            vocabulary". One asks *may I believe this about you* and is answered yes or
+            no; the other asks *which of two things did you mean* and is answered in
+            words. Two buttons, two panels, two vocabularies.
+          -->
+          <button type="button" id="goals-button">What I am working on</button>
           <button type="button" id="observe-button">Look over this conversation</button>
         </p>
         <!--
@@ -432,6 +455,30 @@
         <div id="question-list"></div>
         <h3>Answers that were begun and never recorded</h3>
         <div id="interrupted-list"></div>
+      </section>
+
+      <!--
+        The goal surface (ADR-0250 §15). The listing "from which a user learns what is
+        outstanding and obtains the references §11 and §13 take" — so each row carries
+        the two acts that settle a question and the two that act on the goal, and the
+        ids are on screen because the acts take them (§15).
+      -->
+      <section id="goals" class="panel" hidden>
+        <h3>What I am working on</h3>
+        <p class="hint">
+          One line of work per entry, most recently taken up first. A goal waiting on
+          you shows the question it is waiting on; answering it is an ordinary turn
+          with that question attached. Pointing at a goal here is the only way one
+          moves between conversations — nothing searches across them on its own.
+        </p>
+        <!--
+          What the last act on this panel did, in the vocabulary's own words (ADR-0250
+          §12). It is not a fault slot: a withdrawal that withdrew and an abandonment
+          that abandoned are both the act working, and both are worth a sentence — the
+          same place `answer-said` and `cancellation-said` hold one panel over.
+        -->
+        <p id="goal-said" class="account" hidden></p>
+        <div id="goal-list"></div>
       </section>
 
       <section id="review" class="panel" hidden>
