@@ -542,9 +542,11 @@ was settled about the step rather than by where in the plan it sat.
 > retry a write that can never land. **Three refusals therefore raise a `PlanningError` that is
 > **not** the stale class** — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
 > **duplicate-ownership limb** — and §3's `→ RUNNING` conjunct keeps `StaleExecutionError` for its
-> **other four** limbs alone, each of which **is** retryable in the sense that class names: a
-> claim naming no attempt or the wrong one succeeds when corrected, and a claim under an ended
-> attempt succeeds on a later turn under a live one. **The duplicate is the one limb no
+> **other three** limbs alone, each of which **is** retryable in the sense that class names: a
+> claim naming an unknown attempt or an attempt that did not open this execution succeeds when
+> corrected, and a claim under an ended attempt succeeds on a later turn under a live one. **The
+> absent-attempt case is not among them**, because §3's validator makes that transition
+> unconstructible and the store never receives one. **The duplicate is the one limb no
 > correction reaches**: with execution E named by attempts A and B, every claim for E is refused
 > whichever attempt it supplies (below), so handing the caller a class whose contract is *re-read
 > and retry* would be telling it to loop forever against a state this decision deliberately
@@ -900,8 +902,10 @@ wider blast radius, filed there and **not taken here** (§12).
 > reporting a completed action as failed. So recovery does neither."* A skip records that the
 > producer did not act, which is exactly the half of the ambiguity that state refuses to pick.
 > **This rule overrides §7's supersession clause** where the two would meet: a plan superseded
-> after driving whose walk stopped on an `INDETERMINATE` step leaves that step, its dependent
-> branch and every step behind it `PENDING`, and moves none of them to `SKIPPED`/`SUPERSEDED`.
+> after driving whose walk stopped on an `INDETERMINATE` step leaves **that step durably
+> `INDETERMINATE`** — the transition it committed is a record §7's first clause preserves, not a
+> status the sweep may move — and leaves **its dependent branch and every step behind it
+> `PENDING`**, moving none of the three to `SKIPPED`/`SUPERSEDED`.
 
 > **Normative — a step already `SKIPPED` before the uncertainty arose stays `SKIPPED`, and this
 > section does not reach backwards.** A walk that moved an independent step `PENDING → SKIPPED`
@@ -1170,11 +1174,18 @@ nothing depends on it, and no act follows — so nothing fails open.
 > `StepRunner` is therefore always strictly positive**, which ADR-0029 §4 requires: *"a zero or
 > negative duration is refused rather than treated as an instantly-expired deadline"*.
 
-> **Normative — the adapter's figure is validated before the deadline is fixed, and a
-> never-positive budget is refused rather than stopped.** Before it computes anything, the driver
-> applies **ADR-0029 §4's own test** to the `timeout` it was handed — a `timedelta`, **strictly
-> positive** — and raises `ValueError` where it is not, which is `orchestration/executor.py`'s
-> existing `_checked_timeout` applied one level up rather than a new rule. **The two cases are
+> **Normative — the adapter's figure is validated at the entry to the adapter call, and a
+> never-positive budget is refused rather than stopped.** **ADR-0029 §4's own test** — a
+> `timedelta`, **strictly positive** — is applied to the `timeout` **at the first statement of
+> each public entry point that takes one** (`converse`, `converse_spoken`, `resume` and the
+> streaming pair), raising `ValueError` where it fails, which is
+> `orchestration/executor.py`'s existing `_checked_timeout` applied at a second seam rather than
+> a new rule. **At the entry and not where the deadline is fixed**, because a `converse` reaches
+> routing, context assembly and `Planner.plan` before anything is driven: a check placed at the
+> driver would let a zero budget spend a model call first, which is the outcome the arm below
+> forbids, and a path that restates or routes without entering the driver would bypass it
+> altogether. **So it runs before routing, before planning and before any I/O**, and the monotonic
+> deadline is then fixed when driving begins (above). **The two cases are
 > not the same and must not collapse into one**: a budget that **expires during** the walk stops
 > it and leaves the remaining steps `PENDING` (§2), while a budget that was **never** positive —
 > `timedelta(0)`, a negative one, or a value that is not a `timedelta` at all — is a caller fault
@@ -1182,7 +1193,7 @@ nothing depends on it, and no act follows — so nothing fails open.
 > this clause the driver's stop rule would swallow it: the first remainder would be non-positive,
 > the walk would stop having started nothing, and the `ValueError` `StepExecutor` raises today
 > would never be reached, turning a refusal into a silent empty turn. **It is checked once per
-> adapter call**, at the same instant the deadline is fixed and before any I/O.
+> adapter call**, and no stage re-checks it.
 
 > **Normative — the deadline is an elapsed duration, so it is measured on a monotonic source and
 > never on the injected `Clock`.** The driver takes both the deadline and every remainder from
@@ -1688,7 +1699,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   `orchestration/`, the walk, §1's three driver evaluations and **`StepRunner`'s resolution of a
   step's `resolves` from the stored plan and execution while it builds the request** (§1), §2's
   stop and skip rules, §5's park re-evaluation and the fresh walk that follows it, §6's
-  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call, **§10's
+  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call **and
+  its validation of the caller's `timeout` at each public entry point**, **§10's
   walk outcome and the licensed investigation round it admits — which is where ADR-0251 §4's (j)
   is read with its new alternative** — and the retirement of `engine.py`'s single-step path.
   **It adds no `core` type and no field**, both
@@ -1710,6 +1722,19 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 > fakes**: the arms 1–13 below, every one over `ai_assistant.testing`'s canonical fakes with no
 > consequential integration wired. **M34 owes arms 14–18**, and no lane reads an M33 arm as having
 > established one of them.
+
+> **Normative — an arm is owed by the lane that lands the clause it tests, and the division above
+> is about what a *milestone* demonstrates rather than a licence to ship a clause untested.**
+> **No lane lands §6's `EFFECT_UNRESOLVED` commit and its partial-write residual, §7's
+> supersession sweep and its partial-sweep residual, or §9's deadline and its validation without
+> arms 14, 15 and 16 respectively** — each of those three is a controlled-fake arm needing no
+> integration, so nothing about them waits on a milestone. Where **L2** (§14) lands in M33 they
+> land with it and the M34 list reduces to arms 17 and 18; where L2 lands in M34 they land there
+> with it. **Arms 17 and 18 are the two that genuinely cannot move**: 17 is A9's lane's, and 18
+> needs a real integration §13 forbids until A8's, A9's and A10's guarantees are demonstrated.
+> Without this clause an implementation could swallow §6's failed `commit_attempt`, resume §7's
+> half-finished sweep or refix §9's deadline at each step and still pass every arm its own lane
+> owed, which is the gap the thin/full division exists to describe rather than to create.
 
 **Thin — M33, on controlled fakes.**
 
@@ -1887,11 +1912,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     `SKIPPED`/`UNMET_DEPENDENCY` on an unsatisfied `when`, whose **second** returns
     `INDETERMINATE`, and whose **third** the walk never reaches. The arm asserts that after the
     uncertainty is recorded the first step is **still** `SKIPPED` with its original
-    `UNMET_DEPENDENCY` reason, that nothing reverted or rewrote it, that the second and third are
-    `PENDING` and neither is skipped, and — on a paired case that supersedes that plan — that the
-    sweep moves the first step not at all and the second and third not at all (§6's override of
-    §7). It is what stops an implementation reading §6 as a rule over the whole plan and trying
-    to undo a committed transition.
+    `UNMET_DEPENDENCY` reason, that nothing reverted or rewrote it, that the **second is durably
+    `INDETERMINATE`** and the **third `PENDING`**, and that neither is skipped — and, on a paired
+    case that supersedes that plan, that the sweep moves none of the three, the second staying
+    `INDETERMINATE` rather than becoming `PENDING` or `SKIPPED` (§6's override of §7). It is what
+    stops an implementation reading §6 as a rule over the whole plan and trying to undo a
+    committed transition.
 15. **Replan after partial execution preserves what happened** — a plan driven to its second
     step, superseded on a later turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's
     `output` are unchanged, the attempt's `execution_ids` names both executions, and the
