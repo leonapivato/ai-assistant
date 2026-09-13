@@ -1275,6 +1275,14 @@ class PlanStoreContract:
         succeeds and one raises." Dispatched before either completes, so an
         implementation that read and compared before a suspension and wrote after it
         without re-reading fails here rather than passing a sequential arm.
+
+        **The loser is counted and not merely type-checked**, because the arm is "one
+        succeeds and **one raises**" and a conformance suite that let the second call
+        answer anything at all would certify a store breaking the signature
+        :meth:`PlanStore.engage_goal` states — it returns a :class:`Goal` or raises.
+        One winner plus one loser over two dispatched calls admits no third kind of
+        result; a membership test over the losers alone passes vacuously when there
+        are none.
         """
         await store.save_goal(_goal())
 
@@ -1289,7 +1297,11 @@ class PlanStoreContract:
         won = [one for one in settled if isinstance(one, Goal)]
         lost = [one for one in settled if isinstance(one, BaseException)]
         assert len(won) == 1, "exactly one write of a version lands"
-        assert all(isinstance(one, StaleExecutionError) for one in lost)
+        assert len(lost) == 1, "and the other call raised rather than answering with a value"
+        assert isinstance(lost[0], StaleExecutionError), (
+            "the loser computed against a version that had moved, which is what "
+            f"engage_goal refuses on: {lost[0]!r}"
+        )
 
         stored = await store.get_goal("g1")
         assert stored is not None
