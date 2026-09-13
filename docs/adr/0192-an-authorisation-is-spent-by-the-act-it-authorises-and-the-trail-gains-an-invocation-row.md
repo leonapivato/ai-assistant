@@ -1,25 +1,26 @@
 # 192. An authorisation is spent by the act it authorises, and the trail gains an invocation row
 
-- Status: Partially superseded by ADR-0259 (§3's firing clause alone: that section rules the ADR landing automated reconciliation "is fired by a tool contract that offers a lookup by idempotency key — until a tool can be asked whether a key was already acted on, reconciliation has nothing to read", and the superseding decision lands it with no such lookup, on the authorisations §1 itself rules not spendable *and* whose recorded decision carries no `egress_binding` — a tool that is not `side_effecting`, whose interrupted call changed nothing, and a `NATURAL` tool, whose repeat changes nothing — where the call is the read, so §3's premise does not hold and a reader holding only it would wait for a contract that decision does not need. Nothing else in §3 is reached: its "This ADR lands no automated reconciliation of an `INDETERMINATE` act and mints no idempotency mechanism" statement, its recovery-scan clause and its spending-on-`INDETERMINATE` argument all bind entire, and so does every clause of §1 — its spendability rule, which the superseding decision cites as its eligibility test rather than restating, and its further-claim enumeration, which binds verbatim and is what that decision books the side-effecting `KEYED` route behind; no member of `InvocationLedger` gains an admission, a parameter or a changed signature)
+- Status: Partially superseded by ADR-0259 (§3's firing clause alone: that section rules the ADR landing automated reconciliation "is fired by a tool contract that offers a lookup by idempotency key — until a tool can be asked whether a key was already acted on, reconciliation has nothing to read", and the superseding decision lands it with no such lookup, on a read alone — a tool that is not `side_effecting`, whose interrupted call changed nothing, and whose recorded decision carries no `egress_binding` — where the call is the read, so §3's premise does not hold and a reader holding only it would wait for a contract that decision does not need. A side-effecting `NATURAL` tool is non-spendable and is nonetheless **not** reconciled there, because idempotency of the effect is not idempotency of the answer, so the admitted set is strictly narrower than §1's non-spendable one. Nothing else in §3 is reached: its "This ADR lands no automated reconciliation of an `INDETERMINATE` act and mints no idempotency mechanism" statement, its recovery-scan clause and its spending-on-`INDETERMINATE` argument all bind entire, and so does every clause of §1 — its spendability rule, which the superseding decision relies on for the further-claim admission rather than as its eligibility test, and its further-claim enumeration, which binds verbatim and is what that decision books the side-effecting `KEYED` route behind; no member of `InvocationLedger` gains an admission, a parameter or a changed signature)
 - Date: 2026-08-24
 - **Partially superseded: 2026-09-13 by ADR-0259 — §3's firing clause alone. Nothing else in
   this ADR.** §3 rules that *"The ADR that lands automated reconciliation is fired by a tool
   contract that offers a **lookup by idempotency key** — until a tool can be asked whether a key
   was already acted on, reconciliation has nothing to read."* ADR-0259 §3 lands automated
   reconciliation of an `INDETERMINATE` step **with no such lookup**, and it is admissible because
-  it is confined to the authorisations **§1 itself rules not spendable** *and* whose recorded
-  decision carries **no `egress_binding`** — the complete conjunction that decision's §3 states,
-  never one half of it: a tool that is not `side_effecting`, whose interrupted call ADR-0029 §4
-  says *"changed nothing"*, and a `NATURAL` tool, of which the same section says *"whether it
-  acted does not change what a repeat does"*.
-  On those, **the call is the read** — it establishes the effect's status by making it true — so
+  it is confined to a **read** — a tool that is **not `side_effecting`**, whose interrupted call
+  ADR-0029 §4 says *"changed nothing"*, and whose recorded decision carries **no
+  `egress_binding`**: the complete conjunction that decision's §3 states, never one half of it.
+  There **the call is the read** — it establishes the step's status by performing the only thing
+  the step was for — so
   §3's premise that reconciliation *"has nothing to read"* does not hold, and a reader holding
   only §3 would wait for a tool contract that decision does not need.
 
   **Every other clause binds entire, and several are what that decision reasons from.** §1's
   spendability rule — *"An **authorisation is spendable** when the decision's `ToolDefinition` is
-  `side_effecting` and its `idempotency` is not `NATURAL`"* — is **cited as the eligibility test**
-  rather than restated. §1's further-claim enumeration binds **verbatim**, and it is why the
+  `side_effecting` and its `idempotency` is not `NATURAL`"* — is **relied on for the further-claim
+  admission** rather than used as the eligibility test: a side-effecting `NATURAL` tool is
+  non-spendable under it and is nonetheless not reconciled, so the admitted set is strictly
+  narrower than the non-spendable one and the relation is one-way. §1's further-claim enumeration binds **verbatim**, and it is why the
   side-effecting `KEYED` reconciliation that would be the better guarantee is **declined and
   booked** there rather than taken: a further spendable claim is refused where any claim under
   the decision carries `INDETERMINATE`, and lifting that is a change to a safety floor that ADR
