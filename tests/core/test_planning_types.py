@@ -1924,19 +1924,20 @@ def test_an_attempt_carries_no_interpretation_and_no_element() -> None:
     assert set(GoalAttempt.model_fields) & forbidden == set()
 
 
-def test_the_export_closure_reaches_an_evidence_rows_attempt() -> None:
-    """ADR-0252 §13 on ADR-0249 §11's reading: a row's ``attempt_id`` resolves too.
+def test_the_export_refuses_two_evidence_rows_under_one_id() -> None:
+    """ADR-0014 §5's uniqueness, over the record ADR-0252 §13 adds.
 
-    ADR-0014 §5 rules that every reference an included record carries resolves within
-    the same export, and ``GoalEvidence.attempt_id`` "names the attempt that recorded
-    it" (ADR-0252 §1) — so a document carrying a row whose attempt it does not carry is
-    one whose reader cannot answer *which attempt established this*. ADR-0250 §9 already
-    took the same reading for a ``GoalQuestion``'s ``attempt_id``.
+    "Ids must also be unique, since a duplicate makes a reference ambiguous" — and two
+    references name an evidence row: ADR-0252 §10's ``GoalElement.evidence_row_id`` and
+    §8's ``superseded_by``. A document holding two rows under one id answers neither.
+    Checked across the whole document rather than within one history, because a
+    reference carries no goal.
 
-    The row's ``records`` and its ``superseded_by`` are deliberately **not** in the
-    closure, and the asymmetry has a reason: those are ``MemoryStore`` identifiers and
-    **elidable** row references, which §10 and §12 both rule "an identifier and not a
-    resolution guarantee". No bound drops an attempt.
+    **A row's ``attempt_id`` is deliberately not closed over**, which is the other half
+    of this arm. §13 states the closure over ``goal_id`` alone, and §12 rules that
+    ``record_evidence`` "refuses only for the three reasons §12 lists" — so no conforming
+    store may refuse a row whose ``attempt_id`` resolves to nothing, and a document
+    demanding it would refuse what every writer is obliged to accept.
     """
     goal = _goal()
     attempt = GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN)
@@ -1950,12 +1951,19 @@ def test_the_export_closure_reaches_an_evidence_rows_attempt() -> None:
     )
     assert document.evidence[0].rows[0].attempt_id == "a1"
 
-    with pytest.raises(ValidationError, match="evidence whose attempt is missing"):
+    dangling = PlanExport(
+        exported_at=_WHEN,
+        goals=(goal,),
+        evidence=(EvidenceHistory(goal_id="g1", rows=(_evidence_row(attempt_id="ghost"),)),),
+    )
+    assert dangling.evidence[0].rows[0].attempt_id == "ghost", "no attempt closure"
+
+    with pytest.raises(ValidationError, match="duplicate evidence row ids"):
         PlanExport(
             exported_at=_WHEN,
             goals=(goal,),
             attempts=(attempt,),
-            evidence=(EvidenceHistory(goal_id="g1", rows=(_evidence_row(attempt_id="ghost"),)),),
+            evidence=(EvidenceHistory(goal_id="g1", rows=(row, row)),),
         )
 
 

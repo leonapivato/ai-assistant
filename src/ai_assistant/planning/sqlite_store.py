@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -67,6 +68,7 @@ from ai_assistant.planning.goals import (
     engaged,
     invalidated,
     revalidated_evidence,
+    revalidated_revision,
     settled,
     superseded,
 )
@@ -178,16 +180,29 @@ _UPDATE_HIGH_WATER = "UPDATE meta SET value = ? WHERE key = 'exec_high_water'"
 #: version reads as a history that has lost nothing rather than as a ``NULL`` every
 #: reader has to interpret. ``delete_goal`` removes the count with the goal because the
 #: count *is* a column of the goal.
+#:
+#: **It is TEXT rather than INTEGER, and that is the count's own requirement rather than
+#: a storage preference.** ADR-0252 §13 makes the count monotonic and unbounded — "it
+#: **never decreases**, and a write that drops *k* rows advances it by *k*" — and
+#: ``EvidenceHistory.elided`` is a Python ``int``, which has no ceiling. SQLite's
+#: integers stop at 64 bits and its ``+`` **promotes to REAL rather than raising** when
+#: one overflows, so an ``INTEGER`` column would either commit a count no later read
+#: accepts or force the store to refuse a write — and §12 rules that ``record_evidence``
+#: "refuses only for the three reasons §12 lists", so a fourth is not available to it.
+#: Canonical decimal text has neither problem, and §13 leaves the shape open in terms:
+#: "what shape the store keeps it in is not contracted — the contract is the value, its
+#: monotonicity and the fact that it advances in the **same indivisible step** as the
+#: write that drops the rows".
 _GOAL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
     ("conversation_id", "TEXT"),
     ("last_engaged_in", "TEXT"),
-    ("evidence_elided", "INTEGER NOT NULL DEFAULT 0"),
+    ("evidence_elided", "TEXT NOT NULL DEFAULT '0'"),
 )
 
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
     "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-    "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
+    "evidence_elided TEXT NOT NULL DEFAULT '0', data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS executions("
@@ -256,13 +271,13 @@ _ORDINAL_INDEX = "executions_created_seq"
 #: the two columns beside it (ADR-0250 §9).
 _VERSION_BEFORE_INTERPRETATIONS: Final[int] = 1
 
-#: The largest integer SQLite stores exactly, which is a 64-bit signed one. Named
-#: because ADR-0252 §13's elision count is an unbounded Python ``int`` on one side of
-#: this seam and a bounded SQLite one on the other, and SQLite's ``+`` **promotes to
-#: ``REAL`` rather than raising** when it overflows — so an increment past this would
-#: commit a counter of type ``real`` that :func:`_elided_count` then refuses on every
-#: later read. The write is refused instead, at the write that would have caused it.
-_MAX_SQLITE_INTEGER: Final[int] = 2**63 - 1
+#: The one spelling ADR-0252 §13's elision count is stored in: canonical decimal, no
+#: sign, no leading zero, no separator. The column is TEXT because the count is unbounded
+#: and SQLite's integers are not, and a text column read with Python's ``int()`` grammar
+#: would accept spellings this store never writes and that SQLite itself reads
+#: differently (``'1_0'`` is ``10`` to one and ``2`` to the other). Matching the exact
+#: output form instead means there is nothing for the two to disagree about.
+_CANONICAL_COUNT: Final[re.Pattern[str]] = re.compile(r"0|[1-9][0-9]*")
 
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
 #: EXISTS`` is a no-op against a pre-existing table of a different shape (#373),
@@ -283,7 +298,7 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": ("TEXT", False),
         "conversation_id": ("TEXT", False),
         "last_engaged_in": ("TEXT", False),
-        "evidence_elided": ("INTEGER", True),
+        "evidence_elided": ("TEXT", True),
         "data": ("TEXT", True),
     },
     "plans": {
@@ -1421,21 +1436,23 @@ class SqlitePlanStore:
         change invalidated, and a call that cannot mark every row it named appends
         nothing.
 
+        **The command is revalidated before the first ``await``**, which is both
+        ADR-0023 §2's obligation and this method's ADR-0065 snapshot: ``invalidates``
+        can otherwise arrive as a one-shot iterator or as a string whose ``tuple()`` is
+        its characters, either of which marks rows the caller never named.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, the revision does not
-                follow the goal's current one, or a row named by ``invalidates`` is not
-                this goal's or is not ``STANDING``.
+            PlanningError: If the revision is not a valid command, if ``goal_id`` names
+                no stored goal, if the revision does not follow the goal's current one,
+                or if a row named by ``invalidates`` is not this goal's or is not
+                ``STANDING``.
         """
-        # Materialised **once**, before the first await, for the reason
-        # `InMemoryPlanStore.record_interpretation` gives: `model_copy(update=...)` skips
-        # validators, so a caller can plant a one-shot iterator that the refusal pass
-        # drains and the marking pass finds empty (ADR-0023 §2, ADR-0065 §1).
-        named = tuple(revision.invalidates)
+        command = revalidated_revision(revision)
         async with self._lock:
-            return await _run_to_completion(self._record_interpretation_sync, revision, named)
+            return await _run_to_completion(self._record_interpretation_sync, command)
 
-    def _record_interpretation_sync(self, revision: GoalRevision, named: tuple[str, ...]) -> Goal:
+    def _record_interpretation_sync(self, revision: GoalRevision) -> Goal:
         what = f"record an interpretation on goal {revision.goal_id!r}"
         with self._transaction(what) as conn:
             row = conn.execute(
@@ -1454,7 +1471,11 @@ class SqlitePlanStore:
             # Before the append, so a call that cannot mark every row it named leaves
             # the goal exactly as it found it (§12).
             self._refuse_unmarkable(
-                conn, revision.goal_id, named, being_written=None, what="invalidate"
+                conn,
+                revision.goal_id,
+                revision.invalidates,
+                being_written=None,
+                what="invalidate",
             )
             updated = appended(stored, revision.interpretation)
             # The three columns are unmoved by a revision — `record_interpretation`
@@ -1465,7 +1486,7 @@ class SqlitePlanStore:
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
-            for row_id in named:
+            for row_id in revision.invalidates:
                 self._mark_evidence(
                     conn,
                     invalidated(
@@ -1966,28 +1987,21 @@ class SqlitePlanStore:
             return
         doomed = [row_id for row_id in ordered if row_id != keep][:excess]
         conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
-        # **Read, add and write, rather than `evidence_elided + ?` in SQL.** SQLite's
-        # integers are 64-bit and its `+` **silently promotes to REAL on overflow**, so a
-        # counter standing at `2**63 - 1` would become `9.223372036854776e+18` of type
-        # `real` — a value this write commits happily and every later `evidence_of` and
-        # `export` then refuses, leaving a store that accepted a write it can no longer
-        # read back. Doing the arithmetic in Python, whose integers are unbounded, and
-        # refusing the write where the result will not fit keeps the failure **at the
-        # write that caused it**; and reading the current value through
-        # :func:`_elided_count` means a counter an outside writer has already corrupted
-        # is caught here too rather than only on the next read.
+        # **Read, add and write, rather than `evidence_elided + ?` in SQL.** The count is
+        # an unbounded Python integer (§13) held as canonical decimal text, so the
+        # addition is Python's and has no ceiling — where SQLite's `+` is 64-bit and
+        # **promotes to REAL rather than raising** on overflow, which would commit a
+        # count no later read accepts. Reading the current value through
+        # :func:`_elided_count` also means a counter an outside writer has corrupted is
+        # caught **here**, at the write, rather than only on the next read. None of this
+        # adds a refusal: §12 rules that `record_evidence` "refuses only for the three
+        # reasons §12 lists", and a corrupt stored counter is the store being corrupt
+        # rather than a fourth reason to refuse a caller's row.
         held = conn.execute("SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)).fetchone()
         advanced = _elided_count(str(self._path), goal_id, held[0]) + len(doomed)
-        if advanced > _MAX_SQLITE_INTEGER:
-            msg = (
-                f"the evidence elision count for goal {goal_id} would exceed what this "
-                f"store can hold exactly ({advanced}); refusing the write rather than "
-                f"committing a count that cannot be read back (ADR-0252 §13)"
-            )
-            raise PlanningError(msg)
         conn.execute(
             "UPDATE goals SET evidence_elided = ? WHERE id = ?",
-            (advanced, goal_id),
+            (str(advanced), goal_id),
         )
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
@@ -2886,14 +2900,13 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
     each a hole in the boundary every other stored value is read through
     (:func:`_decode_goal` and its siblings).
 
-    **Only an actual ``int`` is admitted, and no text is parsed.** The column has
-    ``INTEGER`` affinity, so SQLite has already converted every value it reads as a
-    number; a value that still comes back as text is one **SQLite** would not read as
-    one, and parsing it with Python's wider grammar would let the two disagree about the
-    same bytes. ``'1_0'`` is the case that forces it: ``int()`` reads it as ``10`` while
-    SQLite's own ``evidence_elided + 1`` reads it as ``2``, so a store that accepted it
-    would report a count that **decreased** on the next elision — the one thing ADR-0252
-    §13 says it never does.
+    **Exactly one spelling is admitted, and it is the one this store writes.** The
+    column holds canonical decimal text, so the check is a full match against
+    ``0|[1-9][0-9]*`` rather than a call to ``int()``: Python's parsing grammar is wider
+    than SQLite's and wider than this store's own output, and a column is read by more
+    than one reader. ``'1_0'`` is the case that forces it — ``int()`` reads it as ``10``
+    and SQLite's arithmetic reads the same bytes as ``2`` — and ``' 7'``, ``'+7'``,
+    ``'007'`` and ``'-0'`` are refused on the same rule rather than each on its own.
 
     **A negative count is refused rather than clamped**, which is ADR-0086 §4's
     direction: the count is the whole of what makes §13's elision non-silent, so a
@@ -2913,31 +2926,22 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
         PlanningError: If the stored value is not a non-negative integer.
     """
     msg = (
-        f"the plan store at {path!r} holds a non-integer evidence elision count for "
+        f"the plan store at {path!r} holds a malformed evidence elision count for "
         f"goal {goal_id} ({raw!r}); the store is corrupt"
     )
-    # **An `int` and never a string, which is where this parts company with
-    # `_meta_int`.** That helper reads the `meta` table, whose `value` column this code
-    # writes as TEXT, so a string there is the normal case. This column has INTEGER
-    # affinity and every write this store makes is an integer, so SQLite has already
-    # converted any well-formed integer literal — which means a value that comes back
-    # as text is one SQLite itself would not read as a number, and parsing it with
-    # Python's grammar would let the two disagree. `'1_0'` is the case: `int()` reads it
-    # as 10 and SQLite's own `evidence_elided + 1` reads it as 2, so the count this
-    # store reported would **decrease** on the next elision — which is exactly what
-    # ADR-0252 §13 says it never does. `bool` is an `int` in Python, so it is named
-    # rather than left to read as a count of 0 or 1.
-    if isinstance(raw, bool) or not isinstance(raw, int):
+    # **One spelling, matched exactly, and no parsing grammar of its own.** The value is
+    # required to be the canonical decimal text this store writes — `str(int)` — rather
+    # than anything Python's `int()` happens to accept, because those two grammars are
+    # not the same and a column is read by more than one reader. `'1_0'` is the case that
+    # forces it: `int()` reads it as 10 while SQLite's own arithmetic reads the same
+    # bytes as 2, so a store that parsed it would disagree with its own file. `' 7'`,
+    # `'+7'`, `'007'` and `'-0'` are refused on the same rule rather than each on its
+    # own: there is exactly one spelling of each count, so any other is a value this
+    # store did not write. A negative cannot be spelled at all, which is where §13's
+    # "never decreases" becomes a property of the column rather than a check.
+    if not isinstance(raw, str) or _CANONICAL_COUNT.fullmatch(raw) is None:
         raise PlanningError(msg)
-    count = raw
-    if count < 0:
-        negative = (
-            f"the plan store at {path!r} holds a negative evidence elision count for "
-            f"goal {goal_id} ({raw!r}); a count of what a history has dropped never "
-            f"decreases (ADR-0252 §13)"
-        )
-        raise PlanningError(negative)
-    return count
+    return int(raw)
 
 
 def _decode_evidence(data: str) -> GoalEvidence:

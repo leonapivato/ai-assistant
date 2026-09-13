@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
+    GoalRevision,
 )
 
 if TYPE_CHECKING:
@@ -312,6 +313,40 @@ def settled(
         # could write and then fail to decode — see `_revalidated` above, whose
         # reasoning this is, over the other record this module stamps.
         msg = f"the settlement would leave question {question.id} in a shape it refuses: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def revalidated_revision(revision: GoalRevision) -> GoalRevision:
+    """Rebuild ``revision`` as a validated, detached :class:`GoalRevision`, or refuse it.
+
+    **A snapshot is not enough here, and that is the whole reason this exists.**
+    ``tuple(revision.invalidates)`` reads the field once, which closes the one-shot
+    iterator hole — but the field is annotated ``tuple[Identifier, ...]`` and
+    ``model_copy(update=...)`` **skips validators** (ADR-0023 §2: "a pydantic property no
+    type can close"), so a caller can also put a **string** there. ``tuple("ev1")`` is
+    ``("e", "v", "1")``: three ids that are not the one the caller named, and where those
+    happen to exist the store would mark them and leave ``ev1`` standing — a revision
+    that invalidated the wrong rows and reported nothing.
+
+    Revalidating turns every such shape into a ``PlanningError`` at the write, before
+    anything is appended, which is §2's "a write that reaches past it must re-validate"
+    read over the command rather than over the record. The validated value's
+    ``invalidates`` is a real tuple, so the caller's container is no longer read at all.
+
+    Args:
+        revision: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return GoalRevision.model_validate(revision.model_dump())
+    except ValidationError as exc:
+        subject = getattr(revision, "goal_id", "<no goal>")
+        msg = f"the revision for goal {subject!r} is not a valid command: {exc}"
         raise PlanningError(msg) from exc
 
 

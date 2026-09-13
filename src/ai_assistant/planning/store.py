@@ -38,6 +38,7 @@ from ai_assistant.planning.goals import (
     engaged,
     invalidated,
     revalidated_evidence,
+    revalidated_revision,
     settled,
     superseded,
 )
@@ -174,35 +175,39 @@ class InMemoryPlanStore:
         invalidated. The refusals run **before** the append, so a call that cannot mark
         every row it named appends nothing.
 
+        **The command is revalidated on the first executed line**, and everything after
+        reads the validated value rather than the caller's. ``model_copy(update=...)``
+        skips validators (ADR-0023 §2), so ``invalidates`` can arrive as a one-shot
+        iterator a second traversal would find empty, or as a **string** whose
+        ``tuple()`` is its characters — either of which would mark rows the caller never
+        named while leaving the ones it did standing.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, the revision does not
-                follow the goal's current one, or a row named by ``invalidates`` is not
-                this goal's or is not ``STANDING``.
+            PlanningError: If the revision is not a valid command, if ``goal_id`` names
+                no stored goal, if the revision does not follow the goal's current one,
+                or if a row named by ``invalidates`` is not this goal's or is not
+                ``STANDING``.
         """
-        stored = self._goals.get(revision.goal_id)
+        command = revalidated_revision(revision)
+        stored = self._goals.get(command.goal_id)
         if stored is None:
-            msg = f"cannot record an interpretation for unknown goal {revision.goal_id}"
+            msg = f"cannot record an interpretation for unknown goal {command.goal_id}"
             raise PlanningError(msg)
-        if stored.version != revision.expected_version:
+        if stored.version != command.expected_version:
             msg = (
-                f"goal {revision.goal_id} is at version {stored.version}, not "
-                f"{revision.expected_version}: re-read it and recompute the revision"
+                f"goal {command.goal_id} is at version {stored.version}, not "
+                f"{command.expected_version}: re-read it and recompute the revision"
             )
             raise StaleExecutionError(msg)
-        # Materialised **once**, before either traversal. `invalidates` is annotated a
-        # tuple, but `model_copy(update=...)` skips validators (ADR-0023 §2), so a caller
-        # can plant a one-shot iterator: the refusal loop would drain it and the marking
-        # loop would find it empty, leaving the revision appended and the rows it
-        # invalidated still STANDING — the exact window §12's indivisibility exists to
-        # close, opened by reading one argument twice (ADR-0065 §1's own rule).
-        named = tuple(revision.invalidates)
-        self._refuse_unmarkable(revision.goal_id, named, being_written=None, what="invalidate")
-        updated = appended(stored, revision.interpretation)
+        self._refuse_unmarkable(
+            command.goal_id, command.invalidates, being_written=None, what="invalidate"
+        )
+        updated = appended(stored, command.interpretation)
         self._goals[updated.id] = updated
-        for row_id in named:
+        for row_id in command.invalidates:
             self._evidence[row_id] = invalidated(
-                self._evidence[row_id], at_revision=revision.interpretation.revision
+                self._evidence[row_id], at_revision=command.interpretation.revision
             )
         return updated.model_copy(deep=True)
 
