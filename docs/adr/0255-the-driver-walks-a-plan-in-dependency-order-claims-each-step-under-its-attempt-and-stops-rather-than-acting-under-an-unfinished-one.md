@@ -346,22 +346,49 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > is set — `BaseException.add_note` included**. Its `__cause__`, `__context__` and `__notes__`
 > stay exactly as they stood, so a transport failure underneath a provider error is still the
 > cause a reader sees. **The ledger failure is recorded where the driver owns the state**: a
-> structured log warning, carrying the **class** of each failure and **neither message**. **The
-> turn failed on the interpretation**, and an implementation whose accounting cleanup masked that
+> structured log warning, carrying the **ledger** failure's class and **nothing at all** taken
+> from the interpretation's exception. **The turn failed on the interpretation**, and an implementation whose accounting cleanup masked that
 > cause would report a store problem for a provider outage and send the next reader to the wrong
 > subsystem. **No lane swallows either, and no lane rewrites either.**
 
-> **Normative — what that warning may carry, and it is ADR-0013 §5's own rule taken rather than
-> restated.** The ledger failure's class is **this project's** (`PlanningError`) and is named as
-> it stands. The interpretation failure's class is the **provider's** and is **never** named as it
-> stands: it is mapped through this project's own taxonomy first — ADR-0013 §5's `_classify`
-> against a set frozen at import, *"the nearest ancestor in the exception's MRO that is one of our
-> `ModelError` subclasses, matched by **object identity**"* — because *"a route may be any
-> `ModelProvider`, so `type(exc).__name__` is provider-controlled text"*. **Neither message, and
-> no `str()`, `repr()`, `args`, `__notes__`, `__cause__` or `__context__` of either, reaches the
-> warning** (ADR-0004 §5, and ADR-0029 §3's channel enumeration as ADR-0032 §5 and ADR-0145 §7
-> restate it), and §10's rule that the driver renders no plan, no step, no execution, no
-> `SkipReason` and no verdict to a log binds entire.
+> **Normative — what that warning may carry, and it carries nothing the provider controls.** The
+> warning carries **exactly two things**. The **ledger** failure's class, which is **this
+> project's** (`PlanningError`, `core/errors.py`), named as it stands. And a **fixed literal**
+> naming what else failed — that an interpretation call did not return a verdict — which is this
+> decision's own text and not a value read off any object at run time. **Nothing whatever is taken
+> from the interpretation's exception**: not its class, not a class derived or mapped from it, not
+> its message, and none of ADR-0029 §3's channels — no `str()`, `repr()`, `args`, `__notes__`,
+> `__cause__` or `__context__` — and the same holds of the ledger exception's message (ADR-0004
+> §5, and ADR-0029 §3's channel enumeration as ADR-0032 §5 and ADR-0145 §7 restate it). §10's rule
+> that the driver renders no plan, no step, no execution, no `SkipReason` and no verdict to a log
+> binds entire.
+
+**Why the interpretation's class is dropped rather than made safe, which an earlier revision of
+this section required.** *"A route may be any `ModelProvider`, so `type(exc).__name__` is
+provider-controlled text"* (ADR-0013 §5), so the provider's class cannot be named as it stands.
+The instrument that section uses to make it safe — `_classify` against a set frozen at import,
+*"the nearest ancestor in the exception's MRO that is one of our `ModelError` subclasses, matched
+by **object identity**"* — is **private to `models.routing` and unreachable from
+`orchestration`**: golden rule 1 and the `lint-imports` contract *subsystems are independent of
+each other* both forbid that import, and a copy would stand up a second authority for a classifier
+whose whole value is being the only one. A project-owned classification surface in `core` is not
+the answer either: §11 adds *"no new model, no new enumeration, no new constant"*, and moving a
+`models` concern into `core` to serve one log line would widen this decision past its own
+boundary (§4). **So the driver carries no provider-derived text at all**, which closes ADR-0013
+§5's hazard **by construction** rather than by a rule an implementation has to keep. The cost is
+stated rather than hidden: this warning is **strictly less informative** than a mapped class would
+be. The operator learns *an interpretation call failed and the ledger write failed too*; **the
+provider's own diagnosis is not this system's to repeat here**, and it is not lost — it reaches
+the caller on the propagating exception, which the driver leaves untouched.
+
+> **Normative — the warning is best-effort, and a logging failure never becomes the turn's
+> failure.** The warning is emitted **inside a guard**. Where emitting it raises — an installed
+> processor, a handler, a sink — **that exception is caught and discarded, and the interpretation's
+> exception still propagates as the same instance, unchanged**: not replaced, not masked, and the
+> logging failure is not set as its cause, its context or a note on it, the clause above binding
+> here too. A diagnostic never becomes the failure it is a diagnostic of. The residual is one line
+> of operator detail lost, against a turn whose caller would otherwise be told its provider call
+> failed for a reason belonging to a log sink.
 
 **Every instrument that writes on the caught exception is refused, and ADR-0013 §5 is where this
 project already worked that out.** That section records `add_note` on a caught provider exception
@@ -2190,8 +2217,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    `commit_attempt` then raising too — once on a stale `expected_version`, once on a store
    failure — the arm asserts that **the interpretation's failure is the exception that reaches the
    caller**, that the ledger failure is **not discarded but recorded in the driver's own
-   structured log warning** — carrying both classes, the provider's mapped through this project's
-   taxonomy, and neither message — and that the residual
+   structured log warning** — carrying the ledger failure's class and this decision's fixed
+   literal, and nothing taken from the interpretation's exception — and that the residual
    is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
    skipped and nothing is re-dispatched. **And each is run with *both* exceptions already carrying
    a cause** — a transport error under the interpretation's, a database error under the ledger's —
@@ -2201,7 +2228,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    interpretation calls raise **one cached exception instance**, failed **twice**, asserting
    `__notes__` is unchanged and no longer after the second failure than after the first; and **two
    walks failing concurrently over that one instance**, asserting neither leaves anything on it
-   for the other to read. They
+   for the other to read.
+   **And the two arms the warning's own two rules earn** (§1): a fake interpreter raising an
+   exception **whose class name carries a sentinel string appearing nowhere else in the
+   fixture** — ADR-0194 §11's sentinel construction, one seam over — asserting the sentinel
+   appears in **no field of the emitted warning**, which a mapped class, a bare
+   `type(exc).__name__` and an interpolated message would each fail while satisfying every arm
+   above, since none of them reads what the warning carries; and an **installed log processor that
+   raises** on that warning, asserting the interpretation's exception still reaches the caller **as
+   the same instance with `__cause__` and `__notes__` unchanged**, that the turn fails on it, and
+   that the processor's own exception reaches no caller. They
    are what stop an accounting cleanup masking a provider outage as a store problem, what
    stop a `raise … from` overwriting the cause a reader needs, and what stop the driver writing on
    an object the provider owns.
