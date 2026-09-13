@@ -6,9 +6,12 @@
   **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
   check passed** — the attempt's `phase` advances to `AttemptPhase.EXECUTE`"* and *"**A
   deterministic check failed on the plan** — the attempt stays `RUNNING` and the plan is replanned
-  within the attempt"* gain a **third** case. A check **of a step** whose operands **this same
-  plan** will produce before that step is dispatched, and has not produced yet, is **deferred**,
-  not failed — and the plan has exactly two such producers: **a step earlier in `steps` that has
+  within the attempt"* gain a **third** case. A check **of a step** at least one of whose operands
+  **this same plan** will produce before that step is dispatched, and has not produced yet, and
+  **every one of whose operands already available at phase 4 is satisfied**, is **deferred**,
+  not failed — **a known failure dominating a deferral**, so a check with an operand available now
+  and failing now stays a **failed** check whatever else it waits on — and the plan has exactly
+  two such producers: **a step earlier in `steps` that has
   not been disposed of**, and **an interpretation of this plan that has not been performed,
   including one carrying a `record`**, which is performed before the plan's first step is
   dispatched and therefore after phase 4. A deferred check neither blocks the advance to `EXECUTE`
@@ -304,6 +307,26 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > `verifies` holds, and **before** any step whose `when` reads its verdict is evaluated. **The
 > rows an interpretation writes are the only `GoalEvidence` rows written during a walk.**
 
+> **Normative — what an interpretation call that does not return a verdict leaves, stated rather
+> than inherited.** Where an interpretation call **raises** — a provider failure, a transport
+> failure, a timeout of its own — or **returns anything that is not one of
+> `InterpretationVerdict`'s three members**, ADR-0253 §8's declared output schema being *"exactly
+> one member of `InterpretationVerdict`"*, **no `GoalEvidence` row is written for it**, no step
+> conditioned on what it settles is dispatched or skipped, and **the turn fails** exactly as a
+> turn whose model call raised already fails today. **Everything already committed stands**: the
+> steps this walk dispatched keep their transitions and their outputs, nothing is undone, nothing
+> is re-dispatched and no step is moved to `SKIPPED` — the same residual §6 and §7 state for their
+> own partial writes, one seam over.
+
+> **Normative — a failed interpretation is never defaulted, and this is not a sixth stop trigger.**
+> **No lane substitutes `INCONCLUSIVE`, `DOES_NOT_QUALIFY` or any other member for a call that did
+> not return one**, writes a row with a fabricated verdict, retries the call, or proceeds as if the
+> element were unsettled: ADR-0249 §7's asymmetry forbids a model's silence clearing a dependency
+> as firmly as it forbids its speech doing so, and a defaulted verdict would be a model output with
+> no model behind it. **And §2's stop enumeration stays closed at five**: a *stop* leaves a turn
+> that composes an answer over what ran, and a raised call leaves a turn that fails — two different
+> outcomes, and no lane reads either as the other.
+
 > **Normative — the driver performs no read, makes no `Planner.plan` call and opens no
 > investigation round.** ADR-0251 §1's rounds are phase 2 and the walk is phase 5. **The only
 > model call the walk makes is an interpretation**, whose whole input and whose output schema are
@@ -328,8 +351,14 @@ per dispatch and not per plan.
 
 > **Normative — a check whose operands a later step will produce is *deferred*, and a deferred
 > check is not a failed one. This partially supersedes ADR-0254 §14** in the one scope §16
-> states. A phase-4 check **of a step** is **deferred** where any operand it reads is a value
-> **this same plan will produce before that step is dispatched** and has not produced yet. There
+> states. A phase-4 check **of a step** is **deferred** where **at least one** operand it reads
+> is a value **this same plan will produce before that step is dispatched** and has not produced
+> yet, **and every operand that check reads which is already available at phase 4 is satisfied**.
+> **A known failure dominates a deferral**: a check with an operand that is available now and
+> **fails** now is a **failed** deterministic check whatever else it waits on, and ADR-0254 §14's
+> replan limb binds it unchanged. **The unit is the operand and never the check**, so a step's
+> `when` carrying one condition no row satisfies and one awaiting an interpretation of this plan
+> **fails** rather than defers. There
 > are exactly two such producers, and both are the plan's own:
 >
 > - **a step of this plan appearing earlier in `steps`** that has not been disposed of — a
@@ -345,6 +374,18 @@ per dispatch and not per plan.
 > **A deferred check neither blocks the advance to `AttemptPhase.EXECUTE` nor triggers a
 > replan**, and it is decided at that step's own dispatch, by §1's evaluation, on ADR-0252 §6's
 > *"at the moment of dispatch"*.
+
+**Deferring only what the plan's own production could change is what keeps ADR-0254 §14's failure
+limb alive rather than swallowing it.** A check defers because its answer is **not yet
+determined** — the producer has not run, the interpretation has not been performed — and that
+reason reaches exactly the operands this plan will produce. It does not reach an operand that is
+available now and refuses now: nothing this plan produces revises it, so the answer at that step's
+dispatch is the answer phase 4 already has, and a plan that carries it is a plan ADR-0254 §14
+replans rather than drives. **Deferring the whole check on one unavailable operand would hide a
+settled failure behind an unsettled one** — the plan would advance to `EXECUTE`, its earlier steps
+would act, and the step whose refusal was known before any of it happened would be skipped at the
+end. That is the one outcome §14's failed limb exists to prevent, and it costs a side effect to
+reach.
 
 > **Normative — every other check keeps ADR-0254 §14's rule entire, and an uncovered argument
 > keeps its own limb.** A check whose operands are all available at phase 4 and that **fails** is
@@ -1462,14 +1503,29 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > not meet it, **and the plan said nothing about what to do then**.
 
 > **Normative — what it is for the plan to have declared the alternative, in ADR-0253 §9's own
-> terms, and the test is that a sibling branch was *dispatched* rather than merely declared.** The
-> alternative to a skipped step was **taken** where that step was skipped because a member of its
-> `when` was not satisfied **and** the walk **dispatched** another step of the same plan declaring
-> a condition that names the **same** element on the **same** basis and requires a **different**
-> member of `InterpretationVerdict`, whose own `when` that same verdict satisfied. That is
+> terms; the test is that a sibling branch was *dispatched* rather than merely declared, and it is
+> taken **per refusal ground** and never over one of them.** The alternative to a skipped step was
+> **taken** only where **both** hold: the step was skipped under §2's **third** case alone — a
+> member of its `when` not satisfied — and **every** member of that step's `when` that was not
+> satisfied has a **sibling the walk dispatched**. A **sibling** is a step of the same plan
+> declaring a condition that names the **same** element on the **same** basis and requiring a
+> **different** member of `InterpretationVerdict`, whose own `when` that same verdict satisfied.
+> That is
 > ADR-0253 §9's own definition of the relation, taken rather than invented: *"Two steps declaring
 > conditions that name the **same** element on the `INTERPRETATION` basis and require
-> **different** members of `InterpretationVerdict` are two branches."* **A step skipped on any of
+> **different** members of `InterpretationVerdict` are two branches."*
+
+> **Normative — one unanswered ground is enough, and the driver evaluates every member to know
+> it.** ADR-0253 §5 lets a `when` carry several conditions and makes a step eligible only where
+> **every** one is satisfied, so a step may be refused on two grounds at once. **A plan that
+> declared a branch for one of them and nothing for the other has answered half of what the walk
+> found**, and the half it did not answer is exactly what a licensed round exists to learn about —
+> so **one unsatisfied member with no dispatched sibling leaves the finding standing**, however
+> many of the others have one. **The driver evaluates every member of a skipped step's `when`
+> rather than stopping at the first unsatisfied one**, which is §1's own wording — *"every member
+> of `when`, by ADR-0252 §6's four tests"* — and is what makes the predicate computable at all.
+
+> **Normative.** **A step skipped on any of
 > §2's other three cases has no declared alternative by construction** — a `FAILED` or `SKIPPED`
 > producer, a `verifies` that does not hold over a `SUCCEEDED` producer's output, and an
 > unresolvable `resolves` are none of them a branch ADR-0253 §9 lets a plan condition a sibling
@@ -1933,6 +1989,15 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    *"enables no branch by itself"* — the plan is **intact**, no step's record is revised,
    rewritten or re-dispatched, and the walk **does** carry a licence, which is arm 13's case
    reached through a plan that declared an alternative no verdict took.
+   **And three paired arms over an interpretation that returns no verdict** (§1): where a
+   `record`-backed interpretation performed before the first dispatch **raises**, no step is
+   dispatched, **no `ActionRequest` is built**, no row is written and the turn **fails**; where the
+   `reads`-backed interpretation 1 raises **after** step 1 is `SUCCEEDED`, step 1's transition and
+   its `output` stand unchanged, no row is written, steps 2 and 3 are **`PENDING`** and neither is
+   `SKIPPED`, nothing is re-dispatched and the turn **fails**; and where the call **returns a value
+   outside `InterpretationVerdict`'s three members**, the same two assertions hold and **no row
+   carrying a defaulted `INCONCLUSIVE` is written** — which is what stops an implementation reading
+   a failed call as a does-not-settle answer.
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
@@ -2014,12 +2079,21 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    P's `SUCCEEDED` step 1 and its output are unchanged. A paired arm asserts a claim on **P2** is
    accepted, so the rule is *this plan has a successor* and not *this goal has two plans*. **And
    the two-writer arm**, in the same suite and on arm 6's dispatched-together construction:
-   `save_plan(P2 with supersedes=P)` dispatched together with a `→ RUNNING` claim on a step of P,
-   asserting that either the claim lands and the save lands after it, or the save lands and the
-   claim is **refused** — and **never** that both a successor stands and a step of P went
-   `RUNNING`. The serial arms above cannot see that interleaving, and an implementation that read
+   `save_plan(P2 with supersedes=P)` dispatched together with a `→ RUNNING` claim on a step of P.
+   **The assertion is over which write linearized first and not over the final state**, because
+   both records standing together is a *legitimate* outcome — the claim that won, followed by the
+   save — and §4's committed-claim rule is what makes it one. So the arm asserts **exactly one of
+   two histories**: the claim linearized **before** the successor's persistence, in which case it
+   **lands** and the step is `RUNNING` and the save then lands too; or the successor's persistence
+   linearized **first**, in which case the claim is **refused** on the non-stale `PlanningError`
+   and `ToolInvoker` is never entered. **What no history may show is a claim that linearized after
+   the successor was persisted and nevertheless landed**, which is the only state the conjunct
+   forbids. The observation is made from the store rather than from the wall clock — the arm reads
+   whether `get_plan(P2)` resolves at the instant the claim is decided, on the same controlled
+   construction ADR-0249 §12's dispatched-together arms already use. The serial arms above cannot
+   see that interleaving, and an implementation that read
    the plan's successors, compared and then wrote across a suspension passes every one of them
-   while letting a superseded plan dispatch, which is the race §7's sweep cannot close from
+   while letting a claim that lost dispatch anyway, which is the race §7's sweep cannot close from
    another turn.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
@@ -2074,7 +2148,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     qualifying row, **also passes**, because ADR-0253 §8 performs that interpretation before the
     first step is dispatched and §1 places it inside the walk. **Failed**: a one-step plan whose
     `when` no row satisfies and which waits on nothing this plan produces is replanned under
-    ADR-0254 §14's unchanged limb. **Not covered**: a one-step transmitting plan with complete
+    ADR-0254 §14's unchanged limb. **And the arm that pins that a known failure dominates a
+    deferral** (§1): a two-step plan whose **second** step carries a `when` of **two** conditions —
+    one over an element **interpretation 1 of this plan settles**, and one over an element **no
+    step and no interpretation of this plan bears on**, which the goal's rows do not satisfy — is
+    **failed** at phase 4 and **replanned**, `start_execution` is **never called** and step 1 is
+    never dispatched, against an implementation that defers the whole check because one operand is
+    unavailable and lets step 1 act under a plan already known to be refused. A paired case flips
+    the second condition to one the goal's rows **do** satisfy and asserts the plan **passes** and
+    the attempt advances, so the arm separates *one operand unavailable* from *one operand
+    failing*. **Not covered**: a one-step transmitting plan with complete
     literal arguments and no covering authorization takes §14's `CONFIRM` park and the attempt
     commits `AWAITING_AUTHORIZATION` — **and is not replanned**, which is the disposition this
     decision routes nothing away from. **Passed**: a one-step plan needing none of it advances.
@@ -2104,7 +2187,15 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     records entry) and the turn composes over the one walk. A paired case returns
     **`INCONCLUSIVE`** over that same three-step plan, dispatching **neither** conditioned step,
     and asserts the licence **is** carried — which is what stops an implementation reading the
-    conjunct off the plan's declarations rather than off what the walk dispatched.
+    conjunct off the plan's declarations rather than off what the walk dispatched. **And the arm
+    that pins the predicate as per-ground** (§10): a step S whose `when` carries **two**
+    conditions, over two different elements on the `INTERPRETATION` basis, **both** unsatisfied,
+    beside a step T the walk **dispatched** that declares the sibling of the **first** of them and
+    nothing for the second — S is `SKIPPED`/`UNMET_DEPENDENCY`, T ran, and the walk **does** carry
+    a licence, because the plan declared no response to the second ground. Against an
+    implementation that suppresses the licence as soon as any one unsatisfied member has a
+    dispatched sibling, which would lose the re-investigation on exactly the plans that branch
+    most.
     **And the arm that pins the trigger group**: the driven plan carries
     **`read_request=None`**, so ADR-0251 §4's (b), (c) and (d) are each unsatisfied on their own
     terms and the round is admitted by the licence alone — which is what a supersession of (j)
@@ -2219,7 +2310,9 @@ deterministic check failed on the plan"*, and replans — producing a plan whose
 unsatisfied for the same reason, forever. So that reader **never dispatches a dependent plan at
 all**, which is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is §14's
 two-case enumeration and nothing else. §1 states the third case and the test that sorts a
-**deferred** check from a **failed** one, and ADR-0253 §2's `INDETERMINATE` treatment is the
+**deferred** check from a **failed** one — **the unit being the operand and never the check**, so
+a check carrying one unavailable operand and one that is available and refuses is a **failed**
+check and reaches §14's replan limb unchanged — and ADR-0253 §2's `INDETERMINATE` treatment is the
 precedent — a dependency *"neither dispatched, skipped nor resolved"* while its producer's
 disposal is outstanding. **Every other clause of ADR-0254 binds entire and is relied on**: §3's
 coverage conditions, §13's recheck-at-`decide` and its no-cached-verdict rule, §14's other clauses
