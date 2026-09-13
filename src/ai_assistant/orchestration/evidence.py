@@ -494,8 +494,7 @@ def affirmative(row: GoalEvidence) -> bool:
     reachable**: §14 rules that no lane of ADR-0252 produces an ``INTERPRETATION`` row
     and §17 repeats it for both lanes, so no such row exists on any tree this function
     runs on; and declining is §8 limb 5's own fail-closed direction, which retires
-    nothing. The lane that lands the vocabulary lands this limb with it (see the issue
-    this module's PR filed).
+    nothing. The lane that lands the vocabulary lands this limb with it (#2333).
 
     Args:
         row: The row to classify.
