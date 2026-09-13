@@ -28,11 +28,18 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
     evidence_order,
-    marked_inapplicable,
-    marked_superseded,
 )
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended, bounded, capped, engaged, settled
+from ai_assistant.planning.goals import (
+    advanced,
+    appended,
+    bounded,
+    capped,
+    engaged,
+    invalidated,
+    settled,
+    superseded,
+)
 from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
@@ -188,7 +195,7 @@ class InMemoryPlanStore:
         updated = appended(stored, revision.interpretation)
         self._goals[updated.id] = updated
         for row_id in revision.invalidates:
-            self._evidence[row_id] = marked_inapplicable(
+            self._evidence[row_id] = invalidated(
                 self._evidence[row_id], at_revision=revision.interpretation.revision
             )
         return updated.model_copy(deep=True)
@@ -408,7 +415,10 @@ class InMemoryPlanStore:
         so nothing can interleave and a caller never has to ask which of its marks
         landed. Every row named by ``supersedes`` is validated against the history **as
         it stood before the call**, so a call is never refused because its own write
-        displaced its own operand.
+        displaced its own operand. That is also this method's discharge of
+        ``core.protocols``' second standing obligation (ADR-0065 §1), by the first of
+        the three routes it names: this store does not suspend, so it cannot read
+        ``supersedes`` twice across a suspension and see two different sets.
 
         Raises:
             PlanningError: If the store already holds a row under this ``id``, if
@@ -429,7 +439,7 @@ class InMemoryPlanStore:
         )
         self._evidence[evidence.id] = evidence.model_copy(deep=True)
         for row_id in supersedes:
-            self._evidence[row_id] = marked_superseded(self._evidence[row_id], by=evidence.id)
+            self._evidence[row_id] = superseded(self._evidence[row_id], by=evidence.id)
         self._elide_evidence(evidence.goal_id, keep=evidence.id)
         return evidence.id
 

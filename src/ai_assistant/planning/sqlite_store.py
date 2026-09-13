@@ -56,12 +56,19 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
     ground_of,
-    marked_inapplicable,
-    marked_superseded,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
-from ai_assistant.planning.goals import advanced, appended, bounded, capped, engaged, settled
+from ai_assistant.planning.goals import (
+    advanced,
+    appended,
+    bounded,
+    capped,
+    engaged,
+    invalidated,
+    settled,
+    superseded,
+)
 from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
@@ -1447,7 +1454,7 @@ class SqlitePlanStore:
             for row_id in revision.invalidates:
                 self._mark_evidence(
                     conn,
-                    marked_inapplicable(
+                    invalidated(
                         self._evidence_row(conn, row_id),
                         at_revision=revision.interpretation.revision,
                     ),
@@ -1774,7 +1781,10 @@ class SqlitePlanStore:
         validators and hand it here, and storing that unchecked would write a record
         every later ``get_evidence``/``export`` fails to decode. That revalidation is
         also this method's ADR-0065 snapshot — it runs before the first ``await`` and
-        the id returned is read from **it**.
+        the id returned is read from **it**. ``supersedes`` is snapshotted on the same
+        line for that clause's own stated reason: "a ``Sequence`` argument is a
+        container the caller may still be holding", so a caller that appends to it while
+        the write is in flight cannot add a row to the set this call marks.
 
         Raises:
             PlanningError: If the store already holds a row under this ``id``, if
@@ -1814,7 +1824,7 @@ class SqlitePlanStore:
             self._insert_evidence(conn, evidence)
             for row_id in supersedes:
                 self._mark_evidence(
-                    conn, marked_superseded(self._evidence_row(conn, row_id), by=evidence.id)
+                    conn, superseded(self._evidence_row(conn, row_id), by=evidence.id)
                 )
             self._elide_evidence(conn, evidence.goal_id, keep=evidence.id)
 

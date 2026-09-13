@@ -61,8 +61,6 @@ from ai_assistant.core.types import (
     StepExecution,
     StepStatus,
     evidence_order,
-    marked_inapplicable,
-    marked_superseded,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 
@@ -117,6 +115,37 @@ def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
 
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
+def _marked_evidence(row: GoalEvidence, mark: dict[str, object], *, what: str) -> GoalEvidence:
+    """Apply one of ADR-0252's two marks to ``row`` and revalidate it (ADR-0023 §2).
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph: importing it would
+    pull in the very subsystem the fake stands in for. The shared ``PlanStoreContract``
+    is what holds the two statements honest.
+
+    §2's own words are why it exists at all: "``model_copy(update=...)`` skips
+    validators … and **a write that reaches past it must re-validate**" — and what it
+    re-validates is ADR-0252 §1's fourth axis, that a row's standing and the argument
+    beside it agree, over a value no constructor built.
+
+    Args:
+        row: The ``STANDING`` row being marked.
+        mark: The standing and its one argument.
+        what: What the caller was doing, for the refusal message.
+
+    Returns:
+        The marked row.
+
+    Raises:
+        PlanningError: If the result is not a shape ``GoalEvidence`` admits.
+    """
+    try:
+        return GoalEvidence.model_validate(row.model_copy(update=mark).model_dump())
+    except ValidationError as exc:
+        msg = f"{what} would leave evidence row {row.id} in a shape it refuses: {exc}"
+        raise PlanningError(msg) from exc
+
+
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.PENDING: frozenset(
         {StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SKIPPED}
@@ -777,8 +806,13 @@ class FakePlanStore:
             )
             self._goals[updated.id] = updated
             for row_id in revision.invalidates:
-                self._evidence[row_id] = marked_inapplicable(
-                    self._evidence[row_id], at_revision=revision.interpretation.revision
+                self._evidence[row_id] = _marked_evidence(
+                    self._evidence[row_id],
+                    {
+                        "standing": EvidenceStanding.INAPPLICABLE,
+                        "inapplicable_at_revision": revision.interpretation.revision,
+                    },
+                    what="the invalidation",
                 )
             return updated.model_copy(deep=True)
 
@@ -1043,11 +1077,21 @@ class FakePlanStore:
         and a row named by ``supersedes`` is validated against the history as it stood
         before the call.
 
+        **``supersedes`` is observed on the coroutine's first executed line**, which is
+        ``core.protocols``' second standing obligation (ADR-0065 §1): "a ``Sequence``
+        argument is a container the caller may still be holding", and this store
+        suspends inside :meth:`suspend_next_operation`'s modelled resource, so reading
+        it again after the suspension would let a caller add a row to the set while the
+        call is held and have it marked. ``evidence`` needs no snapshot on that clause's
+        own terms — it is a frozen model whose every member is frozen or a tuple, so it
+        is "immutable all the way down" — but the set the call marks is not.
+
         Raises:
             PlanningError: If the store already holds a row under this ``id``, if
                 ``goal_id`` names no stored goal, or if a row named by ``supersedes``
                 is not this goal's, is not ``STANDING``, or is the row being written.
         """
+        named = tuple(supersedes)
         async with self._resource.held():
             if evidence.id in self._evidence:
                 msg = (
@@ -1060,11 +1104,18 @@ class FakePlanStore:
                 msg = f"cannot record evidence for unknown goal {evidence.goal_id}"
                 raise PlanningError(msg)
             self._refuse_unmarkable_locked(
-                evidence.goal_id, supersedes, being_written=evidence.id, what="supersede"
+                evidence.goal_id, named, being_written=evidence.id, what="supersede"
             )
             self._evidence[evidence.id] = evidence.model_copy(deep=True)
-            for row_id in supersedes:
-                self._evidence[row_id] = marked_superseded(self._evidence[row_id], by=evidence.id)
+            for row_id in named:
+                self._evidence[row_id] = _marked_evidence(
+                    self._evidence[row_id],
+                    {
+                        "standing": EvidenceStanding.SUPERSEDED,
+                        "superseded_by": evidence.id,
+                    },
+                    what="the supersession",
+                )
             self._elide_evidence_locked(evidence.goal_id, keep=evidence.id)
             return evidence.id
 

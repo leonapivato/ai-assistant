@@ -1,9 +1,10 @@
 """Applying ADR-0249 §12's two commands to a stored record.
 
 The goal half of what :mod:`ai_assistant.planning.execution` is for steps: one
-statement of what appending an interpretation revision and committing an attempt
-transition *do*, so the two conforming ``PlanStore`` implementations in this package
-cannot drift on it. ADR-0049's own note for the transition graph is the precedent —
+statement of what appending an interpretation revision, committing an attempt
+transition, settling a question and marking an evidence row *do*, so the two conforming
+``PlanStore`` implementations in this package cannot drift on it. ADR-0049's own note
+for the transition graph is the precedent —
 "the ADR-0014 §4 transition graph is authoritative in exactly one place and the two
 stores cannot drift on it" — applied to the two writes ADR-0249 §12 adds.
 
@@ -25,9 +26,11 @@ from ai_assistant.core.types import (
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     AttemptPhase,
+    EvidenceStanding,
     Goal,
     GoalAttempt,
     GoalCandidates,
+    GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
 )
@@ -309,6 +312,95 @@ def settled(
         # could write and then fail to decode — see `_revalidated` above, whose
         # reasoning this is, over the other record this module stamps.
         msg = f"the settlement would leave question {question.id} in a shape it refuses: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def superseded(row: GoalEvidence, *, by: str) -> GoalEvidence:
+    """``row`` marked ``SUPERSEDED``, naming the row that displaced it (ADR-0252 §8).
+
+    "A row that refreshes an earlier row supersedes it: the earlier row's ``standing``
+    becomes ``SUPERSEDED`` and its ``superseded_by`` names ``L``" — and **the mark and
+    its argument travel together or the value does not construct** (§1), so the two are
+    written in one ``model_copy`` and revalidated together.
+
+    **Supersession never un-marks** (§8): a row that is ``SUPERSEDED`` is never returned
+    to ``STANDING``, by a later revision, by a later refresh, by the deletion of the row
+    that displaced it, or by any other route. ADR-0252 §12's three refusals — the row is
+    not this goal's, is not ``STANDING``, or is the row being written — are the
+    **store's** and run before this. **Which** rows a new row refreshes is
+    ``orchestration``'s six-limb test and neither this function's nor the store's.
+
+    Args:
+        row: The ``STANDING`` row being displaced.
+        by: The id of the row that refreshed it.
+
+    Returns:
+        The row as it stands after the mark.
+
+    Raises:
+        PlanningError: If the marked row is not a shape ``GoalEvidence`` admits.
+    """
+    return _marked(row, {"standing": EvidenceStanding.SUPERSEDED, "superseded_by": by})
+
+
+def invalidated(row: GoalEvidence, *, at_revision: int) -> GoalEvidence:
+    """``row`` marked ``INAPPLICABLE`` against a revision (ADR-0252 §9).
+
+    **Invalidation is a marking and never a deletion**: the row is kept with its
+    applicabilities, its instants, its verdict and its references intact, it is still
+    exported, still reachable through ``get_evidence`` and ``evidence_of``, and still in
+    the digest the planner sees. **What changes is exactly one field**, plus the
+    argument that field's mark travels with.
+
+    **Invalidation never un-marks** (§9): a later revision that restores the old
+    requirement does not return the row to ``STANDING`` — it is read again or it is not
+    used — because un-marking would make a goal's evidence state depend on the **order**
+    of its revisions rather than on what is known. **Which** rows a revision invalidates
+    is ``orchestration``'s predicate, keyed on ``supported`` and never on ``requested``.
+
+    Args:
+        row: The ``STANDING`` row the revision no longer covers.
+        at_revision: The revision being appended, which did it.
+
+    Returns:
+        The row as it stands after the mark.
+
+    Raises:
+        PlanningError: If the marked row is not a shape ``GoalEvidence`` admits.
+    """
+    return _marked(
+        row,
+        {
+            "standing": EvidenceStanding.INAPPLICABLE,
+            "inapplicable_at_revision": at_revision,
+        },
+    )
+
+
+def _marked(row: GoalEvidence, mark: dict[str, object]) -> GoalEvidence:
+    """Apply one mark to ``row`` and revalidate it (ADR-0023 §2).
+
+    Stated once for both marks, for :func:`_revalidated`'s reason in that section's own
+    words: "``model_copy(update=...)`` skips validators (a pydantic property no type can
+    close), so the invariant holds *at the validation boundary*, and **a write that
+    reaches past it must re-validate**". What it re-validates here is ADR-0252 §1's
+    fourth axis — that a row's standing and the argument beside it agree — over a value
+    no constructor built.
+
+    Args:
+        row: The row being marked.
+        mark: The standing and its one argument.
+
+    Returns:
+        The marked row.
+
+    Raises:
+        PlanningError: If the result is not a shape ``GoalEvidence`` admits.
+    """
+    try:
+        return GoalEvidence.model_validate(row.model_copy(update=mark).model_dump())
+    except ValidationError as exc:
+        msg = f"the mark would leave evidence row {row.id} in a shape it refuses: {exc}"
         raise PlanningError(msg) from exc
 
 
