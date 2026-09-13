@@ -4371,7 +4371,7 @@ async def test_the_evidence_digest_renders_under_its_own_heading() -> None:
     )
 
     assert _EVIDENCE_HEADING in prompt
-    assert '  - asked for "what the ask named", read at 2026-01-01T00:00:00+00:00' in prompt
+    assert '  - E1 asked for "what the ask named", read at 2026-01-01T00:00:00+00:00' in prompt
     assert "    speaking for: 2026-01-01T00:00:00+00:00" in prompt
     assert '    establishes something about: "what the response establishes"' in prompt
     assert '    outcome: "available" [superseded]' in prompt
@@ -4393,8 +4393,74 @@ async def test_an_absent_supported_is_stated_rather_than_omitted() -> None:
 
 
 async def test_no_evidence_renders_nothing_at_all() -> None:
-    """Empty is legal and is the ordinary case: no heading, no line, no mention."""
-    assert _EVIDENCE_HEADING not in _render_request(_goal(), _context(), [], evidence=())
+    """Empty is legal and is the ordinary case: no heading, no line, no label.
+
+    The label half is ADR-0252 §10's: a turn that read nothing for this goal prints
+    no ``E`` label, so ADR-0226 §3's rule — a planner names only a label actually
+    printed — leaves the space empty rather than nameable. The system turn still
+    *describes* the form on such a call, for the reason :func:`_system_turn` gives
+    for the supply, and the arm below is where that is pinned.
+    """
+    prompt = _render_request(_goal(), _context(), [], evidence=())
+
+    assert _EVIDENCE_HEADING not in prompt
+    assert "E1" not in prompt
+
+
+async def test_each_digest_is_labelled_by_its_position_in_the_sequence() -> None:
+    """ADR-0252 §10, and #2334's whole subject: the label is what makes the row citable.
+
+    "The label of the digest at 1-based index *n* of ``Planner.plan``'s ``evidence``
+    sequence is the ASCII string ``E`` followed by *n* in decimal with no padding."
+    Two digests are driven because one cannot distinguish a label from a decoration:
+    the second must read ``E2`` and not ``E1``, which is what a renderer deriving the
+    label from anything but the position would get wrong. The two rows carry
+    deliberately different ``requested`` values, so a label printed against the wrong
+    row fails here rather than passing on a coincidence — an element grounded on
+    ``E2`` is stamped with the id of the row the loop labelled second, and a renderer
+    off by one would ground a durable revision on the wrong read.
+
+    The bullet **opens** with its label, which is :func:`_render_files` and
+    :func:`_render_record`'s property for ADR-0226 §3's reason: the label a model
+    names must be the first token it read.
+    """
+    prompt = _render_request(
+        _goal(),
+        _context(),
+        [],
+        evidence=[
+            _digest(requested="what the first ask named"),
+            _digest(requested="and the second"),
+        ],
+    )
+
+    assert '  - E1 asked for "what the first ask named"' in prompt
+    assert '  - E2 asked for "and the second"' in prompt
+    assert "E0" not in prompt, "1-based, and no padding (§10)"
+    assert "E3" not in prompt, "one label per digest handed, and no more"
+    assert prompt.index("  - E1 ") < prompt.index("  - E2 "), "in the order handed"
+
+
+async def test_the_digest_label_is_an_ordinal_and_never_a_row_id() -> None:
+    """ADR-0252 §10: "a row id is stamped by ``orchestration`` and never parsed out of
+    model output" — so what this side prints is a count of its own and nothing else.
+
+    The structural half is the type's: an :class:`EvidenceDigest` has no field a row
+    id could sit in (ADR-0249 §10). What this arm adds is that the label the lane
+    introduced did not become a second carrier for one: it is derived from the
+    position, so a digest whose every free-text member screams a different ordinal
+    still renders as ``E1``.
+    """
+    prompt = _render_request(
+        _goal(),
+        _context(),
+        [],
+        evidence=[_digest(requested="E7", supported="row-id-nothing-else-says", verdict="E9")],
+    )
+
+    assert '  - E1 asked for "E7"' in prompt
+    assert "  - E7 " not in prompt
+    assert "  - E9 " not in prompt
 
 
 async def test_the_prompt_carries_no_goal_id_and_no_record_id() -> None:
@@ -4451,6 +4517,44 @@ async def test_the_system_prompt_asks_for_an_understanding() -> None:
     await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
 
     assert _UNDERSTANDING_GUIDANCE in _system_turn(model)
+
+
+async def test_the_prompt_names_the_e_form_beside_the_m_form() -> None:
+    """ADR-0252 §10 reaching the model, which is the half #2334 says is missing.
+
+    The grounding block is what tells a planner which forms an ``evidence_label`` may
+    take. Until this lane it named only ``M``, so a model told to ground
+    ``from_evidence`` on a read it could see had no form in which to name one and
+    ``GoalElement.evidence_row_id`` was unreachable end to end — stampable, round-
+    tripping, and emitted by no production planner.
+
+    **Pinned as both forms reaching the model rather than as a sentence**, which is
+    :data:`_STATED_FACT_GUIDANCE`'s own reason for being a named constant: what is
+    obligatory is that the ``E`` space is nameable and that naming it does not cost
+    the ``M`` space, not the wording either is offered in. A block that dropped ``M``
+    while adding ``E`` would satisfy #2334 and break every memory-grounded element.
+
+    **And it is stated on a call with no evidence at all**, which is
+    :func:`_system_turn`'s posture for the supply: "an empty supply changes no shape:
+    it means no label is printed below, and ADR-0226 §3's rule — name only a label
+    actually printed — already says what that leaves askable, without this function
+    taking a second input to say it twice". The prompt has always named ``M1`` on a
+    call with no memories, and ``M`` and ``E`` are one sentence about one field. It is
+    not :data:`_LOCAL_FILE_GUIDANCE`'s conditional case, which describes a whole
+    request **member** an empty listing makes unaskable.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(
+        _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY, evidence=()
+    )
+
+    system_turn = _system_turn(model)
+    assert "`E1`, `E2`" in system_turn, "the E space is nameable"
+    assert "`M1`, `M2`" in system_turn, "and naming it did not cost the M space"
+    assert "`evidence_label`" in system_turn, "one field carries both (§10)"
+    assert "evidence_row_id" not in system_turn, "a row id is never rendered to a model"
 
 
 async def test_the_prompt_asks_for_the_subject_the_extraction_reads() -> None:
@@ -4826,6 +4930,120 @@ async def test_the_writer_clause_fields_are_discarded_on_that_field() -> None:
     assert "forged" not in proposed.model_dump_json()
 
 
+async def test_an_element_grounds_on_an_evidence_row_by_its_e_label() -> None:
+    """ADR-0252 §10's other half of #2334, driven through ``plan`` and not the renderer.
+
+    "A ``ProposedElement``'s ``evidence_label`` carries either an ``M`` label or an
+    ``E`` label, and the prefix is the whole of what decides which sequence
+    ``orchestration`` resolves it against: ``M`` against the ``memories`` passed on
+    that call, ``E`` against the ``evidence`` passed on that call." So the two ride one
+    field, and this drives both on one reply: the prefix is what tells them apart and
+    nothing else is sent to do it.
+
+    **``ProposedElement`` gains no field**, which §10 states in terms — a second field
+    "would let a planner emit both and the loop choose, which is the *two carriers for
+    one fact* defect" — so the arm asserts the envelope carries no row reference of any
+    kind beside the label. The stamping is ``orchestration``'s and is pinned there
+    (#2331); what is pinned here is that a label naming the row **reaches** it, which
+    is what no production planner could do before this lane.
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "constraints": [
+                    {"text": "a site is free", "ground": "from_evidence", "evidence_label": "E2"}
+                ],
+                "criteria": [
+                    {"text": "under $100", "ground": "from_evidence", "evidence_label": "M1"}
+                ],
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    proposed = (
+        await planner.plan(
+            _goal(),
+            utterance=_REQUEST,
+            context=_context(),
+            capabilities=_VOCABULARY,
+            evidence=[_digest(), _digest(requested="whether the site is free")],
+        )
+    ).understanding
+
+    assert proposed is not None
+    assert proposed.constraints[0].evidence_label == "E2", "byte for byte, prefix included"
+    assert proposed.constraints[0].ground is Ground.FROM_EVIDENCE
+    assert proposed.criteria[0].evidence_label == "M1", "one field, two spaces, one reply"
+    assert model.call_count == 1, "a legal ground, so no repair round is spent"
+    assert "evidence_row_id" not in proposed.model_dump_json(), "§10: the planner gains no field"
+
+
+@pytest.mark.parametrize(
+    ("label", "why"),
+    [
+        ("E0", "1-based, so an ordinal below 1 names no digest"),
+        ("E02", "'in decimal with no padding', so a padded ordinal is a label of neither form"),
+        ("E", "a prefix with no ordinal names nothing"),
+        ("E9", "beyond the sequence's length"),
+        ("M1", "a legal label of the other space, resolved against `memories` and not here"),
+    ],
+)
+async def test_an_evidence_label_crosses_as_written_and_the_loop_disposes_of_it(
+    label: str, why: str
+) -> None:
+    """ADR-0249 §7 and ADR-0252 §10: this side refuses none of these, and must not.
+
+    ``_optional_understanding``'s contract is that "nothing here resolves a label or a
+    span" — an ``evidence_label`` crosses as the model wrote it and ``orchestration``
+    resolves it against its own copy of the sequence. §10 says what becomes of each of
+    these there: "a label of neither form, an *n* below 1 or beyond the sequence's
+    length, and an ``E`` label naming a row the store no longer holds each **resolve to
+    nothing**, and the element is **dropped silently**" — ADR-0249 §7's disposal
+    "binding unchanged over one more way to fail to resolve".
+
+    So the disposal is the loop's and the pass-through is this side's, and the reason
+    is not leniency. A check here would make ``planning`` a **second** resolver of one
+    label space, which §10 forbids in terms — "both sides derive it from the sequence
+    they hold and neither consults the other" — and a planner filtering its own
+    out-of-range labels would empty ADR-0226 §9's audit of the population it exists to
+    count. The reply is otherwise sound, so an extraction that refused one of these
+    would spend a bounded-repair round (ADR-0047 §6) and, worse, invite the model to
+    re-state an understanding §7 makes a full statement — which is how an element the
+    user just stated gets deleted.
+
+    ``M1`` rides the same parametrisation because it is the one case that is *not* a
+    failure at all: §10 makes ``M`` a legal prefix on this field, and an extraction
+    that started policing the ``E`` form is exactly the one that would refuse it.
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "constraints": [
+                    {"text": "a site is free", "ground": "from_evidence", "evidence_label": label}
+                ],
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    proposed = (
+        await planner.plan(
+            _goal(),
+            utterance=_REQUEST,
+            context=_context(),
+            capabilities=_VOCABULARY,
+            evidence=[_digest()],
+        )
+    ).understanding
+
+    assert proposed is not None, why
+    assert proposed.constraints[0].evidence_label == label, "crosses byte for byte"
+    assert model.call_count == 1, "not refused here, so no repair round is spent"
+
+
 async def test_a_malformed_understanding_is_refused_and_repaired() -> None:
     """ADR-0249 §7, and the asymmetry with ``read_request`` argued rather than assumed.
 
@@ -5008,7 +5226,7 @@ async def test_plan_forwards_the_request_and_the_evidence_into_the_user_turn() -
     assert lines[1] == '  "actually, make it Lisbon"'
     assert '  statement: "relocate somewhere warm"' in lines
     assert _EVIDENCE_HEADING in lines
-    assert '  - asked for "rents in Lisbon", read at 2026-01-01T00:00:00+00:00' in lines
+    assert '  - E1 asked for "rents in Lisbon", read at 2026-01-01T00:00:00+00:00' in lines
     assert '    establishes something about: "a one-bed is under 1200"' in lines
 
 
