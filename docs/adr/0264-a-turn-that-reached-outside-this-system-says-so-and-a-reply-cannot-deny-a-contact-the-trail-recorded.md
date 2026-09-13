@@ -49,11 +49,30 @@ remaining failures. This decision closes that one.
   of the whole turn and says no action was taken. That is the sentence #2268
   observed coming back.
 - **The servicing site already holds the fact.** `orchestration.reads.ServicedRead`
-  carries `kinds`, `supplied` and `disposition` per servicing, and
-  `SearchDisposition` is a closed seventeen-member vocabulary naming *the stage
-  that produced the outcome*. `SearchRefusal.NO_RESULT` is deliberately not among
-  them, because a search that reached the provider and yielded nothing is a
-  completed servicing.
+  carries `kinds` and `disposition` per servicing, and `SearchDisposition` is a closed
+  seventeen-member vocabulary naming *the stage that produced the outcome*.
+  `SearchRefusal.NO_RESULT` is deliberately not among them, because a search that
+  reached the provider and yielded nothing is a completed servicing.
+- **And it already holds which records came from outside.** `ServicedCarriers.minted` is
+  ADR-0249 §7's carrier: *"the ids of the records this servicing's `WEB_SEARCH` ask
+  **minted**, in the order §10 minted them"*, empty on a servicing that carried no such
+  ask and on one whose search did not yield. Its own docstring states this decision's
+  premise — *"a minted record sits in `memories` beside every other, which is the whole
+  point of ADR-0226 §7's fourth group"* — and states the discipline: the fact is
+  *"supplied by the servicing that knows it and never inferred at the resolution site,
+  exactly as `hop_reached` is"*.
+- **`ServicedRead.supplied` is a count in the *other* direction and is not this
+  decision's.** ADR-0238 §11's first count is *"how many records this servicing supplied
+  to the composer"* — the **query** composer, the population a chosen destination may be
+  told about — and `_serviced_search` assigns it from `_search_supply`'s result before
+  the query is composed and before anything is sent. It says what left, not what came
+  back.
+- **`Disposition.EXECUTED` is the gate's verdict and not the call's result.**
+  `StepOutcome`'s own docstring is explicit: *"a client that renders success from
+  `disposition` alone is wrong — `EXECUTED` says the permission gate let the call through
+  and the executor committed **something**, not that the something succeeded"*, and it
+  makes reading the addressed `StepExecution` by `step_id` an addressable operation
+  rather than advice.
 - **The egress side holds its own.** `orchestration.runner` builds the
   `ActionRequest` the policy rules on and sets `egress_binding` from what
   `EgressBinder.bind` returned, so a step whose call carried a binding is known
@@ -201,19 +220,30 @@ not told is a sentence this system cannot support.
 
 ### 3. An egress contact, established from the binding the request carried
 
-> **Normative.** A driven step establishes an outbound contact where the `ActionRequest`
-> the policy ruled on carried an `EgressBinding` **and** the step's `StepOutcome`
-> disposition is `EXECUTED`. Both halves are values `orchestration` already holds:
-> `orchestration.runner` sets `egress_binding` from what `EgressBinder.bind` returned,
-> and the disposition is the outcome the executor committed.
+> **Normative.** A driven step establishes an outbound contact where **all three** hold:
+> the `ActionRequest` the policy ruled on carried an `EgressBinding`; the step's
+> `StepOutcome` disposition is `EXECUTED`; **and** the `StepExecution` that outcome
+> addresses — the one whose `step_id` is `StepOutcome.step_id`, the operation
+> `StepOutcome`'s docstring makes addressable rather than advisory — carries
+> `StepStatus.SUCCEEDED`.
 
-> **Normative.** The condition is **under-inclusive and is stated as such rather than
-> widened**. A step whose callable was entered and then failed reached the world too —
-> ADR-0192 §1 makes the ledger claim *"immediately before the callable is entered"*, so
-> the ledger row is the record of it — but that row is behind `ToolInvoker` and
-> `StepOutcome` carries nothing that separates a pre-callable refusal from a
-> post-dispatch failure. This decision asserts only what it can establish; §12 defers
-> the rest with its trigger.
+> **Normative.** **The third condition is not decoration, and a reader dropping it
+> builds a defect.** `Disposition.EXECUTED` is the *gate's* verdict: it says the call was
+> authorised and handed to the executor and that the executor committed something, not
+> that the callable was entered. A claim the `InvocationLedger` refused, and a
+> `ToolBindingError` the seam raises before the claim (ADR-0192 §1), both commit a
+> `FAILED` step beneath an `EXECUTED` disposition and reached nothing. Establishing a
+> contact from the disposition alone would state a call that provably never left.
+
+> **Normative.** A step whose addressed status is `FAILED` or `INDETERMINATE`
+> establishes **nothing either way**, and that is the same ruling §2's third group takes
+> for the same reason: `FAILED` covers a pre-callable refusal and a post-dispatch failure
+> without separating them, and `INDETERMINATE` is ADR-0029 §4's expiry shape, which
+> exists precisely because the call *may* have acted. The condition is therefore
+> **under-inclusive and is stated as such rather than widened** — a callable that was
+> entered and then failed reached the world, and ADR-0192 §1's ledger claim, appended
+> *"immediately before the callable is entered"*, is the record of it, behind
+> `ToolInvoker` where `StepOutcome` cannot see it. §12 defers the rest with its trigger.
 
 > **Normative.** No component reads the `EgressBinding`, the tool, the connection, the
 > destination or any parameter of the call in order to compute this fact. What is read is
@@ -245,33 +275,48 @@ and would have left the next outbound seam to mint its own vocabulary.
 > name"* both refuse: what a reader is told is which kinds of thing this turn reached,
 > and the system's internal shape stays inside it.
 
-> **Normative.** **`records` is how many records this turn's established contacts put
-> into the supply the composing stage was given**, summed over the contacting servicings
-> and taken from the per-servicing count ADR-0238 §11 already fixes. It is **not** a count
-> of what a provider returned, not a count of what a servicing fetched before
-> deduplication, and not a count of anything a step produced. It is `0` on a turn whose
-> only contact was an egress one, on a search that was answered with nothing, on one
-> whose every record the supply already held, and on one whose records a channel's
-> withholding kept out of the supply (ADR-0199 §3).
+> **Normative.** **`records` is how many of the records the composing stage was given
+> were minted by this turn's established contacts** — the count of ids in the
+> contacting servicings' `minted` carriers that the supply handed to composition still
+> holds, taken as one population over the turn so a record minted twice counts once.
+> That is `hop_reached`'s own shape, which ADR-0227 §3 states as the ids a servicing
+> reached *"that the supply holds after it"*, and it is computed in `orchestration` from
+> two values that package already has.
+
+> **Normative.** **It is not `ServicedRead.supplied` and no lane derives it from that
+> field.** ADR-0238 §11's count is *"how many records this servicing supplied to the
+> composer"* — the **query** composer, the population a chosen destination may be told —
+> and it is assigned before the query is composed and before anything is sent. It counts
+> what left, and a turn that sent two remembered facts to the provider and got five
+> results back would report `2` and then `0`. It is also **not** a count of what the
+> provider returned, of what a servicing fetched before deduplication, or of anything a
+> step produced.
+
+> **Normative.** `records` is `0` on a turn whose only contact was an egress one, on a
+> search answered with nothing, on one whose every minted record deduplication removed,
+> and on one whose minted records a channel's withholding kept out of the supply
+> (ADR-0199 §3). **A `0` means no record from outside is in front of the composing
+> stage**, and it means nothing else.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
-> contact, and a turn that reached outside itself and brought nothing back is the case
-> this decision most needs to state — it is the one a user cannot tell from a turn that
-> did not look, and telling them apart is what #2268 asks for.
+> contact, and a turn that reached outside itself and brought nothing into the answer is
+> the case this decision most needs to state — it is the one a user cannot tell from a
+> turn that did not look, and telling them apart is what #2268 asks for.
 
-> **Normative.** **The statement says nothing about what the reply did with the
-> records.** What a model made of material in its prompt is not a fact this system holds,
-> and no clause here, no field of this model and no rendering asserts that the answer
-> rests on what was read, is more current because of it, or would have differed without
-> it.
+> **Normative.** **Neither the value nor any rendering of it says what the reply did
+> with the records.** What a model made of material in its prompt is not a fact this
+> system holds. `records` says the records were **put in front of composition** and no
+> more, and no clause here, no field of this model, no prompt fragment and no rendering
+> says that they entered the answer, that the answer rests on them, that it is more
+> current for them, or that it would have differed without them.
 
 **One count and not two, and it is the count of what reached the prompt.** A figure for
 what the provider returned would be a fact about the system's plumbing that the user can do
 nothing with, and stating both would put two numbers in front of a reader who has no way
 to tell which one matters. The count that reached the supply is the one that bears on the
 answer in front of them, and the one whose `0` is informative: *I looked outside, and
-nothing from it is in this answer.* That sentence is unavailable today, which is why #2268
-was reported as a contradiction rather than as a thin reply.
+nothing from it was in front of me when I wrote this.* That sentence is unavailable
+today, which is why #2268 was reported as a contradiction rather than as a thin reply.
 
 ### 5. `OutboundDestination`: a closed vocabulary of classes, never of destinations
 
@@ -308,20 +353,26 @@ was reported as a contradiction rather than as a thin reply.
 
 > **Normative.** The composing stage is given **one fixed fragment**, written in
 > `ai_assistant.orchestration`, interpolating **`records` and nothing else**. The
-> fragment tells the model two things and no others: that some of the material it has
-> been given arrived during this turn from outside this system, and how many records that
-> was. It carries no destination, no host, no origin, no provider name, no connection
+> fragment states the two facts every contact has and no others: that **this turn reached
+> outside this system**, and **how many of the records in front of the model came from
+> doing so — which may be none, and the fragment says so where it is none**. It asserts
+> nothing about what was reached, nothing about a lookup, and nothing about material
+> having arrived, because a turn that only sent something outward reached the world and
+> brought nothing back. It carries no destination, no host, no origin, no provider name, no connection
 > reference, no account identity, no query or fragment of one, no record, no title, no
 > snippet, no monetary figure, no duration, no `Settings` field name, no
 > `SearchDisposition` value, no id and no command name — ADR-0242 §7's bar, binding here
 > unchanged.
 
-> **Normative.** The fragment **forbids the reply from saying that no lookup was made**,
-> and forbids it from saying that the answer is more current, more reliable or better for
-> it. `_STOPPED_ASKING_PROMPT`'s own bar is the shape — *"you have not been told any of
-> that"* — and the prohibition is stated at both ends: the model is told the fact so that
-> it need not guess, and told what the fact does not license so that it does not embroider
-> it.
+> **Normative.** The fragment **forbids the reply from denying that this turn reached
+> outside this system**, and forbids it from saying that the answer is more current, more
+> reliable or better for it. **The prohibition is stated over the contact and never over
+> a lookup**: a turn whose only contact was outward made no lookup, so a fragment barring
+> the denial of one would put a false instruction in front of the model on exactly the
+> shape §3 admits. `_STOPPED_ASKING_PROMPT`'s own bar is the form — *"you have not been
+> told any of that"* — and the fragment is stated at both ends: the model is told the fact
+> so that it need not guess, and told what the fact does not license so that it does not
+> embroider it.
 
 > **Normative.** **`_PLAN_IS_ABOUT_ACTING` is appended on a turn carrying an
 > `OutboundContact` too.** #2213 added that line on a turn that did not service a search,
@@ -365,12 +416,18 @@ is there so that when they do not, the user can see it.
 > `converse_spoken` the spoken reply is the whole of what the user is told.
 
 > **Normative.** **A surface renders, beside the reply and never in place of it, one
-> statement composed from the value**: that this turn looked outside this system, naming
-> each class in `destinations` in the vocabulary's declared order, and what `records`
-> says reached the answer — including that nothing did, where it is `0`. The exact wording
-> is the lane's; what is fixed is that the statement is built from the value, that a `0`
-> is stated rather than elided, and that no surface renders a statement for a value it
-> was not given.
+> statement composed from the value**: that this turn reached outside this system, naming
+> each class in `destinations` in the vocabulary's declared order, and how many records
+> that put **in front of composition** — including that it put none there, where `records`
+> is `0`. The exact wording is the lane's; what is fixed is that the statement is built
+> from the value, that a `0` is stated rather than elided, and that no surface renders a
+> statement for a value it was not given.
+
+> **Normative.** **No statement says a record reached, entered, supported or affected the
+> answer**, and none says the turn looked something up on a turn whose only contact was
+> outward. `records` establishes that the records were available to composition and
+> nothing beyond it (§4), and a surface asserting more would be attributing the answer's
+> content to material a model may have ignored entirely.
 
 > **Normative.** **Rendering it is presentation and not business logic**, on ADR-0242
 > §9's ratified ground and `_render_search_not_serviced`'s precedent. No adapter reads a
@@ -470,10 +527,12 @@ not read. §12 names the trigger.
 > carries. **Fires** when a seam records it, or when a deployment reports a user misled
 > by the silence on one of those three.
 
-> **Normative.** **An egress step whose callable was entered and then failed** (§3).
-> ADR-0192 §1's ledger claim is the record and it is behind `ToolInvoker`. **Fires** on
-> the first widening that brings the claim, or an equivalent fact, out to
-> `StepOutcome` — which is a `core` change and takes its own ADR.
+> **Normative.** **An egress step whose callable was entered and then failed, and one
+> whose addressed status is `INDETERMINATE`** (§3). ADR-0192 §1's ledger claim is the
+> record of the first and it is behind `ToolInvoker`; the second is ADR-0029 §4's
+> may-have-acted shape, which no value on the step separates. **Fires** on the first
+> widening that brings the claim, or an equivalent fact, out to `StepOutcome` — which is
+> a `core` change and takes its own ADR.
 
 > **Normative.** **Whether a reply that denies a recorded contact is recorded as a
 > defect** (§10). **Fires** with the audit-recording ADR #2291 already owes.
@@ -495,26 +554,33 @@ not read. §12 names the trigger.
 > **Normative.** The implementing lane owes these six arms, each over representative
 > input, and a lane that lands fewer has not implemented this decision.
 >
-> 1. **A search that reached the provider and returned records.** `outbound_contact` is
->    set, `destinations` is `(SEARCH_PROVIDER,)`, `records` equals what reached the
->    supply, `search_not_serviced` is `None`, and the composing prompt carries §6's
->    fragment and `_PLAN_IS_ABOUT_ACTING`.
-> 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`).
->    `outbound_contact` is set with `records` `0`, `search_not_serviced` is `None`
->    (ADR-0242 §6's third clause), and the rendered statement states the `0` rather than
->    eliding it.
+> 1. **A search that minted records into the supply, over a turn whose pre-existing
+>    supply is non-empty.** `destinations` is `(SEARCH_PROVIDER,)`, `records` is the
+>    number of **minted** records composition was given and **not** the pre-existing
+>    ones, `search_not_serviced` is `None`, and the prompt carries §6's fragment and
+>    `_PLAN_IS_ABOUT_ACTING`. The non-empty pre-existing supply is what makes the arm
+>    discriminate: a lane reading `ServicedRead.supplied` passes every other arm and
+>    fails this one.
+> 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`),
+>    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
+>    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
+>    rendered statement states the `0` rather than eliding it.
 > 3. **A search refused before the send** (`RULING_DENY`). `outbound_contact` is `None`,
 >    `search_not_serviced` is `DECLINED`, and the composing prompt is byte-identical to
 >    what it is without this decision.
 > 4. **A response received and then refused** (`UNATTESTED`). **Both** members are
 >    carried — `outbound_contact` with `records` `0`, and `search_not_serviced`
 >    `UNAVAILABLE` — and both statements render (§8).
-> 5. **An egress-bound tool step driven to `EXECUTED`.** `destinations` is
->    `(EGRESS_TOOL,)` and `records` is `0`; and the same tool's step refused before its
->    callable carries no contact.
+> 5. **Three egress steps over one tool, and only the first carries a contact**: one
+>    whose addressed `StepExecution` is `SUCCEEDED`, where `destinations` is
+>    `(EGRESS_TOOL,)` and `records` is `0`; one whose disposition is `EXECUTED` and whose
+>    addressed step is **`FAILED`** because the invocation claim was refused before the
+>    callable, which carries **no** contact; and one refused at the gate, which carries
+>    none either.
 > 6. **A turn that both searched and sent, in that encounter order and in the reverse.**
 >    `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both, which is the declared
->    order and not the encounter order (§4).
+>    order and not the encounter order (§4); and the one fragment §6 fixes is rendered
+>    once, stating the contact rather than a lookup.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
@@ -552,9 +618,18 @@ none: `turn`, `routed`, `reply`, `reply_degraded` and `step` carry there exactly
 says, and `None` is the true value of a member describing something a restatement did not
 do. ADR-0242 §9 and ADR-0235 §4 state this in the same words for their own members.
 
-**ADR-0226 §9 and ADR-0238 §11 — no record owed.** No count is added to, removed from or
-redefined in the per-turn audit record. `records` is a `TurnOutcome` member read from a
-count those sections already fix, and the record they govern is unchanged.
+**ADR-0226 §9 and ADR-0238 §11 — no record owed, and `records` is expressly not
+theirs.** No count is added to, removed from or redefined in the per-turn audit record,
+and §4 states in terms that `records` is neither ADR-0238 §11's `supplied` nor derived
+from it: that count is what this system told a destination, assigned before the send, and
+this one is what came back and was put in front of composition. The record those sections
+govern is unchanged and gains nothing.
+
+**ADR-0249 §7's `minted` and ADR-0227 §3's `hop_reached` — no record owed.** §4 reads
+`minted` and copies `hop_reached`'s shape; it redefines neither, adds to neither, and
+takes neither out of the use its own ADR gives it. A second consumer of a carrier is not
+a change to the carrier — the position ADR-0242 §6's own second consumer of
+`ServicedRead.disposition` already stands in.
 
 **`_PLAN_IS_ABOUT_ACTING`'s condition (§6) — no record owed.** That line and its condition
 come from issue #2213 and from code; no ADR clause fixes when it is appended. Widening the
@@ -574,12 +649,12 @@ condition falsifies no ratified sentence.
 
 ## Consequences
 
-- **The system can no longer tell a user nothing was looked up on a turn it looked
-  something up.** The statement is composed from a typed value by code, renders beside the
+- **The system can no longer tell a user it reached nothing on a turn it reached the
+  world.** The statement is composed from a typed value by code, renders beside the
   reply, and cannot be talked out of by the prose next to it. That is the whole of what
   #2268 asks for and the whole of what this decision claims.
-- **A `0` becomes sayable.** *I looked outside and nothing from it is in this answer* is a
-  sentence the system has never been able to make; it is the honest account of a search
+- **A `0` becomes sayable.** *I reached outside this system and nothing from it was in
+  front of me* is a sentence the system has never been able to make; it is the honest account of a search
   that found nothing, and it is the sentence whose absence made #2268 read as a
   contradiction rather than as a thin reply.
 - **Three dispositions stay silent, on purpose.** A transport failure, a deadline expiry
@@ -588,9 +663,11 @@ condition falsifies no ratified sentence.
   told something rather than nothing — but the honest sentence about the wire is not
   available, and §12 says what would make it so.
 - **The egress half is under-inclusive until `StepOutcome` carries the claim.** An egress
-  call that was dispatched and then failed goes unstated. That is stated rather than
-  discovered, and it is the narrow direction: the statement is never false, only sometimes
-  absent.
+  call that was dispatched and then failed goes unstated, and so does one whose step is
+  `INDETERMINATE`, because `EXECUTED` is the gate's verdict and the addressed status is
+  the only thing under it that separates a call from a refusal. That is stated rather
+  than discovered, and it is the narrow direction: the statement is never false, only
+  sometimes absent.
 - **`TurnOutcome` grows to sixteen members**, ten of them `None`-defaulting facts a
   client renders on its own. That is ADR-0244 §9's rule working as designed and also the
   thing to watch: an eleventh and a twelfth make a client's rendering order a decision
