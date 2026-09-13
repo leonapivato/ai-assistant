@@ -1,6 +1,6 @@
 # 256. An authorization with no stated instant and no goal deadline takes the retention window its act's own record lives under
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **six limbs, all about one field, `Authorization.expires_at`.** **§12's ladder rung 3
