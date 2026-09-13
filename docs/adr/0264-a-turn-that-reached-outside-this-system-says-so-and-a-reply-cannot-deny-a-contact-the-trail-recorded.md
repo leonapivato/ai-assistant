@@ -384,6 +384,13 @@ is defined everywhere and claims neither.
 > provider returned, of what a servicing fetched before deduplication, or of anything a
 > step produced.
 
+> **Normative.** **What validation `records` carries beyond `ge=0` is `core/types.py`'s to
+> settle and is not settled here**, and no lane reads this section as ruling that pydantic's
+> default coercion of a bounded `int` is acceptable. [#2362](https://github.com/leonapivato/ai-assistant/issues/2362)
+> holds that question for every bounded `int` the module declares; this field takes whatever
+> answer it gets, and a lane that gave this one field a stricter posture than its neighbours
+> would be deciding a corpus question inside one ADR.
+
 > **Normative.** `records` is `0` on a search that reached the provider and was answered
 > with nothing. **A `0` means this turn's supply holds no record its
 > contacts brought in**, and it means nothing else.
@@ -480,7 +487,8 @@ seam's addition cheap — a second member rather than a second carrier minted fr
 > stands unnarrowed and no record is owed against it (§14). The exclusion is not a
 > convenience: a routed reply is composed over a `RouteOutcome` and not over a supply, the
 > pass takes no read at all, and §7's rendered statement — which §6's closing paragraph
-> names as what makes this decision structural — binds on it exactly as everywhere else. The
+> names as what makes this decision structural — binds on it **on a rendering surface**
+> exactly as everywhere else, which on a routed spoken pass is no surface at all. The
 > guarantee is therefore whole on a routed pass; what it does without is the instruction the
 > guarantee does not rest on.
 
@@ -562,6 +570,14 @@ when they do not, the user can see it.
 > ADR-0250 §5 each made, none of which recorded a supersession of ADR-0170 for it and
 > neither does this one.
 
+> **Normative.** **"A rendering surface" is defined here once and every rendering clause of
+> this decision is stated over it.** A rendering surface is a surface that renders
+> `TurnOutcome`'s members — the terminal today (§9), the browser when #2237's lane runs — and
+> **the spoken surface is expressly not one**, for the reason the next clause gives. Three
+> invariants of this decision have now been broken by restating a narrowed rule instead of
+> referring to it, so the rule is named rather than repeated: wherever a clause below says a
+> statement *renders*, it binds on a rendering surface and on no other.
+
 > **Normative.** **`converse_spoken` gains no parameter and `SpokenTurn` gains nothing**,
 > for ADR-0242 §9's reason: ADR-0200 §4 makes `spoken` *"the rendering of `outcome.reply`
 > and of nothing else"*, so the spoken reply is the whole of what that user is told.
@@ -585,8 +601,9 @@ when they do not, the user can see it.
 > built from the value, that a `0` is stated rather than elided, and that no surface renders
 > a statement for a value it was not given.
 
-> **Normative.** **`REACHED` renders on every pass that carries it; `NOT_REACHED` and
-> `INDETERMINATE` render only on a pass that composed a reply.** The asymmetry is principled
+> **Normative.** **On a rendering surface, `REACHED` renders on every pass that carries it;
+> `NOT_REACHED` and `INDETERMINATE` render only on a pass that composed a reply.** The
+> asymmetry is principled
 > and not economical: `REACHED` reports an **act this system performed**, which the user is
 > owed whether or not prose was written — ADR-0227's posture that the audit records acts —
 > while the other two report **nothing having happened**, whose only function is to stop a
@@ -662,10 +679,12 @@ when they do not, the user can see it.
 > **does not mint a browser lane of its own**, because two lanes editing one renderer for
 > one rule is the collision that lane exists to avoid.
 
-> **Normative.** A surface that renders no statement for a value it was given **has not
-> implemented this section**, and is not exercising a permitted degradation — ADR-0242 §9's
-> clause on exactly that, read here. What the browser's arrears are is a lane not yet run,
-> which is a different thing from a rendering ruled optional.
+> **Normative.** A **rendering surface** that renders no statement for a value it was given
+> **has not implemented this section**, and is not exercising a permitted degradation —
+> ADR-0242 §9's clause on exactly that, read here. What the browser's arrears are is a lane
+> not yet run, which is a different thing from a rendering ruled optional. **The spoken
+> surface is not in default of this clause**, because §7 does not make it a rendering
+> surface; its silence is the stated cost §12 books.
 
 ### 10. A reply that denies a recorded contact: booked, with the reason
 
@@ -757,9 +776,9 @@ this here would reach into a decision this ADR has not read.
 > refuses the enumeration and this ADR mints no route back to one. **Fires** with a
 > decision that argues the case ADR-0226 §9 and ADR-0228 §10 argue against.
 
-> **Normative.** **Whether a surface may abbreviate or suppress the `NOT_REACHED`
-> statement.** §7 renders it on every composing pass, which puts one line about the world on
-> every reply that reached nothing; that is the price of a statement a reader may rely on
+> **Normative.** **Whether a rendering surface may abbreviate or suppress the `NOT_REACHED`
+> statement.** §7 renders it on every composing pass such a surface serves, which puts one
+> line about the world on every rendered reply that reached nothing; that is the price of a statement a reader may rely on
 > from its absence as well as from its presence (§1). **Fires** when a deployment reports
 > the line read as noise, or when a surface gains a compact indicator it could ride.
 
@@ -936,7 +955,8 @@ own ADR's use. A second consumer of a carrier is not a change to it — the posi
 
 **ADR-0197 §6's *"exactly two"* routed-composer inputs and §10's two-input sentence — no
 record owed, and §6 above is written so.** A routed pass carries the member and renders §7's
-statement, and its composer is given nothing new, so the closure binds verbatim and a reader
+statement on a rendering surface, and its composer is given nothing new, so the closure binds
+verbatim and a reader
 holding only ADR-0197 builds the routed composer exactly as it describes. The alternative —
 a third input there — would have been a supersession of a contract closure bought for a
 fragment the guarantee does not rest on.
