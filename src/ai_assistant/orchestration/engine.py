@@ -2852,6 +2852,14 @@ class Engine:
                 f"rendered, and there is no spelling for 'never' (ADR-0197 §7)"
             )
             raise ConfigurationError(msg)
+        if goal_question_ttl <= timedelta(0):
+            msg = (
+                f"goal_question_ttl must be positive, got {goal_question_ttl!r}: a zero or "
+                f"negative lifetime produces a clarification already expired at the instant "
+                f"it is asked, so the question the user is shown can never be answered, and "
+                f"there is no spelling for 'never' (ADR-0250 §8)"
+            )
+            raise ConfigurationError(msg)
         if (transcriber is None) != (synthesizer is None):
             msg = (
                 "a spoken turn needs both speech seams or neither: half a pipeline can "

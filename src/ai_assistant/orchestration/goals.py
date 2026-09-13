@@ -286,22 +286,30 @@ def _indices(labels: tuple[str, ...], length: int) -> tuple[int, ...]:
     beyond ``length``, and where it repeats a position already resolved — a repeat
     would make one candidate two, which is a set the user never has.
 
+    **The positions come back in candidacy order and never in the order the labels
+    named them**, which is §5's clause for both of ``UNDECIDED``'s shapes: *"``candidates``
+    holds exactly those goals' outcome statements, **in candidacy order**"*, and the
+    whole candidacy *"in candidacy order"* otherwise. The model's labels are an answer
+    about a set and carry no ordering of their own — a ``("G2", "G1")`` that reordered
+    the ask would make the question the user reads depend on which way round the model
+    happened to list two goals, and §2's candidacy order is what the set was rendered in.
+
     Args:
         labels: The labels the associator named, verbatim.
         length: How many candidates the candidacy carried.
 
     Returns:
-        The positions, in the order the labels named them, without repeats.
+        The positions, ascending, without repeats.
     """
-    seen: list[int] = []
+    seen: set[int] = set()
     for label in labels:
         # **The same parser ADR-0249 §9's own labels are read by** — one refusal for one
         # scheme, so a zero-padded ordinal, a Unicode decimal, an ordinal below 1 and one
         # beyond the sequence's length are all refused here exactly as they are there.
         index = resolved_ordinal(label, CANDIDATE_LABEL_PREFIX, length)
-        if index is not None and index not in seen:
-            seen.append(index)
-    return tuple(seen)
+        if index is not None:
+            seen.add(index)
+    return tuple(sorted(seen))
 
 
 def disambiguation_of(asked_about: tuple[Goal, ...], *, elided: int) -> GoalDisambiguation:

@@ -42,6 +42,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.testing import (
+    FakeConversationStore,
     FakeGoalAssociator,
     FakeModelProvider,
     FakePlanStore,
@@ -334,16 +335,37 @@ async def test_a_question_about_a_retained_element_carries_the_copied_forward_te
 # --------------------------------------------------------------------------- #
 
 
-async def test_an_unrelated_turn_is_answered_and_the_answer_still_reaches_its_goal() -> None:
-    """§20 arm 7 and §11's Q6: the pause survives an unrelated turn.
+async def test_an_unrelated_turn_and_a_restart_and_the_answer_still_reaches_its_goal() -> None:
+    """§20 arm 7 and §11's Q6: the pause survives an unrelated turn **and a restart**.
 
     "An unrelated request during a clarification is answered normally. The paused goal
     keeps its open question and its ``AWAITING_CLARIFICATION`` attempt; the new turn
     opens or resumes another goal by §3 … When the answer eventually arrives it reaches
-    the right goal by the question's own ``goal_id``, across intervening turns."
+    the right goal by the question's own ``goal_id``, across intervening turns **and
+    across a restart**."
+
+    The restart is a **second façade over the same durable stores**, which is what §11
+    says has to be true of it: *"The handle is the question's own durable ``id`` and
+    needs no re-minting … no handle table holds a question, and ``pending_confirmations``
+    gains nothing"*, so *"no handle table is rebuilt, no continuation is re-minted and no
+    enumeration runs at start"*. The second engine's own handle table is empty, and the
+    answer reaches the goal anyway.
+
+    The planner instance and the goal-id sequence cross the restart because they stand in
+    for process-independent facts — the planner's ``plan_id`` counter and production's
+    ``uuid4`` — while everything the engine holds in memory does not.
     """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    plans = FakePlanStore(now=lambda: AT)
+    conversations = FakeConversationStore(now=lambda: AT)
     planner = _Asking()
-    harness = Harness(planner=planner, associator=_associating(AssociationVerdict.FRESH))
+    harness = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+        associator=_associating(AssociationVerdict.FRESH),
+    )
     paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
     assert paused.turn is not None
     assert paused.clarification is not None
@@ -359,12 +381,23 @@ async def test_an_unrelated_turn_is_answered_and_the_answer_still_reaches_its_go
     assert unrelated.clarification is None, "no lane refuses a turn on account of a clarification"
     assert unrelated.turn is not None
     assert unrelated.turn.goal.goal_id != campsite
-    still = await harness.plans.open_question(campsite)
+    still = await plans.open_question(campsite)
     assert still is not None, "§11: the paused goal keeps its open question"
-    (attempt,) = await harness.plans.attempts_of(campsite)
+    (attempt,) = await plans.attempts_of(campsite)
     assert attempt.state is AttemptState.AWAITING_CLARIFICATION
+    # --- the restart: a second façade over the same durable stores ---
+    restarted = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+        associator=_associating(AssociationVerdict.FRESH),
+    )
+    assert await restarted.engine.pending_confirmations() == (), (
+        "§11: nothing is re-minted at start, and a question is not a park"
+    )
 
-    answer = await harness.engine.converse(
+    answer = await restarted.engine.converse(
         "the river one",
         timeout=PATIENT,
         conversation_id=conversation,
@@ -375,11 +408,12 @@ async def test_an_unrelated_turn_is_answered_and_the_answer_still_reaches_its_go
     assert answer.goal_engagement is not None
     assert answer.turn is not None
     assert answer.turn.goal.goal_id == campsite, "the answer reached the right goal"
-    settled = await harness.plans.get_question(still.id)
+    assert restarted.associator.call_count == 0, "arm 7: no ``associate`` call at all"
+    settled = await plans.get_question(still.id)
     assert settled is not None
     assert settled.disposition is GoalQuestionDisposition.ANSWERED
     assert (settled.text, settled.about) == (None, None), "§8: settling clears the content"
-    (resumed,) = await harness.plans.attempts_of(campsite)
+    (resumed,) = await plans.attempts_of(campsite)
     assert resumed.id == attempt.id, "§11: the **same** attempt, not a new one"
     assert resumed.state is not AttemptState.AWAITING_CLARIFICATION, (
         "§11: the answer resumed it — and the turn then finished it in the ordinary way, "
@@ -546,7 +580,7 @@ async def test_two_labels_ask_rather_than_pick_and_the_undecided_outcome_is_well
     assert outcome.reply is not None
     assert outcome.reply_degraded is False
     assert outcome.disambiguation is not None
-    assert set(outcome.disambiguation.candidates) == {"book a campsite", "book a flight"}
+    assert outcome.disambiguation.candidates == ("book a campsite", "book a flight")
     assert "book a campsite" in outcome.reply, "the reply is built from the typed value"
     assert planner._calls == 0, "§3: no Planner.plan call at all"
     for goal_id in (one.id, two.id):
@@ -555,6 +589,41 @@ async def test_two_labels_ask_rather_than_pick_and_the_undecided_outcome_is_well
         assert len(held.interpretation) == 1, "no revision recorded"
     fresh = await harness.plans.candidates_for(conversation, limit=8)
     assert [goal.last_engaged_at for goal in fresh.goals] == [AT, AT], "§1: neither engaged"
+
+
+async def test_the_ask_is_in_candidacy_order_whatever_order_the_labels_named() -> None:
+    """§5: "``candidates`` holds exactly those goals' outcome statements, **in candidacy order**".
+
+    The labels are an answer *about a set* and carry no ordering of their own, so a
+    ``("G2", "G1")`` must ask the same question a ``("G1", "G2")`` asks. Ordering the ask
+    by the labels would make what the user reads depend on which way round the model
+    happened to list two goals — and §2's candidacy order is the order the set was
+    rendered in and the order §1 states.
+    """
+    harness = Harness(
+        planner=NoStepPlanner(), associator=_associating(AssociationVerdict.UNDECIDED, "G2", "G1")
+    )
+    conversation = (await harness.conversations.begin(None)).id
+    await _seed(
+        harness.plans,
+        _goal("goal-one", "book a campsite", conversation=conversation),
+        engaged_in=conversation,
+    )
+    await _seed(
+        harness.plans,
+        _goal("goal-two", "book a flight", conversation=conversation),
+        engaged_in=conversation,
+    )
+
+    outcome = await harness.engine.converse(
+        "make it Sunday", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert outcome.disambiguation is not None
+    assert outcome.disambiguation.candidates == ("book a campsite", "book a flight"), (
+        "§1's order — the greatest last_engaged_at first, the goal_id ascending as the "
+        "tie-break — and not the order the labels arrived in"
+    )
 
 
 async def test_fewer_than_two_resolving_labels_asks_over_the_whole_candidacy() -> None:
@@ -1027,6 +1096,83 @@ class _FailingRevision(FakePlanStore):
             msg = "the fake store refuses this write"
             raise PlanningError(msg)
         return await super().record_interpretation(revision)
+
+
+async def test_a_crash_between_the_question_and_the_pause_leaves_it_answerable() -> None:
+    """§20 arm 31's **second** window, and nothing repairs it either.
+
+    "With failure injected between ``record_question`` and ``commit_attempt``, the
+    restarted system reads an ``OPEN`` question on a ``RUNNING`` attempt, and that
+    question is **answerable**. **No start-up pass, sweep, reconciliation or repair runs
+    in either case**, and no implementation refuses a question whose attempt is not
+    ``AWAITING_CLARIFICATION``."
+
+    §11 states the same window in terms — *"a crash between them leaves an ``OPEN``
+    question on an attempt still ``RUNNING``. It is answerable, its ``goal_id`` still
+    reaches the goal, its deadline still frees it, and the turn that answers it moves the
+    attempt by §11's ordinary path."* The restart is a second façade over the same stores,
+    for the reason arm 7's case states.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    plans = _FailingPause(now=lambda: AT)
+    conversations = FakeConversationStore(now=lambda: AT)
+    planner = _Asking()
+    harness = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+    )
+    plans.fail = True
+
+    with pytest.raises(PlanningError):
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    (goal,) = (await plans.export()).goals
+    (attempt,) = await plans.attempts_of(goal.id)
+    assert attempt.state is AttemptState.RUNNING, "the pause never landed"
+    question = await plans.open_question(goal.id)
+    assert question is not None
+    assert question.disposition is GoalQuestionDisposition.OPEN
+    assert question.attempt_id == attempt.id
+    # --- the restart, which resolves nothing and is asked to resolve nothing ---
+    planner.understanding = None
+    restarted = Harness(
+        planner=planner,
+        plans=plans,
+        conversation_store=conversations,
+        loop_id_factory=lambda: next(goals),
+    )
+    assert await restarted.engine.pending_confirmations() == (), "no start-up pass runs"
+
+    answer = await restarted.engine.converse(
+        "the river one", timeout=PATIENT, reference=TurnReference(question_id=question.id)
+    )
+
+    assert answer.reference is ReferenceOutcome.ANSWERED, (
+        "arm 31: no implementation refuses a question whose attempt is not AWAITING_CLARIFICATION"
+    )
+    assert answer.turn is not None
+    assert answer.turn.goal.goal_id == goal.id
+    settled = await plans.get_question(question.id)
+    assert settled is not None
+    assert settled.disposition is GoalQuestionDisposition.ANSWERED
+    assert (settled.text, settled.about) == (None, None), "§8: settling clears the content"
+    (same,) = await plans.attempts_of(goal.id)
+    assert same.id == attempt.id, "§11: the same attempt, and no new one was opened"
+
+
+class _FailingPause(FakePlanStore):
+    """A store that refuses the transition into ``AWAITING_CLARIFICATION``."""
+
+    fail: bool = False
+
+    async def commit_attempt(self, transition: Any, /) -> Any:
+        """Commit as the fake does, or refuse the pause where the case armed a failure."""
+        if self.fail and transition.to_state is AttemptState.AWAITING_CLARIFICATION:
+            msg = "the fake store refuses this write"
+            raise PlanningError(msg)
+        return await super().commit_attempt(transition)
 
 
 async def test_a_siblings_failed_ground_does_not_drop_a_valid_questions_subject() -> None:
