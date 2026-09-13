@@ -955,6 +955,13 @@ composed is a state the answer could not mention.
 > modifies the earlier one or is planned afresh. **No lane reads a replan as licence to repeat
 > an act.**
 
+> **Normative — until A8 lands, the obligation is discharged by §13's Q4 gate and by nothing
+> else, so no implementation of this decision is asked to satisfy what it cannot.** No
+> consequential capability is wired in that interval, so the acts the obligation governs cannot be
+> performed, and **no arm of this decision requires a duplicate dispatch to be demonstrated** —
+> that demonstration is part of A8's acceptance requirement (§12), on the lane that lands the
+> mechanism.
+
 > **Normative — the obligation is undischarged until A8, and §13's rule is what makes that
 > interval safe rather than a hazard.** **L2 does not discharge it**, and no lane reads its
 > landing as having done so. What stops the interval being a live duplicate-booking risk is the
@@ -1445,11 +1452,29 @@ ledger and stops on the same three guards.
   fixes that `verifies` is not it.
 - **`GoalStatus.BLOCKED`'s producer.** **A3**, as ADR-0249 §4 and ADR-0250 §12 reserve it. A walk
   that stops writes no `GoalStatus` at all.
-- **At-most-once for an effect across two plans of one goal.** **Not decided**, and §7 states the
-  limit rather than claiming the property. Fired by **either** A8's idempotency key **or** a
-  decision that projects an attempt's executions into the planner's input, which is a widening
-  against ADR-0253 §10's *"`GoalBrief` and `BriefElement` gain nothing"* and which would carry its
-  own containment argument.
+- **The mechanism that makes an effect at most once across two plans of one goal, and the arm
+  that establishes it.** **A8.** §7 states the **obligation** — a step whose effect the goal
+  records as completed or as uncertain is never dispatched a second time, across a modified plan
+  and a freshly planned one alike — and this decision lands no mechanism that could enforce it, so
+  **A8's acceptance requirement is stated here and is owed on that lane**: *no duplicate dispatch
+  of a completed or uncertain effect across a replan, demonstrated over **both** a plan that
+  modifies the earlier one and a plan produced afresh.*
+
+  **The arm is A8's and is written here so that lane inherits it rather than invents it**: a plan
+  driven to a `SUCCEEDED` and verified step, superseded on a later turn by a plan whose step would
+  perform the same effect, where the later step is **not dispatched**; and the paired case over an
+  **`INDETERMINATE`** first step, where it is likewise not dispatched, because an effect that may
+  have happened is not an effect to repeat. **It is deliberately absent from §15.** An arm
+  demanding a demonstration a decision's own lanes cannot make is a demonstration nobody can give,
+  and ADR-0255's lanes land no key — so §15 asserts what a walk preserves and asserts nothing
+  about a second dispatch. **Until A8 lands, §13's Q4 gate is what discharges the obligation**: no
+  consequential capability is wired, so the acts it governs cannot be performed.
+- **Whether an attempt's executions are projected into the planner's input**, so a planner can
+  avoid planning a repeat. **Not decided**, and §7 states why it is an aid rather than the
+  guarantee — a planner is a model, and ADR-0249 §7 forbids taking a prerequisite on a model's
+  word. It is a widening against ADR-0253 §10's *"`GoalBrief` and `BriefElement` gain nothing"*
+  and would carry its own containment argument. Fired by a measured planner failure that A8's key
+  does not already prevent.
 - **#257's remaining half — making the ruling and the transition atomic.** **Not decided.** §5
   answers what the driver does when it meets a stranded step, using the by-step query ADR-0044 §3
   landed. Making the pair atomic needs a `PlanStore` that accepts more than one transition in a
