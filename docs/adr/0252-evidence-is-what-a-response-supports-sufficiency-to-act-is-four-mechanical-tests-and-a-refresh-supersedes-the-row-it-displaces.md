@@ -38,6 +38,44 @@
   should check first: its two instants and its never-a-gate rule are what make sufficiency a
   separate question rather than a freshness verdict on the evidence.
 - Date: 2026-09-12
+- **Partially superseded: 2026-09-12 by [ADR-0253](0253-the-plan-declares-what-a-step-waits-on-what-fills-its-arguments-and-what-must-be-evidenced-before-it-is-dispatched.md)
+  — two scopes, and nothing else in this ADR.** The `Status` line above has carried the
+  record since ADR-0253 merged; this is the appended dated note ADR-0070 §1 requires beside
+  it, which ADR-0082 §1 calls *"the invariant half of the record"* and which was owed from
+  that day (#2314).
+  **§1's `GoalEvidence` field enumeration and the `INTERPRETATION` limb of its by-basis
+  validator.** The model gains `interpreted_output`, an `InterpretedOutput | None`, and the
+  limb admits a **second** shape: such a row carries **exactly one** of one member of
+  `records` and an `interpreted_output`, `records` being empty in the second and `returned`
+  and `admitted` `0` in both. The ground is stated in ADR-0253's own record — an
+  interpretation over the output of a step of the same plan has otherwise no durable way to
+  name its own input, and #2255's dynamic plan is then not expressible in one plan at all.
+  §1's every other clause binds **verbatim**: the row's remaining fields, the by-kind,
+  by-count and by-standing limbs, the rule that a `records` identifier resolves in the
+  owner's `MemoryStore` and its refusal of a search-minted or fetch-minted one,
+  `MAX_EVIDENCE_RECORDS`, the `source` clause and the no-content rule — the new shape makes
+  that resolution rule costless rather than contradicting it.
+  **And §14's writer clause, in one term on one basis.** Its enumeration of what *"no model
+  supplies"* stops being true of **`applicability`** on the **`INTERPRETATION`** basis alone,
+  because §3's second source composes such a row's `supported` from *"the one region the
+  interpretation step **declared**"* and only a plan can declare one; ADR-0253 §7 resolves
+  that tension between two clauses of this decision in favour of the specific rule. Every
+  other term of §14 binds entire on **both** bases — no model supplies an identifier, an
+  instant, a standing, a basis, a read kind, a source, a declaration, a count or a verdict of
+  a read — and §14's *"exactly one thing"* is still the whole of what a model supplies at the
+  interpretation call itself.
+  **Everything else stands entire**: §1's row shape and its four-axis validator, §2's
+  applicability algebra and its three relations, §3's two composition sources and its
+  prohibition list, §4's two instants, §5's verdict vocabularies and the affirmative
+  partition, §6's four mechanical tests, §7's conflict rules, §8's six refresh limbs, §9's
+  invalidation predicate, §§10-13 and §§15-19.
+  **The 2026-09-12 note below is left standing rather than rewritten**, as ADR-0070 §1's
+  append-only rule requires. Its heading says *"nothing of this ADR is superseded"*, which was
+  true when it was written — the two scopes above were added to the `Status` line later in
+  ADR-0253's own review — and is superseded by this note; everything else it records, the
+  discharge of every clause this decision pushed onto A5, is unaffected and untouched.
+  Appended dated note per ADR-0070 §1; no ratified text is rewritten, no `Status` line moves,
+  and no mark is added (ADR-0089 §5). Refs #2314.
 - **Note (2026-09-12): every clause this decision pushed onto A5 is discharged by
   [ADR-0253](0253-the-plan-declares-what-a-step-waits-on-what-fills-its-arguments-and-what-must-be-evidenced-before-it-is-dispatched.md),
   and nothing of this ADR is superseded.** §6's push — *"A step's condition declares a required
