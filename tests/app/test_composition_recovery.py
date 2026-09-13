@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -58,6 +59,9 @@ AT = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 STEP = "step-1"
 DECISION = "d-1"
+
+#: The attempt the crashed claim was made under (ADR-0255 §3).
+ATTEMPT = "a-1"
 
 SEND_MAIL = ToolDefinition(
     id="smtp",
@@ -121,6 +125,17 @@ async def _a_crash_left_a_claim_open(engine: Engine) -> tuple[str, str]:
         )
     )
     state = await plans.start_execution("p-1")
+    # ADR-0255 §3: the claim below names the attempt that owns this execution, appended
+    # at the moment the execution exists, as ``engine.py`` does.
+    await plans.open_attempt(
+        GoalAttempt(
+            id=ATTEMPT,
+            goal_id="g-1",
+            opened_at=AT,
+            plan_ids=("p-1",),
+            execution_ids=(state.id,),
+        )
+    )
     request = ActionRequest(
         tool=SEND_MAIL,
         parameters={"to": "someone@example.com"},
@@ -143,6 +158,7 @@ async def _a_crash_left_a_claim_open(engine: Engine) -> tuple[str, str]:
             expected_version=state.version,
             bound_tool=SEND_MAIL.id,
             approval_ref=DECISION,
+            attempt_id=ATTEMPT,
         )
     )
     return state.id, str(claim.id)

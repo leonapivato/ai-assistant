@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     ExecutionState,
     FrozenJson,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
     Ground,
     MemorySource,
@@ -74,6 +75,9 @@ MEMORY_SYNONYMS = (
 
 #: A fixed instant, so nothing here depends on how fast the suite runs.
 AT = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+
+#: The attempt every execution here is opened under (ADR-0255 §3).
+ATTEMPT = "a-1"
 
 #: Long enough that these instant tools finish inside it anywhere.
 PATIENT = timedelta(seconds=30)
@@ -192,7 +196,19 @@ async def _execution_for(plans: FakePlanStore, step: PlanStep) -> ExecutionState
     await plans.save_goal(goal)
     plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await plans.save_plan(plan)
-    return await plans.start_execution(plan.id)
+    state = await plans.start_execution(plan.id)
+    # ADR-0255 §3: a claim is made under an attempt that owns the execution, appended
+    # at the moment the execution exists, as ``engine.py`` does.
+    await plans.open_attempt(
+        GoalAttempt(
+            id=ATTEMPT,
+            goal_id=goal.id,
+            opened_at=AT,
+            plan_ids=(plan.id,),
+            execution_ids=(state.id,),
+        )
+    )
+    return state
 
 
 async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
@@ -203,7 +219,9 @@ async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     step = PlanStep(id="step-1", intent="what time is it", capability="report_current_time")
     state = await _execution_for(plans, step)
 
-    disposition = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    disposition = await runner.run(
+        state, "step-1", attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert disposition.disposition is Disposition.EXECUTED
     assert disposition.tool_id == "current_time"
@@ -267,7 +285,9 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     # selection stage turns the refusal into a disposition rather than letting
     # `ActionRequest`'s validator raise out of `run` (#1115, ADR-0145 §4, §7).
     # Everything below it is the durable fact and held under both.
-    result = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await runner.run(
+        state, "step-1", attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.INVALID_PARAMETERS
     assert spy.calls == 0  # the callable is never reached (ADR-0145 §3)
@@ -303,7 +323,9 @@ async def test_a_plan_naming_a_memory_lookup_reaches_no_capable_tool(emitted: st
     step = PlanStep(id="step-1", intent="what do i take in my coffee", capability=emitted)
     state = await _execution_for(plans, step)
 
-    disposition = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    disposition = await runner.run(
+        state, "step-1", attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert disposition.disposition is Disposition.NO_CAPABLE_TOOL
     assert disposition.tool_id is None

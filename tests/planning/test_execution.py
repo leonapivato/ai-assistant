@@ -57,6 +57,7 @@ def _claim(execution_id: str, step_id: str, version: int) -> StepTransition:
         expected_version=version,
         bound_tool="smtp",
         approval_ref="perm-1",
+        attempt_id="a1",
     )
 
 
@@ -362,6 +363,7 @@ def test_a_retry_inherits_the_original_authorisation() -> None:
             step_id="s1",
             to_status=StepStatus.RUNNING,
             expected_version=state.version,
+            attempt_id="a1",
         ),
     )
 

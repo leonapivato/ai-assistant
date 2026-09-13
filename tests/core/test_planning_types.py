@@ -796,6 +796,10 @@ def _transition(to_status: StepStatus, **overrides: object) -> StepTransition:
         "to_status": to_status,
         "expected_version": 0,
     }
+    if to_status is StepStatus.RUNNING:
+        # A claim names the attempt it is made under, and no other transition may
+        # carry one (ADR-0255 §3) — so the default belongs to this status alone.
+        fields["attempt_id"] = "a1"
     return StepTransition(**(fields | overrides))  # type: ignore[arg-type]
 
 
@@ -836,6 +840,51 @@ def test_transition_is_frozen() -> None:
     transition = _transition(StepStatus.RUNNING)
     with pytest.raises(ValidationError):
         transition.to_status = StepStatus.SUCCEEDED
+
+
+def test_a_claim_requires_the_attempt_it_is_made_under() -> None:
+    """ADR-0255 §3's validator, in the direction that removes the absent case.
+
+    A ``→ RUNNING`` transition carrying no ``attempt_id`` does not construct, which is
+    why ``PlanStore.commit_transition`` never receives one and why no store is asked to
+    refuse a case no conforming implementation could be shown to obey. It is ADR-0039
+    §2's own shape — "required when the status is ``FAILED`` or ``INDETERMINATE``, and
+    forbidden on every other status" — applied to one more field.
+    """
+    with pytest.raises(ValidationError, match="requires an attempt_id"):
+        _transition(StepStatus.RUNNING, attempt_id=None)
+
+
+@pytest.mark.parametrize(
+    "to_status",
+    [status for status in StepStatus if status is not StepStatus.RUNNING],
+)
+def test_no_other_transition_may_name_an_attempt(to_status: StepStatus) -> None:
+    """The other direction, over **every** other status (ADR-0255 §3, §11).
+
+    Only a claim is made under an attempt: ``recovery.py``'s ``→ INDETERMINATE``, the
+    terminal writes and the skips each carry none today and may carry none after this
+    decision, so the field cannot become a second place a status is recorded.
+    """
+    with pytest.raises(ValidationError, match="only valid for a transition to RUNNING"):
+        _transition(
+            to_status,
+            attempt_id="a1",
+            **_payload_for(to_status),
+        )
+
+
+def _payload_for(to_status: StepStatus) -> dict[str, object]:
+    """What a transition to ``to_status`` needs besides the field under test.
+
+    The other validators run first, so an arm about ``attempt_id`` has to hand each
+    status the payload its own rule requires or it would fail for that reason instead.
+    """
+    if to_status is StepStatus.SKIPPED:
+        return {"skip_reason": SkipReason.UNMET_DEPENDENCY}
+    if to_status in _FAILURE:
+        return {"failure": StepFailure(message="boom")}
+    return {}
 
 
 def test_transition_carries_no_approval_ref_requirement_of_its_own() -> None:

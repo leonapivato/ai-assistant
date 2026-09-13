@@ -1568,6 +1568,36 @@ _PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
 )
 
 
+def _driving(opened: OpenedAttempt | None, state: ExecutionState) -> str:
+    """The attempt a claim of this turn is made under (ADR-0255 §3).
+
+    *"The driver supplies it from the ``GoalAttempt`` it is driving under"*, which is
+    the row ``orchestration`` has held in memory since the attempt was opened — so
+    **no stage of the walk fetches the attempt to fill it**.
+
+    Args:
+        opened: The attempt this turn is driving, as the store now holds it.
+        state: The execution about to be driven, named in the refusal.
+
+    Returns:
+        Its id.
+
+    Raises:
+        PlanningError: Where the turn holds no attempt. Unreachable — every
+            ``RespondedTurn`` carries one, which is why :meth:`Engine._persist_attempt`
+            marks its own ``None`` arm the same way — and refused rather than assumed
+            away, because a claim naming no attempt is one ADR-0255 §3 makes
+            unconstructible.
+    """
+    if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
+        msg = (
+            f"this turn holds no attempt, so no step of execution {state.id!r} is "
+            f"claimed: a step is claimed under an attempt (ADR-0255 §3)"
+        )
+        raise PlanningError(msg)
+    return opened.attempt.id
+
+
 def _reference_outcome(disposition: GoalQuestionDisposition) -> ReferenceOutcome:
     """Read ADR-0250 §11's outcome off a settled question's own disposition.
 
@@ -10385,8 +10415,19 @@ class Engine:
             # drive; a lane adding a second model call over a second selection adds
             # an argument to that one call (§4's third clause) rather than replacing
             # it or reinstating a second one here.
+            # ADR-0255 §3: the claim is made under the attempt this turn is driving,
+            # supplied from the row already in hand rather than fetched — and after
+            # `add_execution_id` above, which is what makes the conjunct's membership
+            # test resolve. The ordering fails closed: an execution whose append has
+            # not landed carries no attempt that names it, so the claim is refused and
+            # nothing is invoked.
             disposition = await self._runner.run(
-                state, first.id, timeout=timeout, origin=origin, on_ruled=ruled
+                state,
+                first.id,
+                attempt_id=_driving(attempt, state),
+                timeout=timeout,
+                origin=origin,
+                on_ruled=ruled,
             )
             step = self._step_outcome(
                 turn,
@@ -11983,10 +12024,18 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
+            # ADR-0255 §3, §5: the resuming path holds no attempt in memory — a park
+            # recovered from durable state has no live turn (ADR-0052 §3) — so it is
+            # resolved once, here, from values the store already holds, and the runner
+            # refuses an approving resume that names none. The resolution is
+            # `orchestration`'s and the **check** is the store's, which is what keeps
+            # it clear of §3's refusal of a store-side derivation.
+            owner = await self._attempt_of(state)
             disposition = await self._runner.resume(
                 state,
                 parked.step_id,
                 confirmation_id=parked.confirmation_id,
+                attempt_id=None if owner is None else owner.attempt.id,
                 approved=approved,
                 timeout=timeout,
                 remember_recipients_until=remember_recipients_until,

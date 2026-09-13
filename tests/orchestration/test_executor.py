@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -85,6 +86,10 @@ PATIENT = timedelta(seconds=30)
 BRIEF = timedelta(milliseconds=20)
 
 STEP = "step-1"
+
+#: The attempt every execution here is opened under, and the one each claim names
+#: (ADR-0255 §3). The store refuses a claim whose attempt does not own the execution.
+ATTEMPT = "a-1"
 
 
 class _AdmittingLedger:
@@ -241,7 +246,20 @@ async def a_claimed_execution(
         targets_revision=1,
     )
     await store.save_plan(plan)
-    return await store.start_execution(plan.id)
+    state = await store.start_execution(plan.id)
+    # ADR-0249 §12's ordering, which ADR-0255 §3's claim conjunct relies on: the
+    # execution is appended to the attempt at the moment it exists, before any step of
+    # it is dispatched. A claim made before that append is refused.
+    await store.open_attempt(
+        GoalAttempt(
+            id=ATTEMPT,
+            goal_id=goal.id,
+            opened_at=AT,
+            plan_ids=(plan.id,),
+            execution_ids=(state.id,),
+        )
+    )
+    return state
 
 
 async def stored_step(store: FakePlanStore, state: ExecutionState) -> StepExecution:
@@ -534,7 +552,9 @@ async def test_the_claim_names_the_tool_and_the_decision_that_authorised_it() ->
     )
     call = call_for(tool(), decision_id="d-99", execution_id=state.id)
     task = asyncio.create_task(
-        executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call, attempt_id=ATTEMPT, timeout=PATIENT
+        )
     )
 
     await implementation.entered.wait()
@@ -574,7 +594,11 @@ async def test_a_binding_refusal_is_committed_failed_and_not_re_driven() -> None
     )
 
     final = await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -596,7 +620,11 @@ async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -661,7 +689,11 @@ async def test_a_spend_refusal_is_committed_failed_and_not_re_driven(
     seam = FakeToolInvoker([(tool(), implementation)], ledger=_AdmittingLedger(), gate=gate)
 
     final = await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -706,7 +738,11 @@ async def test_a_spend_refusal_stays_payload_free_in_the_step_a_user_reads(
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -764,7 +800,11 @@ async def test_a_spend_refusal_reaches_the_user_with_its_own_ground(
     seam = FakeToolInvoker([(tool(), Spy())], ledger=_AdmittingLedger(), gate=gate)
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -796,7 +836,11 @@ async def test_an_unmeasurable_spend_reaches_the_user_stating_no_amount() -> Non
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -826,7 +870,11 @@ async def test_both_crossed_ceilings_stay_legible_in_the_step() -> None:
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -860,7 +908,11 @@ async def test_a_ledger_refusal_still_records_the_seam_wording(refusal: Assistan
     seam = LedgerRefusingInvoker(tool(), refusal)
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -927,7 +979,11 @@ async def test_a_spend_refusal_with_no_readable_account_still_closes_the_step(
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -951,7 +1007,11 @@ async def test_a_success_is_committed_with_its_output() -> None:
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -974,7 +1034,11 @@ async def test_a_failure_is_committed_with_its_message() -> None:
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -1002,7 +1066,11 @@ async def test_a_live_deadline_expiry_reaches_indeterminate() -> None:
     seam = FakeToolInvoker([(tool(), Blocking())], ledger=_AdmittingLedger(), gate=FakeAuditTrail())
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=BRIEF
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=BRIEF,
     )
 
     step = await stored_step(store, state)
@@ -1029,7 +1097,11 @@ async def test_a_read_only_deadline_expiry_reaches_failed() -> None:
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=BRIEF
+        state,
+        step_id=STEP,
+        call=call_for(read_only(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=BRIEF,
     )
 
     step = await stored_step(store, state)
@@ -1066,7 +1138,11 @@ async def test_a_cancelled_call_is_committed_and_the_cancellation_re_raised(
     )
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(definition, execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(definition, execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1108,7 +1184,11 @@ async def test_the_transition_lands_before_a_repeat_cancellation_escapes() -> No
     )
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1146,7 +1226,11 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     )
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1190,7 +1274,9 @@ async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> Non
     call.__dict__["request"] = None
 
     with pytest.raises(ToolBindingError) as caught:
-        await executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+        await executor_over(store, seam).execute(
+            state, step_id=STEP, call=call, attempt_id=ATTEMPT, timeout=PATIENT
+        )
 
     assert isinstance(caught.value.__cause__, ValidationError), "the fault is carried, not restated"
     assert implementation.calls == []
@@ -1221,7 +1307,11 @@ async def test_a_claim_that_lands_as_the_cancellation_arrives_is_still_closed() 
 
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(read_only(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
     store.target = task
@@ -1257,6 +1347,7 @@ async def test_a_call_authorised_for_another_step_claims_nothing() -> None:
             state,
             step_id=STEP,
             call=call_for(read_only(), step_id="some-other-step"),
+            attempt_id=ATTEMPT,
             timeout=PATIENT,
         )
 
@@ -1290,6 +1381,7 @@ async def test_a_call_authorised_for_another_execution_claims_nothing() -> None:
             state,
             step_id=STEP,
             call=call_for(read_only(), execution_id="some-other-execution"),
+            attempt_id=ATTEMPT,
             timeout=PATIENT,
         )
 
@@ -1329,7 +1421,9 @@ async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() ->
     substitute = call_for(tool(), decision_id="d-2", execution_id=state.id)
 
     task = asyncio.create_task(
-        executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call, attempt_id=ATTEMPT, timeout=PATIENT
+        )
     )
     await store.entered.wait()
     call.__dict__["request"] = substitute.request
@@ -1457,7 +1551,11 @@ async def _assert_unusable_indeterminate(definition: ToolDefinition, seam: Scrip
     state = await a_claimed_execution(store, capability=definition.capability)
 
     final = await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(definition, execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(definition, execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     assert final.step(STEP) is not None
@@ -1568,7 +1666,11 @@ async def test_an_exact_result_cannot_forge_success_by_shadowing_model_dump() ->
     }
 
     await executor_over(store, ScriptedInvoker(tool(), [forged])).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -1636,7 +1738,11 @@ async def test_a_process_signal_from_serialization_still_propagates(
 
     with pytest.raises(interrupt) as excinfo:
         await executor_over(store, ScriptedInvoker(tool(), [succeeded()])).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert excinfo.value is raised
@@ -1658,7 +1764,11 @@ async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() ->
     )
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1719,7 +1829,11 @@ async def test_a_cancellation_requested_before_invoke_lands_on_the_claim_append(
 
     with pytest.raises(asyncio.CancelledError):
         await executor_over(store, seam, now=cancelling_clock).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert implementation.calls == 0, "the cancellation lands on the claim, before the callable"
@@ -1762,7 +1876,11 @@ async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> Non
 
     with pytest.raises(PlanningError):
         await executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert implementation.calls == [], "the tool was never reached"
@@ -1791,7 +1909,11 @@ async def test_a_cancellation_absorbed_while_closing_unstarted_outranks_the_caus
 
     task = asyncio.create_task(
         executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1830,7 +1952,11 @@ async def test_a_rejected_unstarted_close_is_raised_not_logged_away() -> None:
 
     with pytest.raises(PlanningError, match="rejected") as caught:
         await executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert isinstance(caught.value.__context__, PlanningError), "the reason for closing is kept"
@@ -1863,7 +1989,11 @@ async def test_a_cancelled_reason_survives_a_rejected_unstarted_close() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await executor_over(store, seam, now=cancelled_clock).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert implementation.calls == []
@@ -1889,7 +2019,11 @@ async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
 
     with pytest.raises(OSError, match="unreachable"):
         await executor_over(store, seam, now=exploding).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert implementation.calls == []
@@ -1912,7 +2046,11 @@ async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> No
     )
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
     )
 
@@ -1935,7 +2073,11 @@ async def test_a_commit_failure_with_nothing_absorbed_is_still_a_planning_error(
 
     with pytest.raises(PlanningError, match="rejected"):
         await executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
 
@@ -1955,7 +2097,9 @@ async def test_classification_reads_the_trusted_binding_not_the_callers_object()
         [(tool(), implementation)], ledger=_AdmittingLedger(), gate=FakeAuditTrail()
     )
     task = asyncio.create_task(
-        executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call, attempt_id=ATTEMPT, timeout=PATIENT
+        )
     )
 
     await implementation.entered.wait()
@@ -1995,6 +2139,7 @@ async def test_a_timeout_the_seam_would_refuse_leaves_no_claim(bad: object) -> N
             state,
             step_id=STEP,
             call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
             timeout=bad,  # type: ignore[arg-type]  # the annotation is not the enforcement
         )
 
@@ -2024,6 +2169,7 @@ async def test_the_window_is_measured_from_the_first_attempt_not_the_claim() -> 
         state,
         step_id=STEP,
         call=call_for(keyed(window=timedelta(hours=1)), execution_id=state.id),
+        attempt_id=ATTEMPT,
         timeout=PATIENT,
     )
 
@@ -2040,7 +2186,11 @@ async def test_a_keyed_tool_is_retried_inside_its_window() -> None:
     clock = stepping_clock([AT, AT + timedelta(minutes=1)])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(keyed(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -2067,6 +2217,7 @@ async def test_a_keyed_tool_is_not_retried_at_the_exact_window_boundary() -> Non
         state,
         step_id=STEP,
         call=call_for(keyed(window=window), execution_id=state.id),
+        attempt_id=ATTEMPT,
         timeout=PATIENT,
     )
 
@@ -2090,7 +2241,11 @@ async def test_a_natural_tool_is_retried_without_a_window() -> None:
     seam = ScriptedInvoker(natural(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(natural(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(natural(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     assert seam.calls == 2
@@ -2114,6 +2269,7 @@ async def test_retrying_stops_once_the_window_has_elapsed() -> None:
         state,
         step_id=STEP,
         call=call_for(keyed(window=timedelta(hours=1)), execution_id=state.id),
+        attempt_id=ATTEMPT,
         timeout=PATIENT,
     )
 
@@ -2145,7 +2301,11 @@ async def test_a_reading_that_is_not_a_positive_elapsed_duration_is_lapsed(
     clock = stepping_clock([AT, second])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(keyed(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     assert seam.calls == 1, "an unusable measurement declines the retry"
@@ -2160,7 +2320,11 @@ async def test_a_side_effecting_tool_with_no_guarantee_is_never_auto_retried() -
     seam = ScriptedInvoker(tool(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     assert seam.calls == 1
@@ -2180,7 +2344,11 @@ async def test_a_read_only_tool_is_retried_without_consulting_any_clock() -> Non
     seam = ScriptedInvoker(read_only(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(read_only(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     assert seam.calls == 2
@@ -2199,7 +2367,11 @@ async def test_retrying_stops_at_the_trackers_ceiling() -> None:
     seam = ScriptedInvoker(read_only(), [unavailable()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(read_only(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -2295,7 +2467,11 @@ async def test_a_ledger_refusal_is_committed_failed_and_never_indeterminate(
     seam = LedgerRefusingInvoker(tool(), refusal)
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -2324,7 +2500,11 @@ async def test_a_ledger_refusal_records_nothing_the_executor_did_not_author() ->
     )
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(tool(), execution_id=state.id),
+        attempt_id=ATTEMPT,
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -2357,7 +2537,11 @@ async def test_a_cancellation_out_of_the_seam_commits_the_interrupted_outcome() 
 
     with pytest.raises(asyncio.CancelledError) as caught:
         await executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+            state,
+            step_id=STEP,
+            call=call_for(tool(), execution_id=state.id),
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
         )
 
     assert caught.value.__cause__ is cause, "the append failure rides as the cause"
