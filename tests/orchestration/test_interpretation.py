@@ -19,6 +19,7 @@ projection site in the system.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from itertools import count
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -38,7 +39,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.interpretation import RecordedUnderstanding, recorded_revision
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import MemoryRecord
 
@@ -74,6 +75,18 @@ def _opened(**fields: object) -> GoalInterpretation:
         raised_by="turn-1",
         **fields,  # type: ignore[arg-type]  # one keyword per field a case varies
     )
+
+
+def _ids() -> Callable[[], str]:
+    """ADR-0253 §7's minter, counting, so an arm can name the id it expects.
+
+    A counter and not a uuid, because §7 makes the id the durable **name** of a
+    proposition and several arms below assert which element a value points at. It is
+    still opaque to everything that reads it, and it can never match §9's condition-label
+    grammar — which ``GoalElement`` refuses outright.
+    """
+    minted = count(1)
+    return lambda: f"e-{next(minted)}"
 
 
 def _budget() -> GoalElement:
@@ -112,6 +125,7 @@ def _understood(
         minted=minted,
         recorded_at=_LATER,
         raised_by="turn-2",
+        id_factory=_ids(),
     )
 
 

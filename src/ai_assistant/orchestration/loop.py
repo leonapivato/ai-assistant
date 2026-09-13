@@ -95,7 +95,7 @@ from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.evidence import composed_row, digests, ordered_history
 from ai_assistant.orchestration.goals import RaisedSubject, taken_question
-from ai_assistant.orchestration.interpretation import recorded_revision
+from ai_assistant.orchestration.interpretation import recorded_revision, substituted_plan
 from ai_assistant.orchestration.reads import (
     SearchFooting,
     SearchServicer,
@@ -2413,6 +2413,25 @@ class LearningLoop:
         # would leave every turn on which the planner revised its understanding holding
         # a plan §8 forbids driving, with no serviced read to license a second call.
         plan = _stamped(produced.plan, targets_revision=goal.revision)
+        # ADR-0253 §9: the condition labels this call wrote, resolved to element ids —
+        # "once per plan, immediately on return, **after** this same call's
+        # `understanding` … has been recorded and its element ids minted, and **after**
+        # ADR-0249 §8's `targets_revision` stamp, and before any other component
+        # observes the plan". The one read of the plan that precedes it is `_raised`'s
+        # materiality limb, which reads `PlanStep.capability` and no label at all.
+        #
+        # **A label that resolves to nothing refuses the plan**, which is neither saved
+        # nor driven: the `PlanningError` leaves this turn exactly as a planner that
+        # could not produce a plan does, and what that refusal then causes — a report,
+        # a replan, a turn that composes without acting — is A7's and A9's.
+        plan = substituted_plan(
+            plan,
+            goal=goal,
+            understanding=produced.understanding,
+            positions=positions,
+            supply=memories,
+            minted=minted,
+        )
         plans += (plan,)
         # §6: `INVESTIGATE` is stamped as the turn enters the servicing loop, whose work
         # it is. **Vacuous where the plan asked for no read** — "a phase whose work is
@@ -2711,6 +2730,19 @@ class LearningLoop:
                 revised.plan,
                 targets_revision=goal.revision,
                 supersedes=plan.id,
+            )
+            # ADR-0253 §9, on the same terms as the first call's and against **this**
+            # call's own supply: ADR-0228 §8 binds ADR-0226 §3's label space per call,
+            # so the `memories` an interpretation's `record` is checked against is the
+            # sequence as it stands now, grown by whatever this turn's servicings
+            # appended, and `minted` is what those servicings minted.
+            plan = substituted_plan(
+                plan,
+                goal=goal,
+                understanding=revised.understanding,
+                positions=positions,
+                supply=memories,
+                minted=minted,
             )
             plans += (plan,)
         # §6: `PLAN` is stamped where the turn takes its final plan — after the
@@ -3556,6 +3588,10 @@ class LearningLoop:
             evidence=evidence,
             recorded_at=at,
             raised_by=raised_by,
+            # ADR-0253 §7: the element ids this revision mints, from the loop's own
+            # factory — the same one every other identifier this turn authors comes
+            # from, so a test that pins ids pins these too and nothing mints its own.
+            id_factory=self._id_factory,
         )
         revision = understood.revision
         # §1: append-only. Nothing edits an element in place, reorders the tuple or
