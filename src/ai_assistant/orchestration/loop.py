@@ -2401,13 +2401,6 @@ class LearningLoop:
             brief=brief,
             open_question=open_question,
         )
-        # ADR-0250 §6, §7: what this call raised, if anything, resolved against the
-        # proposal it came back on and the revision that proposal produced. Recomputed
-        # at **every** call and never accumulated, so a later call that raised none
-        # leaves the turn raising none — §6's conditions are the planner's report "on
-        # this call", and a turn that carried an earlier call's question forward would
-        # re-ask what its own re-plan had just resolved (§11's late answer).
-        raised = await self._raised(produced, goal=goal, positions=positions)
         # ADR-0249 §8: the stamp is the goal's revision **after this call's
         # understanding, if any, has been recorded**. Stamping the *input* revision
         # would leave every turn on which the planner revised its understanding holding
@@ -2416,9 +2409,16 @@ class LearningLoop:
         # ADR-0253 §9: the condition labels this call wrote, resolved to element ids —
         # "once per plan, immediately on return, **after** this same call's
         # `understanding` … has been recorded and its element ids minted, and **after**
-        # ADR-0249 §8's `targets_revision` stamp, and before any other component
-        # observes the plan". The one read of the plan that precedes it is `_raised`'s
-        # materiality limb, which reads `PlanStep.capability` and no label at all.
+        # ADR-0249 §8's `targets_revision` stamp, and **before any other component
+        # observes the plan**".
+        #
+        # **That last clause is why this sits above the question and not below it.**
+        # ADR-0250 §6's materiality limb reads the plan's capabilities and hands each to
+        # the `ToolRegistry`, so a plan §9 refuses would otherwise reach a second
+        # component first — and a registry that raised would surface *its* failure in
+        # place of the `PlanningError` §9 mandates, on a plan that was never readable.
+        # Ordering the refusal first costs a turn that raises nothing at all, because
+        # the substitution is pure and the question is not.
         #
         # **A label that resolves to nothing refuses the plan**, which is neither saved
         # nor driven: the `PlanningError` leaves this turn exactly as a planner that
@@ -2433,6 +2433,13 @@ class LearningLoop:
             minted=minted,
         )
         plans += (plan,)
+        # ADR-0250 §6, §7: what this call raised, if anything, resolved against the
+        # proposal it came back on and the revision that proposal produced. Recomputed
+        # at **every** call and never accumulated, so a later call that raised none
+        # leaves the turn raising none — §6's conditions are the planner's report "on
+        # this call", and a turn that carried an earlier call's question forward would
+        # re-ask what its own re-plan had just resolved (§11's late answer).
+        raised = await self._raised(produced, plan=plan, goal=goal, positions=positions)
         # §6: `INVESTIGATE` is stamped as the turn enters the servicing loop, whose work
         # it is. **Vacuous where the plan asked for no read** — "a phase whose work is
         # vacuous is stamped and left in the same instant" — and stamped once, because
@@ -2723,19 +2730,16 @@ class LearningLoop:
                 brief=brief,
                 open_question=open_question,
             )
-            # §6, §7 again, on the same terms as the first call's: this call's own
-            # report, over this call's own plan, replacing whatever the last one said.
-            raised = await self._raised(revised, goal=goal, positions=positions)
             plan = _stamped(
                 revised.plan,
                 targets_revision=goal.revision,
                 supersedes=plan.id,
             )
-            # ADR-0253 §9, on the same terms as the first call's and against **this**
-            # call's own supply: ADR-0228 §8 binds ADR-0226 §3's label space per call,
-            # so the `memories` an interpretation's `record` is checked against is the
-            # sequence as it stands now, grown by whatever this turn's servicings
-            # appended, and `minted` is what those servicings minted.
+            # ADR-0253 §9, on the same terms as the first call's — before the question,
+            # and against **this** call's own supply: ADR-0228 §8 binds ADR-0226 §3's
+            # label space per call, so the `memories` an interpretation's `record` is
+            # checked against is the sequence as it stands now, grown by whatever this
+            # turn's servicings appended, and `minted` is what those servicings minted.
             plan = substituted_plan(
                 plan,
                 goal=goal,
@@ -2745,6 +2749,9 @@ class LearningLoop:
                 minted=minted,
             )
             plans += (plan,)
+            # §6, §7 again, on the same terms as the first call's: this call's own
+            # report, over this call's own plan, replacing whatever the last one said.
+            raised = await self._raised(revised, plan=plan, goal=goal, positions=positions)
         # §6: `PLAN` is stamped where the turn takes its final plan — after the
         # rounds, so a turn that iterated is stamped once rather than moved backwards
         # and forwards across its calls. On an attempt already past `PLAN` it is not
@@ -3416,6 +3423,7 @@ class LearningLoop:
         self,
         produced: PlannerOutput,
         *,
+        plan: ActionPlan,
         goal: Goal,
         positions: Mapping[str, tuple[int | None, ...]],
     ) -> RaisedSubject | None:
@@ -3441,10 +3449,21 @@ class LearningLoop:
         and is only ever a *reason to ask*, never a reason to do anything else, so a
         turn with nothing to ask has no use for it.
 
+        **It is handed the plan rather than reading it off ``produced``**, and the plan
+        it is handed is the one ADR-0253 §9 has already stamped and substituted. §6's
+        limb is *"The ``ActionPlan`` the **same** ``PlannerOutput`` carries"* and the two
+        values differ in no field it reads — substitution touches a condition's ``about``
+        and an interpretation's ``settles`` and nothing else — but §9 requires the
+        substitution to happen *"before any other component observes the plan"*, and this
+        method's limb hands a capability to the ``ToolRegistry``. Taking the validated
+        value is what makes that ordering a property of the parameter rather than of the
+        order two lines happen to sit in.
+
         Args:
-            produced: The envelope this call returned, whose ``plan`` §6's second
-                materiality limb is read over — *"The ``ActionPlan`` the **same**
-                ``PlannerOutput`` carries"*.
+            produced: The envelope this call returned, whose ``understanding`` carries
+                the question and the tuples §7 resolves its subject against.
+            plan: That same call's plan, stamped (ADR-0249 §8) and substituted (ADR-0253
+                §9), over which §6's second materiality limb is read.
             goal: The goal as it stands **after** this call's understanding was
                 recorded, so ``interpretation[-1]`` is the revision §7 resolves the
                 subject's text out of.
@@ -3463,7 +3482,7 @@ class LearningLoop:
             understanding,
             recorded=goal.interpretation[-1],
             positions=positions,
-            side_effecting=await self._side_effecting(produced.plan),
+            side_effecting=await self._side_effecting(plan),
         )
 
     async def _side_effecting(self, plan: ActionPlan) -> bool:

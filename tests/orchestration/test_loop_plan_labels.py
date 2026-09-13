@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     PlanInterpretation,
     PlanStep,
     ProposedElement,
+    ProposedQuestion,
     ProposedUnderstanding,
     Provenance,
     StepCondition,
@@ -50,7 +51,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.interpretation import substituted_plan
 from ai_assistant.orchestration.loop import ConversationalOperation
-from ai_assistant.testing import FakeMemoryStore, FakePlanner
+from ai_assistant.testing import FakeMemoryStore, FakePlanner, FakeToolRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -485,3 +486,45 @@ async def test_the_revision_after_a_servicing_resolves_against_that_calls_own_va
         "resolved against the *second* call's understanding, not the first's revision"
     )
     assert responded.turn.plan.interpretations[0].record == "episode-1"
+
+
+async def test_a_refused_plan_is_refused_before_the_question_reaches_the_registry() -> None:
+    """§9: the substitution happens "before any other component observes the plan".
+
+    ADR-0250 §6's second materiality limb reads the plan's capabilities and hands each
+    to the ``ToolRegistry``, so a turn that raises a question is a turn on which a second
+    component sees the plan. §9 puts the refusal ahead of it, and the consequence is
+    twofold: the error a caller gets is the ``PlanningError`` §9 mandates rather than
+    whatever that component did with an unreadable plan, and no lookup is spent on a plan
+    that was never going to be saved.
+
+    **The arm fails if the two lines are swapped back**, which is the only way it could
+    be wrong while every other arm here stayed green — the registry is consulted exactly
+    when a question comes back, and no other case raises one.
+    """
+    registry = FakeToolRegistry()
+    understanding = ProposedUnderstanding(
+        retains_outcome=True,
+        conditions=(ProposedElement(text="the forecast is dry", ground=Ground.INFERRED),),
+        questions=(ProposedQuestion(text="which weekend?", about="D1"),),
+    )
+    memory = FakeMemoryStore(now=lambda: _NOW)
+    loop = _loop(
+        memory,
+        planner=FakePlanner(
+            _plan(when=(_condition("D2"),)), now=lambda: _NOW, understanding=understanding
+        ),
+        registry=registry,
+    )
+
+    with pytest.raises(PlanningError, match="D2"):
+        await loop.respond(
+            _ASKED,
+            narrow=_bounded(),
+            operation=ConversationalOperation.CONVERSE,
+            conversation_id="c-1",
+        )
+
+    assert registry.lookups == [], (
+        "§9's ordering: the refused plan reached no second component at all"
+    )
