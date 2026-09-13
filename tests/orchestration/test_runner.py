@@ -2554,3 +2554,62 @@ async def test_a_declaration_classifying_nothing_behaves_exactly_as_before() -> 
 
     assert result.disposition is Disposition.EXECUTED
     assert len(harness.invoker.invocations) == 1
+
+
+# --- phase 4, before any step of the plan is dispatched (ADR-0254 §14) ----
+
+
+async def test_a_plan_whose_later_step_can_never_be_completed_drives_nothing() -> None:
+    """ADR-0254 §14 puts the evaluation "Before any step of a plan is dispatched".
+
+    So a plan whose **second** step can never be given an argument it requires does
+    not get its **first** step's irreversible act performed first. Commits nothing:
+    no ruling requested, no record written, the step still `PENDING` — which is
+    `INVALID_PARAMETERS`' own shape and leaves the attempt `RUNNING`.
+    """
+    requiring = {
+        "type": "object",
+        "properties": {"to": {"type": "string"}, "ref": {"type": "string"}},
+        "required": ["to", "ref"],
+    }
+    harness = Harness(tools=(tool("smtp", parameters_schema=requiring),))
+    state = await a_two_step_execution(harness.plans)
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert harness.policy.requests == []
+    assert await harness.trail.export() == []
+    assert harness.invoker.invocations == []
+    assert result.state.step(STEP).status is StepStatus.PENDING  # type: ignore[union-attr]
+
+
+async def test_a_plan_every_step_of_which_can_be_completed_drives_the_first() -> None:
+    """The gate passes what it should: a two-step plan whose steps are both fillable."""
+    harness = Harness(tools=(tool(),))
+    state = await a_two_step_execution(harness.plans)
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    assert len(harness.invoker.invocations) == 1
+
+
+async def test_a_step_naming_a_capability_no_tool_offers_still_skips_rather_than_refusing() -> None:
+    """ADR-0211 §6: no stage rejects a step on its capability's vocabulary.
+
+    Phase 4 passes such a step over, and it is disposed of at its own dispatch
+    through ADR-0037 §1's `NO_CAPABLE_TOOL` — the behaviour before this gate.
+    """
+    harness = Harness()
+    state = await an_execution(harness.plans, plan_step())
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.NO_CAPABLE_TOOL
