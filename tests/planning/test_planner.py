@@ -4441,6 +4441,62 @@ async def test_each_digest_is_labelled_by_its_position_in_the_sequence() -> None
     assert prompt.index("  - E1 ") < prompt.index("  - E2 "), "in the order handed"
 
 
+async def test_the_loops_counted_rendering_reaches_the_model_whole() -> None:
+    r"""ADR-0252 §11's rendering is ``orchestration``'s, and this side prints it whole.
+
+    §11 makes ``requested`` and ``supported`` a **deterministic** rendering the loop
+    writes: regions delimited by parentheses, axes by field name, and every label value
+    length-counted in its own UTF-8 bytes (``orchestration/evidence.py``'s
+    ``rendered_region`` / ``rendered_support``), because the values are model-reachable
+    text that may itself contain a delimiter — "one region holding ``x) (topics=y``
+    would otherwise render exactly as two regions holding ``x`` and ``y``", the
+    manufactured conjunction §2 exists to prevent. "**No model writes the rendering, no
+    lane substitutes a prose summary for it, and no lane makes it configurable**."
+
+    So the obligation on *this* side is that it survives: the renderer prints the value
+    it was handed and does not re-render it, split it on the delimiters, summarise it,
+    truncate it or normalise it. The literal below is exactly what ``rendered_region``
+    produces for a region whose first participant carries the rendering's own
+    delimiters, and the arm asserts the line carries it back byte for byte after the
+    quote is undone.
+
+    **The quoting stays, and it is not in tension with the count** (ADR-0098 §2). A
+    digest member is still externally influenced text, and :func:`_quoted_span` is what
+    stops it opening a second bullet or forging a second ``E`` label — note the label
+    sits **outside** the quoted value, which is what makes that impossible rather than
+    unlikely. ``json.dumps`` is lossless, so the loop's bytes are recoverable from the
+    line; what it is not is byte-*identical* on the page, because at
+    ``ensure_ascii=True`` a non-ASCII value is escaped and its netstring count then
+    describes bytes the page shows as an escape. That interaction is filed as #2341 and
+    is not repaired here: ``_quoted_span`` is this prompt's single transform for every
+    block of this message, and ADR-0222 §4's ceiling is documented against its ASCII
+    expansion, so moving it is a ruling rather than a lane's edit.
+    """
+    counted = (
+        "(window=[2026-01-01T00:00:00+00:00, ); "
+        "participants=12:x) (topics=y,5:Alice; topics=7:weather; elided=2)"
+    )
+    support = f"{counted} (about_person=3:Bob) supported_elided=3"
+
+    prompt = _render_request(
+        _goal(),
+        _context(),
+        [],
+        evidence=[_digest(requested=counted, supported=support)],
+    )
+
+    asked = next(one for one in prompt.splitlines() if one.startswith("  - E1 asked for "))
+    carried = json.loads(asked.removeprefix("  - E1 asked for ").split(", read at ")[0])
+    assert carried == counted, "printed whole: not re-rendered, not split, not summarised"
+
+    establishes = next(
+        one for one in prompt.splitlines() if one.startswith("    establishes something about: ")
+    )
+    assert json.loads(establishes.removeprefix("    establishes something about: ")) == support
+    assert prompt.count("  - E1 ") == 1, "one bullet, whatever delimiters the value carries"
+    assert "  - E2 " not in prompt, "and a value carrying a delimiter forges no second row"
+
+
 async def test_the_digest_label_is_an_ordinal_and_never_a_row_id() -> None:
     """ADR-0252 §10: "a row id is stamped by ``orchestration`` and never parsed out of
     model output" — so what this side prints is a count of its own and nothing else.
@@ -4978,6 +5034,55 @@ async def test_an_element_grounds_on_an_evidence_row_by_its_e_label() -> None:
     assert proposed.criteria[0].evidence_label == "M1", "one field, two spaces, one reply"
     assert model.call_count == 1, "a legal ground, so no repair round is spent"
     assert "evidence_row_id" not in proposed.model_dump_json(), "§10: the planner gains no field"
+
+
+async def test_the_outcome_grounds_on_an_evidence_row_by_its_e_label_too() -> None:
+    """ADR-0252 §18 arm 19, over the member the guidance sends through the same rule.
+
+    §10 widens the outcome on the element's own shape: "``GoalInterpretation`` gains
+    ``outcome_evidence_row_id`` on the same rule, because ADR-0249 §1 validates the
+    outcome's arguments *as a ``GoalElement``'s are*". The block this lane edited says
+    exactly that to the model — the objective is restated "with an ``outcome_ground``
+    — plus ``outcome_span`` or ``outcome_evidence_label`` **under the same rules as
+    above**" — so widening the element's label space widened the outcome's in the same
+    sentence, and pinning only the element would leave the other half of one rule
+    untested.
+
+    The failure that leaves is narrow and silent, which is why the arm is here rather
+    than filed: an extraction that later stripped or refused ``E1`` on the outcome
+    while the element path stayed correct would pass every other arm in this file, and
+    what is lost is a **restated objective's** grounding — the one value ADR-0249 §7
+    records as ``INFERRED`` rather than dropping, so the turn would look well-formed
+    and the goal would quietly hold an outcome whose warrant nobody can show.
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "outcome": "book the Sunday pitch that came back free",
+                "outcome_ground": "from_evidence",
+                "outcome_evidence_label": "E1",
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    proposed = (
+        await planner.plan(
+            _goal(),
+            utterance=_REQUEST,
+            context=_context(),
+            capabilities=_VOCABULARY,
+            evidence=[_digest()],
+        )
+    ).understanding
+
+    assert proposed is not None
+    assert proposed.outcome_evidence_label == "E1", "byte for byte, prefix included"
+    assert proposed.outcome_ground is Ground.FROM_EVIDENCE
+    assert proposed.retains_outcome is False, "restated, not retained"
+    assert proposed.outcome_span is None, "exactly one argument, which §10 is explicit about"
+    assert model.call_count == 1, "a legal ground, so no repair round is spent"
+    assert "outcome_evidence_row_id" not in proposed.model_dump_json(), "§10: no second carrier"
 
 
 @pytest.mark.parametrize(
