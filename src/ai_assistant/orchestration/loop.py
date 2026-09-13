@@ -93,6 +93,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.evidence import composed_row, digests, ordered_history
 from ai_assistant.orchestration.goals import RaisedSubject, taken_question
 from ai_assistant.orchestration.interpretation import recorded_revision
 from ai_assistant.orchestration.reads import (
@@ -124,7 +125,9 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         ActionPlan,
+        EvidenceDigest,
         FeedbackEvent,
+        GoalEvidence,
         ParkedRead,
         PermissionDecision,
         PlannerOutput,
@@ -375,6 +378,22 @@ class RespondedTurn:
             planner's report *"on this call"* and a later call that raised none is a
             call that no longer reports an ambiguity — which is what makes ADR-0250 §11's
             late answer able to *"proceed"* rather than re-ask what it just resolved.
+        evidence: ADR-0252 §14's carrier: the ``GoalEvidence`` rows this turn's
+            servicings composed, in the order they were composed — **one per outcome
+            entry** ADR-0251 §2's classifier produced, the ``EMPTY``, ``REFUSED``,
+            ``FAILED`` and ``EXPIRED`` entries included, each with ``supported`` empty
+            where no record came back.
+
+            It rides here for :attr:`goal`'s own reason and on the same terms: the loop
+            **composes** every value of a row — from the injected clock, the injected id
+            factory, the typed outcomes of a servicing and the values a store returned —
+            and ``Engine`` **writes** it through ``record_evidence`` at the persistence
+            boundary, because ADR-0249 §11 gives this loop no ``PlanStore``. The
+            ``supersedes`` set each write carries is ADR-0252 §8's predicate, which §12
+            rules is ``orchestration``'s and never the store's.
+
+            Empty on every turn that did not fire, whose servicing was declined, whose
+            servicing failed, and which worked on no goal.
     """
 
     turn: TurnResult
@@ -388,6 +407,7 @@ class RespondedTurn:
     parked_read: ParkedRead | None = None
     parked_decision: PermissionDecision | None = None
     raised: RaisedSubject | None = None
+    evidence: tuple[GoalEvidence, ...] = ()
 
 
 #: ADR-0251 §5's planner-call allowance for
@@ -1639,6 +1659,7 @@ class LearningLoop:
         continuing: Goal | None = None,
         continuing_attempt: GoalAttempt | None = None,
         open_question: str | None = None,
+        evidence: Sequence[GoalEvidence] = (),
         charge: PlannerCharge | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
@@ -1732,6 +1753,12 @@ class LearningLoop:
                 **no** stored goal value to such a turn. Read from the store by
                 ``Engine`` and handed over as a string: this loop holds no
                 ``PlanStore`` (ADR-0249 §11) and acquires none for it.
+            evidence: This goal's ``GoalEvidence`` rows as the store holds them
+                (ADR-0252 §11, §12) — read by ``Engine`` and handed over for the same
+                reason ``open_question`` is, and ``()`` on every goal the store holds no
+                row of, which is every goal this turn opens. ADR-0252 §11's digests are
+                projected from it here, and ADR-0252 §10's ``E`` labels are ordinals
+                into that projection.
             charge: What to call immediately before each ``Planner.plan`` call, on an
                 attempt the store **already holds** (ADR-0251 §12, #2294,
                 :data:`PlannerCharge`). ``None`` on an attempt this turn opened, which
@@ -1776,6 +1803,7 @@ class LearningLoop:
                 continuing=continuing,
                 continuing_attempt=continuing_attempt,
                 open_question=open_question,
+                evidence=evidence,
                 charge=charge,
             )
         finally:
@@ -1801,6 +1829,7 @@ class LearningLoop:
         continuing: Goal | None = None,
         continuing_attempt: GoalAttempt | None = None,
         open_question: str | None = None,
+        evidence: Sequence[GoalEvidence] = (),
         charge: PlannerCharge | None = None,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
@@ -2068,6 +2097,12 @@ class LearningLoop:
                 **no** stored goal value to such a turn. Read from the store by
                 ``Engine`` and handed over as a string: this loop holds no
                 ``PlanStore`` (ADR-0249 §11) and acquires none for it.
+            evidence: This goal's ``GoalEvidence`` rows as the store holds them
+                (ADR-0252 §11, §12) — read by ``Engine`` and handed over for the same
+                reason ``open_question`` is, and ``()`` on every goal the store holds no
+                row of, which is every goal this turn opens. ADR-0252 §11's digests are
+                projected from it here, and ADR-0252 §10's ``E`` labels are ordinals
+                into that projection.
             charge: What to call immediately before each ``Planner.plan`` call, on an
                 attempt the store **already holds** (ADR-0251 §12, #2294,
                 :data:`PlannerCharge`). ``None`` on an attempt this turn opened, which
@@ -2212,6 +2247,20 @@ class LearningLoop:
         # to the engine on `RespondedTurn` as data (§11); what crosses the planning seam
         # and the wire is this value, which carries no ground reference at all.
         brief = _brief_of(goal, open_question)
+        # ADR-0252 §11, §12: the goal's evidence history in the **total** order
+        # `evidence_of` returns it in — `read_at` oldest first, ties broken by `id`
+        # ascending — and the digests projected from it. Ordered here rather than
+        # trusted from the caller, so that the `E` label space and the digest sequence
+        # are two views of **one** order by construction rather than by agreement: a
+        # label is an ordinal into the sequence the planner was handed, and the loop
+        # stamps "the id of the row it itself labelled".
+        #
+        # **Projected once and passed to both calls of a turn**, like `files` and unlike
+        # `memories`: the store's answer does not move between them, because every row
+        # this turn writes is persisted at ADR-0249 §11's site, after the last call.
+        # What tells a later round what this one read is `read_outcomes`.
+        evidence_rows = ordered_history(evidence)
+        evidence_digests = digests(evidence_rows)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
         preceding = recent + retrieved
@@ -2251,6 +2300,14 @@ class LearningLoop:
         # not fire, whose servicing was declined and whose servicing failed carries
         # into its second call too.
         read_outcomes: tuple[ReadAskOutcome, ...] = ()
+        # ADR-0252 §14's carrier: the rows this turn's servicings are to write, in the
+        # order they were composed. **Composed here and written by `Engine`** — this
+        # loop holds no `PlanStore` and gains none (ADR-0249 §11), so the row travels
+        # out on `RespondedTurn` as data exactly as the goal record and the attempt do.
+        # Empty on every turn that did not fire, whose servicing was declined and whose
+        # servicing failed, which is §14's "a servicing that did not complete produces
+        # none".
+        recorded_evidence: tuple[GoalEvidence, ...] = ()
         # ADR-0240 §8's three facts, each on its own condition. The first two are
         # **accumulated over the turn** because ADR-0228 §7 keeps every servicing's
         # records in one growing fourth group; the third is replaced by each servicing
@@ -2317,6 +2374,10 @@ class LearningLoop:
             # every call, exactly as it passes `files`, which is what makes the
             # widening the compatibility break §3 flags it as.
             read_outcomes=(),
+            # ADR-0252 §11: the same sequence on both calls of the turn, for ADR-0230
+            # §3's reason one seam over — the history does not move between them, so a
+            # label's meaning is stable across a turn where an `M` label's is not.
+            evidence=evidence_digests,
             audit=audit,
             charge=charge,
             charged=opened_calls,
@@ -2334,6 +2395,7 @@ class LearningLoop:
             utterance=utterance,
             supply=memories,
             minted=minted,
+            evidence=evidence_rows,
             at=turn_at,
             raised_by=raised_by,
             brief=brief,
@@ -2484,7 +2546,44 @@ class LearningLoop:
             # there as data: nothing here re-derives an outcome, and a loop reading
             # one off `serviced.new` would read a deduplicated-away read as an empty
             # one exactly as ADR-0240 §6 warns.
-            read_outcomes += carried.read_outcomes
+            read_outcomes += tuple(one.entry for one in carried.yields)
+            # **ADR-0252 §14's production rule, and this is the one site it runs at.**
+            # "A **completed** servicing produces **exactly one** `READ_OUTCOME` row per
+            # ask it reached that produced an outcome entry", and "the member the entry
+            # carries decides the row's `verdict` and decides nothing about whether the
+            # row is written": `EMPTY`, `DUPLICATE`, `TRUNCATED`, `REFUSED`, `FAILED`
+            # and `EXPIRED` are each recorded, with `supported` empty where no record
+            # came back. An ask in ADR-0251 §2's classifier case 1 produced no entry and
+            # so reaches this loop not at all, and a servicing that did not complete
+            # carries `yields` empty. **No lane writes a second row for one entry,
+            # suppresses a row for an entry it judges uninteresting, or writes one from
+            # anything but an entry.**
+            #
+            # **One reading of the clock for the whole servicing** (§4). `read_at` is
+            # "the instant **this system** performed the read, taken from the injected
+            # clock" — one event per servicing, not one per ask — and taking it per ask
+            # would report five instants for one round the source answered in. §12's
+            # order is total on `(read_at, id)` precisely because two rows written from
+            # one servicing share the instant to the microsecond.
+            #
+            # **No `ContextFacet` produces a row** (§3) and **no row is produced by a
+            # turn that is not working on a goal** (§14): neither reaches this line,
+            # because a facet is not a servicing and every turn here holds a goal and an
+            # attempt to fill the row's two identifiers from.
+            read_at = self._now_utc()
+            recorded_evidence += tuple(
+                composed_row(
+                    row_id=self._id_factory(),
+                    goal_id=goal.id,
+                    attempt_id=attempt.id,
+                    ask=one.ask,
+                    outcome=one.outcome,
+                    records=one.records,
+                    admitted=one.admitted,
+                    read_at=read_at,
+                )
+                for one in carried.yields
+            )
             # ADR-0249 §7, ADR-0231 §16: accumulated across the turn's servicings for
             # the same reason `memories` is — the supply grows and a later call's
             # `FROM_EVIDENCE` ground may name a record an *earlier* servicing minted,
@@ -2582,6 +2681,7 @@ class LearningLoop:
                 memories=memories,
                 files=files,
                 read_outcomes=read_outcomes,
+                evidence=evidence_digests,
                 audit=audit,
                 charge=charge,
                 charged=opened_calls,
@@ -2598,6 +2698,7 @@ class LearningLoop:
                 utterance=utterance,
                 supply=memories,
                 minted=minted,
+                evidence=evidence_rows,
                 at=turn_at,
                 raised_by=raised_by,
                 brief=brief,
@@ -2724,6 +2825,11 @@ class LearningLoop:
             # loop holds no `PlanStore`, no clock the question's deadline is computed
             # from, and no way to know whether the one-open-question gate accepted it.
             raised=raised,
+            # ADR-0252 §14: the rows this turn's servicings composed, carried to the
+            # engine on the same terms and for the same reason — every value is written
+            # here, and the write itself is the engine's because ADR-0249 §11 forbids
+            # this loop a store.
+            evidence=recorded_evidence,
         )
 
     async def resumed_read(  # noqa: PLR0913 — the parked turn's three persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
@@ -2921,6 +3027,7 @@ class LearningLoop:
         memories: Sequence[MemoryRecord],
         files: Sequence[ShownFile],
         read_outcomes: Sequence[ReadAskOutcome],
+        evidence: Sequence[EvidenceDigest],
         audit: TurnReadAudit,
         charge: PlannerCharge | None = None,
         charged: int = 0,
@@ -2971,6 +3078,14 @@ class LearningLoop:
                 reason: ADR-0240 §7, which §3 widens rather than relaxes, has the loop
                 pass it on every call, and a defaulted parameter on this side would let
                 a call site forget it silently.
+            evidence: One :class:`~ai_assistant.core.types.EvidenceDigest` per row of
+                this goal's evidence history the store holds, in ADR-0252 §12's total
+                order (ADR-0252 §11). **The same sequence on both calls of a turn**, and
+                required and undefaulted here for ``files``' own reason. It is the
+                sequence ADR-0252 §10's ``E`` labels are ordinals into, and it carries
+                no row this turn is about to write: a row is persisted at ADR-0249 §11's
+                site, after every planner call this turn makes, and what tells a *later*
+                round what this one read is ``read_outcomes``.
             charge: What to call immediately before the planner, on an attempt the
                 store already holds (ADR-0251 §12, :data:`PlannerCharge`), or ``None``
                 on one this turn opened — which is §12's first case and writes nothing.
@@ -3036,9 +3151,14 @@ class LearningLoop:
             capabilities=capabilities,
             files=files,
             read_outcomes=read_outcomes,
-            # ADR-0249 §10's carrier, empty on every call of this lane: no evidence
-            # row exists to project a digest from, and `GoalEvidence` is A4's to mint.
-            evidence=(),
+            # ADR-0249 §10's carrier, as ADR-0252 §11 fills it: one digest per row of
+            # this goal's history, in §12's total order, projected by `orchestration`
+            # alone and carrying no identifier of any kind. Every row is projected,
+            # `INAPPLICABLE` and `SUPERSEDED` ones included — "a digest sequence
+            # filtered to `STANDING` would make the member constant and the sentence
+            # false" — and none of them says whether anything is satisfied: §6's tests
+            # are evaluated by code at dispatch and their result crosses no seam.
+            evidence=evidence,
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:
@@ -3353,6 +3473,7 @@ class LearningLoop:
         utterance: str,
         supply: Sequence[MemoryRecord],
         minted: Collection[str],
+        evidence: Sequence[GoalEvidence],
         at: datetime,
         raised_by: str,
         brief: GoalBrief,
@@ -3403,6 +3524,10 @@ class LearningLoop:
             at: This turn's own instant.
             raised_by: The turn whose message caused this revision — one value per turn
                 (§1), minted by the caller and shared with its opening revision.
+            evidence: This goal's evidence rows in ADR-0252 §12's total order, which
+                is the sequence an ``E`` label is an ordinal into (§10) and the one this
+                call's digests were projected from. ``()`` on a goal the store holds no
+                row of.
             open_question: The text of the goal's open question, where one stands
                 (ADR-0250 §8), so that the brief this method re-projects carries it
                 exactly as the one :meth:`_turn` built did. ``None`` where none does.
@@ -3423,6 +3548,12 @@ class LearningLoop:
             utterance=utterance,
             supply=supply,
             minted=minted,
+            # ADR-0252 §10: the sequence an `E` label is an ordinal into — **the one
+            # this call's `evidence` digests were projected from**, so the label the
+            # planner emitted and the row the loop stamps are read off one order. An `M`
+            # label goes on resolving against `supply`, and the prefix is the whole of
+            # what decides which.
+            evidence=evidence,
             recorded_at=at,
             raised_by=raised_by,
         )
