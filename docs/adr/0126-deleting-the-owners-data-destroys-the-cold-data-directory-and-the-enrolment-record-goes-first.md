@@ -1,10 +1,6 @@
 # 126. Deleting the owner's data destroys the cold data directory, and the enrolment record goes first
 
-- Status: Partially superseded by ADR-0153 (§3's cross-boundary-injection clause,
-  §6's first and second clauses, §7's "no keyring is reached" limb, §8's
-  `core/protocols.py` limb and §11's "destroying the resolved `data_dir` and
-  nothing else" limb — each only as this act reaches the `INTEGRATION`
-  purge)
+- Status: Partially superseded by ADR-0153 (§3's cross-boundary-injection clause, §6's first and second clauses, §7's "no keyring is reached" limb, §8's `core/protocols.py` limb and §11's "destroying the resolved `data_dir` and nothing else" limb — each only as this act reaches the `INTEGRATION` purge)
 - Date: 2026-08-10
 - Accepted: 2026-08-10
 - Partially superseded: 2026-08-14 by ADR-0153 — **six limbs, one scope,
@@ -106,7 +102,13 @@
   ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
   superseded by` is a target"* — and this line carried 1 such token inside its scope
   parentheses. A consumer doing what §4 says a consumer does read ADR-0149 as a
-  supersession target of this ADR, which it is not.
+  supersession target of this ADR, which it is not. **The field is also folded onto one
+  physical line**, which the same §4 requires — *"A canonical status is one physical
+  line … so the value is read whole without reconstructing wrapped continuations"* — as a
+  going-forward rule whose five grandfathered exceptions §4 enumerates by name
+  (ADR-0003, ADR-0029, ADR-0038, ADR-0040, ADR-0065) and this ADR is not among; it was
+  written 2026-08-10, after ADR-0070. No character of the value changes but the line
+  breaks and the spaces that wrapped it.
   **The targets are unchanged — ADR-0153 — each still paired with the same scope, whose
   extent does not move; what is re-rendered is the prose naming the clauses.** **The
   cross-references that prose carried, on which §4 places no constraint in a note:** the
