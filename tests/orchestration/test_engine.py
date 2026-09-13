@@ -344,6 +344,10 @@ OBSERVATION_BATCH = 20
 #: case that advances the injected clock past it names one figure rather than two.
 ROUTED_TTL = timedelta(minutes=15)
 
+#: ADR-0250 §8's default, restated here so a case that pins a deadline reads the same
+#: figure the composition root passes.
+GOAL_QUESTION_TTL = timedelta(hours=72)
+
 #: The engine's own default outstanding-confirmation ceiling, restated so a case that
 #: wants backpressure can lower it without every other case naming a number.
 DEFAULT_MAX_OUTSTANDING = 1024
@@ -664,6 +668,9 @@ class Harness:
         speakable_attested_sources: frozenset[str] = frozenset(),
         max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
         routed_confirmation_ttl: timedelta = ROUTED_TTL,
+        # ADR-0250 §8's one `Settings` field, so a case can pin the deadline it
+        # computes and the figure the engine refuses at construction.
+        goal_question_ttl: timedelta = GOAL_QUESTION_TTL,
         max_outstanding_confirmations: int = DEFAULT_MAX_OUTSTANDING,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         notification_outbox: DeliveryOutbox | None = None,
@@ -1006,6 +1013,7 @@ class Harness:
             speakable_attested_sources=speakable_attested_sources,
             max_spoken_audio_bytes=max_spoken_audio_bytes,
             routed_confirmation_ttl=routed_confirmation_ttl,
+            goal_question_ttl=goal_question_ttl,
             max_outstanding_confirmations=max_outstanding_confirmations,
             # ADR-0085 §8c's contract limit, a knob so a case can put a *result* over
             # it cheaply — which is the only way ADR-0200 §4's fourth degradation and
