@@ -247,10 +247,12 @@ evaluation is what decides a dispatch.
 > - the step's own outcome is **`INDETERMINATE`** (§6);
 > - the **request deadline** has no strictly positive remainder (§9).
 
-> **Normative.** **A step the walk did not reach is `PENDING` and is never `SKIPPED` by this
-> decision.** No lane sweeps the remainder of a stopped walk into `SKIPPED`, writes a
-> `SkipReason` for a step nothing evaluated, or reads `PENDING` after a stopped walk as a
-> terminal state.
+> **Normative.** **A step the walk did not reach is `PENDING` when the walk ends**, and **the
+> walk itself never skips it**. No lane sweeps the remainder of a stopped walk into `SKIPPED`,
+> writes a `SkipReason` for a step nothing evaluated, or reads `PENDING` after a stopped walk as
+> a terminal state. **Exactly one later event disposes of such a step, and it is not the walk**:
+> §7's supersession, on a different ground, at a different moment, and forbidden by §6 behind an
+> `INDETERMINATE` step.
 
 > **Normative — what re-enters a stopped walk, and this decision provides no automatic route.** A
 > stopped walk is re-entered by **exactly one** route: `StepRunner.resume` answering a park of
@@ -494,10 +496,33 @@ system says it cannot know how far a call got, and no conjunct on a store write 
 > is a `→ RUNNING` transition and §3 binds it — so a park answered after the goal moved on, or
 > after the attempt ended, is refused and nothing is invoked.
 
-> **Normative — the driver holds no cursor, and re-entry is computed from durable state.** The
-> position the walk resumes at is **the first step of the plan whose stored
-> `StepExecution.status` is `PENDING`**, read from `PlanStore.get_execution`. **No lane carries a
-> step index across a park, a turn or a restart, and no lane persists one.**
+> **Normative — the driver holds no cursor, and a resumed walk starts where every walk starts.**
+> **Every walk visits the plan's steps from the first position**, reading each step's stored
+> `StepExecution.status` from `PlanStore.get_execution`, and disposes of it by that status:
+> **`SUCCEEDED`, `FAILED` and `SKIPPED`** are already disposed of and are **passed over without
+> re-dispatch** — their dependents are governed by ADR-0253 §2 when the walk reaches them;
+> **`PENDING`** is evaluated under §1; and **`AWAITING_APPROVAL`, `RUNNING` or `INDETERMINATE`
+> stops the walk** where it stands. **No lane carries a step index across a park, a turn or a
+> restart, no lane persists one, and no lane computes a resume position at all.**
+
+**Re-walking from the first position rather than seeking to a resume point is what makes the
+cursor unnecessary instead of merely derived, and it is also what stops a resumed walk
+overtaking.** The obvious rule — resume at the first step still `PENDING` — is wrong on the very
+shape §5 exists for: a plan whose **second** step is `AWAITING_APPROVAL` and whose **third** is
+`PENDING` has its first `PENDING` step at position three, so that rule would dispatch step three
+**past an unanswered question about step two**. Starting at position one cannot: the walk meets
+step two first and stops there. The pass costs one store read and a status comparison per step,
+against a durable state that ADR-0014 §3 already guarantees carries *"everything a restarted
+executor needs to **not redo work**"*.
+
+**Each of the three stopping statuses is a stop for a reason already ruled, and none is new
+here.** `AWAITING_APPROVAL` is the park, and driving past it is what §2's park argument refuses.
+`INDETERMINATE` is ADR-0014 §4's ignorance and §6's branch stop. **`RUNNING` is a step this
+process is not executing** — every walk is sequential and in-process (§1, §4), so a stored
+`RUNNING` the walk meets was left by something else, which is exactly the state ADR-0014 §4 gives
+the **startup recovery scan** and which `ExecutionState.has_live_step` already marks for
+`delete_goal`. The driver resolves none of them: it stops, and A8 and the recovery scan own what
+happens next (§12).
 
 **A cursor would be a second authority that can disagree with the executions, which is the defect
 ADR-0014 §3 splits `ExecutionState` out of `ActionPlan` to avoid.** That section's whole argument
@@ -1047,7 +1072,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    `resume` then disposes of step 2 and the driver **re-enters at step 3**, computed from the
    stored execution and not from a carried index. A paired arm answers `DENY`: step 2 is
    `SKIPPED`/`APPROVAL_DENIED`, and step 3 — declaring `depends_on` step 2 — is
-   `SKIPPED`/`UNMET_DEPENDENCY`.
+   `SKIPPED`/`UNMET_DEPENDENCY`. **And the arm that pins the overtake**: with step 2 durably
+   `AWAITING_APPROVAL` and step 3 `PENDING`, a walk started afresh over that execution — the shape
+   a restart produces — dispatches **nothing**, because it meets step 2 first. A driver that
+   sought to the first `PENDING` step would dispatch step 3, which is the defect §5's
+   start-at-position-one rule makes unreachable rather than checks for.
 9. **"Restart during approval"** — the same plan parked at its second step; a **fresh** engine over
    the same durable state recovers it through `pending_confirmations()` (ADR-0052 §1), answers it,
    and the driver re-enters at step 3. The arm asserts the recovery is over steps and not
