@@ -7906,6 +7906,16 @@ class GoalAuthorizationStore(Protocol):
           retire**, and the uniqueness refusal is what holds it to a pair no row is
           established for.
 
+        **The origin a path determines is the one the row must carry.** ``origin`` is
+        what ADR-0254 §6 reads to decide whether route (d) re-takes the recipient
+        authority an opening act rested on, *"read off the row, with no store read
+        and no walk back through a chain"* — so a row naming a ``confirmation`` is
+        written ``CONFIRMED`` and one naming **neither** pointer is written
+        ``OPENING_ACT``. A correction **transcribes** it, which the non-widening
+        check below is what holds; and a path-(iii) row falsely marked ``CONFIRMED``
+        is exactly the row route (d) would carry **alone**, with the grant seam
+        consulted zero times.
+
         **The write-path rules, which are deliberately not model validators** (§1):
         a row carrying ``confirmation`` is written ``PROPOSED``; a row carrying
         ``confirmation`` **unset** is written ``ESTABLISHED`` with ``settled_at``
@@ -8008,8 +8018,22 @@ class GoalAuthorizationStore(Protocol):
         :attr:`~ai_assistant.core.types.AuthorizationSettlement.WOULD_DUPLICATE`
         where one would.
 
+        **An answer arriving at or after the row's ``expires_at`` establishes
+        nothing** (ADR-0254 §1, §12). ``settle`` is the second of §1's exactly two
+        settling operations — *"a ``live_for`` read, and the answer that names
+        it"* — so on an **answer** (a move to ``ESTABLISHED`` or to ``DECLINED``)
+        the expiry settlement is taken **first**, and the requested edge is then
+        evaluated from where the row stands: a late approval lands the row
+        ``EXPIRED`` and is answered ``NOT_AT_SOURCE``, because *"an expired proposal
+        is refused as an establishment at all"*. **On every other move the row is
+        left exactly as it stands**, which is arm 37's *"and by no other
+        operation"*: a request for ``REVOKED`` or ``SUPERSEDED`` from ``PROPOSED``
+        leaves ``PROPOSED`` by no edge, so it is not an answer and a refused
+        settlement must mutate nothing.
+
         **It reads no clock** and takes ``settled_at`` from the caller, as
-        :meth:`record` takes its instants (ADR-0021 §3).
+        :meth:`record` takes its instants (ADR-0021 §3): the comparison above is
+        between the caller's instant and the row's own.
 
         Args:
             authorization_id: The row to settle.

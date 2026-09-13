@@ -1526,3 +1526,83 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         held = await store.resolve("a1")
         assert held is not None
         assert held.disposition is AuthorizationDisposition.REVOKED
+
+    async def test_a_move_that_is_not_an_answer_leaves_a_lapsed_proposal_untouched(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 37: settled ``EXPIRED`` by those two operations *"and by no other"*.
+
+        ``PROPOSED`` is left by no edge to ``REVOKED`` or ``SUPERSEDED``, so a call
+        asking for one is **not an answer** — it is a malformed call — and a refused
+        settlement must mutate nothing. **A lane that took the expiry settlement on
+        every move fails this arm**: the refusal would still have written to the
+        store.
+        """
+        for target in (AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED):
+            await store.record(authorization(id=f"a-{target.value}", confirmation=target.value))
+            assert (
+                await store.settle(f"a-{target.value}", to=target, settled_at=EXPIRES)
+                is AuthorizationSettlement.NOT_AT_SOURCE
+            )
+            held = await store.resolve(f"a-{target.value}")
+            assert held is not None
+            assert (held.disposition, held.settled_at) == (
+                AuthorizationDisposition.PROPOSED,
+                None,
+            )
+
+    # --- record: the origin a path determines (ADR-0254 §1, §6) ------------
+
+    async def test_a_row_naming_a_confirmation_is_written_confirmed(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1's path (i): ``origin`` is ``CONFIRMED`` *"because the destination set is
+        named in the question the user answers"*."""
+        await _refuses(store, authorization(id="a1", origin=AuthorizationOrigin.OPENING_ACT))
+
+    async def test_a_row_naming_neither_pointer_is_written_opening_act(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1's path (iii), and it is what keeps §6's recipient recheck reachable.
+
+        ``origin`` is what route (d) reads to decide whether to re-take the recipient
+        authority an opening act rested on, *"read off the row, with no store read
+        and no walk back through a chain"*. **A path-(iii) row falsely marked
+        ``CONFIRMED`` is exactly the row route (d) would carry alone**, with the
+        grant seam consulted zero times — which is the failure arm 70 names.
+        """
+        await _refuses(
+            store,
+            authorization(
+                id="a1",
+                confirmation=None,
+                supersedes=None,
+                origin=AuthorizationOrigin.CONFIRMED,
+                disposition=AuthorizationDisposition.ESTABLISHED,
+            ),
+        )
+
+    async def test_a_correction_transcribes_the_origin_rather_than_determining_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: a path-(ii) row carries ``supersedes``, so its origin is neither
+        determined by its pointers nor free — it is **transcribed**, and the
+        non-widening check is what holds it.
+
+        That is why the rule above is stated over a row carrying **neither** pointer
+        rather than over ``confirmation`` alone: a correction of a ``CONFIRMED`` row
+        is ``CONFIRMED`` and a correction of an opening act is ``OPENING_ACT``, and
+        both are correct.
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        held = await store.resolve("a2")
+        assert held is not None
+        assert held.origin is AuthorizationOrigin.OPENING_ACT

@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
@@ -417,7 +417,20 @@ def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zon
             day = date.fromisoformat(text)
         except ValueError:  # pragma: no cover — an impossible date, e.g. 2026-02-31
             return None
-        return datetime.combine(day, time(), tzinfo=located)
+        start = datetime.combine(day, time(), tzinfo=located)
+        # **A civil date that has no start in that zone denotes no instant, and the
+        # reading refuses it** (§4's totality: *"every failure of it is a refusal to
+        # cover"*). A zone can skip a whole calendar day — Samoa skipped 30 December
+        # 2011 when it crossed the date line — and ``datetime.combine`` answers such a
+        # date with an instant all the same, resolving the gap by PEP 495's rule. That
+        # instant belongs to a **different** local day, so a bound containing it would
+        # cover a request whose date the user could not have meant: the permissive
+        # direction, on a value nothing in this system can prove. The round trip is
+        # the whole test — where the instant reads back as the day asked for, the day
+        # has a start and this is it.
+        if start.astimezone(UTC).astimezone(located).date() != day:
+            return None
+        return start
     if not _DATE_TIME.match(text):
         return None
     # **RFC 3339 §5.6's own case rule permits a lower-case ``t`` and ``z``**, and
