@@ -1146,6 +1146,125 @@ async def test_an_elision_reconciles_every_candidate_before_it_destroys_one(
         store.close()
 
 
+async def test_a_deletion_takes_every_row_whose_record_names_the_deleted_goal(
+    tmp_path: Path,
+) -> None:
+    """ADR-0014 §5 is a promise about the **record**, not about the projection.
+
+    "A goal the user deletes must not leave its plan history behind", and ADR-0252 §12
+    extends the cascade to evidence "of every standing". The promoted ``goal_id`` is a
+    projection of the record, so a cascade keyed on it alone answers the question with
+    the projection: a row whose record names the deleted goal while its column names
+    another **survives the deletion**, and ``evidence_removed`` reports that nothing was
+    left behind. That is the user's data still in the store after the store said it was
+    gone, which is the one outcome §5 forbids outright.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.save_goal(_goal("g2"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+    finally:
+        store.close()
+
+    # The record still names `g1`; only the column is walked over to `g2`.
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goal_evidence SET goal_id = 'g2' WHERE id = 'ev1'")
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        removed = await store.delete_goal("g1")
+
+        assert removed.deleted
+        assert removed.evidence_removed == 1, "the row went with the goal its record names"
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
+    finally:
+        store.close()
+
+
+async def test_a_deletion_refuses_a_row_whose_column_claims_the_goal_its_record_does_not(
+    tmp_path: Path,
+) -> None:
+    """The mirror-image fault is refused rather than committed (ADR-0049 §1).
+
+    A row whose **column** names the goal being deleted while its **record** names
+    another is the same disagreement every read refuses. Deleting it would destroy a row
+    whose record says it belongs to a goal the user did not delete — irrecoverably, and
+    reported as a successful cascade. The two directions resolve asymmetrically because
+    the two errors are not symmetrical: a record claiming the goal is taken, a column
+    claiming it alone is refused.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.save_goal(_goal("g2"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+    finally:
+        store.close()
+
+    # The column still names `g1`; the record is walked over to `g2`.
+    with sqlite3.connect(path) as conn:
+        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
+        held = json.loads(raw)
+        held["goal_id"] = "g2"
+        conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (json.dumps(held),))
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="while its record names goal"):
+            await store.delete_goal("g1")
+
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM goals WHERE id = 'g1'").fetchone() == (1,)
+    finally:
+        store.close()
+
+
+async def test_evidence_of_a_goal_the_store_does_not_hold_is_empty_even_with_an_orphan_row(
+    tmp_path: Path,
+) -> None:
+    """``core.protocols`` states this member's answer for an absent goal, and it is empty.
+
+    "*Empty, with a zero count, for a goal this store does not hold*: an absent goal is
+    not a fault to raise on a read that is already a lookup, which is ``open_question``'s
+    own posture." The rows are keyed by the promoted ``goal_id``, which an outside writer
+    can point at a goal the store has never held — and selecting them before asking
+    whether the goal exists answered that lookup with a **non-empty** history for a goal
+    that does not exist, which is neither answer the contract offers. It is also the
+    state ``export`` refuses, so the two reads disagreed about one file.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
+        held = json.loads(raw)
+        held["goal_id"] = "ghost"
+        conn.execute(
+            "UPDATE goal_evidence SET goal_id = 'ghost', data = ? WHERE id = 'ev1'",
+            (json.dumps(held),),
+        )
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert await store.evidence_of("ghost") == EvidenceHistory(goal_id="ghost")
+    finally:
+        store.close()
+
+
 async def test_an_export_refuses_an_evidence_row_whose_goal_it_does_not_hold(
     tmp_path: Path,
 ) -> None:

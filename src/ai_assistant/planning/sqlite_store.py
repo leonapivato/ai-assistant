@@ -2105,6 +2105,71 @@ class SqlitePlanStore:
             row = await _run_to_completion(self._read_evidence, evidence_id)
         return None if row is None else _checked_evidence(str(self._path), row)
 
+    def _delete_goal_evidence(self, conn: sqlite3.Connection, goal_id: str) -> int:
+        """Remove every evidence row that is this goal's, by **both** of the two answers.
+
+        ADR-0014 §5's guarantee is about the record — *"a goal the user deletes must not
+        leave its plan history behind"* — and the promoted ``goal_id`` column is only a
+        projection of it. A ``DELETE ... WHERE goal_id = ?`` therefore answers the
+        question with the projection alone, and on a file where the two disagree it gets
+        it wrong in the direction that matters: a row whose **record** names the deleted
+        goal, but whose column names another, survives the deletion and is reported as
+        nothing removed. That is the user's data, still in the store, after the store
+        said it was gone.
+
+        So both answers are consulted, and they resolve asymmetrically because the two
+        errors are not symmetrical:
+
+        - **A record naming this goal goes with it**, whatever its column says. Deletion
+          is the conservative direction for a row that claims the goal: keeping it is
+          the one outcome ADR-0014 §5 forbids outright.
+        - **A column naming this goal over a record that names another is refused**, as
+          the same disagreement every read refuses (:func:`_checked_evidence`). Deleting
+          it would destroy a row whose record says it belongs to a goal the user did not
+          delete, which is the mirror-image fault and is not recoverable.
+
+        **The record's goal is read out of the JSON rather than through the model**, and
+        that is deliberate: the question is about one field, and requiring the whole row
+        to validate would let an unrelated invalid row — one no read of *this* goal would
+        ever touch — block a user's ADR-0004 data-rights call behind a fault they cannot
+        clear. A row whose blob does not parse at all is removed where its column names
+        this goal: an unreadable record under the goal's own key goes with the goal
+        rather than outliving it.
+
+        Args:
+            conn: The connection the delete transaction is running on.
+            goal_id: The goal being deleted.
+
+        Returns:
+            How many rows were removed.
+
+        Raises:
+            PlanningError: If a row's column claims this goal while its record names
+                another.
+        """
+        doomed: list[str] = []
+        for row in conn.execute("SELECT id, goal_id, data FROM goal_evidence").fetchall():
+            try:
+                claimed = json.loads(str(row[2])).get("goal_id")
+            except json.JSONDecodeError:
+                claimed = None
+            if claimed == goal_id:
+                doomed.append(str(row[0]))
+                continue
+            if str(row[1]) != goal_id:
+                continue
+            if claimed is None:
+                doomed.append(str(row[0]))
+                continue
+            msg = (
+                f"the plan store at {str(self._path)!r} holds evidence row {row[0]} "
+                f"under goal {goal_id} while its record names goal {claimed}; the store "
+                f"is corrupt"
+            )
+            raise PlanningError(msg)
+        conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
+        return len(doomed)
+
     def _read_evidence(self, evidence_id: str) -> Sequence[Any] | None:
         """One evidence row and the four columns beside it, outside a transaction."""
         try:
@@ -2130,27 +2195,37 @@ class SqlitePlanStore:
 
     def _evidence_of_sync(self, goal_id: str) -> tuple[list[Sequence[Any]], int]:
         with self._transaction(f"read evidence of goal {goal_id!r}") as conn:
+            # **The goal first, and the rows only if it is held.** `core.protocols`
+            # states this member's answer for an absent goal in terms — "*Empty, with a
+            # zero count, for a goal this store does not hold*: an absent goal is not a
+            # fault to raise on a read that is already a lookup" — and the rows are
+            # keyed by the promoted `goal_id`, which an outside writer can point at a
+            # goal the store has never held. Selecting them first would answer that
+            # lookup with a **non-empty** history for a goal that does not exist, which
+            # is neither of the two answers the contract offers. On a sound file the
+            # foreign key makes this test redundant; it is the file where it is not that
+            # this member is being held to its own stated answer.
+            if conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
+                return [], 0
             # The filter and the order are the **columns'**, and every row returned is
             # reconciled against them (:func:`_checked_evidence`) — otherwise a
             # disagreeing `read_at` would hand a caller §12's total order over values the
             # rows themselves contradict, and §10's `E` label is an ordinal into exactly
             # this sequence. A row whose promoted `goal_id` disagrees is not silently
             # dropped from this answer: it is refused on the read of the goal its column
-            # names, and `export` refuses it outright, so no read reports a history as
-            # complete while a row of it is unaccounted for.
+            # names, `export` refuses it outright, and `delete_goal` takes it with the
+            # goal its record claims — so no read reports a history as complete while a
+            # row of it is unaccounted for.
             rows: list[Sequence[Any]] = list(
                 conn.execute(
                     _EVIDENCE_COLUMNS + " WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
                     (goal_id,),
                 ).fetchall()
             )
-            # `None` for a goal this store does not hold, which reads as a history with
-            # nothing in it and nothing lost — an absent goal is not a fault to raise on
-            # a read that is already a lookup.
             held = conn.execute(
                 "SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)
             ).fetchone()
-        return rows, _elided_count(str(self._path), goal_id, held[0]) if held is not None else 0
+        return rows, _elided_count(str(self._path), goal_id, held[0])
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -2820,18 +2895,7 @@ class SqlitePlanStore:
             # keys on a RUNNING step — and the elision count goes with the goal because
             # the count is a column of the goal's own row. Before the goal, so the
             # foreign key holds at each step.
-            evidence_removed = conn.execute(
-                # Keyed on the **promoted** `goal_id` and deliberately not reconciled:
-                # the foreign key onto `goals` is declared over that column, so deleting
-                # by it removes exactly the rows SQLite holds as this goal's children and
-                # leaves nothing orphaned. A record that disagreed would go with them,
-                # which is the safe direction — and refusing a deletion on a corrupt row
-                # would trap a user's ADR-0004 data-rights call behind a fault they
-                # cannot clear. `evidence_removed` counts rows removed, not records
-                # decoded.
-                "DELETE FROM goal_evidence WHERE goal_id = ?",
-                (goal_id,),
-            ).rowcount
+            evidence_removed = self._delete_goal_evidence(conn, goal_id)
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,

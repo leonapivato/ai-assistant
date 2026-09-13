@@ -10069,9 +10069,56 @@ class GoalEvidence(BaseModel):
         """
         self._refuse_a_basis_mismatch()
         self._refuse_a_kind_mismatch()
+        self._refuse_a_verdict_mismatch()
         self._refuse_a_count_mismatch()
         self._refuse_a_standing_mismatch()
         return self
+
+    def _refuse_a_verdict_mismatch(self) -> None:
+        """ADR-0252 §5: which vocabulary the verdict is drawn from, decided by the basis.
+
+        *"``verdict`` carries the value of a typed outcome and **never a prose
+        summary**"*, and *"which vocabulary the value is drawn from is decided by
+        ``basis`` and by nothing else"* — so a reader holding a row *"never has to guess
+        what ``'empty'`` is a member of"*. Without this the field is an
+        ``EncodableText`` and any sentence a model wrote satisfies it, which is the one
+        thing §5 opens by forbidding.
+
+        **A ``READ_OUTCOME`` row's verdict is one of** :class:`ReadOutcomeKind`'s seven.
+        §5 adopts that vocabulary *"whole and not re-minted"* and enumerates the members
+        by name, so the check reads the enumeration rather than restating it.
+
+        **An ``INTERPRETATION`` row's verdict is not one of them**, which is as much as
+        this decision can check and exactly what §5 asks it to: the members of that
+        vocabulary are *"the one the interpretation step declares"* and are A5's and
+        A7's to fix, but §5's disjointness clause is normative here and now — *"no member
+        of an interpretation enumeration takes a value equal to any of
+        ``ReadOutcomeKind``'s seven"* — because the digest carries ``verdict`` and **not**
+        ``basis``, so *"a planner told ``'empty'`` without being told of what would be
+        told nothing"*. The constraint is *"on the **later** vocabulary"*, and this is
+        where the later vocabulary reaches a stored row.
+
+        Raises:
+            ValueError: If the verdict is not from the vocabulary the basis names.
+        """
+        known = {member.value for member in ReadOutcomeKind}
+        if self.basis is EvidenceBasis.READ_OUTCOME:
+            if self.verdict not in known:
+                msg = (
+                    f"a READ_OUTCOME evidence row's verdict is one of ReadOutcomeKind's "
+                    f"seven and never a prose summary; {self.verdict!r} is none of "
+                    f"{sorted(known)} (ADR-0252 §5)"
+                )
+                raise ValueError(msg)
+            return
+        if self.verdict in known:
+            msg = (
+                f"an INTERPRETATION evidence row's verdict is a member of the "
+                f"enumeration its declaration names, and the two vocabularies are "
+                f"disjoint in their values; {self.verdict!r} is a ReadOutcomeKind "
+                f"(ADR-0252 §5)"
+            )
+            raise ValueError(msg)
 
     def _refuse_a_basis_mismatch(self) -> None:
         """ADR-0252 §1's first axis: what each basis carries.
