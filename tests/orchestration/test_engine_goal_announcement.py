@@ -33,6 +33,12 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.goals import announcement_of
+from ai_assistant.orchestration.payloads import (
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    JSON_STRING_QUOTE_BYTES,
+    canonical_payload,
+    encoded_text_bytes,
+)
 from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
 
 if TYPE_CHECKING:
@@ -86,6 +92,7 @@ def _harness(
     *,
     streaming: StreamAttempt | None = None,
     model: FakeModelProvider | None = None,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
 ) -> Harness:
     """A harness whose association continues the conversation's focused goal.
 
@@ -94,6 +101,7 @@ def _harness(
         streaming: The one attempt a streamed case's seam scripts, or ``None``.
         model: The provider behind the composing stage, where a case reads back what
             was sent to it. A fresh one by default.
+        max_payload_bytes: ADR-0173 §3's ceiling, for the cases that measure it.
 
     Returns:
         The wired harness.
@@ -101,6 +109,7 @@ def _harness(
     return Harness(
         planner=planner,
         associator=_associating(AssociationVerdict.CONTINUES),
+        max_payload_bytes=max_payload_bytes,
         composing=ComposingStage(
             model=FakeModelProvider() if model is None else model,
             streaming=FakeStreamingCompleter(script=() if streaming is None else (streaming,)),
@@ -113,6 +122,7 @@ async def _continuing(
     *,
     streaming: StreamAttempt | None = None,
     model: FakeModelProvider | None = None,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
 ) -> tuple[Harness, str, str]:
     """A harness holding one stored campsite goal the next turn continues.
 
@@ -120,11 +130,14 @@ async def _continuing(
         planner: The scripted planner every turn of the case runs.
         streaming: The one attempt a streamed case's seam scripts, or ``None``.
         model: The provider behind the composing stage, or ``None`` for a fresh one.
+        max_payload_bytes: ADR-0173 §3's ceiling, for the cases that measure it.
 
     Returns:
         The harness, the conversation the goal was engaged in, and the goal's id.
     """
-    harness = _harness(planner, streaming=streaming, model=model)
+    harness = _harness(
+        planner, streaming=streaming, model=model, max_payload_bytes=max_payload_bytes
+    )
     conversation = (await harness.conversations.begin(None)).id
     goal = await _seed(
         harness.plans,
@@ -308,7 +321,7 @@ async def test_a_turn_that_adds_two_constraints_states_both_of_them() -> None:
         "buy from a European supplier",
     )
     assert revised.reply == _reply(
-        f'{_REVISED}: "book a campsite". I have added "keep it under 150 euros" '
+        f'{_REVISED}: "book a campsite", adding "keep it under 150 euros" '
         'and "buy from a European supplier".'
     )
 
@@ -333,8 +346,8 @@ async def test_a_replaced_element_states_the_new_text_and_the_old_one() -> None:
     )
 
     assert replaced.reply == _reply(
-        f'{_REVISED}: "book a campsite". I have added "under forty pounds". '
-        'I am no longer holding "under fifty pounds".'
+        f'{_REVISED}: "book a campsite", adding "under forty pounds" '
+        'and no longer holding "under fifty pounds".'
     )
 
 
@@ -360,7 +373,7 @@ async def test_an_element_dropped_by_omission_is_stated_as_no_longer_held() -> N
     assert omitted.goal_engagement is not None
     assert omitted.goal_engagement.added == ()
     assert omitted.reply == _reply(
-        f'{_REVISED}: "book a campsite". I am no longer holding "under fifty pounds".'
+        f'{_REVISED}: "book a campsite", no longer holding "under fifty pounds".'
     )
 
 
@@ -415,8 +428,8 @@ async def test_a_resumption_that_also_revised_states_both_facts_in_one_sentence(
     assert resumed.goal_engagement.disposition is EngagementDisposition.RESUMED
     assert resumed.goal_engagement.added == ("under fifty pounds",)
     assert resumed.reply == _reply(
-        "Picking up what you asked for earlier, and I have changed what I understand "
-        'it to be: "book a campsite". I have added "under fifty pounds".'
+        "Picking up what you asked for earlier, which I now understand as: "
+        '"book a campsite", adding "under fifty pounds".'
     )
     assert resumed.reply.count(_OUTCOME) == 1, "§14: still named once"
 
@@ -445,7 +458,7 @@ async def test_a_streamed_turn_publishes_the_sentence_first_and_still_joins() ->
         )
     )
 
-    announcement = f'{_REVISED}: "book a campsite". I have added "under fifty pounds".'
+    announcement = f'{_REVISED}: "book a campsite", adding "under fifty pounds".'
     assert chunks[0] == f"{announcement}\n\n", "its own chunk, published first"
     assert outcome.reply == "".join(chunks), "ADR-0173 §3: the reply is the join"
     assert outcome.reply == f"{announcement}\n\nYou prefer hiking."
@@ -509,3 +522,94 @@ async def test_the_sentence_reaches_no_prompt_the_model_was_given() -> None:
     assert sent, "the turn did call the model"
     assert not any(_REVISED in content for content in sent)
     assert not any(announcement in content for content in sent)
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0173 §3's ceiling, measured: the sentence is reserved for, never dropped #
+# --------------------------------------------------------------------------- #
+
+
+async def _streamed(limit: int) -> tuple[list[str], TurnOutcome]:
+    """One streamed, announced turn driven at ``limit`` payload bytes.
+
+    Args:
+        limit: The ceiling ADR-0173 §3 bounds the answer by.
+
+    Returns:
+        Its chunk texts and its terminal outcome.
+    """
+    harness, conversation, _ = await _continuing(
+        _Asking(_constraints("under fifty pounds")),
+        streaming=StreamAttempt(deltas=("You prefer", " ", "hiking.")),
+        max_payload_bytes=limit,
+    )
+    return await _drain(
+        harness.engine.converse_streaming(
+            "and under fifty pounds", timeout=PATIENT, conversation_id=conversation
+        )
+    )
+
+
+async def test_an_announced_reply_that_exactly_fits_the_ceiling_is_not_degraded() -> None:
+    """ADR-0173 §3's ceiling is inclusive, and the sentence is charged its body alone.
+
+    ``_reply_room`` answers in **escaped body** bytes — it has already subtracted the
+    reply string's two quotes — so charging ``encoded_text_bytes``' pair a second time
+    for the announcement would take two bytes off every announced turn's room and
+    refuse a reply the ceiling admits. Measured rather than asserted against a figure,
+    which is §3's own *"the implementing lane measures it rather than guessing"*: the
+    turn is composed once at an ample limit, and a fresh harness is then run at exactly
+    the payload that turn produced.
+    """
+    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
+    exact = len(canonical_payload(outcome))
+
+    chunks, fitted = await _streamed(exact)
+
+    assert chunks == ample, "the same chunks, at a ceiling of exactly their payload"
+    assert fitted.reply == outcome.reply
+    assert fitted.reply_degraded is False
+
+
+async def test_one_byte_short_trims_the_answer_and_keeps_the_sentence() -> None:
+    """§3's fourth shape, with the announcement already published.
+
+    *"having yielded at least one ``ReplyChunk`` it terminates with §6's fourth shape,
+    ``reply`` the text actually yielded and ``reply_degraded`` ``True``"*. What the
+    room reserved for the sentence buys is that the sentence is not what gets trimmed:
+    the user is still told what the assistant now understands, and the answer is what
+    ran out of room.
+    """
+    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
+    exact = len(canonical_payload(outcome))
+
+    chunks, short = await _streamed(exact - 1)
+
+    assert chunks[0] == ample[0], "the sentence, published first and published whole"
+    assert short.reply is not None
+    assert short.reply == "".join(chunks), "ADR-0173 §3: still the join"
+    assert short.reply != outcome.reply, "and the answer is what ran out of room"
+    assert short.reply_degraded is True
+
+
+async def test_a_room_too_small_for_the_sentence_publishes_nothing_at_all() -> None:
+    """An owed announcement is never turned into an ordinary unannounced answer.
+
+    §5 owes the sentence on every turn that resumed, reopened or moved a word, so a
+    ceiling that cannot hold it is not a licence to stream the model's answer without
+    it — that is exactly the silent shape #2332 records. ADR-0173 §3's third case
+    governs instead: *"having yielded none — because the room left could not hold even
+    the first chunk — it terminates with §6's pre-commit shape, ``reply`` ``None`` and
+    ``reply_degraded`` ``True``"*.
+    """
+    ample, outcome = await _streamed(DEFAULT_MAX_PAYLOAD_BYTES)
+    exact = len(canonical_payload(outcome))
+    answer = encoded_text_bytes("".join(ample[1:])) - JSON_STRING_QUOTE_BYTES
+
+    chunks, starved = await _streamed(exact - answer - 1)
+
+    assert chunks == [], "not one chunk, and so not an unannounced answer either"
+    assert starved.reply is None
+    assert starved.reply_degraded is True
+    assert starved.goal_engagement is not None
+    assert starved.goal_engagement.added == ("under fifty pounds",)
