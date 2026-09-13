@@ -78,7 +78,12 @@ from ai_assistant.core.types import (
     ToolCall,
 )
 from ai_assistant.orchestration.capability_alias import resolve_capability
-from ai_assistant.orchestration.selection import Preference, eligible_candidates, select
+from ai_assistant.orchestration.selection import (
+    Preference,
+    eligible_candidates,
+    model_supplied_keys,
+    select,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -1825,6 +1830,35 @@ class StepRunner:
             return StepDisposition(
                 Disposition.AMBIGUOUS_CAPABILITY, state, tied_candidates=selection.tied
             )
+        # **A system-supplied argument the model reached for is a fault, not a
+        # question** (ADR-0254 §3). The step's parameters are a planner's output, so
+        # a key the selected declaration classifies `system_supplied` is one
+        # `orchestration` fills and the model named anyway: "**Where a plan step's
+        # own arguments name such a key at all, the request is not built**: the step
+        # does not dispatch, no ruling is sought and **no `CONFIRM` is put**."
+        #
+        # It sits after the selection because the classification is a field of the
+        # *declaration* — two candidates for one capability may classify differently,
+        # and the same step is a fault against one and ordinary against the other. It
+        # sits before the binding seam because ADR-0148 §1 refuses a request that
+        # cannot be completed *"**before** the ruling"* with no ruling sought, which
+        # is `INVALID_PARAMETERS`' own shape one rule over: nothing is committed, the
+        # step stays `PENDING`, and no decision nobody can use reaches the trail.
+        #
+        # The keys themselves are not logged. They are argument *names* rather than
+        # values, but ADR-0145 §8's discipline is that a rendering of a refusal names
+        # a key only where the declaration declared it, and the count says which
+        # refusal fired without deciding that question here.
+        supplied = model_supplied_keys(step.parameters, selection.tool)
+        if supplied:
+            _log.info(
+                "step_names_a_system_supplied_argument",
+                step_id=step.id,
+                capability=capability,
+                tool_id=selection.tool.id,
+                named=len(supplied),
+            )
+            return StepDisposition(Disposition.INVALID_PARAMETERS, state)
         return selection.tool
 
     async def _resolve_capability(self, step: PlanStep) -> str:

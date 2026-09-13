@@ -2452,3 +2452,105 @@ async def test_the_goal_is_read_from_the_stored_plan_and_never_from_the_caller()
     )
 
     assert [request.goal for request in harness.policy.requests] == ["g-1"]
+
+
+# --- a system-supplied argument the model named (ADR-0254 §3) -------------
+
+
+async def test_a_step_naming_a_system_supplied_argument_builds_no_request() -> None:
+    """ADR-0254 §3, arm 68's third clause: not built, no ruling, no `CONFIRM`.
+
+    "A user is never asked to approve an idempotency key, and a model that reached
+    for one is a fault and not a question." ADR-0148 §1 puts the refusal before the
+    ruling, so nothing is committed and nothing reaches the trail.
+    """
+    harness = Harness(tools=(tool("smtp", system_supplied=("idempotency_key",)),))
+    step = PlanStep(
+        id=STEP,
+        intent="send the note",
+        capability=CAPABILITY,
+        parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+    )
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert harness.policy.requests == []  # no ruling sought (ADR-0148 §1)
+    assert await harness.trail.export() == []  # and no `CONFIRM` put
+    assert harness.invoker.invocations == []
+    assert result.state.step(STEP) is not None
+    assert result.state.step(STEP).status is StepStatus.PENDING  # type: ignore[union-attr]
+
+
+async def test_a_confirmable_declaration_puts_no_question_about_a_supplied_key() -> None:
+    """The refusal is a fault, so it fires ahead of the ruling that would have asked.
+
+    The declaration here is one the fake policy confirms, so a lane that ran the
+    refusal after the ruling would have parked a `CONFIRM` naming an idempotency
+    key — which is exactly what ADR-0254 §3 forbids.
+    """
+    confirming = tool(
+        "smtp",
+        discloses=(DataTier.PERSONAL,),
+        system_supplied=("idempotency_key",),
+    )
+    harness = Harness(tools=(confirming,))
+    step = PlanStep(
+        id=STEP,
+        intent="send the note",
+        capability=CAPABILITY,
+        parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+    )
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert await harness.trail.export() == []
+
+
+async def test_the_refusal_is_asked_of_the_selected_declaration_and_not_of_the_step() -> None:
+    """The classification is a field of the declaration (ADR-0254 §3).
+
+    The same step is a fault against a declaration that classifies the key and is
+    ordinary against one that does not. A lane that read the key off the step alone,
+    or off any candidate, would refuse this call.
+    """
+    harness = Harness(tools=(tool("smtp"),))
+    step = PlanStep(
+        id=STEP,
+        intent="send the note",
+        capability=CAPABILITY,
+        parameters={"to": "someone@example.com", "idempotency_key": "k-1"},
+    )
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    assert [dict(request.parameters) for request in harness.policy.requests] == [
+        dict(step.parameters)
+    ]
+
+
+async def test_a_declaration_classifying_nothing_behaves_exactly_as_before() -> None:
+    """ADR-0254 §3: an unclassified argument is user-facing, and nothing moves.
+
+    Arm 68's last clause, over the ordinary step every other test here uses.
+    """
+    harness = Harness(tools=(tool("smtp"),))
+    state = await an_execution(harness.plans, plan_step())
+
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    assert len(harness.invoker.invocations) == 1
