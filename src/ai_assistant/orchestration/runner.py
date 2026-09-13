@@ -71,6 +71,7 @@ from ai_assistant.core.types import (
     EgressBinding,
     ExecutionState,
     OriginUnrecordedBinding,
+    OutboundReach,
     PermissionDecision,
     PermissionOutcome,
     PlanStep,
@@ -81,6 +82,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.authorizing import authorization_id_for, proposed_authorization
 from ai_assistant.orchestration.capability_alias import resolve_capability
+from ai_assistant.orchestration.executor import CallableReach
 from ai_assistant.orchestration.selection import (
     Preference,
     eligible_candidates,
@@ -409,6 +411,45 @@ class EstablishingAnswer:
     answer: PermissionDecision
 
 
+def _egress_reach(request: ActionRequest, reach: CallableReach) -> OutboundReach | None:
+    """ADR-0264 §2's egress contribution, from the two facts this stage holds.
+
+    **Stated over the executor's own pre-callable fact and never over**
+    ``Disposition.EXECUTED``, which is not that fact: :meth:`StepRunner._execute`
+    returns ``EXECUTED`` for the three windows ADR-0192 §1 places before the callable as
+    well as for a call that reached it, so a classification read off the disposition
+    would report a refused spend as a send that may have left.
+
+    **It establishes no contact** (§3). The prohibition is over ``REACHED`` and over
+    ``destinations``: no component derives either from an ``EgressBinding``, from
+    ``Disposition.EXECUTED``, from ``StepStatus.SUCCEEDED`` or from any combination of
+    them, because ADR-0192 §4 rules that "a transmission fact would have to come from
+    the integration, and ``ToolImplementation`` returns ``FrozenJson`` with no channel
+    for one".
+
+    **But such a step is not nothing either.** What this takes from the step is the
+    *absence of a ground for either answer*, and it takes it only where the executor's
+    own fact leaves that absence — so a send the executor proved never reached the
+    callable contributes nothing and lets the turn answer ``NOT_REACHED``, while one it
+    reached, or cannot say it did not, makes the turn ``INDETERMINATE`` with no class
+    named.
+
+    Args:
+        request: What the step was ruled on. Read for its ``egress_binding`` alone,
+            which is what makes a step an outbound act at all; a step with none
+            contributes nothing however it ran.
+        reach: The executor's observer for this drive (:class:`CallableReach`).
+
+    Returns:
+        :attr:`~ai_assistant.core.types.OutboundReach.INDETERMINATE` where an egress
+        step's callable was reached or cannot be said not to have been, and ``None``
+        — contributing nothing — otherwise.
+    """
+    if request.egress_binding is None or not reach.reached:
+        return None
+    return OutboundReach.INDETERMINATE
+
+
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
     """What one pass of :class:`StepRunner` did with a step (ADR-0037 §4).
@@ -460,6 +501,34 @@ class StepDisposition:
             ``approved=True`` that reached a recorded answer (ADR-0235 §2). ``None``
             everywhere else, including on a ``resume`` that collected the act and
             was refused before any ruling was sought, which raises instead.
+        outbound: ADR-0264 §2's egress contribution — what this drive establishes
+            about the world, **carried out of the drive as a typed classification**
+            and never an ``EgressBinding``, a :class:`~ai_assistant.core.types.Disposition`
+            or a :class:`~ai_assistant.core.types.StepExecution` read at the fold (§6).
+
+            :attr:`~ai_assistant.core.types.OutboundReach.INDETERMINATE` on a step
+            whose :class:`~ai_assistant.core.types.ActionRequest` carried an
+            :class:`~ai_assistant.core.types.EgressBinding` and whose executor
+            **reached the callable, or cannot say whether it did**; ``None`` — a
+            contribution of nothing — everywhere else: on a step with no such binding,
+            on one the executor exited before the callable (ADR-0192 §1's three
+            windows), and on every disposition that was refused, denied or never driven.
+
+            **It establishes no contact and it is not** ``NOT_REACHED`` **either**
+            (§3). ADR-0192 §4 rules that ``SUCCEEDED`` is *"bounded by ADR-0031 §4 to
+            exactly three facts — a validated callable return, an unexpired deadline,
+            and no increase in the cancellation count — and none of them is a
+            transmission"*, so no turn is ``REACHED`` on a send's account and no
+            :class:`~ai_assistant.core.types.OutboundDestination` is named on one —
+            **and** a turn whose only outbound act was such a send is not reported as
+            having reached nothing, because the send may have left. "An implementation
+            that mints a contact from an executed step fails this arm, and so does one
+            that answers ``NOT_REACHED`` for a step whose callable was reached" (§13
+            item 8).
+
+            **Never gated on** ``StepStatus.SUCCEEDED`` (§13 item 8): a failed send may
+            still have transmitted, so the two reached-the-callable shapes carry the
+            same value.
     """
 
     disposition: Disposition
@@ -470,6 +539,7 @@ class StepDisposition:
     tied_candidates: tuple[str, ...] = ()
     violations: tuple[ParameterViolation, ...] = ()
     establishing: EstablishingAnswer | None = None
+    outbound: OutboundReach | None = None
 
 
 type Ruled = Callable[[PermissionDecision], Awaitable[None]]
@@ -2156,12 +2226,32 @@ class StepRunner:
 
         ``attempt_id`` is threaded on to the claim the executor makes and read for
         nothing else (ADR-0255 §3).
+
+        **ADR-0264 §2's egress contribution is computed here and nowhere else.** This
+        stage holds both halves of it: the request, which says whether the step was an
+        egress one at all, and — through :class:`CallableReach` — the executor's own
+        pre-callable fact, which the three windows ADR-0192 §1 places before the
+        callable are the whole of. It is carried out of the drive on
+        :attr:`StepDisposition.outbound` as a typed classification, so the fold never
+        reads a binding or a disposition to reconstruct it (§6).
         """
         call = self._authorised(request, decision)
+        reach = CallableReach()
         ran = await self._executor.execute(
-            state, step_id=step.id, call=call, attempt_id=attempt_id, timeout=timeout
+            state,
+            step_id=step.id,
+            call=call,
+            attempt_id=attempt_id,
+            timeout=timeout,
+            reach=reach,
         )
-        return StepDisposition(Disposition.EXECUTED, ran, decision.id, call.decision.tool.id)
+        return StepDisposition(
+            Disposition.EXECUTED,
+            ran,
+            decision.id,
+            call.decision.tool.id,
+            outbound=_egress_reach(request, reach),
+        )
 
     async def _deny(
         self,

@@ -32,6 +32,7 @@ Three rules shape the whole module and are worth stating before the code:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -268,6 +269,45 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
         return None
 
 
+@dataclass(slots=True)
+class CallableReach:
+    """Whether this drive got as far as the tool's own callable (ADR-0264 §2, §3).
+
+    **The executor's own pre-callable fact, written through rather than returned**, on
+    the shape ``_SearchCounts`` already has in
+    :mod:`ai_assistant.orchestration.reads` and for the same reason: the three exits
+    ADR-0192 §1 places *before* the callable are caught inside :meth:`StepExecutor._run_once`
+    and never leave it, so a caller that wanted the fact back would have to read it off
+    the ``ExecutionState`` those exits committed — and ADR-0192 §4 rules that no such
+    value carries it.
+
+    **It is not** ``Disposition.EXECUTED`` **and no lane reads it as one** (ADR-0264
+    §2, §3). ``StepRunner`` returns ``EXECUTED`` for those three windows as well as for
+    a call that reached the callable, which is exactly why §2 states the contribution
+    over this fact instead: an implementation gating on the disposition would report a
+    refused spend as a send that may have left.
+
+    **It establishes no contact** (§3). What a ``True`` here buys is
+    :attr:`~ai_assistant.core.types.OutboundReach.INDETERMINATE` — this system cannot
+    say the turn reached nothing — and never
+    :attr:`~ai_assistant.core.types.OutboundReach.REACHED`, because
+    ``ToolImplementation`` returns ``FrozenJson`` with no channel for a transmission
+    fact and ADR-0192 §4 says so in terms.
+
+    Attributes:
+        reached: Whether the seam was entered at all — set once
+            :meth:`~ai_assistant.core.protocols.ToolInvoker.invoke` has returned or
+            raised from inside the callable, and **sticky**. Stickiness is the whole of
+            the retry story: ADR-0029 §5 re-claims only after a *result* came back, so a
+            second attempt that is refused before the callable must not unmake what the
+            first attempt reached. ``False`` where every attempt exited in one of
+            ADR-0192 §1's three windows, which is the executor establishing that the
+            call provably never reached the callable.
+    """
+
+    reached: bool = False
+
+
 def _checked_timeout(timeout: object) -> timedelta:
     """Refuse a deadline *before* the claim is committed (ADR-0029 §4, §8).
 
@@ -336,7 +376,7 @@ class StepExecutor:
         self._invoker = invoker
         self._clock = checked_clock(now, owner="StepExecutor")
 
-    async def execute(
+    async def execute(  # noqa: PLR0913 — the execution, the step, the authorised call, the attempt the claim is made under and the budget, plus ADR-0264 §2's observer; each is a distinct fact about the act
         self,
         state: ExecutionState,
         *,
@@ -344,6 +384,7 @@ class StepExecutor:
         call: ToolCall,
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+        reach: CallableReach | None = None,
     ) -> ExecutionState:
         """Claim ``step_id``, run ``call``, and commit the outcome.
 
@@ -373,6 +414,11 @@ class StepExecutor:
                 ``PlanStore`` read it did not already have (ADR-0058, ADR-0254 §13).
             timeout: How long the seam may wait, per attempt. The caller's
                 budget, not the tool's property (ADR-0029 §4).
+            reach: ADR-0264 §2's pre-callable observer, written through as the drive
+                runs (:class:`CallableReach`). ``None``, the default, observes nothing
+                and changes no behaviour — it is what every caller that does not carry
+                an outbound statement passes, and what keeps this signature honest about
+                the fact being an observation rather than an input.
 
         Returns:
             The execution state after the last transition this executor
@@ -466,8 +512,13 @@ class StepExecutor:
                 msg = f"step {step_id!r} was closed unstarted; its task was cancelled"
                 raise asyncio.CancelledError(msg) from None
             raise
+        # One observer for the whole drive, so a retry cannot unmake what an earlier
+        # attempt reached (:class:`CallableReach`).
+        observed = reach if reach is not None else CallableReach()
         while True:
-            state, result = await self._run_once(state, step_id, authorised, trusted, timeout)
+            state, result = await self._run_once(
+                state, step_id, authorised, trusted, timeout, observed
+            )
             # A `None` result is a terminal close — a seam rejection, a
             # cancellation's classification, or a returned value too tampered to
             # read (`_run_once`) — none of which ADR-0029 §5 retries. A recorded
@@ -483,13 +534,14 @@ class StepExecutor:
                 _log.info("step_retries_exhausted", step_id=step_id)
                 return state
 
-    async def _run_once(
+    async def _run_once(  # noqa: PLR0913 — the five values one attempt is assembled from, plus ADR-0264 §2's observer; each is a distinct fact about the attempt
         self,
         state: ExecutionState,
         step_id: str,
         authorised: ToolCall,
         trusted: ToolDefinition | None,
         timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+        reach: CallableReach,
     ) -> tuple[ExecutionState, ToolResult | None]:
         """Invoke the seam once and commit what it says, revalidating the result.
 
@@ -521,6 +573,13 @@ class StepExecutor:
         makes both total over what the seam returned, the mirror of
         :func:`_detached` for the inbound call.
         """
+        # ADR-0264 §2, and the three `except` clauses below are the whole of what
+        # establishes the negative: each is one of ADR-0192 §1's pre-callable windows,
+        # committed `FAILED` "for the stated reason that recording `INDETERMINATE` would
+        # be about a call that provably never reached the callable". Every other exit
+        # from `invoke` — a return, a fault the callable itself raised, a cancellation
+        # that landed inside it — leaves the observer set, because none of them
+        # establishes that nothing left the machine.
         try:
             returned = await self._invoker.invoke(authorised, timeout=timeout)
         except ToolBindingError:
@@ -530,8 +589,10 @@ class StepExecutor:
         except AssistantError:
             return await self._close_unclaimed(state, step_id), None
         except asyncio.CancelledError:
+            reach.reached = True
             await self._commit_through_cancellation(state, step_id, _interrupted(trusted))
             raise
+        reach.reached = True
         result = _detached_result(returned)
         if result is None:
             return await self._discard_unusable(state, step_id), None
