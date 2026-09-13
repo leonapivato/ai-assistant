@@ -688,7 +688,7 @@ def outbound_statement(
     search: OutboundReach | None,
     egress: OutboundReach | None,
     records: int,
-    composed: bool,
+    composes: bool,
 ) -> OutboundStatement | None:
     """Assemble one turn's statement, once, from the carriers §2 and §4 name (ADR-0264 §6).
 
@@ -719,9 +719,30 @@ def outbound_statement(
         records: How many records this turn's established contacts put into its supply
             (§4). Read only where a contact was established, because §4 couples the
             two and the model refuses an uncoupled value.
-        composed: Whether this pass reached the composing stage at all. ``False`` on a
-            routed park and on every other pass ADR-0170 §4 composes nothing for, which
-            with no contact established is §7's one ``None`` case.
+        composes: Whether an answer is owed on this pass — that is, whether the
+            composing stage is **reached**. ``False`` on a routed park, on which
+            ADR-0197 §10 rules "the composing stage is not reached", and on the two
+            shapes §6 names in terms: "ADR-0170 §4 requires no composition on a pass
+            whose step parked for confirmation or whose ``turn`` is ``None``". With no
+            contact established, that is §7's one ``None`` case.
+
+            **It is not a report of what the composing stage produced, and the
+            difference decides a real pass.** A composition that *failed* reached the
+            stage and is neither of §6's two shapes, so it carries the member it was
+            given — and it must, for two reasons §7 states. The outcome carries "the
+            value §6 computed, **by value, and never a second computation**", so
+            re-deriving one at the capture point from what the reply turned out to be is
+            the move that clause forbids; and the composing stage was handed the
+            fragment for *this* value, so a second derivation would leave the assembled
+            prompt and the rendered member disagreeing about one turn.
+
+            **§7's rendering asymmetry is the surface's rule and not this one.**
+            "``NOT_REACHED`` and ``INDETERMINATE`` render only on a pass that composed a
+            reply … The condition is the reply's existence and never its content" binds
+            **on a rendering surface**, which §11 makes lane 2's — and §13 item 10 names
+            the failure it exists to catch: "one that renders ``NOT_REACHED`` with no
+            reply beside it fails it too", which is a failure only a surface *handed*
+            that member can commit.
 
     Returns:
         The statement this turn carries, or ``None`` on a pass that **neither
@@ -736,7 +757,7 @@ def outbound_statement(
             destinations=(OutboundDestination.SEARCH_PROVIDER,),
             records=records,
         )
-    if composed:
+    if composes:
         # §4: on `NOT_REACHED` and `INDETERMINATE` the classes are empty and the count
         # is `0` — there is no contact for a record to have entered the supply on.
         return OutboundStatement(reach=reach)

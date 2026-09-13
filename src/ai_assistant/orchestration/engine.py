@@ -10453,7 +10453,12 @@ class Engine:
                 search=searched_reach,
                 egress=None,
                 records=searched_records,
-                composed=True,
+                # An answer is owed on this pass, which is the fact §7's `None` rule is
+                # stated over — not what the composing stage below then produced. A
+                # composition that fails still carries the member it was given (§7's
+                # "by value, and never a second computation"), and whether a surface
+                # *renders* it is that surface's rule (§7, §11).
+                composes=True,
             )
             composed = await compose(
                 turn,
@@ -10690,11 +10695,12 @@ class Engine:
             egress=disposition.outbound,
             records=searched_records,
             # ADR-0170 §4: a pass whose step parked for confirmation owes no answer, and
-            # `_compose` declines on exactly that shape — so what is true here is that
-            # the composing stage is reached wherever an answer is owed. A parked pass
-            # that established a contact still carries the statement (§7); one that did
-            # not carries `None`.
-            composed=step.confirmation is None,
+            # `_compose` declines on exactly that shape — which is one of the two §6
+            # names. A parked pass that established a contact still carries the
+            # statement (§7's asymmetry: `REACHED` reports an act this system performed,
+            # which the user is owed whether or not prose was written); one that did not
+            # carries `None`.
+            composes=step.confirmation is None,
         )
         composed = await compose(
             turn,
@@ -11979,7 +11985,7 @@ class Engine:
         # pass whose `turn` is `None`, which is a park recovered after a restart
         # (ADR-0052 §3), and a resolving disposition is never `AWAITING_CONFIRMATION`.
         outbound = outbound_statement(
-            search=None, egress=egress, records=0, composed=parked.turn is not None
+            search=None, egress=egress, records=0, composes=parked.turn is not None
         )
         composed = await self._compose(parked.turn, step, deliveries={}, outbound=outbound)
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
@@ -12209,7 +12215,7 @@ class Engine:
             search=answered.contact,
             egress=None,
             records=resumed.admitted,
-            composed=True,
+            composes=True,
         )
         composed = await self._compose(
             turn,
