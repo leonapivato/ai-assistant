@@ -58,21 +58,14 @@ remaining failures. This decision closes that one.
   **minted**, in the order §10 minted them"*, empty on a servicing that carried no such
   ask and on one whose search did not yield. Its own docstring states this decision's
   premise — *"a minted record sits in `memories` beside every other, which is the whole
-  point of ADR-0226 §7's fourth group"* — and states the discipline: the fact is
-  *"supplied by the servicing that knows it and never inferred at the resolution site,
-  exactly as `hop_reached` is"*.
-- **`ServicedRead.supplied` is a count in the *other* direction and is not this
-  decision's.** ADR-0238 §11's first count is *"how many records this servicing supplied
-  to the composer"* — the **query** composer, the population a chosen destination may be
-  told about — and `_serviced_search` assigns it from `_search_supply`'s result before
-  the query is composed and before anything is sent. It says what left, not what came
-  back.
+  point of ADR-0226 §7's fourth group"*.
+- **`ServicedRead.supplied` is a count in the *other* direction.** `_serviced_search`
+  assigns ADR-0238 §11's count from `_search_supply`'s result before the query is composed
+  and before anything is sent, so it says what left and not what came back (§4).
 - **`Disposition.EXECUTED` is the gate's verdict and not the call's result.**
   `StepOutcome`'s own docstring is explicit: *"a client that renders success from
   `disposition` alone is wrong — `EXECUTED` says the permission gate let the call through
-  and the executor committed **something**, not that the something succeeded"*, and it
-  makes reading the addressed `StepExecution` by `step_id` an addressable operation
-  rather than advice.
+  and the executor committed **something**, not that the something succeeded"*.
 - **And the servicing is not the only site that performs the call.** ADR-0244 §7's
   resume runs the parked read's one call from `ParkedReadOperations._dispatched`, which is
   no servicing and drives no step; the records it returns are admitted later, by
@@ -84,10 +77,8 @@ remaining failures. This decision closes that one.
   `EgressBinder.bind` returned, so a step whose call carried a binding is known
   inside `orchestration` at the time the step is driven. `tools/send_email.py` is
   a live egress tool.
-- `TurnOutcome` carries fifteen members today, and **nine** of them — `routed`,
-  `recipient_grant`, `search_not_serviced`, `read_confirmation`, `read_answer`,
-  `goal_engagement`, `clarification`, `reference` and `disambiguation` — were added
-  by a later ADR as a `None`-defaulting widening.
+- `TurnOutcome` carries fifteen members today, **nine** of them added by a later ADR as
+  a `None`-defaulting widening a client renders on its own.
 
 ### The gap this closes, stated exactly
 
@@ -103,9 +94,8 @@ model infers — and #2268 records it inferring the opposite of the truth.
 
 - **ADR-0242 §6's not-serviced statement.** Every clause of §§6-9 binds entire and
   none is narrowed, widened or re-read here.
-- **The browser's rendering arrears.** Issue #2237 records that the browser renders
-  none of ADR-0242 §9's statements. That is its own lane and this decision neither
-  closes it nor competes with it (§9).
+- **The browser's rendering arrears.** Issue #2237 records that the browser renders none
+  of ADR-0242 §9's statements; that is its own lane, not this one (§9).
 - **What the model writes.** No clause here inspects, classifies or corrects a
   composed reply.
 
@@ -181,13 +171,28 @@ a user reading one has not been told the other.
 > non-asserting direction is taken deliberately**, and §12 defers the finer answer with
 > its trigger.
 
-> **Normative.** **The absence of a disposition establishes a contact only on a servicing
-> that completed.** A servicing that failed discards its records and zeroes its counts
-> (ADR-0226 §5), and nothing in the record says whether its search had already returned —
-> `failed_after_read_returned` is stated over *reads* and not over the send. So a failed
-> servicing carrying no disposition establishes nothing either way; one carrying a
-> disposition is placed by the clauses above, which do not turn on whether the servicing
-> then failed.
+> **Normative.** **A contact is established the moment a response arrived, and nothing
+> that happens to the enclosing servicing afterwards unmakes it.** The discriminator is
+> over the **call** and never over the servicing's completion: before the send there is no
+> contact, a response that arrived is one whatever the servicing's disposition, and the
+> send itself asserts nothing either way. A servicing whose `WEB_SEARCH` was answered and
+> whose later `SIGHTED_QUERY` then raises carries the contact its call established, and so
+> does one whose recorded disposition places it in the second group above.
+> **What ADR-0226 §5 discards is the records and not the call**: a failed servicing
+> zeroes its counts, so `records` counts what entered the supply, which on that turn is
+> none — and §4 rules that a `records` of `0` never suppresses the statement.
+
+> **Normative.** **The fact is therefore established where it is known — at the performing
+> site, from the outcome it holds — and is carried out of the servicing on every path out
+> of it, the failed one included.** That is the fold `ServicedCarriers` already performs:
+> `not_serviced` and `minted` are *"folded onto the servicing's carriers on **every** path
+> out of the body above — the completed servicing, the degraded one, and the one whose
+> searcher raised"*, and this fact rides the same one. **No site re-derives it from
+> `ServicedRead.disposition` after the servicing has ended**, because an absent disposition
+> on a failed servicing covers both a search that was answered and a servicing that raised
+> before its search was serviced, and the record holds nothing that separates them —
+> `failed_after_read_returned` is stated over *reads* and not over the send. A site that
+> performed no call establishes nothing either way.
 
 > **Normative.** **That partition is total over the seventeen members
 > `SearchDisposition` is closed at**, and the absence of a disposition is the eighteenth
@@ -224,21 +229,19 @@ group exists: recording a failure there would say *the call did not act* about *
 whose query may have left the machine and may have been served and billed, which is the one
 direction ADR-0014 §4 refuses to guess in"*.
 
-**Two readings of that docstring have to be kept apart, because a reviewer will reach for
-the wrong one.** It also groups `PROVIDER_REFUSED` and `RESPONSE_TOO_LARGE` with
-`TRANSPORT_FAILED` as *"calls that did not complete as calls"* — a statement about the
-**invocation's** outcome, which is what the ledger row and ADR-0192 §3's completion are
-written from. It is not a statement about whether bytes crossed the wire, and this section
-asks only that. A provider that refused answered, and a response too large to carry is a
-response that arrived; a refused connection is neither.
+**Two readings of that docstring have to be kept apart.** It also groups
+`PROVIDER_REFUSED` and `RESPONSE_TOO_LARGE` with `TRANSPORT_FAILED` as *"calls that did
+not complete as calls"* — a statement about the **invocation's** outcome, which is what
+the ledger row and ADR-0192 §3's completion are written from. It is not a statement about
+whether bytes crossed the wire, and this section asks only that. A provider that refused
+answered, and a response too large to carry is a response that arrived; a refused
+connection is neither.
 
 **And absence here asserts nothing, which is why the third group is not the guess ADR-0014
 §4 refuses.** That rule bites where a record must take one of several values and one of
 them would be false; `INDETERMINATE` is what it buys. Here the statement is present or it
-is not, an absent one claims nothing about the wire, and the turn is not silent: ADR-0242
-§9 already renders `INTERRUPTED` or `UNAVAILABLE` for every member of this group, and
-neither says no request was made. The user is told the honest indeterminate; what they are
-not told is a sentence this system cannot support.
+is not, and an absent one claims nothing about the wire — so the user is told the honest
+indeterminate rather than a sentence this system cannot support.
 
 ### 3. An egress contact, established from the binding the request carried
 
@@ -305,15 +308,13 @@ and would have left the next outbound seam to mint its own vocabulary.
 > not over any later stage, so it is defined and true on every outcome shape a contact
 > can reach, the parked and recovered ones ADR-0170 §4 composes nothing for included.
 
-**"Over the supply and not over any later stage" is the half that had to be got right,
-and an earlier draft of this section got it wrong.** It defined the count over what the
-composing stage was given, which is undefined on a pass that composes nothing and false on
-one where a channel's withholding (ADR-0199 §3) left the composing stage holding none of
-them — and ADR-0170 §4 makes both shapes reachable beside a contact: a turn can service a
-search, admit its records, and then park its step for confirmation. Stated over the
-supply the count is defined everywhere and claims neither of those things, and §6's
-fragment is then the only place a statement about a model's own prompt is made, on the
-passes that have one.
+**"Over the supply and not over any later stage" is the half that had to be got right.**
+A count over what the composing stage was given is undefined on a pass that composes
+nothing and false on one where a channel's withholding (ADR-0199 §3) left it holding none
+of them, and ADR-0170 §4 makes both shapes reachable beside a contact: a turn can service
+a search, admit its records, and then park its step for confirmation. Stated over the
+supply the count is defined everywhere and claims neither, and §6's fragment is then the
+only place a statement about a model's own prompt is made.
 
 > **Normative.** **The admitted set is recorded by the site that performs the admission
 > and never reconstructed**, and in particular it is not `ServicedCarriers.minted`
@@ -337,22 +338,20 @@ passes that have one.
 > search answered with nothing. **A `0` means this turn's supply holds no record its
 > contacts brought in**, and it means nothing else.
 
-**Nothing between the call and the supply can drop a record on today's bounds, and
-stating the count over admission anyway is a forward-compatibility guard rather than a
-claim that it bites.** Deduplication cannot: a search's records are minted with a fresh
-identifier and ADR-0231 §16 keeps them out of every store, so *"no id in here is ever seen
-again"* and a minted id is never already in `_Union.held`. The read budget cannot either:
-`READ_BUDGET` is ten, `search_max_results` is capped at three, and the search is serviced
-second behind a one-record file — the arithmetic `SearchDisposition.NO_BUDGET`'s own
-docstring already states, *"at least nine of the ten slots therefore always remain"*. So
-**`records` equals what the call returned on every turn reachable today**, and no clause
-here depends on their differing. The count is nonetheless defined over admission, for
-`NO_BUDGET`'s own stated reason — that is *"the forward-compatibility guard §11 states in
-terms for the lane that reorders the kinds"* — and because a count defined over a fact its
-own site holds needs no arithmetic to be argued from. An earlier draft defined it by
-filtering `minted` against the final supply, and a later one made a read-budget truncation
-a required arm; the first made an identifier scheme load-bearing and the second required a
-turn these bounds cannot produce.
+**The count is stated over admission because that is the fact its own site holds, and no
+clause here asserts of any bound that it cannot bite.** Where one response carries two
+records under one id the supply takes one, and `records` is then `1`: ADR-0226 §7's
+deduplication is over the whole union, which `admitted_fourth_group` states in terms —
+*"two records of one batch sharing an id enter once, and the second consumes no slot"*.
+**This ADR does not claim that case, or a budget truncation, is unreachable**, and the
+reason is that neither claim can be made from the seam. `SearchOutcome` constrains a
+record's provenance and its attestation and constrains neither identifier uniqueness nor
+record count — its own docstring puts `search_max_results` outside it, as a `Settings`
+field *"the configured searcher enforces"* and one *"this model carries neither"* of. An
+unreachability argued from `tools/web_search.py` would be an argument about the shipped
+searcher rather than about the seam every `WebSearcher` is wired through, and an ADR
+reasons over the seam. Stated over admission the count needs no such argument: it is what
+this turn's supply took, on every outcome any searcher can return.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
 > contact, and a turn that reached outside itself and brought nothing into its supply
@@ -366,13 +365,12 @@ turn these bounds cannot produce.
 > says that they entered the answer, that the answer rests on them, that it is more
 > current for them, or that it would have differed without them.
 
-**One count and not two, and it is the count of what entered the turn's supply.** A figure
-for what the provider returned would be a fact about the system's plumbing that the user
-can do nothing with, and stating both would put two numbers in front of a reader who has
-no way to tell which one matters. The count that entered the supply is the one that bears
-on the answer in front of them, and the one whose `0` is informative: *I reached outside this
-system and nothing came back that this turn could use.* That sentence is unavailable
-today, which is why #2268 was reported as a contradiction rather than as a thin reply.
+**One count and not two.** A figure for what the provider returned would be a fact about
+the system's plumbing that the user can do nothing with, and stating both would put two
+numbers in front of a reader who has no way to tell which one matters. The count that
+entered the supply is the one that bears on the answer in front of them, and the one whose
+`0` is informative: *I reached outside this system and nothing came back that this turn
+could use.*
 
 ### 5. `OutboundDestination`: a closed vocabulary of classes, never of destinations
 
@@ -533,6 +531,15 @@ is there so that when they do not, the user can see it.
 > sentence, which §9 declined to assert because it had nothing establishing it. Read
 > together they say: a request was made, and nothing usable came back.
 
+> **Normative.** **A servicing that failed after its search was answered is where the two
+> conditions most visibly answer different questions, and the reply carries whichever of
+> them stands.** Recording no disposition it carries a contact — `records` `0`, because
+> ADR-0226 §5 discarded what came back — and **no** `SearchNotServiced` member, ADR-0242
+> §6's eligibility being the disposition's presence and there being none. Recording
+> `UNATTESTED` it carries **both**, and both are rendered. Neither shape is a disagreement
+> between the two statements and neither member is read off the other: one says this turn
+> reached outside itself, the other says what act would change what a lookup produced.
+
 ### 9. What each surface owes, and where the browser's arrears are answered
 
 > **Normative.** The terminal renders the statement in the implementing lane (§11), beside
@@ -638,19 +645,20 @@ not read. §12 names the trigger.
 
 ### 13. The arms this decision owes
 
-> **Normative.** The implementing lanes owe these six arms **between them**, each over
-> representative input, split by §11's rule that an arm's assertions belong to the lane
-> that owns the code they are about. A lane that lands fewer of the assertions it owns
-> has not implemented this decision.
+> **Normative.** The implementing lanes owe these seven arms **between them**, each over
+> representative input and split by §11's ownership rule. A lane that lands fewer of the
+> assertions it owns has not implemented this decision.
 >
 > 1. **A search that brought records into the supply, over a turn whose pre-existing
 >    supply is non-empty.** `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the
 >    records the search brought in and **not** the pre-existing ones; `search_not_serviced`
 >    is `None`; the prompt carries §6's fragment and `_PLAN_IS_ABOUT_ACTING`. The
 >    non-empty pre-existing supply is what makes the arm discriminate: a lane reading
->    `ServicedRead.supplied` passes every other arm and fails this one. **No arm requires
->    a truncated or deduplicated search record**, because today's bounds make neither
->    reachable (§4).
+>    `ServicedRead.supplied` passes every other arm and fails this one. **The same search
+>    returns two records under one id**, and `records` is the count the supply admitted —
+>    the duplicate enters once (ADR-0226 §7) and is counted once — so a lane counting what
+>    the response carried fails the arm. No arm asserts that a searcher cannot return such
+>    a response (§4).
 > 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`),
 >    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
 >    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
@@ -684,7 +692,20 @@ not read. §12 names the trigger.
 >    itself, asserted on the model and not on its producer**, because it is a
 >    boundary-crossing value a wire decode also builds: an empty `destinations`, one
 >    carrying a class twice, and one carrying `(EGRESS_TOOL, SEARCH_PROVIDER)` are each
->    refused rather than accepted and rendered in the order they arrived.
+>    refused rather than accepted and carried in the order they arrived.
+
+> 7. **A servicing that failed after its search had already been answered**, in three
+>    shapes, which are what separate the ruling from the record it cannot be read off.
+>    One whose search was answered and whose later `SIGHTED_QUERY` raises, recording **no
+>    disposition**: it carries a contact with `records` `0` — ADR-0226 §5 discarded the
+>    records, and §4's `0` does not suppress the statement — and `search_not_serviced`
+>    `None`. One whose search recorded **`UNATTESTED`** before the same later failure: it
+>    carries the contact **and** `search_not_serviced` `UNAVAILABLE` (§8). And one that
+>    raised **before** its search was serviced, recording no disposition and performing no
+>    call: it carries **no** contact. An implementation that suppresses a failed
+>    servicing's contact fails the first, and one that classifies from the ended
+>    servicing's record rather than at the performing site cannot tell the first from the
+>    third (§2).
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
@@ -702,13 +723,12 @@ is wrong about nothing.
 
 **ADR-0242 §6's byte-identity guarantee — no record owed, and this is the one worth being
 explicit about.** §6 promises that on a turn carrying no `SearchNotServiced` member *"the
-assembled prompt is byte-identical to what it is today"*. §6 makes that promise about its
-own carrier, as ADR-0228 §10 and ADR-0227 §3 each make it about theirs — and those three
-already hold simultaneously over one prompt, which is only possible on the self-scoped
-reading. Read as a closure on the prompt, ADR-0242 §6 would have falsified ADR-0228 §10 on
-the day it was ratified and would have recorded it; it did not, so the corpus already
-settles the reading. This decision adds nothing on a turn carrying no contact, which is the
-promise in the sense the corpus holds it.
+assembled prompt is byte-identical to what it is today"*, and **§6 scopes that promise in
+the same sentence**: it is *"the same guarantee ADR-0228 §10 makes for its own carrier and
+ADR-0227 §3 for its own"*. Held per carrier is the only reading on which those three stand
+together over one prompt, and it is the reading §6 wrote rather than one inferred for it.
+This decision adds nothing on a turn carrying no contact, which is that promise in the
+sense §6 states it.
 
 **ADR-0170 §4 — no record owed.** A `None`-defaulting member changes neither the three
 shapes on which `reply` is `None` nor the one on which `reply_degraded` is `True`. ADR-0197
@@ -725,9 +745,7 @@ do. ADR-0242 §9 and ADR-0235 §4 state this in the same words for their own mem
 **ADR-0226 §9 and ADR-0238 §11 — no record owed, and `records` is expressly not
 theirs.** No count is added to, removed from or redefined in the per-turn audit record,
 and §4 states in terms that `records` is neither ADR-0238 §11's `supplied` nor derived
-from it: that count is what this system told a destination, assigned before the send, and
-this one is what came back and entered the turn's supply. The record those sections
-govern is unchanged and gains nothing.
+from it. The record those sections govern is unchanged and gains nothing.
 
 **ADR-0249 §7's `minted` and ADR-0227 §3's `hop_reached` — no record owed.** §4 reads
 `minted` and copies `hop_reached`'s shape; it redefines neither, adds to neither, and
