@@ -329,45 +329,58 @@ def _verdict(proposed: object) -> AssociationVerdict | None:
         return None
 
 
-def _labels(proposed: object) -> tuple[str, ...]:
-    """Read one envelope's labels, verbatim (ADR-0250 §4).
+def _labels(proposed: object) -> tuple[str, ...] | None:
+    """Read one envelope's labels verbatim, or report that there are none to read.
 
     **Nothing here resolves, repairs, orders, de-duplicates or bounds them.** "The
     loop resolves a label by parsing *n* and indexing the very tuple it passed on this
-    call", so a label crosses back exactly as the model wrote it — not stripped, not
-    upper-cased, not matched against the candidacy's length — and one that resolves to
-    nothing becomes the ask (§3) rather than a pick this module repaired into
+    call" (§4), so a label crosses back exactly as the model wrote it — not stripped,
+    not upper-cased, not matched against the candidacy's length — and one that resolves
+    to nothing becomes the ask (§3) rather than a pick this module repaired into
     existence.
 
-    Two kinds of entry are dropped, and neither is a resolution. An entry that is not
-    a JSON string is not a label at all, and one with no UTF-8 encoding — JSON admits
-    an unpaired surrogate escape and
-    :data:`~ai_assistant.core.types.EncodableText` refuses one — could not be carried
-    on a :class:`~ai_assistant.core.types.GoalAssociation` in the first place. Dropping
-    either leaves the ask, which is where an unreadable answer belongs.
+    **A malformed value is reported as malformed and never silently emptied**, which is
+    the distinction that keeps §4's "never a guess" clause true for the *decisive*
+    verdicts. A ``goals`` that is not a list, or a list carrying an entry that is not a
+    usable label, is an answer this module could not read; filtering it down to what
+    survived would let ``{"verdict": "fresh", "goals": "G1"}`` open a goal and
+    ``{"verdict": "associates", "goals": ["G2", 17]}`` pick one, each on the strength of
+    an answer that was partly unreadable, and each for a reason invisible to every
+    caller. So the two are kept apart: an absent key is no labels, and a malformed value
+    is ``None``, which :func:`_read` turns into the ask.
+
+    Two shapes of entry make the whole value malformed rather than being skipped. An
+    entry that is not a JSON string is not a label at all; and one with no UTF-8
+    encoding — JSON admits an unpaired surrogate escape and
+    :data:`~ai_assistant.core.types.EncodableText` refuses one — could not be carried on
+    a :class:`~ai_assistant.core.types.GoalAssociation` in the first place.
 
     Args:
         proposed: Whatever the envelope's goals key held — a ``list`` if the model
-            answered the shape it was asked for, and any JSON value or ``None`` if it
-            did not.
+            answered the shape it was asked for, ``None`` where the key is absent
+            (which is the shape ``fresh`` and ``continues`` are asked for), and any
+            other JSON value where it answered something else.
 
     Returns:
-        The labels the model named, in the order it named them.
+        The labels the model named, in the order it named them; or ``None`` where the
+        value was present and could not be read as labels at all.
     """
-    if not isinstance(proposed, list | tuple):
-        # `None` (the key absent, which is the shape `fresh` and `continues` are asked
-        # for) and a bare string both land here rather than being coerced: a string is
-        # not a one-element list, and reading one as a label would accept a shape the
-        # prompt does not offer.
+    if proposed is None:
         return ()
+    if not isinstance(proposed, list | tuple):
+        # A bare string lands here rather than being read as a one-element list:
+        # reading `"G1"` as a label would accept a shape the prompt does not offer,
+        # and under `associates` would turn an answer this module could not read into
+        # a pick.
+        return None
     labels: list[str] = []
     for entry in proposed:
         if not isinstance(entry, str):
-            continue
+            return None
         try:
             encodable_text(entry)
         except ValueError:
-            continue
+            return None
         labels.append(entry)
     return tuple(labels)
 
@@ -497,11 +510,15 @@ def _read(content: str) -> GoalAssociation:
     """Read one model reply into an association (ADR-0250 §4).
 
     **Every unreadable answer is the decline and none is a guess.** A reply carrying
-    no readable object, an object with no verdict in it, and a verdict outside the
-    four all land on
+    no readable object, an object with no verdict in it, a verdict outside the four,
+    and a ``goals`` value that is not a list of usable labels all land on
     :attr:`~ai_assistant.core.types.AssociationVerdict.UNDECIDED` with no labels:
     nothing in an answer this module could not read is carried forward as an
-    assertion, so labels beside an unreadable verdict are dropped with it.
+    assertion, so labels beside an unreadable verdict are dropped with it — and a
+    verdict beside unreadable labels is dropped too, however decisive it reads. That
+    last one is the clause's sharp edge: filtering a malformed ``goals`` down to the
+    entries that happened to parse would let a partly unreadable answer open a goal or
+    pick one, which is exactly what "never a guess" forbids (§4).
 
     **A shape :class:`~ai_assistant.core.types.GoalAssociation` refuses is the ask,
     carrying the labels the model named.** §3 rules that "an ``ASSOCIATES`` carrying
@@ -530,6 +547,8 @@ def _read(content: str) -> GoalAssociation:
     if verdict is None:
         return GoalAssociation(verdict=AssociationVerdict.UNDECIDED)
     labels = _labels(envelope.get(_GOALS_KEY))
+    if labels is None:
+        return GoalAssociation(verdict=AssociationVerdict.UNDECIDED)
     try:
         return GoalAssociation(verdict=verdict, labels=labels)
     except ValueError:
