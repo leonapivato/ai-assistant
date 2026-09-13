@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import IllegalTransitionError, PlanningError
 from ai_assistant.core.types import (
+    MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     AttemptPhase,
@@ -235,7 +236,9 @@ def capped(goals: Iterable[Goal], *, limit: int) -> GoalCandidates:
 
     Args:
         goals: The whole membership of the set, in any order.
-        limit: The most candidates to return.
+        limit: The most candidates to return, held down to
+            :data:`~ai_assistant.core.types.MAX_ASSOCIATION_CANDIDATES` where a caller
+            asks for more — §2 fixes that ceiling and no caller raises it.
 
     Returns:
         The capped set, with ``elided`` counting what the truncation dropped.
@@ -246,15 +249,26 @@ def capped(goals: Iterable[Goal], *, limit: int) -> GoalCandidates:
     if limit < 1:
         msg = f"a candidate set is read with a positive limit and not {limit} (ADR-0250 §9)"
         raise PlanningError(msg)
-    ordered = sorted(
-        goals,
-        key=lambda goal: (
-            goal.last_engaged_at is None,
-            -(goal.last_engaged_at.timestamp() if goal.last_engaged_at is not None else 0.0),
-            goal.id,
-        ),
-    )
-    return GoalCandidates(goals=tuple(ordered[:limit]), elided=max(0, len(ordered) - limit))
+    # §2 fixes the ceiling at `MAX_ASSOCIATION_CANDIDATES` and the type enforces it, so
+    # a caller asking for more gets the cap rather than a raw `ValidationError` out of
+    # the store: "truncated to MAX_ASSOCIATION_CANDIDATES, and carrying the count of
+    # goals the truncation dropped". `elided` is then counted against what was actually
+    # returned, so it stays the true remainder whichever bound applied.
+    taken = min(limit, MAX_ASSOCIATION_CANDIDATES)
+    held = list(goals)
+    # **Ordered by comparing the instants themselves, never a float of them.**
+    # `datetime.timestamp()` is a float of seconds, and two instants a microsecond
+    # apart compare *equal* as floats from about 2262 onward — which would hand the
+    # `goal_id` tie-break a pair §1 does not tie, and §1 states that tie-break for
+    # equal instants alone. Two passes over a stable sort rather than one composite
+    # key, because the instant descends while the id ascends and no single key
+    # expresses both without arithmetic on a datetime.
+    carrying = [(goal.last_engaged_at, goal) for goal in held if goal.last_engaged_at is not None]
+    carrying.sort(key=lambda pair: pair[1].id)
+    carrying.sort(key=lambda pair: pair[0], reverse=True)
+    absent = sorted((goal for goal in held if goal.last_engaged_at is None), key=lambda one: one.id)
+    ordered = [goal for _, goal in carrying] + absent
+    return GoalCandidates(goals=tuple(ordered[:taken]), elided=max(0, len(ordered) - taken))
 
 
 def settled(

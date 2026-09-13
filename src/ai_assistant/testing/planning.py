@@ -37,6 +37,7 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
@@ -858,21 +859,28 @@ class FakePlanStore:
         if limit < 1:
             msg = f"a candidate set is read with a positive limit and not {limit} (ADR-0250 §9)"
             raise PlanningError(msg)
+        taken = min(limit, MAX_ASSOCIATION_CANDIDATES)
         async with self._resource.held():
             members = [
                 goal.model_copy(deep=True)
                 for goal in self._goals.values()
                 if conversation_id in (goal.conversation_id, goal.last_engaged_in)
             ]
-        ordered = sorted(
-            members,
-            key=lambda goal: (
-                goal.last_engaged_at is None,
-                -(goal.last_engaged_at.timestamp() if goal.last_engaged_at is not None else 0.0),
-                goal.id,
-            ),
+        # Two passes over a stable sort, comparing the instants themselves: a float of
+        # a datetime makes two instants a microsecond apart compare equal from about
+        # 2262, which would hand the id tie-break a pair §1 does not tie. The real
+        # stores state the same rule in `planning/goals.capped`; `PlanStoreContract` is
+        # what holds the two statements honest.
+        carrying = [
+            (one.last_engaged_at, one) for one in members if one.last_engaged_at is not None
+        ]
+        carrying.sort(key=lambda pair: pair[1].id)
+        carrying.sort(key=lambda pair: pair[0], reverse=True)
+        absent = sorted(
+            (one for one in members if one.last_engaged_at is None), key=lambda one: one.id
         )
-        return GoalCandidates(goals=tuple(ordered[:limit]), elided=max(0, len(ordered) - limit))
+        ordered = [one for _, one in carrying] + absent
+        return GoalCandidates(goals=tuple(ordered[:taken]), elided=max(0, len(ordered) - taken))
 
     async def record_question(self, question: GoalQuestion, /) -> bool:
         """Write an ``OPEN`` question, or refuse a second on one goal (§9).
