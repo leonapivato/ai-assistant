@@ -18,10 +18,12 @@
   third rung reads one deployment value, `core.config.Settings.episode_retention`**, together
   with **§12's justification clause in its limb *"and in neither case by a deployment"***; every
   other limb of both stands, `Settings` gains nothing and no figure bounds rung 1 or rung 2 (§2,
-  §7). **The path-(ii) transcription rule in all five places ADR-0254 states it** — §12's
+  §7). **The path-(ii) transcription rule in all six places ADR-0254 states it** — §12's
   path-(ii) transcription clause, §1's path-(ii) *"transcribed unchanged"* list, §1's path-(i)
   *"the only path that may … set `expires_at`"*, §1's *"what path (ii) may change"* clause in its
-  limb *"or move `expires_at`"*, and §5's *"`expires_at` is transcribed from the row it
+  limb *"or move `expires_at`"*, §1's path-(ii) liveness clause in its reason limb *"because a
+  correction transcribes the predecessor's `expires_at`"* — that limb alone, the live-row
+  requirement itself untouched — and §5's *"`expires_at` is transcribed from the row it
   supersedes"* — **together with §20's arm 17 in its `expires_at` field alone and §20's arm 25
   in its *"carry one `expires_at`"* limb alone**, each in the `expires_at` limb and in the
   **narrowing direction alone** (§5). **§9 clause (ii)'s
@@ -482,8 +484,11 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    `proposed_at` → **no path-(i) proposal and no path-(iii) row is written** … one test each"* —
    which a lane must now ship as §9's arms instead. A reader holding only ADR-0254 writes no row
    for every deadline-free goal and ships a test asserting that; after this decision they write
-   one wherever the turn-retention window is finite, which is the default. **Superseded, narrowed
-   to where a window exists** (§1, §3). **Every other case of arm 69 stands verbatim**: rung 1's,
+   one wherever the turn-retention window is finite, which is the default. **Superseded wherever
+   `episode_retention` is finite — which is its shipped default — and not otherwise**: the
+   ratified rung and its no-row outcome survive **verbatim** in the one case where
+   `episode_retention` is `None`, and there alone (§1, §3). **Every other case of arm 69 stands
+   verbatim**: rung 1's,
    rung 2's, its path-(ii) case — *"a live row with an explicit future `expires_at` on a goal
    carrying **no** `deadline`, corrected by 'make it Sunday' naming no horizon → the correction
    **is written**, transcribing that `expires_at` unchanged"*, which §5 leaves untouched because
@@ -497,13 +502,19 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    for an expiry at all. **Superseded in the single respect that §1's rung reads
    `episode_retention`**, and in no other: `Settings` gains nothing, the expiry stays per
    `Authorization` and shown when granted, and no figure bounds rung 1 or rung 2 (§2, §6).
-4. **The path-(ii) transcription rule, in all five places ADR-0254 states it, and the two arms
-   that test it.** §12's path-(ii) transcription clause; §1's path-(ii) *"`expires_at` … transcribed
-   unchanged"*; §1's path-(i) *"the only path that may … set `expires_at`"*; and **§5's
-   *"`expires_at` is transcribed from the row it supersedes"***; and **§1's *"what path (ii)
+4. **The path-(ii) transcription rule, in all six places ADR-0254 states it, and the two arms
+   that test it.** §12's path-(ii) transcription clause; §1's path-(ii)
+   *"`expires_at` … transcribed unchanged"*; §1's path-(i) *"the only path that may … set
+   `expires_at`"*; **§5's
+   *"`expires_at` is transcribed from the row it supersedes"***; **§1's *"what path (ii)
    may change, and what it may never touch"* clause, in its limb *"or move `expires_at`"***,
-   which is the flattest statement of the rule and would on its own refuse the narrowing. Each
-   states the same rule, and any one of them left standing would refuse it. With them, **§20's
+   which is the flattest statement of the rule and would on its own refuse the narrowing; and
+   **§1's path-(ii) liveness clause, in its reason limb *"because a correction transcribes the
+   predecessor's `expires_at`"*** — **that limb alone and not the requirement it explains**. The
+   requirement stands entire and is untouched: a correction still supersedes a **live** row only,
+   which §5's own bound restates, the narrowed instant having to be strictly before the superseded
+   row's `expires_at` and strictly after the new row's `proposed_at`. Each of the six states the
+   same rule, and any one of them left standing would refuse the narrowing. With them, **§20's
    arm 25** — *"Three successive superseding records carry **one** `expires_at`"* — **in that
    limb alone**, a chain that narrows carrying two or three; arm 25's own headline, *"A chain of
    corrections does not outlive the first act's expiry"*, and its *"the third covers nothing
@@ -593,11 +604,25 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 
 ### 9. The lane cut, and the arms this decision owes
 
-> **Normative.** **This decision cuts no lane of its own.** It changes one rung of a ladder
-> ADR-0254 §20 already assigns: *"**Lane 2, the proposal, the settlement and the recheck** …
-> writing a path-(ii) correction **and a path-(iii) opening act** … **taking §12's ladder**"*.
-> Lane 2 takes the ladder as this decision leaves it, and **§5's narrowing is Lane 2's too**,
-> being a rule of the path-(ii) write path. Lanes 1 and 3 are untouched.
+> **Normative.** **This decision cuts no lane of its own and splits its work across the two
+> ADR-0254 §20 already assigns.** It changes one rung of a ladder §20 gives Lane 2 — *"**Lane 2,
+> the proposal, the settlement and the recheck** … writing a path-(ii) correction **and a
+> path-(iii) opening act** … **taking §12's ladder**"* — so **Lane 2 takes the ladder as this
+> decision leaves it, computes the narrowed instant on a path-(ii) correction and submits the
+> row**. **Lane 3 is untouched.**
+
+> **Normative.** **The store half is Lane 1's, because §20 puts the store there and a contract
+> is landed once.** ADR-0254 §20 assigns `GoalAuthorizationStore`, its shared conformance suite
+> and `SqliteGoalAuthorizationStore` to **Lane 1**, and §5's narrowing changes what `record`
+> refuses. **Lane 1 therefore owns the revised refusal, its conformance arm and every
+> implementation of it** — accept a superseding row whose `expires_at` is strictly after the new
+> row's `proposed_at` and strictly before the superseded row's, refuse every other movement of
+> that field and every movement of the other five — and **Lane 2 owns computing the instant and
+> submitting such a row**. Splitting it the other way would land a validation rule in the lane
+> that does not own the validator, which is the drift ADR-0254 §16's roster-and-lane pairing
+> exists to prevent. **§20's lane cut is not superseded by this**: Lane 1 still owns the store and
+> Lane 2 still owns the write path, and what moves is only the content of Lane 1's arm 17 (§7
+> limb 4).
 
 > **Normative.** **No lane bumps the wire for this decision.** No `core` type gains a field, no
 > member reaches the promoted surface and no wire-carried value changes shape, so ADR-0124 §9 is
@@ -635,8 +660,16 @@ what forbids joining them into one.
 > rung 1 **even where that instant is later than the window would give**, and the row carries it
 > unshortened.
 
-> **Normative.** **Prospectivity after the write.** Widen `episode_retention` between the write
-> and a later read → the row's `expires_at` is **unchanged**, and a lapsed row is not revived.
+> **Normative.** **Prospectivity after the write, widening.** Widen `episode_retention` between
+> the write and a later read → the row's `expires_at` is **unchanged**, and a lapsed row is not
+> revived.
+
+> **Normative.** **Prospectivity after the write, shortening.** **Shorten** `episode_retention`
+> between the write and a later read → the row's `expires_at` is **unchanged** and its liveness
+> is decided on the instant it was written with, not on `proposed_at` advanced by the current
+> setting. The arm exists because an implementation recomputing `min(stored, proposed_at +
+> current)` passes the widening arm and fails this one, and §2's read-once clause is stated over
+> **a later change** in either direction.
 
 > **Normative.** **The capture-to-write interval.** Widen `episode_retention` between an act's
 > capture and a path-(i) row's write → the row carries the window in force **at the write**, so
@@ -644,9 +677,13 @@ what forbids joining them into one.
 > repairs.
 
 > **Normative.** **A clock rollback before capture.** Move the injected clock backwards between an
-> act's turn and that act's episode capture, with `episode_retention` unchanged → the episode is
-> stamped from the earlier reading and the row outlives it, which is again §1's bound and not a
-> defect. Nothing in the row is clamped, re-stamped or recomputed for it.
+> act's turn and that act's episode capture, with `episode_retention` unchanged **and the
+> proposal's `proposed_at` read at or after the capture's own reading** → the episode is stamped
+> from the earlier reading and the row outlives it, which is again §1's bound and not a defect.
+> **The proviso is part of the arm and not scenery**: the clock may move backwards again before
+> the write, and where `proposed_at` is read earlier than the capture the ordering reverses and
+> the row expires first — which §1's bound permits too, it being a bound and not an equality.
+> Nothing in the row is clamped, re-stamped or recomputed in either case.
 
 > **Normative.** **An older basis act does not shorten the row, and the row then outlives that
 > act's record.** A path-(i) proposal whose coverage carries a member resting on a recorded turn
