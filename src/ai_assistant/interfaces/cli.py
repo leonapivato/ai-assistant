@@ -4953,6 +4953,14 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
 #: no need to name the member to render it, ``GoalStatus`` being a ``StrEnum``. So the
 #: keys are the values, the guard stays as strict as ADR-0249 §16 wants it, and
 #: ``test_the_status_words_are_total_over_the_enumeration`` is what keeps this total.
+#: The one status on which the abandonment is offered, as the **value** rather than the
+#: member, for :data:`_GOAL_STATUS_WORDS`' reason: this module names no ``GoalStatus``
+#: member at all, so ADR-0249 §16 item 7's producer guard has nothing here to weigh.
+#: ADR-0250 §12 answers ``ALREADY_CLOSED`` on a goal that is achieved or abandoned, so a
+#: command offered there is one that reports having done nothing — which is the browser's
+#: own rule for that control, stated once per surface.
+_OPEN_STATUS: Final = "active"
+
 _GOAL_STATUS_WORDS: Final[Mapping[str, str]] = {
     "active": "open",
     "achieved": "done",
@@ -5025,8 +5033,14 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
         return
     _print(f"[bold]{len(page)} goal(s)[/], most recently taken up first.")
     for goal in page:
-        _print(f"\n  [bold cyan]{_safe(goal.id)}[/]")
-        _print(f"  {_safe(goal.outcome)}")
+        # **The outcome statement heads the row and the id does not.** A goal is what it
+        # is aiming at to a reader; the id is a handle, and §15 admits it on the screen
+        # *because the act takes it* — so it is rendered where the acts are, inside a
+        # command that carries it correctly, and nowhere else. A bare id printed as a
+        # heading would be lossy for exactly the values the acts most need (round 7,
+        # `blocker`): `_safe` **replaces** a character a terminal must not be handed, so
+        # an id carrying one was displayed as something that names a different goal.
+        _print(f"\n  [bold]{_safe(goal.outcome)}[/]")
         waiting = " — waiting on you" if goal.paused else ""
         said = _GOAL_STATUS_WORDS.get(goal.status.value, _GOAL_STATUS_UNREADABLE)
         _print(f"  [dim]State:[/] {said}{waiting}")
@@ -5035,8 +5049,51 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
         else:
             _print(f"  [dim]Last taken up:[/] {_when(goal.last_engaged_at)}")
         _render_goal_question(goal.clarification)
+        _render_goal_acts(goal)
     if limit and len(page) == limit:
         _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
+
+
+def _render_goal_acts(goal: GoalSummary) -> None:
+    """The two acts on one goal, as commands a person can paste (ADR-0250 §13, §12).
+
+    **This listing is the sole route to a cross-conversation resumption** (§13): "a goal
+    is resumed from another conversation by explicit reference and by that alone", and
+    the reference is "performed from a surface listing the user was shown (§15)". So a
+    goal whose id this surface cannot hand back is a goal that cannot be resumed at
+    all — which is why the id travels inside a command through :func:`_argument` and
+    :func:`_is_pasteable` rather than being printed as a heading. Adversarial review,
+    round 7, ``blocker``; it is round 6's finding one id over.
+
+    **The abandonment is offered on an open goal and on no other**, which is ADR-0250
+    §12's own reading — a closed goal answers ``ALREADY_CLOSED``, so a command there is
+    one that reports having done nothing — and it is the browser's rule for that control,
+    stated once per surface rather than derived from the other.
+
+    **What a lossy id costs is the copyable line and never the act.** Both commands are
+    still named, and each still takes the value from anything that can carry the exact
+    bytes.
+
+    Args:
+        goal: The summary this row is about.
+    """
+    open_goal = goal.status.value == _OPEN_STATUS
+    if not _is_pasteable(goal.id):
+        _print(
+            "  [dim]Take it up here with[/] 'assistant ask' [dim]and[/] --goal"
+            + (
+                "[dim], or give it up with[/] 'assistant abandon-goal'."
+                if open_goal
+                else "[dim].[/]"
+            )
+        )
+        _print(f"  {_uncopyable('Its id')}")
+        return
+    _print_hint(
+        f'  [dim]Take it up here:[/] assistant ask "<what next>" --goal {_argument(goal.id)}'
+    )
+    if open_goal:
+        _print_hint(f"  [dim]Or give it up:[/] assistant abandon-goal {_argument(goal.id)}")
 
 
 def _render_goal_question(clarification: Clarification | None) -> None:
