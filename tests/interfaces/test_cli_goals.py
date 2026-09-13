@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, Final
@@ -248,6 +249,118 @@ def test_the_listing_renders_the_two_ids_its_acts_take_and_no_other(
     assert QUESTION_ID in screen
     assert f"--answering {QUESTION_ID}" in screen
     assert f"assistant withdraw-clarification {QUESTION_ID}" in screen
+
+
+@pytest.mark.parametrize(
+    ("question_id", "argument"),
+    [
+        ("q 1", "'q 1'"),
+        ("it's-mine", "'it'\"'\"'s-mine'"),
+        ("q;rm -rf /", "'q;rm -rf /'"),
+    ],
+)
+def test_a_command_this_listing_offers_parses_back_to_the_id_it_names(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO, question_id: str, argument: str
+) -> None:
+    """#984's clause on this listing's two commands.
+
+    ``Identifier`` requires encodability and nothing more, so an interior space is
+    admissible — and a line rendered without quoting is then a *valid* command against
+    the wrong argument: ``--answering q 1`` names ``q``. Adversarial review, round 6,
+    ``major``.
+
+    Asserted by **parsing the rendered line the way a shell would** rather than by
+    looking for quotes, which is the only form that says the paste works.
+    """
+    _wire(
+        monkeypatch,
+        _listing(
+            _summary().model_copy(
+                update={
+                    "clarification": _clarification().model_copy(
+                        update={"question_id": question_id}
+                    )
+                }
+            )
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert f"--answering {argument}" in screen
+    assert f"assistant withdraw-clarification {argument}" in screen
+    answering = shlex.split(screen[screen.index("--answering") :].split("Or take it back")[0])
+    assert answering == ["--answering", question_id]
+
+
+def test_an_id_this_terminal_cannot_show_withholds_the_command_and_not_the_act(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """#1013's clause on the same two commands.
+
+    ``_safe`` **replaces** a character a terminal must not be handed, so a value carrying
+    one renders — inside perfectly correct shell quotes — as a command naming something
+    that does not exist: the failure quoting was added to prevent, arriving one step
+    later and looking like a working instruction. ``"q\x1b[2J1"`` is an admissible
+    ``Identifier``.
+
+    **What is withheld is the copyable line and never the act**: both commands are still
+    named, and each still takes the value from anything that can carry the exact bytes.
+    """
+    _wire(
+        monkeypatch,
+        _listing(
+            _summary().model_copy(
+                update={
+                    "clarification": _clarification().model_copy(
+                        update={"question_id": "q\x1b[2J1"}
+                    )
+                }
+            )
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert "no command here to copy" in screen
+    assert "assistant withdraw-clarification" in screen
+    assert "--answering" in screen
+    assert "\x1b" not in screen
+
+
+def test_the_commands_this_listing_offers_are_never_folded_into_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1023's clause on the same two commands.
+
+    Rich wraps by inserting a **real newline**, so a hint wider than the console arrives
+    as two lines and pastes as two commands — ``assistant withdraw-clarification`` with
+    no argument, and then the argument as a command of its own. ``_print_hint`` emits the
+    line as it stands and lets the terminal fold it, which keeps it one line to anything
+    that copies it. No field a hint carries has a length limit, so the trigger is a long
+    id plus a narrow terminal.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=30))
+    long_id = "q" * 120
+    _wire(
+        monkeypatch,
+        _listing(
+            _summary().model_copy(
+                update={
+                    "clarification": _clarification().model_copy(update={"question_id": long_id})
+                }
+            )
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    lines = buffer.getvalue().splitlines()
+    assert any(f"assistant withdraw-clarification {long_id}" in line for line in lines)
+    assert any(f"--answering {long_id}" in line for line in lines)
 
 
 def test_the_listing_renders_the_engines_paused_and_derives_nothing(

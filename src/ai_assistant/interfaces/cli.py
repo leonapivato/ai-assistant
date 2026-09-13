@@ -5064,14 +5064,31 @@ def _render_goal_question(clarification: Clarification | None) -> None:
         return
     _print(f"  [bold]Waiting on:[/] {_safe(clarification.text)}")
     _print(f"  [dim]Answerable until {_when(clarification.expires_at)}.[/]")
+    # **Through the copyable-command path and not through `_safe` alone** (#984, #1013,
+    # #1023; adversarial review, round 6, `major`). `Identifier` requires encodability
+    # and nothing more, so a question id carrying an interior space renders a line that
+    # is a *valid* command against the wrong argument — `--answering q 1` names `q` —
+    # and one carrying a control character renders, inside correct quotes, a command
+    # naming something that does not exist. `_argument` answers the shell's question,
+    # `_is_pasteable` asks whether the value survives being displayed at all, and
+    # `_print_hint` keeps the line one line so a narrow terminal cannot fold it into two
+    # commands. **What a lossy id costs is the copyable line and never the act**: the
+    # commands still take the value from anything that can carry the exact bytes.
+    if _is_pasteable(clarification.question_id):
+        _print_hint(
+            f'  [dim]Answer it:[/] assistant ask "<your answer>" '
+            f"--answering {_argument(clarification.question_id)}"
+        )
+        _print_hint(
+            f"  [dim]Or take it back:[/] assistant withdraw-clarification "
+            f"{_argument(clarification.question_id)}"
+        )
+        return
     _print(
-        f'  [dim]Answer it:[/] assistant ask "<your answer>" '
-        f"--answering {_safe(clarification.question_id)}"
+        "  [dim]Answer it with[/] 'assistant ask' [dim]and[/] --answering[dim], or take "
+        "it back with[/] 'assistant withdraw-clarification'."
     )
-    _print(
-        f"  [dim]Or take it back:[/] assistant withdraw-clarification "
-        f"{_safe(clarification.question_id)}"
-    )
+    _print(f"  {_uncopyable('Its id')}")
 
 
 def _render_clarification_withdrawal(outcome: ClarificationWithdrawal) -> None:
