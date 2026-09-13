@@ -261,23 +261,35 @@ ADR-0254 §1's write-before-the-question rule is untouched by all of this, becau
 > ASCII whitespace to one space, which is normalisation *"part of the resolution … recorded with
 > it"* (ADR-0254 §10) and never applied at the comparison — against exactly these forms, in
 > which `<amount>` is a decimal figure ADR-0254 §4's `MONEY` reading accepts together with one
-> word of the currency table below, in either order:
+> word of the currency table below, in either order, and `<not>` is **one** token of the negation
+> vocabulary below followed by zero or more tokens carrying **none** of it:
 >
-> - **a `maximum`** — `under <amount>`, `below <amount>`, `at most <amount>`,
->   `no more than <amount>`, `up to <amount>`;
-> - **a `minimum`** — `at least <amount>`, `no less than <amount>`, `more than <amount>`,
->   `over <amount>`, `above <amount>`.
+> - **a `maximum`** — `<not> over <amount>`, `<not> above <amount>`, `<not> more than <amount>`,
+>   `under <amount>`, `below <amount>`, `at most <amount>`, `no more than <amount>`,
+>   `up to <amount>`;
+> - **a `minimum`** — `<not> under <amount>`, `<not> below <amount>`, `<not> less than <amount>`,
+>   `at least <amount>`, `no less than <amount>`, `more than <amount>`, `over <amount>`,
+>   `above <amount>`.
+>
+> Each negated row is the positive comparator inverted. *"no more than"* and *"no less than"* are
+> the case where the negation sits adjacent to the comparator; they are listed in their own right
+> so the table reads whole, and both routes to them give one answer.
 >
 > The currency table is `euro`/`euros`/`eur`/`€` → `EUR`, `dollar`/`dollars`/`usd`/`$` → `USD`,
 > `pound`/`pounds`/`gbp`/`£` → `GBP`. **A span matching no form mints no member**, and no lane
 > adds a form, a currency or a language without its own ratified decision.
 
-> **Normative — a span carrying a negation the matched form does not itself carry mints no
-> member.** The negation vocabulary is closed at `not`, `never`, `no`, `n't` and `without`, and
-> the test is over the span's own folded tokens. *"no more than"* and *"no less than"* carry
-> their own `no` and match; a span that negates a form from outside it does not, and **refuses
-> rather than reversing**. This is the one place a reading could invert what the user said, and
-> an inversion is a standing authority in the opposite direction from the one they gave.
+> **Normative — a negation inverts the comparator it governs, and a negation governing no
+> comparator refuses.** The negation vocabulary is closed at `not`, `never`, `no`, `n't` and
+> `without`, and the test is over the span's own folded tokens. A `<not>` prefix governs the
+> comparator it precedes, so *"never spend over 100 euros"* matches `<not> over <amount>` and
+> mints a **`maximum`** of `100` — the owner's own illustration of this rule, and the inversion
+> is the user's own arithmetic rather than a direction read into words that do not carry one.
+> **A span whose negation governs no listed comparator mints no member**: *"not 100 euros"* and
+> *"not exactly 100 euros"* state no direction, and a **second** negation token inside the prefix
+> takes the span out of every form and mints nothing either. That refusal is the fail-closed
+> half — a bound guessed where the user stated no direction is a standing authority they never
+> gave, and it is the one place a reading could otherwise authorise against their words.
 
 > **Normative — `DATE_FROM_CONTEXT` mints a `PERIOD` member.** Its `starts_at` and `ends_at` are
 > the half-open interval the resolution yielded, and its **`timezone` is the configured IANA
@@ -504,8 +516,9 @@ no second carrier for a derived key.
   component. **Until that decision lands, the only readings an element takes are `STATED_BOUND`
   and `AS_STATED`, and no `PERIOD` member is minted by any live path.** Fired by the decision
   that lands the reader, with its own totality argument and its own arms.
-- **Any widening of §4's table** — a form it does not list, a currency it does not name, a
-  language other than English, a figure written in words, a bound on a count or a distance.
+- **Any widening of §4's table** — a form it does not list (bare *"less than"* among them,
+  which the table carries only under a negation), a currency it does not name, a language other
+  than English, a figure written in words, a bound on a count or a distance.
   The table is deliberately narrow and refuses rather than guessing. Fired by a decision that
   states the wider reading and its own totality argument. **This is the residual a reader should
   weigh most carefully**, and the Consequences name the case it costs.
@@ -564,10 +577,10 @@ no second carrier for a derived key.
    in **no** request, whatever value it carries, because `price` is declared `MONEY`.
 3. **A stated floor mints a `minimum`.** **3(a):** span `"at least 150 euros"` mints `minimum`
    `Decimal("150")` and **no** `maximum`. **3(b):** a request at `"140"` is **not** covered and
-   one at `"200"` is. The same arm carries §4's negation guard, in both
-   directions: span `"no more than 100 euros"` mints a `maximum`, the matched form carrying its
-   own `no`; span `"not under 100 euros"` mints **nothing**, the `not` being a negation the
-   matched form does not carry — the reading refuses rather than reversing.
+   one at `"200"` is. The same arm carries §4's negation rule, in both directions and at its
+   guard: span `"never spend over 100 euros"` mints a `maximum` of `100` and span
+   `"not under 100 euros"` a `minimum` of `100`, each the comparator inverted; span
+   `"not exactly 100 euros"` mints **nothing**, its negation governing no listed comparator.
 4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
    constructible. **4(b):** a goal carrying two `USER_STATED` constraints that each read as
    `MONEY` mints **neither**, and a `PERIOD` constraint beside them still mints its own.
@@ -640,14 +653,15 @@ obligation they are not billed for until they read this ADR, and the empty defau
 declaration that says nothing gets more questions rather than fewer.
 
 **The reading is the narrow part, and it is where a reader should look first.** §4's table has
-ten forms and three currencies. *"under 100 euros"* reads; *"under a hundred euros"*,
-*"unter 100 Euro"*, *"max €100"* and *"never spend over 100 euros"* do not — the last because
-the negation guard refuses a form whose polarity a token outside it inverts, which is the
-fail-closed half of the one reading that could reverse what the user said. **That is a
-deliberate refusal and not an oversight**, and it means the owner's own illustration of the rule
-mints nothing until the table is widened by the decision §9 books. Refusing costs a question;
-reading *"never … over"* as a floor would cost a standing authority in the opposite direction
-from the one the user gave.
+sixteen forms and three currencies. *"under 100 euros"* reads, and so does the owner's own
+*"never spend over 100 euros"*, at a `maximum` of `100`; *"under a hundred euros"*,
+*"unter 100 Euro"* and *"max €100"* do not. **The table is also asymmetric on purpose**:
+*"not less than 100 euros"* mints a floor while bare *"less than 100 euros"* mints nothing,
+because the positive comparator is not a form the table lists — a gap §9's widening entry books
+and no lane closes on its own. And a negation governing no comparator still refuses, so
+*"not exactly 100 euros"* mints nothing; that is the fail-closed half of the one reading that
+could reverse what the user said. Refusing costs a question; inventing a direction the user
+never stated would cost a standing authority in the opposite direction from the one they gave.
 
 **These are the cases that would falsify the design.** A deployment where users routinely state
 bounds the table does not carry, so route (d) is never reached and the mechanism is inert. A
