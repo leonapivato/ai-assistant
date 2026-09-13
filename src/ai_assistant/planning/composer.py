@@ -148,11 +148,24 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: **What makes the order mean that is `orchestration`, not this module.** The loop
 #: assembles `preceding = recent + retrieved` and `memories = preceding + supplement`,
 #: with `recent` the conversation's own history; the one construction site filters
-#: that sequence by membership and preserves its order. So this conversation's own
-#: episodes lead the supply whenever it holds any. This module neither re-ranks nor
-#: truncates that order — it now also *relies* on it, which is a dependency on a value
-#: handed across the contract rather than on a name imported across a boundary, and it
-#: is stated here because nothing in `planning` can assert it.
+#: that sequence by membership and preserves its order. So the supply **opens** with
+#: this conversation's own turns whenever it holds any. This module neither re-ranks
+#: nor truncates that order — it now also *relies* on it, which is a dependency on a
+#: value handed across the contract rather than on a name imported across a boundary,
+#: and it is stated here because nothing in `planning` can assert it.
+#:
+#: **The leading run is the whole of what the order says, and the sentence claims no
+#: more.** It does *not* say that everything after the opening notes is somebody
+#: else's: `_supplement` searches the episodic band with no conversation filter,
+#: deduplicating only against `preceding` by id, so an older turn of *this*
+#: conversation — one outside the tail window — can come back after a retrieved belief.
+#: That is the same boundary ADR-0158 §4 already names from the other side, where
+#: `planning.planner` splits the tail from the retrieved group by "taking the **leading
+#: run** of `EPISODIC` records, so any belief between the two keeps them apart". An
+#: earlier wording here asserted the complement — that later notes are retrieved
+#: background — and that was false of exactly this supply. What is left is true and is
+#: what the measurements were taken over: the turns at the top are this conversation's
+#: recent ones, and an implicit subject comes from there.
 #:
 #: **It says the opening notes are this conversation's, and deliberately does not say
 #: which of them wins.** `history` is the conversation's turns *oldest first*
@@ -225,14 +238,15 @@ one into the query unless the request is asking about it."""
 #: model, and where it sits; what the block *says* is a reviewer's read, and the
 #: reasoning to read it against is above.
 _IMPLICIT_SUBJECT_GUIDANCE: Final = """\
-The notes are in the order this assistant selected them. If any of them record \
-earlier turns of this same conversation, those come first, and everything after \
-them is background this assistant retrieved. So where the request leaves its \
-subject implicit — "that", "them", "more about it" — it refers to what was asked for in \
-those opening notes, and never to a want, a purchase or a plan a note further \
-down records, however close to the request it reads. Search for the thing that \
-was asked for; carry a further detail in beside it only where the detail narrows \
-that thing rather than naming something else."""
+The notes are in the order this assistant selected them, and they open with the \
+turns this conversation has already had. Later notes are things this assistant \
+retrieved, which may themselves include an older turn of this conversation. So \
+where the request leaves its subject implicit — "that", "them", "more about it" \
+— it refers to what was asked for in one of this conversation's own turns, and \
+the notes at the top are where the recent ones are: take the subject from there, \
+and never from a want, a purchase or a plan a note merely records about the \
+user. Search for the thing that was asked for; carry a further detail in beside \
+it only where the detail narrows that thing rather than naming something else."""
 
 #: The whole instruction: the ratified prompt, then the paragraph above it.
 _SYSTEM_PROMPT: Final = f"{_SYSTEM_PROMPT_BASE}\n\n{_IMPLICIT_SUBJECT_GUIDANCE}"
