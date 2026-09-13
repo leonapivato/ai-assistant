@@ -429,6 +429,17 @@ def test_the_undecided_shape_is_admitted_and_is_the_only_one_carrying_a_disambig
         ({"reply_degraded": True}, "cannot have degraded"),
         (
             {
+                "clarification": Clarification(
+                    question_id="q1", text="which campsite?", expires_at=_LATER
+                )
+            },
+            "raised no question",
+        ),
+        ({"reference": ReferenceOutcome.ANSWERED}, "unreachable here"),
+        ({"reference": ReferenceOutcome.EXPIRED}, "unreachable here"),
+        ({"reference": ReferenceOutcome.ALREADY_SETTLED}, "unreachable here"),
+        (
+            {
                 "goal_engagement": GoalEngagement(
                     disposition=EngagementDisposition.OPENED, outcome="book a campsite"
                 )
@@ -457,6 +468,31 @@ def test_the_undecided_shape_refuses_every_incoherent_variant(
     }
     with pytest.raises(ValidationError, match=refusal):
         TurnOutcome(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def test_an_undecided_turn_may_report_that_the_handle_it_was_given_resolved_to_nothing() -> None:
+    """§11, §20 arm 32: ``UNKNOWN`` is the one reference outcome this shape admits.
+
+    "**An ``UNKNOWN`` reference is reported whatever the association then does.** The
+    turn falls through to §3 and is associated like any other, so it may come back
+    ``UNDECIDED`` — an outcome carrying **no** ``goal_engagement`` (§5) — and
+    ``reference`` is a member of its own precisely so that the user is still told the
+    handle they gave resolved to nothing."
+
+    This is the anti-vacuity half of the refusals above: without it, a validator that
+    banned ``reference`` outright would pass every one of them and would forbid the one
+    combination §11 exists to make expressible.
+    """
+    asking = TurnOutcome(
+        turn=None,
+        step=None,
+        reply="I could not tell which goal that was about.",
+        disambiguation=GoalDisambiguation(candidates=("book a campsite",)),
+        reference=ReferenceOutcome.UNKNOWN,
+    )
+
+    assert asking.reference is ReferenceOutcome.UNKNOWN
+    assert asking.goal_engagement is None, "and no engagement was constructed to hold it"
 
 
 def test_a_disambiguation_names_at_least_one_goal() -> None:

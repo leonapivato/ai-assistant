@@ -826,14 +826,33 @@ class FakeAssistantEngine:
             conversation_id=selected,
             reference=reference,
         )
-        return self._streamed(utterance, conversation_id=selected)
+        return self._streamed(utterance, conversation_id=selected, reference=reference)
 
     async def _streamed(
-        self, utterance: EncodableText, *, conversation_id: str | None
+        self,
+        utterance: EncodableText,
+        *,
+        conversation_id: str | None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
-        """Yield the outcome's own reply in pieces, then the outcome."""
+        """Yield the outcome's own reply in pieces, then the outcome.
+
+        ``reference`` is recorded and read by nothing, exactly as :meth:`converse`
+        records it: ADR-0250 §19's M1 resolves no reference. It is carried **here**
+        rather than dropped at the call because this fake is what a wire client, the
+        gateway and the CLI are tested against, and a consumer that dropped or replaced
+        the reference on the streaming path would otherwise be undetectable — the
+        double would certify a client the real engine would see differently.
+        """
         self.calls.append(
-            ("converse_streaming", {"utterance": utterance, "conversation_id": conversation_id})
+            (
+                "converse_streaming",
+                {
+                    "utterance": utterance,
+                    "conversation_id": conversation_id,
+                    "reference": reference,
+                },
+            )
         )
         held = self._resolve(conversation_id)
         outcome = self.turn_outcome or TurnOutcome(
@@ -1803,11 +1822,8 @@ class FakeAssistantEngine:
         Returns:
             The scripted page, sliced by the paging arguments.
         """
-        page_argument(limit, name="limit")
-        page_argument(offset, name="offset")
-        check_arguments("goals", max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
-        self.calls.append(("goals", {"limit": limit, "offset": offset}))
-        return tuple(self.goal_summaries[offset : offset + limit])
+        self._check_page("goals", limit=limit, offset=offset)
+        return self._checked(tuple(self.goal_summaries[offset : offset + limit]), "goals")
 
     async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
         """Return what became of a withdrawal (ADR-0250 §12).
