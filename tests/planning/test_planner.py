@@ -5713,6 +5713,7 @@ async def test_a_read_kind_outside_its_enumeration_is_an_extraction_failure(bad:
         "PT",
         "P1DT",
         "PT1.5H30M",
+        None,
     ],
 )
 async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_clamped(
@@ -5727,7 +5728,10 @@ async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_cla
     an ISO-8601 duration" rather than a different one. ``PT1.5H30M`` puts a fraction
     somewhere other than the lowest-order component, which the parser refuses on its
     own — the pattern does not restate that rule, and this arm is what says the
-    disposal there is still a refusal rather than a reading.
+    disposal there is still a refusal rather than a reading. ``None`` is in the list
+    because a key present is a key declared: reading a null as "no particular
+    freshness" is §9's "defaulted into range", and it loses a bound in the fail-open
+    direction — an arbitrarily stale row then satisfies the step's every condition.
 
     **The relaxed-parser cases**, and they are the ones a leading-
     ``P`` test alone would let through: pydantic sums repeated designators and accepts
@@ -6200,3 +6204,24 @@ async def test_a_decline_carrying_interpretations_is_neither_read_nor_refused(
 
     assert plan.steps == ()
     assert plan.interpretations == ()
+
+
+@pytest.mark.parametrize("key", ["after", "resolves", "when", "verifies", "evidence_recency"])
+async def test_a_step_key_written_as_null_is_an_extraction_failure(key: str) -> None:
+    """ADR-0253 §9: one rule over all five, because the failure is one failure.
+
+    §1's "an empty ``depends_on`` means the step waits on no other step", §4's "a step
+    declaring no ``verifies`` imposes none" and §5's "a step declaring none imposes
+    none" each describe a step that said **nothing**. A key written as ``null`` is not
+    that: reading it as silence is §9's "defaulted into range", and every one of the
+    five loses in the **fail-open** direction — a dependency that vanishes (§1's
+    dropped edge, "not a smaller plan but a different and more dangerous one"), a
+    predicate that stops being checked, a condition that stops being required, or a
+    freshness bound whose absence lets an arbitrarily stale row satisfy the step.
+
+    ADR-0253 §7 is the decision's own statement of the rule one member over —
+    "declaring nothing and declaring something malformed are two different states" —
+    and :func:`_structured_axis` is this module's: "the only spelling of *not applied*
+    is a key the object does not carry".
+    """
+    await _refused(_shaped_reply([_step(**{key: None})]))
