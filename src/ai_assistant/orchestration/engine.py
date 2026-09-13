@@ -8717,7 +8717,6 @@ class Engine:
         *,
         record: RecordedGoal | None,
         opened: OpenedAttempt | None,
-        asked: tuple[datetime, datetime] | None,
     ) -> Clarification | None:
         """Write the question this turn's planner raised, if the store takes it (§8, §10).
 
@@ -8733,11 +8732,12 @@ class Engine:
         **``expires_at`` is computed once, at the instant the question is written, and
         is never extended, refreshed or recomputed** (§8), from
         ``Settings.goal_question_ttl`` — required, positive, with no disable spelling.
-        That field is bounded below and not above, so the pair is taken **before this
-        turn persisted anything** (:meth:`_asked_at`) and handed in: this site runs after
-        the goal, the plans and the attempt are written (§11's order), and a deployment's
-        configuration fault must be neither the thing that fails a turn whose records
-        already stand nor the thing that quietly produces no question.
+        That field is bounded below and not above, so the same refusal is **also taken
+        before this turn persisted anything** (:meth:`_checked_deadline`): this site runs
+        after the goal, the plans and the attempt are written (§11's order), and a
+        deployment's configuration fault must not ordinarily be the thing that fails a
+        turn whose records already stand. What the record keeps is stamped **here**,
+        because that is where §8 fixes it.
 
         **A question exists only where the store accepted it** (§10). Where
         ``record_question`` answered ``False`` — that goal already holds an open one — or
@@ -8751,16 +8751,17 @@ class Engine:
             record: This turn's goal record, which names the goal the question is bound
                 to.
             opened: This turn's attempt, which names the attempt that raised it.
-            asked: §8's two instants, taken together before this turn persisted anything
-                (:meth:`_asked_at`), or ``None`` where nothing was raised.
 
         Returns:
             The clarification to put on the outcome, or ``None`` where nothing was
             written.
         """
-        if raised is None or record is None or opened is None or asked is None:
+        if raised is None or record is None or opened is None:
             return None
-        asked_at, expires_at = asked
+        # §8: "computed from it **once**, at the instant the question is written". Both
+        # instants come from this one reading, so the record's deadline is one lifetime
+        # after its own `asked_at` however long the writes above it took.
+        asked_at = self._clock()
         question = GoalQuestion(
             id=self._id_factory(),
             goal_id=record.goal.id,
@@ -8768,7 +8769,7 @@ class Engine:
             text=raised.text,
             about=raised.about,
             asked_at=asked_at,
-            expires_at=expires_at,
+            expires_at=self._deadline(asked_at),
         )
         try:
             written = await self._plans.record_question(question)
@@ -8828,34 +8829,36 @@ class Engine:
         for plan in plans:
             await self._plans.save_plan(plan)
 
-    def _asked_at(self) -> tuple[datetime, datetime]:
-        """When a question is being asked, and when it stops being answerable (§8).
+    def _deadline(self, at: datetime) -> datetime:
+        """When a question asked at ``at`` stops being answerable (ADR-0250 §8).
 
-        **One clock reading and one addition**, taken together, so that ``expires_at``
-        is *"computed from it **once**, at the instant the question is written"* (§8)
-        and there is no second reading for it to drift from. The pair is the whole of
-        what the record's two instants are.
+        §8 computes ``expires_at`` *"**once**, at the instant the question is written,
+        and … never extended, refreshed or recomputed"*, so the addition is taken from
+        the instant the record's own ``asked_at`` carries and from no earlier one.
 
-        **It is taken before the turn's persistence sequence begins.** §11's order puts
-        the question's write after the goal, the plans and the attempt, so a lifetime
-        with no representable deadline must be refused *before* those — a deployment's
-        configuration fault is not something that may fail a turn whose records already
-        stand, and nor is it something that may quietly produce no question when the
-        planner reported a material ambiguity.
+        **The overflow refusal is taken twice and the difference is deliberate.**
+        :meth:`_checked_deadline` runs it before the turn persists anything, so a
+        deployment whose ``goal_question_ttl`` has no representable deadline fails a turn
+        that has written nothing — §11's order puts the question's write after the goal,
+        the plans and the attempt, and a configuration fault must not be the thing that
+        fails a turn whose records already stand. This call is the one that actually
+        produces the value, and it raises too rather than quietly writing no question,
+        because a material ambiguity that silently produced nothing is the failure §6 and
+        §10 exist to prevent. What is left between them is a lifetime within one turn's
+        duration of the end of the calendar.
+
+        Args:
+            at: The instant the question is asked, which is its ``asked_at``.
 
         Returns:
-            The instant the question is asked, and the instant it expires.
+            The deadline.
 
         Raises:
-            ConfigurationError: If ``Settings.goal_question_ttl`` added to this instant
-                runs past the end of the calendar a stored instant can carry. That field
-                is bounded below and not above, and whether a given lifetime is
-                representable depends on when it is added — so this is the actual
-                ``clock + ttl`` and never a proxy for it.
+            ConfigurationError: If the configured lifetime added to this instant runs
+                past the end of the calendar a stored instant can carry.
         """
-        asked = self._clock()
         try:
-            return asked, asked + self._goal_question_ttl
+            return at + self._goal_question_ttl
         except OverflowError as exc:
             msg = (
                 f"goal_question_ttl is {self._goal_question_ttl}, which added to this "
@@ -8864,6 +8867,23 @@ class Engine:
                 f"(ADR-0250 §8)"
             )
             raise ConfigurationError(msg) from exc
+
+    def _checked_deadline(self) -> None:
+        """Refuse an unrepresentable lifetime before the turn persists anything (§8).
+
+        The same computation :meth:`_deadline` performs at the write, taken from an
+        earlier reading of the same clock — a *check*, producing nothing the record
+        keeps, so that §8's "computed **once**, at the instant the question is written"
+        stays literally true of the value the record carries.
+
+        **It is the actual ``clock + ttl`` and never a proxy for it.** A bound on the
+        lifetime alone cannot answer the question, because whether a given lifetime is
+        representable depends on when it is added.
+
+        Raises:
+            ConfigurationError: As :meth:`_deadline` raises it.
+        """
+        self._deadline(self._clock())
 
     # --- ADR-0250 §3: a turn resolves its goal before it plans ---------------
 
@@ -10037,12 +10057,13 @@ class Engine:
         # one was found, and `association.disposition` is `None` exactly where this turn
         # opened the goal.
         elided = association.elided > 0 and association.disposition is None
-        # ADR-0250 §8's two instants, taken **once and together, before the persistence
-        # sequence begins**: §11's order puts the question's write after the goal, the
-        # plans and the attempt, so a lifetime with no representable deadline is refused
-        # here — where the turn has written nothing — rather than at the write, and
-        # there is no second clock reading for `expires_at` to drift from.
-        asked = None if raised is None else self._asked_at()
+        # ADR-0250 §8's refusal, taken **before the persistence sequence begins** and on
+        # the turn that would actually ask: §11's order puts the question's write after
+        # the goal, the plans and the attempt, so a lifetime with no representable
+        # deadline fails a turn that has written nothing. It produces no value — the
+        # record's own instants are stamped at the write, which is where §8 fixes them.
+        if raised is not None:
+            self._checked_deadline()
         if raised is not None or not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
             # could park — so it needs no capacity slot, and its goal and plan are
@@ -10055,9 +10076,7 @@ class Engine:
             attempt = await self._persist_attempt(
                 attempt, association=association, plans=plans, charged=charged
             )
-            clarification = await self._raise(
-                raised, record=goal_record, opened=attempt, asked=asked
-            )
+            clarification = await self._raise(raised, record=goal_record, opened=attempt)
             if raised is not None:
                 # ADR-0250 §10: "The attempt's state becomes `AWAITING_CLARIFICATION`
                 # and its phase does not move" — "a question is a pause, not a retreat,
