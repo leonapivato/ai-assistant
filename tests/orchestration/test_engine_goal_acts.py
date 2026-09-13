@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     ClarificationWithdrawal,
     EngagementDisposition,
     GoalAbandonment,
+    GoalQuestion,
     GoalQuestionDisposition,
     GoalStatus,
     Ground,
@@ -205,6 +206,67 @@ async def test_abandoning_closes_the_goal_and_settles_its_question() -> None:
     (attempt,) = await harness.plans.attempts_of(goal_id)
     assert attempt.state is AttemptState.AWAITING_CLARIFICATION, "§12: the attempt is A9's"
     assert attempt.outcome is None
+
+
+async def test_abandoning_settles_a_question_admitted_while_the_status_was_written() -> None:
+    """§12: the open question is settled ``WITHDRAWN``, and the window is narrowed.
+
+    ``record_question`` does not advance the goal's ``version`` (§9), so a clarification
+    a concurrent turn admits between the first read and ``set_goal_status`` is invisible
+    to the abandonment's compare-and-swap: the status write succeeds and §12's *"settles
+    its open question ``WITHDRAWN``"* would not be true of the state it left. Reading the
+    goal's open question again **after** the status write settles that one too.
+
+    **It narrows the window rather than closing it.** A question admitted after the
+    second read lands on a goal the store already holds as ``ABANDONED``; refusing that
+    at the store boundary is a ``PlanStore`` contract change with its own ADR, filed as
+    an issue and not taken here.
+    """
+    plans = _AdmitsWhileClosing(now=lambda: AT)
+    harness = Harness(planner=_Asking(), plans=plans)
+    paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert paused.turn is not None
+    assert paused.clarification is not None
+    goal_id = paused.turn.goal.goal_id
+    (attempt,) = await plans.attempts_of(goal_id)
+    plans.late = GoalQuestion(
+        id="question-raced",
+        goal_id=goal_id,
+        attempt_id=attempt.id,
+        text="Which weekend did you mean?",
+        about="the weekend",
+        asked_at=AT,
+        expires_at=AT + GOAL_QUESTION_TTL,
+    )
+
+    answer = await harness.engine.abandon_goal(goal_id)
+
+    assert answer is GoalAbandonment.ABANDONED
+    held = await plans.get_goal(goal_id)
+    assert held is not None
+    assert held.status is GoalStatus.ABANDONED
+    first = await plans.get_question(paused.clarification.question_id)
+    assert first is not None
+    assert first.disposition is GoalQuestionDisposition.WITHDRAWN
+    raced = await plans.get_question("question-raced")
+    assert raced is not None
+    assert raced.disposition is GoalQuestionDisposition.WITHDRAWN, (
+        "§12: the abandoned goal holds no open question, whenever it was admitted"
+    )
+    assert await plans.open_question(goal_id) is None
+
+
+class _AdmitsWhileClosing(FakePlanStore):
+    """A store where a concurrent turn admits a question during the status write."""
+
+    late: GoalQuestion | None = None
+
+    async def set_goal_status(self, goal_id: str, /, **fields: Any) -> Any:
+        """Admit the waiting question first, then write the status as the fake does."""
+        if self.late is not None:
+            admitted, self.late = self.late, None
+            await super().record_question(admitted)
+        return await super().set_goal_status(goal_id, **fields)
 
 
 async def test_abandoning_twice_and_abandoning_nothing_are_both_results() -> None:
@@ -614,7 +676,7 @@ def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> 
     )
 
     with pytest.raises(ClockReadingError, match="localizable range"):
-        harness.engine._checked_deadline()
+        harness.engine._question_instants()
 
 
 async def test_a_reference_to_an_already_terminal_question_settles_nothing_at_all() -> None:
@@ -660,6 +722,78 @@ class _CountingSettlement(FakePlanStore):
     async def settle_question(self, question_id: str, /, **fields: Any) -> bool:
         """Settle as the fake does, counting the attempt."""
         self.settled += 1
+        return await super().settle_question(question_id, **fields)
+
+
+async def test_two_turns_answering_one_question_leave_the_winner_s_settlement_standing() -> None:
+    """§9 and §11: the loser of the compare-and-swap re-reads and engages the goal.
+
+    Two turns reference the same ``OPEN`` question. ``settle_question`` is *"the
+    resolve-once gate"* and answers ``True`` *"to the caller that moved it and ``False``
+    to every other"*, so one of them loses.
+
+    **The loser has acted on no answer.** §9's gate is stated over exactly that — *"no
+    lane acts on **an answer** before ``settle_question`` has answered ``True`` for
+    it"* — and this turn attempts no second disposition and re-clears nothing. It
+    **re-reads the question**, which is now terminal, and that is §11's fourth branch in
+    terms: *"**terminal already** → nothing is settled and the turn proceeds as an
+    ordinary engagement of the goal."* So the goal is engaged (§1's first act, on the
+    turn's own request, which the winner did not carry), the reference reports
+    ``ALREADY_SETTLED`` — *"its ``disposition`` is ``ANSWERED`` … and **this turn did
+    not settle it**"* — and the winner's row is untouched, content and settling instant
+    alike.
+    """
+    plans = _LosesTheRace(now=lambda: AT)
+    planner = _Asking()
+    harness = Harness(planner=planner, plans=plans)
+    paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert paused.turn is not None
+    assert paused.clarification is not None
+    question_id = paused.clarification.question_id
+    goal_id = paused.turn.goal.goal_id
+    before = await plans.get_goal(goal_id)
+    assert before is not None
+    planner.understanding = None
+    plans.race = True
+
+    loser = await harness.engine.converse(
+        "the river one", timeout=PATIENT, reference=TurnReference(question_id=question_id)
+    )
+
+    assert loser.reference is ReferenceOutcome.ALREADY_SETTLED, "read off the disposition"
+    assert loser.turn is not None, "§11: it proceeds as an ordinary engagement of the goal"
+    assert loser.goal_engagement is not None
+    assert loser.turn.goal.goal_id == goal_id
+    engaged = await plans.get_goal(goal_id)
+    assert engaged is not None
+    assert engaged.last_engaged_at is not None
+    assert before.last_engaged_at is not None
+    assert engaged.last_engaged_at >= before.last_engaged_at, "§1's first act still ran"
+    settled = await plans.get_question(question_id)
+    assert settled is not None
+    assert settled.disposition is GoalQuestionDisposition.ANSWERED, "the winner's, unchanged"
+    assert settled.settled_at == _WINNER_AT, "and at the winner's instant, not this turn's"
+    assert settled.text is None, "the winner cleared the content; the loser re-cleared nothing"
+
+
+_WINNER_AT: Final = AT + timedelta(minutes=5)
+
+
+class _LosesTheRace(FakePlanStore):
+    """A store where another turn settles the question a moment before this one does."""
+
+    race: bool = False
+
+    async def settle_question(self, question_id: str, /, **fields: Any) -> bool:
+        """Let the other turn win once, then behave as the fake does."""
+        if self.race:
+            self.race = False
+            await super().settle_question(
+                question_id,
+                disposition=GoalQuestionDisposition.ANSWERED,
+                at=_WINNER_AT,
+            )
+            return False
         return await super().settle_question(question_id, **fields)
 
 
@@ -717,24 +851,92 @@ class _UnreadableBindings:
         raise ConversationStoreError(msg)
 
 
-async def test_the_deadline_is_one_lifetime_after_the_instant_the_question_was_written() -> None:
-    """§8: "computed from it **once**, at the instant the question is written".
+async def test_the_deadline_is_one_lifetime_after_the_instant_the_question_carries() -> None:
+    """§8: "computed from it **once**" — and the once is *before* the writes.
 
-    Both instants come from one reading **at the write**, so however long the writes
-    §11's order puts ahead of it took, the deadline is one whole lifetime after the
-    record's own ``asked_at`` — a question is never born already expired. A clock that
-    advances on every read makes that observable: the goal, the engagement stamp, the
-    plans and the attempt each read it before this does.
+    Both instants come from a single reading taken before the persistence sequence
+    begins, so the deadline is one whole lifetime after the record's own ``asked_at``
+    and a question is never born already expired. A clock that advances on every read
+    makes the placement observable: the goal row and its engagement stamp are written
+    **after** that reading, so the question's ``asked_at`` is *earlier* than the stamp
+    ``engage_goal`` left — the ordering a second reading at the write would invert.
     """
     harness = Harness(planner=_Asking(), now=_Ticking(AT))
 
     outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
     assert outcome.turn is not None
-    question = await harness.plans.open_question(outcome.turn.goal.goal_id)
+    goal_id = outcome.turn.goal.goal_id
+    question = await harness.plans.open_question(goal_id)
     assert question is not None
     assert question.expires_at - question.asked_at == GOAL_QUESTION_TTL
-    assert question.asked_at > AT, "and it is the write's instant, not the turn's first"
+    assert question.asked_at > AT, "it is a reading of this turn's own clock"
+    goal = await harness.plans.get_goal(goal_id)
+    assert goal is not None
+    assert goal.last_engaged_at is not None
+    assert question.asked_at < goal.last_engaged_at, (
+        "and the reading precedes every write this turn made, the engagement included"
+    )
+
+
+async def test_a_deadline_checked_before_the_writes_is_the_deadline_stamped_on_them() -> None:
+    """§8 and §11: one reading, so an overflow cannot land after a record stands.
+
+    ``goal_question_ttl`` is bounded below and not above, so ``clock + ttl`` can
+    overflow — and whether it does depends on *when* it is added. A check before the
+    writes plus a second computation at the write are therefore two different questions,
+    and a clock crossing the boundary between them would fail a turn whose goal, plans
+    and attempt already stand. §11 accepts crash windows in terms; it does not accept
+    one this code opens for itself.
+
+    Here the clock stands still until the turn's first write and then leaps three days,
+    against a lifetime representable from the first instant and not from the second.
+    One reading serves both the check and the stamp, so the turn completes and the
+    question carries exactly the deadline that was checked.
+    """
+    clock = _JumpingClock(AT, to=AT + timedelta(days=3))
+    plans = _JumpsOnFirstWrite(clock, now=lambda: AT)
+    ttl = datetime.max.replace(tzinfo=UTC) - AT - timedelta(days=2)
+    harness = Harness(planner=_Asking(), plans=plans, now=clock, goal_question_ttl=ttl)
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.clarification is not None, "the turn asked, and was not failed for it"
+    assert outcome.turn is not None
+    question = await plans.open_question(outcome.turn.goal.goal_id)
+    assert question is not None
+    assert question.asked_at == AT, "the one reading, taken before the persistence began"
+    assert question.expires_at == AT + ttl, "and the deadline that reading was checked for"
+
+
+class _JumpingClock:
+    """A clock that stands still until something tells it to leap (ADR-0009's seam)."""
+
+    def __init__(self, start: datetime, *, to: datetime) -> None:
+        self._now = start
+        self._to = to
+
+    def __call__(self) -> datetime:
+        """Read the instant this clock currently stands at."""
+        return self._now
+
+    def jump(self) -> None:
+        """Move to the far instant."""
+        self._now = self._to
+
+
+class _JumpsOnFirstWrite(FakePlanStore):
+    """A store whose first write moves the turn's injected clock on."""
+
+    def __init__(self, clock: _JumpingClock, *, now: Any) -> None:
+        super().__init__(now=now)
+        self._jumping = clock
+
+    async def save_goal(self, goal: Any) -> str:
+        """Persist as the fake does, then advance the turn's clock."""
+        written: str = await super().save_goal(goal)
+        self._jumping.jump()
+        return written
 
 
 class _Ticking:
