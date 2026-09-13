@@ -324,9 +324,8 @@ intended action, the same tool called with the same concrete arguments under the
 > action.** A row is identified by **`(goal_id, intended_action_id, effect_key)`** — §6's own keying, *"not on the pair"* —
 > and names the `(execution_id, step_id)` currently holding it together with the key it was taken under. **The store
 > additionally keeps at most one row per `(goal_id, intended_action_id)`**, not as a competing constraint but as an invariant
-> of the write rules below: the only writes are the first claim, a **re-point onto a dead holder** — which **re-keys** the
-> row rather than leaving the dead key's row beside it — and a **failed holder's own re-claim**, which re-keys the row without
-> moving its holder. `claim_effect` therefore **resolves the row by the
+> of the write rules below: the only writes are the first claim and a **re-point onto a dead holder**, and a re-point
+> **re-keys** the row rather than leaving the dead key's row beside it. `claim_effect` therefore **resolves the row by the
 > pair and compares the effect key within it**, which is the lookup §6's second clause requires — *"a completed effect claimed
 > under **this** intended action whose key is **not** this call's key"* is a state a triple-keyed lookup could not ask about,
 > finding no row at all. **No lane scopes this claim to a goal and an argument key alone** (§6).
@@ -390,14 +389,9 @@ intended action, the same tool called with the same concrete arguments under the
 >      supersession itself**, from the holder's execution's plan and the plans it holds, inside the
 >      same indivisible step as the write — `orchestration` neither computes it nor asks for it, and
 >      **no member is added** for it.
->    - **`FAILED`** → **`CLAIMED`**, **re-keying the row to this call's key** and restamping
->      `claimed_at`, the row's holder and its `targets_revision` unchanged, where the row names
->      **this same `(execution_id, step_id)`** — **whether or not** its key equals this call's key,
->      because a holder that failed completed nothing; **`HELD`**, writing nothing, in every other
->      case.
->    - **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing, where the row
->      names **this same `(execution_id, step_id)`** **and** its key equals this call's key;
->      **`HELD`**, writing nothing, in every other case.
+>    - **`FAILED`**, **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing,
+>      where the row names **this same `(execution_id, step_id)`** **and** its key equals this
+>      call's key; **`HELD`**, writing nothing, in every other case.
 >
 > **The second limb is total: each of `StepStatus`'s seven members, crossed with whether the row's key equals this call's key
 > and with whether the row names this step, has exactly one answer, and no input is left undecided.** The statuses under which
@@ -552,19 +546,6 @@ take the key while that retry was still coming, and both would invoke: two claim
 compare-and-swap orders against each other. **So `FAILED` takes the shape `PENDING` takes** — its own holder re-claims it,
 nothing else does, and the key is freed by that holder being disposed of.
 
-**That re-claim re-keys the row, and it is the only write in this section that leaves the holder where it is.** The claim is
-taken before `ToolInvoker.invoke` validates the decision against the request, and §1 takes the key from the concrete
-authorised call, so the row a failed holder leaves may carry a key its own retry does not reconstruct — a decision mutated in
-between moves the key with it, which arm 4 already asserts. Demanding equality there would answer `HELD` to the very holder
-*"its own holder re-claims it"* names, and the intended action would stall for good on a plan nothing supersedes. **A holder
-that failed completed nothing** — ADR-0034 §1's *"nothing could have run under it" is a fact the executor **holds*** — so
-replacing its key forfeits no at-most-once guarantee, there being no performed act behind the key replaced. The admission is
-as narrow as the exemption it rides on, **the same `(execution_id, step_id)`**: a different step reads `HELD` under an unequal
-key exactly as under an equal one, and no live holder is ever re-keyed by another. **Nothing is re-pointed, because the holder
-does not change**: `claimed_at` restamps, as §9 stamps it at every write that lands, and `targets_revision` is read from
-the same holder's execution's plan and so cannot move — the staleness a re-point restamps away cannot arise where the row
-keeps the step it named.
-
 **`RUNNING` is grouped with `INDETERMINATE` rather than with `SUCCEEDED`, and ADR-0014 §4 is why.** A step durably `RUNNING`
 is precisely the state that decision calls indistinguishable — *"a crash between a tool's side effect and the commit of
 `RUNNING → SUCCEEDED` … cannot, from planning's vantage point, be distinguished from a crash before the effect"* — and it is
@@ -583,12 +564,25 @@ proceeds; and once a stored plan supersedes that plan the holder can never retry
 to whichever step asks. **A goal is therefore never stuck behind a dead claim**, and the one case that stays held is a
 `FAILED` holder on a live plan — which is exactly the case where the retry may still come.
 
-**And what `HELD` now blocks is one intended action rather than one goal, which is the whole of what the scoping buys here.**
-Before ADR-0265 the row was the goal's, so a live hold on any effect held every step of the goal carrying that key; now it
-holds only the steps that are attempts at **the same act**. A goal whose user asked for two rooms has two rows and neither
-holds the other, and a goal pursuing two unrelated acts that happen to resolve to one tool and one digest — the collision §1's
-key alone could not tell from a repeat — has two rows as well. **The live-plan hold survives unchanged inside an intended
-action**, and it is the same trade §2 fixed: a hold that can stall one act, rather than a gap that could double it.
+**A row whose key moved after its call was constructed is held rather than re-keyed.** ADR-0029 §5 rules that *"every retry of
+an authorised call reuses the same `ToolCall`, hence the same decision, hence the same key"*, and §1 takes the effect key from
+that same authorised call, so an **honest** retry reconstructs the **equal** key and the exemption above answers it. An
+unequal key on the holder's own retry therefore means the key **moved** — ADR-0018's threat model, not a fresh intent — and
+re-keying to it would hand the mutated call the claim the authorised one holds. Nor would `FAILED` license it: ADR-0029 §4
+classifies a side-effecting `NATURAL` call that timed out or was cancelled as `FAILED`, on the ground that *"whether it acted
+does not change what **a repeat** does"* — which covers repeating the same call and not authorising a different one. **Such a
+row is freed as every dead claim is**: §4's act 1 sweeps a superseded plan's `PENDING` or `AWAITING_APPROVAL` holder to
+`SKIPPED`, whose branch re-keys, and a `FAILED` holder on a superseded plan is re-keyed by the branch above — **whichever step
+asks**, with no key condition in either. **The stall is bounded by the holding plan's life rather than permanent**, which is
+the trade this section already takes.
+
+**And what `HELD` now blocks is one intended action rather than one goal, which is the whole of what the scoping buys
+here.** Before ADR-0265 the row was the goal's, so a live hold on any effect held every step of the goal carrying that key;
+now it holds only the steps that are attempts at **the same act**. A goal whose user asked for two rooms has two rows and
+neither holds the other, and a goal pursuing two unrelated acts that happen to resolve to one tool and one digest — the
+collision §1's key alone could not tell from a repeat — has two rows as well. **The live-plan hold survives unchanged inside
+an intended action**, and it is the same trade §2 fixed: a hold that can stall one act, rather than a gap that could double
+it.
 
 **The store decides it rather than the caller, for ADR-0255 §3's reason and no other.** That section refuses a
 caller-supplied revision because *"a check with an extra step"* is a check the world can move under; the compared value
@@ -1083,11 +1077,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > annotations `PermissionDecision.execution_id` and `PermissionDecision.step_id` use for the same two values;
 > **`targets_revision: int`**, constrained `ge=1` and carrying `ActionPlan.targets_revision`'s own annotation less its `None`;
 > and **`claimed_at`**, a `UtcInstant` **read from the store's own injected clock at each write that lands** — so a first
-> claim stamps it, a re-point after a `SKIPPED` holder **restamps** it at the new holder's instant, **a failed holder's own
-> re-key restamps it in place** (§2), and every no-write outcome (`COMPLETED`, `COMPLETED_OTHERWISE`, `UNCERTAIN`, `HELD`, and
-> the same-step `CLAIMED` of a `PENDING` or `AWAITING_APPROVAL` holder) **leaves it exactly as it stands**. **No record ever
-> carries an instant earlier than its current holder's claim**, and the clock is injected on ADR-0026's discipline rather than
-> read from the wall.
+> claim stamps it, a re-point after a `SKIPPED` holder **restamps** it at the new holder's instant, and every no-write outcome
+> (`COMPLETED`, `COMPLETED_OTHERWISE`, `UNCERTAIN`, `HELD`, and the same-step `CLAIMED`) **leaves it exactly as it stands**.
+> **No record ever carries an instant earlier than its current holder's claim**, and the clock is injected on ADR-0026's
+> discipline rather than read from the wall.
 
 > **Normative — `targets_revision` is recorded and compared by nothing, and ADR-0265 §6 is why it is on the row at all.** That
 > section rules that *"the effect record names the interpretation revision the claiming plan targeted … so that 'the
@@ -1214,16 +1207,19 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   supersession — **neither is taken here, and no lane adds either on this decision's authority**.
   **Fired by a decision that takes one of the two**, which is also the decision that first makes
   this system's best uncertain-effect guarantee reachable.
-- **Reconciling an uncertain effect at the designated egress seam.** **Not decided**, and §3 states the ground: ADR-0148 §9
-  rules *"There is no egress outside a claimed step"* and *"A designated seam adds no reconciliation path of its own"*, while
-  §3's call takes no step claim. **This is the consequential case**, so the shape a later decision would most plausibly take
-  is named **without being decided**: the reconciliation made as a **claimed read step of the goal's next attempt** — planned
-  and serviced as one of ADR-0251 §1's rounds, dispatched under its own committed `→ RUNNING` claim so §9 is **satisfied
-  rather than bent**, its answer recorded as an ADR-0252 §1 `GoalEvidence` row and the `INDETERMINATE` step resolved from that
-  row — and **never a direct invoke taken by §4's pass**. **No lane builds it on this decision's authority**: it needs a
-  producer from an evidence row to a step transition that neither ADR-0252 nor this decision has. **Fired by A8's second ADR**
-  (the retry policy, which must say what to do about an uncertain egress effect) **or by the wiring of the first consequential
-  capability through the seam ADR-0154 §1 designated, whichever is first.**
+- **Reconciling an uncertain effect at the designated egress seam.** **Not decided**, and §3
+  states the ground: ADR-0148 §9 rules *"There is no egress outside a claimed step"* and *"A
+  designated seam adds no reconciliation path of its own"*, while §3's call takes no step claim.
+  **This is the consequential case**, so the shape a later decision would most plausibly take is
+  named **without being decided**: the reconciliation made as a **claimed read step of the goal's
+  next attempt** — planned and serviced as one of ADR-0251 §1's rounds, dispatched under its own
+  committed `→ RUNNING` claim so §9 is **satisfied rather than bent**, its answer recorded as an
+  ADR-0252 §1 `GoalEvidence` row and the `INDETERMINATE` step resolved from that row — and **never
+  a direct invoke taken by §4's pass**. **No lane builds it on this decision's authority**: it
+  needs a producer from an evidence row to a step transition that neither ADR-0252 nor this
+  decision has. **Fired by A8's second ADR** (the retry policy, which must say what to do about an
+  uncertain egress effect) **or by the wiring of the first consequential capability through the
+  seam ADR-0154 §1 designated, whichever is first.**
 - **Reconciling a side-effecting `Idempotency.NATURAL` step.** **Not decided**, and §3 states both blockers rather
   than one. `NATURAL` is ADR-0016 §4's guarantee about **the effect** — *"the operation is idempotent by nature (a
   read; set-to-a-value)"* — and **no declaration in this corpus says a repeat returns what the first call returned**,
@@ -1402,35 +1398,35 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    where it moved, that its key moved with it**. **The `SUCCEEDED` pair is the Sunday case at the store**: equal keys answer
    `COMPLETED`, unequal keys answer `COMPLETED_OTHERWISE`, and neither writes. **The `SKIPPED` and superseded-`FAILED` rows
    are asserted to re-key**, which is what keeps at most one row per `(goal_id, intended_action_id)`. **The `FAILED` pair is
-   what stops `StepExecutor.execute`'s retry racing a later plan without stopping that retry**: this step answers `CLAIMED`
-   **and the row re-keys to it under an unequal stored key too** — the pre-dispatch case, a row written under a key a decision
-   mutation moved, which its own holder recovers and no other step can, **with `claimed_at` restamped and the holder and its
-   `targets_revision` unchanged** — while a **different** step answers `HELD` under equal and unequal keys alike with the row
-   unmoved. It adds: **durable re-pointing** after a `SKIPPED` holder, with **`claimed_at` and `targets_revision` both
-   restamped** to the new holder's; **both preserved** on every no-write outcome, under an injected clock, and **both asserted
-   on the initial claim** — the pair together on every path, because a stale revision surviving a re-point hands §10's
-   modify-before-replace decision a false account; the **refusal** paths — an unknown `execution_id`, a `step_id` that is not
-   a step of that execution, and a `step_id` whose stored step carries **no `intended_action`** — each raising `PlanningError`
-   with **no row written**; the **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying the two identifiers
-   persists **both exactly as given** onto the committed `StepExecution` with `attempts` at `0` and `started_at` and
-   `approval_ref` `None`, while **`bound_tool` is left as the source had it** — absent from a `PENDING` one, **kept** from an
-   `AWAITING_APPROVAL` one — the validator's own refusals sitting in `core`'s construction table (§9) — **and the claim
-   condition's six refusals**: a trio naming **another goal's** execution, a step **not of** that execution, a step **not
-   standing `SUCCEEDED`**, one the goal's **effect row does not name as holder**, one whose **`satisfied_by_key` is not the
-   row's key** — the Sunday case at the store — and one whose **stored source status is `RUNNING` or `INDETERMINATE`**, each
-   raising the **non-stale `PlanningError`** with **no write**, and staying refused across a re-read, **and the store's own
-   writes**: the row's `output` is the **holder's**, its `finished_at` the injected clock's, and the claim marks absent. **The
-   export closure is armed too**: a valid satisfaction pair resolves, while a **dangling** `satisfied_by_execution`, a
-   `satisfied_by_step` of **another execution**, and an execution of **another goal** are each **rejected**; and **atomicity
-   under contention**, where two writers claim one `(goal_id, intended_action_id)` concurrently, **over both write paths** —
-   **no row**, and an existing **`SKIPPED`** holder two callers would each re-point, because a uniqueness constraint on
-   insertion passes the first and leaves the second racing. In each, **exactly one** receives `CLAIMED`, the other `HELD`, and
-   exactly one durable row names a holder. The store under test is not permitted to pass either by serialising the two calls
-   in the test's own control flow. It adds the **two erase paths over a non-empty table** — a goal holding an effect row, with
-   `delete_goal` and `clear` exercised **separately** and each asserting **no row survives in storage or in the export** — and
-   one **upgrade** case: a store written before this decision opens with an **empty** effects table, exports and deletes
-   cleanly, and answers **`CLAIMED`** for the key of a legacy `SUCCEEDED` side-effecting step — the delimited guarantee §9
-   states.
+   what stops `StepExecutor.execute`'s retry racing a later plan**: this step answers `CLAIMED`, a different one `HELD`, and
+   the row moves in neither. **And the moved-key row is pinned in the same pair**: a row whose key a post-construction
+   mutation moved answers **`HELD`** to its own holder's retry while that plan stands, with the row unmoved — and
+   **`CLAIMED`**, re-keyed and re-pointed, to a later plan's step once a stored plan supersedes the holder's, which then
+   dispatches exactly once. It adds: **durable re-pointing** after a `SKIPPED` holder, with **`claimed_at` and
+   `targets_revision` both restamped** to the new holder's; **both preserved** on every no-write outcome, under an injected
+   clock, and **both asserted on the initial claim** — the pair together on every path, because a stale revision surviving a
+   re-point hands §10's modify-before-replace decision a false account; the **refusal** paths — an unknown `execution_id`, a
+   `step_id` that is not a step of that execution, and a `step_id` whose stored step carries **no `intended_action`** — each
+   raising `PlanningError` with **no row written**; the **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition`
+   carrying the two identifiers persists **both exactly as given** onto the committed `StepExecution` with `attempts` at `0`
+   and `started_at` and `approval_ref` `None`, while **`bound_tool` is left as the source had it** — absent from a `PENDING`
+   one, **kept** from an `AWAITING_APPROVAL` one — the validator's own refusals sitting in `core`'s construction table (§9) —
+   **and the claim condition's six refusals**: a trio naming **another goal's** execution, a step **not of** that execution, a
+   step **not standing `SUCCEEDED`**, one the goal's **effect row does not name as holder**, one whose **`satisfied_by_key` is
+   not the row's key** — the Sunday case at the store — and one whose **stored source status is `RUNNING` or
+   `INDETERMINATE`**, each raising the **non-stale `PlanningError`** with **no write**, and staying refused across a re-read,
+   **and the store's own writes**: the row's `output` is the **holder's**, its `finished_at` the injected clock's, and the
+   claim marks absent. **The export closure is armed too**: a valid satisfaction pair resolves, while a **dangling**
+   `satisfied_by_execution`, a `satisfied_by_step` of **another execution**, and an execution of **another goal** are each
+   **rejected**; and **atomicity under contention**, where two writers claim one `(goal_id, intended_action_id)` concurrently,
+   **over both write paths** — **no row**, and an existing **`SKIPPED`** holder two callers would each re-point, because a
+   uniqueness constraint on insertion passes the first and leaves the second racing. In each, **exactly one** receives
+   `CLAIMED`, the other `HELD`, and exactly one durable row names a holder. The store under test is not permitted to pass
+   either by serialising the two calls in the test's own control flow. It adds the **two erase paths over a non-empty table**
+   — a goal holding an effect row, with `delete_goal` and `clear` exercised **separately** and each asserting **no row
+   survives in storage or in the export** — and one **upgrade** case: a store written before this decision opens with an
+   **empty** effects table, exports and deletes cleanly, and answers **`CLAIMED`** for the key of a legacy `SUCCEEDED`
+   side-effecting step — the delimited guarantee §9 states.
 5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**: the `ALLOW` is
    **replayed**, no second permission record is authored, and the step reaches its dispatch exactly once. **And the
    replay is withheld wherever it must be**, in a table over ADR-0255 §5's three predicates — a dependency that no
