@@ -389,9 +389,6 @@
   reading its own §4 does not support is corrected rather than grandfathered. Appended
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
-- **Partially superseded: 2026-09-12 by ADR-0255 — §5's two per-turn clauses, in their
-  subject alone. Nothing else in this ADR.** *"Every plan of the turn is persisted before anything
-  is driven"* and *"Exactly one plan of a turn is driven and it is the last"* become statements
 - **Partially superseded: 2026-09-12 by ADR-0255 — §5 in three scopes: its two per-turn
   clauses, in their subject; its superseded-plan-drives-nothing rule, in the moment it binds at;
   and its no-new-failure-mode clause. Nothing else in this ADR.** *"Every plan of the turn is
