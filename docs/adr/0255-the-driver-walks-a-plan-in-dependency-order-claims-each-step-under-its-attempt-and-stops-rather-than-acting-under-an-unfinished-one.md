@@ -256,7 +256,8 @@ evaluation is what decides a dispatch.
 
 > **Normative — what re-enters a stopped walk, and this decision provides no automatic route.** A
 > stopped walk is re-entered by **exactly one** route: `StepRunner.resume` answering a park of
-> that plan, after which the driver resumes at the first `PENDING` step (§5). **There is no
+> that plan, after which the driver **walks that plan again from its first position** (§5).
+> **There is no
 > sweep, no timer, no queue, no background continuation and no automatic re-drive** of a plan the
 > walk stopped on any of the other four triggers. A later turn of the same attempt **plans
 > again** — which produces a **new** plan, driven over a **new** execution, and §7 governs what
@@ -475,7 +476,7 @@ finds a tool already invoked, and the step's outcome is one of its own three —
 and it is a statement about the world rather than about this design: ADR-0029 §4 is where the
 system says it cannot know how far a call got, and no conjunct on a store write changes that.
 
-### 5. Mid-plan park: the walk stops, and the resume re-enters from the stored execution
+### 5. Mid-plan park: the walk stops, and the answered park is followed by another whole walk
 
 > **Normative.** A step whose ruling is `CONFIRM` parks exactly as ADR-0037 §4 already parks one —
 > the decision recorded, the step committed `PENDING → AWAITING_APPROVAL` carrying `bound_tool`,
@@ -488,10 +489,10 @@ system says it cannot know how far a call got, and no conjunct on a store write 
 > again until the park is answered**. No step independent of the parked one is dispatched, no
 > second `CONFIRM` is put in one turn, and no lane collects several parks into one prompt.
 
-> **Normative — resumption drives that exact step, and the driver re-enters after it.**
+> **Normative — resumption drives that exact step, and a whole fresh walk follows it.**
 > `StepRunner.resume` disposes of the parked step on ADR-0037 §4's unchanged sequence. Where it
-> returns `EXECUTED`, the driver **resumes the walk**; where it returns `DENIED`, the step is
-> `SKIPPED`/`APPROVAL_DENIED` and the driver **resumes the walk**, which will then dispose of
+> returns `EXECUTED`, the driver **walks that plan again**; where it returns `DENIED`, the step is
+> `SKIPPED`/`APPROVAL_DENIED` and the driver **walks that plan again**, which will then dispose of
 > that step's dependents by §2's skip rule. **The resumed claim carries the same conjunct** — it
 > is a `→ RUNNING` transition and §3 binds it — so a park answered after the goal moved on, or
 > after the attempt ended, is refused and nothing is invoked.
@@ -1069,8 +1070,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 8. **A parked middle step, answered and resumed** — a three-step plan whose **second** step rules
    `CONFIRM`: the walk stops, step 3 is `PENDING` and **not** `SKIPPED`, no third step is
    dispatched, the attempt is `AWAITING_AUTHORIZATION`, and the turn carries the confirmation.
-   `resume` then disposes of step 2 and the driver **re-enters at step 3**, computed from the
-   stored execution and not from a carried index. A paired arm answers `DENY`: step 2 is
+   `resume` then disposes of step 2 and the driver **walks the plan again**, passing over the now
+   terminal steps 1 and 2 and reaching step 3 — from the stored execution and not from a carried
+   index. A paired arm answers `DENY`: step 2 is
    `SKIPPED`/`APPROVAL_DENIED`, and step 3 — declaring `depends_on` step 2 — is
    `SKIPPED`/`UNMET_DEPENDENCY`. **And the arm that pins the overtake**: with step 2 durably
    `AWAITING_APPROVAL` and step 3 `PENDING`, a walk started afresh over that execution — the shape
@@ -1079,7 +1081,7 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    start-at-position-one rule makes unreachable rather than checks for.
 9. **"Restart during approval"** — the same plan parked at its second step; a **fresh** engine over
    the same durable state recovers it through `pending_confirmations()` (ADR-0052 §1), answers it,
-   and the driver re-enters at step 3. The arm asserts the recovery is over steps and not
+   and the driver's next walk reaches step 3. The arm asserts the recovery is over steps and not
    positions, by parking at a middle step rather than a first.
 
 10. **A commits-nothing disposition stops the walk** — a three-step plan whose **second** step
@@ -1166,9 +1168,10 @@ clause and its monotonic phase order are what §10 rests on and declines to weak
 discharged, which is the entry spent rather than replaced.
 
 **ADR-0014 — relied on entire, and the two deferrals it still holds are named.** §3's
-`ExecutionState` and its resumability argument are what §5 computes re-entry from; §4's transition
-graph, its `→ RUNNING`-before-invoke ordering, its `approval_ref` rule, its `PENDING → SKIPPED` row
-with `SUPERSEDED`, and its `INDETERMINATE` treatment are each taken as written; §5's
+`ExecutionState` and its resumability argument are what §5 reads each walk's dispositions from;
+§4's transition graph, its `→ RUNNING`-before-invoke ordering, its `approval_ref` rule, its
+`PENDING → SKIPPED` row with `SUPERSEDED`, and its `INDETERMINATE` treatment are each taken as
+written; §5's
 compare-and-swap and its commands-not-snapshots argument are what §3 strengthens by one conjunct.
 **`SkipReason` gains no member** and **`StepStatus` gains no member**, so §3's and §4's
 vocabularies are untouched. §7's **execution leases** and the **parallel-execution** half of its
