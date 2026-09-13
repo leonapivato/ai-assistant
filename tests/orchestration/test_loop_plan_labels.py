@@ -27,7 +27,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from test_loop_reads import _NOW, _belief, _bounded, _loop
+from test_loop_reads import _NOW, _belief, _bounded, _hop, _loop
+from test_loop_revision import _seeded
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
@@ -430,3 +431,57 @@ async def test_an_understanding_that_drops_every_condition_leaves_no_label_resol
             understanding=ProposedUnderstanding(retains_outcome=True),
             continuing=goal,
         )
+
+
+# --------------------------------------------------------------------------- #
+# §9 on a turn's *second* call, over the supply that call was handed           #
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_revision_after_a_servicing_resolves_against_that_calls_own_values() -> None:
+    """§9 at the second planner call, which is a different call with different values.
+
+    ADR-0228 §8 binds ADR-0226 §3's label space **per call**, and ADR-0228 §1 makes a
+    revision "the model's judgement over a wider supply" — so a turn that serviced a read
+    hands its second call a supply the first did not have, and an understanding recorded
+    off that call mints elements the first call's did not.
+
+    Both halves are asserted over one turn, because both are ways the second site could
+    be wrong while every other arm here stayed green: the interpretation's ``record``
+    names the record **the servicing added**, which the first call's supply does not
+    hold, and the step's condition label resolves against the **second** call's
+    understanding, whose element the first call's revision does not carry.
+    """
+    memory = await _seeded()
+    revision = _plan(
+        when=(_condition("D1"),),
+        interpretations=(PlanInterpretation(id="i-1", settles="D1", record="episode-1"),),
+    ).model_copy(update={"id": "plan-2"})
+    planner = FakePlanner(
+        now=lambda: _NOW,
+        read_request=_hop("M1"),
+        revision=revision,
+        understanding=ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(ProposedElement(text="the forecast is dry", ground=Ground.INFERRED),),
+        ),
+    )
+
+    responded = await _loop(memory, planner=planner).respond(
+        _ASKED, narrow=_bounded(), operation=ConversationalOperation.CONVERSE
+    )
+
+    first_supply = [record.id for record in planner.calls[0][3]]
+    assert "episode-1" not in first_supply, (
+        "the hop is what put it in front of the planner, so the first call's supply "
+        "could not have satisfied §8's record check"
+    )
+    record = responded.goal
+    assert record is not None
+    assert responded.turn.plan.id == "plan-2", "the plan the second call returned"
+    assert responded.turn.plan.targets_revision == 3, "both calls revised (ADR-0249 §8)"
+    [element] = record.goal.interpretation[-1].conditions
+    assert responded.turn.plan.steps[0].when[0].about == element.id, (
+        "resolved against the *second* call's understanding, not the first's revision"
+    )
+    assert responded.turn.plan.interpretations[0].record == "episode-1"
