@@ -2109,17 +2109,24 @@ ledger and stops on the same three guards.
 
 > **Normative — a walk drives several steps and `TurnOutcome.step` stays the one field `core`
 > already has, so this states which step it carries.** `StepOutcome` is singular and **gains no
-> member and loses none**. **`TurnOutcome.step` carries the last step the walk *dispatched*** — the
-> last step that reached `StepRunner` and produced a `StepDisposition` — and is **`None` where the
-> walk dispatched none**, exactly as it is today. **Where the walk stopped at a dispatched step,
-> that step is the last dispatched one**, so the stopping step is what the field carries: the step
-> that parked, the step that returned `INDETERMINATE`, the step whose disposition commits nothing
-> (§2). **The ground is what a spoke renders: where the goal stands**, which is the step the user
-> must act on. **A step the driver skipped and a claim `commit_transition` refused reach no
-> `StepRunner` and dispatch nothing, so neither is carried here**: `Disposition` is the gate's
-> verdict and holds no member for either, so naming one would fabricate a verdict no gate gave —
-> and **what they cause at the user's surface is A9's**, which §12 books by name and this decision
-> does not take. **No step's outcome is lost**: every step's `status`, `skip_reason`, `failure` and
+> member and loses none**. **`TurnOutcome.step` carries the last step *of the turn* that
+> *returned* a `StepDisposition`** — across **both** the walks §10 permits and not the last walk's
+> alone — and is **`None` where no step of the turn returned one**, which is what the field already
+> carries for a turn of one walk. **Where a walk stopped at a step that returned one, that step is
+> the last of the turn that did**, so the stopping step is what the field carries: the step that
+> parked, the step that returned `INDETERMINATE`, the step whose disposition commits nothing (§2).
+> **A stopped walk is the turn's last**, because §10 carries a licence only from a walk that *ran
+> to the end of the plan*, so no second walk follows one that stopped and nothing later displaces
+> its step. **The ground is what a spoke renders: where the goal stands**, which is the step the
+> user must act on. **Two cases return no `StepDisposition`, and they differ in whether the step
+> was dispatched at all**: a step the driver **skipped** is **not dispatched**, since §1 makes
+> dispatching a step *calling `StepRunner.run`* on it and a skip calls it never; a step whose claim
+> `commit_transition` **refused** **is** dispatched — §3 puts that claim inside the run, after the
+> request and the ruling — and returns none because it **raises**. **Neither is carried here**:
+> `Disposition` is the gate's verdict and holds no member for either, so naming one would fabricate
+> a verdict no gate gave — and **what they cause at the user's surface is A9's**, which §12 books
+> by name and this decision does not take. **No step's outcome is lost**: every step's
+> `status`, `skip_reason`, `failure` and
 > `output` are on the `ExecutionState` that `StepOutcome.state` already carries, addressable by
 > `step_id`, which is that model's own documented idiom — so the singular field is a projection of
 > a walk the returned state already records in full. **This mints no `core` shape, no field and no
@@ -2596,8 +2603,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    sought to the first `PENDING` step would dispatch step 3, which is the defect §5's
    start-at-position-one rule makes unreachable rather than checks for. **And the arm that pins
    which step the turn reports** (§11): over that same plan, with step 1 `SUCCEEDED` and step 2
-   parked, the turn's `TurnOutcome.step` names **step 2** — the last step the walk dispatched,
-   and the one it stopped at — and
+   parked, the turn's `TurnOutcome.step` names **step 2** — the last step of the turn that
+   returned a `StepDisposition`, and the one the walk stopped at — and
    **not** step 1, against an implementation that kept the retired single-step path's habit of
    reporting the first step it drove.
 9. **"Restart during approval"** — the same plan parked at its second step; a **fresh** engine over
@@ -2701,7 +2708,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     starts**, asserted by a paired case in which the licensed round returns a plan whose first
     step's `when` no row satisfies and which waits on nothing that plan produces: phase 4 **fails**
     it under ADR-0254 §14's unchanged limb, **`start_execution` is never called** and no
-    `ActionRequest` is built, so the second walk is gated exactly as the first. A final paired arm
+    `ActionRequest` is built, so the second walk is gated exactly as the first.
+    **And the arm that pins which step *the turn* reports across two walks** (§11): over that
+    same pair, where the first walk dispatched step A and the second walk dispatched nothing —
+    because phase 4 failed its plan, or because §9's remainder was gone before its first step —
+    the turn's `TurnOutcome.step` names **step A** and **not** `None`, against an implementation
+    that projects the last walk rather than the turn. A final paired arm
     asserts **one licence per turn**: the second walk carries none, whatever it skipped. **And a
     persistence arm**: where the licensed round's `save_plan` raises, the first walk's execution
     and its `SUCCEEDED` step are unchanged, no second walk begins, and nothing is re-dispatched.
@@ -3197,9 +3209,14 @@ render a whole walk, and §11's projection is chosen because it is available wit
 and every spoke reads, which is a **breaking `core` change under golden rule 5** and takes **its
 own ADR, ratified and merged before anything implements against it** (ADR-0015 §5) — and this
 decision is about walking a plan, not about what a turn reports. It costs nothing to defer:
-§11's rule loses no disposition, since every step's own is on its `StepTransition` record and
-reachable from the goal surfaces, so a later decision that gives a surface the whole walk reads
-what it needs from the store rather than from a field this one would have had to widen first.
+§11's rule loses no step's **outcome**, since every step's `status`, `skip_reason`, `failure` and
+`output` are on the persisted `ExecutionState` the returned `StepOutcome.state` carries,
+addressable by `step_id` — and **not** on a `StepTransition`, which §11 records the plan store
+persists nowhere. What the singular field leaves unsurfaced is the other steps' **dispositions**,
+which are the gate's verdicts rather than the steps' own results and which no stored row holds —
+and a commits-nothing disposition writes no transition at all, so there is nothing there to read
+either. That, and not the outcomes, is what a sequence would buy: a later decision that gives a
+surface the whole walk reads every step's outcome from the store as things stand.
 **Fired by a surface that needs the sequence.**
 
 **The store derives the attempt itself, by searching `attempts_of(goal_id)` for the row whose
