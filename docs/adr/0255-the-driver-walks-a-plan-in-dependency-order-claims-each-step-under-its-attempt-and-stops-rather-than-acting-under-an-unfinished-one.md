@@ -1,6 +1,24 @@
 # 255. The driver walks a plan in dependency order, claims each step under its attempt, and stops rather than acting under an unfinished one
 
 - Status: Proposed
+- **Partially supersedes [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md),
+  in one narrowly stated scope**, and §16 shows the working.
+  **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
+  check passed** — the attempt's `phase` advances to `AttemptPhase.EXECUTE`"* and *"**A
+  deterministic check failed on the plan** — the attempt stays `RUNNING` and the plan is replanned
+  within the attempt"* gain a **third** case. A check **of a step** whose operands a step earlier
+  in the same plan will produce and has not yet produced is **deferred**, not failed: it neither
+  blocks the advance to `EXECUTE` nor triggers a replan, and it is decided at that step's own
+  dispatch. Without it every plan carrying a `depends_on` replans forever, because a dependent
+  step's checks are unsatisfied at phase 4 for every such plan by construction. **§14's every
+  other clause binds verbatim**: the four checks and their order, the no-fifth-check rule, the
+  no-capability-vocabulary-check and no-spend-ceiling clauses, the advisory-in-one-direction rule
+  for an intent-match assessment, the `AWAITING_AUTHORIZATION` limb and its single-writer clause,
+  the failed-check limb for every check that is **not** deferred, the no-phase-moves-backwards
+  clause, and the supplying-an-authorization-opens-no-attempt clause.
+- **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
+  reader would expect to be — ADR-0014, ADR-0037, ADR-0228, ADR-0249, ADR-0042 and ADR-0253 among
+  them.
 - Date: 2026-09-12
 
 ## Context
@@ -170,14 +188,48 @@ interval safe rather than merely admitted.
 >    `depends_on` and that step's `verifies` over its stored `output`.
 > 2. **The step's conditions** — every member of `when`, by ADR-0252 §6's four tests over the
 >    goal's `GoalEvidence` rows, **at this moment** and not earlier.
-> 3. **The result references** — every member of `resolves`, by ADR-0253 §6's total function of
->    the `PlanStep` read from `PlanStore.get_plan` and the `ExecutionState` read from
->    `PlanStore.get_execution`.
-> 4. **`StepRunner.run`, once**, with the resolved `parameters`.
+> 3. **That every result reference is resolvable** — every member of `resolves`, against
+>    ADR-0253 §6's six unresolvable cases, over the `PlanStep` read from `PlanStore.get_plan` and
+>    the `ExecutionState` read from `PlanStore.get_execution`. **This is the predicate and not the
+>    substitution** (below).
+> 4. **`StepRunner.run`, once.** The driver passes the execution, the step id, the remaining
+>    budget (§9), the selection origin and the `attempt_id` (§3), **and no parameter mapping, no
+>    resolved value and no step.**
 >
 > **Authorization coverage is not a fifth evaluation of the driver's**: ADR-0254 §13 puts the
 > comparison *"at `ActionPolicy.decide`, on the concrete request, at every dispatch"*, which is
 > inside step 4. The driver **reaches** that test and does not take it.
+
+> **Normative — the substitution happens where ADR-0253 §6 already puts it, inside the request
+> construction, and the driver hands over nothing.** A resolved value is placed at its
+> `parameter` **by the stage that builds the `ActionRequest`**, from the two values that section
+> names — *"the `PlanStep` read from `PlanStore.get_plan` and the `ExecutionState` read from
+> `PlanStore.get_execution`"* — and **`StepRunner` is that stage**. ADR-0253 §6 binds verbatim and
+> is satisfied rather than worked around: *"**no caller supplies a resolved value, a parameter
+> mapping or a substituted step**, and no entry point of the permission stage gains a parameter
+> for one."* **No clause of this decision gives `StepRunner.run` or `StepExecutor.execute` a
+> parameter mapping**, and §3's `attempt_id` stays the only argument either gains.
+
+**The driver evaluating resolvability and the runner performing the resolution are one total
+function read twice, not two carriers for one fact.** ADR-0253 §6 states it as *"a total function
+of two values both read from the `PlanStore`"*, so two evaluations over the same stored values
+return the same answer by construction — there is no state between them to disagree about, and
+ADR-0254 §13 already requires exactly this of coverage, which *"is taken at `ActionPolicy.decide`
+… at every dispatch"* with *"no cached coverage verdict anywhere"*. What the driver needs is the
+**predicate**, because §2's skip is its to write and ADR-0037 §6 keeps `StepRunner` disposing of
+*"one step, once"* rather than reporting a fourth kind of refusal. What the request needs is the
+**value**, and ADR-0148 §1 requires it to be there before `ActionPolicy.decide` — which is inside
+the runner and after the driver has handed over.
+
+> **Normative — `StepRunner`'s request construction changes, and that is permitted here rather
+> than assumed.** The stage reads the step from the plan and the execution from the store exactly
+> as ADR-0037 §2 requires — *"The step itself is read from the plan, not accepted from the
+> caller"* — and now also resolves that step's `resolves` from the same two stored values before
+> building the request. **ADR-0037 §6's *"This object disposes of one step, once"* is untouched**,
+> no entry point gains a parameter for a resolved value, no collaborator is added (ADR-0058), and
+> the substitution reaches no other stage: ADR-0253 §6's ordering clauses — the schema check, the
+> canonicalisation, `bind`, and ADR-0021 §1's digest — all run over the resolved mapping at the
+> slots they already occupy.
 
 **The order is fixed rather than left to an implementation, and correctness fixes it before cost
 does.** ADR-0148 §1 requires the `ActionRequest` a policy rules on to be complete — *"Nothing in
@@ -225,13 +277,44 @@ per dispatch and not per plan.
 > reason. **No lane caches a dependency verdict, a condition verdict or a resolved value across
 > two dispatches**, and no lane satisfies a dispatch from a verdict phase 4 took.
 
-**A plan's later step cannot be validated before its earlier step runs, and pretending otherwise
-is the one thing a phase-4-only reading would do.** Step 2's dependency on step 1 is unsatisfied
-at phase 4 for every plan that has one, because step 1 has not run; its `when` over an element
-step 1's output will settle is unsatisfied for the same reason. Read as a gate, phase 4 would
-refuse every dependent plan there is. Read as ADR-0254 §14 writes it — *"deterministically and
-over stored values alone"* — it is an evaluation over what is knowable then, and the dispatch-time
-evaluation is what decides a dispatch.
+> **Normative — a check whose operands a later step will produce is *deferred*, and a deferred
+> check is not a failed one. This partially supersedes ADR-0254 §14** in the one scope §16
+> states. A phase-4 check **of a step** is **deferred** where any operand it reads is a value a
+> step of the **same plan** that appears **earlier in `steps`** will produce and **has not been
+> disposed of**: a `depends_on` member still `PENDING`, a `when` over an element an interpretation
+> of this plan settles from such a step's output, a `resolves` naming such a step's `output`, and
+> the coverage comparison over a request such a reference completes. **A deferred check neither
+> blocks the advance to `AttemptPhase.EXECUTE` nor triggers a replan**, and it is decided at that
+> step's own dispatch, by §1's evaluation, on ADR-0252 §6's *"at the moment of dispatch"*.
+
+> **Normative — every other check keeps ADR-0254 §14's rule entire.** A check whose operands are
+> all available at phase 4 and that **fails** is a failed deterministic check and §14's limb binds
+> unchanged: *"the attempt stays `RUNNING` and the plan is replanned within the attempt … Where no
+> replan can satisfy the check, the attempt is left for A3's `BLOCKED` producer."* A plan whose
+> **first** step's `when` no row satisfies, a `resolves` naming a step outside its `depends_on`, an
+> argument neither literal nor referenced nor system-supplied, and an uncovered argument on a step
+> waiting for nothing are each **failures** and none is deferred. **The advance to `EXECUTE` is
+> therefore: every check either passed or deferred.**
+
+**Without this scope ADR-0254 §14 refuses every dependent plan there is, which is the one thing
+it cannot have meant.** Step 2's dependency on step 1 is unsatisfied at phase 4 for *every* plan
+that has one, because step 1 has not run; its `when` over an element step 1's output will settle
+is unsatisfied for the same reason. Read as written — *"advances to `AttemptPhase.EXECUTE`"* only
+when *"Every check passed"*, and *"the plan is replanned"* when one failed — the two-step plan
+ADR-0253 exists to make expressible would replan forever and never dispatch. **An earlier draft of
+this section called that reading an evaluation "over what is knowable then" and left §14's text
+alone.** That is an interpretation, not an exemption: a reader holding ADR-0254 §14 and this
+document would still find one clause requiring a replan and the other requiring a dispatch, and
+ADR-0070 §1's test comes out on the supersession side. So the scope is taken explicitly and §16
+shows the working.
+
+**The distinction is already in the corpus one level down, which is why it is a narrow scope and
+not a new idea.** ADR-0253 §2 rules that an `INDETERMINATE` producer *"**fails it and stops the
+branch**: neither the dependent step nor any step that depends on it, transitively, is dispatched,
+skipped or resolved, and each stays `PENDING` until the `INDETERMINATE` step is resolved
+explicitly"* — a dependency that is neither satisfied nor failed, left pending on a producer's
+disposal. **A producer that has simply not run yet is the same shape with a cheaper resolution**,
+and ADR-0254 §14 wrote its enumeration before any lane could walk a plan and meet one.
 
 ### 2. The stop rule and the skip rule: one stops the walk, the other disposes of a step
 
@@ -299,6 +382,8 @@ happening.
 > minted here:
 >
 > - its dependency **fails on a `FAILED` or `SKIPPED` producer** (ADR-0253 §2);
+> - its dependency is **unsatisfied on a `SUCCEEDED` producer whose `verifies` does not hold**
+>   over that producer's stored `output` (ADR-0253 §2's second conjunct, §4);
 > - a member of its `when` is **not satisfied** by any row of the goal (ADR-0253 §2, §5);
 > - one of its `resolves` is **unresolvable**, by any of ADR-0253 §6's six cases (ADR-0253 §6).
 >
@@ -336,13 +421,32 @@ was settled about the step rather than by where in the plan it sat.
 > status"* — applied to one more field.
 
 > **Normative.** **`PlanStore.commit_transition` gains one claim condition**: a `→ RUNNING`
-> transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, belongs
-> to the **same goal** as the plan the execution runs, and is in a **non-terminal
-> `AttemptState`**. A claim naming no attempt, an unknown attempt, an attempt of another goal, or
-> an attempt whose `state` is `CANCELLED` or `ENDED` is **refused with the error class a stale
-> `expected_version` already raises** (`StaleExecutionError`), which is ADR-0249 L1's precedent
-> for the revision conjunct. This is a **strengthening of an existing member** rather than a new
-> one, exactly as ADR-0249 §12 classifies the first added condition.
+> transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, carries
+> the transition's own **`execution_id` among its `execution_ids`**, and is in a **non-terminal
+> `AttemptState`**. A claim naming no attempt, an unknown attempt, an attempt that **did not open
+> this execution**, or an attempt whose `state` is `CANCELLED` or `ENDED` is **refused with the
+> error class a stale `expected_version` already raises** (`StaleExecutionError`), which is
+> ADR-0249 L1's precedent for the revision conjunct. This is a **strengthening of an existing
+> member** rather than a new one, exactly as ADR-0249 §12 classifies the first added condition.
+
+> **Normative — the binding is the execution's membership and never the goal's, and this is the
+> conjunct's whole strength.** A goal may carry many attempts (ADR-0249 §5, ADR-0250 §12), so a
+> check that the attempt merely **belongs to the same goal** would accept a claim for an
+> execution of an **ended** attempt A that named a **live** attempt B of that same goal — every
+> stated condition satisfied, the plan still targeting the current revision, and the cancellation
+> of A defeated by naming B. **`GoalAttempt.execution_ids` is the authoritative binding**: it is
+> appended by `commit_attempt` (ADR-0249 §12) at the moment the execution is opened, it is
+> append-only — *"an `add_*` member appends its identifier … and no member of `AttemptTransition`
+> removes, reorders or replaces an identifier"* — and membership in it is a comparison against
+> one stored row rather than a scan.
+
+> **Normative — the append precedes the first claim, and a lane that reverses the order finds
+> every claim refused rather than a gap.** `orchestration` commits `add_execution_id` for an
+> execution **before** any step of it is dispatched, which is where ADR-0249 §12 already puts it
+> — *"referenced by id and never inlined, appended at the moment the execution exists"* — and is
+> what `engine.py` already does today, immediately after `start_execution` and before the runner
+> is called. **The ordering fails closed**: an execution whose append has not landed carries no
+> attempt that names it, so the conjunct refuses and nothing is invoked.
 
 > **Normative — how the value reaches the claim, and it is threaded rather than fetched.**
 > **`StepRunner.run` and `StepRunner.resume` each gain one required keyword parameter,
@@ -363,8 +467,9 @@ was settled about the step rather than by where in the plan it sat.
 > on**. `attempt_id` is not a subject: it is not read into the `ActionRequest`, not shown to the
 > policy, not carried into the `PermissionDecision`, not used to select a tool or fill an
 > argument, and not compared against anything the caller supplied. It names a row, and **a caller
-> that names the wrong row is refused rather than obeyed** — the store checks the row's goal and
-> its state against values only the store holds. That is exactly `approval_ref`'s shape under
+> that names the wrong row is refused rather than obeyed** — the store checks the row's own
+> `execution_ids` and its state against values only the store holds. That is exactly
+> `approval_ref`'s shape under
 > ADR-0014 §4 and ADR-0058: the caller names the record, the store refuses a claim without one,
 > and the resolution property is the path's.
 
@@ -424,8 +529,8 @@ that end an attempt rather than revise a goal.
 > **Normative — the four tests of revision 1 §H.4, and which of them is owed here.** **Test 3 —
 > the store-level invariant in the shared `PlanStore` conformance suite — is this decision's**,
 > and it is owed for **both** conjuncts: no `→ RUNNING` transition is ever accepted whose goal
-> revision is not the stored one, and none whose attempt is **absent**, **of another goal**, or
-> **terminal**. **Tests 1, 2 and 4 —
+> revision is not the stored one, and none whose attempt is **absent**, **does not name this
+> execution**, or is **terminal**. **Tests 1, 2 and 4 —
 > interleaved cancel before the claim, interleaved cancel after it, and the exhaustive two-writer
 > interleaving — are A9's**, because each is stated over a cancellation whose semantics that lane
 > decides. **No lane reads this decision as having established them.**
@@ -489,13 +594,48 @@ system says it cannot know how far a call got, and no conjunct on a store write 
 > again until the park is answered**. No step independent of the parked one is dispatched, no
 > second `CONFIRM` is put in one turn, and no lane collects several parks into one prompt.
 
-> **Normative — resumption drives that exact step, and a whole fresh walk follows it.**
-> `StepRunner.resume` disposes of the parked step on ADR-0037 §4's unchanged sequence. Where it
-> returns `EXECUTED`, the driver **walks that plan again**; where it returns `DENIED`, the step is
+> **Normative — an approval is re-evaluated before it is resolved, because a resumed dispatch is
+> a dispatch.** Before `StepRunner.resume` is called with `approved=True`, the driver re-evaluates
+> §1's first three predicates for the parked step — the dependency rule, every member of `when` by
+> ADR-0252 §6's four tests, and the resolvability of every `resolves` — **against the state as it
+> then stands**. Where any of them refuses, **`resume` is not called at all**: no ruling is
+> resolved, no claim is made, nothing is invoked, the step stays `AWAITING_APPROVAL` at its stored
+> version, and the walk stops (§2).
+
+> **Normative — a denial is never gated on any of them.** `resume` with `approved=False` is called
+> whatever those predicates say, and the step is committed `AWAITING_APPROVAL → SKIPPED` with
+> `skip_reason=APPROVAL_DENIED` exactly as ADR-0037 §4 rules. **A refusal to act needs no evidence
+> and no dependency**, and a user's *no* is never withheld from the record because a forecast went
+> stale.
+
+> **Normative — the step is left parked rather than skipped, and the reason is the transition
+> graph.** ADR-0014 §4's table admits `AWAITING_APPROVAL → SKIPPED` on `APPROVAL_DENIED` and
+> `SUPERSEDED` **and on nothing else**, which `planning/execution.py`'s `_LEGAL_SKIP_REASONS`
+> already enforces — so `UNMET_DEPENDENCY` is **not a legal disposal from a parked step**, and no
+> lane widens that table to make one. Leaving the park standing also leaves the user's answer
+> **unconsumed**, which matters because ADR-0036 §2's unique index and ADR-0044 §2(b)'s
+> per-binding rule make a resolution **single-use**: resolving it into a dispatch that cannot
+> happen would spend the one answer the binding admits and strand the step exactly as #257
+> describes. **What the turn tells the user is A9's report** (§12).
+
+**A park is the one place a dispatch's inputs are guaranteed to age, which is why this is stated
+rather than left to the general rule.** Every other dispatch in a walk is evaluated and made in
+the same pass; a parked one is evaluated, then waits for a human, and is made minutes or days
+later. ADR-0252 §6 puts recency *"at **the moment of dispatch**"* and ADR-0254 §13 rules that
+*"Coverage and sufficiency are two tests and neither clears the other"* — so an approval, which is
+the coverage half arriving late, establishes nothing about the sufficiency half. A step declaring
+a fifteen-minute recency requirement that parks on fresh evidence and is approved an hour later
+would otherwise dispatch on a forecast ADR-0252 §6 test 4 refuses, with the user's *yes* as the
+only thing anyone checked.
+
+> **Normative — the resumed claim carries the same conjunct** — it is a `→ RUNNING` transition
+> and §3 binds it — so a park answered after the goal moved on, or under an attempt that has
+> ended, is refused and nothing is invoked.
+
+> **Normative — a whole fresh walk follows the resumed step.** Where `resume` returns `EXECUTED`,
+> the driver **walks that plan again**; where it returns `DENIED`, the step is
 > `SKIPPED`/`APPROVAL_DENIED` and the driver **walks that plan again**, which will then dispose of
-> that step's dependents by §2's skip rule. **The resumed claim carries the same conjunct** — it
-> is a `→ RUNNING` transition and §3 binds it — so a park answered after the goal moved on, or
-> after the attempt ended, is refused and nothing is invoked.
+> that step's dependents by §2's skip rule.
 
 > **Normative — the driver holds no cursor, and a resumed walk starts where every walk starts.**
 > **Every walk visits the plan's steps from the first position**, reading each step's stored
@@ -742,9 +882,12 @@ nothing depends on it, and no act follows — so nothing fails open.
 
 > **Normative.** **ADR-0042 §3's per-request deadline is attached here, and it is the driver's.**
 > The `timeout` an adapter supplies to `converse` or `resume` is the **whole request's** budget.
-> The driver reads the injected clock **once**, at the instant it begins the walk, to fix the
-> deadline, and passes each `StepRunner.run` call the **remaining** duration rather than the whole
-> figure. **No lane passes the adapter's figure unchanged to more than one step.**
+> **The deadline is fixed once per adapter call**, from the injected clock at the instant
+> `orchestration` enters that call's driving — **before** the resumed step's disposal on a
+> `resume`, and before the first step's on a `converse` — and every disposal that call makes,
+> **the resumed one and every step of every walk that follows it**, is passed the **remaining**
+> duration rather than the whole figure. **No lane passes the adapter's figure unchanged to more
+> than one disposal, and no lane fixes a second deadline inside one call.**
 
 > **Normative — it gates starting and never cancels what is running.** Immediately before it
 > begins a step's disposal, the driver reads the injected clock and computes the remainder. Where
@@ -778,6 +921,14 @@ nothing depends on it, and no act follows — so nothing fails open.
 > ADR-0251 §5's planner-call allowance and outside ADR-0228 §3's bound, and *"What bounds the
 > number of interpretation calls a turn makes is the plan"*, which declares at most
 > `MAX_INTERPRETATION_STEPS` of them.
+
+**Fixing the deadline per adapter call rather than per walk is what stops a resume replenishing
+it, and §5's fresh walk is exactly the shape that would.** A `resume(timeout=PT30S)` whose parked
+step takes twenty-nine seconds is followed by a whole new walk (§5); a deadline fixed when *that
+walk* begins would hand its first step another thirty seconds, so one adapter call carrying one
+budget would have spent nearly two. The budget belongs to **the request the user is waiting on**
+(ADR-0042 §3), and a request is one `converse` or one `resume` — not one walk, of which a single
+`resume` may produce one after the step it answered.
 
 **The two quantities are kept apart for ADR-0251 §5's own stated reason, one level over.** That
 section declines to re-key ADR-0228 §4's budget on the attempt because *"an attempt **spans
@@ -1028,8 +1179,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 > **Normative — what M33 demonstrates and what M34 owes, and the division is the owner's Q4
 > ruling applied rather than invented.** **M33 demonstrates dependent execution on controlled
-> fakes**: the arms 1–10 below, every one over `ai_assistant.testing`'s canonical fakes with no
-> consequential integration wired. **M34 owes arms 11–15**, and no lane reads an M33 arm as having
+> fakes**: the arms 1–12 below, every one over `ai_assistant.testing`'s canonical fakes with no
+> consequential integration wired. **M34 owes arms 13–17**, and no lane reads an M33 arm as having
 > established one of them.
 
 **Thin — M33, on controlled fakes.**
@@ -1048,9 +1199,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
 3. **`UNMET_DEPENDENCY` gets its first producer**, parameterized over every case §2's skip rule
-   names — a `FAILED` producer and a `SKIPPED` producer for the first, an unsatisfied `when` for
-   the second, and each of ADR-0253 §6's **six** unresolvable-reference cases for the third, which
-   is nine inputs over three rules. Each asserts the step is `SKIPPED` with that reason **at the
+   names — a `FAILED` producer and a `SKIPPED` producer for the first; a **`SUCCEEDED` producer
+   whose `verifies` does not hold** for the second, over a step declaring `FIELD_PRESENT` whose
+   output is `{}` and carrying **no** `resolves`, so the dependency alone refuses it; an
+   unsatisfied `when` for the third; and each of ADR-0253 §6's **six** unresolvable-reference
+   cases for the fourth — ten inputs over four rules. Each asserts the step is `SKIPPED` with
+   that reason **at the
    moment the walk reached it** and that no request was built.
 4. **A result reference reaches the ruling as itself** — a two-step plan where step 2's
    `resolves` fills a parameter from step 1's output; the arm asserts the resolved value is in the
@@ -1062,11 +1216,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    stops.
 6. **A terminal-attempt claim is refused** — the attempt is committed `ENDED` between step 1's
    success and step 2's claim; same four assertions. A paired arm asserts the **goal's revision
-   did not move**, which is what makes this conjunct not redundant with the previous arm's.
+   did not move**, which is what makes this conjunct not redundant with the previous arm's. **And
+   the arm that pins the binding**: with execution E opened under attempt A, A committed `ENDED`,
+   and a second attempt **B non-terminal on the same goal**, a claim for E naming **B** is
+   **refused** — every goal-level fact about B is satisfactory and B's `execution_ids` does not
+   carry E, which is the only thing that decides it (§3).
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
-   goal revision is not the stored one, and none whose attempt is absent, of another goal, or
-   terminal. **And `attempt_id` on any other `to_status` is not constructible.**
+   goal revision is not the stored one, and none whose attempt is absent, does not carry this
+   execution in its `execution_ids`, or is terminal. **And `attempt_id` on any other `to_status`
+   is not constructible.**
 8. **A parked middle step, answered and resumed** — a three-step plan whose **second** step rules
    `CONFIRM`: the walk stops, step 3 is `PENDING` and **not** `SKIPPED`, no third step is
    dispatched, the attempt is `AWAITING_AUTHORIZATION`, and the turn carries the confirmation.
@@ -1092,33 +1251,67 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     state. The arm is what distinguishes this trigger from `NO_CAPABLE_TOOL`, which **does** commit
     a skip and whose dependents are therefore disposed of by §2's skip rule rather than left.
 
+11. **A park answered after its evidence went stale dispatches nothing** — step 2 declares a
+    fifteen-minute `evidence_recency` and a `when` the goal's one row satisfies; the step parks;
+    the clock advances past the requirement with the confirmation still unresolved and the goal's
+    revision and the attempt both unmoved. On `approved=True`: **`StepRunner.resume` is never
+    called**, no resolving decision is recorded, `ToolInvoker` is **never entered**, the step is
+    still `AWAITING_APPROVAL` at its stored version, the confirmation is still **unresolved** and
+    answerable, and the walk stopped. The paired arm answers **`approved=False`** on the same
+    state and asserts the opposite: `resume` **is** called and the step is
+    `SKIPPED`/`APPROVAL_DENIED`, because a denial is gated on nothing (§5).
+12. **Phase 4 admits a deferred check and refuses a failed one** — the two-step dependent plan of
+    arm 1 passes phase 4 and the attempt advances to `AttemptPhase.EXECUTE`, **with step 2's
+    dependency and `when` both unsatisfied at that moment**; and a one-step plan whose `when` no
+    row satisfies, waiting on no earlier step, **fails** phase 4 and is replanned under ADR-0254
+    §14's unchanged limb. The arm is what separates the scope this decision supersedes from the
+    rule it leaves standing, and arm 1's plan is driven **through** phase 4 rather than around it.
+
 **Full — M34, owed there and not established here.**
 
-11. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
+13. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
     the walk stops, step 3 stays **`PENDING`** whether or not it depends on step 2, **no step is
     `SKIPPED`**, and the attempt's `state` is `EFFECT_UNRESOLVED` **before** the turn composes. A
     paired arm asserts a plan superseded in that state moves **no** step to `SKIPPED`/`SUPERSEDED`
     (§6's override of §7).
-12. **Replan after partial execution** — a plan driven to its second step, superseded on a later
+14. **Replan after partial execution** — a plan driven to its second step, superseded on a later
     turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's `output` are unchanged, the
     attempt's `execution_ids` names both executions, the superseded plan's still-`PENDING` steps
     are `SKIPPED`/`SUPERSEDED`, and **the new plan's booking step dispatches** — which is the arm
     that records §7's stated limit rather than a property, and is why it is M34's beside A8's
     idempotency work.
-13. **The deadline, decremented across steps** — a three-step plan under a budget that two steps
-    exhaust: each `StepRunner.run` receives a **strictly smaller and strictly positive** remainder,
-    the third step is never started, it is `PENDING` and not `SKIPPED`, and a step already begun
-    ran to completion past the deadline. A paired arm asserts `AttemptEffort.working` advanced by
-    the walk and `planner_calls` did not.
-14. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
-15. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
+15. **The deadline, decremented across steps and not replenished by a resume** — a three-step
+    plan under a budget that two steps exhaust: each `StepRunner.run` receives a **strictly
+    smaller and strictly positive** remainder, the third step is never started, it is `PENDING`
+    and not `SKIPPED`, and a step already begun ran to completion past the deadline. **The arm
+    that pins the resume**: a `resume(timeout=PT30S)` whose parked step takes PT29S leaves the
+    following walk's first step approximately **PT1S** and not PT30S, so one adapter call spends
+    one budget (§9). A paired arm asserts `AttemptEffort.working` advanced by the walk and
+    `planner_calls` did not.
+16. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
+17. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Nothing is superseded, in whole or in part**, and the entries below show the working for each
-document a reader would expect to be — ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and
-ADR-0253 among them. ADR-0082 §1's test is applied to each earlier ADR's **text**.
+**Exactly one document is partially superseded — ADR-0254, in one scope** — and the entries below
+show the working for it and for each other document a reader would expect to be superseded and is
+not: ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them. ADR-0082 §1's test
+is applied to each earlier ADR's **text**.
+
+**ADR-0254 §14 — partially superseded in the field of one enumeration, and the scope is on this
+document's `Status` line.** A reader holding only §14 evaluates a dependent plan's second step at
+phase 4, finds its `depends_on` unsatisfied because the producer has not run, reads *"A
+deterministic check failed on the plan"*, and replans — producing a plan whose second step is
+unsatisfied for the same reason, forever. So that reader **never dispatches a dependent plan at
+all**, which is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is §14's
+two-case enumeration and nothing else. §1 states the third case and the test that sorts a
+**deferred** check from a **failed** one, and ADR-0253 §2's `INDETERMINATE` treatment is the
+precedent — a dependency *"neither dispatched, skipped nor resolved"* while its producer's
+disposal is outstanding. **Every other clause of ADR-0254 binds entire and is relied on**: §3's
+coverage conditions, §13's recheck-at-`decide` and its no-cached-verdict rule, §14's other clauses
+as the `Status` line enumerates them, §17's Q4 rule (§13 of this document), and §19's reservation
+of the re-entry mechanism to A7, which §10 discharges.
 
 **ADR-0037 §6 — relied on and not superseded, and the report's cut table is corrected.** Revision
 1's §L.1 row for A7 reads *"partially supersedes ADR-0037 §6's 'terminal for this turn'"*.
@@ -1225,8 +1418,9 @@ terms is *"the system as ratified"* — leaves `depends_on`, `when`, `resolves`,
 after a park, an uncertain effect or an expired budget. That is ADR-0070 §1's test met, and a new
 ADR is the instrument.
 
-**It supersedes nothing, in whole or in part** (ADR-0070 §3), so its `Status` line carries no
-supersession pair and ADR-0070 §4's extraction invariant is not engaged. Every ADR it touches is
+**It is a partial supersession of exactly one document** (ADR-0070 §3) — **ADR-0254**, in §14's
+two-case enumeration alone — and the `Status` line names the scope without an `ADR-NNNN` token
+inside the parentheses, so ADR-0070 §4's extraction invariant holds. Every other ADR it touches is
 **relied on**, and what it takes it takes by **firing deferrals** rather than by replacing
 clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, and the three
 questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
