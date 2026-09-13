@@ -1,6 +1,6 @@
 # 258. The investigation's per-ask outcome is named ReadAskOutcome, and the permission trail keeps ReadOutcome
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes**
   [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md)
   — **one scope, and it is a name: `ReadOutcome` → `ReadAskOutcome`, wherever ADR-0251 writes it
