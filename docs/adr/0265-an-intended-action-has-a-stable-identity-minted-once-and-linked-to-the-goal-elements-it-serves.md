@@ -696,7 +696,14 @@ The owner's two cases are arms 1 and 2.
    the two steps** while the argument key is equal, which is the fact an at-most-once claim scoped
    to the goal alone cannot see. **1(b), L2:** given a `PlannerOutput` carrying two
    `ProposedAction`s and a plan whose two steps name `A1` and `A2`, the loop records two actions
-   and resolves **both** labels, in §2's order, before the plan is saved.
+   and resolves **both** labels, in §2's order, before the plan is saved. The same arm carries
+   §3's drop rule, which no other arm reaches: a `ProposedAction` whose `serves` is `("C1",
+   "C99")` over a brief holding one constraint is **recorded**, with `serves` naming the element
+   `C1` resolved to and **nothing else** — the surviving links in their proposed order, the
+   unresolvable one gone, and the action neither refused nor held; one whose `serves` resolves
+   **wholly** to nothing is recorded with `serves` **empty**, which §3 makes a well-formed action
+   rather than a degraded one. And a `PlannerOutput` whose `actions` is **empty** records none,
+   raises nothing and re-plans nothing (§2).
 2. **"Change our booking to Sunday" mints no second action.** From arm 1's goal at a revision
    whose element reads Saturday, record a revision restating it Sunday. Assert: the element's `id`
    is **new** (ADR-0253 §7); `Goal.intended_actions` is **byte-identical** before and after; the
@@ -746,7 +753,9 @@ The owner's two cases are arms 1 and 2.
 8. **The seam discloses no identifier and no history.** Over a goal with two intended actions, one
    already performed in an earlier turn's execution, assert that the rendered request contains
    **no** `IntendedAction.id`, no execution, no step and no outcome — and that the `A` block
-   carries the intents and the live `C`/`S`/`D` labels alone.
+   carries the intents and the live `C`/`S`/`D` labels alone — **one entry per member of
+   `Goal.intended_actions`, in that tuple's own order**, so that `A1` names the first-minted
+   action on both sides of the seam.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
