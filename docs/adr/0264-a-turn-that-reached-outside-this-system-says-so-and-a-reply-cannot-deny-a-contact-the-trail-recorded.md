@@ -293,21 +293,32 @@ and would have left the next outbound seam to mint its own vocabulary.
 > name"* both refuse: what a reader is told is which kinds of thing this turn reached,
 > and the system's internal shape stays inside it.
 
-> **Normative.** **`records` is how many of the records the composing stage was given
-> came from this turn's established contacts.** The contacting site records **the ids it
-> admitted into the supply from its own call** — a fact it holds, because admission is
-> its own act — and `records` is how many of those the supply handed to composition still
-> holds, taken as one population over the turn. The second half is the withholding test
-> and is `hop_reached`'s ratified shape, which ADR-0227 §3 states as the ids a servicing
-> reached *"that the supply holds after it"*.
+> **Normative.** **`records` is how many records this turn's established contacts put
+> into the turn's supply** — the records admitted from those calls, counted as one
+> population over the turn. It is a fact about **the turn**, stated over the supply and
+> not over any later stage, so it is defined and true on every outcome shape a contact
+> can reach, the parked and recovered ones ADR-0170 §4 composes nothing for included.
 
-> **Normative.** **The admitted set is recorded and never reconstructed**, and in
-> particular it is not `ServicedCarriers.minted` filtered after the fact. `minted` is
-> every id the call produced; the supply's budget can stop one of them entering
-> (`_Union.admit`'s truncation), and the difference is a fact the union has and a later
-> reader does not. The rule is ADR-0249 §7's own for `minted` — *"supplied by the
-> servicing that knows it and never inferred at the resolution site"* — applied to the
-> narrower set this decision needs.
+**"Over the supply and not over any later stage" is the half that had to be got right,
+and an earlier draft of this section got it wrong.** It defined the count over what the
+composing stage was given, which is undefined on a pass that composes nothing and false on
+one where a channel's withholding (ADR-0199 §3) left the composing stage holding none of
+them — and ADR-0170 §4 makes both shapes reachable beside a contact: a turn can service a
+search, admit its records, and then park its step for confirmation. Stated over the
+supply the count is defined everywhere and claims neither of those things, and §6's
+fragment is then the only place a statement about a model's own prompt is made, on the
+passes that have one.
+
+> **Normative.** **The admitted set is recorded by the site that performs the admission
+> and never reconstructed**, and in particular it is not `ServicedCarriers.minted`
+> filtered after the fact: `minted` is every id the call produced, and the supply's budget
+> can stop one of them entering (`_Union.admit`'s truncation). On an ordinary turn that
+> site is the servicing; on ADR-0244 §7's resume it is **the admission in
+> `LearningLoop.resumed_read`**, where `admitted_fourth_group` applies the resumed
+> supply's deduplication and budget, and which is a different site from the dispatch that
+> classified the contact. The rule is ADR-0249 §7's own for `minted` — *"supplied by the
+> servicing that knows it and never inferred at the resolution site"* — applied to each
+> of the two facts at the site that has it.
 
 > **Normative.** **It is not `ServicedRead.supplied` and no lane derives it from that
 > field.** ADR-0238 §11's count is *"how many records this servicing supplied to the
@@ -319,10 +330,9 @@ and would have left the next outbound seam to mint its own vocabulary.
 > step produced.
 
 > **Normative.** `records` is `0` on a turn whose only contact was an egress one, on a
-> search answered with nothing, on one whose every returned record the budget stopped,
-> and on one whose admitted records a channel's withholding kept out of what composition
-> was given (ADR-0199 §3). **A `0` means no record from outside is in front of the
-> composing stage**, and it means nothing else.
+> search answered with nothing, and on one whose every returned record the budget
+> stopped. **A `0` means this turn's supply holds no record its contacts brought in**,
+> and it means nothing else.
 
 **Deduplication is deliberately absent from that list, and the reason is worth stating
 because its absence looks like an omission.** A search's records are minted with a fresh
@@ -336,14 +346,14 @@ draft of this section, which defined the count by filtering `minted` against the
 supply, is what made that argument load-bearing.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
-> contact, and a turn that reached outside itself and put nothing in front of composition
+> contact, and a turn that reached outside itself and brought nothing into its supply
 > is the case this decision most needs to state — it is the one a user cannot tell from a
 > turn that did not look, and telling them apart is what #2268 asks for.
 
 > **Normative.** **Neither the value nor any rendering of it says what the reply did
 > with the records.** What a model made of material in its prompt is not a fact this
-> system holds. `records` says the records were **put in front of composition** and no
-> more, and no clause here, no field of this model, no prompt fragment and no rendering
+> system holds. `records` says the records **entered this turn's supply** and no more,
+> and no clause here, no field of this model, no prompt fragment and no rendering
 > says that they entered the answer, that the answer rests on them, that it is more
 > current for them, or that it would have differed without them.
 
@@ -351,8 +361,8 @@ supply, is what made that argument load-bearing.
 what the provider returned would be a fact about the system's plumbing that the user can do
 nothing with, and stating both would put two numbers in front of a reader who has no way
 to tell which one matters. The count that reached the supply is the one that bears on the
-answer in front of them, and the one whose `0` is informative: *I looked outside, and
-nothing from it was in front of me when I wrote this.* That sentence is unavailable
+answer in front of them, and the one whose `0` is informative: *I reached outside this
+system and nothing came back that this turn could use.* That sentence is unavailable
 today, which is why #2268 was reported as a contradiction rather than as a thin reply.
 
 ### 5. `OutboundDestination`: a closed vocabulary of classes, never of destinations
@@ -382,9 +392,13 @@ today, which is why #2268 was reported as a contradiction rather than as a thin 
 
 ### 6. The carrier, and what the composing stage is told
 
-> **Normative.** The value is computed **once**, inside `ai_assistant.orchestration`,
-> from the per-servicing records §2 names and the step facts §3 names, and from nothing
-> else. It travels to the composing stage as data — the shape ADR-0242 §7 fixes for its
+> **Normative.** The value is assembled **once per turn**, inside
+> `ai_assistant.orchestration`, from the carriers §2, §3 and §4 name and from nothing
+> else — the contact classification each performing site computed (§2, §3), and the
+> admitted ids each admitting site recorded (§4). On ADR-0244 §7's resume those are two
+> different sites and the engine is where the pair is brought together; no site
+> recomputes another's fact, and nothing is inferred at the assembly point. It travels to
+> the composing stage as data — the shape ADR-0242 §7 fixes for its
 > own carrier and ADR-0228 §10 for its own — adds no member to any Protocol, and is
 > **never recomputed downstream**.
 
@@ -400,8 +414,8 @@ today, which is why #2268 was reported as a contradiction rather than as a thin 
 > fragment**, written in
 > `ai_assistant.orchestration`, interpolating **`records` and nothing else**. The
 > fragment states the two facts every contact has and no others: that **this turn reached
-> outside this system**, and **how many of the records in front of the model came from
-> doing so — which may be none, and the fragment says so where it is none**. It asserts
+> outside this system**, and **how many records it took in from doing so — which may be
+> none, and the fragment says so where it is none**. It asserts
 > nothing about what was reached, nothing about a lookup, and nothing about material
 > having arrived, because a turn that only sent something outward reached the world and
 > brought nothing back. It carries no destination, no host, no origin, no provider name, no connection
@@ -464,16 +478,17 @@ is there so that when they do not, the user can see it.
 > **Normative.** **A surface renders, beside the reply and never in place of it, one
 > statement composed from the value**: that this turn reached outside this system, naming
 > each class in `destinations` in the vocabulary's declared order, and how many records
-> that put **in front of composition** — including that it put none there, where `records`
-> is `0`. The exact wording is the lane's; what is fixed is that the statement is built
+> that **brought into this turn's supply** — including that it brought none, where
+> `records` is `0`. The exact wording is the lane's; what is fixed is that the statement is built
 > from the value, that a `0` is stated rather than elided, and that no surface renders a
 > statement for a value it was not given.
 
 > **Normative.** **No statement says a record reached, entered, supported or affected the
 > answer**, and none says the turn looked something up on a turn whose only contact was
-> outward. `records` establishes that the records were available to composition and
-> nothing beyond it (§4), and a surface asserting more would be attributing the answer's
-> content to material a model may have ignored entirely.
+> outward. `records` establishes that the records entered this turn's supply and nothing
+> beyond it (§4) — not that a model was given them, and not that one used them — and a
+> surface asserting more would be attributing the answer's content to material a model
+> may never have seen.
 
 > **Normative.** **Rendering it is presentation and not business logic**, on ADR-0242
 > §9's ratified ground and `_render_search_not_serviced`'s precedent. No adapter reads a
@@ -551,15 +566,24 @@ not read. §12 names the trigger.
 > absorb the other's paths.
 >
 > 1. **Contract and `orchestration`.** `OutboundDestination`, `OutboundContact` and
->    `TurnOutcome.outbound_contact` in `core/types.py`; the §2/§3 establishment and the
->    §6 carrier in `ai_assistant.orchestration`; the composing fragment and
->    `_PLAN_IS_ABOUT_ACTING`'s widened condition; every arm of §13. The two packages ride
->    in one lane under ADR-0137 §2 — a contract seam and the primary production
->    implementation whose demands shape it — and under no wider reading of it.
+>    `TurnOutcome.outbound_contact` in `core/types.py`; §2's and §3's establishment at
+>    every site that performs a call or drives a step; §4's admitted sets and §6's
+>    assembly; the composing fragment and `_PLAN_IS_ABOUT_ACTING`'s widened condition.
+>    The two packages ride in one lane under ADR-0137 §2 — a contract seam and the
+>    primary production implementation whose demands shape it — and under no wider
+>    reading of it.
 > 2. **The terminal surface.** `interfaces/cli.py` renders §7's statement. No logic, no
 >    store read, no computation (golden rule 3).
 >
 > The browser's rendering is #2237's lane and is not a lane of this decision (§9).
+
+> **Normative.** **Each arm of §13 is owed by the lane that owns the code it asserts
+> over, and no arm obliges a lane to touch the other's paths.** Every arm's assertions
+> about the member, the establishment, the admitted count and the composing prompt are
+> lane 1's; every arm's assertions about a **rendered statement** — arm 2's stated `0`,
+> arm 3's two statements, arm 6's — are lane 2's, landed with the renderer they are
+> about. Lane 1 is complete when it owes no rendering assertion, and a lane that lands an
+> assertion over code it does not own has broken the cut rather than honoured §13.
 
 > **Normative.** Lane 1 changes `core/types.py`, so **this ADR is ratified and merged as
 > its own PR before anything implements against it** (golden rule 5, ADR-0015 §5). This
@@ -600,7 +624,7 @@ not read. §12 names the trigger.
 > **Normative.** The implementing lane owes these six arms, each over representative
 > input, and a lane that lands fewer has not implemented this decision.
 >
-> 1. **A search that put records in front of composition, over a turn whose pre-existing
+> 1. **A search that brought records into the supply, over a turn whose pre-existing
 >    supply is non-empty, and with the read budget stopping one returned record.**
 >    `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the **admitted** records and
 >    neither the pre-existing ones nor the truncated one; `search_not_serviced` is `None`;
@@ -612,12 +636,17 @@ not read. §12 names the trigger.
 >    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
 >    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
 >    rendered statement states the `0` rather than eliding it.
-> 3. **The two sides of the disposition partition.** A search refused before the send
->    (`RULING_DENY`) carries **no** contact, carries `search_not_serviced` `DECLINED`, and
->    leaves the composing prompt byte-identical to what it is without this decision; a
->    response received and then refused (`UNATTESTED`) carries **both** members —
->    `outbound_contact` with `records` `0`, and `search_not_serviced` `UNAVAILABLE` — and
->    renders both statements (§8).
+> 3. **The partition, asserted over the enumeration itself and then over its two
+>    reachable sides.** The arm walks **every member of `SearchDisposition`** and asserts
+>    the group §2 places it in, so a member added without an arm **fails** rather than
+>    falling to a default — the discipline §18 item 9a of ADR-0231 already holds over
+>    `SEARCH_DISPOSITIONS` — and it asserts that `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`
+>    and `SEARCH_FAILED` establish nothing either way. Then the two sides in a turn: a
+>    search refused before the send (`RULING_DENY`) carries **no** contact, carries
+>    `search_not_serviced` `DECLINED`, and leaves the composing prompt byte-identical to
+>    what it is without this decision; a response received and then refused (`UNATTESTED`)
+>    carries **both** members — `outbound_contact` with `records` `0`, and
+>    `search_not_serviced` `UNAVAILABLE` — and renders both statements (§8).
 > 4. **A parked read the user approved, dispatched on the resume** (ADR-0244 §7), in two
 >    shapes: one whose call returns records, which carries a contact with those records
 >    counted; and one that reaches the provider and returns nothing, which carries a
@@ -676,7 +705,7 @@ do. ADR-0242 §9 and ADR-0235 §4 state this in the same words for their own mem
 theirs.** No count is added to, removed from or redefined in the per-turn audit record,
 and §4 states in terms that `records` is neither ADR-0238 §11's `supplied` nor derived
 from it: that count is what this system told a destination, assigned before the send, and
-this one is what came back and was put in front of composition. The record those sections
+this one is what came back and entered the turn's supply. The record those sections
 govern is unchanged and gains nothing.
 
 **ADR-0249 §7's `minted` and ADR-0227 §3's `hop_reached` — no record owed.** §4 reads
