@@ -445,8 +445,8 @@ happening.
 
 > **Normative — the skip rule, and the moment it fires.** A step the walk **reached** and whose
 > evaluation refuses it is moved **`PENDING → SKIPPED`** with **`skip_reason=UNMET_DEPENDENCY`**,
-> **at the moment the walk reaches it**, in exactly three cases — all three ADR-0253's, none
-> minted here:
+> **at the moment the walk reaches it**, in exactly **four** cases — all four ADR-0253's, none
+> minted here, and the first two the two limbs of that section's one dependency rule:
 >
 > - its dependency **fails on a `FAILED` or `SKIPPED` producer** (ADR-0253 §2);
 > - its dependency is **unsatisfied on a `SUCCEEDED` producer whose `verifies` does not hold**
@@ -1686,11 +1686,18 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 **Full — M34, owed there and not established here.**
 
-14. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
+14. **Mid-plan `INDETERMINATE`, and the residual when its second write does not land** — a
+    three-step plan whose second step returns `INDETERMINATE`:
     the walk stops, step 3 stays **`PENDING`** whether or not it depends on step 2, **no step is
     `SKIPPED`**, and the attempt's `state` is `EFFECT_UNRESOLVED` **before** the turn composes. A
     paired arm asserts a plan superseded in that state moves **no** step to `SKIPPED`/`SUPERSEDED`
-    (§6's override of §7).
+    (§6's override of §7). **And two arms over the partial write** (§6): with the step's
+    `→ INDETERMINATE` transition committed and the following `commit_attempt` failing — once on a
+    stale `expected_version`, once on a store failure — the arm asserts the exact residual, that
+    **the step stays `INDETERMINATE`**, **the attempt stays `RUNNING`**, the turn **fails**, **no
+    later step is dispatched and none is skipped**, and the committed step transition is **not
+    lost or retried**. They are what stop an implementation composing over the failure, sweeping
+    the remainder, or re-driving the step.
 15. **Replan after partial execution** — a plan driven to its second step, superseded on a later
     turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's `output` are unchanged, the
     attempt's `execution_ids` names both executions, and the superseded plan's still-`PENDING`
