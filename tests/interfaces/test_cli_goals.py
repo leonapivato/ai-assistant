@@ -415,6 +415,37 @@ def test_a_goal_id_this_terminal_cannot_show_withholds_the_command_and_not_the_a
     assert "\x1b" not in screen
 
 
+def test_the_goal_commands_this_listing_offers_are_never_folded_into_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1023's clause on the **goal** id, the third of round 7's four arms.
+
+    Round 7's ``blocker`` named four hazards for ``GoalSummary.id`` — spaces, shell
+    metacharacters, control characters and narrow terminals — and the arms above cover
+    the first three. This is the fourth, and it is not a restatement of the question
+    id's: the two ids are rendered by **different functions**, and it is
+    :func:`~ai_assistant.interfaces.cli._render_goal_acts` rather than
+    :func:`~ai_assistant.interfaces.cli._render_goal_question` that would regress here.
+
+    That distinction is the whole lesson of rounds 6 and 7, which were one clause
+    applied to one id and then the other: a device reached for at one render site says
+    nothing about the site beside it. ``_print_hint`` emits the line as it stands and
+    lets the terminal fold it, so the command stays **one** line to anything that copies
+    it — and no field a hint carries has a length limit, so the trigger is a long id
+    plus a narrow terminal.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=30))
+    long_id = "g" * 120
+    _wire(monkeypatch, _listing(_summary(asking=False).model_copy(update={"id": long_id})))
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    lines = buffer.getvalue().splitlines()
+    assert any(f"--goal {long_id}" in line for line in lines)
+    assert any(f"assistant abandon-goal {long_id}" in line for line in lines)
+
+
 def test_a_closed_goal_is_offered_the_resume_and_not_the_abandonment(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:
