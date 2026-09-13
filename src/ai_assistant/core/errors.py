@@ -1440,6 +1440,69 @@ class DuplicateRecipientGrantError(InvalidRecipientGrantError):
     """
 
 
+class AuthorizationError(AssistantError):
+    """A goal-authorization store could not be read or written (ADR-0254 §16).
+
+    The store fault, and the base for the refusal below, so a caller that only
+    wants "the authorization store could not answer" gets one handler. It is
+    :class:`RecipientGrantError`'s shape one store over, and the split between a
+    fault and a refusal is ADR-0193 §1's own: **a refusal is the caller's error
+    and a fault is the store's**.
+
+    **It is also what**
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizations.live_for` **raises where
+    more than one live row of a goal and declaration id would answer** (ADR-0254
+    §1, §16). That is an integrity failure rather than an answer: ``None`` is this
+    seam's word for *"the store holds no live record"*, and two rows are not none
+    of them. A query that chose between them would be the composition ADR-0254 §5
+    declines.
+
+    **A fault takes ADR-0254 §6's bar and is never read as an absence**, which is
+    the one place this seam departs from
+    :class:`~ai_assistant.core.protocols.RecipientGrants`'s discipline. The grant
+    seam discovers **permissions** only, so a fault there can only make a ruling
+    more restrictive and answering ``None`` is safe. This seam discovers
+    **restrictions** as well — a live record the request exceeds is what refuses
+    route (b) and route (c) — so a fault read as absence would turn a ``CONFIRM``
+    the user's own act earned into an ``ALLOW``. A policy that catches this logs
+    it, takes the bar, and rules the ``CONFIRM`` the request would have drawn had
+    the user authorised nothing.
+    """
+
+
+class InvalidAuthorizationError(AuthorizationError):
+    """A goal-authorization store refused the record it was handed (ADR-0254 §16).
+
+    Raised by :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.record`
+    where the write is not one the store admits: a second ``ESTABLISHED`` row of
+    one ``goal`` and declaration **id**; a path-(ii) row that fails the
+    transcription or the non-widening check; a row carrying ``confirmation``
+    written in any disposition but ``PROPOSED``; a row carrying ``confirmation``
+    **unset** written in any disposition but ``ESTABLISHED`` or with ``settled_at``
+    unequal to ``proposed_at``; a ``supersedes`` that resolves to no
+    ``ESTABLISHED`` row of that goal and declaration id; and a duplicate id, the
+    store being write-once.
+
+    **One class rather than several**, on :class:`InvalidRecipientGrantError`'s
+    reasoning and for its reason: the caller's recourse is identical in every
+    refusing case — read the store and construct a different record.
+
+    **A refusal is the caller's error and a fault is the store's** (ADR-0254 §16).
+    The subclass relation means a caller catching :class:`AuthorizationError`
+    still catches both, and the policy's fault clause is stated over the base
+    class deliberately — a ``record`` refusal never reaches a policy, which writes
+    nothing.
+
+    **A settlement that cannot be taken is not this class and is not an
+    exception.** :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.settle`
+    answers a
+    :class:`~ai_assistant.core.types.AuthorizationSettlement` member — a refusal
+    that is a **result** rather than a raise, which is
+    ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
+    rule (ADR-0254 §16).
+    """
+
+
 class InvalidDestinationTrustError(AssistantError):
     """A destination-trust store refused a record, or could not answer (ADR-0238 §1).
 
