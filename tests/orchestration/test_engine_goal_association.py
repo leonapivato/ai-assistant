@@ -1008,3 +1008,165 @@ class _FailingRevision(FakePlanStore):
             msg = "the fake store refuses this write"
             raise PlanningError(msg)
         return await super().record_interpretation(revision)
+
+
+async def test_a_siblings_failed_ground_does_not_drop_a_valid_questions_subject() -> None:
+    """§7: a question is dropped where **its own** element is not in the recorded revision.
+
+    "A question about an element whose ground did not resolve is itself **dropped**,
+    because the element it is about is not in the recorded revision and a question about
+    nothing is not a question." A **sibling**'s failure is not that: ADR-0249 §7 drops
+    the sibling and records the rest, so a question about a surviving element is still a
+    question about something.
+    """
+    harness = Harness(
+        planner=_Asking(
+            ProposedUnderstanding(
+                retains_outcome=True,
+                criteria=(
+                    ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),
+                    ProposedElement(
+                        text="near the gold standard",
+                        ground=Ground.FROM_EVIDENCE,
+                        evidence_label="M9",
+                    ),
+                ),
+                questions=(ProposedQuestion(text="Which campsite did you mean?", about="S1"),),
+            )
+        )
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.clarification is not None, "the sibling failed, not the subject"
+    assert outcome.turn is not None
+    question = await harness.plans.open_question(outcome.turn.goal.goal_id)
+    assert question is not None
+    assert question.about == "a pitch by the river"
+
+
+async def test_a_question_about_an_element_whose_own_ground_failed_is_dropped() -> None:
+    """§7's other half, over the element the question actually names.
+
+    The subject's own ``FROM_EVIDENCE`` label resolves to nothing, so ADR-0249 §7 drops
+    the element and §7 drops the question with it — silently, without failing the turn.
+    """
+    harness = Harness(
+        planner=_Asking(
+            ProposedUnderstanding(
+                retains_outcome=True,
+                criteria=(
+                    ProposedElement(
+                        text="near the gold standard",
+                        ground=Ground.FROM_EVIDENCE,
+                        evidence_label="M9",
+                    ),
+                    ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),
+                ),
+                questions=(ProposedQuestion(text="Which standard?", about="S1"),),
+            )
+        )
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.clarification is None
+    assert outcome.turn is not None
+    assert await harness.plans.open_question(outcome.turn.goal.goal_id) is None
+
+
+async def test_a_zero_padded_candidate_label_never_selects_a_goal() -> None:
+    """§3: the scheme is ``G`` and *n* "in decimal with **no padding**", and nothing else.
+
+    "A string that does not match the form … is treated as ``UNDECIDED`` and the turn
+    asks. **No implementation falls back to the focused goal, to the first candidate, to
+    the most recent one, or to any tie-break at all.**"
+    """
+    harness = Harness(
+        planner=NoStepPlanner(), associator=_associating(AssociationVerdict.ASSOCIATES, "G01")
+    )
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        harness.plans,
+        _goal("goal-campsite", "book a campsite", conversation=conversation),
+        engaged_in=conversation,
+    )
+
+    outcome = await harness.engine.converse(
+        "make it Sunday", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert outcome.disambiguation is not None, "a padded ordinal is not the form, so the turn asks"
+    assert outcome.goal_engagement is None
+    held = await harness.plans.get_goal(campsite.id)
+    assert held is not None
+    assert len(held.interpretation) == 1, "and nothing was revised against it"
+
+
+async def test_a_zero_padded_subject_label_never_resolves_a_question() -> None:
+    """§7 reads ADR-0249 §9's scheme over the proposal, padding included.
+
+    The same refusal one sequence over: ``S01`` is not a label this side resolves, so the
+    question is dropped rather than pointed at ``criteria``'s first element.
+    """
+    harness = Harness(
+        planner=_Asking(
+            ProposedUnderstanding(
+                retains_outcome=True,
+                criteria=(ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),),
+                questions=(ProposedQuestion(text="Which campsite?", about="S01"),),
+            )
+        )
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.clarification is None
+    assert outcome.turn is not None
+    assert await harness.plans.open_question(outcome.turn.goal.goal_id) is None
+
+
+async def test_an_expiry_that_loses_the_race_reports_what_the_store_holds() -> None:
+    """§9's resolve-once gate, on the **expiry** settlement as well as on the answer.
+
+    "A caller that lost the compare-and-swap records nothing, revises nothing and reports
+    the settled state." A second party that answered the question between this turn's read
+    and its write left a disposition that is now the truth, and §11 states the outcome over
+    that disposition — so reporting ``EXPIRED`` would tell the user their answer never
+    arrived.
+    """
+    clock = _Advancing()
+    plans = _RacingSettlement(now=lambda: AT)
+    harness = Harness(planner=_Asking(), plans=plans, now=clock)
+    paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert paused.clarification is not None
+    clock.advance(timedelta(hours=73))
+    plans.answer_first = paused.clarification.question_id
+
+    late = await harness.engine.converse(
+        "the river one",
+        timeout=PATIENT,
+        reference=TurnReference(question_id=paused.clarification.question_id),
+    )
+
+    assert late.reference is ReferenceOutcome.ALREADY_SETTLED, (
+        "the question was answered by somebody else, and this turn reports that"
+    )
+    settled = await plans.get_question(paused.clarification.question_id)
+    assert settled is not None
+    assert settled.disposition is GoalQuestionDisposition.ANSWERED
+
+
+class _RacingSettlement(FakePlanStore):
+    """A store that lets a second party settle the question just before this caller does."""
+
+    answer_first: str | None = None
+
+    async def settle_question(self, question_id: str, /, **fields: Any) -> bool:
+        """Settle as the fake does, after letting the armed second party settle first."""
+        if self.answer_first == question_id:
+            self.answer_first = None
+            await super().settle_question(
+                question_id, disposition=GoalQuestionDisposition.ANSWERED, at=AT
+            )
+        return await super().settle_question(question_id, **fields)
