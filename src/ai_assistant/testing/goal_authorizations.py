@@ -890,7 +890,11 @@ class FakeGoalAuthorizations:
             records: The history it starts with, applied in order under the same
                 invariants ``record`` applies.
             now: The clock :meth:`live_for` evaluates liveness against, read
-                **once** per call.
+                **once** per call. **A clock this process cannot read propagates
+                untranslated**, which is
+                :class:`~ai_assistant.permissions.goal_authorizations.SqliteGoalAuthorizationStore`'s
+                posture and is quoted here because a double that translated what the
+                store propagates would leave a consumer's own handling untested.
 
         Raises:
             InvalidAuthorizationError: If ``records`` is not a history a conforming
@@ -1123,7 +1127,11 @@ class FakeGoalAuthorizationStore:
             records: The history it starts with, applied in order under the same
                 invariants :meth:`record` applies.
             now: The clock :meth:`live_for` evaluates liveness against, read
-                **once** per call. No other member reads it.
+                **once** per call. **A clock this process cannot read propagates
+                untranslated**, which is
+                :class:`~ai_assistant.permissions.goal_authorizations.SqliteGoalAuthorizationStore`'s
+                posture and is quoted here because a double that translated what the
+                store propagates would leave a consumer's own handling untested.
 
         Raises:
             InvalidAuthorizationError: If ``records`` is not a history a conforming

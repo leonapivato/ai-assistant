@@ -522,6 +522,16 @@ class SqliteGoalAuthorizationStore:
                 to it: a store that enforced liveness against a number the party
                 being authorised chose would enforce nothing. It is the only member
                 that reads it.
+                **A clock this process cannot read propagates untranslated** —
+                ``checked_clock``'s own ``ClockReadingError`` (ADR-0026 §3), which
+                is a ``ValueError``. It is a **wiring bug** rather than a store
+                fault, and translating it into an
+                :class:`~ai_assistant.core.errors.AuthorizationError` would have the
+                policy take ADR-0254 §6's bar for a reason that is not about the
+                store at all — and log *"the authorization store could not be
+                read"* about a store that answered perfectly well. That is
+                ``SqliteRecipientGrantStore``'s posture one store over, stated here
+                rather than inherited silently.
 
         Raises:
             AuthorizationError: If the database cannot be opened or initialised.
