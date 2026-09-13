@@ -323,8 +323,12 @@ def _conditioned_plan(
     )
 
 
-def _claim(state: ExecutionState, step_id: str = "s1") -> StepTransition:
-    """The transition that claims a step — bound tool plus authorisation."""
+def _claim(state: ExecutionState, step_id: str = "s1", *, attempt_id: str = "a1") -> StepTransition:
+    """The transition that claims a step — bound tool, authorisation, attempt.
+
+    ``attempt_id`` is required on a ``→ RUNNING`` transition (ADR-0255 §3) and names
+    the attempt :func:`_owned` opens, which is the one every arm here claims under.
+    """
     return StepTransition(
         execution_id=state.id,
         step_id=step_id,
@@ -332,7 +336,39 @@ def _claim(state: ExecutionState, step_id: str = "s1") -> StepTransition:
         expected_version=state.version,
         bound_tool="smtp",
         approval_ref="perm-1",
+        attempt_id=attempt_id,
     )
+
+
+async def _owned(
+    store: PlanStore, state: ExecutionState, *, attempt_id: str = "a1", goal_id: str = "g1"
+) -> ExecutionState:
+    """Open the attempt that owns ``state``, as ``orchestration`` does (ADR-0249 §12).
+
+    The execution id is appended at the moment the execution exists and before any step
+    of it is dispatched, which is what makes ADR-0255 §3's membership limb resolve. An
+    execution whose append has not landed carries no attempt that names it, so a claim
+    on it is refused — which is the ordering failing closed.
+
+    By whichever of ADR-0249 §12's two routes the attempt is at: ``open_attempt``
+    carrying the reference where the row does not exist yet, and ``commit_attempt``
+    appending it where it does — which is how one attempt comes to own the several
+    executions its walks open.
+    """
+    held = await store.get_attempt(attempt_id)
+    if held is None:
+        await store.open_attempt(
+            GoalAttempt(id=attempt_id, goal_id=goal_id, opened_at=_WHEN, execution_ids=(state.id,))
+        )
+    else:
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id=attempt_id,
+                expected_version=held.version,
+                add_execution_id=state.id,
+            )
+        )
+    return state
 
 
 class _CancellationOp(Protocol):
@@ -467,18 +503,22 @@ class _CommitTransitionOp:
         """Start two independent executions and remember their versions."""
         await store.save_goal(_goal("gA"))
         await store.save_plan(_plan("pA", "gA"))
-        self._state_a = await store.start_execution("pA")
+        self._state_a = await _owned(
+            store, await store.start_execution("pA"), attempt_id="aA", goal_id="gA"
+        )
         await store.save_goal(_goal("gB"))
         await store.save_plan(_plan("pB", "gB"))
-        self._state_b = await store.start_execution("pB")
+        self._state_b = await _owned(
+            store, await store.start_execution("pB"), attempt_id="aB", goal_id="gB"
+        )
 
     def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
         """Claim a step on execution A — the swap that is cancelled."""
-        return store.commit_transition(_claim(self._state_a))
+        return store.commit_transition(_claim(self._state_a, attempt_id="aA"))
 
     def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
         """Claim a step on execution B concurrently."""
-        return store.commit_transition(_claim(self._state_b))
+        return store.commit_transition(_claim(self._state_b, attempt_id="aB"))
 
     async def verify(self, store: PlanStore) -> None:
         """Execution B took its claim; the store still serves reads."""
@@ -758,7 +798,7 @@ class PlanStoreContract:
     async def _started(self, store: PlanStore, *, steps: int = 1) -> ExecutionState:
         await store.save_goal(_goal())
         await store.save_plan(_plan(steps=steps))
-        return await store.start_execution("p1")
+        return await _owned(store, await store.start_execution("p1"))
 
     # --- goals and plans ------------------------------------------------
 
@@ -1386,12 +1426,12 @@ class PlanStoreContract:
         """
         await store.save_goal(_goal())
         await store.save_plan(_plan())
-        state = await store.start_execution("p1")
+        state = await _owned(store, await store.start_execution("p1"))
         current = await store.commit_transition(_claim(state))
         assert current.step("s1") is not None
 
         await store.save_plan(_plan(plan_id="p2"))
-        second = await store.start_execution("p2")
+        second = await _owned(store, await store.start_execution("p2"))
         await store.record_interpretation(
             GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
         )
@@ -1409,7 +1449,7 @@ class PlanStoreContract:
         """
         await store.save_goal(_goal())
         await store.save_plan(_plan())
-        state = await store.start_execution("p1")
+        state = await _owned(store, await store.start_execution("p1"))
         await store.record_interpretation(
             GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=0)
         )
@@ -1640,7 +1680,7 @@ class PlanStoreContract:
         await store.save_plan(_plan())
         outputs = {}
         for run, value in (("first", "cloudy"), ("second", "clear")):
-            state = await store.start_execution("p1")
+            state = await _owned(store, await store.start_execution("p1"))
             state = await store.commit_transition(_claim(state))
             await store.commit_transition(
                 StepTransition(
@@ -3217,6 +3257,7 @@ class PlanStoreContract:
                     to_status=StepStatus.RUNNING,
                     expected_version=state.version,
                     bound_tool="smtp",
+                    attempt_id="a1",
                 )
             )
 
@@ -3378,6 +3419,7 @@ class PlanStoreContract:
                     expected_version=state.version,
                     bound_tool="payments.delete_account",
                     approval_ref="perm-for-smtp",
+                    attempt_id="a1",
                 )
             )
 
@@ -3402,6 +3444,7 @@ class PlanStoreContract:
                     to_status=StepStatus.RUNNING,
                     expected_version=state.version,
                     bound_tool="payments.delete_account",
+                    attempt_id="a1",
                 )
             )
 

@@ -84,6 +84,7 @@ from ai_assistant.core.types import (
     FeedbackKind,
     Goal,
     GoalAssociation,
+    GoalAttempt,
     GoalBrief,
     GoalInterpretation,
     Ground,
@@ -734,6 +735,16 @@ async def _claimed(store: FakePlanStore) -> str:
         )
     )
     state = await store.start_execution("p1")
+    # ADR-0255 §3: a claim is made under an attempt that owns the execution.
+    await store.open_attempt(
+        GoalAttempt(
+            id="a1",
+            goal_id="g1",
+            opened_at=_AWARE,
+            plan_ids=("p1",),
+            execution_ids=(state.id,),
+        )
+    )
     return state.id
 
 
@@ -997,6 +1008,7 @@ async def _executor(now: Clock) -> None:
         state,
         step_id="s1",
         call=ToolCall(request=request, decision=decision),
+        attempt_id="a1",
         timeout=timedelta(seconds=30),
     )
 
@@ -1015,7 +1027,7 @@ async def _runner(now: Clock) -> None:
         trail=trail,
         executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: _AWARE),
         now=now,
-    ).run(state, "s1", timeout=timedelta(seconds=30), origin=NOTHING_EXTERNAL)
+    ).run(state, "s1", attempt_id="a1", timeout=timedelta(seconds=30), origin=NOTHING_EXTERNAL)
 
 
 async def _recipient_grant_operations(now: Clock) -> None:

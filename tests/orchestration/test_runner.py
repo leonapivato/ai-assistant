@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     DataTier,
     Disposition,
     Goal,
+    GoalAttempt,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -68,6 +69,12 @@ PATIENT = timedelta(seconds=30)
 
 STEP = "step-1"
 NEIGHBOUR = "step-2"
+
+#: The attempt every execution here is opened under, and the one a claim names
+#: (ADR-0255 §3). The store refuses a claim whose attempt does not own the
+#: execution, so the builders below append the execution to it as ``orchestration``
+#: does — immediately after ``start_execution`` and before anything is driven.
+ATTEMPT = "a-1"
 CAPABILITY = "send_email"
 
 #: The id ``Harness`` mints for the first decision of a test.
@@ -163,7 +170,7 @@ async def an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
     await store.save_goal(goal)
     plan = ActionPlan(id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1)
     await store.save_plan(plan)
-    return await store.start_execution(plan.id)
+    return await _driven_under(store, plan)
 
 
 async def a_two_step_execution(store: FakePlanStore) -> ExecutionState:
@@ -189,7 +196,28 @@ async def a_two_step_execution(store: FakePlanStore) -> ExecutionState:
         id="p-1", goal_id=goal.id, steps=(plan_step(), neighbour), created_at=AT, targets_revision=1
     )
     await store.save_plan(plan)
-    return await store.start_execution(plan.id)
+    return await _driven_under(store, plan)
+
+
+async def _driven_under(store: FakePlanStore, plan: ActionPlan) -> ExecutionState:
+    """Open an execution of ``plan`` under the attempt a claim will name.
+
+    ADR-0249 §12's own ordering, which ADR-0255 §3 relies on: the execution id is
+    appended to the attempt at the moment the execution exists, before any step of it
+    is dispatched. A claim made before that append is refused, so the builders here do
+    what ``engine.py`` does rather than leaving the store in a state no turn reaches.
+    """
+    state = await store.start_execution(plan.id)
+    await store.open_attempt(
+        GoalAttempt(
+            id=ATTEMPT,
+            goal_id=plan.goal_id,
+            opened_at=AT,
+            plan_ids=(plan.id,),
+            execution_ids=(state.id,),
+        )
+    )
+    return state
 
 
 async def stored_step(store: FakePlanStore, state: ExecutionState) -> StepExecution:
@@ -486,7 +514,9 @@ async def test_no_capable_tool_skips_the_step_with_the_reserved_reason() -> None
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.NO_CAPABLE_TOOL
     assert result.decision_id is None
@@ -512,7 +542,9 @@ async def test_a_capability_synonym_resolves_onto_a_wired_tool_and_runs() -> Non
     step = plan_step(capability="get_time")
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "clock"
@@ -530,7 +562,9 @@ async def test_a_case_and_separator_variant_selects_the_advertised_tool() -> Non
     step = plan_step(capability="Report-Current-Time")
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "clock"
@@ -547,7 +581,9 @@ async def test_an_unknown_capability_still_skips_no_capable_tool() -> None:
     step = plan_step(capability="teleport")
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.NO_CAPABLE_TOOL
     stored = await stored_step(harness.plans, state)
@@ -568,7 +604,9 @@ async def test_a_synonym_whose_target_is_unregistered_skips_no_capable_tool() ->
     step = plan_step(capability="get_time")
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.NO_CAPABLE_TOOL
     assert harness.policy.requests == []
@@ -593,7 +631,9 @@ async def test_candidates_tied_under_the_whole_key_commit_nothing_and_name_thems
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.AMBIGUOUS_CAPABILITY
     assert result.tied_candidates == ("a-sender", "b-sender")
@@ -624,7 +664,9 @@ async def test_several_candidates_the_rule_separates_run_the_least_severe_one() 
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "safe"
@@ -648,7 +690,9 @@ async def test_the_selected_candidate_does_not_depend_on_the_order_find_returned
         harness = Harness(tools=candidates)
         state = await an_execution(harness.plans, plan_step())
 
-        result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        result = await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
         assert result.tool_id == "z-safe"
 
@@ -665,8 +709,12 @@ async def test_a_tie_is_selected_afresh_by_a_later_run_on_the_same_stage() -> No
     harness = Harness(tools=(tool("a-sender"), tool("b-sender")))
     state = await an_execution(harness.plans, plan_step())
 
-    first = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
-    second = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    first = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+    second = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert first.disposition is Disposition.AMBIGUOUS_CAPABILITY
     assert second.disposition is Disposition.AMBIGUOUS_CAPABILITY
@@ -687,7 +735,9 @@ async def test_a_newly_constructed_stage_naming_a_tied_id_runs_that_candidate() 
     stalled = Harness(tools=tied)
     state = await an_execution(stalled.plans, plan_step())
     assert (
-        await stalled.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await stalled.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
     ).tied_candidates == (
         "a-sender",
         "b-sender",
@@ -699,7 +749,9 @@ async def test_a_newly_constructed_stage_naming_a_tied_id_runs_that_candidate() 
     reloaded = await restarted.plans.get_execution(state.id)
     assert reloaded is not None
 
-    result = await restarted.runner.run(reloaded, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await restarted.runner.run(
+        reloaded, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "b-sender"
@@ -719,7 +771,9 @@ async def test_the_preference_never_promotes_a_candidate_over_the_severity_block
     )
     state = await an_execution(harness.plans, plan_step())
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.tool_id == "tame"
 
@@ -754,7 +808,9 @@ async def test_mutating_the_sequence_mid_selection_changes_nothing() -> None:
 
     harness.invoker.find = find_then_mutate  # type: ignore[method-assign]  # a mid-await mutation has no other seam
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.tool_id == "a-sender"
     assert supplied == ["b-sender", "b-sender"]  # the mutation really happened
@@ -783,7 +839,9 @@ async def test_a_candidate_the_arguments_do_not_fit_is_dropped_before_the_orderi
     step = plan_step()  # its parameters carry `to`, which `strict` forbids
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "lax"
@@ -807,7 +865,9 @@ async def test_the_fit_filter_emptying_the_set_asks_nobody_and_writes_nothing() 
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.INVALID_PARAMETERS
     assert result.tool_id is None
@@ -840,7 +900,9 @@ async def test_every_candidate_failing_the_fit_is_invalid_parameters_not_ambigui
     )
     state = await an_execution(harness.plans, plan_step())
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.INVALID_PARAMETERS
     assert result.tied_candidates == ()
@@ -865,7 +927,9 @@ async def test_arguments_the_schema_accepts_reach_the_ruling_unchanged() -> None
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert [dict(request.parameters) for request in harness.policy.requests] == [
@@ -931,7 +995,9 @@ async def test_an_evaluation_that_raises_refuses_the_step_and_leaks_nothing(
     )
 
     with structlog.testing.capture_logs() as captured:
-        result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        result = await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert result.disposition is Disposition.INVALID_PARAMETERS
     assert result.violations == ()  # none, rather than partial (§7)
@@ -971,7 +1037,9 @@ async def test_a_raising_evaluation_does_not_let_the_exception_escape_the_stage(
             "ai_assistant.orchestration.selection.parameter_violations", _exploding_evaluator
         )
         # No `pytest.raises`: the point is that this returns at all.
-        result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        result = await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert isinstance(result.disposition, Disposition)
 
@@ -982,7 +1050,9 @@ async def test_the_single_candidate_is_the_tool_ruled_on_and_run() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "smtp"
@@ -996,7 +1066,9 @@ async def test_the_step_parameters_are_what_the_policy_rules_on() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert dict(harness.policy.requests[0].parameters) == {"to": "someone@example.com"}
     assert harness.policy.requests[0].step_id == STEP
@@ -1011,7 +1083,9 @@ async def test_an_allowed_step_runs_and_names_a_decision_the_trail_holds() -> No
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     stored = await stored_step(harness.plans, state)
@@ -1029,7 +1103,9 @@ async def test_the_call_carries_the_trails_copy_of_the_decision() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     invoked = harness.invoker.invocations[0]
     recorded = await harness.trail.get(str(result.decision_id))
@@ -1044,7 +1120,9 @@ async def test_a_trail_that_lost_the_write_stops_the_turn_before_the_claim() -> 
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="does not hold decision"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
@@ -1073,7 +1151,9 @@ async def test_a_trail_answering_about_another_action_is_refused() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="is not the decision that was recorded"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
@@ -1098,7 +1178,9 @@ async def test_a_denial_read_back_as_an_approval_runs_nothing() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="is not the decision that was recorded"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
@@ -1119,7 +1201,9 @@ async def test_an_approval_read_back_as_a_denial_skips_nothing() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="is not the decision that was recorded"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
@@ -1136,7 +1220,9 @@ async def test_a_denied_step_is_skipped_as_denied_and_points_at_the_decision() -
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.DENIED
     stored = await stored_step(harness.plans, state)
@@ -1155,7 +1241,9 @@ async def test_a_denial_is_recorded_in_the_trail() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     recorded = await harness.trail.get(str(result.decision_id))
     assert recorded is not None
@@ -1171,7 +1259,9 @@ async def test_a_confirm_parks_the_step_durably_and_asks_nobody() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.AWAITING_CONFIRMATION
     assert result.decision_id is not None
@@ -1189,11 +1279,14 @@ async def test_an_approved_confirmation_runs_the_step_it_was_about() -> None:
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     result = await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=True,
         timeout=PATIENT,
@@ -1221,11 +1314,15 @@ async def test_a_reloaded_step_recovers_its_confirmation_without_a_carried_id() 
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     reloaded = await harness.plans.get_execution(state.id)
     assert reloaded is not None
-    result = await harness.runner.resume(reloaded, STEP, approved=True, timeout=PATIENT)
+    result = await harness.runner.resume(
+        reloaded, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
 
     assert result.disposition is Disposition.EXECUTED
     stored = await stored_step(harness.plans, state)
@@ -1241,15 +1338,24 @@ async def test_recovery_refuses_once_the_binding_is_already_resolved() -> None:
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     await harness.runner.resume(
-        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+        parked.state,
+        STEP,
+        attempt_id=ATTEMPT,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
     )
 
     reloaded = await harness.plans.get_execution(state.id)
     assert reloaded is not None
     with pytest.raises(PermissionDeniedError, match="already be resolved"):
-        await harness.runner.resume(reloaded, STEP, approved=True, timeout=PATIENT)
+        await harness.runner.resume(
+            reloaded, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+        )
 
 
 async def test_recovery_refuses_when_nothing_is_parked() -> None:
@@ -1259,7 +1365,7 @@ async def test_recovery_refuses_when_nothing_is_parked() -> None:
     state = await an_execution(harness.plans, step)  # PENDING, never parked
 
     with pytest.raises(PermissionDeniedError, match="never parked"):
-        await harness.runner.resume(state, STEP, approved=True, timeout=PATIENT)
+        await harness.runner.resume(state, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT)
 
 
 async def test_a_declined_confirmation_skips_the_step_as_denied() -> None:
@@ -1267,11 +1373,14 @@ async def test_a_declined_confirmation_skips_the_step_as_denied() -> None:
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     result = await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=False,
         timeout=PATIENT,
@@ -1289,13 +1398,16 @@ async def test_the_resumed_tool_is_the_declaration_the_user_was_shown() -> None:
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     shown = await harness.trail.get(str(parked.decision_id))
     assert shown is not None
 
     await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=True,
         timeout=PATIENT,
@@ -1308,12 +1420,15 @@ async def test_resuming_a_confirmation_for_another_step_is_refused() -> None:
     """One step's prompt must not release another step's action (ADR-0021 §1)."""
     harness = Harness(tools=(confirmable(),))
     state = await a_two_step_execution(harness.plans)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     with pytest.raises(PermissionDeniedError, match="different plan step"):
         await harness.runner.resume(
             parked.state,
             NEIGHBOUR,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1328,12 +1443,15 @@ async def test_resuming_something_that_was_never_a_question_is_refused() -> None
     harness = Harness(tools=(tool(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    allowed = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    allowed = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     with pytest.raises(PermissionDeniedError, match="never shown as a question"):
         await harness.runner.resume(
             allowed.state,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(allowed.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1350,7 +1468,12 @@ async def test_resuming_an_unknown_confirmation_is_refused() -> None:
 
     with pytest.raises(AuditError, match="does not hold decision"):
         await harness.runner.resume(
-            state, STEP, confirmation_id="never-recorded", approved=True, timeout=PATIENT
+            state,
+            STEP,
+            attempt_id=ATTEMPT,
+            confirmation_id="never-recorded",
+            approved=True,
+            timeout=PATIENT,
         )
 
 
@@ -1365,7 +1488,9 @@ async def test_the_answered_action_cannot_drift_from_the_one_confirmed() -> None
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     rewritten = step.model_copy(update={"parameters": {"to": "somebody-else@example.com"}})
 
     with pytest.raises(PlanningError, match="already exists and differs"):
@@ -1378,6 +1503,7 @@ async def test_the_answered_action_cannot_drift_from_the_one_confirmed() -> None
     result = await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=True,
         timeout=PATIENT,
@@ -1396,7 +1522,9 @@ async def test_a_confirmation_cannot_release_the_same_step_of_another_execution(
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     first = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(first, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        first, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     # A second execution of the same plan: the same step id, still `PENDING`,
     # for which `PENDING → RUNNING` would be a perfectly legal claim.
     second = await harness.plans.start_execution("p-1")
@@ -1405,6 +1533,7 @@ async def test_a_confirmation_cannot_release_the_same_step_of_another_execution(
         await harness.runner.resume(
             second,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1423,7 +1552,9 @@ async def test_a_confirmation_for_another_tool_does_not_release_a_parked_step() 
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     # A real, recorded confirmation about the same step and a *different*
     # declaration — the shape a rebound id produces (ADR-0016 §5, issue #54).
     about_another_tool = PermissionDecision.from_request(
@@ -1442,6 +1573,7 @@ async def test_a_confirmation_for_another_tool_does_not_release_a_parked_step() 
         await harness.runner.resume(
             parked.state,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id="d-elsewhere",
             approved=True,
             timeout=PATIENT,
@@ -1461,7 +1593,9 @@ async def test_a_forged_parked_state_does_not_release_a_pending_step() -> None:
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     first = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(first, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        first, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     second = await harness.plans.start_execution("p-1")
     forged = second.model_copy(
         update={
@@ -1477,6 +1611,7 @@ async def test_a_forged_parked_state_does_not_release_a_pending_step() -> None:
         await harness.runner.resume(
             forged,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1503,7 +1638,9 @@ async def test_a_step_rewritten_mid_ruling_does_not_move_its_neighbour() -> None
     )
     state = await a_two_step_execution(leaky)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.DENIED
     reloaded = await harness.plans.get_execution(state.id)
@@ -1546,7 +1683,9 @@ async def test_a_state_repointed_mid_ruling_claims_the_execution_it_authenticate
 
     harness = Harness(tools=(tool(),), plans=plans, trail=RedirectingTrail(repoint))
 
-    result = await harness.runner.run(first, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        first, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     ran = await plans.get_execution(a_id)
@@ -1573,12 +1712,15 @@ async def test_a_confirmation_answered_past_its_lifetime_is_refused() -> None:
     harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     with pytest.raises(PermissionDeniedError, match="the question has expired"):
         await harness.runner.resume(
             parked.state,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1604,12 +1746,15 @@ async def test_a_stale_confirmation_is_unanswerable_even_when_declined() -> None
     )
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     with pytest.raises(PermissionDeniedError, match="the question has expired"):
         await harness.runner.resume(
             parked.state,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=False,
             timeout=PATIENT,
@@ -1628,11 +1773,14 @@ async def test_a_confirmation_answered_within_its_lifetime_runs() -> None:
     )
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     result = await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=True,
         timeout=PATIENT,
@@ -1649,11 +1797,14 @@ async def test_no_lifetime_means_a_confirmation_never_expires() -> None:
     harness = Harness(tools=(confirmable(),), now=lambda: next(ticks))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     result = await harness.runner.resume(
         parked.state,
         STEP,
+        attempt_id=ATTEMPT,
         confirmation_id=str(parked.decision_id),
         approved=True,
         timeout=PATIENT,
@@ -1685,7 +1836,9 @@ async def test_a_configured_lifetime_is_recorded_as_a_deadline_on_the_confirm() 
     harness = Harness(tools=(confirmable(),), confirmation_ttl=hour)
     state = await an_execution(harness.plans, plan_step())
 
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     assert parked.decision is not None
@@ -1701,7 +1854,9 @@ async def test_no_configured_lifetime_records_a_confirm_with_no_deadline() -> No
     harness = Harness(tools=(confirmable(),))
     state = await an_execution(harness.plans, plan_step())
 
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert parked.decision is not None
     assert parked.decision.expires_at is None
@@ -1719,7 +1874,9 @@ async def test_only_a_confirm_carries_a_deadline() -> None:
     harness = Harness(tools=(tool(),), confirmation_ttl=timedelta(hours=1))
     state = await an_execution(harness.plans, plan_step())
 
-    allowed = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    allowed = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert allowed.disposition is Disposition.EXECUTED
     granted = await harness.trail.get(FIRST_DECISION)
@@ -1730,9 +1887,16 @@ async def test_only_a_confirm_carries_a_deadline() -> None:
     # And the resolving decision, which reaches the same recording path.
     confirming = Harness(tools=(confirmable(),), confirmation_ttl=timedelta(hours=1))
     other = await an_execution(confirming.plans, plan_step())
-    parked = await confirming.runner.run(other, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await confirming.runner.run(
+        other, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     resumed = await confirming.runner.resume(
-        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+        parked.state,
+        STEP,
+        attempt_id=ATTEMPT,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
     )
 
     assert resumed.disposition is Disposition.EXECUTED
@@ -1752,10 +1916,17 @@ async def test_a_confirmation_is_answerable_at_exactly_its_deadline() -> None:
     ticks = advancing_clock(first=AT, then=AT + hour)
     harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
     state = await an_execution(harness.plans, plan_step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     result = await harness.runner.resume(
-        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+        parked.state,
+        STEP,
+        attempt_id=ATTEMPT,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
     )
 
     assert result.disposition is Disposition.EXECUTED
@@ -1767,12 +1938,15 @@ async def test_a_confirmation_is_refused_one_tick_past_its_deadline() -> None:
     ticks = advancing_clock(first=AT, then=AT + hour + timedelta(microseconds=1))
     harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
     state = await an_execution(harness.plans, plan_step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     with pytest.raises(PermissionDeniedError, match="the question has expired"):
         await harness.runner.resume(
             parked.state,
             STEP,
+            attempt_id=ATTEMPT,
             confirmation_id=str(parked.decision_id),
             approved=True,
             timeout=PATIENT,
@@ -1794,7 +1968,9 @@ async def test_the_recorded_deadline_governs_after_the_lifetime_is_reconfigured(
     hour = timedelta(hours=1)
     asked = Harness(tools=(confirmable(),), confirmation_ttl=hour)
     state = await an_execution(asked.plans, plan_step())
-    parked = await asked.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await asked.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     assert parked.decision is not None
     assert parked.decision.expires_at == AT + hour
 
@@ -1812,6 +1988,7 @@ async def test_the_recorded_deadline_governs_after_the_lifetime_is_reconfigured(
             await answering.runner.resume(
                 parked.state,
                 STEP,
+                attempt_id=ATTEMPT,
                 confirmation_id=str(parked.decision_id),
                 approved=True,
                 timeout=PATIENT,
@@ -1833,7 +2010,9 @@ async def test_a_record_with_no_deadline_does_not_expire_under_a_live_lifetime()
     """
     asked = Harness(tools=(confirmable(),))
     state = await an_execution(asked.plans, plan_step())
-    parked = await asked.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await asked.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     assert parked.decision is not None
     assert parked.decision.expires_at is None
 
@@ -1848,7 +2027,12 @@ async def test_a_record_with_no_deadline_does_not_expire_under_a_live_lifetime()
     )
 
     result = await answering.runner.resume(
-        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+        parked.state,
+        STEP,
+        attempt_id=ATTEMPT,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
     )
 
     assert result.disposition is Disposition.EXECUTED
@@ -1870,7 +2054,9 @@ async def test_an_unrepresentable_deadline_is_recorded_as_no_lifetime() -> None:
     )
     state = await an_execution(harness.plans, plan_step())
 
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     assert parked.decision is not None
@@ -1879,7 +2065,12 @@ async def test_an_unrepresentable_deadline_is_recorded_as_no_lifetime() -> None:
 
     # And it is answerable, which is what "no lifetime" has to mean.
     result = await harness.runner.resume(
-        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+        parked.state,
+        STEP,
+        attempt_id=ATTEMPT,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
     )
 
     assert result.disposition is Disposition.EXECUTED
@@ -1895,7 +2086,9 @@ async def test_a_step_the_plan_does_not_hold_is_refused() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(PlanningError, match="has no step"):
-        await harness.runner.run(state, "step-invented", timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, "step-invented", attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.policy.requests == []
     assert harness.invoker.invocations == []
@@ -1919,7 +2112,9 @@ async def test_a_state_naming_another_execution_s_plan_does_not_redirect_the_ste
     )
     forged = state.model_copy(update={"plan_id": "p-2"})
 
-    result = await harness.runner.run(forged, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        forged, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     # Selection asked about the *stored* execution's capability, not "p-2"'s.
     assert result.disposition is Disposition.EXECUTED
@@ -1934,7 +2129,9 @@ async def test_an_execution_the_store_does_not_hold_runs_nothing() -> None:
     invented = state.model_copy(update={"id": "execution-invented"})
 
     with pytest.raises(PlanningError, match="holds no execution"):
-        await harness.runner.run(invented, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            invented, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
 
@@ -1948,7 +2145,9 @@ async def test_an_execution_whose_plan_is_gone_runs_nothing() -> None:
     forgetful.forget_plans = True
 
     with pytest.raises(PlanningError, match="which the store does not hold"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
 
@@ -1963,7 +2162,9 @@ async def test_a_trail_answering_under_the_wrong_id_is_refused() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="calls itself"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
@@ -1982,7 +2183,9 @@ async def test_a_lost_denial_is_refused_before_the_step_is_skipped() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="does not hold decision"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
@@ -1996,7 +2199,9 @@ async def test_a_lost_confirmation_is_refused_before_the_step_is_parked() -> Non
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="does not hold decision"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
@@ -2014,7 +2219,9 @@ async def test_a_ruling_mutated_while_it_is_recorded_does_not_steer_the_outcome(
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     recorded = await harness.trail.get(str(result.decision_id))
@@ -2042,7 +2249,9 @@ async def test_a_denial_recorded_about_another_action_is_refused() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="is not the decision that was recorded"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
@@ -2062,7 +2271,9 @@ async def test_a_confirmation_recorded_about_another_action_is_refused() -> None
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(AuditError, match="is not the decision that was recorded"):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
@@ -2082,7 +2293,9 @@ async def test_a_policy_cannot_swap_the_action_it_ruled_on() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "smtp"
@@ -2110,7 +2323,9 @@ async def test_a_request_rewritten_while_it_is_recorded_does_not_fail_the_turn()
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    result = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
 
     assert result.disposition is Disposition.EXECUTED
     assert result.tool_id == "smtp"
@@ -2129,11 +2344,15 @@ async def test_running_an_already_parked_step_records_no_orphan_decision() -> No
     harness = Harness(tools=(confirmable(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     before = await harness.trail.export()
 
     with pytest.raises(PlanningError, match="already awaiting approval"):
-        await harness.runner.run(parked.state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            parked.state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert await harness.trail.export() == before
     assert len(harness.policy.requests) == 1
@@ -2144,11 +2363,15 @@ async def test_running_a_finished_step_is_refused() -> None:
     harness = Harness(tools=(tool(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    done = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    done = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
     before = await harness.trail.export()
 
     with pytest.raises(PlanningError, match="nothing here left to dispose of"):
-        await harness.runner.run(done.state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            done.state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert await harness.trail.export() == before
     assert len(harness.invoker.invocations) == 1
@@ -2164,7 +2387,9 @@ async def test_a_naive_clock_reading_fails_the_stage_that_read_it() -> None:
     state = await an_execution(harness.plans, step)
 
     with pytest.raises(PlanningError):
-        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        await harness.runner.run(
+            state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+        )
 
     assert await harness.trail.export() == []
     assert harness.invoker.invocations == []

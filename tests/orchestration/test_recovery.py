@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     CostBasis,
     Goal,
     GoalAssociation,
+    GoalAttempt,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -88,6 +89,10 @@ class LedgerTrail(AuditTrail, InvocationLedger, Protocol):
 AT = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 STEP = "step-1"
+
+#: The attempt every execution here is opened under, and the one each claim names
+#: (ADR-0255 §3).
+ATTEMPT = "a-1"
 OTHER_STEP = "step-2"
 DECISION = "d-1"
 
@@ -185,7 +190,19 @@ async def an_execution(
         targets_revision=1,
     )
     await plans.save_plan(plan)
-    return await plans.start_execution(plan.id)
+    state = await plans.start_execution(plan.id)
+    # ADR-0255 §3: the claim below names the attempt that owns this execution, appended
+    # at the moment the execution exists, as ``engine.py`` does.
+    await plans.open_attempt(
+        GoalAttempt(
+            id=ATTEMPT,
+            goal_id=goal.id,
+            opened_at=AT,
+            plan_ids=(plan.id,),
+            execution_ids=(state.id,),
+        )
+    )
+    return state
 
 
 async def claimed(
@@ -205,6 +222,7 @@ async def claimed(
             expected_version=state.version,
             bound_tool=tool_id,
             approval_ref=decision_id,
+            attempt_id=ATTEMPT,
         )
     )
 

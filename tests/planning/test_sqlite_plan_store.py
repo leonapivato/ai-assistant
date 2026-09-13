@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     EvidenceBasis,
     EvidenceHistory,
     EvidenceStanding,
+    ExecutionState,
     Goal,
     GoalAttempt,
     GoalElement,
@@ -92,15 +93,23 @@ def _journal_mode(database: Path) -> int | None:
 
 
 async def _seed_and_start(store: SqlitePlanStore, plan_id: str = "p1") -> str:
-    """Save a goal+plan and start one execution, returning its id."""
+    """Save a goal+plan and start one execution under an attempt, returning its id."""
     await store.save_goal(_goal())
     await store.save_plan(_plan(plan_id=plan_id))
-    return (await store.start_execution(plan_id)).id
+    return (await _owned(store, await store.start_execution(plan_id))).id
+
+
+async def _owned(store: SqlitePlanStore, state: ExecutionState) -> ExecutionState:
+    """Open the attempt that owns ``state``, which is what a claim names (ADR-0255 §3)."""
+    await store.open_attempt(
+        GoalAttempt(id="a1", goal_id="g1", opened_at=_fixed_now(), execution_ids=(state.id,))
+    )
+    return state
 
 
 async def _park(store: SqlitePlanStore) -> str:
     """Seed, start, and drive the one step to AWAITING_APPROVAL; return the id."""
-    state = await store.start_execution("p1")
+    state = await _owned(store, await store.start_execution("p1"))
     await store.commit_transition(
         StepTransition(
             execution_id=state.id,
@@ -240,6 +249,7 @@ async def test_a_parked_confirmation_survives_a_restart(tmp_path: Path) -> None:
                 to_status=StepStatus.RUNNING,
                 expected_version=state.version,
                 approval_ref="perm-1",
+                attempt_id="a1",
             )
         )
         resumed = ran.step("s1")
@@ -479,6 +489,7 @@ async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> N
             expected_version=state_a.version,
             bound_tool="smtp",
             approval_ref="perm-1",
+            attempt_id="a1",
         )
         claim_b = claim_a.model_copy(update={"approval_ref": "perm-2"})
 
@@ -846,6 +857,11 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
         )
         await recorded("start_execution", lambda: store.start_execution("p1"))
         state = await store.start_execution("p1")
+        # The claim names the attempt that owns this execution (ADR-0255 §3), appended
+        # through the member that is already recorded above.
+        await store.commit_attempt(
+            AttemptTransition(attempt_id="a1", expected_version=1, add_execution_id=state.id)
+        )
         await recorded("commit_transition", lambda: store.commit_transition(_claim(state)))
         await recorded("export", store.export)
         await recorded("delete_goal (absent)", lambda: store.delete_goal("no-such-goal"))

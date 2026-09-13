@@ -342,6 +342,7 @@ class StepExecutor:
         *,
         step_id: str,
         call: ToolCall,
+        attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
     ) -> ExecutionState:
         """Claim ``step_id``, run ``call``, and commit the outcome.
@@ -363,6 +364,13 @@ class StepExecutor:
                 Its ``request.tool.id`` becomes ``bound_tool`` and its
                 ``decision.id`` becomes ``approval_ref``, so the durable record
                 describes the call that actually ran (ADR-0029 §8).
+            attempt_id: The :class:`~ai_assistant.core.types.GoalAttempt` every claim
+                this executor makes is made under (ADR-0255 §3) — including each
+                **re-claim** a retry spends, since each is its own ``→ RUNNING``
+                transition. It is passed to the ``StepTransition`` and read for
+                nothing else: it selects no tool, fills no argument and reaches no
+                gate, so **no collaborator is added** and this executor gains no
+                ``PlanStore`` read it did not already have (ADR-0058, ADR-0254 §13).
             timeout: How long the seam may wait, per attempt. The caller's
                 budget, not the tool's property (ADR-0029 §4).
 
@@ -439,7 +447,7 @@ class StepExecutor:
             raise ToolBindingError(msg)
         trusted = await self._registry.get(authorised.request.tool.id)
 
-        state = await self._claim(state, step_id, authorised)
+        state = await self._claim(state, step_id, authorised, attempt_id)
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
         # attempt of this call" — a slow `commit_transition` is not part of the
         # window, and counting it could consume one before the tool was reached.
@@ -467,7 +475,7 @@ class StepExecutor:
             if result is None or not self._may_retry(result, trusted, started):
                 return state
             try:
-                state = await self._claim(state, step_id, authorised)
+                state = await self._claim(state, step_id, authorised, attempt_id)
             except RetriesExhaustedError:
                 # The ceiling is the tracker's (ADR-0014 §4), and hitting it is
                 # an ordinary end to this loop rather than a fault: the step is
@@ -531,12 +539,18 @@ class StepExecutor:
 
     # --- the transitions ------------------------------------------------
 
-    async def _claim(self, state: ExecutionState, step_id: str, call: ToolCall) -> ExecutionState:
+    async def _claim(
+        self, state: ExecutionState, step_id: str, call: ToolCall, attempt_id: str
+    ) -> ExecutionState:
         """Commit the ``→ RUNNING`` claim that must precede the call.
 
         ``bound_tool`` and ``approval_ref`` are pinned to the call being made,
         which is what makes the durable record a description of what ran rather
-        than of what was planned (ADR-0029 §8).
+        than of what was planned (ADR-0029 §8). **``attempt_id`` names the attempt
+        the claim is made under** (ADR-0255 §3), which the store checks against that
+        row's own ``execution_ids`` and state in the same indivisible step as the
+        write — so a caller naming the wrong attempt is refused rather than obeyed,
+        and nothing is invoked.
 
         **A claim that lands into a cancellation is closed, not left standing.**
         The claim is a write like any other, so a cancellation can arrive while
@@ -548,10 +562,19 @@ class StepExecutor:
         happened, which is what §8 says of the other pre-invocation exit — before
         the cancellation is allowed to leave.
 
+        Args:
+            state: The execution as stored, whose ``version`` the claim is computed
+                against.
+            step_id: The step being claimed.
+            call: The authorised call, already detached and revalidated.
+            attempt_id: The attempt the claim is made under (ADR-0255 §3).
+
         Raises:
             CancelledError: If the executing task was cancelled while the claim
                 was in flight. Raised after the step has been closed.
-            PlanningError: If the store rejected the claim.
+            PlanningError: If the store rejected the claim — including where
+                ADR-0255 §3's conjuncts refuse it, which leaves the step at its entry
+                status with nothing invoked.
         """
         claimed, cancelled = await self._commit_shielded(
             StepTransition(
@@ -561,6 +584,7 @@ class StepExecutor:
                 expected_version=state.version,
                 bound_tool=call.request.tool.id,
                 approval_ref=call.decision.id,
+                attempt_id=attempt_id,
             )
         )
         if not cancelled:

@@ -1039,35 +1039,25 @@ async def test_the_parking_turns_own_work_survives_the_resumption() -> None:
     assert ended.state is AttemptState.ENDED
 
 
-async def test_a_failed_boundary_write_is_recovered_by_the_finishing_commit() -> None:
-    """§12's bookkeeping neither destroys the act it describes nor gives up on it.
+async def test_a_failed_boundary_write_leaves_the_attempt_paused_and_the_claim_refused() -> None:
+    """§12's boundary meeting ADR-0255 §3's paused limb, which rules the outcome.
 
-    Two things have to hold at once when the store refuses the boundary's write. The
-    approval must survive: a confirmation is answerable once (ADR-0044 §2b) and the
-    resolving ruling is already in the trail by then, so a failure propagating from the
-    boundary would leave the approval spent, the step ``AWAITING_APPROVAL``, a retry
-    refused as already resolved and the binding absent from ``pending_confirmations`` —
-    an authorised act with no route back. And the record must still be written: §12 asks
-    for the facts established after the opening write, and a store that refused one
-    commit and served the next has left nothing that stops the second from recording
-    them.
+    The boundary write is what moves a resumed attempt out of
+    ``AWAITING_AUTHORIZATION`` (ADR-0254 §14), and ADR-0255 §3 refuses a claim under a
+    paused attempt: *"A resume that nevertheless finds the attempt paused is refused
+    rather than excused, which is the fail-closed direction."* So where the store
+    refuses that write, the step is **not** claimed and the tool is **not** reached —
+    which is a change from what this arm pinned before ADR-0255, and is the direction
+    that keeps *paused* true of a paused system rather than the one that keeps the act.
 
-    So the boundary is reported rather than raised, the decision's identity is kept before
-    the write that may fail, and the finishing commit reads the attempt itself and commits
-    what is true then — ``VERIFY``, the terminal fields, the ledger, and the authorization
-    the boundary did not manage to append. Nothing is replayed and no failed transition is
-    retried.
-
-    ``StepRunner.run`` keeps the raise, and the difference is not arbitrary: nothing has
-    been answered there, the step is still ``PENDING``, and the whole turn is retryable,
-    so failing loudly costs a turn rather than an authorisation.
+    **§12's own guarantee still holds and is what separates the two failures.** The
+    boundary is reported rather than raised, so the resumption does not fail *because
+    the bookkeeping did* — it fails at the claim, on the claim's own message. The
+    residual is §3's, stated there and booked to A8: the resolving ruling **is**
+    recorded, so the one answer ADR-0044 §2b admits is spent on a claim that never
+    landed, and the step stands ``AWAITING_APPROVAL`` at its stored version with
+    nothing invoked.
     """
-    reading = 0
-
-    def advancing() -> datetime:
-        nonlocal reading
-        reading += 1
-        return AT + timedelta(seconds=reading)
 
     class _FailingOnTheBoundary(_Recording):
         """Refuses exactly the resumption's ``EXECUTE`` write, once."""
@@ -1085,61 +1075,49 @@ async def test_a_failed_boundary_write_is_recovered_by_the_finishing_commit() ->
             return await super().commit_attempt(transition)
 
     plans = _FailingOnTheBoundary()
-    harness = Harness(tools=(confirmable(),), plans=plans, now=advancing)
+    harness = Harness(tools=(confirmable(),), plans=plans)
     parked = await harness.engine.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     assert parked.step.confirmation is not None
     (stored,) = plans.opened
-    waiting = await harness.plans.get_attempt(stored.id)
-    assert waiting is not None
-    asked = waiting.effort.working
 
-    resumed = await harness.engine.resume(
-        parked.step.confirmation.token, approved=True, timeout=PATIENT
-    )
+    with pytest.raises(PlanningError, match="no step is claimed under it"):
+        await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
 
     assert plans.refused == 1, "the boundary's write really was refused"
-    assert resumed.step is not None
-    assert resumed.step.disposition is Disposition.EXECUTED, "the approved act still ran"
-    claimed = resumed.step.state.step("step-1")
+    assert harness.invoker.invocations == [], "and nothing was invoked under a paused attempt"
+    execution = await harness.plans.get_execution(parked.step.state.id)
+    assert execution is not None
+    claimed = execution.step("step-1")
     assert claimed is not None
-    assert claimed.status is StepStatus.SUCCEEDED
-    assert claimed.approval_ref is not None
+    assert claimed.status is StepStatus.AWAITING_APPROVAL, "the step is at its entry status"
     attempt = await harness.plans.get_attempt(stored.id)
     assert attempt is not None
-    assert attempt.phase is AttemptPhase.VERIFY, "the finishing commit recorded the phase"
-    assert attempt.state is AttemptState.ENDED
-    assert attempt.outcome is AttemptOutcome.ANSWERED
-    assert attempt.authorization_ids == (claimed.approval_ref,), "and what allowed the step"
-    assert attempt.effort.working > asked, "and the resumption's own interval"
+    assert attempt.state is AttemptState.AWAITING_AUTHORIZATION, "still waiting on the user"
+    # §3's residual, which is the reason it is called the real one: the answer was
+    # recorded before the claim (ADR-0037 §4's steps 5 and 6), so the approval is spent.
+    resolving = [one for one in await harness.trail.export() if one.resolves is not None]
+    assert len(resolving) == 1, "the resolving ruling was recorded before the refused claim"
 
 
-@pytest.mark.parametrize(
-    ("approved", "handler", "composing"),
-    [
-        pytest.param(False, None, None, id="the_user_declined"),
-        pytest.param(True, "raises", None, id="the_tool_failed"),
-        pytest.param(True, None, "refuses", id="the_composition_produced_nothing"),
-    ],
-)
-async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_nothing(
-    *, approved: bool, handler: str | None, composing: str | None
-) -> None:
-    """The recovery's other half: the three answers that earn no ``AttemptOutcome``.
+async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_nothing() -> None:
+    """The recovery's other half: an answer that earns no ``AttemptOutcome``.
 
-    ``ANSWERED`` asserts a reply exists, no step failed and no condition blocked (§5), and
-    each of these fails one of the three. **Which member such an attempt earns instead is
-    A10's** (§13), so none is written — but the attempt is not *waiting* either: the user
-    answered, and the token is settled. An implementation that only wrote the state
-    alongside a terminal outcome would leave a row saying ``AWAITING_AUTHORIZATION`` at
-    ``VERIFY`` wherever the boundary's write was refused, which is §5's paused state over
-    a question nobody can answer again.
+    ``ANSWERED`` asserts a reply exists, no step failed and no condition blocked (§5),
+    and a **declining** answer fails the first. **Which member such an attempt earns
+    instead is A10's** (§13), so none is written — but the attempt is not *waiting*
+    either: the user answered, and the token is settled. An implementation that only
+    wrote the state alongside a terminal outcome would leave a row saying
+    ``AWAITING_AUTHORIZATION`` at ``VERIFY`` wherever the boundary's write was refused,
+    which is §5's paused state over a question nobody can answer again.
+
+    **The two approving answers this arm used to carry — the tool failing and the
+    composition producing nothing — are unreachable behind a refused boundary write
+    since ADR-0255 §3**: the write is what leaves ``AWAITING_AUTHORIZATION``, and a
+    claim under a paused attempt is refused, so no tool runs and no composition is
+    reached. The arm above pins that, and the recovery this one is about is driven
+    through the answer that claims nothing.
     """
-
-    async def _fails(parameters: object, *, idempotency_key: str | None) -> None:
-        del parameters, idempotency_key
-        msg = "the mail server refused it"
-        raise ToolError(msg)
 
     class _FailingOnTheBoundary(_Recording):
         """Refuses exactly the resumption's ``EXECUTE`` write."""
@@ -1152,23 +1130,12 @@ async def test_a_refused_boundary_write_is_recovered_on_an_answer_that_earns_not
             return await super().commit_attempt(transition)
 
     plans = _FailingOnTheBoundary()
-    harness = Harness(
-        tools=(confirmable(),),
-        plans=plans,
-        tool_handler=_fails if handler is not None else None,
-        composing=(
-            None
-            if composing is None
-            else ComposingStage(
-                model=FakeModelProvider(_refusing), streaming=FakeStreamingCompleter()
-            )
-        ),
-    )
+    harness = Harness(tools=(confirmable(),), plans=plans)
     parked = await harness.engine.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     assert parked.step.confirmation is not None
 
-    await harness.engine.resume(parked.step.confirmation.token, approved=approved, timeout=PATIENT)
+    await harness.engine.resume(parked.step.confirmation.token, approved=False, timeout=PATIENT)
 
     (stored,) = plans.opened
     attempt = await harness.plans.get_attempt(stored.id)
