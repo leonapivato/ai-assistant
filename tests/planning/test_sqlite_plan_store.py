@@ -1041,6 +1041,70 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
         store.close()
 
 
+@pytest.mark.parametrize(
+    "mark",
+    ["supersede", "invalidate"],
+    ids=["record_evidence", "record_interpretation"],
+)
+async def test_an_evidence_row_whose_record_and_columns_disagree_is_refused(
+    tmp_path: Path, mark: str
+) -> None:
+    """A mark is validated over the columns, so it must be applied to the same row.
+
+    ``goal_evidence`` holds the record as a blob beside the ``goal_id``, ``read_at`` and
+    ``standing`` columns ADR-0252 §13 promotes, and ``CREATE TABLE IF NOT EXISTS`` is a
+    no-op against a table an outside writer shaped (#373), so the two can be made to
+    disagree. That is the one disagreement a **marking** write cannot survive: §12's
+    refusals are evaluated over the columns, so a SQL row keyed ``ev1`` whose blob calls
+    itself ``ev2`` would be validated as ``ev1`` and then written back as ``ev2`` —
+    marking a row the caller never named, leaving ``ev1`` ``STANDING``, and answering
+    success. Both marking members are driven, because each reads the row the same way.
+
+    It is refused as the corrupt file it is, on the boundary
+    ``_decode_evidence`` already draws for the blob's own shape, and the whole call rolls
+    back — a mark is atomic with the write that occasions it (§12).
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
+    finally:
+        store.close()
+
+    # `ev1`'s blob is replaced with `ev2`'s: the primary key still reads `ev1`, and so do
+    # every one of the columns the refusals are evaluated over.
+    with sqlite3.connect(path) as conn:
+        impostor = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev2'").fetchone()[0]
+        conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (impostor,))
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        if mark == "supersede":
+            with pytest.raises(PlanningError, match="record and columns disagree"):
+                await store.record_evidence(
+                    _evidence_row("ev3", read_at=_AT + timedelta(hours=1)), supersedes=("ev1",)
+                )
+        else:
+            revision = GoalRevision(
+                goal_id="g1",
+                interpretation=_revision(2),
+                expected_version=0,
+                invalidates=("ev1",),
+            )
+            with pytest.raises(PlanningError, match="record and columns disagree"):
+                await store.record_interpretation(revision)
+
+        untouched = await store.get_evidence("ev2")
+        assert untouched is not None
+        assert untouched.standing is EvidenceStanding.STANDING, "no other row was marked"
+        assert await store.get_evidence("ev3") is None, "and the whole call rolled back"
+    finally:
+        store.close()
+
+
 async def test_a_tampered_elision_count_at_sqlites_ceiling_is_refused_as_corruption(
     tmp_path: Path,
 ) -> None:
