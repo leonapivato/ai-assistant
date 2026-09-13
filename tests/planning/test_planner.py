@@ -4453,6 +4453,91 @@ async def test_the_system_prompt_asks_for_an_understanding() -> None:
     assert _UNDERSTANDING_GUIDANCE in _system_turn(model)
 
 
+async def test_the_prompt_asks_for_the_subject_the_extraction_reads() -> None:
+    """ADR-0250 §7: a raised question names what it is about, so the prompt asks.
+
+    "With no subject, condition 2 could only be a review convention — a reviewer
+    reading the question text and forming a view — which is exactly the shape #2255's
+    addendum rules out." So §6's materiality test has a subject to run over only where
+    the prompt asks for one, and this pins the **key** rather than the wording: a
+    prompt that stopped asking for ``about``, or an extraction that started reading a
+    different key, would leave every question about the outcome and the second limb of
+    the materiality test unreachable — silently, and with every other arm still green.
+
+    The open-question line is pinned in the same breath because it has the same shape
+    of failure: ADR-0250 §8 puts ``open_questions`` on the brief "so that a planner
+    does not raise a question the system is already asking", and the guidance is the
+    only thing that tells a model what the printed lines are for.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
+
+    prompt = _system_turn(model)
+    assert '"about"' in prompt, "the key the extraction reads is the key the prompt asks for"
+    assert "open_question" in prompt, "and the printed lines are given their purpose"
+
+
+async def test_the_planner_neither_opens_a_question_nor_moves_focus() -> None:
+    """ADR-0250 §16's writer clauses, at the seam a model could break them from.
+
+    "``orchestration`` writes every value this decision adds, and no model writes any
+    of them" — the question's id, its ``asked_at``, its ``expires_at``, its
+    ``attempt_id``, every disposition it carries, and focus itself. "What a model
+    supplies is exactly three things", and a question's ``text`` and ``about`` are one
+    of them; a value coming back carrying any of the others "has it **discarded
+    silently**".
+
+    So an envelope that raises a question *and* stamps it, and stamps the engagement
+    beside it, yields the question's two content fields and **nothing else** — no
+    repair round bought for the invented keys, and no forged value anywhere in the
+    output. The engagement half is this decision's own addition to the clause
+    ``test_the_writer_clause_fields_are_discarded_on_that_field`` already asserts for
+    ADR-0249's fields.
+    """
+    model = FakeModelProvider(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "last_engaged_at": "2020-01-01T00:00:00+00:00",
+                "last_engaged_in": "conversation-forged",
+                "focused": "G2",
+                "status": "achieved",
+                "constraints": [],
+                "criteria": [],
+                "conditions": [],
+                "questions": [
+                    {
+                        "text": "which weekend?",
+                        "about": None,
+                        "id": "question-forged",
+                        "asked_at": "2020-01-01T00:00:00+00:00",
+                        "expires_at": "2020-01-04T00:00:00+00:00",
+                        "attempt_id": "attempt-forged",
+                        "disposition": "answered",
+                        "settled_at": "2020-01-02T00:00:00+00:00",
+                    }
+                ],
+            }
+        )
+    )
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    output = await planner.plan(
+        _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+    )
+
+    assert model.call_count == 1, "discarded silently, so no repair round is spent"
+    proposed = output.understanding
+    assert proposed is not None
+    [question] = proposed.questions
+    assert (question.text, question.about) == ("which weekend?", None)
+    assert set(question.model_dump()) == {"text", "about"}, "and nothing else crossed"
+    assert "forged" not in output.model_dump_json(), "no id, no conversation, no attempt"
+    assert not hasattr(proposed, "focused"), "focus is stamped by the loop and by nothing here"
+
+
 async def test_an_element_free_brief_is_not_a_reason_to_ask_anything() -> None:
     """ADR-0249 §16 item 13, at the seam that would do the asking.
 
@@ -4540,9 +4625,10 @@ async def test_a_proposed_understanding_is_extracted_whole() -> None:
     assert proposed.conditions[0].ground is Ground.INFERRED
     assert [one.text for one in proposed.questions] == ["which weekend?"]
     # ADR-0250 §7: the element type carries a subject, and `None` means the question
-    # is about the outcome. The prompt does not yet ask for a label — that is that
-    # decision's M2 — so an envelope written against today's prompt reads as a
-    # question about the outcome, which is what a bare text always meant.
+    # is about the outcome. The prompt asks for the two-key object, so a model that
+    # answered with a bare text answered loosely — and a bare text has always meant a
+    # question about the outcome, which is the reading taken rather than a subject
+    # invented for it.
     assert [one.about for one in proposed.questions] == [None]
     assert model.call_count == 1, "one pass decides the plan and the understanding"
 
