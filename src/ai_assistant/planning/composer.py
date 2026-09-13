@@ -189,7 +189,9 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: asserting one does. What it cannot do is make the case decidable; measured on a
 #: supply stripped of its own episode, this instruction and the one before it compose
 #: the same query on 8 of 8 samples, so the un-decidable case is left exactly where it
-#: already was and the honest statement is the whole of what is available here.
+#: already was and the honest statement is the whole of what is available here. The
+#: conditional was lost once in this lane's own rework and a round found it again,
+#: which is what the regression arm below is for.
 #:
 #: Measured rather than assumed, against the two drives #2262 recorded failing and the
 #: four it recorded passing, replayed over the supplies a scratch hub actually built
@@ -238,15 +240,16 @@ one into the query unless the request is asking about it."""
 #: model, and where it sits; what the block *says* is a reviewer's read, and the
 #: reasoning to read it against is above.
 _IMPLICIT_SUBJECT_GUIDANCE: Final = """\
-The notes are in the order this assistant selected them, and they open with the \
-turns this conversation has already had. Later notes are things this assistant \
-retrieved, which may themselves include an older turn of this conversation. So \
-where the request leaves its subject implicit — "that", "them", "more about it" \
-— it refers to what was asked for in one of this conversation's own turns, and \
-the notes at the top are where the recent ones are: take the subject from there, \
-and never from a want, a purchase or a plan a note merely records about the \
-user. Search for the thing that was asked for; carry a further detail in beside \
-it only where the detail narrows that thing rather than naming something else."""
+The notes are in the order this assistant selected them. If any of them record \
+turns this conversation has already had, the notes open with those; the rest are \
+things this assistant retrieved, which may themselves include an older turn of \
+this conversation. So where the request leaves its subject implicit — "that", \
+"them", "more about it" — it refers to what was asked for in one of this \
+conversation's own turns, and the notes at the top are where the recent ones \
+are: take the subject from there, and never from a want, a purchase or a plan a \
+note merely records about the user. Search for the thing that was asked for; \
+carry a further detail in beside it only where the detail narrows that thing \
+rather than naming something else."""
 
 #: The whole instruction: the ratified prompt, then the paragraph above it.
 _SYSTEM_PROMPT: Final = f"{_SYSTEM_PROMPT_BASE}\n\n{_IMPLICIT_SUBJECT_GUIDANCE}"

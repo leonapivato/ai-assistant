@@ -307,6 +307,20 @@ _B1_WITH_SUPPLEMENT_EPISODE: Final = (
     "The user asked: earlier in this conversation, what sofa would suit the room?",
 )
 
+#: The supply a first turn builds, and the one a degraded history read builds:
+#: `recent` is empty while retrieval still returns records, so **no** note here is
+#: this conversation's and the list opens with retrieved background — an episode of
+#: another conversation among it, which begins "The user asked: …" exactly as this
+#: conversation's own would. Nothing in a `SearchSupply` distinguishes them, which is
+#: why the instruction's opening claim is conditional; this arm is the shape that
+#: makes an unconditional one false, and it is here because one was shipped into this
+#: lane's own rework and a review round found it.
+_RETRIEVED_ONLY: Final = (
+    "The user and Alex settled on wide oak boards with a brushed finish for the living-room floor.",
+    "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
+    "gravel bike before that trip.",
+)
+
 #: #2262's C1, whose own turn is the only one of its shape in the supply.
 _C1_RECORDS: Final = (
     "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
@@ -342,6 +356,7 @@ def _echoing_the_first_record() -> FakeModelProvider:
             _B1_WITH_SUPPLEMENT_EPISODE[0],
             id="b1-supplement-episode",
         ),
+        pytest.param(_RETRIEVED_ONLY, _RETRIEVED_ONLY[0], id="retrieved-only"),
         pytest.param(_C1_RECORDS, _C1_RECORDS[0], id="c1"),
     ],
 )
@@ -375,7 +390,10 @@ async def test_the_records_reach_the_prompt_in_the_supplys_own_order(
     The supplement arm is here for the same reason from the other side: a trailing
     episode of *this* conversation is a supply this loop really builds, so the order it
     is listed in is worth pinning even though the order is exactly what cannot tell
-    that episode from a retrieved one.
+    that episode from a retrieved one. The retrieved-only arm is the third such supply
+    — a first turn, or one whose history read degraded — where the leading run is empty
+    and ``expected`` is a retrieved record precisely because no note here is this
+    conversation's.
     """
     model = _echoing_the_first_record()
     supply = SearchSupply(
