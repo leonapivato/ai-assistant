@@ -71,9 +71,12 @@ def test_the_outcomes_are_the_six_the_adr_names() -> None:
     }
 
 
-@pytest.mark.parametrize("foreign", [ReadOutcomeKind.REFUSED, ReadOutcomeKind.FAILED])
+@pytest.mark.parametrize(
+    ("foreign", "grant"),
+    [(ReadOutcomeKind.REFUSED, None), (ReadOutcomeKind.FAILED, "g-1")],
+)
 def test_the_planners_vocabularys_member_is_refused_on_a_shared_value(
-    foreign: ReadOutcomeKind,
+    foreign: ReadOutcomeKind, grant: str | None
 ) -> None:
     """#2320's reciprocal seam: the costlier of the two directions.
 
@@ -91,9 +94,19 @@ def test_the_planners_vocabularys_member_is_refused_on_a_shared_value(
 
     ADR-0258 §3 names the hazard, files it as #2320 and rules nothing about it, so this
     arm holds the issue's remedy rather than a clause.
+
+    **The rest of the row is coherent with the conversion this refuses**, which is what
+    makes the arm about the guard and nothing else. ``_grant_matches_outcome`` requires
+    ``grant=None`` beside a converted ``refused`` and a grant beside a converted
+    ``failed``, so a row carrying the default grant would raise on *that* invariant
+    whether or not this guard existed — the arm would pass over a guard dropped, or
+    written against one of the two values only. Paired this way it raises **only** because
+    the member is foreign, which the ``match`` pins. The first pair is precisely the
+    fabricated row: ``REFUSED`` naming no grant is what a real gated refusal looks like,
+    so nothing downstream would have found it.
     """
-    with pytest.raises(ValidationError):
-        _record(outcome=foreign)
+    with pytest.raises(ValidationError, match="expected a ReadOutcome member"):
+        _record(outcome=foreign, grant=grant)
 
 
 def test_a_planner_member_sharing_no_value_was_refused_already() -> None:
