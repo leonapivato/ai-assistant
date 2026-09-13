@@ -1723,15 +1723,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     later step is dispatched and none is skipped**, and the committed step transition is **not
     lost or retried**. They are what stop an implementation composing over the failure, sweeping
     the remainder, or re-driving the step.
-15. **Replan after partial execution** — a plan driven to its second step, superseded on a later
-    turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's `output` are unchanged, the
-    attempt's `execution_ids` names both executions, and the superseded plan's still-`PENDING`
-    steps are `SKIPPED`/`SUPERSEDED`. **This arm records the obligation §7 states and the interval
-    in which it is undischarged**: without A8's key the new plan's booking step **does** dispatch,
-    which is the duplicate §7 forbids and which A8's own acceptance requirement (§12) is what
-    closes — over a plan that modifies the earlier one and a plan produced afresh alike. The arm
-    is M34's because the guarantee is, and it is written now so the lane that lands the key
-    inherits the case rather than invents it.
+15. **Replan after partial execution preserves what happened** — a plan driven to its second
+    step, superseded on a later turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's
+    `output` are unchanged, the attempt's `execution_ids` names both executions, and the
+    superseded plan's still-`PENDING` steps are `SKIPPED`/`SUPERSEDED`. **The arm asserts
+    preservation and asserts nothing about a second dispatch**: whether the later plan's act
+    happens at most once is §7's obligation, whose mechanism and whose demonstration are **A8's**
+    (§12). **No arm of this decision requires a duplicate dispatch to be shown**, because no lane
+    of this decision can prevent one.
 16. **The deadline, decremented across steps and not replenished by a resume** — a three-step
     plan under a budget that two steps exhaust: each `StepRunner.run` receives a **strictly
     smaller and strictly positive** remainder, the third step is never started, it is `PENDING`
