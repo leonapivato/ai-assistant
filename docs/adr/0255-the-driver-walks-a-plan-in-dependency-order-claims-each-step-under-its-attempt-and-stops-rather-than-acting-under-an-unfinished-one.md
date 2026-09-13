@@ -2793,16 +2793,25 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     `EFFECT_UNRESOLVED`** (§6) — and **every** case asserts three things: the charging
     **`commit_attempt` is reached**, and either **returns** — with `AttemptEffort.working`
     **advanced by the interval consumed up to the cancellation** — or **raises**, in which case
-    §1's precedence binds and the ledger undercounts; the `CancelledError` **propagates to the
-    caller as the same instance**, not converted to a value and not replaced by a failure of the
-    accounting; and **no later step is dispatched and none is skipped**. **One further assertion is
-    made at every one of the five seams, and what is committed inside the call one of them makes is
-    cited rather than restated.** §4 is the ground: *"The driver introduces no second boundary, no
-    pre-claim reservation, no post-claim window and no reachability fact."* **The further
-    assertion is the entry status: where no write of that seam has begun**, the step stands at
-    its **entry** status (§3) — **`PENDING`** where a walk entered the seam and
-    **`AWAITING_APPROVAL`** where a `resume` did, §3's two and only two — which the fixture
-    reaches by delivering before that seam's first write is dispatched. **What is committed once
+    §1's precedence binds and the ledger undercounts; the `CancelledError` **reaches the caller**,
+    not converted to a value and not replaced by a failure of the accounting — **as the same
+    instance wherever this decision's own code caught it and re-delivered it**, which is §1's
+    accounting and its logging guard and is what the assertion exists to refute, and **as a
+    `CancelledError` and nothing narrower wherever the cancellation passed through an interval
+    `StepExecutor.execute` manages**, whose re-delivery is ADR-0034 §1's and ADR-0029 §4's and
+    which §4 forbids this decision to change; and **no later step is dispatched and none is
+    skipped**. **What is asserted beyond those, and what is committed inside the call one of these
+    seams makes, is cited rather than restated.** §4 is the ground: *"The driver introduces no
+    second boundary, no pre-claim reservation, no post-claim window and no reachability fact."*
+    **The entry-status assertion is the claim seam's and the resume seam's**, those being the two
+    that make a `→ RUNNING` claim from one of §3's entry statuses: where no write of that seam has
+    begun the step stands at the one it was claimed from — **`PENDING`** by a walk and
+    **`AWAITING_APPROVAL`** by a `resume`, §3's two and only two — which the fixture reaches by
+    delivering before that seam's first write is dispatched. **At the `commit_attempt` that
+    records `EFFECT_UNRESOLVED` the residual is §6's own and is not an entry status**: §6 commits
+    the step's `→ INDETERMINATE` transition and the attempt's write under **two**
+    compare-and-swaps, so there the step stands durably **`INDETERMINATE`** whether or not the
+    attempt write landed, which is what §6 already fixes. **What is committed once
     a write has begun, inside `StepExecutor.execute`, this arm cites by clause and does not
     restate**: **ADR-0034 §1** for the window between the committed claim and entering `invoke`,
     **ADR-0029 §4** for the interrupted-call classification once `invoke` has been entered, and
