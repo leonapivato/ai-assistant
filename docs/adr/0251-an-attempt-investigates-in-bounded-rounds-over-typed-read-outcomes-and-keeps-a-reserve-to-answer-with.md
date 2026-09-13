@@ -1,6 +1,6 @@
 # 251. An attempt investigates in bounded rounds over typed read outcomes, and keeps a reserve to answer with
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0258 (§3's name for the model it mints, in that term alone — the model is named `ReadAskOutcome` and `Planner.plan`'s replaced parameter is annotated `read_outcomes: Sequence[ReadAskOutcome] = ()`, because `core/types.py` has held `ReadOutcome` since the permission trail's own record of how a gated source read ended. Every other clause of §3 binds **verbatim** — the two fields `ask` and `outcome` and their types, the `extra="forbid"`, the carries-nothing-else clause, the parameter's name, its default, its keyword position and its additive-in-shape character, the breaking-change flag, the one-entry-per-serviced-ask-in-servicing-order clause and its `()` reading, the nothing-the-source-said clause, the ask-carried-back-unaltered clause, the carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the planner-is-not-told-which-round clause — and §§1-2 and §§4-18 are untouched)
 - **Partially supersedes four ADRs, in seven narrowly stated scopes** — three of
   [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md),
   two of
@@ -90,6 +90,29 @@
   §1 becomes false or over-wide: its enum keeps its name, its six members and its every reader.
   Appended dated note per ADR-0070 §1; no ratified text is rewritten, no `Status` line moves,
   every ratified section below is byte-identical, and no mark is added (ADR-0089 §5).
+- Partially superseded: 2026-09-13 by ADR-0258 — **§3's name for the model it mints, and
+  nothing else of this ADR.** This is the reconciliation the note directly above records as
+  owed: that note states the divergence and decides nothing, and this decides it. That note's
+  text stands unrewritten, as the append-only mechanism requires (ADR-0070 §1).
+  §3 states *"`core/types.py` gains **`ReadOutcome`**, a frozen model with `extra="forbid"`
+  carrying exactly two fields"* and replaces `Planner.plan`'s `empty_reads` with
+  *"**`read_outcomes: Sequence[ReadOutcome] = ()`**"*. That name was already taken:
+  `core/types.py` has held a `ReadOutcome` since
+  [ADR-0185](0185-every-attempt-to-read-a-source-is-recorded-refusals-included-and-the-trails-bound-has-no-unlimited-spelling.md)
+  §1 — a `StrEnum` recording how one **gated source read** ended, carried on `SourceReadRecord`
+  and read by the audit path. ADR-0258 rules the model **`ReadAskOutcome`** and the annotation
+  `Sequence[ReadAskOutcome]`, on the ground that the two are different facts about different
+  things and that ADR-0185 §1's enum is the ratified, implemented, wire-visible one. **Every
+  other clause of §3 binds verbatim** over the renamed model — the two fields `ask` and
+  `outcome` and their types, the `extra="forbid"`, the carries-nothing-else clause, the
+  parameter's name, its default, its keyword position and its additive-in-shape character, the
+  breaking-change flag, the one-entry-per-serviced-ask-in-servicing-order clause and its `()`
+  reading, the nothing-the-source-said clause, the ask-carried-back-unaltered clause, the
+  carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the
+  planner-is-not-told-which-round clause. §2's `ReadOutcomeKind` collides with nothing and is
+  untouched, and §§1-2 and §§4-18 are untouched entire. The `Status` line above and this note
+  are the whole of the record (ADR-0070 §1 and §4, ADR-0082 §1 and §2); no ratified text below
+  is rewritten and no mark is added (ADR-0089 §5). Refs #2281, PR #2287.
 
 ## Context
 
