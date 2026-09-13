@@ -1460,6 +1460,103 @@ class TestACivilDateThatHasNoStartInTheBoundsZone:
         assert ruling.outcome is PermissionOutcome.ALLOW
 
 
+class TestTheReadingIsTotalAtTheRepresentableBoundary:
+    """§4: *"every failure of it is a refusal to cover, **never an exception out of
+    ``decide``**"*.
+
+    A reading that raised would take down a ruling that owed a ``CONFIRM`` — and
+    ``OverflowError`` is neither a ``ValueError`` nor an ``AssistantError``, so it
+    would leave the policy's own error boundary through a hole rather than reaching
+    a caller's fail-closed branch.
+    """
+
+    @staticmethod
+    def _gate(zone: str) -> ThresholdActionPolicy:
+        return policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(
+                            starts_at=AT - timedelta(days=1),
+                            ends_at=AT + timedelta(days=1),
+                            timezone=zone,
+                        ),
+                    ),
+                )
+            )
+        )[0]
+
+    @pytest.mark.parametrize(
+        ("stay_from", "zone"),
+        [
+            pytest.param("0001-01-01", "Etc/GMT-14", id="year-one-ahead-of-utc"),
+            pytest.param("9999-12-31", "Etc/GMT+12", id="year-nine-thousand-behind-utc"),
+        ],
+    )
+    async def test_a_date_at_the_representable_boundary_is_a_refusal_and_not_a_raise(
+        self, stay_from: str, zone: str
+    ) -> None:
+        """``0001-01-01`` in a zone ahead of UTC converts to a **year-0** instant,
+        which ``datetime`` cannot hold; the far end is the mirror of it."""
+        ruling = await self._gate(zone).decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+
+class TestALeapSecondIsRefusedRatherThanNormalised:
+    """RFC 3339 §5.6's ``time-second`` admits ``60``; ``datetime`` cannot hold it.
+
+    So the reading ADR-0254 §4 states over *"the instant it denotes"* cannot be
+    taken, and §4's own totality clause is the answer: *"every failure of it is a
+    refusal to cover"*. The refusal costs a question rather than authorising
+    anything.
+
+    **What is refused with it is normalising the value onto the subset.** ADR-0140
+    ruled this exact question for a delivery header, and its reasoning is the
+    corpus's: a lane *"does not roll a leap second to the following instant"* or
+    clamp it to ``:59``, because *"three incompatible outcomes, each claiming
+    compliance"* is what delegating the decision produces.
+    """
+
+    async def test_a_leap_second_inside_the_bound_is_not_covered(self) -> None:
+        """Both the instant before it and the instant after it **are** covered, so a
+        reading that rolled or clamped would have covered this too."""
+        gate, _, _ = policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(
+                            starts_at=datetime(2016, 12, 31, tzinfo=UTC),
+                            ends_at=datetime(2017, 1, 2, tzinfo=UTC),
+                        ),
+                    ),
+                )
+            )
+        )
+        ruling = await gate.decide(request(binding(SITE), stay_from="2016-12-31T23:59:60Z"))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+    @pytest.mark.parametrize("stay_from", ["2016-12-31T23:59:59Z", "2017-01-01T00:00:00Z"])
+    async def test_the_instants_either_side_of_it_are_covered(self, stay_from: str) -> None:
+        """The narrowing is the leap second and nothing else."""
+        gate, _, _ = policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(
+                            starts_at=datetime(2016, 12, 31, tzinfo=UTC),
+                            ends_at=datetime(2017, 1, 2, tzinfo=UTC),
+                        ),
+                    ),
+                )
+            )
+        )
+        ruling = await gate.decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.ALLOW
+
+
 class TestRfc3339sUnknownLocalOffsetSpelling:
     """``-00:00`` denotes the same **instant** as ``+00:00``, and §4 compares instants.
 

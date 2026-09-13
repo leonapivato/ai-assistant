@@ -428,7 +428,19 @@ def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zon
         # direction, on a value nothing in this system can prove. The round trip is
         # the whole test — where the instant reads back as the day asked for, the day
         # has a start and this is it.
-        if start.astimezone(UTC).astimezone(located).date() != day:
+        try:
+            round_tripped = start.astimezone(UTC).astimezone(located).date()
+        except OverflowError, OSError, ValueError:
+            # **A date at the representable boundary is unreadable, not an exception
+            # out of ``decide``** (§4). ``0001-01-01`` in a zone ahead of UTC
+            # converts to a year-0 instant, which ``datetime`` cannot hold and which
+            # surfaces as ``OverflowError`` — neither a ``ValueError`` nor an
+            # ``AssistantError``, so it would leave the policy's own error boundary
+            # through a hole and take down a ruling that owed a ``CONFIRM``. §4's
+            # totality clause is what this is: "every failure of it is a refusal to
+            # cover".
+            return None
+        if round_tripped != day:
             return None
         return start
     if not _DATE_TIME.match(text):
