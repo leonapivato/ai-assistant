@@ -666,8 +666,9 @@ one.
 > **Normative.** **`episode_retention = None`.** The same inputs → **no row on either path**,
 > `Confirmation.authorization` absent, route (a), and no deployment value read for anything else.
 
-> **Normative.** **Rung 2 is not displaced.** A goal carrying a `deadline` takes rung 2 and the
-> goal's own instant, though a finite window exists and would give a different one.
+> **Normative.** **Rung 2 is not displaced.** A goal carrying a `deadline` **strictly after
+> `proposed_at`** takes rung 2 and the goal's own instant, though a finite window exists and would
+> give a different one.
 
 > **Normative.** **A stale or equal `deadline` reaches rung 3, not rung 2.** A finite
 > `episode_retention`; a goal carrying a `deadline` **at or before `proposed_at`**; an act naming
