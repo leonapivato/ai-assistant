@@ -59,13 +59,13 @@ so only a superseding ADR can make it, reviewed while `Proposed` and merged on i
 decides nothing**, states that §3 binds as ratified, directs a reader to neither name, and says
 the reconciliation is owed. **This ADR is that reconciliation.**
 
-**PR #2315 is not merged at this ADR's base** (`origin/main` `2ce4c193`), so nothing described in
-the paragraph above is on the tree this ADR is reviewed against; ADR-0251 carries no note there
-at all, and the note §5 adds is its first. The merge order puts #2315 ahead of this lane, and
-where it lands first its note stands unrewritten above this ADR's — the two are compatible,
-because one records what the other decides.
+**PR #2315 merged ahead of this lane**, so its note of 2026-09-13 is on ADR-0251 at this ADR's
+base (`origin/main` `f3bd08f5`) and this change adds a second note directly below it. The two are
+compatible and deliberately so: that note records the divergence and says the reconciliation is
+owed, and this one is the reconciliation. Its text is left unrewritten, which is what the
+append-only mechanism requires (ADR-0070 §1).
 
-### The tree, read rather than assumed, at `origin/main` `2ce4c193`
+### The tree, read rather than assumed, at `origin/main` `f3bd08f5`
 
 Three types, one file, and not one of them is a draft:
 
@@ -251,11 +251,11 @@ only that ADR now act differently, or read one of its clauses more widely than i
   makes the partial form first-class). ADR-0251's `Status` takes the leading
   `Partially superseded by` token with the scope naming exactly what was replaced (ADR-0070
   §4), and the record itself lives in the appended dated note this change adds (ADR-0082 §2,
-  ADR-0070 §1). **On this ADR's base that note is the only one ADR-0251 carries.** PR #2315's
-  note of 2026-09-13 — which records the divergence and decides nothing — is not merged at
-  `2ce4c193`; where it lands first, it stands unrewritten above this one and this note is what
-  decides what that one could only record. Either way no earlier note is edited, which is what
-  the append-only mechanism requires (ADR-0070 §1).
+  ADR-0070 §1). **It is the second note ADR-0251 carries**: PR #2315's note of 2026-09-13 —
+  which records the divergence and decides nothing — merged ahead of this lane and stands
+  directly above it, unrewritten. This note decides what that one could only record, and says
+  so in its first sentence. No earlier note is edited, which is what the append-only mechanism
+  requires (ADR-0070 §1).
 - **ADR-0185 — nothing is recorded, and nothing is owed.** No clause of ADR-0185 §1 becomes
   false or over-wide. Its enum keeps its name, its six members, its totality claim, its
   `SourceReadRecord` home and every consumer rule §1 states about it; a reader holding ADR-0185
