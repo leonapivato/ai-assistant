@@ -2107,6 +2107,21 @@ ledger and stops on the same three guards.
 > selects between them: two drives over one plan is the lost-update ADR-0014 §5's
 > compare-and-swap exists to make detectable, arrived at deliberately.
 
+> **Normative — a walk drives several steps and `TurnOutcome.step` stays the one field `core`
+> already has, so this states which step it carries.** `StepOutcome` is singular and **gains no
+> member and loses none**. **`TurnOutcome.step` carries the step that stopped the walk** — the
+> step that parked, the step that returned `INDETERMINATE`, the step whose claim was refused, or
+> the `SKIPPED`/`UNMET_DEPENDENCY` step that ended it — **and where no step stopped the walk, the
+> last step the walk dispatched**; it is `None` only where the walk dispatched none, exactly as it
+> is today. **The ground is what a spoke renders: where the goal stands.** That is the step the
+> user must act on, and it is the stopping step wherever there is one. **No earlier step's
+> disposition is lost and none is carried here**: each is on the plan's `StepTransition` record
+> (§3, §10) and is reachable from the goal surfaces, so the singular field is a projection of a
+> walk that is fully recorded rather than the only account of it. **This mints no `core` shape, no
+> field and no enumeration, and supersedes nothing**: `StepOutcome`'s clauses bind verbatim — the
+> disposition is still the gate's verdict and not the step's own result, and `step_id` is still
+> required and still addresses a step of the returned `state`.
+
 > **Normative.** **The composing stage's `undriven` argument keeps its meaning and gains no
 > member.** After a walk it is the steps the walk left `PENDING` and the steps it skipped, which
 > is what it already is; **no lane reads this decision as widening what composing is told.** What
@@ -2574,7 +2589,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    `AWAITING_APPROVAL` and step 3 `PENDING`, a walk started afresh over that execution — the shape
    a restart produces — dispatches **nothing**, because it meets step 2 first. A driver that
    sought to the first `PENDING` step would dispatch step 3, which is the defect §5's
-   start-at-position-one rule makes unreachable rather than checks for.
+   start-at-position-one rule makes unreachable rather than checks for. **And the arm that pins
+   which step the turn reports** (§11): over that same plan, with step 1 `SUCCEEDED` and step 2
+   parked, the turn's `TurnOutcome.step` names **step 2** — the step that stopped the walk — and
+   **not** step 1, against an implementation that kept the retired single-step path's habit of
+   reporting the first step it drove.
 9. **"Restart during approval"** — the same plan parked at its second step; a **fresh** engine over
    the same durable state recovers it through `pending_confirmations()` (ADR-0052 §1), answers it,
    and the driver's next walk reaches step 3. The arm asserts the recovery is over steps and not
@@ -3164,6 +3183,18 @@ the clause above closes"* — and the gap is real rather than formal: a user act
 read and the caller's claim moves the stored revision while the copy the caller carries goes on
 matching itself. §H.1's property is right and its construction spends it; deriving the revision in
 the store buys the property outright.
+
+**`TurnOutcome` reports the walk's steps as a sequence rather than the one stopping step.**
+Rejected **here**, and not on the merits — it is the better shape for a surface that wants to
+render a whole walk, and §11's projection is chosen because it is available without moving a
+`core` model. Making `TurnOutcome` sequence-valued replaces a cross-boundary shape every adapter
+and every spoke reads, which is a **breaking `core` change under golden rule 5** and takes **its
+own ADR, ratified and merged before anything implements against it** (ADR-0015 §5) — and this
+decision is about walking a plan, not about what a turn reports. It costs nothing to defer:
+§11's rule loses no disposition, since every step's own is on its `StepTransition` record and
+reachable from the goal surfaces, so a later decision that gives a surface the whole walk reads
+what it needs from the store rather than from a field this one would have had to widen first.
+**Fired by a surface that needs the sequence.**
 
 **The store derives the attempt itself, by searching `attempts_of(goal_id)` for the row whose
 `execution_ids` names this execution.** Rejected — and note that the **field** is the one §3's
