@@ -1,6 +1,6 @@
 # 257. The mark admits a label, and the 321 labelled clauses in seven ratified ADRs bind
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0089](0089-a-ruling-is-marked-and-nothing-else-binds.md)
   — **two scopes, each narrow, and §6 shows the working for both.**
