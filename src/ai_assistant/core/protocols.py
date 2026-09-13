@@ -8049,21 +8049,26 @@ class GoalAuthorizationStore(Protocol):
             was not at the source.
 
         **``to`` is a member of
-        :class:`~ai_assistant.core.types.AuthorizationDisposition` and an
-        implementation normalises a value naming one before anything branches on
-        it.** That vocabulary is a ``StrEnum``, so its own value is **equal** to the
-        member and is not **identical** to it — and a settlement asks both questions,
-        *"is this an edge"* by equality and *"is this the establishment"* by
-        identity. An implementation that let the two disagree would take the direct
-        write on ``"established"`` and skip ADR-0254 §1's uniqueness check, leaving
-        two ``ESTABLISHED`` rows of one pair: the state §1 forbids.
+        :class:`~ai_assistant.core.types.AuthorizationDisposition`, and an
+        implementation refuses anything else before it branches on it.** ADR-0254
+        §16 signs this member with that type and ``mypy --strict`` holds every
+        caller in ``src`` and ``tests`` to it; the guard is for the one caller a
+        type cannot reach, and it **narrows** rather than widens — a value naming a
+        member is refused too, and no implementation is obliged to admit one.
+
+        The reason the guard is owed at all is that the vocabulary is a ``StrEnum``,
+        so a member's own value is **equal** to it and is not **identical** to it —
+        and a settlement asks both questions, *"is this an edge"* by equality and
+        *"is this the establishment"* by identity. An implementation that let the
+        two disagree would take the direct write on ``"established"`` and skip §1's
+        uniqueness check, leaving two ``ESTABLISHED`` rows of one pair: the state §1
+        forbids.
 
         Raises:
-            ValueError: If ``to`` names no member of that vocabulary, refused
-                **locally and before any I/O**. A wiring bug rather than a
-                settlement outcome — the four outcomes are total over what the step
-                can answer *about a row*, and a value naming no disposition asks
-                about no edge at all.
+            ValueError: If ``to`` is not a member of that vocabulary, refused
+                **locally and before any I/O** — and before any fault an
+                implementation would otherwise raise, so a caller's fail-closed
+                branch cannot be handed the wrong class for the same call.
             AuthorizationError: If the store cannot be read or written. A refusal
                 is **not** this: the four outcomes are total over what the step can
                 answer.

@@ -433,6 +433,25 @@ _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]
 }
 
 
+def _checked_target(to: AuthorizationDisposition) -> None:
+    """Hold ``to`` to the exact member, as the durable store does and before it.
+
+    See
+    :func:`~ai_assistant.permissions.goal_authorizations._checked_target`, whose
+    reasoning this is: a ``StrEnum`` member's own value is equal to it and is not
+    it, and a settlement asks both questions.
+
+    Raises:
+        ValueError: If ``to`` is not an ``AuthorizationDisposition`` member.
+    """
+    if type(to) is not AuthorizationDisposition:
+        msg = (
+            f"to must be an AuthorizationDisposition member, got "
+            f"{describe_untrusted(to)} (ADR-0254 §1, §16)"
+        )
+        raise ValueError(msg)
+
+
 #: The two moves that are an **answer** to the question a proposal put, and the only
 #: ones on which ``settle`` performs ADR-0254 §1's expiry settlement — arm 37's *"by
 #: no other operation"*. See
@@ -1014,7 +1033,8 @@ class FakeGoalAuthorizations:
         Returns:
             Which of the four outcomes the step answered.
         """
-        return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
+        _checked_target(to)
+        return self._log.settle(authorization_id, to, settled_at)
 
     def fail_live_for(self, error: Exception | None = None) -> None:
         """Arm every subsequent :meth:`live_for` to raise a store fault.
@@ -1121,7 +1141,8 @@ class FakeAuthorizationResolution:
         Returns:
             Which of the four outcomes the step answered.
         """
-        return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
+        _checked_target(to)
+        return self._log.settle(authorization_id, to, settled_at)
 
     def fail_resolve(self, error: Exception | None = None) -> None:
         """Arm every subsequent :meth:`resolve` to raise a store fault.
@@ -1312,20 +1333,22 @@ class FakeGoalAuthorizationStore:
         members are returned rather than raised; the only raise here is the scripted
         store fault.
 
-        **``to`` is coerced to the member before anything branches on it**, which is
-        the durable store's guard and is held here for ADR-0084 §4's substitutability
-        — in **both** directions: a double that admitted ``"established"`` where the
-        store normalises it would let a consumer's tests pass over a call production
-        reads differently. See
-        :meth:`~ai_assistant.permissions.goal_authorizations.SqliteGoalAuthorizationStore.settle`.
+        **``to`` is held to the exact member before anything else happens**, the
+        scripted fault included. That ordering is ADR-0084 §4's substitutability in
+        the one place a double can get it wrong: the durable store refuses *"locally
+        and before any I/O"*, so a double that raised its own store fault first would
+        report a different class for the same call and let a consumer's fail-closed
+        branch be written against the wrong one.
 
         Raises:
-            ValueError: If ``to`` names no member, locally and before any I/O.
+            ValueError: If ``to`` is not an ``AuthorizationDisposition`` member.
+                Refused **before** any scripted fault, for the reason above.
             AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
         """
+        _checked_target(to)
         self._refuse_write()
         async with self._resource.held():
-            return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
+            return self._log.settle(authorization_id, to, settled_at)
 
     async def live_for(self, goal: str, tool_id: str) -> Authorization | None:
         """The live row of ``goal`` through ``tool_id``, or ``None``.
