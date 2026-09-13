@@ -1109,6 +1109,17 @@ class SqliteGoalAuthorizationStore:
             # an **answer** (:data:`_ANSWERS`): arm 37 confines it to *"a ``live_for``
             # read and the answer that names it, **and by no other operation**"*.
             held = self._expired_first(conn, stored, settled_at) if to in _ANSWERS else stored
+            if to is AuthorizationDisposition.EXPIRED and settled_at < held.expires_at:
+                # **``PROPOSED → EXPIRED`` is "the deadline passed before an answer"**
+                # (§1's graph, stated with the edge), so the source of that edge is a
+                # proposal **whose deadline has passed** — and a row whose deadline has
+                # not is not standing at it. Settling one ``EXPIRED`` early would record
+                # a false fact the store can see is false, from two recorded values and
+                # no clock: a row saying it lapsed at 10:00 while carrying an
+                # ``expires_at`` of 21:00, which ``recent`` and ``export`` then render as
+                # a question that expired. §1 keeps that member apart from every other
+                # precisely so a listing can tell them apart.
+                return AuthorizationSettlement.NOT_AT_SOURCE
             if to not in _EDGES.get(held.disposition, frozenset()):
                 # **One member and not four** (ADR-0254 §16): a PROPOSED row asked for
                 # an edge that leaves ESTABLISHED, a retired row asked for anything, a

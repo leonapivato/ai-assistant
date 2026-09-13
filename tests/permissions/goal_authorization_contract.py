@@ -371,6 +371,7 @@ class AuthorizationResolutionContract:
         authorization_id: str,
         *,
         to: AuthorizationDisposition,
+        settled_at: datetime = NOW,
     ) -> AuthorizationSettlement:
         """Move a row along an edge in the subject's history."""
         raise NotImplementedError
@@ -396,7 +397,10 @@ class AuthorizationResolutionContract:
         and leave the trail unable to say which of the five it refused on.
         """
         await self.hold_for_resolution(resolution, authorization(id="a1"))
-        await self.settle_for_resolution(resolution, "a1", to=to)
+        # §1 states ``PROPOSED → EXPIRED`` as *"the deadline passed before an
+        # answer"*, so that one edge is taken at the deadline rather than at ``NOW``.
+        at = EXPIRES if to is AuthorizationDisposition.EXPIRED else NOW
+        await self.settle_for_resolution(resolution, "a1", to=to, settled_at=at)
         found = await resolution.resolve("a1")
         assert found is not None
         assert found.disposition is to
@@ -496,10 +500,11 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         authorization_id: str,
         *,
         to: AuthorizationDisposition,
+        settled_at: datetime = NOW,
     ) -> AuthorizationSettlement:
         """Settle through the store's own write path."""
         subject = cast("GoalAuthorizationStore", resolution)
-        return await subject.settle(authorization_id, to=to, settled_at=NOW)
+        return await subject.settle(authorization_id, to=to, settled_at=settled_at)
 
     # --- record: the write paths (ADR-0254 §1, §16) ------------------------
 
@@ -976,12 +981,14 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(authorization(id="a1"))
         if source is AuthorizationDisposition.ESTABLISHED:
             await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
-        assert (
-            await store.settle("a1", to=target, settled_at=NOW) is AuthorizationSettlement.SETTLED
-        )
+        # **The ``EXPIRED`` edge is taken at the deadline**, because §1 states it as
+        # *"the deadline passed before an answer"* — so its source is a proposal whose
+        # deadline has passed, and the instant is part of what that edge is.
+        at = EXPIRES if target is AuthorizationDisposition.EXPIRED else NOW
+        assert await store.settle("a1", to=target, settled_at=at) is AuthorizationSettlement.SETTLED
         held = await store.resolve("a1")
         assert held is not None
-        assert (held.disposition, held.settled_at) == (target, NOW)
+        assert (held.disposition, held.settled_at) == (target, at)
 
     @pytest.mark.parametrize(("source", "target"), NON_EDGES)
     async def test_every_move_that_is_not_an_edge_answers_not_at_source(
@@ -1011,7 +1018,9 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(authorization(id="a1"))
         if retired in (AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED):
             await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
-        await store.settle("a1", to=retired, settled_at=NOW)
+        # The ``EXPIRED`` edge is taken at the deadline (§1's own statement of it).
+        at = EXPIRES if retired is AuthorizationDisposition.EXPIRED else NOW
+        await store.settle("a1", to=retired, settled_at=at)
         for target in AuthorizationDisposition:
             assert (
                 await store.settle("a1", to=target, settled_at=NOW)
@@ -1651,4 +1660,47 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         assert (
             await store.settle("a1", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
             is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+
+    async def test_a_proposal_whose_deadline_has_not_passed_is_not_settled_expired(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1's graph states that edge as *"the deadline passed before an answer"*.
+
+        So its source is a proposal **whose deadline has passed**, and a row whose
+        deadline has not is not standing at it. Settling one early would record a
+        false fact the store can see is false, from two recorded values and no clock:
+        a row saying it lapsed at an instant its own ``expires_at`` says it was still
+        live at — which ``recent`` and ``export`` would then render as a question that
+        expired, the one thing §1 keeps that member apart from every other to say.
+
+        **Nothing is written**, which is what makes this a refusal rather than a
+        different settlement.
+        """
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle(
+                "a1",
+                to=AuthorizationDisposition.EXPIRED,
+                settled_at=EXPIRES - timedelta(microseconds=1),
+            )
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+        held = await store.resolve("a1")
+        assert held is not None
+        assert (held.disposition, held.settled_at) == (AuthorizationDisposition.PROPOSED, None)
+
+    async def test_the_expired_edge_is_taken_at_the_deadline_itself(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """The boundary is *at or after*, so the deadline's own instant takes it.
+
+        Stated beside the arm above because a lane that compared with ``>`` would
+        pass that one and refuse the settlement §1 says is owed the moment the
+        deadline arrives.
+        """
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.EXPIRED, settled_at=EXPIRES)
+            is AuthorizationSettlement.SETTLED
         )

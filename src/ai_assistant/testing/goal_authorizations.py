@@ -791,6 +791,11 @@ class _AuthorizationLog:
         # **answer** (:data:`_ANSWERS`): arm 37 confines it to "a ``live_for`` read
         # and the answer that names it, **and by no other operation**".
         held = self._expired_first(found, settled_at) if to in _ANSWERS else found
+        if to is AuthorizationDisposition.EXPIRED and settled_at < held.expires_at:
+            # "The deadline passed before an answer" is what that edge **is** (§1), so
+            # a row whose deadline has not passed is not standing at its source. See
+            # the durable store, whose reasoning this is.
+            return AuthorizationSettlement.NOT_AT_SOURCE
         if to not in _EDGES.get(held.disposition, frozenset()):
             return AuthorizationSettlement.NOT_AT_SOURCE
         if to is not AuthorizationDisposition.ESTABLISHED:
