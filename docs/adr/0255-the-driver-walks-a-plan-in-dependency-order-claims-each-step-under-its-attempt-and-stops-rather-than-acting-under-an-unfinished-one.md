@@ -225,8 +225,12 @@ interval safe rather than merely admitted.
 > `steps` tuple carries them, calling **`StepRunner.run` once per step it dispatches**.
 > **`StepRunner`'s behaviour is not changed**: ADR-0037 §6's *"This object disposes of one step,
 > once"* and its `PENDING`-only entry bind entire, ADR-0037 §2's decide → record → read back →
-> claim order is untouched, and **`StepExecutor` gains no collaborator** (ADR-0058). The one
-> change either takes is §3's threaded `attempt_id`.
+> claim order is untouched, and **`StepExecutor` gains no collaborator** (ADR-0058). **The one
+> change either takes to *what it is handed* is §3's threaded `attempt_id`; the one change
+> `StepRunner` takes to *what it builds* is the reference resolution stated below**, and the
+> enumeration is closed at those two. Neither touches what the sentence above preserves: the
+> disposal contract, the `PENDING`-only entry and the order of the ruling each bind entire under
+> both.
 
 > **Normative.** **The walk is sequential and dispatches one step at a time.** No lane reads this
 > decision as licence to dispatch two steps concurrently: ADR-0014 §7's parallel-execution
@@ -2222,9 +2226,17 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
    skipped and nothing is re-dispatched. **And each is run with *both* exceptions already carrying
    a cause** — a transport error under the interpretation's, a database error under the ledger's —
-   asserting that the propagating exception is the **same instance** the fake interpreter raised,
-   that its `__cause__` is **still the transport error**, and that its `__notes__` is
-   **unchanged**. **And the two arms ADR-0013 §5's own wrong turn earns**: a fake whose
+   **and the interpretation's already carrying a `__context__` of its own**, a distinct sentinel
+   exception set on it before the walk begins: each asserts that the propagating exception is the
+   **same instance** the fake interpreter raised, that its `__cause__` is **still the transport
+   error**, that its **`__context__` is still that same sentinel instance**, and that its
+   `__notes__` is **unchanged**. **The `__context__` assertion is not implied by the other
+   three**: `raise exc` inside an active `except` block rebinds `__context__` to the exception
+   being handled and leaves identity, an explicit `__cause__` and `__notes__` exactly as they
+   stood, so a driver that re-raised the interpretation from inside its ledger handler satisfies
+   every other assertion here and still hands a reader **a store failure as the chain underneath a
+   provider outage** — the one substitution §1 states these arms exist to stop, reached through
+   the one channel they did not read. **And the two arms ADR-0013 §5's own wrong turn earns**: a fake whose
    interpretation calls raise **one cached exception instance**, failed **twice**, asserting
    `__notes__` is unchanged and no longer after the second failure than after the first; and **two
    walks failing concurrently over that one instance**, asserting neither leaves anything on it
@@ -2235,9 +2247,10 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    appears in **no field of the emitted warning**, which a mapped class, a bare
    `type(exc).__name__` and an interpolated message would each fail while satisfying every arm
    above, since none of them reads what the warning carries; and an **installed log processor that
-   raises** on that warning, asserting the interpretation's exception still reaches the caller **as
-   the same instance with `__cause__` and `__notes__` unchanged**, that the turn fails on it, and
-   that the processor's own exception reaches no caller. They
+   raises** on that warning, run over the same construction, asserting the interpretation's
+   exception still reaches the caller **as the same instance with `__cause__`, `__context__` — the
+   sentinel instance above, against the same rebinding — and `__notes__` each unchanged**, that
+   the turn fails on it, and that the processor's own exception reaches no caller. They
    are what stop an accounting cleanup masking a provider outage as a store problem, what
    stop a `raise … from` overwriting the cause a reader needs, and what stop the driver writing on
    an object the provider owns.
