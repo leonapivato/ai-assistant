@@ -3,11 +3,16 @@
 - Status: Proposed
 - **Partially supersedes**
   [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md)
-  — **one scope, and it is a name.** §3's minting clause in the model's name alone,
-  *"`core/types.py` gains **`ReadOutcome`**, a frozen model with `extra="forbid"` carrying
-  exactly two fields"*, and §3's parameter clause in the same term,
-  *"**`read_outcomes: Sequence[ReadOutcome] = ()`**"*: the model is named **`ReadAskOutcome`**
-  and the annotation is `Sequence[ReadAskOutcome]`, because `core/types.py` has held
+  — **one scope, and it is a name: `ReadOutcome` → `ReadAskOutcome`, wherever ADR-0251 writes it
+  for the model §3 mints.** That is §3's minting clause, *"`core/types.py` gains
+  **`ReadOutcome`**, a frozen model with `extra="forbid"` carrying exactly two fields"*, and its
+  parameter clause, *"**`read_outcomes: Sequence[ReadOutcome] = ()`**"* — **and five further
+  sites outside §3**, two of them marked: **§12's writer clause** (*"each round's
+  `ReadOutcomeKind` and the `ReadOutcome` carrying it"*) and **§16's L1 clause** (*"`core/types.py`
+  gains `ReadOutcomeKind`, `ReadOutcome` and `AttemptKind`"*), plus §15's working for ADR-0240 §7,
+  the header bullet stating that same scope, §17's arm 2 and the Alternatives entry. §1 states the
+  rule and enumerates every site. The model is named **`ReadAskOutcome`** and the annotation is
+  `Sequence[ReadAskOutcome]`, because `core/types.py` has held
   `ReadOutcome` since
   [ADR-0185](0185-every-attempt-to-read-a-source-is-recorded-refusals-included-and-the-trails-bound-has-no-unlimited-spelling.md)
   §1 for the permission trail's own record of how a gated source read ended. **Every other
@@ -17,8 +22,10 @@
   one-entry-per-serviced-ask-in-servicing-order clause and its `()` reading, the
   nothing-the-source-said clause, the ask-carried-back-unaltered clause, the
   carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the planner-is-not-told-which-round clause — and
-  §§1-2 and §§4-18 are untouched. **§3 loses no obligation and gains none**; one identifier
-  moves, this ADR imposes nothing beside it, and §6 shows the working.
+  **no clause anywhere in ADR-0251 loses an obligation or gains one** — §§1-2 and §§4-18 keep
+  every ruling they carry, and the two marked clauses named above are replaced in the model's
+  name and in nothing else. One identifier moves, this ADR imposes nothing beside it, and §6
+  shows the working.
 - **No other ADR is superseded in whole or in part**, and §5 shows the working for each one a
   reader would expect to be — ADR-0185, ADR-0240, ADR-0249 and ADR-0015. **ADR-0185 is the one
   to check first**: its §1 `ReadOutcome` is the whole reason this decision exists, and it is untouched
@@ -106,8 +113,9 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 - **Whether the two vocabularies should ever be reconciled, merged or ordered.** They are
   different facts (above) and this decision keeps them apart; anything further is a decision of
   its own.
-- **Anything else of ADR-0251.** §§1-2 and §§4-18 are outside this ADR's scope entirely, and
-  within §3 only the identifier moves.
+- **Anything of ADR-0251 but one identifier.** The name reaches seven sites across §3, §12,
+  §15, §16, §17, the header and the Alternatives (§1 lists them); at every one of them the name
+  is the only thing replaced, and no other clause of any section moves.
 - **Anything of ADR-0185.** §5 shows why no record is owed there.
 - **Whether ADR-0015 §5's ordering should change.** §4 records that it was breached and that the
   breach is not cured by the record. ADR-0015 is untouched by this ADR and nothing here is a
@@ -122,14 +130,36 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 ### 1. The model ADR-0251 §3 mints is named `ReadAskOutcome`
 
 > **Normative.** The frozen model ADR-0251 §3 mints in `core/types.py` is named
-> **`ReadAskOutcome`**. Wherever §3 writes `ReadOutcome` for that model — in its minting clause
-> and in its parameter clause — the name an implementation writes, and the name a later ADR
-> cites, is `ReadAskOutcome`.
+> **`ReadAskOutcome`**, and that is its name **wherever ADR-0251 names it** — in §3 and in every
+> other clause, section and header bullet of that ADR that writes `ReadOutcome` for this model.
+> A reader implementing, citing or auditing any of them writes and cites `ReadAskOutcome`.
 
 > **Normative.** `core/protocols.py`'s `Planner.plan` parameter that ADR-0251 §3 replaces is
 > annotated **`read_outcomes: Sequence[ReadAskOutcome] = ()`**. The parameter's name
 > `read_outcomes`, its default `()`, its keyword position and its additive-in-shape character
 > are ADR-0251 §3's and are not touched by this clause.
+
+**The sites, so a reader can check the clause rather than trust it.** ADR-0251 as ratified writes
+`ReadOutcome` for this model in seven places, and the clause above reaches all seven. Two of them
+are **marked**, which is why the scope could not stop at §3 — two marked clauses reading
+`ReadOutcome` beside a supersession reading `ReadAskOutcome` would leave the ADR instructing an
+implementation two ways at once:
+
+- **§3's minting clause and its parameter clause**, and the heading above them.
+- **§12's writer clause** (marked) — *"each round's `ReadOutcomeKind` and the `ReadOutcome`
+  carrying it"*, in the enumeration of what `orchestration` mints and no model output sets.
+- **§16's L1 clause** (marked) — *"`core/types.py` gains `ReadOutcomeKind`, `ReadOutcome` and
+  `AttemptKind`"*, in the lane cut.
+- **§15's working for ADR-0240 §7** and **the header bullet stating that same scope**, each
+  writing the annotation `Sequence[ReadOutcome]`.
+- **§17's arm 2** — *"rather than from a constructed `ReadOutcome`"*.
+- **The Alternatives entry** — *"Make `ReadOutcome` carry the source vocabulary's own member
+  rather than one of seven"*.
+
+Nothing else of any of them moves: §12's writer clause still says `orchestration` mints every
+value and no model output sets one; §16 still cuts two lanes in that order; §15's working for
+ADR-0240 §7 still supersedes exactly the parameter declaration; §17's arm still asks for a real
+source vocabulary value; the Alternative is still rejected on the ground it states.
 
 ### 2. Every other clause of ADR-0251 §3 binds verbatim, over the renamed model
 
@@ -142,6 +172,11 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 > carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the
 > planner-is-not-told-which-round clause. This decision replaces an identifier and nothing
 > else.
+
+> **Normative.** Every clause of ADR-0251 outside §3 that this decision reaches — §12's writer
+> clause, §16's L1 clause, §15's working for ADR-0240 §7 and the header bullet stating it, §17's
+> arm 2 and the Alternatives entry — binds **verbatim** but for the model's name. No obligation
+> of any of them is lifted, narrowed or widened, and §§1-2 and §§4-18 otherwise stand entire.
 
 > **Normative.** ADR-0251 §2's `ReadOutcomeKind` keeps its name, its seven members and their
 > values and meanings. Nothing in this decision reaches it, and the `outcome` field's type is
@@ -245,10 +280,11 @@ only that ADR now act differently, or read one of its clauses more widely than i
 
 - **ADR-0251 — a record is owed, and it is a partial supersession.** A reader holding §3 writes
   `ReadOutcome` into `core/types.py` and `Sequence[ReadOutcome]` onto `Planner.plan`; a reader
-  holding this ADR writes `ReadAskOutcome` and `Sequence[ReadAskOutcome]`. That is acting
+  holding §12 mints a `ReadOutcome` per round; a reader holding §16 adds one to `core/types.py`;
+  a reader holding this ADR writes `ReadAskOutcome` at every one of them. That is acting
   differently on the decision itself, so under ADR-0070 §1 it is a supersession and not an
-  amendment, and it is **partial** — one clause's identifier, nothing else (§3 of ADR-0070
-  makes the partial form first-class). ADR-0251's `Status` takes the leading
+  amendment, and it is **partial** — one identifier across the seven sites §1 lists, and nothing
+  else (§3 of ADR-0070 makes the partial form first-class). ADR-0251's `Status` takes the leading
   `Partially superseded by` token with the scope naming exactly what was replaced (ADR-0070
   §4), and the record itself lives in the appended dated note this change adds (ADR-0082 §2,
   ADR-0070 §1). **It is the second note ADR-0251 carries**: PR #2315's note of 2026-09-13 —
@@ -260,8 +296,8 @@ only that ADR now act differently, or read one of its clauses more widely than i
   false or over-wide. Its enum keeps its name, its six members, its totality claim, its
   `SourceReadRecord` home and every consumer rule §1 states about it; a reader holding ADR-0185
   alone acts identically before and after. **This ADR adds no obligation about it either**: §3
-  is unmarked, so under ADR-0089 §3 it supplies none, and the five marked clauses are §§1-2's
-  four about ADR-0251 §3 and §4's one about this ADR's own scope. ADR-0082 §1 is explicit that
+  is unmarked, so under ADR-0089 §3 it supplies none, and the six marked clauses are §§1-2's
+  five about ADR-0251's naming of the model and §4's one about this ADR's own scope. ADR-0082 §1 is explicit that
   a record may not be demanded on book-keeping grounds where no clause of the earlier ADR fails
   ADR-0070 §1's test, and none does.
 - **ADR-0240 — nothing is recorded.** §7's `empty_reads: Sequence[ReadAsk] = ()` was already
@@ -298,8 +334,8 @@ unedited, and no mark is added to any ratified ADR (ADR-0089 §5).
 
 ### 7. Marking, review and ratification
 
-This ADR is **marked** (ADR-0089), and it carries **five** clauses: two in §1, two in §2 and one
-in §4. Under ADR-0089 §3 those five are the whole of what it obligates — the prose beside them is
+This ADR is **marked** (ADR-0089), and it carries **six** clauses: two in §1, three in §2 and one
+in §4. Under ADR-0089 §3 those six are the whole of what it obligates — the prose beside them is
 read to determine what they mean and supplies no obligation of its own. **§3 is unmarked on
 purpose** (§3 says why), and §§5-6 are classification of this change, which ADR-0089 §1 puts
 outside the normative set.
