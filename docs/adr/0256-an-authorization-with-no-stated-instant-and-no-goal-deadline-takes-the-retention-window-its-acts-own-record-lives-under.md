@@ -382,6 +382,22 @@ rungs above.
 > chain is unprovenanced"* is never reached for. §8 books the decision that would take an
 > unsettled instant without a question, with what fires it.
 
+**Which span, and how a horizon is told from a date the same sentence sets: both questions are
+ADR-0254's, and neither is minted here.** The span is the correcting **turn's** — the one
+ADR-0254 §1's path-(ii) clause names, *"A later recorded turn of the same goal whose span names
+an argument a **live** row of that goal already carries a member for"* — and not a coverage
+member's basis span of the act that established the row. Telling *"only until Friday"* from the
+date the same sentence sets on an argument is **rung 1's** question, and ADR-0254 §12 answers it
+for path (i): rung 1 is *"the instant the user's own act states, where the recorded act states
+one and §10's resolutions take it … resolved by `DATE_FROM_CONTEXT` or `AS_STATED` under §9's
+clauses entire"*. A correction reads its own span by that reading and no other, so a turn stating
+dates for several arguments and a horizon is read exactly as the same turn would be on path (i):
+where that reading yields no horizon the first clause does not fire and `expires_at` is
+transcribed unchanged, and where it yields more than one admissible instant §9 clause (iii)
+reaches it first. **This decision mints no expiry-span carrier, no provenance for one and no rule
+for generating one** — `Alternatives considered` records the draft that did and why it is not
+taken, and §8 books what would fire it.
+
 **Why the unsettled case is left exactly where ADR-0254 put it.** An earlier draft of this
 decision took the **earliest admissible** reading of an unsettled instant and put no question,
 on the argument that the earliest is the narrowest and so the fail-closed choice. The argument
@@ -554,9 +570,28 @@ correction's span does not settle, both its *"not taken"* half and its *"the use
 limb. §5 narrows only the case §10's resolutions settle to one value, which clause (iii) does
 not reach.
 
-**Every other ADR this decision touches is relied on, not amended.** ADR-0074 §7 supplies a
-setting and a window and loses no sentence (§6). ADR-0193 §9's *"The user chooses the instant in
-the establishing act"* is about `RecipientGrant` and is untouched. ADR-0250 §5's announcement
+**Every other ADR this decision touches is relied on, not amended, and ADR-0074 §7 is the one to
+test because it is where the window comes from.** Its word *"**dedicated**"* is stated of the
+**field** and against a named alternative — §7's reason is that `confirmation_ttl` *"is the right
+*shape* to copy and the wrong default to inherit"*, so `episode_retention` is *"Its own field,
+with its own default"* — and it says nothing about which subsystems may **read** the value. Every
+clause of §7 stays true word for word: episodes still carry a finite `expires_at` stamped at
+capture, the default is still finite, `None` still means keep forever and is still available only
+by the user setting it, expiry is still enforced at read time and reclaimed by `purge_expired`,
+and the stated cost — *"a conversation whose turns have passed the horizon continues with no
+history"* — is untouched. `Settings` gains nothing (§2), no default moves, and **no `memory`
+module, no `MemoryStore` and no episode record is read** for this rung (§1): what is read is one
+duration on `core.config.Settings`, which is how every subsystem reads configuration. So a reader
+holding only ADR-0074 acts no differently and reads no clause of it more widely than it now
+holds — ADR-0070 §1's test is not met and no record is owed against it. What **does** become
+over-wide is a clause of **ADR-0254**, its *"there is no deployment-wide expiry, and
+`core.config.Settings` gains nothing"*, and limb 3 above is that record. **The borrowing is
+deliberate and is decision 4's**: the window is taken rather than minted precisely so that no
+figure of the permissions layer's own exists to be set, which is what ADR-0254 §12's *"An
+operator's figure is a clock the user never saw"* asks for (§1, §2).
+
+ADR-0193 §9's *"The user chooses the instant in the establishing act"* is about `RecipientGrant`
+and is untouched. ADR-0250 §5's announcement
 rule is untouched — the announcement this decision's instants ride is `TurnOutcome.authorizations`,
 which ADR-0254 §11 already added beside §5's four members for its own stated reason. ADR-0148 §3's
 route (a) is what §3 falls back to, unchanged. ADR-0247 §8(b)'s prospectivity is the shape §2's
@@ -746,6 +781,16 @@ one.
 > instant at or before the new row's `proposed_at` → `expires_at` **transcribed unchanged**, and
 > no row is written born expired.
 
+> **Normative.** **A chain narrows against the row it supersedes, not against the first.** A
+> first correction narrows the horizon; a second states an instant strictly after the narrowed
+> row's `expires_at` and strictly before the original's → `expires_at` **transcribed unchanged**,
+> the bound being the **superseded** row's instant and never the chain's first. The arm exists
+> because an implementation comparing against the first row's `expires_at` passes every
+> single-correction arm above and lengthens on the second, and because §7 limb 4 supersedes
+> ADR-0254 §20's arm 25 in its *"carry **one** `expires_at`"* limb alone — that arm's own
+> *"A chain of corrections does not outlive the first act's expiry"* standing and holding a
+> fortiori is what this pins.
+
 > **Normative.** **An unsettled instant is ADR-0254 §9 clause (iii)'s and is not narrowed.** A
 > correction whose span admits more than one admissible instant → the resolution is **not
 > taken**, `expires_at` **transcribed unchanged**, and whether a question is raised is ADR-0250
@@ -811,10 +856,16 @@ and its handle is put in front of the user **at the act** (§11); and a user who
 and is now heard (§5). What is **not** available is a deployment shortening it centrally with a
 figure of its own, and that is deliberate.
 
-**An operator's retention setting now has a second effect, and it is legible.** Shortening
-`episode_retention` shortens new authorities; setting it to `None` stops them being written at
-all. The second is the surprising one, and §3 states it rather than leaving a deployment to
-discover it. It is also the honest direction: a deployment that keeps everything forever is not
+**An operator's retention setting now has a second effect, and it is legible — but it reaches
+§1's rung and nothing above it.** Shortening `episode_retention` shortens new authorities **that
+take rung 3**; setting it to `None` stops **those** being written at all. It bounds neither of
+the rungs above: an act that states an instant takes rung 1 unclamped and a goal carrying a
+`deadline` strictly after `proposed_at` takes rung 2, under any setting and under `None` as well,
+so an operator cannot shorten or stop an authority the user's own act or the goal's own horizon
+bounds (§1, §2, §6). That is the ratified direction and not an oversight: ADR-0254 §12 refuses a
+deployment figure over an instant the user was shown, and §2 keeps that refusal entire. The
+`None` case is the surprising one, and §3 states it rather than leaving a deployment to discover
+it. It is also the honest direction: a deployment that keeps everything forever is not
 one where an authority should quietly last forever. §7 limb 3 is the record that this is a real
 change to what ADR-0254 decided, and not a reading of it.
 
