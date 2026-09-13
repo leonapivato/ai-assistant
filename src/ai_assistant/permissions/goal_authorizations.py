@@ -1030,13 +1030,35 @@ class SqliteGoalAuthorizationStore:
         **It reads no clock**: ``settled_at`` is the caller's, as ``record``'s
         instants are (ADR-0021 §3).
 
+        **``to`` is coerced to the member before anything branches on it**, and the
+        reason is that this method asks *"which member is this"* twice, in two ways:
+        the edge lookup compares by **equality** and the establishment branch by
+        **identity**. :class:`~ai_assistant.core.types.AuthorizationDisposition` is a
+        ``StrEnum``, so its own value is equal to it and is not it — and a caller
+        reaching this from untyped code with ``"established"`` would have passed the
+        first test and failed the second, taking the direct write and skipping §1's
+        uniqueness check entirely: **two ``ESTABLISHED`` rows of one pair, which is
+        the state §1 forbids**. The annotation is the contract and ``mypy --strict``
+        holds every caller in ``src`` and ``tests`` to it; this is
+        :meth:`recent`'s own guard on the same ground — *"reachable only from
+        untyped code"* — taken as a normalisation rather than a refusal, because
+        there is exactly one right answer for a value that names a member.
+
         Raises:
+            ValueError: If ``to`` is not a member of
+                :class:`~ai_assistant.core.types.AuthorizationDisposition` or a
+                value naming one. Raised **locally and before any I/O**, and it is a
+                wiring bug rather than a settlement outcome: the four outcomes are
+                total over what the step can answer *about a row*, and a value that
+                names no disposition asks about no edge at all.
             AuthorizationError: If the store cannot be read or written. **A refusal
                 is not this**: the four outcomes are total over what the step can
                 answer, and a refusal that raised would make one an exception.
         """
         async with self._lock:
-            return await _run_to_completion(self._settle_sync, authorization_id, to, settled_at)
+            return await _run_to_completion(
+                self._settle_sync, authorization_id, AuthorizationDisposition(to), settled_at
+            )
 
     def _settle_sync(
         self, authorization_id: str, to: AuthorizationDisposition, settled_at: datetime
