@@ -312,13 +312,27 @@ _B1_WITH_SUPPLEMENT_EPISODE: Final = (
 #: this conversation's and the list opens with retrieved background — an episode of
 #: another conversation among it, which begins "The user asked: …" exactly as this
 #: conversation's own would. Nothing in a `SearchSupply` distinguishes them, which is
-#: why the instruction's opening claim is conditional; this arm is the shape that
-#: makes an unconditional one false, and it is here because one was shipped into this
-#: lane's own rework and a review round found it.
+#: why the instruction states its claim under a condition rather than flatly; this arm
+#: is the shape that makes an unconditional one false, and it is here because one was
+#: shipped into this lane's own rework and a review round found it.
 _RETRIEVED_ONLY: Final = (
     "The user and Alex settled on wide oak boards with a brushed finish for the living-room floor.",
     "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
     "gravel bike before that trip.",
+)
+
+#: The supply the instruction's condition exists for, and the one a review round
+#: named: the history read failed, so `recent` is empty and the list opens with a
+#: retrieved belief — and then `_supplement` returns an older episode of **this**
+#: conversation, which therefore lands *last*. It is the single shape in which "the
+#: notes open with the turns this conversation has already had" would be false, and it
+#: is why that sentence's antecedent is the assistant's own read of the conversation
+#: rather than the presence of such a note among the records: where the read failed,
+#: the sentence claims nothing here. The order is pinned because the paragraph reads
+#: it, and because this supply is the one whose order cannot be read.
+_DEGRADED_WITH_SUPPLEMENT_EPISODE: Final = (
+    *_RETRIEVED_ONLY,
+    "The user asked: earlier in this conversation, what sofa would suit the room?",
 )
 
 #: #2262's C1, whose own turn is the only one of its shape in the supply.
@@ -357,6 +371,11 @@ def _echoing_the_first_record() -> FakeModelProvider:
             id="b1-supplement-episode",
         ),
         pytest.param(_RETRIEVED_ONLY, _RETRIEVED_ONLY[0], id="retrieved-only"),
+        pytest.param(
+            _DEGRADED_WITH_SUPPLEMENT_EPISODE,
+            _DEGRADED_WITH_SUPPLEMENT_EPISODE[0],
+            id="degraded-with-supplement-episode",
+        ),
         pytest.param(_C1_RECORDS, _C1_RECORDS[0], id="c1"),
     ],
 )
@@ -393,7 +412,13 @@ async def test_the_records_reach_the_prompt_in_the_supplys_own_order(
     that episode from a retrieved one. The retrieved-only arm is the third such supply
     — a first turn, or one whose history read degraded — where the leading run is empty
     and ``expected`` is a retrieved record precisely because no note here is this
-    conversation's.
+    conversation's. The fourth is those two at once, and is the shape the instruction's
+    condition is written for: the read failed *and* the supplement returned an older
+    turn of this conversation, so a note of this conversation is present and is last.
+    ``expected`` is the retrieved belief that opens it — which is what makes the arm
+    evidence that the leading run is not where that note is, and therefore that a
+    sentence conditioned on such a note being *present* would claim something false
+    here, while one conditioned on the read does not.
     """
     model = _echoing_the_first_record()
     supply = SearchSupply(
