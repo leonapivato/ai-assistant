@@ -122,6 +122,23 @@
   The `Status` line above and this note are the whole of the record (ADR-0070 §1 and §4,
   ADR-0082 §1 and §2); no ratified text below is rewritten and no mark is added (ADR-0089 §5).
   Refs #2281, PR #2287.
+- **Partially superseded: 2026-09-12 by ADR-0255 — §4's trigger group (conditions (b),
+  (c), (d) and (j)) and §1's occupancy clause, in one term. Nothing else in this ADR.**
+  A **re-investigation licence** — the typed outcome of a plan-driving walk that ran to the end of
+  its plan and skipped at least one step because the world did not meet what the plan declared —
+  satisfies those four conditions in place of a serviced read, and places a round that §1 would
+  otherwise require to sit inside an `AttemptPhase.INVESTIGATE` occupancy. Without it an attempt
+  that executed and learned something makes its turn's one ungated planner call and may not
+  iterate over what it learned, while the decisions fixing which acts open an attempt forbid
+  opening a fresh one to escape the bar. **Both hazards (j) names are avoided rather than
+  accepted**: the phase does not move, and the loop is placed by the attempt's current activity
+  rather than by a phase it does not occupy — a licensed round re-enters `INVESTIGATE` at no
+  point, so §1's no-re-entry clause and its no-round-moves-the-phase clause each bind verbatim.
+  **Every guard of §4 binds verbatim and is checked** — (a), (g), (f′)'s planner-call allowance,
+  (h)'s working allowance less the reserve and (i)'s unproductive-rounds test — so a licensed
+  round is charged from this decision's own ledger and stops on this decision's own guards; §13's
+  *"A replan never resets an allowance"* is what makes it charge rather than refresh, and is
+  relied on rather than touched.
 
 ## Context
 
