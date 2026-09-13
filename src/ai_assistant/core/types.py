@@ -10960,6 +10960,29 @@ class StepTransition(BaseModel):
     :class:`ExecutionState` is what makes the transition graph *authoritative*:
     there is no Protocol-level way to persist a state the tracker would have
     rejected.
+
+    **A claim names the attempt it is made under** (ADR-0255 §3).
+    :attr:`attempt_id` is required on a ``→ RUNNING`` transition and forbidden on
+    every other, which is ADR-0039 §2's own shape — "required when the status is
+    ``FAILED`` or ``INDETERMINATE``, and forbidden on every other status" — applied
+    to one more field. A ``→ RUNNING`` transition carrying none is therefore
+    **unconstructible** rather than refused by a store, so
+    ``PlanStore.commit_transition`` never receives one and no implementation is
+    asked to refuse a case it cannot be shown to meet.
+
+    **It is a field where the goal revision is not**, and the asymmetry is
+    ADR-0255 §3's. Execution → plan → goal names exactly one value at each hop, so
+    a store *derives* the revision (ADR-0249 §8) and a caller-supplied one would be
+    a check with an extra step. Which attempt a claim is made under is a
+    **selection** over a goal's several attempts, so the caller names the row and
+    the store checks it — ``approval_ref``'s own division under ADR-0014 §4. An id
+    does not go stale; everything about the row that can — its ``execution_ids``
+    membership and its state — is read inside the same indivisible step as the
+    claim.
+
+    Attributes:
+        attempt_id: The :class:`GoalAttempt` a ``→ RUNNING`` claim is made under,
+            and ``None`` on every other transition.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -10970,6 +10993,9 @@ class StepTransition(BaseModel):
     expected_version: int = Field(ge=0, description="Version the caller computed this against.")
     bound_tool: Identifier | None = None
     approval_ref: Identifier | None = None
+    attempt_id: Identifier | None = Field(
+        default=None, description="The attempt a `→ RUNNING` claim is made under (ADR-0255 §3)."
+    )
     output: FrozenJsonValue = None
     skip_reason: SkipReason | None = None
     failure: StepFailure | None = None
@@ -11002,6 +11028,29 @@ class StepTransition(BaseModel):
             msg = "output is only valid for a transition to SUCCEEDED"
             raise ValueError(msg)
 
+        return self
+
+    @model_validator(mode="after")
+    def _a_claim_names_its_attempt(self) -> StepTransition:
+        """Require ``attempt_id`` on a claim and forbid it everywhere else (§3).
+
+        Its own validator rather than a clause of the one above, which is already at
+        the complexity the linter admits — and the rule is one field's, on ADR-0039
+        §2's shape: a claim is made **under an attempt** and no other transition is,
+        so the absent case is removed at construction rather than left for every
+        store to refuse.
+
+        Raises:
+            ValueError: If a ``→ RUNNING`` transition carries no ``attempt_id``, or
+                any other transition carries one.
+        """
+        if self.to_status is StepStatus.RUNNING:
+            if self.attempt_id is None:
+                msg = "a transition to RUNNING requires an attempt_id"
+                raise ValueError(msg)
+        elif self.attempt_id is not None:
+            msg = "attempt_id is only valid for a transition to RUNNING"
+            raise ValueError(msg)
         return self
 
 
