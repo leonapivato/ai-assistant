@@ -17867,6 +17867,27 @@ class BoundKind(StrEnum):
     the user named. The owner's *"materially different terms"*."""
 
 
+#: The two keys an ordinary tz installation exposes that name the **host** rather
+#: than a zone. ``localtime`` is the machine's configured zone, copied or symlinked
+#: into the tz directory by the system; ``posixrules`` is a local copy of whatever
+#: zone the installer chose. Neither is in the tz database's own distribution, and
+#: both resolve through ``ZoneInfo`` on a stock Linux install.
+#:
+#: **Refused, because what they denote is configuration and ADR-0254 §§2 and 4 put
+#: the zone on the record precisely so that nothing is read from configuration at
+#: the moment the comparison is taken.** A bound recording ``"localtime"`` would
+#: mean one interval on one machine and another on the next — and another on the
+#: same machine after the operator changes its timezone — while the stored string
+#: and the row's ``subject_digest`` stayed identical, so a calendar date previously
+#: outside the bound could start drawing an ``ALLOW`` with no further act of the
+#: user's. That is a widening no one recorded.
+#:
+#: **A membership test against ``available_timezones()`` is not the fix**: CPython
+#: excludes ``posixrules`` from that set and does **not** exclude ``localtime``,
+#: which is the more dangerous of the two — so the refusal is stated here, by name.
+_HOST_LOCAL_ZONE_KEYS: Final[frozenset[str]] = frozenset({"localtime", "posixrules"})
+
+
 def _iana_zone_name(value: str) -> str:
     """Require a name the tz database knows, without normalising it.
 
@@ -17876,14 +17897,35 @@ def _iana_zone_name(value: str) -> str:
     unavailable at the one comparison that decides whether a call is authorised —
     and §4's answer to an unproven comparison is to refuse rather than to guess.
 
+    **Resolving is necessary and not sufficient**, which is what
+    :data:`_HOST_LOCAL_ZONE_KEYS` is for: a key naming the host's own configuration
+    resolves perfectly well and denotes a different interval on a different machine.
+    The comparison this validator protects is over **two recorded values**, and a
+    name whose meaning lives outside the record is not one of them.
+
+    **Compared case-folded, and only to widen the refusal.** The tz lookup is a file
+    lookup, so on a case-insensitive filesystem ``"Localtime"`` reaches the same
+    host-local file; no IANA zone is spelled either way, so nothing legitimate is
+    caught by folding and a spelling the tz database does not name is refused twice
+    over.
+
     ``ZoneInfo`` rather than ``available_timezones()``, which is
     ``readers/calendar.py``'s own choice for the same check: the constructor is
     cached, and building the whole key set to answer one membership question
-    costs a directory walk per validation.
+    costs a directory walk per validation — and, as above, would not answer this
+    question anyway.
 
     Raises:
-        ValueError: If ``value`` is not a zone the tz database resolves.
+        ValueError: If ``value`` names the host's own configuration rather than a
+            zone, or is not a zone the tz database resolves.
     """
+    if value.casefold() in _HOST_LOCAL_ZONE_KEYS:
+        msg = (
+            f"timezone names the host's own configuration rather than a zone, got "
+            f"{value!r}; the zone is recorded so that the comparison reads none "
+            f"(ADR-0254 §2, §4)"
+        )
+        raise ValueError(msg)
     try:
         ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError) as exc:
