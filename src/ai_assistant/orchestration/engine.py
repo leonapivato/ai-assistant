@@ -2923,6 +2923,37 @@ class Engine:
         self._reserved: set[str] = set()
         self._reserved_routes: set[str] = set()
         self._recovery_lock = asyncio.Lock()
+        #: Serialises :meth:`_record_evidence` against itself, so one goal's evidence
+        #: history cannot be read by two of this engine's turns before either has
+        #: written (ADR-0252 §8, §12).
+        #:
+        #: **It guards the predicate, not the marks.** §12 puts the refresh test in
+        #: ``orchestration`` and the atomicity in the store — "a store that evaluated
+        #: the refresh test would be a second place the rule lives" — so the store's
+        #: write stays one indivisible step and this adds no second authority over it.
+        #: What it closes is the window *between* the read the predicate is computed
+        #: over and the write that applies its answer. Two turns on one goal that both
+        #: read before either writes each compute their set against the same older
+        #: history, and what follows is one of two failures rather than none: the later
+        #: covering row leaves an earlier one ``STANDING`` where §8 requires it
+        #: superseded, or — where both sets name a row the first write has since marked
+        #: — ``record_evidence`` **refuses the whole call** on §12's own rule that a
+        #: mark is never re-applied, and the turn fails outright. The arm in
+        #: ``tests/orchestration/test_engine_goal_evidence.py`` reaches the second.
+        #:
+        #: **Engine-wide rather than per goal**, because the section it guards is two
+        #: short store calls per row and a goal-keyed table of locks would need a
+        #: lifetime rule for a contention this system does not have. ``converse`` takes
+        #: no lock of its own — the pruning reconciliation says so in terms, "safe
+        #: against a concurrent ``converse``" — so concurrent turns are the ordinary
+        #: case and this is the narrowest place to serialise them.
+        #:
+        #: **It is this process's** (ADR-0058: the hub is "one resident process per
+        #: data directory"), which is the whole population of writers a deployment
+        #: has. A second process over one data directory would reopen the window, and
+        #: closing *that* needs a store-level conditional write ADR-0252 §12 does not
+        #: mint — filed rather than invented here (#2339).
+        self._evidence_lock = asyncio.Lock()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
@@ -8703,15 +8734,27 @@ class Engine:
         and restates §13 nowhere: the store stays the one authority on which rows it
         holds, and this asks it.
 
+        **And the read and the write it decides are serialised against this engine's
+        other turns** (:attr:`_evidence_lock`). The store makes each write indivisible,
+        which is what stops two marks racing; it cannot make the *predicate* indivisible
+        with the write, because §12 deliberately puts the predicate here. Without this,
+        two turns on one goal that both read an empty history each compute an empty
+        ``supersedes``, and the later covering row leaves the earlier ``STANDING`` where
+        §8 requires it superseded — a silently missed retirement, which is exactly the
+        "retained historical disagreement" correction 1 exists to remove. ``converse``
+        takes no lock of its own, so that interleaving is the ordinary case rather than
+        an exotic one.
+
         Args:
             rows: The rows the loop composed, in the order it composed them.
 
         Raises:
             PlanningError: As ``record_evidence`` raises it.
         """
-        for row in rows:
-            history = await self._plans.evidence_of(row.goal_id)
-            await self._plans.record_evidence(row, supersedes=refresh_set(row, history.rows))
+        async with self._evidence_lock:
+            for row in rows:
+                history = await self._plans.evidence_of(row.goal_id)
+                await self._plans.record_evidence(row, supersedes=refresh_set(row, history.rows))
 
     async def _persist_attempt(
         self,
