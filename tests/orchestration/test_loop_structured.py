@@ -70,7 +70,11 @@ from ai_assistant.orchestration.reads import (
     StructuredOutcome,
     TriggerOutcome,
 )
-from ai_assistant.planning.planner import _label_axes, _system_prompt
+from ai_assistant.planning.planner import (
+    _STRUCTURED_AXIS_GUIDANCE,
+    _label_axes,
+    _system_prompt,
+)
 from ai_assistant.planning.planner import _render_request as plan_prompt
 from ai_assistant.testing import (
     FakeMemoryStore,
@@ -571,7 +575,13 @@ async def test_a_belief_carrying_a_subject_opens_no_axis_where_no_episode_does()
         _conversation("e1", "Ada: hello."),
     ]
     assert _label_axes(unlabelled) == frozenset()
-    assert "about_person" not in _system_prompt((), files_shown=False, label_axes=())
+    # The **block** and not the bare word: ADR-0253 §7 gives a proposed goal element
+    # the same four axes, so ``about_person`` now names two different fields of two
+    # different members and the word alone no longer tells them apart. What §9 owes is
+    # that the *structured-read* axis is described nowhere, which is this paragraph.
+    assert _STRUCTURED_AXIS_GUIDANCE["about_person"] not in _system_prompt(
+        (), files_shown=False, label_axes=()
+    )
 
     mixed: list[MemoryRecord] = [
         _belief("belief-2", "marta minds the boiler", about_person="marta"),
