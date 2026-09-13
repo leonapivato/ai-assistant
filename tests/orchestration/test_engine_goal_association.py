@@ -1173,7 +1173,17 @@ async def test_an_expiry_that_loses_the_race_reports_what_the_store_holds() -> N
     )
     settled = await plans.get_question(paused.clarification.question_id)
     assert settled is not None
-    assert settled.disposition is GoalQuestionDisposition.ANSWERED
+    assert settled.disposition is GoalQuestionDisposition.ANSWERED, (
+        "§9: the loser records nothing of its own — the winner's disposition stands, "
+        "and no second settlement was written over it"
+    )
+    assert late.goal_engagement is not None, (
+        "and §11 is what the turn then does: 'terminal already → nothing is settled and "
+        "the turn proceeds as an ordinary engagement of the goal'. It acts on **its own "
+        "request**, which the winning turn did not carry, so a revision here is that "
+        "request being understood rather than one answer applied twice"
+    )
+    assert late.turn is not None, "which is an ordinary turn, planner call and all"
 
 
 class _RacingSettlement(FakePlanStore):

@@ -614,7 +614,7 @@ def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> 
     )
 
     with pytest.raises(ClockReadingError, match="localizable range"):
-        harness.engine._asked_at()
+        harness.engine._checked_deadline()
 
 
 async def test_a_reference_to_an_already_terminal_question_settles_nothing_at_all() -> None:
@@ -717,14 +717,14 @@ class _UnreadableBindings:
         raise ConversationStoreError(msg)
 
 
-async def test_the_questions_two_instants_come_from_one_reading_under_a_moving_clock() -> None:
-    """§8: ``expires_at`` is "computed from it **once**, at the instant the question is written".
+async def test_the_deadline_is_one_lifetime_after_the_instant_the_question_was_written() -> None:
+    """§8: "computed from it **once**, at the instant the question is written".
 
-    There is no time-of-check/time-of-use pair left to get wrong, because there is only
-    one reading: :meth:`Engine._asked_at` takes the instant and the addition **together**,
-    before the turn persists anything. A clock that moves on every read is what makes
-    that observable — two readings would put the deadline more than one lifetime after
-    the asking.
+    Both instants come from one reading **at the write**, so however long the writes
+    §11's order puts ahead of it took, the deadline is one whole lifetime after the
+    record's own ``asked_at`` — a question is never born already expired. A clock that
+    advances on every read makes that observable: the goal, the engagement stamp, the
+    plans and the attempt each read it before this does.
     """
     harness = Harness(planner=_Asking(), now=_Ticking(AT))
 
@@ -734,6 +734,7 @@ async def test_the_questions_two_instants_come_from_one_reading_under_a_moving_c
     question = await harness.plans.open_question(outcome.turn.goal.goal_id)
     assert question is not None
     assert question.expires_at - question.asked_at == GOAL_QUESTION_TTL
+    assert question.asked_at > AT, "and it is the write's instant, not the turn's first"
 
 
 class _Ticking:
