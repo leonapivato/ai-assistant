@@ -781,7 +781,7 @@ class SqlitePlanStore:
                 conn.execute(f"ALTER TABLE goals ADD COLUMN {column} {declaration}")
 
     def _backfill_goal_columns(self, conn: sqlite3.Connection) -> None:
-        """Write the two ``goals`` columns from the rows themselves (ADR-0250 §9).
+        """Write the two projected ``goals`` columns from the rows themselves (§9).
 
         The columns are **projections of the blob** — ``Goal.conversation_id`` and
         ``Goal.last_engaged_in`` — so a migrated row's values are read out of the
@@ -791,6 +791,13 @@ class SqlitePlanStore:
         passes see one shape; a version 2 store's blobs are not rewritten at all, and
         every one of them yields ``last_engaged_in`` absent, which is §1's one route to
         a ``None``.
+
+        **ADR-0252 §13's ``evidence_elided`` is not written here, and that is the column
+        working rather than a pass that forgot it.** It is not a projection of the blob
+        — it is a count the store holds — and the ``NOT NULL DEFAULT 0`` in
+        :data:`_GOAL_COLUMNS` has already set every existing goal's to **zero**, which
+        is true of a store that has never dropped a row. A backfill reading it out of
+        the record would be reading a value no record carries.
 
         Args:
             conn: The connection the setup transaction is running on.

@@ -34,6 +34,7 @@ from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     AttemptTransition,
+    EvidenceHistory,
     Goal,
     GoalAttempt,
     GoalQuestion,
@@ -2507,7 +2508,77 @@ def _version_2_database(path: Path, *, engaged_at: datetime | None = None) -> No
         conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
 
 
-async def test_a_version_2_plan_store_gains_the_columns_and_the_questions_table(
+def _version_3_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0250 and before ADR-0252.
+
+    The **previous** version, which is the one ADR-0252 §18 arm 21 states the migration
+    over: "the migration runs on a database of the previous version, creates the table
+    empty, sets every goal's elision count to zero, converts nothing". Built from the
+    version 2 shape and then carried forward by hand, so the file this test opens is the
+    one the previous release actually wrote rather than a fresh one relabelled.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_2_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        for column in ("conversation_id", "last_engaged_in"):
+            conn.execute(f"ALTER TABLE goals ADD COLUMN {column} TEXT")
+        conn.execute("UPDATE goals SET conversation_id = 'c1'")
+        conn.execute(
+            "CREATE TABLE goal_questions(id TEXT PRIMARY KEY, "
+            "goal_id TEXT NOT NULL REFERENCES goals(id), attempt_id TEXT NOT NULL, "
+            "asked_at TEXT NOT NULL, disposition TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+
+
+async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
+    tmp_path: Path,
+) -> None:
+    """ADR-0252 §18 arm 21, over the **previous** version's stored shape.
+
+    "The migration adds a table, a per-goal counter and converts nothing" (§13). The
+    upgrade "creates the evidence table with the foreign key onto ``goals`` … **empty**,
+    because no earlier store holds a row; and it provides for the per-goal elision
+    count, at **zero** for every existing goal, which is true of a store that has never
+    dropped a row". **It writes no value this system did not record** — no row, no
+    instant, no region and no verdict — which is satisfied trivially here because there
+    is nothing to convert.
+
+    **The stored ``goals`` blobs are not rewritten either**, and that is a property of
+    how §10 widens rather than a step the migration skips: the three new fields are
+    optional with an absent or empty default and §10's validator adds a fourth shape
+    while leaving ADR-0249 §1's three untouched.
+    """
+    path = tmp_path / "plans.db"
+    _version_3_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
+        assert goal.interpretation[0].outcome_evidence_row_id is None, "and nothing back-fills"
+
+        assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
+
+        export = await store.export()
+        assert export.schema_version == 11
+        assert export.evidence == (EvidenceHistory(goal_id="g1"),)
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "4",
+        )
+        assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
+        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
+
+
+async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shape(
     tmp_path: Path,
 ) -> None:
     """ADR-0250 §9's migration, from a **stored** version 2 database.
