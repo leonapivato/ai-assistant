@@ -21,7 +21,7 @@ from test_engine_goal_association import (
     _seed,
 )
 
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     AssociationVerdict,
@@ -38,7 +38,7 @@ from ai_assistant.core.types import (
     TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
+from ai_assistant.testing import FakeModelProvider, FakePlanStore, FakeStreamingCompleter
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import GoalBrief
@@ -488,3 +488,99 @@ async def test_a_grounding_only_revision_is_recorded_and_announces_nothing() -> 
     assert second.goal_engagement.removed == (), (
         "§5: what moved is the record of who said it, which no reply states"
     )
+
+
+async def test_a_contended_engagement_gives_up_its_stamp_rather_than_failing_the_act() -> None:
+    """§1's acts 3 and 4 run **after** the work they stamp, so contention costs the stamp.
+
+    ADR-0014 §5 makes a stale write "a detectable, **retryable** failure" and says "the
+    caller should re-read and retry" — which is what the retry does. What it must never
+    do is raise: this stamp is taken once the read has dispatched or the confirmed step
+    has resolved, and failing there would throw away the outcome of work that already
+    happened, for a value §1 reads for focus alone.
+    """
+    plans = _AlwaysStale(now=lambda: AT)
+    harness = Harness(planner=NoStepPlanner(), plans=plans)
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        plans, _goal("goal-campsite", "book a campsite", conversation=conversation)
+    )
+
+    await harness.engine._engage(campsite.id, conversation_id=conversation)
+
+    assert plans.attempts == 3, "ADR-0014 §5: the read is retaken rather than the token guessed"
+    held = await plans.get_goal(campsite.id)
+    assert held is not None
+    assert held.last_engaged_at is None, "the stamp is given up, and nothing is raised"
+
+
+class _AlwaysStale(FakePlanStore):
+    """A store whose goal is engaged by somebody else between every read and write."""
+
+    attempts: int = 0
+
+    async def engage_goal(self, goal_id: str, /, **fields: Any) -> Any:
+        """Refuse as a lost compare-and-swap does, every time."""
+        self.attempts += 1
+        msg = "another turn advanced this goal"
+        raise StaleExecutionError(msg)
+
+
+def test_a_goal_question_ttl_with_no_representable_deadline_is_refused_at_construction() -> None:
+    """§8's deadline is computed after the turn's records are written, so the figure is
+    checked first.
+
+    ``Settings.goal_question_ttl`` is bounded below and not above, and §11's order puts
+    the question's write **after** the goal, the plans and the attempt. A figure whose
+    addition overflows would therefore fail a turn whose records already stand, for a
+    fault in the deployment rather than in the turn — so it is refused before any turn
+    runs, against the latest instant the record's own type can carry.
+    """
+    with pytest.raises(ValueError, match="representable deadline"):
+        Harness(planner=NoStepPlanner(), goal_question_ttl=timedelta.max)
+
+
+async def test_a_reference_to_an_already_terminal_question_settles_nothing_at_all() -> None:
+    """§9's gate at its strongest: a question read as terminal is not written to.
+
+    "**No lane reads a question, decides, and writes back**", so a reference naming a
+    question somebody has already answered attempts **no** settlement — it does not try a
+    second disposition, and it does not re-clear content the winner already cleared.
+
+    What the turn then *does* is §11's, in terms: "**terminal already** → nothing is
+    settled and the turn proceeds as an ordinary engagement of the goal", because this
+    turn carries its own request, which the winning turn did not.
+    """
+    plans = _CountingSettlement(now=lambda: AT)
+    planner = _Asking()
+    harness = Harness(planner=planner, plans=plans)
+    paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert paused.clarification is not None
+    question_id = paused.clarification.question_id
+    planner.understanding = None
+    await plans.settle_question(question_id, disposition=GoalQuestionDisposition.ANSWERED, at=AT)
+    plans.settled = 0
+
+    late = await harness.engine.converse(
+        "the river one", timeout=PATIENT, reference=TurnReference(question_id=question_id)
+    )
+
+    assert late.reference is ReferenceOutcome.ALREADY_SETTLED
+    assert plans.settled == 0, (
+        "§9: no lane reads a question, decides, and writes back — a question already "
+        "terminal is reported, not written to"
+    )
+    settled = await plans.get_question(question_id)
+    assert settled is not None
+    assert settled.disposition is GoalQuestionDisposition.ANSWERED, "the winner's, unchanged"
+
+
+class _CountingSettlement(FakePlanStore):
+    """A store that counts the settlements attempted against it."""
+
+    settled: int = 0
+
+    async def settle_question(self, question_id: str, /, **fields: Any) -> bool:
+        """Settle as the fake does, counting the attempt."""
+        self.settled += 1
+        return await super().settle_question(question_id, **fields)

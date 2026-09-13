@@ -102,6 +102,7 @@ from ai_assistant.core.errors import (
     OversizedValueError,
     PlanningError,
     SpeechError,
+    StaleExecutionError,
     TraceStoreError,
     TranscriptionFailedError,
     UngrantableActError,
@@ -364,6 +365,23 @@ _DEFAULT_ROUTED_CONFIRMATION_TTL: Final = timedelta(minutes=15)
 #: :data:`_DEFAULT_ROUTED_CONFIRMATION_TTL` does — a test double constructing an engine
 #: directly is not a deployment — and the composition root passes the configured value.
 _DEFAULT_GOAL_QUESTION_TTL: Final = timedelta(hours=72)
+
+#: How many times a resumption re-reads a goal before giving up its engagement stamp.
+#:
+#: ADR-0014 §5 makes a stale write "a detectable, **retryable** failure", and this is the
+#: bound on the retry: three reads absorb the ordinary interleaving of two turns, and a
+#: goal contended past that is one where the *other* turn's stamp is the order this
+#: conversation would have read anyway.
+_ENGAGEMENT_ATTEMPTS: Final = 3
+
+#: The widest span a :data:`~ai_assistant.core.types.UtcInstant` pair can express.
+#:
+#: :attr:`Engine._goal_question_ttl`'s refusal is stated against the **type's own range**
+#: rather than against a ceiling this file invented: a deadline further away than the
+#: whole calendar the record can carry is not a long deadline, it is a value no instant
+#: could hold. It is a `datetime` subtraction and reads no clock, so constructing an
+#: engine still reads the injected clock exactly where it always did.
+_REPRESENTABLE_SPAN: Final = datetime.max.replace(tzinfo=UTC) - datetime.min.replace(tzinfo=UTC)
 
 #: How many times a colliding ``route_id`` is retried from the injected factory inside
 #: the reserving critical section before the pass gives up (ADR-0197 §9). Small,
@@ -2858,6 +2876,23 @@ class Engine:
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
         self._max_spoken_audio_bytes = max_spoken_audio_bytes
         self._routed_ttl = routed_confirmation_ttl
+        # ADR-0250 §8 computes `expires_at` "**once**, at the instant the question is
+        # written", which is **after** the goal, the plans and the attempt are persisted
+        # (§11's order) — so an addition that overflows there would fail a turn whose
+        # records already stand, for a fault in the deployment's configuration rather
+        # than in the turn. `Settings.goal_question_ttl` is bounded below and not above,
+        # so the absurd figures are refused here, before any turn runs, against the
+        # record type's **own** range rather than against a ceiling this file invented.
+        # The residue — a figure inside that range whose addition still overflows from
+        # *this* instant — is caught at the raise site, where it costs a question rather
+        # than a turn (:meth:`_raise`).
+        if goal_question_ttl > _REPRESENTABLE_SPAN:
+            msg = (
+                f"goal_question_ttl must leave a representable deadline, and "
+                f"{goal_question_ttl} is longer than the whole calendar a stored instant "
+                f"can carry (ADR-0250 §8)"
+            )
+            raise ValueError(msg)
         self._goal_question_ttl = goal_question_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
@@ -8723,6 +8758,10 @@ class Engine:
         **``expires_at`` is computed once, at the instant the question is written, and
         is never extended, refreshed or recomputed** (§8), from
         ``Settings.goal_question_ttl`` — required, positive, with no disable spelling.
+        That field is bounded below and not above, so a lifetime whose addition runs off
+        the end of the calendar leaves **no question** here rather than failing a turn
+        whose goal, plans and attempt are already written; the figures that could never
+        work at all are refused at construction instead.
 
         **A question exists only where the store accepted it** (§10). Where
         ``record_question`` answered ``False`` — that goal already holds an open one — or
@@ -8744,6 +8783,17 @@ class Engine:
         if raised is None or record is None or opened is None:
             return None
         now = self._clock()
+        try:
+            expires_at = now + self._goal_question_ttl
+        except OverflowError:
+            # A configured lifetime inside the type's range whose addition still runs
+            # off the end of the calendar from *this* instant. It is a deployment fault
+            # and it is reported as one — but it costs a **question** and not a turn:
+            # this site runs after the goal, the plans and the attempt are written
+            # (§11's order), so raising here would fail a turn whose records already
+            # stand. §10 already gives the shape for a question that was not written.
+            _log.error("goal_question_deadline_unrepresentable", ttl=self._goal_question_ttl)
+            return None
         question = GoalQuestion(
             id=self._id_factory(),
             goal_id=record.goal.id,
@@ -8751,7 +8801,7 @@ class Engine:
             text=raised.text,
             about=raised.about,
             asked_at=now,
-            expires_at=now + self._goal_question_ttl,
+            expires_at=expires_at,
         )
         try:
             written = await self._plans.record_question(question)
@@ -8828,6 +8878,15 @@ class Engine:
         and *"No lane repairs, back-fills or refuses such a park"*. The same is true of
         a plan whose goal a later ``delete_goal`` removed.
 
+        **Contention is retried and then given up, and never raised** (ADR-0014 §5).
+        This runs after the act it stamps has already happened — the read dispatched, the
+        step resolved — so a stale-write refusal here would fail a resumption whose
+        irreversible work succeeded, in order to move a value §1 reads for focus alone.
+        The read is retaken :data:`_ENGAGEMENT_ATTEMPTS` times, which is ADR-0014 §5's own
+        instruction ("the caller should re-read and retry"), and a goal still contended
+        after that is one another turn is engaging in this same instant — so the order
+        this conversation reads is that turn's rather than absent.
+
         Args:
             goal_id: The goal the resumption reached, or ``None`` where the record
                 carries none.
@@ -8835,21 +8894,34 @@ class Engine:
                 ``None`` where it resolved to none — ADR-0074 §3's *"not captured at
                 all, and no conversation invented"*, which leaves nothing to stamp
                 ``last_engaged_in`` with.
-
-        Raises:
-            StaleExecutionError: As ``engage_goal`` raises it (ADR-0014 §5).
         """
         if goal_id is None or conversation_id is None:
             return
-        goal = await self._plans.get_goal(goal_id)
-        if goal is None:
+        for _ in range(_ENGAGEMENT_ATTEMPTS):
+            goal = await self._plans.get_goal(goal_id)
+            if goal is None:
+                return
+            try:
+                await self._plans.engage_goal(
+                    goal.id,
+                    at=self._clock(),
+                    conversation_id=conversation_id,
+                    expected_version=goal.version,
+                )
+            except StaleExecutionError:
+                # Another turn advanced the goal between the read and the write. The
+                # read is retaken rather than the token guessed, which is ADR-0014 §5's
+                # own instruction — "the caller should re-read and retry".
+                continue
             return
-        await self._plans.engage_goal(
-            goal.id,
-            at=self._clock(),
-            conversation_id=conversation_id,
-            expected_version=goal.version,
-        )
+        # **The stamp is given up rather than the act failed**, and that is the whole of
+        # what contention costs here. This runs *after* the read dispatched or the
+        # confirmed step resolved (§1's acts 3 and 4), so raising would throw away the
+        # outcome of work that already happened for the sake of a value §1 reads for
+        # focus alone — and the goal is engaged again by the very turn that is winning
+        # the race, so the order this conversation sees is the other turn's rather than
+        # absent. The alternative, retrying without bound, spins on a busy goal.
+        _log.warning("goal_engagement_contended", goal_id=goal_id)
 
     async def _engage_execution(self, execution_id: str, *, conversation_id: str) -> None:
         """ADR-0250 §1's fourth act: the goal the resumed step's plan carries.
