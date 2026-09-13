@@ -736,6 +736,18 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     supplies. ``TimeWindow`` is the type ADR-0237 §2 minted for ``MemoryStore``'s own
     filter axis and reaches this graph unchanged (ADR-0240 §2's no-second-window-type
     clause), so what is new here is a path to it and not a second shape of it.
+
+    **``OutboundStatement`` joined it with ADR-0264 §6**, because the stage gained the
+    ``outbound`` keyword. The judgement §7 asks of the lane that grows the graph, made
+    rather than assumed: ADR-0264 §4 closes the model at three fields and states the bar
+    over them in terms — "no destination, no host, no origin, no provider name, no
+    connection reference, no account identity, no tool identifier, no query and no
+    fragment of one, no record, no title, no snippet, no monetary figure, no duration,
+    no ``Settings`` field name, no ``SearchDisposition`` value, no record id, no decision
+    id and no instant". What is left is two ``StrEnum`` members and a bounded ``int``,
+    none of which admits a ``SecretStr``, and the model sets ``extra="forbid"`` so a
+    fourth field is unconstructable rather than unnoticed. The carrier check below is
+    what keeps that true rather than merely stated.
     """
     reachable = _reachable_from_the_composing_stage()
 
@@ -765,6 +777,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "ReadRequest",
         "ReportedExtent",
         "ResultReference",
+        "OutboundStatement",
         "SemanticMemory",
         "SpokenDelivery",
         "StepCondition",

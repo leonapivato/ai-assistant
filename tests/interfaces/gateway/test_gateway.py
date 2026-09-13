@@ -966,6 +966,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "clarification",
         "reference",
         "disambiguation",
+        "outbound_statement",
     }
 
 
