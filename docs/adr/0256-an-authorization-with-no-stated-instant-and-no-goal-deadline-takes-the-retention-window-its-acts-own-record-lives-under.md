@@ -611,18 +611,22 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 > decision leaves it, computes the narrowed instant on a path-(ii) correction and submits the
 > row**. **Lane 3 is untouched.**
 
-> **Normative.** **The store half is Lane 1's, because §20 puts the store there and a contract
-> is landed once.** ADR-0254 §20 assigns `GoalAuthorizationStore`, its shared conformance suite
-> and `SqliteGoalAuthorizationStore` to **Lane 1**, and §5's narrowing changes what `record`
-> refuses. **Lane 1 therefore owns the revised refusal, its conformance arm and every
-> implementation of it** — accept a superseding row whose `expires_at` is strictly after the new
-> row's `proposed_at` and strictly before the superseded row's, refuse every other movement of
-> that field and every movement of the other five — and **Lane 2 owns computing the instant and
-> submitting such a row**. Splitting it the other way would land a validation rule in the lane
-> that does not own the validator, which is the drift ADR-0254 §16's roster-and-lane pairing
-> exists to prevent. **§20's lane cut is not superseded by this**: Lane 1 still owns the store and
-> Lane 2 still owns the write path, and what moves is only the content of Lane 1's arm 17 (§7
-> limb 4).
+> **Normative.** **The store half is Lane 1's, because §20 puts the store there and a contract is
+> landed once.** ADR-0254 §20 assigns `GoalAuthorizationStore`, its shared conformance suite and
+> `SqliteGoalAuthorizationStore` to **Lane 1**, and §5's narrowing changes what `record` refuses.
+> **Lane 1 therefore owns the revised refusal, its conformance arm and every implementation of
+> it** — on a **path-(ii) row alone**, one written `ESTABLISHED` directly with `confirmation`
+> unset and `supersedes` set: accept it where its `expires_at` is strictly after its own
+> `proposed_at` and strictly before the superseded row's, refuse every other movement of that
+> field and every movement of the other five. **A path-(i) proposal carrying `supersedes` is
+> untouched by this and by the transcription rule it narrows**: ADR-0254 §1 lets it set
+> `expires_at`, §5 has it *"compute a fresh `expires_at`"*, and it may therefore carry a **later**
+> instant than the row it names, which is what renews an authority. **Lane 2 owns computing the
+> instant and submitting such a row**. Splitting it the other way would land a validation rule in
+> the lane that does not own the validator, which is the drift ADR-0254 §16's roster-and-lane
+> pairing exists to prevent. **§20's lane cut is not superseded by this**: Lane 1 still owns the
+> store and Lane 2 still owns the write path, and what moves is only the content of Lane 1's arm
+> 17 (§7 limb 4).
 
 > **Normative.** **No lane bumps the wire for this decision.** No `core` type gains a field, no
 > member reaches the promoted surface and no wire-carried value changes shape, so ADR-0124 §9 is
@@ -635,15 +639,20 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 > alteration — the narrowing — and refuse every other. **No member is added, removed or
 > re-signed, and no argument or return type changes**; what changes is the refusal the
 > implementation and its conformance suite assert. ADR-0254's own lane cut lands that store, so
-> **the change is to a contract that has not yet been written** and is carried by Lane 2's arms
-> rather than by a migration; the flag is owed regardless, and this clause is it.
+> **the change is to a contract that has not yet been written** and is carried by Lane 1's two
+> arms below rather than by a migration; the flag is owed regardless, and this clause is it.
 
-**Lane 2 owes the arms below for this decision**, and they **replace ADR-0254 §20's arm 69 in
-its two rung-3 cases and its arm 17 in the `expires_at` field alone** (§7 limbs 1 and 4); every
-other case of both stands and is still owed. Each is a representative-input test shipped with it,
-and **each is a clause of its own** because each is separately satisfiable: a lane could ship
-the ordinary case and omit the refusals, and ADR-0089 §2's *"A clause states one obligation"* is
-what forbids joining them into one.
+**The arms below are owed for this decision, and each names the lane that owes it.** **Lane 1**
+owes the two that are about what `GoalAuthorizationStore.record` accepts and refuses — they are
+its conformance suite's, because §20 puts the store, its suite and
+`SqliteGoalAuthorizationStore` there — and **Lane 2** owes every other, they being about the
+instant `orchestration` computes and the behaviour a turn then shows. Together they **replace
+ADR-0254 §20's arm 69 in its two rung-3 cases and its arm 17 in the `expires_at` field alone**
+(§7 limbs 1 and 4); every other case of both stands and is still owed by the lane that already
+owes it. Each is a representative-input test shipped with it, and **each is a clause of its
+own** because each is separately satisfiable: a lane could ship the ordinary case and omit the
+refusals, and ADR-0089 §2's *"A clause states one obligation"* is what forbids joining them into
+one.
 
 > **Normative.** **The ordinary case.** A finite `episode_retention`; a goal with no `deadline`;
 > an act naming no instant → a row **is** written on path (i) and on path (iii), `expires_at`
@@ -678,12 +687,13 @@ what forbids joining them into one.
 
 > **Normative.** **A clock rollback before capture.** Move the injected clock backwards between an
 > act's turn and that act's episode capture, with `episode_retention` unchanged **and the
-> proposal's `proposed_at` read at or after the capture's own reading** → the episode is stamped
-> from the earlier reading and the row outlives it, which is again §1's bound and not a defect.
-> **The proviso is part of the arm and not scenery**: the clock may move backwards again before
-> the write, and where `proposed_at` is read earlier than the capture the ordering reverses and
-> the row expires first — which §1's bound permits too, it being a bound and not an equality.
-> Nothing in the row is clamped, re-stamped or recomputed in either case.
+> proposal's `proposed_at` read strictly after the capture's own reading** → the episode is
+> stamped from the earlier reading and the row outlives it, which is again §1's bound and not a
+> defect. **The proviso is part of the arm and not scenery**: the clock may move backwards again
+> before the write, and where `proposed_at` is read **equal to** the capture's reading the two
+> expire together, and where it is read **earlier** the row expires first — both of which §1's
+> bound permits, it being a bound and not an equality. Nothing in the row is clamped, re-stamped
+> or recomputed in any of the three cases.
 
 > **Normative.** **An older basis act does not shorten the row, and the row then outlives that
 > act's record.** A path-(i) proposal whose coverage carries a member resting on a recorded turn
@@ -697,17 +707,25 @@ what forbids joining them into one.
 > with, stays live until that instant, and is settled by nothing (§6). No sweep, no reclaim and
 > no cross-store deletion touches it.
 
-> **Normative.** **A correction stating an earlier admissible instant narrows.** A path-(ii)
-> correction whose span states an instant strictly after the new row's `proposed_at` and strictly
-> before the superseded row's `expires_at` → **the new row carries that instant**, and the store
-> **accepts** it where ADR-0254 §20's arm 17 would have refused the altered field.
+> **Normative.** **Lane 2. A correction stating an earlier admissible instant narrows.** A
+> path-(ii) correction whose span states an instant strictly after the new row's `proposed_at` and
+> strictly before the superseded row's `expires_at` → **the new row carries that instant**.
 
-> **Normative.** **The store refuses every other movement of a transcribed field, exactly as
-> before.** A superseding record altering `goal`, `tool`, `account` or `destinations` →
-> **refused**, one test per field, which is ADR-0254 §20's arm 17 standing entire in its other
-> four fields; one altering **`origin`** → **refused** too, on ADR-0254 §1's path-(ii)
-> transcription list, which names `origin` where arm 17 does not; and one altering `expires_at`
-> in any direction but the single narrowing §5 permits → **refused**.
+> **Normative.** **Lane 1. The store accepts exactly that row.** A path-(ii) row — written
+> `ESTABLISHED` directly, `confirmation` unset, `supersedes` set — whose `expires_at` is strictly
+> after its own `proposed_at` and strictly before the superseded row's → **`record` accepts it**,
+> where ADR-0254 §20's arm 17 refused every altered `expires_at`. The arm belongs to the shared
+> conformance suite, so every implementation answers it.
+
+> **Normative.** **Lane 1. The store refuses every other movement of a transcribed field on a
+> path-(ii) row, exactly as before.** A path-(ii) row altering `goal`, `tool`, `account` or
+> `destinations` → **refused**, one test per field, which is ADR-0254 §20's arm 17 standing entire
+> in its other four fields; one altering **`origin`** → **refused** too, on ADR-0254 §1's
+> path-(ii) transcription list, which names `origin` where arm 17 does not; and one altering
+> `expires_at` in any direction but the single narrowing §5 permits → **refused**. **A path-(i)
+> proposal carrying `supersedes` is not this arm's subject and is refused by none of it**: it may
+> set `expires_at` to an instant later than the row it names (ADR-0254 §1, §5), and an
+> implementation that applied the path-(ii) rule to it would break renewal.
 
 > **Normative.** **A correction stating a later instant does not lengthen.** An instant at or
 > after the superseded row's `expires_at` → `expires_at` **transcribed unchanged**.
@@ -758,7 +776,8 @@ under golden rule 5 and is flagged here as well as in §9**, and ADR-0015 §1 ma
 requirement true of a prose-only PR.
 
 **It merges as its own PR, ratified, before anything implements against it** (golden rule 5,
-ADR-0015). It briefs no lane of its own; ADR-0254 §20's Lane 2 takes it, and the ratification
+ADR-0015). It briefs no lane of its own; ADR-0254 §20's **Lane 1 and Lane 2** take it between
+them as §9 partitions, and the ratification
 flip is one line and no other byte (ADR-0165).
 
 ## Consequences
