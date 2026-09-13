@@ -1,6 +1,6 @@
 # 255. The driver walks a plan in dependency order, claims each step under its attempt, and stops rather than acting under an unfinished one
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0265 (one scope, and it is a count. §15 item 19's enumeration of what §13's rule requires before a consequential capability is wired — "five conditions and not three, the fourth assigned to none of those three lanes and the fifth assigned to A8 but outside the reconciliation guarantee the gate names" — becomes six. The sixth is a containment for a wrongly minted intended action: a deterministic or user-authorised ruling that a proposed act is a second act the user asked for and not the act this goal already performed. It is assigned to none of the three lanes the gate names and is reached by none of their guarantees, because the duplicate it admits is a correctly claimed, correctly authorised and correctly verified dispatch of an effect the goal already holds — nothing downstream of the mint can see that it was one act and not two, so a reader holding only item 19 wires an integration after five and is wrong. That one count, and nothing else in this ADR: §13's rule itself binds verbatim and is relied on, its statement that that decision adds two prerequisites stays true of that decision, and the two it adds are untouched; §7's obligation that an effect is performed at most once across every plan of a goal binds entire and is what the new identity serves; §7's refusal of an identity derived from capability and parameters is honoured rather than lifted; §12's booking of whether an attempt's executions are projected into the planner's input is untouched and no projection is taken; and §§1-6, §§8-12, §14 and §§16-17 stand entire)
 - **Partially supersedes [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md),
   in two narrowly stated scopes**, and §16 shows the working for both.
   **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
@@ -86,6 +86,33 @@
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
   reader would expect to be — ADR-0014, ADR-0037, ADR-0249, ADR-0042 and ADR-0253 among them.
 - Date: 2026-09-12
+- **Partially superseded: 2026-09-13 by ADR-0265 — §15 item 19's condition count alone.
+  Nothing else in this ADR.** The owner's correction of 2026-09-13 on #2255 requires a stable
+  identity for an intended action; ADR-0265 mints it and obliges an at-most-once effect claim to
+  scope itself to that identity rather than to the goal and the call's arguments.
+
+  **Why the count moves.** Scoping the claim to the intended action is what lets *"book two
+  identical rooms"* dispatch twice — the owner's *"an earlier booking must not count as fulfilling
+  'book another one'"* — and the price is that an action a planner mints **wrongly** makes an
+  otherwise duplicate claim fresh. §13's three named guarantees do not reach that path and neither
+  do the two prerequisites this ADR adds to it: verification, uncertain-outcome handling,
+  cancellation, the evidence-to-claim window and the resolved-but-unapplied answer could each land
+  and leave it exactly where it stands, because the duplicate is a **correctly claimed, correctly
+  authorised, correctly verified** dispatch of an effect the goal already holds. So ADR-0265 adds
+  a sixth condition — a deterministic or user-authorised ruling that a proposed act is a second
+  act the user asked for — and a reader holding only item 19 would wire an integration after five
+  and be wrong. That is ADR-0070 §1's test on the supersession side and **partial** in §3's sense.
+
+  **What does not move.** §13's rule is quoted and relied on unchanged, and its own sentence —
+  *"this decision adds **two** prerequisites to that gate, and the count is stated so a reader
+  does not take the first for the whole"* — stays true of **this** decision; it is the **gate's
+  total** that item 19 enumerates and that grows. §7 is **relied on and superseded in nothing**:
+  its obligation that an effect is performed at most once across every plan of one goal is what
+  ADR-0265 exists to make reachable, and its refusal of an identity *"derived"* from capability
+  and parameters — *"A driver that compared capability and parameters would be inventing an
+  identity nobody declared"* — is **honoured**, because the identity ADR-0265 mints is declared
+  and never derived. §12's booking of an executions projection into the planner's input is
+  untouched. Appended dated note per ADR-0070 §1. Refs #2255.
 
 ## Context
 
