@@ -150,6 +150,7 @@ if TYPE_CHECKING:
         EpisodicMemory,
         EvaluationTrace,
         EvidenceDigest,
+        EvidenceHistory,
         ExecutionState,
         FeedbackEvent,
         FetchOutcome,
@@ -162,6 +163,7 @@ if TYPE_CHECKING:
         GoalCandidacy,
         GoalCandidates,
         GoalDeletion,
+        GoalEvidence,
         GoalQuestion,
         GoalQuestionDisposition,
         GoalRevision,
@@ -4139,6 +4141,37 @@ class PlanStore(Protocol):
     deletion: a question's life is its goal's, and a second store would put it behind
     a second cascade with no transaction between the two.
 
+    **Three members carry ADR-0252's goal evidence and one is strengthened**, and that
+    is a third **BREAKING** contract change under golden rule 5, layering on ADR-0249
+    §12's widening of this Protocol and on ADR-0250 §9's: :meth:`record_evidence`,
+    :meth:`get_evidence`, :meth:`evidence_of`, and :meth:`record_interpretation`, which
+    gains the invalidation set ``GoalRevision`` now carries. **All four are commands or
+    lookups and none is a snapshot** — neither mutation takes a whole ``GoalEvidence``
+    back in order to write it and no member replaces a stored row, which is ADR-0014
+    §5's argument unchanged.
+
+    **Every mark rides on the write that occasions it, and there is no third member**
+    (ADR-0252 §12). A supersession rides on :meth:`record_evidence`, an invalidation
+    rides on :meth:`record_interpretation`, and **no member marks a row on its own**, so
+    there is no window in which a recorded revision stands beside evidence it
+    invalidated and none in which a refreshing row stands beside the row it refreshed.
+    A standalone marking member would reopen both windows for no caller's benefit.
+
+    **The standing member is the compare-and-swap token, and ``GoalEvidence`` carries no
+    ``version``.** A row moves **once**, from ``STANDING`` to a terminal member, and
+    never again (§8, §9), so the comparison a write needs is *is this row still
+    ``STANDING``* and a monotonic counter beside it would be a second spelling of the
+    same fact. A call naming a row another writer has already marked **refuses whole**
+    rather than partially applying, so a caller never has to ask which of its marks
+    landed.
+
+    **The predicate is ``orchestration``'s and the atomicity is the store's** (§12). The
+    loop computes **which** rows a new row refreshes (§8) and **which** a revision
+    invalidates (§9); the store applies the marks it is given and evaluates neither
+    predicate. A store that evaluated the refresh test would be a second place the rule
+    lives, and the first conforming implementation to read it differently would be right
+    in one of them.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
     """
@@ -4177,13 +4210,115 @@ class PlanStore(Protocol):
         stored ``Goal.version`` still equals ``revision.expected_version``, and the
         read, the comparison and the write are one step.
 
+        **It applies ``revision.invalidates`` in that same indivisible step**
+        (ADR-0252 §9, §12), marking each named row ``INAPPLICABLE`` with
+        ``inapplicable_at_revision`` set to the revision being appended. There is **no
+        second call and no window** in which a recorded revision stands beside evidence
+        its own change invalidated: "a crash between two calls would leave exactly that
+        state, and it is the state correction 1's whole purpose is to make
+        unreachable". The whole call is refused where a named row is not this goal's or
+        is not ``STANDING`` — a caller never has to ask which of its marks landed — and
+        a row this call marks is **never returned to ``STANDING``** by any later
+        revision, refresh or deletion (§9).
+
+        **Which rows a revision invalidates is not the store's to work out** (§12): the
+        predicate is ``orchestration``'s, keyed on ``supported`` and never on
+        ``requested``, and the store applies the set it is given.
+
         Returns:
             The goal as stored after the append.
 
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, or the revision does
-                not follow the goal's current one.
+            PlanningError: If ``goal_id`` names no stored goal, the revision does
+                not follow the goal's current one, or a row named by ``invalidates``
+                is not this goal's or is not ``STANDING``.
+        """
+        ...
+
+    async def record_evidence(
+        self, evidence: GoalEvidence, /, *, supersedes: Sequence[str] = ()
+    ) -> str:
+        """Persist a **new** evidence row and return its id (ADR-0252 §12).
+
+        **It refuses** a row whose ``id`` the store already holds, and a row whose
+        ``goal_id`` the store does not hold, each with the error class an unknown goal
+        already raises. No member replaces a stored row, so this is the one route by
+        which a row enters the history.
+
+        **In the same indivisible step it marks each row named by** ``supersedes``
+        ``SUPERSEDED`` with ``superseded_by`` set to the new row's id, **refusing the
+        whole call** where any named row is not this goal's, is not ``STANDING``, or is
+        the row being written. A refresh and the retirement it causes are therefore one
+        write, exactly as a revision and its invalidations are.
+
+        **Within that one step the order is fixed: the refusals, then the append, then
+        the marks, then §13's elision.** A row named by ``supersedes`` is validated
+        against the history **as it stood before the call**, so a call is never refused
+        because its own write displaced its own operand. The elision then runs over the
+        **marked** history by age alone — a row this call has just marked is an ordinary
+        candidate for it — and **the one row it never drops is the row being written**,
+        whatever place ``evidence_of``'s order gives it, because a store that discarded
+        the row it had just been told to persist would return an id that resolves in
+        nothing.
+
+        **Which rows a new row refreshes is not the store's to work out** (§12, §8): the
+        six-limb test is ``orchestration``'s, and the store applies the set it is given.
+
+        Args:
+            evidence: The row to persist.
+            supersedes: The rows this one refreshes, each of the same goal and each
+                ``STANDING``.
+
+        Returns:
+            The stored row's id.
+
+        Raises:
+            PlanningError: If the store already holds a row under this ``id``, if
+                ``goal_id`` names no stored goal, or if a row named by ``supersedes``
+                is not this goal's, is not ``STANDING``, or is the row being written.
+        """
+        ...
+
+    async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
+        """Return the evidence row under that id, or ``None`` (ADR-0252 §12).
+
+        Args:
+            evidence_id: The row's own identifier.
+
+        Returns:
+            The row, **whatever its standing** — an ``INAPPLICABLE`` and a
+            ``SUPERSEDED`` row are each kept with everything else intact, because
+            invalidation and supersession are markings and never deletions (§9, §8) —
+            or ``None`` where no row holds that id, which includes a row ADR-0252
+            §13's elision has dropped.
+        """
+        ...
+
+    async def evidence_of(self, goal_id: str, /) -> EvidenceHistory:
+        """Return one goal's evidence history (ADR-0252 §12).
+
+        Its rows come back in a **total** order — ``read_at`` oldest first, **ties
+        broken by ``id`` ascending** — and ``elided`` carries what §13's bound has
+        dropped. **The order is total rather than merely by instant** because two rows
+        written from one servicing can share a ``read_at`` to the microsecond: an order
+        stated on that field alone would leave two conforming stores free to return them
+        either way round, which makes ADR-0252 §10's ``E`` label space differ between
+        implementations and makes the elision drop different rows.
+
+        **Every row is returned, marked ones included**, and the count is **not
+        recomputed from the row count**: it is a value the store holds per goal, it never
+        decreases, and it advances in the same indivisible step as the write that drops
+        the rows — so a reader can never see a shortened history without the count that
+        explains it.
+
+        Args:
+            goal_id: The goal to read.
+
+        Returns:
+            That goal's history. **Empty, with a zero count, for a goal this store does
+            not hold**: an absent goal is not a fault to raise on a read that is already
+            a lookup, which is :meth:`open_question`'s own posture.
         """
         ...
 

@@ -20,16 +20,24 @@ from uuid import uuid4
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
+    MAX_GOAL_EVIDENCE,
+    EvidenceHistory,
+    EvidenceStanding,
     GoalDeletion,
     GoalQuestionDisposition,
     PlanExport,
     StepStatus,
+    evidence_order,
+    marked_inapplicable,
+    marked_superseded,
 )
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import advanced, appended, bounded, capped, engaged, settled
 from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         ActionPlan,
@@ -38,6 +46,7 @@ if TYPE_CHECKING:
         Goal,
         GoalAttempt,
         GoalCandidates,
+        GoalEvidence,
         GoalQuestion,
         GoalRevision,
         GoalStatus,
@@ -80,6 +89,12 @@ class InMemoryPlanStore:
         self._goals: dict[str, Goal] = {}
         self._attempts: dict[str, GoalAttempt] = {}
         self._questions: dict[str, GoalQuestion] = {}
+        # ADR-0252 §12: the rows, and §13's per-goal elision count beside them. The
+        # count is **held** rather than recomputed from the row count — a history that
+        # dropped rows and then had them deleted with the goal would otherwise report
+        # nothing was ever lost — and it goes with the goal on `delete_goal`.
+        self._evidence: dict[str, GoalEvidence] = {}
+        self._evidence_elided: dict[str, int] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
@@ -146,10 +161,16 @@ class InMemoryPlanStore:
         between reading the stored version and writing the appended goal, so nothing
         can interleave and no decision is taken on a separate read.
 
+        **``invalidates`` is applied in that same step** (ADR-0252 §9, §12), so there is
+        no window in which a recorded revision stands beside evidence its own change
+        invalidated. The refusals run **before** the append, so a call that cannot mark
+        every row it named appends nothing.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, or the revision does
-                not follow the goal's current one.
+            PlanningError: If ``goal_id`` names no stored goal, the revision does not
+                follow the goal's current one, or a row named by ``invalidates`` is not
+                this goal's or is not ``STANDING``.
         """
         stored = self._goals.get(revision.goal_id)
         if stored is None:
@@ -161,8 +182,15 @@ class InMemoryPlanStore:
                 f"{revision.expected_version}: re-read it and recompute the revision"
             )
             raise StaleExecutionError(msg)
+        self._refuse_unmarkable(
+            revision.goal_id, revision.invalidates, being_written=None, what="invalidate"
+        )
         updated = appended(stored, revision.interpretation)
         self._goals[updated.id] = updated
+        for row_id in revision.invalidates:
+            self._evidence[row_id] = marked_inapplicable(
+                self._evidence[row_id], at_revision=revision.interpretation.revision
+            )
         return updated.model_copy(deep=True)
 
     def _goal_for_write(self, goal_id: str, expected_version: int, what: str) -> Goal:
@@ -367,6 +395,148 @@ class InMemoryPlanStore:
             return False
         self._questions[question_id] = settled(stored, disposition=disposition, at=at)
         return True
+
+    # --- evidence (ADR-0252 §12) ------------------------------------------
+
+    async def record_evidence(
+        self, evidence: GoalEvidence, /, *, supersedes: Sequence[str] = ()
+    ) -> str:
+        """Persist a **new** evidence row, applying its refresh marks (ADR-0252 §12).
+
+        **One indivisible step, in a fixed order: the refusals, then the append, then
+        the marks, then §13's elision.** There is no ``await`` anywhere between them,
+        so nothing can interleave and a caller never has to ask which of its marks
+        landed. Every row named by ``supersedes`` is validated against the history **as
+        it stood before the call**, so a call is never refused because its own write
+        displaced its own operand.
+
+        Raises:
+            PlanningError: If the store already holds a row under this ``id``, if
+                ``goal_id`` names no stored goal, or if a row named by ``supersedes``
+                is not this goal's, is not ``STANDING``, or is the row being written.
+        """
+        if evidence.id in self._evidence:
+            msg = (
+                f"evidence row {evidence.id} already exists: record_evidence persists a "
+                f"new row and no member replaces a stored one (ADR-0252 §12)"
+            )
+            raise PlanningError(msg)
+        if evidence.goal_id not in self._goals:
+            msg = f"cannot record evidence for unknown goal {evidence.goal_id}"
+            raise PlanningError(msg)
+        self._refuse_unmarkable(
+            evidence.goal_id, supersedes, being_written=evidence.id, what="supersede"
+        )
+        self._evidence[evidence.id] = evidence.model_copy(deep=True)
+        for row_id in supersedes:
+            self._evidence[row_id] = marked_superseded(self._evidence[row_id], by=evidence.id)
+        self._elide_evidence(evidence.goal_id, keep=evidence.id)
+        return evidence.id
+
+    async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
+        """Return the evidence row under that id, or ``None`` (ADR-0252 §12)."""
+        stored = self._evidence.get(evidence_id)
+        return None if stored is None else stored.model_copy(deep=True)
+
+    async def evidence_of(self, goal_id: str, /) -> EvidenceHistory:
+        """Return one goal's history in §12's total order, with its count."""
+        return self._history(goal_id)
+
+    def _history(self, goal_id: str) -> EvidenceHistory:
+        """That goal's rows in ``(read_at, id)`` order, and what the bound dropped.
+
+        Args:
+            goal_id: The goal to read.
+
+        Returns:
+            Its history — empty with a zero count for a goal this store does not hold.
+        """
+        rows = sorted(
+            (row for row in self._evidence.values() if row.goal_id == goal_id),
+            key=evidence_order,
+        )
+        return EvidenceHistory(
+            goal_id=goal_id,
+            rows=tuple(row.model_copy(deep=True) for row in rows),
+            elided=self._evidence_elided.get(goal_id, 0),
+        )
+
+    def _refuse_unmarkable(
+        self,
+        goal_id: str,
+        named: Sequence[str],
+        *,
+        being_written: str | None,
+        what: str,
+    ) -> None:
+        """Refuse the whole call where a named row cannot take its mark (§12).
+
+        The three refusals are stated once for both marking writes: a row of another
+        goal — which includes one this store does not hold at all — a row that is not
+        ``STANDING``, and, on :meth:`record_evidence` alone, the row the call is
+        writing. **The whole call is refused rather than partially applied**, which is
+        what lets a caller never ask which of its marks landed.
+
+        Args:
+            goal_id: The goal whose rows may be marked.
+            named: The ids the caller asked to mark.
+            being_written: The row this call is appending, or ``None``.
+            what: The verb for the message.
+
+        Raises:
+            PlanningError: If any named row cannot take the mark.
+        """
+        for row_id in named:
+            if being_written is not None and row_id == being_written:
+                msg = (
+                    f"cannot {what} evidence row {row_id} with itself: a row is validated "
+                    f"against the history as it stood before the call (ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            row = self._evidence.get(row_id)
+            if row is None or row.goal_id != goal_id:
+                msg = (
+                    f"cannot {what} evidence row {row_id}: it is not goal {goal_id}'s "
+                    f"(ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            if row.standing is not EvidenceStanding.STANDING:
+                msg = (
+                    f"cannot {what} evidence row {row_id}: it is {row.standing.value} and "
+                    f"a mark is never un-marked and never re-applied (ADR-0252 §8, §9)"
+                )
+                raise PlanningError(msg)
+
+    def _elide_evidence(self, goal_id: str, *, keep: str) -> None:
+        """Hold the goal's history to :data:`MAX_GOAL_EVIDENCE`, disclosing the drop.
+
+        **By age and by nothing else** (§13) — not by standing, not by verdict, not by
+        whether a row is referenced — over the history as the marks have just left it,
+        so a row this call marked ``SUPERSEDED`` is an ordinary candidate. **The one
+        row never dropped is the row being written**, whatever place §12's order gives
+        it, because a store that discarded the row it had just been told to persist
+        would return an id that resolves in nothing.
+
+        Args:
+            goal_id: The goal whose history to bound.
+            keep: The row this write appended, which is never dropped.
+        """
+        rows = sorted(
+            (row for row in self._evidence.values() if row.goal_id == goal_id),
+            key=evidence_order,
+        )
+        excess = len(rows) - MAX_GOAL_EVIDENCE
+        if excess <= 0:
+            return
+        dropped = 0
+        for row in rows:
+            if dropped == excess:
+                break
+            if row.id == keep:
+                continue
+            del self._evidence[row.id]
+            dropped += 1
+        self._evidence_elided[goal_id] = self._evidence_elided.get(goal_id, 0) + dropped
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -685,6 +855,11 @@ class InMemoryPlanStore:
             executions=tuple(state.model_copy(deep=True) for state in self._executions.values()),
             attempts=tuple(one.model_copy(deep=True) for one in self._attempts.values()),
             questions=tuple(one.model_copy(deep=True) for one in self._questions.values()),
+            # ADR-0252 §13: exactly one history per goal the export carries, each with
+            # its rows **and its elision count** — "a document holding 64 rows and no
+            # count would say *this is the evidence*, where the truth is *this is the
+            # evidence that was kept*".
+            evidence=tuple(self._history(goal_id) for goal_id in self._goals),
         )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
@@ -732,6 +907,15 @@ class InMemoryPlanStore:
         # the record carries no count for either.
         for question_id in [one.id for one in self._questions.values() if one.goal_id == goal_id]:
             del self._questions[question_id]
+        # ADR-0252 §12: and it reaches that goal's evidence, **of every standing**, with
+        # the elision count going with the goal exactly as the rows do. No row blocks a
+        # deletion — the live-step refusal above is unchanged and keys on a RUNNING step
+        # — and `delete_goal` is one of only three routes out of the store for a row,
+        # the others being `clear` and §13's elision.
+        evidence_ids = [one.id for one in self._evidence.values() if one.goal_id == goal_id]
+        for evidence_id in evidence_ids:
+            del self._evidence[evidence_id]
+        self._evidence_elided.pop(goal_id, None)
         del self._goals[goal_id]
 
         return GoalDeletion(
@@ -739,6 +923,7 @@ class InMemoryPlanStore:
             plans_removed=len(plan_ids),
             executions_removed=len(executions),
             indeterminate_steps=indeterminate,
+            evidence_removed=len(evidence_ids),
         )
 
     async def clear(self) -> int:
@@ -752,12 +937,15 @@ class InMemoryPlanStore:
             len(self._goals)
             + len(self._attempts)
             + len(self._questions)
+            + len(self._evidence)
             + len(self._plans)
             + len(self._executions)
         )
         self._goals.clear()
         self._attempts.clear()
         self._questions.clear()
+        self._evidence.clear()
+        self._evidence_elided.clear()
         self._plans.clear()
         self._executions.clear()
         return removed
