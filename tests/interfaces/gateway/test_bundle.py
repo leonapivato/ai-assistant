@@ -2453,7 +2453,13 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # `/ask`: a **successful** head is the proof, and only that. A refusal is decided by
     # `_check_door` or `_session_bound` before `_assistant` is reached, so a refusal head
     # whose body then stalls says the gateway replied and nothing about the assistant.
-    assert "if (response.ok) {\n    waiting.heard = true;\n  }" in whole
+    # Stated as the branch each fact sits in rather than as a byte sequence: ADR-0250's
+    # lane added ``waiting.ran`` to the same ``if`` (the ok head is proof the turn *ran*
+    # on this entry), and a literal would have made that a failure of this clause rather
+    # than a change beside it. What the clause is about is that `heard` is set on the ok
+    # branch and on no other.
+    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
+    assert "waiting.heard = true;" in ok_branch
     assert whole.index("waiting.heard = true;") < whole.index(
         "const body = await readBody(response);"
     )
@@ -2700,7 +2706,9 @@ def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_o
     assert script.count("waiting.refusedWith = response.status;") == 2
     # `heard` is the other branch of the same test on the entry that has both, so no ask
     # can ever carry a refusal status and a claim that the assistant was reached.
-    assert "if (response.ok) {\n    waiting.heard = true;\n  } else {\n" in whole
+    ok_branch = whole[whole.index("if (response.ok) {") : whole.index("  } else {")]
+    assert "waiting.heard = true;" in ok_branch
+    assert "waiting.heard" not in whole[whole.index("  } else {") :]
     assert "waiting.heard" not in stream[: stream.index("waiting.refusedWith")]
 
     # Stopping the wait then takes re-entry, and takes it *before* the wording and the
@@ -8141,3 +8149,57 @@ def test_the_goal_surface_is_not_the_deferred_question_surface() -> None:
     assert "/goals" not in questions
     assert "/clarification/withdraw" not in questions
     assert "/goal/abandon" not in questions
+
+
+def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -> None:
+    """A refusal the gateway took before the engine consumes nothing.
+
+    ADR-0168 §6 classifies a request "from its method and path alone", and the door takes
+    an expired session, a malformed body and the connection ceiling **before**
+    ``_assistant`` is reached — so such a turn settled no question and engaged no goal.
+    ``waiting.ran`` is set exactly where an entry establishes that the assistant took the
+    question: ``askWhole``'s ok head, which "is proof the turn ran" on that entry;
+    ``askStreaming``'s first chunk, "what proves the question reached the assistant"; and
+    a terminal **outcome** value, because ADR-0173 §4 yields "zero or more chunks, then
+    exactly one ``TurnOutcome``" and a turn composed in one piece carries no chunk.
+
+    A terminal **fault** is none of the three, and the branch that renders one returns
+    before the flag is set. Adversarial review, round 2, ``major``.
+    """
+    functions = _functions(_code("app.js"))
+
+    ask = functions["ask"]
+    assert "if (waiting.ran) {" in ask
+    assert "restoreReference(sent)" in ask
+    assert "referenceSent(sent)" in ask
+    whole, streamed = functions["askWhole"], functions["askStreaming"]
+    assert "waiting.ran = true;" in whole
+    assert whole.count("waiting.ran = true;") == 1
+    assert streamed.count("waiting.ran = true;") == 2
+    # The terminal-fault branch returns before the flag, so a refused exchange never
+    # reaches it.
+    fault_branch = streamed.index('if (terminal.kind === "fault") {')
+    assert streamed.index("waiting.ran = true;", fault_branch) > streamed.index(
+        "return;", fault_branch
+    )
+
+
+def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back() -> None:
+    """The control stops being offered once the body carrying it has gone out.
+
+    The reference is serialised at submission, so a "never mind" pressed while that
+    request is in flight would hide the hint while the value still reached the assistant
+    — a page claiming to have withdrawn something it had already sent. ``referenceSent``
+    is called at the submission site, after the body is built, and the sentence it writes
+    **does not say the turn can be stopped**: that is a different control with a
+    different meaning, and ADR-0173 §9 is explicit that abandoning the stream does not
+    abandon the turn. Adversarial review, round 2, ``major``.
+    """
+    script = _code("app.js")
+    ask = _functions(script)["ask"]
+    said = _constant(script, "REFERENCE_SENT")
+
+    assert ask.index("asked.reference = sent.value;") < ask.index("referenceSent(sent);")
+    assert "no longer be taken back" in said
+    for barred in ("stop", "cancel", "abandon", "undo"):
+        assert barred not in said.lower(), barred
