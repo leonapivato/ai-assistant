@@ -1248,7 +1248,7 @@ def test_the_resumed_fourth_group_is_bounded_and_deduplicated() -> None:
     engine-level case below asserts what the pipeline *can* show: that the union it
     composes over holds each record once.
     """
-    held = ("already-held",)
+    held = (_minted("already-held"),)
 
     assert [
         record.id
@@ -1260,6 +1260,46 @@ def test_the_resumed_fourth_group_is_bounded_and_deduplicated() -> None:
     assert [
         record.id for record in admitted_fourth_group((_minted("r-1"), _minted("r-1")), held=())
     ] == ["r-1"], "and the seen set advances, so one batch's duplicate enters once"
+
+
+def test_a_record_the_supply_holds_is_one_it_holds_under_either_of_its_names() -> None:
+    """#2364: ADR-0226 §7's sameness, in both directions, at the one function.
+
+    §7 names no field: "A record the servicer returns that the supply already holds is
+    deduplicated out", applying ADR-0158 §4's rule "for its reason" — what a prompt may
+    not repeat — and naming the mischief as a servicer that would "render one record
+    twice and spend two of the ten on it". Two cases reach that mischief by different
+    routes and a test keyed on one field can only catch one of them.
+
+    **The same words under a fresh id**, which is every minted record: its id "is minted
+    for one turn … and resolves in no store" (ADR-0231 §16, ADR-0230 §10), so two
+    servicings of one turn that are handed the same result mint two ids that can never
+    match. The three instants a re-reading moves are stepped over with it, because a
+    provider re-read declares a later one (ADR-0231 §10) for the same words.
+
+    **The same id over moved words**, which is what a store that revised a record
+    between two of a turn's reads hands back: ADR-0113 §5 gives "no cross-call read
+    consistency of any kind", and ADR-0251 §7 quotes it for this case. Rendering both
+    copies is the same mischief read from the other side.
+    """
+    held = _minted("already-held")
+    twin = held.model_copy(
+        update={
+            "id": "minted-afresh",
+            "provenance": held.provenance.model_copy(update={"last_updated": AT + timedelta(6)}),
+        }
+    )
+    revised = held.model_copy(update={"content": "the same record, saying something else"})
+
+    assert admitted_fourth_group((twin,), held=(held,)) == (), (
+        "the same words under a fresh id and a later reading are a record the supply holds"
+    )
+    assert admitted_fourth_group((revised,), held=(held,)) == (), (
+        "and so is a revision the store handed back under the id the supply holds it by"
+    )
+    assert [record.id for record in admitted_fourth_group((twin,), held=())] == ["minted-afresh"], (
+        "while a supply holding neither name admits it, which is what keeps this a test"
+    )
 
 
 def _minted(record_id: str) -> SemanticMemory:

@@ -3006,7 +3006,7 @@ class LearningLoop:
         # that states them — so a resumed turn's fourth group is bounded and
         # deduplicated exactly as a servicing's is, and a second statement of the two
         # rules cannot drift from the first (ADR-0244 §7).
-        fourth = admitted_fourth_group(records, held={record.id for record in memories})
+        fourth = admitted_fourth_group(records, held=memories)
         # **ADR-0226 §7's timing, and it is the whole reason the filter is applied
         # here rather than three lines up.** §7 partially supersedes ADR-0204 §2's
         # timing clause: one evaluation, over the turn's **final** supply — which on a

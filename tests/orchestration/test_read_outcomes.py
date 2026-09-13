@@ -41,6 +41,8 @@ from test_loop_search import (
     _CostedSearcher,
     _loop,
     _record,
+    _RefiningSearcher,
+    _RereadingSearcher,
     _serviced,
     _servicer,
 )
@@ -603,6 +605,14 @@ async def test_the_allowance_is_four_over_a_turn_whose_every_round_was_productiv
     on each further call, so it iterates until the **attempt's** planner-call allowance
     refuses one: four calls, three servicings planned over, and ``BOUND_REACHED`` —
     which keeps ADR-0228 §3's own stopped-at-the-bound rule and moves only its subject.
+
+    **"Whose every round was productive" is an input this case has to supply** (#2364).
+    §7 makes a round productive where an ask "admitted at least one record the supply
+    did not already hold, counted after ADR-0226 §7's deduplication", so a searcher
+    answering three identical rounds identically makes rounds 2 and 3 unproductive and
+    stops this turn at ``UNPRODUCTIVE`` on its third call. That is §7 working, and it is
+    the subject of the cases below rather than of this one, which is about the
+    allowance — so the provider here answers each round with something new.
     """
     memory = FakeMemoryStore(now=_clock)
     await memory.add(_belief("belief-1", "the bell tower is in Porto"))
@@ -618,12 +628,138 @@ async def test_the_allowance_is_four_over_a_turn_whose_every_round_was_productiv
             planner=planner,
             memory=memory,
             search=_servicer(
-                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT,))), granted=True
+                searcher=_RefiningSearcher(_CostedSearcher(FakeWebSearcher(results=(_RESULT,)))),
+                granted=True,
             ),
         ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
 
     assert len(planner.calls) == _PLANNER_CALL_ALLOWANCE, "§5's allowance, and §4(f')"
     assert _record(captured)["stop"] == StopReason.BOUND_REACHED.value
+    assert [entry["new"] for entry in _record(captured)["servicings"]] == [1, 1, 1, 1], (
+        "every round admitted a record, which is the premise this case's name states"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# #2364: §7's run test over records that carry no durable name                 #
+# --------------------------------------------------------------------------- #
+
+#: Three results, as one response carries them: ``search_max_results`` is three
+#: (ADR-0231 §5), and three is what the hub journal #2364 quotes for every one of that
+#: turn's four rounds — ``returned 3, new 3, deduplicated 0``, four times over.
+_THREE_RESULTS: Final = (
+    _RESULT,
+    "Porto weather\nhttps://example.com/porto-weather\nRain from Friday.",
+    "Douro valley\nhttps://example.com/douro\nTerraced vineyards upriver.",
+)
+
+
+async def test_a_turn_asking_one_question_four_times_stops_on_the_unproductive_run() -> None:
+    """#2364: §7's run test fires on the ``WEB_SEARCH`` path, where it could not.
+
+    The production shape, in one turn: a planner that goes on asking, one utterance, one
+    composed query — ADR-0231 §1 gives the ask "no field" and §3 composes the query from
+    the turn's own words — and a provider handing back the same three results each time,
+    declared a few seconds later on each call.
+
+    **Every round used to be productive by construction.** ADR-0226 §7 deduplicates "a
+    record the servicer returns that the supply already holds", §7 of ADR-0251 counts a
+    round productive where an ask "admitted at least one record the supply did not
+    already hold, counted after ADR-0226 §7's deduplication" — and a minted record's id
+    "is minted for one turn … and resolves in no store" (ADR-0231 §16), so a
+    deduplication keyed on the id alone never matched, ``deduplicated`` was always zero,
+    and the run test could not reach one. The hub turn #2364 records ran four rounds
+    against a byte-identical ask, gained nothing from three of them, and stopped at
+    ``bound_reached``.
+
+    So this asserts the three counts §9's record carries, the members §2 classifies them
+    to, and the stop — because the stop alone would pass for a turn that stopped for the
+    wrong reason, and the counts alone would not say that anything acted on them.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = FakePlanner(
+        now=_clock, read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.WEB_SEARCH),))
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=planner,
+            memory=memory,
+            search=_servicer(
+                searcher=_RereadingSearcher(
+                    _CostedSearcher(FakeWebSearcher(results=_THREE_RESULTS))
+                ),
+                granted=True,
+            ),
+        ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    servicings = _record(captured)["servicings"]
+    assert [(entry["returned"], entry["new"], entry["deduplicated"]) for entry in servicings] == [
+        (3, 3, 0),
+        (3, 0, 3),
+        (3, 0, 3),
+    ], (
+        "the second and third rounds were handed the same three results and admitted "
+        "none of them — which is the line the journal in #2364 has as `new 3` three "
+        "times over"
+    )
+    assert [entry["outcomes"] for entry in servicings] == [
+        ("returned_records",),
+        ("duplicate",),
+        ("duplicate",),
+    ], "§2's `DUPLICATE`: the servicing returned records and admitted none"
+    assert _record(captured)["stop"] == StopReason.UNPRODUCTIVE.value, (
+        "two consecutive unproductive rounds, and §7 stops at two"
+    )
+    assert len(planner.calls) == 3, (
+        "so the fourth call the allowance would have admitted was never made — the "
+        "whole of what #2170 asks for, and what `BOUND_REACHED` was standing in for"
+    )
+
+
+async def test_a_round_answered_with_new_material_is_productive_however_it_is_minted() -> None:
+    """#2364's other direction: the deduplication is not a suppression of the kind.
+
+    A turn whose rounds are answered with **different** material admits every record of
+    every round, however freshly each one's id was minted — so the run test never fires
+    and the turn stops where ADR-0251 §5's allowance leaves it. Stated beside the case
+    above because a deduplication that read too much would pass that one and fail this,
+    and the pair is what says the test is over what a record carries rather than over
+    the fact that a search asked twice.
+
+    ADR-0251 §7 is explicit that the loop refuses no repeated ask: "A repeated ask is
+    serviced under ADR-0226 §5, §6 and §7 exactly as any other". Both cases here service
+    every ask the planner emitted; what differs is only what came back.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = FakePlanner(
+        now=_clock, read_request=ReadRequest(asks=(ReadAsk(kind=ReadKind.WEB_SEARCH),))
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await _loop(
+            planner=planner,
+            memory=memory,
+            search=_servicer(
+                searcher=_RefiningSearcher(
+                    _RereadingSearcher(_CostedSearcher(FakeWebSearcher(results=_THREE_RESULTS)))
+                ),
+                granted=True,
+            ),
+        ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    servicings = _record(captured)["servicings"]
+    assert [(entry["new"], entry["deduplicated"]) for entry in servicings] == [
+        (3, 0),
+        (3, 0),
+        (3, 0),
+        (3, 0),
+    ], "nothing was deduplicated, because no round was handed what an earlier one was"
+    assert [entry["outcomes"] for entry in servicings] == [("returned_records",)] * 4
+    assert _record(captured)["stop"] == StopReason.BOUND_REACHED.value
+    assert len(planner.calls) == _PLANNER_CALL_ALLOWANCE, "§5's allowance and no run test"
 
 
 def test_the_stop_vocabulary_holds_seven_and_every_earlier_member_kept_its_value() -> None:
