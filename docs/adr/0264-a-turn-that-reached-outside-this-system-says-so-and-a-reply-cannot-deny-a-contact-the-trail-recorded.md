@@ -215,9 +215,8 @@ this decision asserting a fact its inputs do not establish, which is exactly wha
 §8 refuses when it states each member *"over what its inputs establish and never over a
 cause they do not"*. **The user is not left silent there**: every member of the third group
 already carries a `SearchNotServiced` member under ADR-0242 §8 — `INTERRUPTED` for
-`DEADLINE_EXPIRED`, `UNAVAILABLE` for the other two — whose statements say the search was
-begun and stopped, or that the lookup produced nothing usable, and §6's third clause
-already forbids the latter from saying that no request was made.
+`DEADLINE_EXPIRED`, `UNAVAILABLE` for the other two — and §6's third clause already
+forbids `UNAVAILABLE`'s statement from saying that no request was made.
 
 **The tree states both halves of that partition already, in `tools/web_search.py`, and
 this section is that statement read for a different consumer.** `_result_of`'s docstring
@@ -338,18 +337,16 @@ only place a statement about a model's own prompt is made.
 
 **The count is stated over admission because that is the fact its own site holds, and no
 clause here asserts of any bound that it cannot bite.** Where one response carries two
-records under one id the supply takes one, and `records` is then `1`: ADR-0226 §7's
+records under one id the supply takes one and `records` is `1`: ADR-0226 §7's
 deduplication is over the whole union, which `admitted_fourth_group` states in terms —
 *"two records of one batch sharing an id enter once, and the second consumes no slot"*.
-**This ADR does not claim that case, or a budget truncation, is unreachable**, and the
-reason is that neither claim can be made from the seam. `SearchOutcome` constrains a
-record's provenance and its attestation and constrains neither identifier uniqueness nor
-record count — its own docstring puts `search_max_results` outside it, as a `Settings`
-field *"the configured searcher enforces"* and one *"this model carries neither"* of. An
-unreachability argued from `tools/web_search.py` would be an argument about the shipped
-searcher rather than about the seam every `WebSearcher` is wired through, and an ADR
-reasons over the seam. Stated over admission the count needs no such argument: it is what
-this turn's supply took, on every outcome any searcher can return.
+**Neither that case nor a budget truncation is claimed unreachable**, because neither
+claim can be made from the seam: `SearchOutcome` constrains a record's provenance and its
+attestation and constrains neither identifier uniqueness nor record count, putting
+`search_max_results` outside itself as a field *"the configured searcher enforces"*. An
+unreachability argued from `tools/web_search.py` would be about the shipped searcher and
+not about the seam every `WebSearcher` is wired through; stated over admission the count
+needs no such argument.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
 > contact, and a turn that reached outside itself and brought nothing into its supply
@@ -406,6 +403,12 @@ could use.*
 > the composing stage as data — the shape ADR-0242 §7 fixes for its
 > own carrier and ADR-0228 §10 for its own — adds no member to any Protocol, and is
 > **never recomputed downstream**.
+
+> **Normative.** **Assembly accumulates and never replaces.** A servicing that establishes
+> no contact clears nothing an earlier one established, and one that fails contributes its
+> own zero without resetting what an earlier one admitted: §1's condition is *at least
+> one*, and §4's count is one population over the turn. A last-writer-wins assembly is
+> the defect this clause names.
 
 > **Normative.** **The fragment obligation binds on a contact-carrying pass that
 > composes a reply, and on no other.** ADR-0170 §4 requires no composition on a pass whose
@@ -591,8 +594,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    widens the exception for **a contract triad with its primary implementation**, this
 >    decision adds no Protocol and no triad, and §2 says in terms that *"any other
 >    cross-subsystem pairing remains outside the exception"*.
-> 2. **The terminal surface.** `interfaces/cli.py` renders §7's statement. No logic, no
->    store read, no computation (golden rule 3).
+> 2. **The terminal surface.** `interfaces/cli.py` renders §7's statement (golden rule 3).
 >
 > The browser's rendering is #2237's lane and is not a lane of this decision (§9).
 
@@ -635,9 +637,8 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > refuses the enumeration and this ADR mints no route back to one. **Fires** with a
 > decision that argues the case ADR-0226 §9 and ADR-0228 §10 argue against.
 
-> **Normative.** **A notification.** This is a statement in a reply and beside it, and no
-> lane mints a `Notification`, a notification kind, a delivery or a poll result for an
-> outbound contact — ADR-0235 §8's second clause, binding here as ADR-0242 §6 made it bind
+> **Normative.** **A notification.** No lane mints a `Notification`, a notification kind,
+> a delivery or a poll result for an outbound contact — ADR-0235 §8's second clause, binding here as ADR-0242 §6 made it bind
 > there.
 
 ### 13. The arms this decision owes
@@ -688,12 +689,13 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    and not the encounter order (§4) — and **`records` is the search's admitted count in
 >    both**, the egress contact neither zeroing nor replacing it, and a second search
 >    servicing that also admits records adding to it, because §4 counts one population
->    over the turn. §6's one fragment is given once, stating the contact rather than a
->    lookup. **And the construction invariants over `OutboundContact` itself, asserted on
->    the model and not on its producer**, because it is a boundary-crossing value a wire
->    decode also builds: an empty `destinations`, one carrying a class twice, one carrying
->    `(EGRESS_TOOL, SEARCH_PROVIDER)`, one carrying a negative `records` and one carrying
->    an unknown field are each refused rather than accepted and carried as they arrived.
+>    over the turn; **a later servicing that refuses before the send (`RULING_DENY`) or
+>    that fails after a response leaves both the contact and the count standing** (§6).
+>    §6's one fragment is given once, stating the contact rather than a lookup. **And
+>    `OutboundContact`'s own construction invariants, asserted on the model and not on its
+>    producer**, because a wire decode builds it too: an empty `destinations`, one carrying
+>    a class twice, `(EGRESS_TOOL, SEARCH_PROVIDER)`, a negative `records` and an unknown
+>    field are each refused rather than accepted and carried as they arrived.
 
 > 7. **A servicing that failed after its search had already been answered**, in three
 >    shapes, which are what separate the ruling from the record it cannot be read off.
@@ -741,7 +743,7 @@ ADR-0250 §5 added a second `turn`-`None` shape. This decision moves no shape.
 **ADR-0198 §2 — no record owed.** The restatement's enumeration gains a value and loses
 none: `turn`, `routed`, `reply`, `reply_degraded` and `step` carry there exactly what §2
 says, and `None` is the true value of a member describing something a restatement did not
-do. ADR-0242 §9 and ADR-0235 §4 state this in the same words for their own members.
+do — as ADR-0242 §9 and ADR-0235 §4 each state for their own members.
 
 **ADR-0226 §9 and ADR-0238 §11 — no record owed, and `records` is expressly not
 theirs.** No count is added to, removed from or redefined in the per-turn audit record,
@@ -785,12 +787,10 @@ condition falsifies no ratified sentence.
   already carries a `SearchNotServiced` member whose statement is true, so the user is
   told something rather than nothing — but the honest sentence about the wire is not
   available, and §12 says what would make it so.
-- **The egress half is under-inclusive until `StepOutcome` carries the claim.** An egress
-  call that was dispatched and then failed goes unstated, and so does one whose step is
-  `INDETERMINATE`, because `EXECUTED` is the gate's verdict and the addressed status is
-  the only thing under it that separates a call from a refusal. That is stated rather
-  than discovered, and it is the narrow direction: the statement is never false, only
-  sometimes absent.
+- **The egress half is under-inclusive until `StepOutcome` carries the claim.** A call
+  dispatched and then failed goes unstated, and so does an `INDETERMINATE` step (§3).
+  That is stated rather than discovered: the statement is never false, only sometimes
+  absent.
 - **`TurnOutcome` grows to sixteen members**, and `outbound_contact` is the **tenth** a
   later ADR has added as a `None`-defaulting fact a client renders on its own. That is
   ADR-0244 §9's rule working as designed and also the thing to watch: an eleventh and a
