@@ -44,13 +44,16 @@ from ai_assistant.core.types import (
     encodable_text,
 )
 from ai_assistant.planning.composer import (
+    # The block under test, taken from the module rather than restated, so the case
+    # asserts the thing the prompt is actually built from (ADR-0176 §4).
+    _IMPLICIT_SUBJECT_GUIDANCE,
+    DEFAULT_SEARCH_QUERY_MAX_CHARS,
+    ModelBackedQueryComposer,
+)
+from ai_assistant.planning.composer import (
     # The scan's own bound, taken from the module under test rather than restated, so
     # the pair of arms below cannot drift from the figure the parse actually uses.
     _MAX_EXTRACTION_MISSES as _MISS_BUDGET,
-)
-from ai_assistant.planning.composer import (
-    DEFAULT_SEARCH_QUERY_MAX_CHARS,
-    ModelBackedQueryComposer,
 )
 from ai_assistant.testing import FakeModelProvider
 from ai_assistant.testing.cancellation import SuspendableResource
@@ -354,20 +357,33 @@ async def test_the_records_reach_the_prompt_in_the_supplys_own_order(
     assert listed == list(records), "and the rest follow in the supply's own order"
 
 
-async def test_the_instruction_says_where_an_implicit_subject_comes_from() -> None:
-    """#2262's defect, pinned at the one place a prompt can be pinned.
+async def test_the_implicit_subject_guidance_reaches_the_model() -> None:
+    """#2262's defect, pinned the way ADR-0176 §4 asks a prompt block to be pinned.
 
-    Two of six drives searched the setting rather than the thing asked for — one
+    Two of six drives searched something other than the thing asked for — one
     returning flooring for a rug, one returning bike tours for a frame bag — and
     replaying their own supplies showed why: nothing in the instruction said which of
     several same-shaped notes resolves an implicit "that", so the model resolved it
     against whichever read as most substantial, including one belonging to another
-    conversation. The fix is a sentence, and a sentence is not deterministically
-    testable against a real model; what **is** testable is that the model is shown it.
+    conversation. The fix is a paragraph, and what a paragraph can be held to is what
+    §4 decides.
 
-    Asserted over the system message the provider received, and over fragments rather
-    than the whole paragraph, so rewording the guidance does not fail the case while
-    dropping either half of it does.
+    **This asserts the block reaches the model, and not its wording.** §4 is normative
+    that "no test is required — and none is demanded of the implementing lane — that
+    string-matches the wording of the prompt", and says why: such an assertion "fails
+    on every rewording that improves the instruction and passes on every rewording
+    that guts it, so it pins prose and reports nothing about behaviour". An earlier
+    revision of this case matched three substrings and was exactly that — it would
+    have passed against a paragraph telling the model to ignore the notes it names.
+    Holding the block in its own constant is what lets the presence be asserted
+    without the wording; the emptiness guard is what stops the constant being hollowed
+    out while this case still passes.
+
+    The ordering assertion is anchored on the rendered envelope — structural JSON, not
+    prose — because the block is about which note supplies a subject, and a reader
+    meeting it before the shapes it must answer in has been told how to choose a
+    subject before being told what a reply looks like. Where it sits relative to the
+    surrounding prose is a reviewer's read, which is what §4 leaves it to.
     """
     model = FakeModelProvider(json.dumps({"query": "porto"}))
 
@@ -378,20 +394,12 @@ async def test_the_instruction_says_where_an_implicit_subject_comes_from() -> No
         )
     )
 
+    assert _IMPLICIT_SUBJECT_GUIDANCE.strip(), "the block decides nothing if it is empty"
     system = model.last_messages[0]
     assert system.role is Role.SYSTEM
-    assert "in the order this assistant selected them" in system.content, (
-        "the order means something"
-    )
-    assert "those opening notes" in system.content, "and what it means: the subject is one of those"
-    assert "If any of them record" in system.content, (
-        "stated conditionally, because `recent` is empty on a first turn and on one "
-        "whose history read degraded, and the supply carries no boundary that would "
-        "let the model tell an opening note from retrieved background"
-    )
-    assert "earliest" not in system.content, (
-        "and never the earliest of them — history is oldest first, so that is the "
-        "oldest turn rather than the one a follow-up is about"
+    assert _IMPLICIT_SUBJECT_GUIDANCE in system.content
+    assert system.content.index('{"no_search_needed": true}') < system.content.index(
+        _IMPLICIT_SUBJECT_GUIDANCE
     )
 
 
