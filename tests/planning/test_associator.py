@@ -601,6 +601,42 @@ async def test_an_absent_goals_key_is_no_labels_and_not_a_malformed_one() -> Non
     assert got.labels == ()
 
 
+@pytest.mark.parametrize("verdict", _SPELLINGS)
+async def test_an_explicit_null_goals_is_no_labels_and_is_pinned_as_such(verdict: str) -> None:
+    """``"goals": null`` is the answer "no labels", not an answer that could not be read.
+
+    Pinned rather than left incidental, because it is the one place this module reads a
+    value as *empty* where the arms above read every other non-list as unreadable, and
+    the distinction is load-bearing: JSON's spelling of an empty optional field is the
+    one thing a ``null`` can mean here, so it is parsed rather than guessed at.
+
+    **It is the reading this envelope's own neighbours already take.**
+    ``_optional_understanding`` reads an explicit ``"understanding": null`` as "the
+    planner proposed no change to the understanding" rather than as a malformed member,
+    and ADR-0250 §7 fixes the same equivalence one level down for a question's subject:
+    "``None`` means the question is about the outcome". Declining on it would buy a
+    user-visible question for an answer that was perfectly clear — which §3 prices as a
+    loss, the ask being worth its one sentence only where there is really a doubt.
+
+    ``associates`` is in the parametrisation for the opposite reason: a null there
+    leaves it naming no label, which the type refuses and §3 turns into the ask, so the
+    reading costs nothing in the one case where a wrong empty *would* pick a goal.
+    """
+    expected = {
+        "associates": AssociationVerdict.UNDECIDED,
+        "fresh": AssociationVerdict.FRESH,
+        "continues": AssociationVerdict.CONTINUES,
+        "undecided": AssociationVerdict.UNDECIDED,
+    }[verdict]
+
+    got = await _answering(json.dumps({"verdict": verdict, "goals": None})).associate(
+        candidacy_of("book a campsite", "file taxes")
+    )
+
+    assert got.verdict is expected
+    assert got.labels == ()
+
+
 # --- the scanning parse (ADR-0071, issue #2267) ------------------------------
 
 
