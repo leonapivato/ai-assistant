@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     AttemptState,
     BriefElement,
     EvidenceDigest,
+    EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
     FrozenDict,
@@ -84,6 +85,16 @@ def _goal(*, statement: str = "relocate to Lisbon in September", **overrides: ob
         "created_at": _WHEN,
     }
     return Goal(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def _histories(*goal_ids: str) -> tuple[EvidenceHistory, ...]:
+    """One empty history per goal, which ADR-0252 §13's closure rule requires.
+
+    "Exactly one entry per goal the export carries" — an empty history with a zero
+    count is a true answer for a goal that has recorded nothing, and is not an
+    omission, so every export below that carries a goal carries one of these.
+    """
+    return tuple(EvidenceHistory(goal_id=one) for one in goal_ids)
 
 
 def _step(**overrides: object) -> StepExecution:
@@ -1263,7 +1274,9 @@ def test_export_carries_a_whole_supersession_chain() -> None:
     first = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
     revision = ActionPlan(id="p2", goal_id="g1", steps=(), created_at=_WHEN, supersedes="p1")
 
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
+    export = PlanExport(
+        exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
+    )
 
     assert export.schema_version == 11
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
@@ -1298,7 +1311,13 @@ def test_export_rejects_an_execution_that_does_not_match_its_plan() -> None:
         updated_at=_WHEN,
     )
     with pytest.raises(ValidationError, match="does not line up"):
-        PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(_goal(),),
+            plans=(plan,),
+            executions=(execution,),
+            evidence=_histories("g1"),
+        )
 
 
 def test_a_step_cannot_finish_before_it_started() -> None:
@@ -1343,7 +1362,13 @@ def test_export_round_trips_through_json() -> None:
         ),
         updated_at=_WHEN,
     )
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
+    export = PlanExport(
+        exported_at=_WHEN,
+        goals=(_goal(),),
+        plans=(plan,),
+        executions=(execution,),
+        evidence=_histories("g1"),
+    )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
     assert restored.schema_version == 11
@@ -1394,7 +1419,9 @@ def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() ->
             )
         ),
     )
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,))
+    export = PlanExport(
+        exported_at=_WHEN, goals=(_goal(),), plans=(plan,), evidence=_histories("g1")
+    )
 
     document = export.model_dump_json()
     restored = TypeAdapter(PlanExport).validate_json(document)
@@ -1462,7 +1489,7 @@ def test_plan_export_is_deeply_immutable() -> None:
     export's referential integrity. ADR-0068 freezes ``Goal``, so it now raises —
     the wrapper needed no change of its own.
     """
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),))
+    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), evidence=_histories("g1"))
     with pytest.raises(ValidationError):
         export.goals[0].interpretation[0].outcome = "tampered"
 
@@ -1894,6 +1921,7 @@ def test_the_export_closure_reaches_an_attempt() -> None:
             exported_at=_WHEN,
             goals=(goal,),
             attempts=(GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN),),
+            evidence=_histories("g1"),
         )
         .attempts[0]
         .id

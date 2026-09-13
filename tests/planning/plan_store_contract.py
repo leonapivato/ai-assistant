@@ -32,6 +32,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
+    MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
     ActionPlan,
     AttemptEffort,
@@ -40,8 +41,14 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     AttemptTransition,
+    EvidenceApplicability,
+    EvidenceBasis,
+    EvidenceHistory,
+    EvidenceStanding,
     Goal,
     GoalAttempt,
+    GoalElement,
+    GoalEvidence,
     GoalInterpretation,
     GoalQuestion,
     GoalQuestionDisposition,
@@ -53,6 +60,7 @@ from ai_assistant.core.types import (
     Provenance,
     ReadAsk,
     ReadKind,
+    ReadOutcomeKind,
     ReadRequest,
     SkipReason,
     StepFailure,
@@ -166,6 +174,62 @@ async def _goal_with_attempt(
     """
     await store.save_goal(_goal(goal_id))
     await store.open_attempt(_attempt(attempt_id, goal_id=goal_id))
+
+
+#: One region every evidence arm below composes from, applying the one axis whose
+#: comparison is byte-exact (ADR-0213 §3) so an arm never turns on a fold.
+_REGION = EvidenceApplicability(topics=("weather",))
+
+
+def _evidence(  # noqa: PLR0913 — the row's own fields, each a distinct thing an arm varies
+    evidence_id: str = "ev1",
+    *,
+    goal_id: str = "g1",
+    attempt_id: str = "a1",
+    read_at: datetime = _WHEN,
+    as_of: datetime | None = None,
+    supported: tuple[EvidenceApplicability, ...] = (_REGION,),
+    verdict: str = ReadOutcomeKind.RETURNED_RECORDS.value,
+    records: tuple[str, ...] = ("m1",),
+) -> GoalEvidence:
+    """A ``STANDING`` ``READ_OUTCOME`` row, in the shape ADR-0252 §1 admits.
+
+    A ``SIGHTED_QUERY``, because that is one of the three durable kinds whose
+    ``len(records)`` must equal ``returned`` — so an arm varying ``records`` varies the
+    count with it and never has to remember the invariant.
+    """
+    return GoalEvidence(
+        id=evidence_id,
+        goal_id=goal_id,
+        attempt_id=attempt_id,
+        basis=EvidenceBasis.READ_OUTCOME,
+        read_kind=ReadKind.SIGHTED_QUERY,
+        supported=supported,
+        supported_elided=0,
+        read_at=read_at,
+        as_of=as_of,
+        records=records,
+        returned=len(records),
+        admitted=len(records),
+        verdict=verdict,
+        standing=EvidenceStanding.STANDING,
+    )
+
+
+async def _goal_with_evidence(
+    store: PlanStore, *, rows: int = 1, goal_id: str = "g1"
+) -> tuple[str, ...]:
+    """A goal, an attempt and ``rows`` standing evidence rows, oldest first.
+
+    ``read_at`` steps by a minute per row, so ``evidence_of``'s order is a fact about
+    the instants rather than about the order the writes happened to land in.
+    """
+    await _goal_with_attempt(store, goal_id=goal_id)
+    written = []
+    for index in range(rows):
+        row = _evidence(f"ev{index + 1}", goal_id=goal_id, read_at=_WHEN + timedelta(minutes=index))
+        written.append(await store.record_evidence(row))
+    return tuple(written)
 
 
 #: One read request of each of ADR-0226 §2's two kinds, for the export arms below.
@@ -1972,6 +2036,506 @@ class PlanStoreContract:
         assert export.schema_version == 11
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
+
+    # --- evidence: ADR-0252 §12's three members and §13's bound --------------
+    # §12 obliges this suite to carry all four obligations in the change that adds
+    # them: "a conformance suite exercising one implementation would be a suite that
+    # lets the other disagree". The predicates of §§6-8 are **not** here — §12 puts
+    # them in `orchestration` and the store "applies the marks it is given and
+    # evaluates neither predicate" — so what these arms pin is the store's half:
+    # the refusals, the indivisibility, the order, the bound and the cascade.
+
+    async def test_a_row_is_written_and_read_back_by_id(self, store: PlanStore) -> None:
+        """ADR-0252 §18 arm 26: the row names its attempt and reads back whole.
+
+        "The row names the attempt that recorded it on ``attempt_id``, and is read back
+        by ``get_evidence`` by ``id``." A row that came back missing a field would be a
+        store that had quietly decided which of §1's values it keeps.
+        """
+        await _goal_with_attempt(store)
+        written = _evidence()
+
+        assert await store.record_evidence(written) == "ev1"
+
+        stored = await store.get_evidence("ev1")
+        assert stored == written
+        assert stored is not None
+        assert stored.attempt_id == "a1"
+        assert stored.standing is EvidenceStanding.STANDING
+        assert await store.get_evidence("nope") is None
+
+    async def test_record_evidence_refuses_an_id_it_already_holds(self, store: PlanStore) -> None:
+        """§12: it "refuses a row whose ``id`` the store already holds".
+
+        No member replaces a stored row, so a second write under one id would be the
+        upsert §12 declines to offer — and the first row's applicabilities, instants and
+        verdict would be gone with no record that they ever stood.
+        """
+        await _goal_with_evidence(store)
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(_evidence("ev1", supported=()))
+
+        stored = await store.get_evidence("ev1")
+        assert stored is not None
+        assert stored.supported == (_REGION,), "the held row is untouched"
+
+    async def test_record_evidence_refuses_a_goal_the_store_does_not_hold(
+        self, store: PlanStore
+    ) -> None:
+        """§12: it refuses "a row whose ``goal_id`` the store does not hold".
+
+        With the error class an unknown goal already raises, so a caller handling one
+        handles both.
+        """
+        with pytest.raises(PlanningError):
+            await store.record_evidence(_evidence(goal_id="ghost"))
+
+    async def test_evidence_of_returns_a_total_order_and_a_count(self, store: PlanStore) -> None:
+        """§12: ``read_at`` oldest first, **ties broken by ``id`` ascending** (arm 39).
+
+        "Two rows sharing a ``read_at`` to the microsecond are returned by
+        ``evidence_of`` in ``id`` order by both conforming implementations." An order
+        stated on the instant alone would leave two stores free to return them either
+        way round, which makes ADR-0252 §10's ``E`` label space differ between them and
+        makes §13's elision drop different rows — so the tie-break is a contract and not
+        a convenience.
+
+        The rows are written **newest first** here, so an implementation that returned
+        insertion order fails rather than passing by accident.
+        """
+        await _goal_with_attempt(store)
+        later = _WHEN + timedelta(hours=1)
+        for row in (
+            _evidence("ev9", read_at=later),
+            _evidence("ev3", read_at=_WHEN),
+            _evidence("ev1", read_at=_WHEN),
+        ):
+            await store.record_evidence(row)
+
+        history = await store.evidence_of("g1")
+
+        assert [row.id for row in history.rows] == ["ev1", "ev3", "ev9"]
+        assert history.goal_id == "g1"
+        assert history.elided == 0
+
+    async def test_evidence_of_an_unheld_goal_is_an_empty_history(self, store: PlanStore) -> None:
+        """A lookup, not a fault: an absent goal reads as a history with nothing in it.
+
+        ``open_question``'s own posture — "an absent goal is not a fault to raise on a
+        read that is already a lookup" — and the zero count is a true statement about a
+        goal that has never dropped a row.
+        """
+        history = await store.evidence_of("ghost")
+
+        assert history == EvidenceHistory(goal_id="ghost")
+
+    async def test_a_refresh_marks_the_row_it_displaces_in_the_same_write(
+        self, store: PlanStore
+    ) -> None:
+        """§8, §12 and arm 16: the append and the marks land together.
+
+        "A row that refreshes an earlier row supersedes it: the earlier row's
+        ``standing`` becomes ``SUPERSEDED`` and its ``superseded_by`` names ``L``, **in
+        the same indivisible write that records ``L``**." Which rows a new row refreshes
+        is ``orchestration``'s six-limb test (§8) and not the store's — the store applies
+        the set it is given (§12) — so this arm hands it one.
+
+        **The mark and its argument travel together or the value does not construct**
+        (§1), so a store that moved the standing and left ``superseded_by`` absent could
+        not have written the row at all.
+        """
+        await _goal_with_evidence(store)
+
+        await store.record_evidence(
+            _evidence("ev2", read_at=_WHEN + timedelta(hours=1)), supersedes=("ev1",)
+        )
+
+        displaced = await store.get_evidence("ev1")
+        assert displaced is not None
+        assert displaced.standing is EvidenceStanding.SUPERSEDED
+        assert displaced.superseded_by == "ev2"
+        assert displaced.inapplicable_at_revision is None
+        fresh = await store.get_evidence("ev2")
+        assert fresh is not None
+        assert fresh.standing is EvidenceStanding.STANDING
+
+    @pytest.mark.parametrize(
+        ("named", "arrange"),
+        [
+            pytest.param("ev-other", "another goal's", id="not-this-goals"),
+            pytest.param("nope", "no row at all", id="no-such-row"),
+            pytest.param("ev1", "already marked", id="not-standing"),
+            pytest.param("ev2", "the row being written", id="the-row-being-written"),
+        ],
+    )
+    async def test_record_evidence_refuses_a_supersedes_it_cannot_apply(
+        self, store: PlanStore, named: str, arrange: str
+    ) -> None:
+        """§12's three refusals, and the whole call is refused rather than half applied.
+
+        "Refusing the whole call where any named row is not this goal's, is not
+        ``STANDING``, or is the row being written" — so a caller never has to ask which
+        of its marks landed. A row this store does not hold at all is "not this goal's",
+        which is why it is one case rather than a fourth.
+
+        The last case is what §12's own sentence rules out: a row is validated against
+        the history **as it stood before the call**, so naming the row being written
+        names nothing.
+        """
+        assert arrange  # the parametrisation's own label, carried for the report
+        await _goal_with_evidence(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+        await store.record_evidence(_evidence("ev-other", goal_id="g2"))
+        if named == "ev1":
+            await store.record_evidence(
+                _evidence("ev-mark", read_at=_WHEN + timedelta(hours=1)), supersedes=("ev1",)
+            )
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(
+                _evidence("ev2", read_at=_WHEN + timedelta(hours=2)), supersedes=(named,)
+            )
+
+        assert await store.get_evidence("ev2") is None, "the whole call is refused"
+        other = await store.get_evidence("ev-other")
+        assert other is not None
+        assert other.standing is EvidenceStanding.STANDING
+
+    async def test_a_marked_row_is_never_marked_again(self, store: PlanStore) -> None:
+        """§8 and §9 and arm 15: the mark is terminal and is never un-marked.
+
+        "A row that is ``SUPERSEDED`` is never returned to ``STANDING``, by a later
+        revision, by a later refresh, by the deletion of the row that displaced it, or
+        by any other route." The store's half of that is refusing to mark a row that is
+        already marked — in **either** direction, so a superseded row cannot be
+        invalidated and an invalidated one cannot be superseded.
+        """
+        await _goal_with_evidence(store, rows=2)
+        await store.record_evidence(
+            _evidence("ev3", read_at=_WHEN + timedelta(hours=1)), supersedes=("ev1",)
+        )
+        await store.record_interpretation(
+            GoalRevision(
+                goal_id="g1", interpretation=_revision(2), expected_version=0, invalidates=("ev2",)
+            )
+        )
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(
+                _evidence("ev4", read_at=_WHEN + timedelta(hours=2)), supersedes=("ev1",)
+            )
+        with pytest.raises(PlanningError):
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_revision(3),
+                    expected_version=1,
+                    invalidates=("ev2",),
+                )
+            )
+
+        first = await store.get_evidence("ev1")
+        second = await store.get_evidence("ev2")
+        assert first is not None
+        assert second is not None
+        assert (first.standing, first.superseded_by) == (EvidenceStanding.SUPERSEDED, "ev3")
+        assert (second.standing, second.inapplicable_at_revision) == (
+            EvidenceStanding.INAPPLICABLE,
+            2,
+        )
+
+    async def test_a_revision_applies_its_invalidations_in_the_same_step(
+        self, store: PlanStore
+    ) -> None:
+        """§9, §12 and arm 16: the append, the version advance and the marks are one.
+
+        "``GoalRevision`` carries the set, ``record_interpretation`` applies it, and
+        there is **no second call and no window** in which a recorded revision stands
+        beside evidence its own change invalidated." ``inapplicable_at_revision``
+        carries "the ``revision`` that did it", which is the revision being appended.
+
+        **Which rows a revision invalidates is not the store's to work out** (§9, §12):
+        the predicate is keyed on ``supported`` and is ``orchestration``'s, so this arm
+        hands the store a set.
+        """
+        await _goal_with_evidence(store, rows=2)
+
+        goal = await store.record_interpretation(
+            GoalRevision(
+                goal_id="g1",
+                interpretation=_revision(2),
+                expected_version=0,
+                invalidates=("ev1",),
+            )
+        )
+
+        assert goal.version == 1
+        assert goal.interpretation[-1].revision == 2
+        marked = await store.get_evidence("ev1")
+        assert marked is not None
+        assert marked.standing is EvidenceStanding.INAPPLICABLE
+        assert marked.inapplicable_at_revision == 2
+        assert marked.superseded_by is None
+        untouched = await store.get_evidence("ev2")
+        assert untouched is not None
+        assert untouched.standing is EvidenceStanding.STANDING, "every other row is untouched"
+
+    async def test_a_revision_naming_an_unmarkable_row_appends_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§12: ``record_interpretation`` "refuses the whole call" the same way.
+
+        A revision that cannot mark every row it named must not land its append either —
+        otherwise the goal moves on while the evidence its own change invalidated stays
+        ``STANDING``, which is exactly the window the atomicity exists to close.
+        """
+        await _goal_with_evidence(store)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+        await store.record_evidence(_evidence("ev-other", goal_id="g2"))
+
+        with pytest.raises(PlanningError):
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_revision(2),
+                    expected_version=0,
+                    invalidates=("ev-other",),
+                )
+            )
+
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.version == 0, "the append did not land"
+        assert len(goal.interpretation) == 1
+
+    async def test_an_invalidation_does_not_rewrite_the_revision_that_grounds_on_it(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0252 §10 and arm 17: an element grounded on a row survives the mark.
+
+        "A ``GoalElement`` grounded on a row that is later marked ``INAPPLICABLE`` or
+        ``SUPERSEDED`` is **not rewritten, not dropped, not re-grounded and not removed
+        from the revision it sits in**, and no lane records a revision on account of a
+        mark." The chain is append-only and a revision states what was understood **when
+        it was recorded**; editing one to reflect a later mark would destroy exactly the
+        audit it exists to be.
+        """
+        await _goal_with_evidence(store)
+        grounded = _revision(2).model_copy(
+            update={
+                "conditions": (
+                    GoalElement(
+                        text="the forecast is settled",
+                        ground=Ground.FROM_EVIDENCE,
+                        evidence_row_id="ev1",
+                    ),
+                )
+            }
+        )
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=grounded, expected_version=0)
+        )
+
+        await store.record_interpretation(
+            GoalRevision(
+                goal_id="g1",
+                interpretation=_revision(3),
+                expected_version=1,
+                invalidates=("ev1",),
+            )
+        )
+
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.interpretation[1].conditions[0].evidence_row_id == "ev1"
+        assert goal.interpretation[1].conditions[0].ground is Ground.FROM_EVIDENCE
+
+    async def test_the_bound_drops_the_oldest_row_and_discloses_it(self, store: PlanStore) -> None:
+        """§13 and arm 20: the history is bounded, and the elision is never silent.
+
+        "A goal whose history would exceed it drops its **oldest** row on the write that
+        would exceed it", and ``EvidenceHistory.elided`` "carries how many rows this
+        goal's history has dropped … it **never decreases**, and a write that drops *k*
+        rows advances it by *k*". Silent truncation is not available, on ADR-0086 §4's
+        ground.
+
+        **The drop is by age and by nothing else** — the oldest row here is ``STANDING``
+        and is dropped all the same, because "a rule that kept ``STANDING`` rows
+        preferentially would make the history a curated selection rather than a record".
+        """
+        await _goal_with_attempt(store)
+        for index in range(MAX_GOAL_EVIDENCE):
+            await store.record_evidence(
+                _evidence(f"ev{index:03d}", read_at=_WHEN + timedelta(minutes=index))
+            )
+        assert (await store.evidence_of("g1")).elided == 0
+
+        await store.record_evidence(_evidence("ev-new", read_at=_WHEN + timedelta(days=1)))
+
+        history = await store.evidence_of("g1")
+        assert len(history.rows) == MAX_GOAL_EVIDENCE
+        assert history.elided == 1
+        assert await store.get_evidence("ev000") is None, "the oldest went"
+        assert await store.get_evidence("ev-new") is not None
+        assert history.rows[0].id == "ev001"
+
+    async def test_the_write_never_elides_the_row_it_is_writing(self, store: PlanStore) -> None:
+        """§12, §13 and arm 36: "a write never elides the row it is writing".
+
+        "Whatever place §12's order gives it: the oldest **other** row is dropped
+        instead", because "a store that discarded the row it had just been told to
+        persist would return an id from ``record_evidence`` that resolves in nothing".
+        The row written here is the **oldest** of the goal's history by ``read_at``, so
+        an implementation that elided by age alone would drop it.
+        """
+        await _goal_with_attempt(store)
+        for index in range(MAX_GOAL_EVIDENCE):
+            await store.record_evidence(
+                _evidence(f"ev{index:03d}", read_at=_WHEN + timedelta(days=1, minutes=index))
+            )
+
+        oldest = await store.record_evidence(_evidence("ev-old", read_at=_WHEN))
+
+        assert await store.get_evidence(oldest) is not None, "the appended row is kept"
+        history = await store.evidence_of("g1")
+        assert history.elided == 1
+        assert history.rows[0].id == "ev-old"
+        assert await store.get_evidence("ev000") is None, "the oldest *other* row went"
+
+    async def test_a_full_history_refreshed_whole_still_writes_marks_and_elides(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0252 §18 arm 40, which is the case that forced §12's two guarantees apart.
+
+        "A goal holding ``MAX_GOAL_EVIDENCE`` standing rows with identical support and
+        one shared effective instant, written to with a later answering row covering that
+        support and naming all of them in ``supersedes``, **succeeds**." A rule
+        protecting every row the call marks would leave the write with no eligible
+        candidate — "retaining all of them breaks the bound, dropping any of them breaks
+        the protection, and refusing the write breaks ``record_evidence``'s own
+        contract" — so the protection is scoped to the **appended** row and the elision
+        then runs over the marked history by age alone.
+        """
+        await _goal_with_attempt(store)
+        held = [f"ev{index:03d}" for index in range(MAX_GOAL_EVIDENCE)]
+        for row_id in held:
+            await store.record_evidence(_evidence(row_id, read_at=_WHEN))
+
+        await store.record_evidence(
+            _evidence("ev-new", read_at=_WHEN + timedelta(hours=1)), supersedes=tuple(held)
+        )
+
+        history = await store.evidence_of("g1")
+        assert len(history.rows) == MAX_GOAL_EVIDENCE
+        assert history.elided == 1
+        assert history.rows[-1].id == "ev-new"
+        assert [row.standing for row in history.rows[:-1]] == [EvidenceStanding.SUPERSEDED] * (
+            MAX_GOAL_EVIDENCE - 1
+        )
+        assert await store.get_evidence("ev000") is None, "a row this call marked was elided"
+
+    async def test_a_superseded_by_may_name_a_row_the_bound_has_dropped(
+        self, store: PlanStore
+    ) -> None:
+        """§12 and arm 36: the reference is "an identifier and not a resolution guarantee".
+
+        §12's order is ``(read_at, id)`` and §8 limb 6 orders by the **effective
+        instant**, which is ``as_of`` where a source declares one — so a row that
+        superseded another can sort **before** it and be elided first. "The mark still
+        states what it states, the loss is carried on ``EvidenceHistory.elided``, and no
+        lane repairs it, back-fills it, un-marks the row, reorders retention to prevent
+        it, or keeps a row alive because something names it."
+        """
+        await _goal_with_attempt(store)
+        # The two orders come apart exactly here: `ev-fresh` was **read** first and is
+        # therefore first in `(read_at, id)` order, but the source it read declares the
+        # **later** instant — so it is the later row by §8 limb 6's effective instant
+        # and legitimately supersedes `ev-old`.
+        await store.record_evidence(
+            _evidence("ev-old", read_at=_WHEN + timedelta(minutes=10), as_of=_WHEN)
+        )
+        await store.record_evidence(
+            _evidence("ev-fresh", read_at=_WHEN, as_of=_WHEN + timedelta(minutes=5)),
+            supersedes=("ev-old",),
+        )
+        for index in range(MAX_GOAL_EVIDENCE - 2):
+            await store.record_evidence(
+                _evidence(f"ev{index:03d}", read_at=_WHEN + timedelta(days=1, minutes=index))
+            )
+        assert (await store.evidence_of("g1")).elided == 0, "the bound is not yet reached"
+
+        await store.record_evidence(_evidence("ev-last", read_at=_WHEN + timedelta(days=2)))
+
+        assert await store.get_evidence("ev-fresh") is None, "the superseding row went first"
+        survivor = await store.get_evidence("ev-old")
+        assert survivor is not None
+        assert survivor.standing is EvidenceStanding.SUPERSEDED
+        assert survivor.superseded_by == "ev-fresh", "the mark is not repaired"
+        assert (await store.evidence_of("g1")).elided == 1
+
+    async def test_the_export_carries_one_history_per_goal_with_its_count(
+        self, store: PlanStore
+    ) -> None:
+        """§13 and arm 22: export closure and disclosure.
+
+        "An export carries exactly one ``EvidenceHistory`` per goal, each with its rows
+        and its elision count." ADR-0004 §6's export right is what obliges the member —
+        a goal's evidence is the user's data — and the count is what stops the document
+        saying *this is the evidence* where the truth is *this is the evidence that was
+        kept*. A goal that has recorded nothing carries an **empty** history rather than
+        none, which is a true answer and not an omission.
+        """
+        await _goal_with_evidence(store, rows=2)
+        await _goal_with_attempt(store, goal_id="g2", attempt_id="a2")
+
+        export = await store.export()
+
+        by_goal = {history.goal_id: history for history in export.evidence}
+        assert set(by_goal) == {"g1", "g2"}
+        assert [row.id for row in by_goal["g1"].rows] == ["ev1", "ev2"]
+        assert by_goal["g1"].elided == 0
+        assert by_goal["g2"] == EvidenceHistory(goal_id="g2")
+
+    async def test_deleting_a_goal_removes_its_evidence_and_counts_it(
+        self, store: PlanStore
+    ) -> None:
+        """§12 and arm 23: the cascade reaches evidence and reports what it removed.
+
+        "``delete_goal``'s cascade reaches evidence, and ``GoalDeletion`` gains
+        ``evidence_removed``" — ADR-0014 §5's "a goal the user deletes must not leave its
+        plan history behind" **extended rather than re-promised**. "No row of any
+        standing blocks a deletion", and the elision count goes with the goal, so a goal
+        reopened under the same id does not inherit a predecessor's losses.
+        """
+        await _goal_with_attempt(store)
+        for index in range(MAX_GOAL_EVIDENCE + 1):
+            await store.record_evidence(
+                _evidence(f"ev{index:03d}", read_at=_WHEN + timedelta(minutes=index))
+            )
+        await store.record_evidence(
+            _evidence("ev-mark", read_at=_WHEN + timedelta(days=1)), supersedes=("ev001",)
+        )
+        assert (await store.evidence_of("g1")).elided == 2
+
+        removal = await store.delete_goal("g1")
+
+        assert removal.deleted
+        assert removal.evidence_removed == MAX_GOAL_EVIDENCE
+        assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
+        assert await store.get_evidence("ev002") is None
+
+    async def test_clearing_the_store_removes_every_row(self, store: PlanStore) -> None:
+        """``clear`` is one of only three routes out of the store for a row (§12).
+
+        The others are ``delete_goal`` and §13's elision: "no member deletes one row".
+        """
+        await _goal_with_evidence(store, rows=2)
+
+        assert await store.clear() >= 2
+
+        assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
+        assert await store.get_evidence("ev1") is None
 
     # --- starting an execution ------------------------------------------
 
