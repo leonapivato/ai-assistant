@@ -4089,6 +4089,50 @@ class Planner(Protocol):
             value it came back carrying (ADR-0228 §5, ADR-0249 §8), so an
             implementation neither sets them nor is penalised for setting them.
 
+            **ADR-0253 makes that a four-field clause and adds obligations to what a
+            conforming implementation produces.** The signature does not move and this
+            envelope gains no member; what changes is what a plan may *be*, which §10
+            classifies a **breaking** Protocol change under golden rule 5 precisely
+            because it is stated here rather than in a type alone.
+
+            - **A plan declaring none of ADR-0253's fields is conforming and unchanged.**
+              ``depends_on``, ``resolves``, ``when`` and ``interpretations`` default
+              empty and ``verifies`` and ``evidence_recency`` to ``None``, and a plan
+              carrying those values is exactly the plan this system wrote before that
+              decision: no dependency, no reference, no condition, no verification and
+              no interpretation.
+            - **An element is named by a label and never by an identifier** (§9,
+              ADR-0228 §8). Each ``StepCondition.about`` and each
+              ``PlanInterpretation.settles`` a planner returns is a **condition
+              label** — the ASCII ``D`` followed by a 1-based ordinal in decimal with
+              no padding — indexing the ``conditions`` of the ``understanding`` this
+              same call returns where it returns one, and the ``GoalBrief.conditions``
+              it received where it does not. **The loop substitutes each for the
+              ``GoalElement.id`` it resolves to**, once, before any other component
+              observes the plan, and ``PlanStore.save_plan`` refuses a plan on which it
+              has not. So the fields another component sets become **exactly four** —
+              ``supersedes``, ``targets_revision``, and each of these two — and an
+              implementation neither resolves them nor is penalised for returning a
+              label. A ``GoalBrief`` carries no element id for one to copy.
+            - **Step and interpretation ids are the implementation's** and are minted
+              by whatever mints step ids today. **No step identifier is rendered to a
+              model and none is accepted from one** (§1): a model names a step by its
+              1-based position in the envelope's own ``steps`` list, and the
+              implementation resolves each ordinal to the id it minted.
+            - **What a returned plan may not be, it may not construct.** A reference
+              outside the declaring step's ``depends_on``, a dependency that does not
+              point strictly earlier, a fifth interpretation, two sharing an ``id`` or a
+              ``settles``, and a step requiring a verdict read from a step at or after
+              it are each **unconstructible** (§§1, 6, 8) — so a planner producing one
+              raises rather than returns, and a conforming implementation does not
+              produce one.
+            - **A vocabulary member is extracted strictly and never repaired** (§9). A
+              ``basis``, a required ``InterpretationVerdict``, a ``VerificationKind``
+              and a ``read_kind`` outside their enumerations, and an
+              ``evidence_recency`` that is not a strictly positive ISO-8601 duration,
+              are each an extraction failure for that envelope rather than a value
+              coerced, case-folded, aliased or clamped into range.
+
         Raises:
             PlanningError: If no plan could be produced for the goal.
         """

@@ -1114,10 +1114,15 @@ class PlannerContract:
         model call that no permission stage rules on", so the count is a per-turn cost
         and the ceiling is fixed in ``core`` rather than configured.
 
-        **And an interpretation is never a step**: ADR-0226 §4's reasoning is adopted
-        whole (§8), so no interpretation appears in ``steps`` and no step carries an
-        interpretation's id — the same seam-level assertion
-        ``test_a_read_it_asks_for_never_becomes_a_step`` makes for a ``ReadAsk``.
+        **It asserts the bound and nothing beside it.** ADR-0253 §8 requires an
+        interpretation's ``id`` to be unique **within** ``interpretations``, exactly as a
+        step's is within ``steps``, and it mints **no shared namespace** between the two:
+        "an interpretation is not a ``PlanStep``" is a statement about routing and
+        authorization — not selected, not resolved to a tool, not ruled on, never
+        reaching ``ExecutionState`` — and not about identifiers. ``ActionPlan`` itself
+        admits a cross-collection collision, so a suite refusing one here would widen the
+        ``Planner`` contract past the ratified decision, which golden rule 5 puts behind
+        an ADR rather than behind a conformance arm.
         """
         plan = (
             await planner.plan(
@@ -1129,11 +1134,8 @@ class PlannerContract:
             )
         ).plan
         assert len(plan.interpretations) <= MAX_INTERPRETATION_STEPS
-        step_ids = {step.id for step in plan.steps}
-        for interpretation in plan.interpretations:
-            assert interpretation.id not in step_ids, (
-                "an interpretation is not a PlanStep and nothing drives it (ADR-0253 §8)"
-            )
+        named = [interpretation.id for interpretation in plan.interpretations]
+        assert len(set(named)) == len(named), "a plan states each interpretation once (ADR-0253 §8)"
 
     async def test_a_read_it_asks_for_never_becomes_a_step(
         self, asking_planner: Planner | None
