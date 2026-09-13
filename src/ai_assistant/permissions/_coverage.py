@@ -37,10 +37,17 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ai_assistant.core.types import BoundKind, canonical_json_bytes
+from ai_assistant.core.types import (
+    BoundAccount,
+    BoundKind,
+    CanonicalDestination,
+    ToolDefinition,
+    canonical_json_bytes,
+)
+from ai_assistant.permissions._detachment import field_state
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -50,13 +57,107 @@ if TYPE_CHECKING:
         Authorization,
         CoverageMember,
         FrozenJson,
-        ToolDefinition,
+        SpanCoverage,
         ValueBound,
     )
 
 
-def user_facing(request: ActionRequest) -> frozenset[str]:
-    """The keys of ``request.parameters`` the declaration does **not** fill itself.
+class CoverageSubject(NamedTuple):
+    """What one request asks ADR-0254 §§3 and 4, read in a **single** observation.
+
+    Built by :func:`coverage_subject` **before the ruling's first suspension** and
+    consulted afterwards in the request's place, so that one ruling is decided about
+    one request (ADR-0065). A sourced ruling suspends — ``live_for`` is a durable
+    read — and a frozen model is rewritable through ``__dict__``, so a caller can
+    replace ``goal`` and ``parameters`` while that seam is out. A policy that
+    selected the row for the goal it read on the way in and compared the arguments
+    it read on the way out would ``ALLOW`` a request that is **neither** the one
+    presented nor the one substituted.
+
+    ``permissions/recipient_grants.py``'s ``_coverage_subject`` is the model this
+    follows one seam over, and the values are **detached as well as captured**:
+    capturing the objects alone leaves the same rewrite available one level down.
+    Rebuilt through validation and never deep-copied, which is
+    ``core.types._detached_tool``'s own discipline continued across a suspension
+    rather than a new one.
+
+    **Narrower than a whole validated** :class:`~ai_assistant.core.types.ActionRequest`
+    **snapshot, deliberately.** Rebuilding the request would re-run ADR-0145 §1's
+    schema evaluation on every ruling, and every value §§3 and 4 are stated over is
+    named here — so the cheaper capture is not a weaker one over the comparisons it
+    carries.
+    """
+
+    goal: str | None
+    """``request.goal``: which row ``live_for`` is asked for, and ``None`` where a
+    request reaches route (d) in no case."""
+
+    tool: ToolDefinition
+    """The declaration by value — §3's condition 3 — and what :func:`user_facing`
+    and :func:`account_of` read."""
+
+    parameters: Mapping[str, FrozenJson]
+    """The arguments condition 6 and every §4 reading are taken over."""
+
+    account: BoundAccount | None
+    """The binding's connected account — §3's condition 4 — and ``None`` exactly
+    where the request carries no ``egress_binding`` at all."""
+
+    destinations: tuple[CanonicalDestination, ...]
+    """The binding's canonical destination set — §3's condition 5 — empty where the
+    request carries no binding."""
+
+    coverage: SpanCoverage | None
+    """The binding's ``coverage``, which route (d)'s own condition 4 is taken over,
+    and ``None`` where the request carries no binding."""
+
+
+def coverage_subject(request: ActionRequest) -> CoverageSubject:
+    """Read off ``request`` everything a ruling compares, once and detached.
+
+    **Called on ``decide``'s first executed line**, before anything is awaited.
+    Every line before the first suspension is already one observation — nothing else
+    runs on this loop between two statements that do not await — so what this buys
+    is not the reading but the **carrying**: the values survive the suspension the
+    authorization seam takes, and every comparison after it is decided over them
+    rather than over the caller's object.
+
+    **A request this cannot read is an argument fault and not a ruling**, which is
+    why nothing here is guarded. ``decide`` reads ``request.tool`` for its own rule
+    table on the same unsuspended stretch, so a request whose ``__dict__`` has been
+    emptied already fails there; what this closes is the window a **suspension**
+    opens, which is the one nothing above it can see.
+
+    Args:
+        request: The action being ruled on.
+
+    Returns:
+        The values ADR-0254 §§3 and 4's comparisons are decided over.
+    """
+    binding = request.egress_binding
+    return CoverageSubject(
+        goal=request.goal,
+        tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
+        parameters=dict(request.parameters),
+        account=(
+            None
+            if binding is None
+            else BoundAccount.model_validate(field_state(BoundAccount, binding.account))
+        ),
+        destinations=(
+            ()
+            if binding is None
+            else tuple(
+                CanonicalDestination.model_validate(field_state(CanonicalDestination, destination))
+                for destination in binding.canonical_destination_set
+            )
+        ),
+        coverage=None if binding is None else binding.coverage,
+    )
+
+
+def user_facing(subject: CoverageSubject) -> frozenset[str]:
+    """The keys of the request's arguments the declaration does **not** fill itself.
 
     ADR-0254 §3: ``ToolDefinition.system_supplied`` names the keys the **system**
     fills — an idempotency key, a client reference, a locale — and *"every key it
@@ -65,12 +166,12 @@ def user_facing(request: ActionRequest) -> frozenset[str]:
     exactly as it would without the classification.
 
     Args:
-        request: The action being ruled on.
+        subject: The one observation of the request this ruling is decided over.
 
     Returns:
         The user-facing argument keys this call actually carries.
     """
-    return frozenset(request.parameters) - frozenset(request.tool.system_supplied)
+    return frozenset(subject.parameters) - frozenset(subject.tool.system_supplied)
 
 
 class ArgumentFailure(StrEnum):
@@ -108,7 +209,7 @@ class UncoveredArgument:
     failure: ArgumentFailure
 
 
-def uncovered(row: Authorization, request: ActionRequest) -> tuple[UncoveredArgument, ...]:
+def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[UncoveredArgument, ...]:
     """Every way ADR-0254 §3's **condition 6** fails over this pair, told apart.
 
     Empty exactly where :func:`covers_arguments` answers ``True``, which is what
@@ -117,20 +218,20 @@ def uncovered(row: Authorization, request: ActionRequest) -> tuple[UncoveredArgu
 
     Args:
         row: The live record the one ``live_for`` read returned.
-        request: The action being ruled on.
+        subject: The one observation of the request this ruling is decided over.
 
     Returns:
         The failures, ordered by :class:`ArgumentFailure` and then by argument name,
         so a rendering of them is deterministic without the renderer sorting.
     """
-    carried = user_facing(request)
+    carried = user_facing(subject)
     named = {member.argument: member for member in row.coverage}
     defects = [UncoveredArgument(key, ArgumentFailure.UNNAMED) for key in carried - set(named)]
     defects += [UncoveredArgument(key, ArgumentFailure.OMITTED) for key in set(named) - carried]
     defects += [
         UncoveredArgument(key, ArgumentFailure.REFUSED)
         for key in carried & set(named)
-        if not _argument_is_covered(named[key], request)
+        if not _argument_is_covered(named[key], subject)
     ]
     return tuple(sorted(defects, key=lambda one: (one.failure.value, one.argument)))
 
@@ -203,7 +304,7 @@ def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> st
     return "; ".join(clauses)
 
 
-def covers_arguments(row: Authorization, request: ActionRequest) -> bool:
+def covers_arguments(row: Authorization, subject: CoverageSubject) -> bool:
     """ADR-0254 §3's **condition 6**, and that condition alone (§6's bar).
 
     *"The request's user-facing arguments and the row's coverage name the same set
@@ -231,15 +332,15 @@ def covers_arguments(row: Authorization, request: ActionRequest) -> bool:
 
     Args:
         row: The live record the one ``live_for`` read returned.
-        request: The action being ruled on.
+        subject: The one observation of the request this ruling is decided over.
 
     Returns:
         Whether condition 6 holds over that pair.
     """
-    return not uncovered(row, request)
+    return not uncovered(row, subject)
 
 
-def covers(row: Authorization, request: ActionRequest) -> bool:
+def covers(row: Authorization, subject: CoverageSubject) -> bool:
     """ADR-0254 §3's conditions **3, 4, 5 and 6** — the policy's half of coverage.
 
     Conditions **1 and 2** and the **id half** of condition 3 are
@@ -266,23 +367,22 @@ def covers(row: Authorization, request: ActionRequest) -> bool:
 
     Args:
         row: The live record the one ``live_for`` read returned.
-        request: The action being ruled on.
+        subject: The one observation of the request this ruling is decided over.
 
     Returns:
         Whether the row covers the request **in full**, which is what ADR-0254 §6's
         lineage discharge and route (d)'s ``ALLOW`` both rest on.
     """
-    binding = request.egress_binding
-    if binding is None:
+    if subject.account is None:
         return False
-    if request.tool != row.tool or binding.account != row.account:
+    if subject.tool != row.tool or subject.account != row.account:
         return False
-    if any(member not in row.destinations for member in binding.canonical_destination_set):
+    if any(member not in row.destinations for member in subject.destinations):
         return False
-    return covers_arguments(row, request)
+    return covers_arguments(row, subject)
 
 
-def _argument_is_covered(member: CoverageMember, request: ActionRequest) -> bool:
+def _argument_is_covered(member: CoverageMember, subject: CoverageSubject) -> bool:
     """ADR-0254 §3's per-argument rule, over one member.
 
     The member is **fixed**, and the canonical JSON encoding of the argument's
@@ -293,27 +393,27 @@ def _argument_is_covered(member: CoverageMember, request: ActionRequest) -> bool
     **An argument the request does not carry is not covered**, whichever shape the
     member takes — which is condition 6's second direction reaching one member.
     """
-    if member.argument not in request.parameters:
+    if member.argument not in subject.parameters:
         return False
-    value = request.parameters[member.argument]
+    value = subject.parameters[member.argument]
     if member.bound is None:
         return canonical_json_bytes(value) == canonical_json_bytes(member.fixed)
-    return _satisfies(member.bound, value, request)
+    return _satisfies(member.bound, value, subject)
 
 
-def _satisfies(bound: ValueBound, value: FrozenJson, request: ActionRequest) -> bool:
+def _satisfies(bound: ValueBound, value: FrozenJson, subject: CoverageSubject) -> bool:
     """ADR-0254 §4's reading of one argument against one bound.
 
     Total, and every failure is a refusal to cover rather than an exception.
     """
     if bound.kind is BoundKind.MONEY:
-        return _satisfies_money(bound, value, request)
+        return _satisfies_money(bound, value, subject)
     if bound.kind is BoundKind.PERIOD:
         return _satisfies_period(bound, value)
     return _satisfies_terms(bound, value)
 
 
-def _satisfies_money(bound: ValueBound, value: FrozenJson, request: ActionRequest) -> bool:
+def _satisfies_money(bound: ValueBound, value: FrozenJson, subject: CoverageSubject) -> bool:
     """ADR-0254 §4's ``MONEY`` reading, with the currency conjunct over the request.
 
     The argument's value is a JSON **string** ``Decimal`` accepts, or a JSON
@@ -336,7 +436,7 @@ def _satisfies_money(bound: ValueBound, value: FrozenJson, request: ActionReques
     """
     if bound.currency_argument is None or bound.maximum is None:  # pragma: no cover — the model
         return False
-    stated = request.parameters.get(bound.currency_argument)
+    stated = subject.parameters.get(bound.currency_argument)
     if not isinstance(stated, str) or stated != bound.currency:
         return False
     if isinstance(value, bool) or not isinstance(value, str | int):
@@ -473,8 +573,10 @@ def _satisfies_terms(bound: ValueBound, value: FrozenJson) -> bool:
 
 __all__ = [
     "ArgumentFailure",
+    "CoverageSubject",
     "UncoveredArgument",
     "account_of",
+    "coverage_subject",
     "covers",
     "covers_arguments",
     "uncovered",

@@ -48,7 +48,12 @@ from ai_assistant.core.types import (
     RiskLevel,
     SpanCoverage,
 )
-from ai_assistant.permissions._coverage import account_of, covers, uncovered
+from ai_assistant.permissions._coverage import (
+    account_of,
+    coverage_subject,
+    covers,
+    uncovered,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -63,11 +68,19 @@ if TYPE_CHECKING:
         RecipientGrant,
         ToolDefinition,
     )
+    from ai_assistant.permissions._coverage import CoverageSubject
 
 _log = structlog.get_logger(__name__)
 
 #: Reported when ``resolve`` is handed a decision the user was never shown.
 _NOT_A_CONFIRMATION = "the decision resolved was not a CONFIRM, so it authorises nothing"
+
+#: Reported when the request changed under a ruling that had already begun
+#: (ADR-0065). An operator's fact and never the user's: nothing is added to the
+#: reason the table reached, and the ruling is the ``CONFIRM`` it already held.
+_REQUEST_CHANGED_MID_RULING = (
+    "the request changed while a seam was out, so no standing grant is taken over it"
+)
 
 #: ADR-0184 §7's floor, worded as a statement about the **record** rather than about
 #: the call: what is missing is the fact the trail never wrote down, and no reading
@@ -526,7 +539,9 @@ class ThresholdActionPolicy:
         grounds = self._grounds(tool)
         return max((outcome for outcome, _ in grounds), default=PermissionOutcome.ALLOW)
 
-    async def _covering(self, request: ActionRequest) -> RecipientGrant | None:
+    async def _covering(
+        self, request: ActionRequest, subject: CoverageSubject
+    ) -> RecipientGrant | None:
         """The standing grant covering ``request``, or ``None`` — **failing closed**.
 
         The one durable read a sourced policy performs, at most once per ruling
@@ -560,10 +575,40 @@ class ThresholdActionPolicy:
         that read raised, from inside the branch that exists to make this failure
         fail *closed*. ``decide`` reads the declaration once for the same reason and
         rules on that value throughout.
+
+        **The request handed on is checked against this ruling's own observation of
+        it first, and a drifted one buys no grant** (ADR-0065, ADR-0193 §1's
+        fail-closed clause). ``RecipientGrants.covering`` takes its subject at *its*
+        first executed line, which since ADR-0254 §6 is after the authorization
+        seam has suspended — so without this the grant returned could be one
+        covering the request as rewritten mid-flight, cited in an ``ALLOW`` whose
+        every other ground was reached about the request as presented. The check is
+        sound where it stands because **nothing suspends between it and that line**:
+        awaiting a coroutine runs it to its own first await. Rebuilding the subject
+        is three validations rather than a whole
+        :class:`~ai_assistant.core.types.ActionRequest`, and a request too broken to
+        read is answered the same way a fault is — no grant.
         """
         if self._grants is None:  # pragma: no cover — the caller has already checked
             return None
-        tool_id = request.tool.id
+        tool_id = subject.tool.id
+        try:
+            if coverage_subject(request) != subject:
+                _log.warning(
+                    "recipient_grant_request_changed_mid_ruling",
+                    tool_id=tool_id,
+                    outcome="confirm",
+                    reason=_REQUEST_CHANGED_MID_RULING,
+                )
+                return None
+        except Exception:  # a request this ruling cannot re-read buys no grant
+            _log.warning(
+                "recipient_grant_request_unreadable",
+                tool_id=tool_id,
+                outcome="confirm",
+                reason=_REQUEST_CHANGED_MID_RULING,
+            )
+            return None
         try:
             return await self._grants.covering(request)
         except RecipientGrantError as exc:
@@ -659,7 +704,8 @@ class ThresholdActionPolicy:
             source; ADR-0247 §2 supersedes that requirement in the limb reaching a
             request at the configured provider, and in no other.
         """
-        tool = request.tool
+        subject = coverage_subject(request)
+        tool = subject.tool
         fired = self._fired(tool)
         grounds = [(rule.outcome, rule.because(tool)) for rule in fired]
         external = _planned_with_external_content(request)
@@ -678,10 +724,18 @@ class ThresholdActionPolicy:
         if self._only_the_disclosure_floor(
             request, fired, outcome=outcome, external=external, at_configured=at_configured
         ):
-            barred, record, account = await self._authority(request)
+            # **Route (c)'s pointer is read here, before the first suspension**, and
+            # not off the binding afterwards (ADR-0065). Every line above this one is
+            # part of a single observation of the request — nothing else runs on the
+            # loop between two statements that do not await — and this is the last of
+            # them: past ``_authority`` the caller has had a turn, and a rewritten
+            # ``egress_binding.account`` would otherwise put a reference this ruling
+            # never checked into the ``ALLOW`` the trail then compares.
+            configured = None if at_configured is None else at_configured.account.reference
+            barred, record, account = await self._authority(subject)
             if not barred:
                 standing = await self._standing_allow(
-                    request, record, at_configured=at_configured, external=external
+                    request, record, subject=subject, configured=configured, external=external
                 )
                 if standing is not None:
                     return standing
@@ -705,7 +759,8 @@ class ThresholdActionPolicy:
         request: ActionRequest,
         record: Authorization | None,
         *,
-        at_configured: EgressBinding | None,
+        subject: CoverageSubject,
+        configured: str | None,
         external: bool,
     ) -> PermissionRuling | None:
         """The standing ``ALLOW`` this request earns, or ``None`` for none.
@@ -743,17 +798,22 @@ class ThresholdActionPolicy:
 
         Args:
             request: The action being ruled on, already past
-                :meth:`_only_the_disclosure_floor`.
+                :meth:`_only_the_disclosure_floor`. **Handed to the grant seam and
+                read for nothing else**: every comparison this method takes is over
+                ``subject``.
             record: The row the one ``live_for`` read returned, or ``None``.
-            at_configured: The binding where ADR-0247 §2's derived fact holds of it,
-                and ``None`` otherwise.
+            subject: The one pre-suspension observation of the request, which §§3
+                and 4's comparisons are decided over.
+            configured: The binding's ``account.reference`` where ADR-0247 §2's
+                derived fact holds of it — read before the suspension, like every
+                other value here — and ``None`` otherwise.
             external: Whether the binding records that the call was planned over
                 external content.
 
         Returns:
             The ``ALLOW`` a standing route earned, or ``None`` where none did.
         """
-        if at_configured is not None:
+        if configured is not None:
             # **Route (c), taken before the grant seam is consulted** (ADR-0247
             # §2): where both routes would be reachable for one request this
             # answers it, ``_covering`` is called **zero** times, and no ruling
@@ -763,18 +823,19 @@ class ThresholdActionPolicy:
             # (ADR-0021 §5, ADR-0247 §2): §5's disclosure floor forbids an
             # ``ALLOW`` with the field unset for a non-empty ``discloses``. The
             # pointer is not a string this policy invented — it is a value
-            # carried on the binding the seam derived, and the trail's own
-            # check compares it against exactly that. ``authorised_subject``
-            # stays unset, and its absence is the discriminator that tells the
-            # two standing routes apart from the row alone.
+            # carried on the binding the seam derived and **read off it before
+            # this ruling suspended** (ADR-0065), and the trail's own check
+            # compares it against exactly that. ``authorised_subject`` stays
+            # unset, and its absence is the discriminator that tells the two
+            # standing routes apart from the row alone.
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
                 reason=_CONFIGURED_SEARCH_PROVIDER,
-                authorised_by=at_configured.account.reference,
+                authorised_by=configured,
             )
         recipient: RecipientGrant | None = None
         consulted = False
-        if self._covers_in_full(request, record):
+        if self._covers_in_full(subject, record):
             assert record is not None  # noqa: S101 — narrowing; the test is stated over it
             if record.origin is AuthorizationOrigin.OPENING_ACT:
                 # **The one exception to "route (d) answers with the grant seam
@@ -785,7 +846,7 @@ class ThresholdActionPolicy:
                 # grant — so the answer is carried rather than the seam re-read,
                 # which is what keeps "at most one durable read per seam per ruling"
                 # true on this path as on every other.
-                recipient = await self._covering(request)
+                recipient = await self._covering(request, subject)
                 consulted = True
             if consulted is False or recipient is not None:
                 return PermissionRuling(
@@ -808,7 +869,7 @@ class ThresholdActionPolicy:
             # ``_covering`` is called **zero** times.
             return None
         if not consulted:
-            recipient = await self._covering(request)
+            recipient = await self._covering(request, subject)
         if recipient is not None:
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
@@ -818,7 +879,7 @@ class ThresholdActionPolicy:
             )
         return None
 
-    async def _authority(self, request: ActionRequest) -> _Authority:
+    async def _authority(self, subject: CoverageSubject) -> _Authority:
         """The one ``live_for`` read, and whether ADR-0254 §6's bar fires on it.
 
         **Where the bar reads, and it is the same read route (d) takes** (§6). The
@@ -864,15 +925,21 @@ class ThresholdActionPolicy:
         would turn a ``CONFIRM`` the bar owes into a route-(b) or route-(c)
         ``ALLOW``. So the fault is logged and **takes the bar**.
 
-        **The log line names the class and no value, and the declaration's id is
-        read before the await** — both :meth:`_covering`'s existing discipline,
-        adopted rather than reinvented (ADR-0065: a frozen model is rewritable
-        through ``__dict__``, so a handler composing its line from
-        ``request.tool.id`` after the seam suspended leaves as whatever that read
-        raised).
+        **The log line names the class and no value, and every value here was read
+        before the await** — :meth:`_covering`'s existing discipline, adopted rather
+        than reinvented and now carried by the subject
+        (:func:`~ai_assistant.permissions._coverage.coverage_subject`). ADR-0065: a
+        frozen model is rewritable through ``__dict__``, so a handler composing its
+        line from ``request.tool.id`` after the seam suspended leaves as whatever
+        that read raised — **and the coverage comparison below has the same
+        problem**, which is why it is taken over the subject and not over the
+        request. A policy that selected the row for the goal it read on the way in
+        and compared the arguments it read on the way out would ``ALLOW`` a request
+        that is neither the one presented nor the one substituted.
 
         Args:
-            request: The action being ruled on.
+            subject: The one pre-suspension observation of the request, which the
+                seam is asked about and which the comparison is decided over.
 
         **A fault carries no account** (§4, §16). *"A store fault is an operator's
         fact and not something to put in front of someone deciding about a call"*,
@@ -886,10 +953,10 @@ class ThresholdActionPolicy:
             faulted; and ADR-0254 §4's account of the coverage failure where the bar
             fired on one.
         """
-        goal = request.goal
+        goal = subject.goal
         if goal is None or self._authorizations is None:
             return _Authority(barred=False, record=None, account=None)
-        tool_id = request.tool.id
+        tool_id = subject.tool.id
         try:
             record = await self._authorizations.live_for(goal, tool_id)
         except AuthorizationError as exc:
@@ -903,13 +970,13 @@ class ThresholdActionPolicy:
             return _Authority(barred=True, record=None, account=None)
         if record is None:
             return _Authority(barred=False, record=None, account=None)
-        defects = uncovered(record, request)
+        defects = uncovered(record, subject)
         if defects:
-            return _Authority(barred=True, record=record, account=account_of(defects, request.tool))
+            return _Authority(barred=True, record=record, account=account_of(defects, subject.tool))
         return _Authority(barred=False, record=record, account=None)
 
     @staticmethod
-    def _covers_in_full(request: ActionRequest, record: Authorization | None) -> bool:
+    def _covers_in_full(subject: CoverageSubject, record: Authorization | None) -> bool:
         """Whether route (d) covers this request but for the opening-act recheck.
 
         **Route (d) is reachable on** :meth:`_only_the_disclosure_floor`'s **five
@@ -942,17 +1009,17 @@ class ThresholdActionPolicy:
         with route (b).
 
         Args:
-            request: The action being ruled on.
+            subject: The one pre-suspension observation of the request, which this
+                comparison is decided over (ADR-0065).
             record: The row the one ``live_for`` read returned, or ``None``.
 
         Returns:
             Whether §3's six conditions hold over that pair and condition 4 holds
             over the binding.
         """
-        binding = request.egress_binding
-        if record is None or binding is None or binding.coverage is not SpanCoverage.NOT_COVERED:
+        if record is None or subject.coverage is not SpanCoverage.NOT_COVERED:
             return False
-        return covers(record, request)
+        return covers(record, subject)
 
     def _only_the_disclosure_floor(
         self,

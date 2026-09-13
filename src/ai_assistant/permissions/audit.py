@@ -1314,7 +1314,8 @@ class SqliteAuditTrail:
                 carrying **no** ``authorised_subject`` — records a binding that is
                 not closed-loop or a pointer that is not that binding's
                 ``account.reference`` (ADR-0247 §2); or if a **resolving** ``ALLOW``
-                carries an ``authorised_subject``. A sibling of the two above under
+                carries an ``authorised_subject`` or an ``authorised_goal`` (ADR-0254
+                §7's partition puts both outside route (a)). A sibling of the two above under
                 ``AuditError`` because a replayed write, a substituted resolution
                 subject and an unvalidated standing pointer are three facts an
                 operator must be able to tell apart.
@@ -3452,14 +3453,23 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     routes (ADR-0247 §2, ADR-0184 §7): such a binding carries no ``closed_loop``
     either, so no lane reads an unrecorded origin as a configured provider.
 
+    **Route (a) carries neither fingerprint nor scope, and both halves are refused
+    here** (ADR-0254 §7). That section's partition puts route (a) at *"``resolves``
+    set, ``authorised_by`` equal to it"* and says ``authorised_goal`` *"is set
+    **only** on a route-(d) ``ALLOW``"*. A resolving row is returned from this
+    function before anything below looks at the scope, and
+    :func:`_check_authorisation` checks the **pointer** alone — so without the
+    second refusal a durable row would carry a goal scope on a route no clause of
+    §7 validates a scope on, and the four-route partition would stop being one.
+
     Raises:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
-            ``authorised_subject``; if a standing egress decision's binding records
-            no origin; if a route-(b) decision's binding records that the call was
-            planned over external content **without recording that it was
-            closed-loop** (ADR-0238 §6); or if a digest-free standing decision's
-            binding is not closed-loop or its pointer is not that binding's
-            ``account.reference`` (ADR-0247 §2).
+            ``authorised_subject`` or an ``authorised_goal``; if a standing egress
+            decision's binding records no origin; if a route-(b) decision's binding
+            records that the call was planned over external content **without
+            recording that it was closed-loop** (ADR-0238 §6); or if a digest-free
+            standing decision's binding is not closed-loop or its pointer is not
+            that binding's ``account.reference`` (ADR-0247 §2).
     """
     ruling = decision.ruling
     if decision.resolves is not None:
@@ -3468,6 +3478,14 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
                 f"decision {decision.id!r} resolves a confirmation and fingerprints a "
                 f"standing authorisation; route (a) rests on a recorded confirmation, "
                 f"which is not a grant and has no subject digest (ADR-0193 §6)"
+            )
+            raise InvalidAuthorisationError(msg)
+        if ruling.authorised_goal is not None:
+            msg = (
+                f"decision {decision.id!r} resolves a confirmation and scopes its "
+                f"authorisation to a goal; route (a) rests on a recorded confirmation "
+                f"about this call, which carries no goal scope — authorised_goal is set "
+                f"only on a route-(d) ALLOW (ADR-0254 §7)"
             )
             raise InvalidAuthorisationError(msg)
         return

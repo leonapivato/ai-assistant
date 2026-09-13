@@ -1294,11 +1294,26 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
     async def test_standing_never_returns_a_retired_row(
         self, store: GoalAuthorizationStore, disposition: AuthorizationDisposition
     ) -> None:
-        """§16, arm 33: ``recent`` and ``export`` are where those are read."""
+        """§16, arm 33: ``recent`` and ``export`` are where those are read.
+
+        **The arrangement is asserted before the read is**, because the three
+        settlements do not all succeed at one instant: ``EXPIRED`` leaves
+        ``PROPOSED`` only *"at or after the row's ``expires_at``"* (§1, §12), so
+        settling it at :data:`NOW` is answered ``NOT_AT_SOURCE`` and leaves a
+        ``PROPOSED`` row — which ``standing`` excludes for a different reason
+        entirely, and the case would pass while proving nothing about a retired one.
+        """
         await store.record(authorization(id="a1"))
         if disposition is AuthorizationDisposition.REVOKED:
             await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
-        await store.settle("a1", to=disposition, settled_at=NOW)
+        at = EXPIRES if disposition is AuthorizationDisposition.EXPIRED else NOW
+        assert (
+            await store.settle("a1", to=disposition, settled_at=at)
+            is AuthorizationSettlement.SETTLED
+        )
+        retired = await store.resolve("a1")
+        assert retired is not None
+        assert retired.disposition is disposition
         assert await store.standing(GOAL) == ()
 
     async def test_standing_reads_no_clock(
