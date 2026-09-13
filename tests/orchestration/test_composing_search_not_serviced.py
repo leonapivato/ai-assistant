@@ -139,13 +139,28 @@ async def test_a_stepped_plan_gets_the_line_too() -> None:
     assert 'capability "send_email"' in block[-2], "the step lines are still last of the block"
 
 
-async def test_a_turn_carrying_no_member_renders_the_block_it_always_did() -> None:
-    """ADR-0242 §6's guarantee, unweakened by a second consumer of the same condition.
+async def test_a_turn_carrying_no_member_still_closes_on_the_scope_line() -> None:
+    """ADR-0264 §6 widens #2213's condition to *the pass composes*.
 
-    "On every other turn it is given nothing, and the assembled prompt is
-    byte-identical to what it is today." The condition #2213 adds is the same one §6
-    already states, so a turn outside it gains nothing at all — asserted here as the
-    exact three lines the block has always had on a decline carrying a rationale.
+    **This assertion is the reverse of what it was, and the reversal is the decision.**
+    It used to hold that a turn carrying no ``SearchNotServiced`` member rendered the
+    exact three lines the block had before #2213 — ADR-0242 §6's byte-identity
+    guarantee, read through a second consumer of the same condition. ADR-0264 §6
+    falsifies that reading for this line: "on a turn that *did* reach outside, and on
+    #2365's turn whose planner named no capability at all, the same block says the same
+    misleading thing and the same line answers it. The condition becomes *the pass
+    composes*, and the line's own text is unchanged."
+
+    #2365 is why. That turn's planner named no capability, so the block closed on
+    "Nothing: the planner named no capability for this turn" with nothing saying the
+    block was an account of acting alone — and the reply told the user its figures were
+    "already in front of me from this turn's searches".
+
+    **The prompt's byte-identity is gone and that cost is booked, not incurred here.**
+    ADR-0264's header records the supersession of ADR-0242 §6's byte-identity sentence,
+    and §14 records that ``_PLAN_IS_ABOUT_ACTING``'s own condition owes no record at all:
+    "that line and its condition come from issue #2213 and from code; no ADR clause
+    fixes when it is appended."
     """
     block = _plan_block(await _composed(member=None))
 
@@ -155,6 +170,7 @@ async def test_a_turn_carrying_no_member_renders_the_block_it_always_did() -> No
         "taken. Only the planner's own rationale says why — do not supply a reason "
         "it did not state.",
         f"  the planner's stated rationale: {json.dumps(_FALSE_CAUSE)}",
+        _SCOPE,
     ]
 
 

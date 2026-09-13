@@ -264,6 +264,12 @@ _NAMESPACE: Final = {
 #: no client at all, which is the containment §4 buys. ``ProposedQuestion`` rides
 #: ``ProposedUnderstanding`` on the ``Planner`` seam, which is likewise not on this
 #: surface.
+#:
+#: **ADR-0264 §7's three are here**, and they reach the surface the way ADR-0242 §9's
+#: ``SearchNotServiced`` does: ``TurnOutcome`` gains ``outbound_statement``, and the
+#: walk then reaches the model and the two vocabularies it carries. §4 and §5 are what
+#: promotes them — the value is what a rendering surface builds its statement from, so
+#: it is contract surface by the same route every other member of this roster is.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "Clarification",
@@ -331,6 +337,9 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ConnectionAct",
         "ReplyChunk",
         "Warrant",
+        "OutboundStatement",
+        "OutboundReach",
+        "OutboundDestination",
     }
 )
 
@@ -1166,6 +1175,16 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     the same constant, so "a number written in this document would be a claim about
     an order nobody controls".
 
+    **43 is ADR-0264 §7's lane 1, and it is under the second limb alone.**
+    ``TurnOutcome`` gains ``outbound_statement``, that model is ``extra="forbid"``,
+    ``project`` renders a model by ``model_dump()`` and a ``TurnOutcome`` is what every
+    turn call returns — so a hub at 43 emits ``"outbound_statement": null`` on every
+    turn it sends and a client at 42 fails it with ``extra_forbidden``. A defaulted
+    member is still a shape change, exactly as the entries at 39, 40 and 42 say. The
+    method set does **not** move: lane 1 adds no ``AssistantEngine`` member, and lane 2
+    renders the statement in ``interfaces/cli.py`` and changes no ``core`` type at all.
+    ADR-0264 fixes no numeral, so 42 is what the tree held when that lane branched.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1174,7 +1193,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 42), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 43), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
