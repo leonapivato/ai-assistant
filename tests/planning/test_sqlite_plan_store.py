@@ -1700,13 +1700,15 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data BLOB NOT NULL",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL",
             "data column has BLOB affinity",
             id="goals-data-not-text",
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
+            "evidence_elided INTEGER NOT NULL DEFAULT 0",
             "data column is absent",
             id="goals-missing-a-column",
         ),
@@ -1746,20 +1748,22 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         ),
         pytest.param(
             "goals",
-            "id TEXT, conversation_id TEXT, last_engaged_in TEXT, data TEXT NOT NULL",
+            "id TEXT, conversation_id TEXT, last_engaged_in TEXT, "
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
             "no PRIMARY KEY",
             id="goals-without-a-primary-key-breaks-on-conflict",
         ),
         pytest.param(
             "goals",
             "id TEXT PRIMARY KEY COLLATE NOCASE, conversation_id TEXT, last_engaged_in TEXT, "
-            "data TEXT NOT NULL",
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
             "NOCASE-collated id PRIMARY KEY",
             id="goals-case-insensitive-primary-key-folds-distinct-ids",
         ),
         pytest.param(
             "goals",
-            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data TEXT",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT",
             "data column is nullable",
             id="goals-nullable-data-can-store-a-null-no-decode-accepts",
         ),
@@ -1803,7 +1807,8 @@ async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) 
     try:
         raw.execute(
             "CREATE TABLE GOALS(ID TEXT PRIMARY KEY, CONVERSATION_ID TEXT, "
-            "LAST_ENGAGED_IN TEXT, DATA TEXT NOT NULL)"
+            "LAST_ENGAGED_IN TEXT, EVIDENCE_ELIDED INTEGER NOT NULL DEFAULT 0, "
+            "DATA TEXT NOT NULL)"
         )
         raw.execute(
             "CREATE TABLE PLANS(ID TEXT PRIMARY KEY, "
@@ -2547,15 +2552,20 @@ async def test_a_version_2_plan_store_gains_the_columns_and_the_questions_table(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "3",
+            "4",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
-        assert {"conversation_id", "last_engaged_in"} <= columns
+        assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert "goal_questions" in tables
+        assert {"goal_questions", "goal_evidence"} <= tables
+        # ADR-0252 §13: the table is created **empty** and every existing goal's count
+        # is **zero**, which is true of a store that has never dropped a row. The
+        # migration converts nothing because there is nothing to convert.
+        assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
+        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
 
 
 async def test_a_migrated_goal_sorts_after_one_that_carries_an_engagement_instant(
@@ -2662,12 +2672,12 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         store.close()
 
     with sqlite3.connect(path) as conn:
-        # ADR-0250 §9's second migration runs in the same open: a version 1 file is
-        # taken the whole way to the current marker rather than parked at 2, because
-        # both passes run inside the one setup transaction and the marker is stamped
-        # last.
+        # ADR-0250 §9's and ADR-0252 §13's migrations run in the same open: a version 1
+        # file is taken the whole way to the current marker rather than parked at 2 or
+        # 3, because every pass runs inside the one setup transaction and the marker is
+        # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "3",
+            "4",
         )
 
 
