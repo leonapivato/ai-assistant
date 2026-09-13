@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.orchestration.goals import announcement_of
 from ai_assistant.planning.planner import _render_request
 from ai_assistant.testing import (
     FakeConversationStore,
@@ -856,14 +857,21 @@ async def test_the_announcement_rule_over_all_four_dispositions() -> None:
 
 
 def _owes_a_sentence(engagement: GoalEngagement) -> bool:
-    """§5's rule, restated here so the arm reads it off the typed value it binds."""
-    return engagement.disposition in {
-        EngagementDisposition.RESUMED,
-        EngagementDisposition.REOPENED,
-    } or (
-        engagement.revised
-        and bool(engagement.outcome_changed or engagement.added or engagement.removed)
-    )
+    """§5's rule, read off the producer that composes the sentence under it.
+
+    Asked of the **production** function rather than restated here, so this arm and
+    the reply a user is shown cannot disagree about which turns owe a sentence — a
+    restatement is a second statement of one rule, and #2332 is what happens when
+    two places each believe the other holds it. What the sentence *says* is asserted
+    over the reply itself, in ``test_engine_goal_announcement.py``.
+
+    Args:
+        engagement: The typed value the turn's outcome carried.
+
+    Returns:
+        Whether §5 owes an announcement for it.
+    """
+    return announcement_of(engagement) is not None
 
 
 # --------------------------------------------------------------------------- #
