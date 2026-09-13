@@ -2172,10 +2172,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
    skipped and nothing is re-dispatched. **And each is run with *both* exceptions already carrying
    a cause** — a transport error under the interpretation's, a database error under the ledger's —
-   asserting that the propagating exception's `__cause__` is **still the transport error** and
-   that the ledger failure and its own cause are present **beside** it and not in its chain. They
-   are what stop an accounting cleanup masking a provider outage as a store problem, and what
-   stop a `raise … from` overwriting the cause a reader needs.
+   asserting that the propagating exception is the **same instance** the fake interpreter raised,
+   that its `__cause__` is **still the transport error**, and that its `__notes__` is
+   **unchanged**. **And the two arms ADR-0013 §5's own wrong turn earns**: a fake whose
+   interpretation calls raise **one cached exception instance**, failed **twice**, asserting
+   `__notes__` is unchanged and no longer after the second failure than after the first; and **two
+   walks failing concurrently over that one instance**, asserting neither leaves anything on it
+   for the other to read. They
+   are what stop an accounting cleanup masking a provider outage as a store problem, what
+   stop a `raise … from` overwriting the cause a reader needs, and what stop the driver writing on
+   an object the provider owns.
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
