@@ -293,6 +293,20 @@ _B1_TWO_TURNS: Final = (
     *_B1_RECORDS[1:],
 )
 
+#: The shape ADR-0158 §4's separator rule admits and the order **cannot** speak to:
+#: this conversation's recent turn, then a retrieved belief, then an *older* turn of
+#: the same conversation that the episodic supplement brought back. `_supplement`
+#: searches the episodic band with no conversation filter and deduplicates only
+#: against `preceding` by id, so the trailing episode really can be this
+#: conversation's. It is here because the guidance had to stop claiming the
+#: complement — that everything after the opening notes is somebody else's — and a
+#: supply of this shape is what made that claim false.
+_B1_WITH_SUPPLEMENT_EPISODE: Final = (
+    _B1_RECORDS[0],
+    "The user and Alex settled on wide oak boards with a brushed finish for the living-room floor.",
+    "The user asked: earlier in this conversation, what sofa would suit the room?",
+)
+
 #: #2262's C1, whose own turn is the only one of its shape in the supply.
 _C1_RECORDS: Final = (
     "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
@@ -323,6 +337,11 @@ def _echoing_the_first_record() -> FakeModelProvider:
     [
         pytest.param(_B1_RECORDS, _B1_RECORDS[0], id="b1"),
         pytest.param(_B1_TWO_TURNS, _B1_TWO_TURNS[0], id="b1-two-turns"),
+        pytest.param(
+            _B1_WITH_SUPPLEMENT_EPISODE,
+            _B1_WITH_SUPPLEMENT_EPISODE[0],
+            id="b1-supplement-episode",
+        ),
         pytest.param(_C1_RECORDS, _C1_RECORDS[0], id="c1"),
     ],
 )
@@ -343,6 +362,20 @@ async def test_the_records_reach_the_prompt_in_the_supplys_own_order(
     break: the records are listed in the supply's own order and the conversation's own
     episode is the first line under the heading. The model here answers with whatever
     is listed first, so the outcome moves if the ordering does.
+
+    **It is about the ordering and about nothing else.** ``expected`` is the supply's
+    own first record because the model was built to echo it, so on the two-request arm
+    the rug is what a position-echoing model returns and not a claim that the rug is
+    the subject a real model should pick there. Which of one conversation's own turns a
+    follow-up is about is decided by the goal the turn was engaged on (ADR-0249 §11,
+    ADR-0250 §5) and no goal reaches a ``SearchSupply``; the instruction says only that
+    the subject comes from this conversation's own turns, which the supply opens with,
+    and that is all this case is evidence for.
+
+    The supplement arm is here for the same reason from the other side: a trailing
+    episode of *this* conversation is a supply this loop really builds, so the order it
+    is listed in is worth pinning even though the order is exactly what cannot tell
+    that episode from a retrieved one.
     """
     model = _echoing_the_first_record()
     supply = SearchSupply(
