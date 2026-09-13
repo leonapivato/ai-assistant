@@ -1894,14 +1894,10 @@ class SqliteMemoryStore:
         slot the cut is taken from. There is no post-KNN eligibility pass and no
         over-fetch: what the KNN returns is servable, and the cut is a prefix of it.
 
-        **``capped`` is ``False`` only where this store can certify a short result
-        is the whole eligible set** (ADR-0128 §2). ``_VEC_KNN_MAX_K`` is its one
-        candidate ceiling, reached only for a ``limit`` above it; the other thing
-        that stops it certifying is a candidate whose distance the metric leaves
-        undefined, which is left out of a relevance ordering it has no value in
-        (see :meth:`_search_sync`). Either way ``True`` is a refusal to certify and
-        never a claim that more exists, and it is available on a short result and
-        nowhere else.
+        **``capped`` reports one thing: whether ``_VEC_KNN_MAX_K`` bound the read.**
+        That is this store's only candidate ceiling, so a short result is the whole
+        eligible set unless the KNN returned exactly the ceiling — which it can only
+        do for a ``limit`` above it (ADR-0128 §2).
 
         Args:
             query: The search text; whitespace-only queries match nothing.
@@ -1954,10 +1950,10 @@ class SqliteMemoryStore:
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: matching
             records, most relevant first, each carrying a ``score`` that is the
-            cosine similarity to the query, in ``[0, 1]``; and ``capped``. A record
-            whose stored vector has no direction has no similarity to any query and
-            is not ranked here at all — ADR-0237's ``select`` is the read that
-            reaches it (#2355). Expired
+            cosine similarity to the query, in ``[0, 1]`` — ``0.0`` where that
+            similarity is undefined because the stored vector has no direction,
+            which is the floor every row no closer than orthogonal already takes
+            (#2355); and ``capped``. Expired
             records, and records not live at now (a closed or not-yet-open
             validity window, both ends — ADR-0045 §6), are never returned.
 
@@ -2201,16 +2197,15 @@ class SqliteMemoryStore:
         short-circuit paths, where no candidate set exists at all (§3's rule that an
         absent key means *not observed* and never zero).
 
-        **Two things can shorten a result, and ``capped`` refuses to certify on
-        either** (ADR-0128 §2). Every candidate is eligible, so a result short of
-        ``limit`` means the KNN gave back everything it had — unless it gave back
-        exactly ``fetch_k``, which it can only do when the ceiling clamped ``limit``
-        below what was asked, or unless a row it gave back carried no distance the
-        metric could define and was left out below. ``False`` is the certification
-        that the result is the whole eligible set, ``True`` the refusal to certify,
-        and the boundary case where the eligible set exactly meets the ceiling is a
-        permitted ``True``: the store cannot tell it apart from a truncation
-        without fetching a row it deliberately did not.
+        **``capped`` is the only thing left that can shorten a result** (ADR-0128
+        §2). Every candidate is eligible, so a result short of ``limit`` means the
+        KNN gave back everything it had — unless it gave back exactly ``fetch_k``,
+        which it can only do when the ceiling clamped ``limit`` below what was
+        asked. ``False`` is therefore the certification that the result is the whole
+        eligible set, ``True`` the refusal to certify, and the boundary case where
+        the eligible set exactly meets the ceiling is a permitted ``True``: the
+        store cannot tell it apart from a truncation without fetching a row it
+        deliberately did not.
 
         Returns:
             The surviving ``(data, revision, score)`` rows, whether the ceiling
@@ -2265,7 +2260,12 @@ class SqliteMemoryStore:
             "JOIN records r ON r.rowid = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? "
             f"AND v.rowid IN (SELECT rowid FROM records WHERE {' AND '.join(eligible)}) "
-            "ORDER BY v.distance"
+            # ``v.distance IS NULL`` first, because SQL orders ``NULL`` *before*
+            # every value and a row whose distance is undefined would otherwise
+            # lead a result documented as most relevant first — at the top of the
+            # list, which is where a caller reads. See the score mapping below for
+            # what makes a distance undefined.
+            "ORDER BY v.distance IS NULL, v.distance"
         )
         # Wrapped as ``_list_beliefs_sync`` wraps its own, because the restriction
         # genuinely *does* add a failure mode the plain KNN lacked. ``json_extract``
@@ -2282,65 +2282,58 @@ class SqliteMemoryStore:
         except sqlite3.Error as exc:
             msg = f"failed to search: {exc}"
             raise MemoryStoreError(msg) from exc
-        # vec0 uses cosine distance; similarity is 1 - distance, floored at 0 —
-        # over the rows the metric could rank, which is not always all of them
-        # (#2355). Cosine divides by each vector's magnitude, so a stored vector of
+        # vec0 uses cosine distance; similarity is 1 - distance, floored at 0. A
+        # ``NULL`` distance is served at that same floor rather than arithmetic'd
+        # (#2355): cosine divides by each vector's magnitude, so a stored vector of
         # zero magnitude — the embedding of text carrying no token, which
-        # ``HashingEmbedder`` returns literally — makes the quotient ``0/0``;
+        # ``HashingEmbedder`` returns literally — makes the quotient ``0/0``.
         # sqlite-vec hands SQLite the ``NaN`` and SQLite, having no ``NaN``,
-        # renders it ``NULL``. ``1.0 - None`` raised ``TypeError``, outside
-        # ``MemoryStoreError`` and so outside what ``LoopEngine._retrieve`` and
-        # ``_supplement`` catch: it aborted a turn instead of degrading it.
+        # renders it ``NULL``. The similarity is *undefined*, not zero and not
+        # infinite, and ``1.0 - None`` raised ``TypeError`` — outside
+        # ``MemoryStoreError``, so outside what ``LoopEngine._retrieve`` and
+        # ``_supplement`` catch, and it aborted a turn instead of degrading it.
         #
-        # **Such a row is left out rather than scored**, and the distinction is not
-        # a similarity floor — this store has none and returns rows of any
-        # similarity at all, ``rocket ship`` for ``coffee`` included. A floor
-        # compares a similarity against a threshold; there is no similarity here to
-        # compare. ADR-0112 §1 makes this read's one ordering axis relevance, and a
-        # row carrying no relevance value has no place in a relevance ordering: put
-        # in it, it lands wherever the sort happens to leave it (SQL orders
-        # ``NULL`` *first*, so it led the page), and given the floor score it would
-        # displace a record that genuinely matched from a result ``core/protocols``
-        # documents as "the records most relevant to ``query``, best first". It is
-        # not thereby unreachable: ADR-0237's ``select`` is the structured read for
-        # records a relevance read cannot rank, and ``get``, ``list_beliefs``,
-        # ``export`` and the walk all still carry it.
+        # **The floor, and not a drop**, which is the disposition both review
+        # rounds of this change argued over and the texts settle. ADR-0128 §1
+        # rules that "what the KNN returns is servable, and the cut is a prefix of
+        # it"; and withholding the row would make ``capped`` unrepresentable
+        # rather than merely awkward — ADR-0128 §2's first clause has ``False`` on
+        # a short result assert the store "holds **no** further record matching
+        # the call's filters and passing its read-time eligibility axes", which a
+        # withheld row contradicts, while its second clause has ``True`` mean the
+        # store's candidate ceiling bound the read, which is not what happened.
+        # Neither value would be true, and the empty case — every eligible row
+        # unrankable — has no value at all, since the fourth clause ends "an empty
+        # result is not a capped one". Serving the row keeps ``capped`` reporting
+        # the one thing ADR-0128 §2 gives it to report.
+        #
+        # ``0.0`` is where this expression already puts every row no closer than
+        # orthogonal, so an undefined similarity joins a populated class rather
+        # than being given a value of its own, and no real distance is clamped.
+        # The ordering above is what keeps it from outranking a scored row.
+        #
+        # **What this does not buy back is the candidate slot** (#2363). The row
+        # held one of the KNN's ``k`` before any of this ran, so the ``k``-th best
+        # match was never fetched and the page is that much poorer. ADR-0128 §2's
+        # third clause is why that is a cost and not a broken promise — "a full
+        # page never asserts that the store holds no more eligible records below
+        # the cut" — and recovering the slot needs the second pass §4 declines to
+        # pre-bless, or a write path that never indexes a directionless vector.
         #
         # A ``NaN`` also compares false against everything, so such a row is never
-        # displaced from a KNN slot it holds and never displaces a ranked one: the
+        # displaced from a KNN slot it holds and never displaces a scored one: the
         # row seen first keeps the slot. #2355 read the trigger as an eligible set
         # at or below ``k``, which is one sufficient condition rather than the
         # mechanism — a store of any size serves one written early enough.
-        ranked = [row for row in rows if row[2] is not None]
         results = [
-            (str(data), int(revision), max(0.0, 1.0 - distance))
-            for data, revision, distance in ranked[:limit]
+            (str(data), int(revision), 0.0 if distance is None else max(0.0, 1.0 - distance))
+            for data, revision, distance in rows[:limit]
         ]
-        # **``False`` on a short result is a certification, so it is withheld
-        # wherever this read cannot make it** (ADR-0128 §2, fourth clause: an
-        # implementation "reports ``False`` only where the first clause lets it
-        # certify and ``True`` wherever it cannot"). Two things stop it certifying,
-        # and both require the result to be short of ``limit`` — ``True`` is
-        # available nowhere else:
-        #
-        # * the KNN filled its whole budget, which needs ``fetch_k < limit``, i.e.
-        #   the clamp: the ceiling ``capped`` was introduced for; or
-        # * a row the metric could not rank was left out above. It matches the
-        #   call's filters and passes every eligibility axis, so "the store holds
-        #   no further record matching the call's filters" — what ``False`` would
-        #   assert — is exactly what this store cannot say.
-        #
-        # An **empty** result is excluded from both, because §2's fourth clause
-        # ends "an empty result is not a capped one" and states it flatly rather
-        # than only of the by-construction cases beside it. The one state that
-        # reaches — every eligible row unrankable — is then certified complete when
-        # it is not, which is the ADR's instruction followed rather than this
-        # store's reading; it is recorded on the PR.
-        capped = (
-            bool(results)
-            and len(results) < limit
-            and (len(rows) >= fetch_k or len(ranked) < len(rows))
-        )
+        # The ceiling bound this read only if the KNN filled its whole budget *and*
+        # still came up short of what the caller asked for — which requires
+        # ``fetch_k < limit``, i.e. the clamp. Anywhere else a short result is the
+        # exhausted eligible set and is certified as such.
+        capped = len(rows) >= fetch_k and len(results) < limit
         return (
             results,
             capped,
