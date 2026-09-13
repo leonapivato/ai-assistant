@@ -242,12 +242,19 @@ a user reading one has not been told the other.
 > having reached nothing while one of its own calls may have reached something.
 
 > **Normative.** **A driven egress step contributes `INDETERMINATE` to that fold**, and is
-> the one input to it that is not a `WEB_SEARCH` call. A step whose `ActionRequest` carried
-> an `EgressBinding` and whose disposition is `EXECUTED` makes the turn at least
-> `INDETERMINATE`; a step that was refused, denied or never driven contributes nothing,
-> because nothing ran. **This establishes no contact and §3 is unchanged** — what it
-> establishes is that this system cannot say the turn reached nothing, which is §2's third
-> group reached by ADR-0192 §4's own reasoning rather than by a `SearchDisposition`.
+> the one input to it that is not a `WEB_SEARCH` call. **The contribution is stated over the
+> executor's own pre-callable fact and never over `Disposition.EXECUTED`**, which is not
+> that fact: a step whose `ActionRequest` carried an `EgressBinding` contributes
+> `INDETERMINATE` where the executor **reached the callable, or cannot say whether it did**,
+> and contributes **nothing** where the executor establishes that it did not. The three
+> exits ADR-0192 §1 places before the callable — a `ToolBindingError` the seam rejected, a
+> `SpendError` refusing the call, and any other `AssistantError` out of the claim on the
+> authorisation — are that establishment, committed `FAILED` for the stated reason that
+> recording `INDETERMINATE` would be *"about a call that provably never reached the
+> callable"*. A step that was refused, denied or never driven contributes nothing for the
+> same reason. **This establishes no contact and §3 is unchanged** — what it establishes is
+> that this system cannot say the turn reached nothing, which is §2's third group reached by
+> ADR-0192 §4's reasoning rather than by a `SearchDisposition`.
 
 > **Normative.** **No component re-derives the partition from a member's name, its
 > value, its declaration order or its docstring.** It is a mapping stated here and
@@ -453,13 +460,22 @@ seam's addition cheap — a second member rather than a second carrier minted fr
 > one*, and §4's count is one population over the turn. A last-writer-wins assembly is
 > the defect this clause names.
 
-> **Normative.** **The fragment obligation binds on every pass that composes a reply**,
-> whatever the statement's value, and on no other. ADR-0170 §4 requires no composition on a
-> pass whose step parked for confirmation or whose `turn` is `None`, and a turn that
+> **Normative.** **The fragment obligation binds on every pass that composes a reply,
+> except a routed one**, whatever the statement's value. ADR-0170 §4 requires no composition
+> on a pass whose step parked for confirmation or whose `turn` is `None`, and a turn that
 > serviced a search and then parked its step for confirmation is exactly such a pass. On it
 > the member is carried and §7's statement is rendered exactly as that section fixes, and
 > there is no fragment because there is nothing to give one to — which is not a degradation,
 > because the reply the fragment guards does not exist.
+
+> **Normative.** **A routed pass carries the member and renders the statement and is given
+> no fragment**, so ADR-0197 §6's closure of the routed composer's inputs at *"exactly two"*
+> stands unnarrowed and no record is owed against it (§14). The exclusion is not a
+> convenience: a routed reply is composed over a `RouteOutcome` and not over a supply, the
+> pass takes no read at all, and §7's rendered statement — which §6's closing paragraph
+> names as what makes this decision structural — binds on it exactly as everywhere else. The
+> guarantee is therefore whole on a routed pass; what it does without is the instruction the
+> guarantee does not rest on.
 
 > **Normative.** Where the pass composes, the composing stage is given **one fixed fragment
 > per `OutboundReach` member**, written in
@@ -494,7 +510,8 @@ seam's addition cheap — a second member rather than a second carrier minted fr
 > so that it need not guess, and told what the fact does not license so that it does not
 > embroider it.
 
-> **Normative.** **`_PLAN_IS_ABOUT_ACTING` is appended on every composing pass.** #2213
+> **Normative.** **`_PLAN_IS_ABOUT_ACTING` is appended on every composing pass that
+> renders a plan block**, which a routed pass does not. #2213
 > added that line on a turn that did not service a search, to stop the plan block being read
 > as an account of lookups; on a turn that *did* reach outside, and on #2365's turn whose
 > planner named no capability at all, the same block says the same misleading thing and the
@@ -744,7 +761,7 @@ this here would reach into a decision this ADR has not read.
 
 ### 13. The arms this decision owes
 
-> **Normative.** The implementing lanes owe these ten arms **between them**, each over
+> **Normative.** The implementing lanes owe these eleven arms **between them**, each over
 > representative input and split by §11's ownership rule. A lane that lands fewer of the
 > assertions it owns has not implemented this decision.
 
@@ -818,17 +835,20 @@ this here would reach into a decision this ADR has not read.
 >    servicing's contact fails the first, and one that classifies from the ended
 >    servicing's record rather than at the performing site cannot tell the first from the
 >    third (§2).
-> 8. **A driven egress step establishes no contact and is not nothing either** (§3): a step
->    whose `ActionRequest` carried an `EgressBinding` and whose disposition is `EXECUTED`
->    carries `reach` **`INDETERMINATE`** on a turn with no established search contact, with
->    `destinations` empty — **asserted across every addressed `StepExecution` status
->    `EXECUTED` admits and not on `SUCCEEDED` alone**, because §2 keys the fold on the
->    disposition and an implementation gating on `SUCCEEDED` would answer `NOT_REACHED` for
->    a failed send that may still have transmitted. A step that was refused, denied or never
->    driven contributes nothing and leaves the turn `NOT_REACHED`. An implementation that
->    mints a contact from the executed step fails this arm, **and so does one that answers
->    `NOT_REACHED`** for it — the send may have left, and saying it did not would be the
->    false statement §1 ranks below silence.
+> 8. **A driven egress step establishes no contact and is not nothing either** (§3), in
+>    three shapes. One whose callable was reached and whose addressed `StepExecution` is
+>    `SUCCEEDED`, and one whose callable was reached and whose addressed status is **not**
+>    `SUCCEEDED`: both carry `reach` **`INDETERMINATE`** with `destinations` empty on a turn
+>    with no established search contact, so an implementation gating on `SUCCEEDED` fails the
+>    second — a failed send may still have transmitted. And one the executor exited **before
+>    the callable** (ADR-0192 §1's three windows): it **contributes nothing**, so a turn
+>    whose only other call reached the provider stays `REACHED`, one whose other call
+>    established nothing either way stays `INDETERMINATE`, and one with no other call is
+>    `NOT_REACHED`. **No egress outcome overrides the fold** (§2): the arm asserts each of
+>    those three turns. An implementation that mints a contact from an executed step fails
+>    this arm, **and so does one that answers `NOT_REACHED`** for a step whose callable was
+>    reached — the send may have left, and saying it did not would be the false statement §1
+>    ranks below silence.
 > 9. **A turn that made no call at all** — #2365's shape, `servicing=not_asked`. The
 >    statement is carried with `reach` `NOT_REACHED`, `destinations` **empty** and `records`
 >    `0`; `search_not_serviced` is `None`; the prompt carries the `NOT_REACHED` fragment and
@@ -840,6 +860,14 @@ this here would reach into a decision this ADR has not read.
 >    same shape renders its own. An implementation that conditions any of the three on what
 >    the reply says fails this arm, and one that renders `NOT_REACHED` with no reply beside
 >    it fails it too.
+> 11. **A routed pass that is not a park**, whole-reply and streaming, which are separate
+>    composers from the conversational one and the path an implementation updating only the
+>    latter would leave behind. It carries `NOT_REACHED`, renders §7's statement, and its
+>    composer is given **neither** §6's fragment **nor** `_PLAN_IS_ABOUT_ACTING` — ADR-0197
+>    §6's two inputs unchanged, which is the assertion that keeps that closure true. A
+>    **routed park** carries `None` and renders nothing. An implementation that gives the
+>    routed composer a third input fails this arm, and so does one that leaves the routed
+>    pass's member `None`.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
@@ -893,6 +921,13 @@ in terms that `records` is neither ADR-0238 §11's `supplied` nor derived from i
 `minted` and copies `hop_reached`'s shape, redefining neither and taking neither out of its
 own ADR's use. A second consumer of a carrier is not a change to it — the position ADR-0242
 §6's own second consumer of `ServicedRead.disposition` already stands in.
+
+**ADR-0197 §6's *"exactly two"* routed-composer inputs and §10's two-input sentence — no
+record owed, and §6 above is written so.** A routed pass carries the member and renders §7's
+statement, and its composer is given nothing new, so the closure binds verbatim and a reader
+holding only ADR-0197 builds the routed composer exactly as it describes. The alternative —
+a third input there — would have been a supersession of a contract closure bought for a
+fragment the guarantee does not rest on.
 
 **`_PLAN_IS_ABOUT_ACTING`'s condition (§6) — no record owed.** That line and its condition
 come from issue #2213 and from code; no ADR clause fixes when it is appended. Widening the
