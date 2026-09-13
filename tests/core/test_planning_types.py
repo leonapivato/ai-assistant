@@ -1993,9 +1993,16 @@ def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
     holds and ``delete_goal`` cascades over — "a reference that resolves for exactly as
     long as the row does", which is the property §8 mints the type for.
 
-    **The ``field`` is not closed over**: a key is not an identifier, and an absent one
-    is one of ADR-0253 §6's six unresolvable cases, disposed of at dispatch by §2's rule
-    rather than by refusing a document.
+    **The ``field`` is not closed over, and neither is the producer's status**: a key is
+    not an identifier, and "the producing step is not ``SUCCEEDED``", "its ``verifies``
+    does not hold" and "the value at that key is JSON ``null``" are three of ADR-0253
+    §6's **six unresolvable cases**, every one of which that section disposes of **at
+    dispatch** by §2's rule. Deciding them here would be resolving a reference and
+    evaluating a verification, which §12 rules "no lane of this decision" does — and it
+    would make an export of the user's own data (ADR-0004 §6) fail on a step's later
+    history rather than on the document's own closure. The fixture below therefore uses
+    a genuinely resolved producer, so that what the arm asserts about the closure is not
+    read as a claim about a warrant it does not check.
     """
     goal = _goal()
     plan = ActionPlan(
@@ -2007,7 +2014,18 @@ def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
     execution = ExecutionState(
         id="x1",
         plan_id="p1",
-        steps=(StepExecution(step_id="s1", status=StepStatus.PENDING),),
+        steps=(
+            StepExecution(
+                step_id="s1",
+                status=StepStatus.SUCCEEDED,
+                bound_tool="forecast",
+                approval_ref="perm-1",
+                attempts=1,
+                output={"summary": "clear all weekend"},
+                started_at=_WHEN,
+                finished_at=_WHEN,
+            ),
+        ),
         updated_at=_WHEN,
     )
     row = _evidence_row().model_copy(

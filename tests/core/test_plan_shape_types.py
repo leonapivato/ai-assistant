@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     EvidenceStanding,
     GoalElement,
     GoalEvidence,
+    GoalInterpretation,
     Ground,
     InterpretationVerdict,
     InterpretedOutput,
@@ -68,6 +69,17 @@ def _plan(**fields: object) -> ActionPlan:
 def _settles(interpretation_id: str, element: str, **fields: object) -> PlanInterpretation:
     """One interpretation of ``element``, over whichever input the arm names."""
     return PlanInterpretation(id=interpretation_id, settles=element, **fields)  # type: ignore[arg-type]
+
+
+def _revision(**tuples: object) -> GoalInterpretation:
+    """One interpretation revision, with whichever element tuples an arm supplies."""
+    return GoalInterpretation(
+        revision=1,
+        outcome="book a campsite",
+        outcome_ground=Ground.INFERRED,
+        recorded_at=_WHEN,
+        **tuples,  # type: ignore[arg-type]
+    )
 
 
 _QUALIFIES = StepCondition(
@@ -492,6 +504,62 @@ def test_an_element_carries_an_identity_and_an_applicability_and_both_default_ab
     assert (named.id, named.applicability) == ("e1", sunday)
 
 
+# --- §7: an element's identity, inside the revision that holds it -----------
+
+
+def test_two_elements_of_one_revision_may_not_share_an_id() -> None:
+    """§7's identity, refused by the container because an element cannot see its tuple.
+
+    This corpus's standing shape for an identity inside a container, and ADR-0253 §8
+    states it three times over for one plan: "``ActionPlan`` refuses two interpretations
+    sharing an ``id`` and two sharing a ``settles``, exactly as it already refuses two
+    steps sharing an id". Two elements under one id leave a ``StepCondition.about``, a
+    ``PlanInterpretation.settles`` and a ``GoalEvidence.declaration`` each naming a
+    proposition nobody can identify — and ADR-0252 §8 limb 3's
+    ``L.declaration == E.declaration`` equating two readings of two propositions, which
+    is what §7 of that decision exists to prevent.
+
+    **One id space across the three tuples**, because the id is the durable name rather
+    than a position and a ``declaration`` carries no tuple. §9's ``C``/``S``/``D``
+    labels are per tuple and are a different space: minted per call, never persisted.
+    """
+    saturday = EvidenceApplicability(window=TimeWindow(start=_WHEN, end=_WHEN + timedelta(days=1)))
+    sunday = EvidenceApplicability(
+        window=TimeWindow(start=_WHEN + timedelta(days=1), end=_WHEN + timedelta(days=2))
+    )
+    first = GoalElement(id="e1", text="the weather permits it", ground=Ground.INFERRED)
+
+    with pytest.raises(ValidationError, match="share an id"):
+        _revision(
+            conditions=(
+                first.model_copy(update={"applicability": saturday}),
+                first.model_copy(update={"applicability": sunday}),
+            )
+        )
+
+    with pytest.raises(ValidationError, match="share an id"):
+        _revision(constraints=(first,), conditions=(first,))
+
+    distinct = _revision(
+        constraints=(GoalElement(id="e0", text="under budget", ground=Ground.INFERRED),),
+        conditions=(first,),
+    )
+    assert (distinct.constraints[0].id, distinct.conditions[0].id) == ("e0", "e1")
+
+
+def test_elements_carrying_no_id_do_not_collide_with_each_other() -> None:
+    """§7: ``None`` is the one value a row written before this decision carries.
+
+    "An element carrying no ``id`` is one recorded **before** this decision … and it
+    decodes." A revision migrated from such a row holds several, every one of them
+    named by nothing, so refusing it for holding two would refuse rows already on disk
+    — the opposite of §10's "no migration and no stored-record version moves for this".
+    """
+    bare = GoalElement(text="it holds", ground=Ground.INFERRED)
+    revision = _revision(conditions=(bare, bare.model_copy(update={"text": "and so does this"})))
+    assert [element.id for element in revision.conditions] == [None, None]
+
+
 # --- §14 arm 12: an element round-trips its identity ------------------------
 
 
@@ -634,17 +702,33 @@ def test_an_output_backed_rows_instants_are_the_producing_steps_and_not_the_call
     one", passing a recency requirement it should fail and superseding a genuinely
     newer reading under ADR-0252 §8 limb 6.
 
-    **The consequence of that is asserted by the lane that computes it.** Evaluating
-    ADR-0252 §6 test 4 and §8's limbs is A7's (§12), so arm 10's paired half is
-    recorded against A7 rather than restated here over a second implementation of
-    those rules; what this arm holds is that the row's effective instant is the step's
-    and not the interpretation's.
+    **An ``as_of`` is refused outright rather than left to the composer**, because the
+    absence is the whole of the protection: an output-backed row carrying one has an
+    effective instant that is not the producing step's, which is exactly the state the
+    two paragraphs above say must not exist. The type can decide it — the field is on
+    the row — where the ``read_at == finished_at`` equality it cannot, holding no
+    execution to compare against.
+
+    **That equality is asserted by the lane that computes it.** Composing the row, and
+    evaluating ADR-0252 §6 test 4 and §8's limbs over it, are A7's (§12), so arm 10's
+    paired half is recorded against A7 rather than restated here over a second
+    implementation of those rules; what this arm holds is that the row's effective
+    instant **cannot** be the interpretation's.
     """
     finished_at = _WHEN
     interpreted_at = _WHEN + timedelta(hours=2)
     row = _row(interpreted_output=_OUTPUT, read_at=finished_at)
     assert (row.read_at, row.as_of) == (finished_at, None)
     assert (row.as_of or row.read_at) < interpreted_at
+
+    with pytest.raises(ValidationError, match="carries no as_of"):
+        _row(interpreted_output=_OUTPUT, read_at=finished_at, as_of=interpreted_at)
+
+    # A records-backed row is untouched: its input is a MemoryRecord, which may well
+    # carry an instant its source declared (ADR-0252 §4).
+    assert _row(records=("m1",), read_at=finished_at, as_of=interpreted_at).as_of == (
+        interpreted_at
+    )
 
 
 # --- §14 arm 11: the two verdict vocabularies are disjoint ------------------
