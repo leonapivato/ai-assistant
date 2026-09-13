@@ -1215,6 +1215,48 @@ class MemoryStoreContract:
 
         assert len(results) <= 2
 
+    async def test_a_record_the_ranking_cannot_score_is_answered_rather_than_raised(
+        self, store: MemoryStore
+    ) -> None:
+        """A record offering the ranking nothing to match on does not break the read.
+
+        Blank content is the one shape that means "nothing to rank this by" under
+        every ranking a ``MemoryStore`` may use: a lexical store finds no term in
+        it, and a vector store embeds it to a vector with no direction — under
+        ``HashingEmbedder``, the literal zero vector, whose cosine distance is
+        ``0/0``. sqlite-vec hands SQLite that ``NaN`` and SQLite renders it
+        ``NULL``, which ``SqliteMemoryStore`` then subtracted from ``1.0``:
+        ``TypeError``, not ``MemoryStoreError``, so not the class
+        ``LoopEngine._retrieve`` and ``_supplement`` catch, and the turn aborted
+        rather than degrading (#2355).
+
+        What the contract can require of every implementation is only this: the
+        read answers, the record that *does* match is in the answer, every score
+        is a real number in ``[0, 1]``, and the order is by non-increasing score.
+        **Whether the unscoreable record is itself returned is left open**, because
+        the implementations legitimately differ: a lexical store admits a record
+        only where a query term hits, while a vector store applies no similarity
+        floor and serves every eligible row for any query at all (the reason
+        ``_assert_indexed_from_the_content_it_carries`` cannot ask whether a row
+        merely comes back). Pinning either answer here would make one of them
+        non-conforming over a difference ADR-0128 decides nothing about.
+
+        The eligible set is deliberately at the size the fault needs — two records
+        against a ``limit`` of ten — because a vector store's KNN returns every
+        eligible row when there is room for it.
+        """
+        await store.add(_semantic("blank", ""))
+        await store.add(_semantic("match", "the user likes coffee"))
+
+        found = await store.search("coffee", limit=10)
+
+        assert "match" in {record.id for record in found.records}
+        ranked = [record.score for record in found.records]
+        assert all(score is not None for score in ranked)
+        scores = [score for score in ranked if score is not None]
+        assert all(0.0 <= score <= 1.0 for score in scores)
+        assert scores == sorted(scores, reverse=True)
+
     async def test_empty_query_matches_nothing(self, store: MemoryStore) -> None:
         await store.add(_semantic("1", "some content"))
 

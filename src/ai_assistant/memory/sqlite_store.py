@@ -1950,7 +1950,10 @@ class SqliteMemoryStore:
         Returns:
             A :class:`~ai_assistant.core.types.MemorySearchResult`: matching
             records, most relevant first, each carrying a ``score`` that is the
-            cosine similarity to the query, in ``[0, 1]``; and ``capped``. Expired
+            cosine similarity to the query, in ``[0, 1]`` — ``0.0`` where that
+            similarity is undefined because the stored vector has no direction,
+            which is the floor every row no closer than orthogonal already takes
+            (#2355); and ``capped``. Expired
             records, and records not live at now (a closed or not-yet-open
             validity window, both ends — ADR-0045 §6), are never returned.
 
@@ -2257,7 +2260,12 @@ class SqliteMemoryStore:
             "JOIN records r ON r.rowid = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? "
             f"AND v.rowid IN (SELECT rowid FROM records WHERE {' AND '.join(eligible)}) "
-            "ORDER BY v.distance"
+            # ``v.distance IS NULL`` first, because SQL orders ``NULL`` *before*
+            # every value and a row whose distance is undefined would otherwise
+            # lead a result documented as most relevant first — at the top of the
+            # list, which is where a caller reads. See the score mapping below for
+            # what makes a distance undefined.
+            "ORDER BY v.distance IS NULL, v.distance"
         )
         # Wrapped as ``_list_beliefs_sync`` wraps its own, because the restriction
         # genuinely *does* add a failure mode the plain KNN lacked. ``json_extract``
@@ -2274,9 +2282,35 @@ class SqliteMemoryStore:
         except sqlite3.Error as exc:
             msg = f"failed to search: {exc}"
             raise MemoryStoreError(msg) from exc
-        # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
+        # vec0 uses cosine distance; similarity is 1 - distance, floored at 0. A
+        # ``NULL`` distance is served at that same floor rather than arithmetic'd
+        # (#2355): cosine divides by each vector's magnitude, so a stored vector of
+        # zero magnitude — the embedding of text carrying no token, which
+        # ``HashingEmbedder`` returns literally — makes the quotient ``0/0``.
+        # sqlite-vec hands SQLite the ``NaN`` and SQLite, having no ``NaN``,
+        # renders it ``NULL``. The similarity is *undefined*, not zero and not
+        # infinite, and ``1.0 - None`` raised ``TypeError`` — outside
+        # ``MemoryStoreError``, so outside what ``LoopEngine._retrieve`` and
+        # ``_supplement`` catch, and it aborted a turn instead of degrading it.
+        #
+        # The floor, and not a drop, for two reasons. This store applies no
+        # similarity floor and serves every eligible row for any query at all, so
+        # dropping one would be its first relevance-based exclusion; and a dropped
+        # row would make ``capped=False`` on a short result assert something untrue
+        # under ADR-0128 §2 — that the store holds no further record matching the
+        # call's filters and passing its eligibility axes — when it holds exactly
+        # that. ``0.0`` is where this expression already puts every row no closer
+        # than orthogonal, so an undefined similarity joins a populated class
+        # rather than being given a value of its own, and no real distance is
+        # clamped. The ordering above keeps it from outranking a scored row.
+        #
+        # A ``NaN`` also compares false against everything, so such a row is never
+        # displaced from a KNN slot it holds and never displaces a scored one: the
+        # row seen first keeps the slot. #2355 read the trigger as an eligible set
+        # at or below ``k``, which is one sufficient condition rather than the
+        # mechanism — a store of any size serves one written early enough.
         results = [
-            (str(data), int(revision), max(0.0, 1.0 - distance))
+            (str(data), int(revision), 0.0 if distance is None else max(0.0, 1.0 - distance))
             for data, revision, distance in rows[:limit]
         ]
         # The ceiling bound this read only if the KNN filled its whole budget *and*

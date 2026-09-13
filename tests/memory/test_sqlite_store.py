@@ -241,6 +241,148 @@ async def test_search_ranks_by_similarity_and_scores(
     assert results[0].score > results[-1].score  # type: ignore[operator]
 
 
+async def test_a_blank_records_stored_vector_has_no_direction_so_vec_reports_no_distance(
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
+) -> None:
+    """The premise the score arithmetic has to survive, pinned against sqlite-vec.
+
+    ``HashingEmbedder`` sums one unit per whitespace-separated token and then
+    normalises, so text carrying no token — ``""``, and anything else ``str.split``
+    empties — embeds to the **zero vector**. ``vec_records`` is created
+    ``distance_metric=cosine``, and cosine distance divides by each vector's
+    magnitude: against a zero-magnitude row the quotient is ``0/0``, sqlite-vec
+    hands SQLite a ``NaN``, and SQLite has no ``NaN`` — it renders one as ``NULL``.
+    So ``v.distance`` comes back ``None`` for that row, meaning *the metric is
+    undefined here*, and not "distance zero" or "distance infinite".
+
+    **And a ``NaN`` compares false against everything**, so such a row neither
+    displaces a ranked one from the KNN's top-``k`` nor is displaced by one: the
+    row that took the slot first keeps it. #2355 read the trigger as an eligible
+    set at or below ``k``, which is one sufficient condition — every eligible row
+    comes back, this one included — but not the mechanism, and the case below
+    pins the other half: written **first**, the blank row holds a slot at ``k =
+    1`` against a record that actually matches. A store of any size can therefore
+    serve it, which is measured in
+    ``test_a_record_with_no_direction_reaches_a_result_over_a_crowded_eligible_set``.
+    """
+    store = make_store()
+    await store.add(_semantic("blank", ""))
+    await store.add(_semantic("c1", "coffee tea"))
+    store.close()
+
+    query = (await HashingEmbedder(dimensions=256).embed(["coffee"]))[0]
+    raw = sqlite3.connect(tmp_path / "memory.db")
+    try:
+        raw.enable_load_extension(True)
+        sqlite_vec.load(raw)
+        raw.enable_load_extension(False)
+        ranked = _knn(raw, query, k=2)
+        alone = _knn(raw, query, k=1)
+    finally:
+        raw.close()
+
+    assert dict(ranked)["blank"] is None
+    assert isinstance(dict(ranked)["c1"], float)
+    assert [record_id for record_id, _ in alone] == ["blank"]
+
+
+def _knn(conn: sqlite3.Connection, query: Embedding, *, k: int) -> list[tuple[str, float | None]]:
+    """``_search_sync``'s own KNN, by hand, so the distance column can be read raw."""
+    rows = conn.execute(
+        "SELECT r.id, v.distance FROM vec_records v JOIN records r ON r.rowid = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
+        (sqlite_vec.serialize_float32(list(query)), k),
+    ).fetchall()
+    return [
+        (str(record_id), None if distance is None else float(distance))
+        for record_id, distance in rows
+    ]
+
+
+async def test_a_record_with_no_direction_is_served_at_the_floor_and_never_leads(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """#2355: an undefined distance is the documented floor, not a ``TypeError``.
+
+    Before this, ``max(0.0, 1.0 - distance)`` met the ``None`` the test above pins
+    and raised ``TypeError: unsupported operand type(s) for -: 'float' and
+    'NoneType'`` — not a ``MemoryStoreError``, so not the class
+    ``LoopEngine._retrieve`` and ``_supplement`` catch, and the turn aborted rather
+    than degrading (ADR-0158 §4). The two records here are the whole eligible set
+    and ``limit`` is above it, which is the shape that lets the undefined row back
+    out of the KNN at all.
+
+    It is served, not dropped: this store applies no similarity floor and returns
+    every eligible row for any query at all, so dropping one would be its first
+    relevance-based exclusion and would make ``capped=False`` on a short result
+    claim something untrue under ADR-0128 §2 — the store would hold a further
+    record matching the call's filters and passing its eligibility axes. ``0.0`` is
+    where ``max(0.0, 1.0 - distance)`` already puts every row no closer than
+    orthogonal, so an undefined similarity joins a populated class rather than
+    getting a value of its own.
+
+    And it is ranked **last**: SQL sorts ``NULL`` first, so the unrankable row led
+    the result until the ordering said otherwise — which contradicts ``search``'s
+    "most relevant first" exactly where a caller reads the top of the list.
+    """
+    store = make_store()
+    await store.add(_semantic("blank", ""))
+    await store.add(_semantic("c1", "coffee tea"))
+
+    found = await store.search("coffee", limit=10)
+
+    assert [record.id for record in found.records] == ["c1", "blank"]
+    assert found.records[-1].score == 0.0
+    assert found.capped is False
+
+
+async def test_a_direction_less_record_is_ranked_last_among_several_floored_ones(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The floor is shared with orthogonal rows, and the ordering still holds.
+
+    ``rocket ship`` scores ``0.0`` too — cosine distance ``1.0``, the same floor —
+    so this pins that the undefined row is ordered against defined *distances*
+    rather than against the scores they collapse to, and that the ranked row still
+    leads.
+    """
+    store = make_store()
+    await store.add(_semantic("blank", ""))
+    await store.add(_semantic("r1", "rocket ship"))
+    await store.add(_semantic("c1", "coffee tea"))
+
+    records = (await store.search("coffee", limit=10)).records
+
+    assert records[0].id == "c1"
+    assert records[-1].id == "blank"
+    assert [record.score for record in records[1:]] == [0.0, 0.0]
+
+
+async def test_a_record_with_no_direction_reaches_a_result_over_a_crowded_eligible_set(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The fault is not confined to a store smaller than the ``limit`` it is asked for.
+
+    #2355 reasoned that "production stores hold hundreds of episodes, which is why
+    this has not been seen there". That holds only while the degenerate row is not
+    among the first the KNN sees: an undefined distance is never displaced from a
+    top-``k`` slot it already holds, so a blank record written **before** thirty
+    that match is served by a ``limit`` of five over an eligible set six times it.
+    Ranked last, and the four best-matching records still lead it.
+    """
+    store = make_store()
+    await store.add(_semantic("blank", ""))
+    for index in range(30):
+        await store.add(_semantic(f"c{index}", f"coffee note {index}"))
+
+    found = await store.search("coffee", limit=5)
+
+    assert len(found.records) == 5
+    assert found.records[-1].id == "blank"
+    assert all((record.score or 0.0) > 0.0 for record in found.records[:4])
+    assert found.records[-1].score == 0.0
+
+
 async def test_add_overwrites_same_id(make_store: Callable[..., SqliteMemoryStore]) -> None:
     store = make_store()
 
