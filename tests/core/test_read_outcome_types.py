@@ -9,12 +9,15 @@ classifier's arms are turn-shaped and live in
 ``tests/orchestration/test_read_outcomes.py``, because what they assert happens at the
 servicing site and reaches the planner.
 
-**The name is this lane's, and it is recorded here rather than left to a reader to
-notice** (issue #2281). ADR-0251 §3 mints ``ReadOutcome``; ``core/types.py`` has held
-that name since ADR-0185 §1 for the permission trail's record of how a gated source
-read ended. The two are different facts, so this lane spells the new one
-``ReadAskOutcome`` and leaves the old one where it stands — asserted below, so a later
-lane that "tidied" one into the other would fail here rather than in production.
+**The name is decided rather than improvised** (ADR-0258 §1, beside ADR-0251 §3, and
+issues #2281 and #2319). ADR-0251 §3 minted ``ReadOutcome``; ``core/types.py`` has held
+that name since ADR-0185 §1 for the permission trail's record of how a gated source read
+ended. The two are different facts, so ADR-0258 partially supersedes §3 in the model's
+name alone and rules the new one ``ReadAskOutcome``, leaving the old one where it stands
+— asserted below, so a later lane that "tidied" one into the other would fail here rather
+than in production. What the annotation alone could **not** stop is asserted below it
+(#2320): the vocabularies share two values, and each seam now refuses the other's member
+instead of converting it.
 """
 
 from __future__ import annotations
@@ -129,6 +132,69 @@ def test_it_is_a_different_type_from_the_gated_reads_outcome() -> None:
     assert {member.value for member in ReadOutcome} & {
         member.value for member in ReadOutcomeKind
     } == {"refused", "failed"}
+
+
+# --- #2320: the overlap is refused at the seam, not left to the annotation ----
+#
+# ADR-0258 §3 names this hazard, files it as #2320 and rules nothing about it — it is
+# unmarked and says in terms that "a guard is code, and the clause that would demand one
+# is a decision this lane is not fenced for". So what these arms hold is the issue's
+# remedy and not an ADR clause, and they are written where the hazard is asserted.
+
+
+@pytest.mark.parametrize("foreign", [ReadOutcome.REFUSED, ReadOutcome.FAILED])
+def test_the_gated_reads_member_is_refused_on_a_value_the_two_vocabularies_share(
+    foreign: ReadOutcome,
+) -> None:
+    """#2320: the two shared values were accepted and silently converted, and are not now.
+
+    Pydantic validates a ``StrEnum`` **by value**, so before the guard
+    ``ReadAskOutcome(ask=…, outcome=ReadOutcome.REFUSED)`` built a model whose
+    ``outcome is ReadOutcomeKind.REFUSED`` — the two facts the test above keeps apart,
+    conflated with no error at the seam that hands the planner its input.
+
+    Driven over **both** members rather than one, because ``refused`` and ``failed`` are
+    independent spellings: a guard written against a single member would pass one arm
+    and leak the other, which is the shape this regression is most likely to come back in.
+    """
+    with pytest.raises(ValidationError):
+        ReadAskOutcome(ask=_ASKS[0], outcome=foreign)  # type: ignore[arg-type]
+
+
+def test_a_member_sharing_no_value_was_refused_already_and_stays_refused() -> None:
+    """#2320: the control, and the reason the defect was hard to see.
+
+    Four of ``ReadOutcome``'s six carry no value of this vocabulary, so they raised from
+    the day the type landed. A caller who checked one of *those* would have concluded the
+    annotation was enforced and stopped looking — which is why the arm above exists and
+    why this one is kept pinned beside it rather than dropped as redundant.
+    """
+    for outside in (
+        ReadOutcome.COMPLETED,
+        ReadOutcome.UNANSWERED,
+        ReadOutcome.DISCARDED,
+        ReadOutcome.UNCONFIRMED,
+    ):
+        assert outside.value not in {member.value for member in ReadOutcomeKind}
+        with pytest.raises(ValidationError):
+            ReadAskOutcome(ask=_ASKS[0], outcome=outside)  # type: ignore[arg-type]
+
+
+def test_a_bare_string_of_a_member_value_is_still_accepted() -> None:
+    """#2320: what the guard refuses is a **foreign enum member**, never a string.
+
+    A stored row, a wire frame (ADR-0087) and ``model_validate`` of a dumped mapping each
+    present the value as a ``str``, and a string carries no vocabulary it could have come
+    from — so refusing one would narrow a decoding path this guard has no quarrel with,
+    and would break every peer at the current ``PROTOCOL_VERSION``. The behaviour is
+    deliberately unchanged, and pinned here rather than left to be inferred from its
+    absence.
+    """
+    for member in ReadOutcomeKind:
+        built = ReadAskOutcome(ask=_ASKS[0], outcome=member.value)  # type: ignore[arg-type]
+        assert built.outcome is member
+    carried = ReadAskOutcome(ask=_ASKS[4], outcome=ReadOutcomeKind.TRUNCATED)
+    assert ReadAskOutcome.model_validate(carried.model_dump()) == carried
 
 
 # --- §3: the carrier's member -------------------------------------------------

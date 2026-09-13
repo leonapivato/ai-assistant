@@ -17,7 +17,13 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.types import GrantScope, ReadOutcome, RiskLevel, SourceReadRecord
+from ai_assistant.core.types import (
+    GrantScope,
+    ReadOutcome,
+    ReadOutcomeKind,
+    RiskLevel,
+    SourceReadRecord,
+)
 
 _CHECKED_AT = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
 
@@ -63,6 +69,56 @@ def test_the_outcomes_are_the_six_the_adr_names() -> None:
         "discarded",
         "unconfirmed",
     }
+
+
+@pytest.mark.parametrize("foreign", [ReadOutcomeKind.REFUSED, ReadOutcomeKind.FAILED])
+def test_the_planners_vocabularys_member_is_refused_on_a_shared_value(
+    foreign: ReadOutcomeKind,
+) -> None:
+    """#2320's reciprocal seam: the costlier of the two directions.
+
+    :class:`ReadOutcomeKind` (ADR-0251 §2) is the planner's vocabulary about an ask the
+    planner composed, and it shares exactly ``{"refused", "failed"}`` with this one —
+    pinned in ``tests/core/test_read_outcome_types.py``. Pydantic validates a ``StrEnum``
+    by value, so ``ReadOutcomeKind.REFUSED`` would have become :attr:`ReadOutcome.REFUSED`
+    here: *the first grant check answered ``None``, so the source is not resolved, not
+    opened and not parsed* (ADR-0097 §5, ADR-0185 §1), and — through
+    ``_grant_matches_outcome``, which then requires ``grant=None`` — a **durable,
+    exported, operator-rendered row asserting an authorisation fact nobody established**.
+    ADR-0185 §1 forbids exactly that over the neighbouring ``UNANSWERED``: folding the two
+    "would put the claim *there was no live grant* into a store whose premise is that its
+    records are not fabricated".
+
+    ADR-0258 §3 names the hazard, files it as #2320 and rules nothing about it, so this
+    arm holds the issue's remedy rather than a clause.
+    """
+    with pytest.raises(ValidationError):
+        _record(outcome=foreign)
+
+
+def test_a_planner_member_sharing_no_value_was_refused_already() -> None:
+    """#2320: the control. Five of the seven carry no value of these six.
+
+    They raised before the guard and raise after it, which is why a caller checking one
+    of them would have concluded the annotation was enforced.
+    """
+    for outside in ReadOutcomeKind:
+        if outside.value in {member.value for member in ReadOutcome}:
+            continue
+        with pytest.raises(ValidationError):
+            _record(outcome=outside)
+
+
+def test_a_bare_string_of_an_outcome_value_is_still_accepted() -> None:
+    """#2320: the guard refuses a foreign enum member and never a string.
+
+    A row read back from the trail's store and a wire frame (ADR-0087) both present the
+    value as a ``str``, so this is the path the guard must leave alone — and it is the
+    reason ``PROTOCOL_VERSION`` does not move for it.
+    """
+    for member in ReadOutcome:
+        grant = None if member in _UNGRANTED else "g-1"
+        assert _record(outcome=member.value, grant=grant).outcome is member
 
 
 def test_the_outcomes_are_not_ordered() -> None:
