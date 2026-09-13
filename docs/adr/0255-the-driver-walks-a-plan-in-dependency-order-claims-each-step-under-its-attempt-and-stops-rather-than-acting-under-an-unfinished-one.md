@@ -318,6 +318,18 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > is re-dispatched and no step is moved to `SKIPPED` — the same residual §6 and §7 state for their
 > own partial writes, one seam over.
 
+> **Normative — the working interval the walk consumed is charged *before* the failure
+> propagates.** §9 states the charging rule of **every** working interval rather than of
+> successful ones, so the elapsed interval up to the instant of the failure **accumulates into
+> `AttemptEffort.working` through `commit_attempt`** before the exception leaves the driver — on
+> §6's own footing, the attempt being in hand with its version known. **Without it a provider call
+> that spent thirty seconds and raised would cost the attempt nothing**, and the next turn would
+> be handed an allowance it has already spent, which is the one thing ADR-0251 §13's monotone
+> ledger exists to prevent. **Where that commit does not land either** — a stale
+> `expected_version`, a store failure — the residual is a ledger that **undercounts**, the turn
+> fails as it would have anyway, **no lane retries it from a later turn**, and A8 owns the repair:
+> §6's residual one field over, and stated rather than inherited.
+
 > **Normative — a failed interpretation is never defaulted, and this is not a sixth stop trigger.**
 > **No lane substitutes `INCONCLUSIVE`, `DOES_NOT_QUALIFY` or any other member for a call that did
 > not return one**, writes a row with a fabricated verdict, retries the call, or proceeds as if the
@@ -332,14 +344,38 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > model call the walk makes is an interpretation**, whose whole input and whose output schema are
 > ADR-0253 §8's, and which *"is **not** a `Planner.plan` call"*.
 
-**That is what makes a condition's verdict at the moment of dispatch stable for the rest of the
-pass, and it is the argument §2's skip rule rests on.** ADR-0252 §6 evaluates recency and every
+**That is what makes a condition's verdict stable against *this turn's* writing for the rest of
+the pass, and it is the argument §2's skip rule rests on — stated at exactly the strength it
+holds.** ADR-0252 §6 evaluates recency and every
 other test *"at the moment of dispatch"*, so a step evaluated early and dispatched late could be
-evaluated against rows that moved. Inside one walk they cannot: the only writer of a row during
-the walk is an interpretation the plan declared, ADR-0253 §8's ordering rule puts every such
-interpretation before every step conditioned on what it settles, and nothing else writes a row
-because nothing else reads the world. **Between walks they can**, which is why the evaluation is
+evaluated against rows that moved. **Against this turn's own writing they cannot**: the only row
+this turn writes during the walk is an interpretation the plan declared, ADR-0253 §8's ordering
+rule puts every such interpretation before every step conditioned on what it settles, and no other
+stage of this turn reads the world. **Between walks they can**, which is why the evaluation is
 per dispatch and not per plan.
+
+> **Normative — a *concurrent turn's* evidence write is outside that argument, and the window it
+> leaves is stated rather than claimed away.** Two turns of one conversation are **not**
+> serialized (§3, and ADR-0014's and ADR-0029's notes of 2026-08-25), and ADR-0252 §8's **refresh**
+> supersedes a `STANDING` row **without moving the goal's `revision`** — ADR-0252 §9 makes an
+> *invalidation* atomic with the revision that occasions it, and a refresh is a different write.
+> **So a row that satisfied a step's `when` when §1's evaluation read it can be `SUPERSEDED` by
+> another turn before that step's claim commits**, and none of §3's three claim conditions refuses
+> the claim: the revision has not moved, the attempt has not changed, and no successor was
+> persisted. **The window is the interval between §1's evaluation and the committed claim**, and
+> **no lane reads §1's stability argument, §2's fixed-inputs argument or §3's conjuncts as
+> excluding it.**
+
+> **Normative — what this decision does about that window, and what it declines.** It **states**
+> it, it adds **no mechanism**, and **§13's Q4 rule is what makes the interval safe rather than a
+> hazard**: no consequential capability is wired into a production deployment until A8's, A9's and
+> A10's guarantees are implemented and demonstrated, so the acts the window governs cannot be
+> performed while it stands — the construction §7 uses for cross-plan at-most-once, applied to one
+> more obligation. **The two mechanisms that would close it are named in §12 and neither is taken
+> here**: a value the claim carries, which §3's argument against a caller-supplied revision
+> applies to in full; or ADR-0252 §6's four tests evaluated inside `commit_transition`, which puts
+> a clock and a plan's conditions inside the store. **Choosing between them is not this decision's
+> to do**, and no lane reads this silence as a ruling that the window does not exist.
 
 > **Normative — the driver re-evaluates, and phase 4 is not thereby moved or duplicated.**
 > ADR-0254 §14's phase-4 evaluation runs once over the plan before the walk begins and is that
@@ -374,6 +410,35 @@ per dispatch and not per plan.
 > **A deferred check neither blocks the advance to `AttemptPhase.EXECUTE` nor triggers a
 > replan**, and it is decided at that step's own dispatch, by §1's evaluation, on ADR-0252 §6's
 > *"at the moment of dispatch"*.
+
+> **Normative — what an *operand* is, per check, so that neither *available* nor *dominates* is
+> read loosely.** The dominance rule above turns on which operands a check reads, and this
+> decision states them rather than leaving an implementation to choose: for **check 1** they are
+> the stored `StepExecution` status and `output` of each `depends_on` member; for **check 2** the
+> step's literal arguments and, for each `ResultReference`, its producing step; for **check 3**
+> **one operand per member of `when`** — the goal's rows for the element that member names; and
+> for **check 4** the operand is the step's **complete concrete `ActionRequest`**, which is **one
+> operand and not several**.
+
+> **Normative — coverage is therefore deferred *entire* while any argument of the step is filled
+> by an unresolved reference, and the dominance rule has nothing to bite on there.** ADR-0148 §1
+> makes the request the thing a ruling is taken on — *"Nothing in it is resolved, canonicalised,
+> defaulted, expanded or added after `ActionPolicy.decide` has been reached"* — and ADR-0254 §3's
+> comparison is over **that** request. So where a step carries a `resolves` naming a step of this
+> plan that has not produced, **there is no concrete request to compare and no available operand
+> to fail**: the coverage check defers, and **no lane routes such a step to §14's `CONFIRM` limb
+> at phase 4**. A step whose every argument is a **literal** has its concrete request at phase 4,
+> so an uncovered argument there is available and refuses, and §14's `CONFIRM` limb takes it
+> exactly as it does today.
+
+**Stating the operands is what stops *known failure dominates* becoming *ask the user early*.**
+The dominance rule exists so a refusal nothing can change is not hidden behind a value the plan
+will supply; it is not a licence to decide a check whose subject does not exist yet. Coverage's
+subject is a whole request, and a request missing a resolved value is not a request that fails
+coverage — it is a request ADR-0148 §1 forbids ruling on at all. **Parking it would ask the user
+to authorise arguments the plan has not filled**, and the answer would bind a request different
+from the one that is finally built — which is exactly the substitution ADR-0037 §2 and ADR-0021 §1
+close by embedding the definition and digesting the parameters.
 
 **Deferring only what the plan's own production could change is what keeps ADR-0254 §14's failure
 limb alive rather than swallowing it.** A check defers because its answer is **not yet
@@ -510,9 +575,10 @@ happening.
 **At the moment the walk reaches it, because by then every input to the refusal is fixed and
 cannot change before the walk ends.** ADR-0253 §2's rule reads the producers' stored statuses,
 and every producer sits strictly earlier and has already been disposed of or has stopped the walk.
-ADR-0252 §6's tests read the goal's rows, and §1 above establishes that the only rows written
-during a walk are the interpretations the plan declared, every one of which ADR-0253 §8 orders
-before the steps conditioned on it. ADR-0253 §6's resolution reads the producing execution's
+ADR-0252 §6's tests read the goal's rows, and §1 above establishes that the only rows **this turn**
+writes during a walk are the interpretations the plan declared, every one of which ADR-0253 §8
+orders before the steps conditioned on it — **a concurrent turn's refresh being the window §1
+states and this argument does not cover**. ADR-0253 §6's resolution reads the producing execution's
 `output`, which is written once when that step succeeds and is never rewritten. **So deferring
 the skip to the end of the walk would record the same fact later, and deferring it to the end of
 the attempt would leave a step `PENDING` that nothing will ever dispatch** — indistinguishable, in
@@ -1387,6 +1453,19 @@ nothing depends on it, and no act follows — so nothing fails open.
 > is not stated and why the arm below tests a strict decrease only over a **controlled** source
 > advanced by known intervals.
 
+> **Normative — the turn's *first* `Planner.plan` call is the one unit of work the remainder does
+> not gate, and that is stated rather than left for a reader to find.** ADR-0251 §4's
+> never-gated-first-call clause is ratified, binds entire and is relied on here (§16), so a turn
+> whose routing and context assembly consumed the whole `timeout` still makes its first planner
+> call. **Everything after it is gated**: every step's disposal, every interpretation the walk
+> makes, and every **licensed** round (§10) are each admitted only on a strictly positive
+> remainder. So *"the whole request's budget"* means that this decision's driver spends nothing
+> outside it — **not** that a `converse` can never exceed it, which ADR-0228 §4 already says it
+> can: *"a planner call already begun runs to its own completion, and a turn's total duration may
+> therefore exceed its budget by one planner call and one servicing."* **This decision gates the
+> first call no more than ADR-0251 §4 does and no lane reads §9 as gating it**; whether it should
+> be gated is that decision's question and not this one's (§12).
+
 > **Normative.** **A step the deadline stopped is `PENDING` and is never `SKIPPED`** (§2), and the
 > remainder is never rounded up, clamped to a minimum, borrowed from a later turn or topped up.
 
@@ -1881,6 +1960,16 @@ ledger and stops on the same three guards.
   that *"`ActionPlan.steps` is **not** bounded by this decision"* binds. A step is selected, ruled
   on and claimed one at a time, so a long plan is expensive in a way the corpus already gates
   (ADR-0004 §7, ADR-0194 §3) and bounded in wall-clock by §9. Fired by a consumer that needs one.
+- **Evidence that moves between a step's evaluation and its committed claim.** **Not decided**,
+  and §1 states the window rather than closing it: a concurrent turn's ADR-0252 §8 refresh
+  supersedes a `STANDING` row without moving the goal's `revision`, so a step whose `when` the
+  driver found satisfied can be claimed and invoked against evidence that is superseded by then.
+  Closing it needs either **a value the claim carries** — which §3's argument against a
+  caller-supplied revision applies to unchanged — or **ADR-0252 §6's four tests evaluated inside
+  `commit_transition`**, which needs a clock and a plan's conditions in the store. §13's Q4 rule
+  bounds the interval meanwhile, exactly as it bounds §7's. **Fired by a decision that chooses
+  between the two**, and no lane reads this entry as licence to add either on its own authority.
+  Filed as [#2309](https://github.com/leonapivato/ai-assistant/issues/2309).
 - **A per-phase event log for an attempt.** ADR-0249 §13's entry, untouched; §10's high-water-mark
   clause is what makes it unnecessary rather than what forecloses it. Fired by a lane that needs
   the timings and carries its own retention and export obligations.
@@ -1997,7 +2086,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    `SKIPPED`, nothing is re-dispatched and the turn **fails**; and where the call **returns a value
    outside `InterpretationVerdict`'s three members**, the same two assertions hold and **no row
    carrying a defaulted `INCONCLUSIVE` is written** — which is what stops an implementation reading
-   a failed call as a does-not-settle answer.
+   a failed call as a does-not-settle answer. **Each of the three asserts the ledger**:
+   `AttemptEffort.working` has **advanced by the interval the walk consumed up to the failure**,
+   over a controlled monotonic source advanced by a known amount across the raising call, and
+   `planner_calls` has not moved — against an implementation that commits elapsed time only after
+   a call returns and would hand the next turn an allowance it has already spent (§1, §9).
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
@@ -2157,7 +2250,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     unavailable and lets step 1 act under a plan already known to be refused. A paired case flips
     the second condition to one the goal's rows **do** satisfy and asserts the plan **passes** and
     the attempt advances, so the arm separates *one operand unavailable* from *one operand
-    failing*. **Not covered**: a one-step transmitting plan with complete
+    failing*. **And the arm that keeps coverage out of the dominance rule** (§1): a two-step plan
+    whose **second** step carries one argument filled by a `resolves` naming step 1 and one
+    **literal** argument no standing authorization covers — phase 4 **defers** the coverage check
+    entire, the attempt advances to `EXECUTE`, **no `CONFIRM` is put and no park is recorded at
+    phase 4**, and the coverage comparison is taken at that step's own `ActionPolicy.decide` over
+    the complete request (ADR-0254 §13). The paired case makes **every** argument of that step a
+    literal, so the concrete request exists at phase 4: coverage is **available and refuses**, and
+    §14's `CONFIRM` limb takes it. Together they are what stop an implementation asking a user to
+    authorise a request the plan has not finished building. **Not covered**: a one-step
+    transmitting plan with complete
     literal arguments and no covering authorization takes §14's `CONFIRM` park and the attempt
     commits `AWAITING_AUTHORIZATION` — **and is not replanned**, which is the disposition this
     decision routes nothing away from. **Passed**: a one-step plan needing none of it advances.
@@ -2279,7 +2381,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     first step approximately **PT1S** and not PT10S, and a second case in which that call
     consumes the whole budget **starts no step at all** — asserted against an implementation that
     fixed its deadline when driving began, which would hand that step a fresh PT10S and spend
-    PT19S against a budget of ten. **And the arm that pins what the budget gates** (§9): a
+    PT19S against a budget of ten. **And the arm that pins the one ungated unit** (§9): a
+    `converse(timeout=PT1S)` whose routing and context assembly consume the whole second on the
+    controlled monotonic source still **makes its first `Planner.plan` call** — ADR-0251 §4's
+    never-gated-first-call clause — and then **starts no step, makes no interpretation call and
+    admits no licensed round**, so the exception is exactly one call wide and is asserted as such
+    rather than left to a reader. **And the arm that pins what the budget gates** (§9): a
     two-step plan with an interpretation
     between the steps, where the budget expires during step 1 — the **interpretation call is
     never made**, its row is unwritten, step 2 is `PENDING` and **not** `SKIPPED`, and the walk
