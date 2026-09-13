@@ -429,13 +429,23 @@ function restoreReference(sent) {
 // And keying it on `WITHDRAWN`/`ABANDONED` alone would leave the reopen reachable
 // through `ALREADY_CLOSED`, which establishes exactly that the goal is closed.
 //
+// **The later of the owner's two acts is the one that stands** (round 5, `major`). An
+// act's request can still be out when the owner presses "Take this up here" on the same
+// row, and matching by record id alone would let the answer erase a selection they made
+// *after* it — §13 makes taking a closed goal up by explicit reference a legitimate act,
+// so the newer press is a decision and not a leftover. `held` is the value that was
+// attached when the act started, and the identity comparison is what tells the two
+// apart; `setReference` installs a fresh object every time, which is what makes it
+// decisive. The id test stays beside it, because a reference to a **different** goal was
+// never this act's to take.
+//
 // **Nothing is lost by dropping it** (§11): the handle is a durable record's own id and
 // is read again from the listing this act is about to re-read, at no cost.
-function forgetReferenceTo(goalId, questionId) {
-  if (reference === null) {
+function forgetReferenceTo(held, goalId, questionId) {
+  if (held === null || reference !== held) {
     return;
   }
-  const named = reference.value;
+  const named = held.value;
   if (named.goal_id === goalId || (questionId !== null && named.question_id === questionId)) {
     clearReference();
   }
@@ -9814,6 +9824,9 @@ function offerGoalActs(item, goal) {
 async function withdrawClarification(questionId) {
   fault(null, "goals");
   sayGoalAct(null);
+  // What was attached when this act started, so a selection the owner makes while it is
+  // out is theirs and not this answer's to take (round 5, `major`).
+  const held = reference;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -9828,8 +9841,9 @@ async function withdrawClarification(questionId) {
     // by a fresh read and a sentence written into it would be gone before it was read.
     sayGoalAct(goalMemberWords(CLARIFICATION_WITHDRAWAL_WORDS, done.withdrawal));
     // The question this act was about is no longer one to answer, so a reference naming
-    // it goes with it (round 4, `major`).
-    forgetReferenceTo(null, questionId);
+    // it goes with it (round 4, `major`) — unless the owner has attached another since
+    // (round 5).
+    forgetReferenceTo(held, null, questionId);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
@@ -9847,6 +9861,8 @@ async function abandonGoal(goal) {
   // Read before the ceremony, so what is forgotten afterwards is what this act was about
   // rather than whatever the row holds by then.
   const asking = goal.clarification === null ? null : goal.clarification.question_id;
+  // And what was attached when this act started, on `withdrawClarification`'s clause.
+  const held = reference;
   const asked = window.confirm(
     `About to give this up.\n\n${goal.outcome}\n\nI will not take it up again on my ` +
       "own and nothing more will be planned for it, and any question it has open is " +
@@ -9875,7 +9891,7 @@ async function abandonGoal(goal) {
     // goal (§11) and a closed goal a turn associates to is **reopened** (§13). The ids
     // are the row's, read before the act rather than off a listing this is about to
     // re-read. Round 4, `major`.
-    forgetReferenceTo(goal.id, asking);
+    forgetReferenceTo(held, goal.id, asking);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
