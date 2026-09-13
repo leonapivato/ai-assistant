@@ -55,6 +55,7 @@ from ai_assistant.core.types import (
     GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
+    GoalRevision,
     PlanExport,
     PlannerOutput,
     SkipReason,
@@ -74,7 +75,6 @@ if TYPE_CHECKING:
         EvidenceDigest,
         GoalBrief,
         GoalCandidacy,
-        GoalRevision,
         GoalStatus,
         MemoryRecord,
         ProposedUnderstanding,
@@ -115,6 +115,35 @@ def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
 
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
+def _revalidated_revision(revision: GoalRevision) -> GoalRevision:
+    """Rebuild ``revision`` as a validated, detached :class:`GoalRevision`, or refuse it.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph. A snapshot is not
+    enough: ``invalidates`` is annotated ``tuple[Identifier, ...]`` but
+    ``model_copy(update=...)`` **skips validators** (ADR-0023 §2), so it can arrive as a
+    one-shot iterator a second traversal finds empty, or as a **string** whose
+    ``tuple()`` is its characters — ``tuple("ev1")`` is ``("e", "v", "1")``, three ids
+    the caller never named. The fake must not certify a weaker contract than the real
+    stores keep.
+
+    Args:
+        revision: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return GoalRevision.model_validate(revision.model_dump())
+    except ValidationError as exc:
+        subject = getattr(revision, "goal_id", "<no goal>")
+        msg = f"the revision for goal {subject!r} is not a valid command: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def _revalidated_evidence(row: GoalEvidence) -> GoalEvidence:
     """Rebuild ``row`` as a validated, detached :class:`GoalEvidence`, or refuse it.
 
@@ -790,42 +819,41 @@ class FakePlanStore:
 
         **``invalidates`` is applied in the same step as the append** (ADR-0252 §9,
         §12), with the refusals ahead of it so a call that cannot mark every row it
-        named appends nothing.
+        named appends nothing. **The command is revalidated on the first executed
+        line**, which is both ADR-0023 §2's obligation and this method's ADR-0065
+        snapshot.
 
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, the revision does not
-                follow the goal's current one, or a row named by ``invalidates`` is not
-                this goal's or is not ``STANDING``.
+            PlanningError: If the revision is not a valid command, if ``goal_id`` names
+                no stored goal, if the revision does not follow the goal's current one,
+                or if a row named by ``invalidates`` is not this goal's or is not
+                ``STANDING``.
         """
-        # Materialised **once**, before the first await, for the reason
-        # `InMemoryPlanStore.record_interpretation` gives: `model_copy(update=...)` skips
-        # validators, so a caller can plant a one-shot iterator that the refusal loop
-        # drains and the marking loop finds empty (ADR-0023 §2, ADR-0065 §1).
-        named = tuple(revision.invalidates)
+        command = _revalidated_revision(revision)
         async with self._resource.held():
-            stored = self._goals.get(revision.goal_id)
+            stored = self._goals.get(command.goal_id)
             if stored is None:
-                msg = f"cannot record an interpretation for unknown goal {revision.goal_id}"
+                msg = f"cannot record an interpretation for unknown goal {command.goal_id}"
                 raise PlanningError(msg)
-            if stored.version != revision.expected_version:
+            if stored.version != command.expected_version:
                 msg = (
-                    f"goal {revision.goal_id} is at version {stored.version}, not "
-                    f"{revision.expected_version}: re-read it and recompute the revision"
+                    f"goal {command.goal_id} is at version {stored.version}, not "
+                    f"{command.expected_version}: re-read it and recompute the revision"
                 )
                 raise StaleExecutionError(msg)
             current = stored.interpretation[-1]
-            if revision.interpretation.revision != current.revision + 1:
+            if command.interpretation.revision != current.revision + 1:
                 msg = (
-                    f"goal {revision.goal_id} is at revision {current.revision}, so the "
+                    f"goal {command.goal_id} is at revision {current.revision}, so the "
                     f"next revision is {current.revision + 1} and not "
-                    f"{revision.interpretation.revision} (ADR-0249 §1)"
+                    f"{command.interpretation.revision} (ADR-0249 §1)"
                 )
                 raise PlanningError(msg)
             self._refuse_unmarkable_locked(
-                revision.goal_id, named, being_written=None, what="invalidate"
+                command.goal_id, command.invalidates, being_written=None, what="invalidate"
             )
-            history = (*stored.interpretation, revision.interpretation)
+            history = (*stored.interpretation, command.interpretation)
             # ADR-0249 §2: the write that would exceed the bound drops the **oldest**
             # element, never the current one, and the count is advanced rather than
             # the truncation left silent.
@@ -838,12 +866,12 @@ class FakePlanStore:
                 }
             )
             self._goals[updated.id] = updated
-            for row_id in named:
+            for row_id in command.invalidates:
                 self._evidence[row_id] = _marked_evidence(
                     self._evidence[row_id],
                     {
                         "standing": EvidenceStanding.INAPPLICABLE,
-                        "inapplicable_at_revision": revision.interpretation.revision,
+                        "inapplicable_at_revision": command.interpretation.revision,
                     },
                     what="the invalidation",
                 )

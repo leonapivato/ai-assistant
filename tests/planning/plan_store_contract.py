@@ -2461,6 +2461,43 @@ class PlanStoreContract:
             )
             assert marked.inapplicable_at_revision == 2
 
+    @pytest.mark.parametrize(
+        "malformed",
+        ["ev1", 7, {"ev1": True}],
+        ids=["a-string-whose-tuple-is-its-characters", "not-a-container", "a-mapping"],
+    )
+    async def test_a_revision_whose_invalidates_is_not_a_tuple_is_refused(
+        self, store: PlanStore, malformed: object
+    ) -> None:
+        """A snapshot is not enough: the command itself has to revalidate (ADR-0023 §2).
+
+        ``invalidates`` is annotated ``tuple[Identifier, ...]``, and
+        ``model_copy(update=...)`` **skips validators**, so the field can hold anything.
+        ``"ev1"`` is the case that shows why a ``tuple()`` snapshot does not close it:
+        ``tuple("ev1")`` is ``("e", "v", "1")`` — three ids the caller never named, which
+        a store would mark wherever they happen to exist while leaving ``ev1``
+        **standing**. A revision that invalidated the wrong rows and said nothing is
+        worse than one that refused.
+
+        The goal is left untouched, because the refusal runs before the append: §12's
+        indivisibility is a promise about a call that succeeds *and* about one that does
+        not.
+        """
+        await _goal_with_evidence(store)
+        revision = GoalRevision(
+            goal_id="g1", interpretation=_revision(2), expected_version=0
+        ).model_copy(update={"invalidates": malformed})
+
+        with pytest.raises(PlanningError):
+            await store.record_interpretation(revision)
+
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.version == 0, "the append did not land"
+        standing = await store.get_evidence("ev1")
+        assert standing is not None
+        assert standing.standing is EvidenceStanding.STANDING
+
     async def test_a_revision_naming_an_unmarkable_row_appends_nothing(
         self, store: PlanStore
     ) -> None:
