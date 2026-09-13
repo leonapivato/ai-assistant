@@ -319,6 +319,31 @@ def test_an_empty_listing_says_so_and_is_not_a_failure(
     assert "Nothing outstanding" in _flat(output.getvalue())
 
 
+@pytest.mark.parametrize("argv", [["goals", "--offset", "1"], ["goals", "--limit", "0"]])
+def test_an_empty_page_makes_no_claim_about_what_is_outstanding(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO, argv: list[str]
+) -> None:
+    """An empty page is not an empty listing, and only one of the two is checkable here.
+
+    :func:`_render_notifications` states the rule one listing over and this is it: a page
+    asked for past the end, or asked for with ``--limit 0``, is empty whatever is
+    outstanding. "Nothing outstanding" there would be a false absence and a confident
+    one — it is the answer to *is anything waiting on me*, so a script reading it off
+    ``--offset 1`` would report a paused goal as none. ``--limit 0`` is accepted here as
+    it is on every other listing, which is what makes the second case reachable.
+
+    Adversarial review, round 1, ``major``. The arm drives a store that **does** hold a
+    goal, because the defect is invisible over an empty one.
+    """
+    _wire(monkeypatch, _listing(_summary()))
+
+    assert CliRunner().invoke(cli.app, argv).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert "No goals on this page" in screen
+    assert "Nothing outstanding" not in screen
+
+
 # --- the two acts (ADR-0250 §12) ---------------------------------------------
 
 

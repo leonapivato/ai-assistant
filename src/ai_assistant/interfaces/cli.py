@@ -5004,6 +5004,20 @@ def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> 
         offset: The offset asked for, for the same line.
     """
     if not page:
+        # **An empty page is not the same claim as an empty listing**, and only one of
+        # the two is checkable from here — :func:`_render_notifications`' clause, one
+        # listing over. A page asked for past the end, or asked for with `--limit 0`, is
+        # empty whatever is outstanding, so "nothing outstanding" there would be a false
+        # absence and a confident one: it is the answer to "is anything waiting on me",
+        # and a script reading it off `--offset 1` would report a paused goal as none.
+        # Adversarial review, round 1, `major`.
+        if offset or not limit:
+            _print(
+                "[dim]No goals on this page.[/] That says nothing about what is "
+                "outstanding — ask from the first page ('--offset 0' with a limit above "
+                "0) to see."
+            )
+            return
         _print(
             "[dim]Nothing outstanding — 'assistant ask' starts something, and what it "
             "starts shows up here.[/]"

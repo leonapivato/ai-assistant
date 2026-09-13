@@ -382,6 +382,13 @@ function setReference(next, note) {
 // where a consent token is process-scoped and is the thing `answerConfirmation` spends
 // so carefully. Keeping one attached across turns would be the worse failure: a second
 // question answered against a record the owner had stopped meaning.
+//
+// **`ask` decides whether it may run rather than passing a sentinel in**, which is the
+// arrangement a click listener forces: `addEventListener("click", clearReference)` hands
+// the handler a `MouseEvent`, so a parameter meaning "only if it is still this one"
+// would be compared against an event object and would refuse the owner's own control.
+// The condition lives at `ask`'s one call site instead, where the value it sent is in
+// scope.
 function clearReference() {
   reference = null;
   const hint = el("referencing");
@@ -5322,8 +5329,12 @@ async function ask(event) {
     // ADR-0250 §11's keyword, the browser's own argument, relayed whole. It is read
     // here — before either entry is chosen — because `converse_streaming` "takes exactly
     // `converse`'s arguments in exactly its" order, so the two entries carry it alike.
-    if (reference !== null) {
-      asked.reference = reference;
+    //
+    // Held in a local as well, because what this turn is allowed to give up when it ends
+    // is the reference it *sent* and not whatever is attached by then.
+    const sent = reference;
+    if (sent !== null) {
+      asked.reference = sent;
     }
     // **Which entry is the owner's choice, and the gateway never chooses between
     // them** (ADR-0175 §3). ADR-0173 §5 makes a provider that cannot stream a
@@ -5343,7 +5354,18 @@ async function ask(event) {
     // next one. It is dropped only where the turn came back — an abort or a dead
     // gateway throws past this line and leaves it attached, so the owner's next attempt
     // is the same attempt.
-    clearReference();
+    //
+    // **And only where it is still the one that went out** (adversarial review, round 1,
+    // `major`). The ask control is disabled while a turn is out, but the goals panel's
+    // are not — so an owner can pick a second goal while the first answer is still in
+    // flight, and a clear that ran whatever was attached by then would undo an act they
+    // had just taken, silently, one turn later. The identity comparison is enough
+    // because `setReference` installs a fresh object every time, and it is the same
+    // device as `awaited === waiting` two lines on: the identity of the thing decides,
+    // not a flag.
+    if (reference === sent) {
+      clearReference();
+    }
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one — `readDeliveries`' own

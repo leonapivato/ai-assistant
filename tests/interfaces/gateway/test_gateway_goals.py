@@ -273,6 +273,13 @@ async def test_a_turn_naming_no_reference_carries_none(harness: Harness) -> None
         {"question_id": None, "goal_id": None},
         "question-1",
         {"question_id": 7},
+        # A member the object does not declare, which is the type's own `extra="forbid"`
+        # at the one seam that would otherwise strip it. Read by name and discarded, this
+        # is a caller naming **both** records — the shape §11's validator exists to
+        # refuse — running as an ordinary turn against the goal. Adversarial review,
+        # round 1, `blocker`.
+        {"goal_id": GOAL_ID, "question_idd": QUESTION_ID},
+        {"question_id": QUESTION_ID, "conversation_id": "c-1"},
     ],
 )
 async def test_a_reference_naming_other_than_one_record_is_refused(
@@ -286,6 +293,14 @@ async def test_a_reference_naming_other_than_one_record_is_refused(
     hands the object over and turns the refusal into this boundary's one refusal kind,
     so a page and a gateway that disagree about a shape get the answer every other
     malformed body gets, and the engine is not reached.
+
+    **And a member the object does not declare is refused rather than ignored**, which
+    is ``extra="forbid"`` reaching the one seam that would otherwise strip it: two reads
+    by name would turn ``{"goal_id": "g", "question_idd": "q"}`` — a caller naming both
+    records — into an ordinary turn against ``g``, reported as success. That is
+    :func:`_optional_string`'s own rule: a member present and wrong is refused rather
+    than read as an absence, because reading it as one "would answer a *different*
+    well-formed question instead". Adversarial review, round 1, ``blocker``.
     """
     status, _ = await harness.whole("POST", "/ask", {"utterance": "either", "reference": reference})
 
