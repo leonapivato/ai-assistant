@@ -4741,7 +4741,20 @@ class Engine:
 
         Returns:
             The page.
+
+        Raises:
+            ValueError: If ``limit`` is not positive.
         """
+        # **This page is refused here rather than by a store**, and that is a
+        # consequence of #2296 rather than a second convention: every other paged read
+        # on this surface passes its `limit` to a `PlanStore`, `MemoryStore` or
+        # `AuditTrail` member that refuses a non-positive one, and ADR-0250 §9 gives
+        # this operation no such member to pass it to. The refusal is stated here so
+        # the operation behaves as its own contract documents rather than answering an
+        # empty page to an argument every neighbouring read rejects.
+        if limit < 1:
+            msg = f"limit must be positive, got {limit}"
+            raise ValueError(msg)
         export = await self._plans.export()
         current: dict[str, GoalAttempt] = {}
         for attempt in export.attempts:
