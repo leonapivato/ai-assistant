@@ -728,9 +728,29 @@ class ThresholdActionPolicy:
                 reason=_CONFIGURED_SEARCH_PROVIDER,
                 authorised_by=at_configured.account.reference,
             )
-        route_d = await self._route_d(request, record)
-        if route_d is not None:
-            return route_d
+        recipient: RecipientGrant | None = None
+        consulted = False
+        if self._covers_in_full(request, record):
+            assert record is not None  # noqa: S101 — narrowing; the test is stated over it
+            if record.origin is AuthorizationOrigin.OPENING_ACT:
+                # **The one exception to "route (d) answers with the grant seam
+                # consulted zero times"** (ADR-0254 §6): an opening-act row carries
+                # no recipient authority of its own, so the one it rested on is
+                # re-taken here, **once, before route (d) may answer**. Where it no
+                # longer stands, route (b) does not cover either — it needs the same
+                # grant — so the answer is carried rather than the seam re-read,
+                # which is what keeps "at most one durable read per seam per ruling"
+                # true on this path as on every other.
+                recipient = await self._covering(request)
+                consulted = True
+            if consulted is False or recipient is not None:
+                return PermissionRuling(
+                    outcome=PermissionOutcome.ALLOW,
+                    reason=_GOAL_AUTHORIZATION,
+                    authorised_by=record.id,
+                    authorised_subject=record.subject_digest,
+                    authorised_goal=record.goal,
+                )
         if external:
             # **The third disjunct is what admitted this request** (ADR-0254 §6):
             # ``_only_the_disclosure_floor``'s lineage limb now reads "…, **or** the
@@ -743,13 +763,14 @@ class ThresholdActionPolicy:
             # goal's record does not cover in full reaches **no** route at all and
             # ``_covering`` is called **zero** times.
             return None
-        grant = await self._covering(request)
-        if grant is not None:
+        if not consulted:
+            recipient = await self._covering(request)
+        if recipient is not None:
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
                 reason=_STANDING_GRANT,
-                authorised_by=grant.id,
-                authorised_subject=grant.subject_digest,
+                authorised_by=recipient.id,
+                authorised_subject=recipient.subject_digest,
             )
         return None
 
@@ -833,10 +854,9 @@ class ThresholdActionPolicy:
             return True, None
         return False, record
 
-    async def _route_d(
-        self, request: ActionRequest, record: Authorization | None
-    ) -> PermissionRuling | None:
-        """ADR-0148 §3's fourth route, decided from the row the one read returned.
+    @staticmethod
+    def _covers_in_full(request: ActionRequest, record: Authorization | None) -> bool:
+        """Whether route (d) covers this request but for the opening-act recheck.
 
         **Route (d) is reachable on** :meth:`_only_the_disclosure_floor`'s **five
         conditions and relaxes none of them** (ADR-0254 §6). Two of them are
@@ -857,52 +877,28 @@ class ThresholdActionPolicy:
         * **condition 3** — the binding does not carry
           ``planned_with_external_content``, **or** the row covers the request under
           §3 **in full**. That second limb is ADR-0181 §5's floor **discharged**, and
-          it is subsumed by the coverage test below rather than stated twice: route
-          (d) answers only where the row covers in full, so a tainted request the
-          row does not cover in full reaches no route at all. **Partial coverage
-          still asks.**
+          it is subsumed by the coverage test rather than stated twice: route (d)
+          answers only where the row covers in full, so a tainted request the row
+          does not cover in full reaches no route at all. **Partial coverage still
+          asks.**
 
-        **The recipient authority an opening act rested on must still stand at every
-        dispatch, and route (d) on such a row re-takes it** (ADR-0254 §1, §6). On a
-        row whose ``origin`` is ``OPENING_ACT``, route (d) covers only where
-        ``RecipientGrants.covering`` answers a live grant covering this request on
-        ADR-0193 §3's comparisons. Where it does not — the grant lapsed, the user
-        revoked it, or it no longer covers this destination set — **route (d) does
-        not cover, route (b) does not either** (it needs the same grant), and the
-        ruling is the ``CONFIRM`` the table reached. **The seam is read over
-        ``origin`` and never over the pointer shape**, which a correction changes,
-        so the dependency survives a chain of corrections and is discharged only by
-        a path-(i) supersession the user was shown and answered.
-
-        **The grant is a condition on the route and never a second contributor to
-        the ruling** (§1): ``authorised_by`` still names **one** row,
-        ``authorised_subject`` is still that row's subject digest, and
-        ``authorised_goal`` is still its goal.
+        The remaining condition — the recipient authority an **opening-act** row
+        rested on, re-taken at every dispatch — is :meth:`_standing_allow`'s,
+        because it is the one that spends a seam read and the read has to be shared
+        with route (b).
 
         Args:
             request: The action being ruled on.
             record: The row the one ``live_for`` read returned, or ``None``.
 
         Returns:
-            The route-(d) ``ALLOW``, or ``None`` where the route does not cover.
+            Whether §3's six conditions hold over that pair and condition 4 holds
+            over the binding.
         """
         binding = request.egress_binding
         if record is None or binding is None or binding.coverage is not SpanCoverage.NOT_COVERED:
-            return None
-        if not covers(record, request):
-            return None
-        if (
-            record.origin is AuthorizationOrigin.OPENING_ACT
-            and await self._covering(request) is None
-        ):
-            return None
-        return PermissionRuling(
-            outcome=PermissionOutcome.ALLOW,
-            reason=_GOAL_AUTHORIZATION,
-            authorised_by=record.id,
-            authorised_subject=record.subject_digest,
-            authorised_goal=record.goal,
-        )
+            return False
+        return covers(record, request)
 
     def _only_the_disclosure_floor(
         self,
