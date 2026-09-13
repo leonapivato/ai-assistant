@@ -256,6 +256,14 @@ _ORDINAL_INDEX = "executions_created_seq"
 #: the two columns beside it (ADR-0250 §9).
 _VERSION_BEFORE_INTERPRETATIONS: Final[int] = 1
 
+#: The largest integer SQLite stores exactly, which is a 64-bit signed one. Named
+#: because ADR-0252 §13's elision count is an unbounded Python ``int`` on one side of
+#: this seam and a bounded SQLite one on the other, and SQLite's ``+`` **promotes to
+#: ``REAL`` rather than raising** when it overflows — so an increment past this would
+#: commit a counter of type ``real`` that :func:`_elided_count` then refuses on every
+#: later read. The write is refused instead, at the write that would have caused it.
+_MAX_SQLITE_INTEGER: Final[int] = 2**63 - 1
+
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
 #: EXISTS`` is a no-op against a pre-existing table of a different shape (#373),
 #: exactly as it is for the ``meta`` table (#349) and the ordinal index (#364), so
@@ -1419,10 +1427,15 @@ class SqlitePlanStore:
                 follow the goal's current one, or a row named by ``invalidates`` is not
                 this goal's or is not ``STANDING``.
         """
+        # Materialised **once**, before the first await, for the reason
+        # `InMemoryPlanStore.record_interpretation` gives: `model_copy(update=...)` skips
+        # validators, so a caller can plant a one-shot iterator that the refusal pass
+        # drains and the marking pass finds empty (ADR-0023 §2, ADR-0065 §1).
+        named = tuple(revision.invalidates)
         async with self._lock:
-            return await _run_to_completion(self._record_interpretation_sync, revision)
+            return await _run_to_completion(self._record_interpretation_sync, revision, named)
 
-    def _record_interpretation_sync(self, revision: GoalRevision) -> Goal:
+    def _record_interpretation_sync(self, revision: GoalRevision, named: tuple[str, ...]) -> Goal:
         what = f"record an interpretation on goal {revision.goal_id!r}"
         with self._transaction(what) as conn:
             row = conn.execute(
@@ -1441,7 +1454,7 @@ class SqlitePlanStore:
             # Before the append, so a call that cannot mark every row it named leaves
             # the goal exactly as it found it (§12).
             self._refuse_unmarkable(
-                conn, revision.goal_id, revision.invalidates, being_written=None, what="invalidate"
+                conn, revision.goal_id, named, being_written=None, what="invalidate"
             )
             updated = appended(stored, revision.interpretation)
             # The three columns are unmoved by a revision — `record_interpretation`
@@ -1452,7 +1465,7 @@ class SqlitePlanStore:
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
-            for row_id in revision.invalidates:
+            for row_id in named:
                 self._mark_evidence(
                     conn,
                     invalidated(
@@ -1932,7 +1945,9 @@ class SqlitePlanStore:
         left it — a row this call marked ``SUPERSEDED`` is an ordinary candidate — and
         **never the row being written**, whatever place §12's order gives it. The count
         advances in this same transaction, so a reader can never see a shortened history
-        without the count that explains it.
+        without the count that explains it — and it advances by **Python** arithmetic,
+        because SQLite's integer ``+`` promotes to ``REAL`` on overflow and would commit
+        a count no later read accepts.
 
         Args:
             conn: The connection the write transaction is running on.
@@ -1951,9 +1966,28 @@ class SqlitePlanStore:
             return
         doomed = [row_id for row_id in ordered if row_id != keep][:excess]
         conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
+        # **Read, add and write, rather than `evidence_elided + ?` in SQL.** SQLite's
+        # integers are 64-bit and its `+` **silently promotes to REAL on overflow**, so a
+        # counter standing at `2**63 - 1` would become `9.223372036854776e+18` of type
+        # `real` — a value this write commits happily and every later `evidence_of` and
+        # `export` then refuses, leaving a store that accepted a write it can no longer
+        # read back. Doing the arithmetic in Python, whose integers are unbounded, and
+        # refusing the write where the result will not fit keeps the failure **at the
+        # write that caused it**; and reading the current value through
+        # :func:`_elided_count` means a counter an outside writer has already corrupted
+        # is caught here too rather than only on the next read.
+        held = conn.execute("SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        advanced = _elided_count(str(self._path), goal_id, held[0]) + len(doomed)
+        if advanced > _MAX_SQLITE_INTEGER:
+            msg = (
+                f"the evidence elision count for goal {goal_id} would exceed what this "
+                f"store can hold exactly ({advanced}); refusing the write rather than "
+                f"committing a count that cannot be read back (ADR-0252 §13)"
+            )
+            raise PlanningError(msg)
         conn.execute(
-            "UPDATE goals SET evidence_elided = evidence_elided + ? WHERE id = ?",
-            (len(doomed), goal_id),
+            "UPDATE goals SET evidence_elided = ? WHERE id = ?",
+            (advanced, goal_id),
         )
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:

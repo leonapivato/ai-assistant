@@ -10524,7 +10524,9 @@ class PlanExport(BaseModel):
     document carries. ADR-0014 §5's closure rule reaches the new member as it reaches
     every other: **a history whose ``goal_id`` the export does not carry does not
     validate as a ``PlanExport`` at all**, and no goal the export carries is without
-    one. ADR-0004 §6's export right is what obliges the member — a goal's evidence is
+    one — and **a row's ``attempt_id`` resolves within the document too**, on the
+    reading ADR-0249 §11 already took for the attempt and ADR-0250 §9 for the question's
+    own ``attempt_id``. ADR-0004 §6's export right is what obliges the member — a goal's evidence is
     the user's data and an export that omitted it would be an incomplete one — and the
     **elision count travels with the rows**, because a document holding 64 rows and no
     count would say *this is the evidence* where the truth is *this is the evidence
@@ -10727,7 +10729,7 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         self._questions_close_over_their_records(goal_ids, attempt_ids)
-        self._evidence_closes_over_its_goals(goal_ids)
+        self._evidence_closes_over_its_records(goal_ids, attempt_ids)
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -10742,7 +10744,7 @@ class PlanExport(BaseModel):
 
         return self
 
-    def _evidence_closes_over_its_goals(self, goal_ids: set[str]) -> None:
+    def _evidence_closes_over_its_records(self, goal_ids: set[str], attempt_ids: set[str]) -> None:
         """Enforce ADR-0252 §13's extension of ADR-0014 §5's closure rule.
 
         **Exactly one entry per goal the export carries**, so a reader holding the
@@ -10751,17 +10753,29 @@ class PlanExport(BaseModel):
         omission. A history whose ``goal_id`` the export does not carry does not
         validate at all, which is §5's own promise stated over one more reference.
 
+        **And a row's ``attempt_id`` resolves too**, on the reading ADR-0249 §11 already
+        took for the attempt and ADR-0250 §9 for the question: §5 rules that every
+        reference an included record carries resolves within the same document, and
+        ``GoalEvidence.attempt_id`` "names the attempt that recorded it" (ADR-0252 §1).
+        A document carrying a row whose attempt it does not carry would be one whose
+        reader cannot answer *which attempt established this*, which is the same loss
+        the dangling ``goal_id`` is.
+
         Nothing here looks at whether a row's ``records``, a ``superseded_by`` or an
-        element's ``evidence_row_id`` resolves: those are ``MemoryStore`` identifiers
-        and elidable row references respectively, and §10 and §12 both rule such a
-        reference "an identifier and not a resolution guarantee".
+        element's ``evidence_row_id`` resolves, and that asymmetry is deliberate: those
+        are ``MemoryStore`` identifiers and **elidable** row references, and §10 and §12
+        both rule such a reference "an identifier and not a resolution guarantee". An
+        ``attempt_id`` is neither — no bound drops an attempt, so requiring it to resolve
+        costs a document nothing it can lose by retention.
 
         Args:
             goal_ids: The ids of the goals this export carries.
+            attempt_ids: The ids of the attempts this export carries.
 
         Raises:
             ValueError: If a history names a goal the export does not carry, if two
-                histories name one goal, or if a goal has no history.
+                histories name one goal, if a goal has no history, or if a row names an
+                attempt the export does not carry.
         """
         named = [history.goal_id for history in self.evidence]
         if len(set(named)) != len(named):
@@ -10774,6 +10788,17 @@ class PlanExport(BaseModel):
         missing = sorted(goal_ids - set(named))
         if missing:
             msg = f"export has goals carrying no evidence history: {', '.join(missing)}"
+            raise ValueError(msg)
+        orphans = sorted(
+            {
+                row.id
+                for history in self.evidence
+                for row in history.rows
+                if row.attempt_id not in attempt_ids
+            }
+        )
+        if orphans:
+            msg = f"export has evidence whose attempt is missing: {', '.join(orphans)}"
             raise ValueError(msg)
 
     def _questions_close_over_their_records(

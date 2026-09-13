@@ -190,12 +190,17 @@ class InMemoryPlanStore:
                 f"{revision.expected_version}: re-read it and recompute the revision"
             )
             raise StaleExecutionError(msg)
-        self._refuse_unmarkable(
-            revision.goal_id, revision.invalidates, being_written=None, what="invalidate"
-        )
+        # Materialised **once**, before either traversal. `invalidates` is annotated a
+        # tuple, but `model_copy(update=...)` skips validators (ADR-0023 §2), so a caller
+        # can plant a one-shot iterator: the refusal loop would drain it and the marking
+        # loop would find it empty, leaving the revision appended and the rows it
+        # invalidated still STANDING — the exact window §12's indivisibility exists to
+        # close, opened by reading one argument twice (ADR-0065 §1's own rule).
+        named = tuple(revision.invalidates)
+        self._refuse_unmarkable(revision.goal_id, named, being_written=None, what="invalidate")
         updated = appended(stored, revision.interpretation)
         self._goals[updated.id] = updated
-        for row_id in revision.invalidates:
+        for row_id in named:
             self._evidence[row_id] = invalidated(
                 self._evidence[row_id], at_revision=revision.interpretation.revision
             )

@@ -24,6 +24,8 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     BriefElement,
+    EvidenceApplicability,
+    EvidenceBasis,
     EvidenceDigest,
     EvidenceHistory,
     EvidenceStanding,
@@ -34,6 +36,7 @@ from ai_assistant.core.types import (
     GoalBrief,
     GoalDeletion,
     GoalElement,
+    GoalEvidence,
     GoalInterpretation,
     GoalStatus,
     Ground,
@@ -85,6 +88,25 @@ def _goal(*, statement: str = "relocate to Lisbon in September", **overrides: ob
         "created_at": _WHEN,
     }
     return Goal(**(fields | overrides))  # type: ignore[arg-type]
+
+
+def _evidence_row(*, attempt_id: str = "a1") -> GoalEvidence:
+    """One ``STANDING`` ``READ_OUTCOME`` row, in the shape ADR-0252 §1 admits."""
+    return GoalEvidence(
+        id="ev1",
+        goal_id="g1",
+        attempt_id=attempt_id,
+        basis=EvidenceBasis.READ_OUTCOME,
+        read_kind=ReadKind.SIGHTED_QUERY,
+        supported=(EvidenceApplicability(topics=("weather",)),),
+        supported_elided=0,
+        read_at=_WHEN,
+        records=("m1",),
+        returned=1,
+        admitted=1,
+        verdict="returned_records",
+        standing=EvidenceStanding.STANDING,
+    )
 
 
 def _histories(*goal_ids: str) -> tuple[EvidenceHistory, ...]:
@@ -1900,6 +1922,41 @@ def test_an_attempt_carries_no_interpretation_and_no_element() -> None:
     """§5: "the objective and its disposition are the goal's"."""
     forbidden = {"outcome_ground", "interpretation", "constraints", "criteria", "conditions"}
     assert set(GoalAttempt.model_fields) & forbidden == set()
+
+
+def test_the_export_closure_reaches_an_evidence_rows_attempt() -> None:
+    """ADR-0252 §13 on ADR-0249 §11's reading: a row's ``attempt_id`` resolves too.
+
+    ADR-0014 §5 rules that every reference an included record carries resolves within
+    the same export, and ``GoalEvidence.attempt_id`` "names the attempt that recorded
+    it" (ADR-0252 §1) — so a document carrying a row whose attempt it does not carry is
+    one whose reader cannot answer *which attempt established this*. ADR-0250 §9 already
+    took the same reading for a ``GoalQuestion``'s ``attempt_id``.
+
+    The row's ``records`` and its ``superseded_by`` are deliberately **not** in the
+    closure, and the asymmetry has a reason: those are ``MemoryStore`` identifiers and
+    **elidable** row references, which §10 and §12 both rule "an identifier and not a
+    resolution guarantee". No bound drops an attempt.
+    """
+    goal = _goal()
+    attempt = GoalAttempt(id="a1", goal_id="g1", opened_at=_WHEN)
+    row = _evidence_row(attempt_id="a1")
+
+    document = PlanExport(
+        exported_at=_WHEN,
+        goals=(goal,),
+        attempts=(attempt,),
+        evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
+    )
+    assert document.evidence[0].rows[0].attempt_id == "a1"
+
+    with pytest.raises(ValidationError, match="evidence whose attempt is missing"):
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            attempts=(attempt,),
+            evidence=(EvidenceHistory(goal_id="g1", rows=(_evidence_row(attempt_id="ghost"),)),),
+        )
 
 
 def test_the_export_closure_reaches_an_attempt() -> None:
