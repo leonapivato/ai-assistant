@@ -353,9 +353,8 @@ under the same binding is the same effect* — and where a user genuinely wants 
 >      where the row names **this same `(execution_id, step_id)`**; **`HELD`**, writing nothing,
 >      where it names a **different** step.
 >
-> **The second limb is total over `StepStatus`'s seven members, exactly one answer is defined for
-> every input, and the same-step case is exactly the three statuses under which the step the row
-> names may still dispatch** —
+> **The second limb is total over `StepStatus`'s seven members, exactly one answer is defined for every input, and the
+> same-step case is exactly the three statuses under which the step the row names may still dispatch** —
 > a row naming this step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED` or
 > `UNCERTAIN` like any other, because this step has then already acted. **No eighth answer
 > exists.**
@@ -373,38 +372,37 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > before the write. A caller that read the row and then decided would be the race this member
 > exists to close.
 
-> **Normative — where it is taken, when it is not taken at all, and what it is not.** The claim
-> is taken **inside the stage that holds the authorised `ToolCall`**, after ADR-0037 §2's
-> *decide → record → read back* and **immediately before** the `PENDING → RUNNING` (or
-> `AWAITING_APPROVAL → RUNNING`) commit — and **it is not taken at all where `effect_key` is
-> `None`** (§1), so a call of a tool that is not `side_effecting` reaches `claim_effect` never,
-> writes no row, and is held to nothing by this section. **A side-effecting call always takes
-> it**, whatever its `Idempotency`. It is
-> **not a fifth evaluation of the driver's** (ADR-0255 §1), the driver is passed no key and
-> computes none, and **`StepRunner.run`, `StepRunner.resume` and `StepExecutor.execute` gain no
-> argument** — the key is derived from a value that stage already holds and the goal is resolved
-> by the store.
+> **Normative — where it is taken, when it is not taken at all, and what it is not.** The claim is taken **inside the
+> stage that holds the authorised `ToolCall`**, after ADR-0037 §2's *decide → record → read back* and **immediately
+> before** the `PENDING → RUNNING` (or `AWAITING_APPROVAL → RUNNING`) commit — and **it is not taken at all where
+> `effect_key` is `None`** (§1), so a call of a tool that is not `side_effecting` reaches `claim_effect` never, writes
+> no row, and is held to nothing by this section. **A side-effecting call always takes it**, whatever its
+> `Idempotency`. It is **not a fifth evaluation of the driver's** (ADR-0255 §1), the driver is passed no key and
+> computes none, and **`StepRunner.run`, `StepRunner.resume` and `StepExecutor.execute` gain no argument** — the key
+> is derived from a value that stage already holds and the goal is resolved by the store.
 
 > **Normative — `StepExecutor` gains no collaborator.** It takes the claim through the
 > `PlanStore` it already holds, which is ADR-0058's rule observed rather than bent, and
 > `ToolRegistry`, `ActionPolicy` and `AuditTrail` each keep exactly the role they have.
 
-> **Normative — the ordering is effect-claim-then-step-claim, it is fixed rather than left to an
-> implementation, and what its failure leaves is stated rather than glossed.** A failure between
-> the two leaves a row naming a step still `PENDING`. **That step re-claims its own key on the
-> next walk** and dispatches; **every other step of that goal carrying the same key is `HELD`
-> until that step is disposed of** — by its own dispatch, or by §4's sweep once its plan is
-> superseded — and **where its plan is never superseded and never driven again, that hold does
-> not lift**. The reverse order would leave a dispatched effect with **no row at all**, which is
-> the one residual that would let a later plan repeat it, so the ordering trades a hold that can
-> stall a plan for a gap that could double an act.
+> **Normative — the ordering is effect-claim-then-step-claim, it is fixed rather than left to an implementation, and
+> what its failure leaves is stated rather than glossed.** A failure between the two leaves a row naming a step still
+> at its entry status. **That step re-claims its own key on the next walk** and dispatches; **every other step of that
+> goal carrying the same key is `HELD` until that step is disposed of** — by its own dispatch, or by §4's sweep once
+> its plan is superseded — and **where its plan is never superseded and never driven again, that hold does not
+> lift**. The reverse order would leave a dispatched effect with **no row at all**, which is the one residual that
+> would let a later plan repeat it, so the ordering trades a hold that can stall a plan for a gap that could double an
+> act.
 
-> **Normative — a non-`CLAIMED` answer dispatches nothing, commits no transition, and stops the
-> walk.** The stage returns the disposition **`Disposition.EFFECT_ALREADY_CLAIMED`**, the step
-> stays **`PENDING`**, `ActionPolicy.decide`'s recorded ruling stands in the trail as ADR-0037 §2
-> already permits for a claim that did not land, and **no step is moved to `SKIPPED` on this
-> ground, with any `SkipReason`**. ADR-0014 §4's `PENDING → SKIPPED` row is untouched and **no
-> lane widens it**.
+> **Normative — a non-`CLAIMED` answer dispatches nothing, commits no transition, and stops the walk.** The stage
+> returns the disposition **`Disposition.EFFECT_ALREADY_CLAIMED`** and the step **keeps the status it was entered at**
+> — **`PENDING`** where `StepRunner.run` took the claim, **`AWAITING_APPROVAL`** where `StepRunner.resume` did, which
+> is the second commit the clause above admits. **It is the entry status rather than `PENDING` because no transition
+> is committed**: a resumed step is `AWAITING_APPROVAL` in the store, and naming `PENDING` there would demand a move
+> ADR-0014 §4's table does not admit. `ActionPolicy.decide`'s recorded ruling stands in the trail as ADR-0037 §2
+> already permits for a claim that did not land — **a resumed step's replayed `ALLOW` therefore stays replayable**
+> (§5) — and **no step is moved to `SKIPPED` on this ground, with any `SkipReason`**. ADR-0014 §4's `PENDING →
+> SKIPPED` row is untouched and **no lane widens it**.
 
 > **Normative.** `Disposition` gains exactly one member, **`EFFECT_ALREADY_CLAIMED`**. **Which
 > `EffectClaim` member produced it is not carried on the disposition**, and what the turn tells
@@ -1182,19 +1180,21 @@ property are the whole of it.
    holder, with `claimed_at` restamped; **`claimed_at` preserved** on every no-write outcome, under an injected clock; the
    **refusal** paths — an unknown `execution_id`, and a `step_id` that is not a step of that execution — raising
    `PlanningError` with **no row written**; and **atomicity under contention**, where two writers claim one
-   `(goal_id, effect_key)` concurrently, **exactly one** receives `CLAIMED`, the other `HELD`, and exactly one durable
-   row names a holder. The store under test is not permitted to pass the last by serialising the two calls in the
-   test's own control flow. It adds one **upgrade** case: a store written before this decision opens with an **empty**
+   `(goal_id, effect_key)` concurrently, **over both write paths** — **no row**, and an existing **`SKIPPED`** holder
+   two callers would each re-point, because a uniqueness constraint on insertion passes the first and leaves the second
+   racing. In each, **exactly one** receives `CLAIMED`, the other `HELD`, and exactly one durable row names a holder.
+   The store under test is not permitted to pass either by serialising the two calls in the test's own control flow. It adds one **upgrade** case: a store written before this decision opens with an **empty**
    effects table, exports and deletes cleanly, and answers **`CLAIMED`** for the key of a legacy `SUCCEEDED`
    side-effecting step — the delimited guarantee §9 states, asserted rather than discovered.
-5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**:
-   the `ALLOW` is **replayed**, no second permission record is authored, and the step reaches its
-   dispatch exactly once. **And the replay is withheld wherever it must be**, in a table over
-   ADR-0255 §5's three predicates — a dependency that no longer holds, a `when` member that no
-   longer holds, an unresolvable `resolves` — each asserting that **`StepRunner.resume` is not
-   called**, `ToolInvoker.invoke` is not reached, **no transition lands**, no effect is claimed,
-   and the step stays **`AWAITING_APPROVAL`** at its stored version with its resolution still
-   unspent.
+5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**: the `ALLOW` is
+   **replayed**, no second permission record is authored, and the step reaches its dispatch exactly once. **And the
+   replay is withheld wherever it must be**, in a table over ADR-0255 §5's three predicates — a dependency that no
+   longer holds, a `when` member that no longer holds, an unresolvable `resolves` — each asserting that
+   **`StepRunner.resume` is not called**, `ToolInvoker.invoke` is not reached, **no transition lands**, no effect is
+   claimed, and the step stays **`AWAITING_APPROVAL`** at its stored version with its resolution still unspent. **One
+   further row takes the replay all the way to a refused effect claim**: `resume` is called, `claim_effect` answers
+   `HELD`, and the step stays **`AWAITING_APPROVAL`** — not `PENDING` — with no transition committed and its `ALLOW`
+   still unspent and replayable on a later turn.
 6. The **`DENY`** counterpart: §4's act 2 commits `AWAITING_APPROVAL → SKIPPED` with
    `APPROVAL_DENIED` naming the recorded decision, and nothing is authored.
 7. A supersession sweep that landed one step and not the rest is **completed** by the pass, from
