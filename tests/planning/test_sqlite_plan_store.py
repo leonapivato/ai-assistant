@@ -986,13 +986,11 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "corrupt",
-    ["bad", "1_0", " 7", "+7", "007", "-1"],
+    ["bad", 7.5, 9.223372036854776e18, -1],
     ids=[
-        "unparseable-text",
-        "python-parseable-text",
-        "leading-space",
-        "explicit-sign",
-        "leading-zero",
+        "text-no-affinity-converts",
+        "a-real-that-is-not-a-whole-number",
+        "the-real-sqlites-own-overflow-yields",
         "negative",
     ],
 )
@@ -1014,15 +1012,15 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
     *nothing was ever dropped* — ADR-0086 §4's "a *false* answer to the one question the
     provenance display exists to answer".
 
-    **Exactly one spelling is admitted**, and the cases are the spellings a looser read
-    would let through rather than a list of dangerous values. ``'1_0'`` is the one that
-    forces the rule: Python's ``int()`` reads it as ``10`` and SQLite's own arithmetic
-    reads the same bytes as ``2``, so a store that parsed it would disagree with its own
-    file. ``' 7'``, ``'+7'`` and ``'007'`` are values ``int()`` also accepts and this
-    store never writes; and ``'-1'`` cannot be a count of what a history has dropped at
-    all. A bare **integer** is not among them and is not a corruption: the column has
-    ``TEXT`` affinity, so SQLite converts one an outside writer puts there into ``'7'``,
-    which is the canonical spelling.
+    **The cases are what an ``INTEGER``-affinity column can still hold, not a list of
+    dangerous-looking values**, because affinity converts most of them away before the
+    store ever sees them: ``'7'``, ``'007'`` and ``' 7'`` an outside writer puts in this
+    column are stored by SQLite as the integer ``7``, which is the value this store
+    would have written itself, so they are not corruption and are not listed. What
+    survives is text no conversion applies to (``'bad'``), a REAL that is not a whole
+    number of rows (``7.5``), the REAL SQLite's own 64-bit ``+`` yields on overflow
+    (``9.223372036854776e18``, which is why this store adds in Python instead), and a
+    negative integer — which cannot be a count of what a history has dropped at all.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
@@ -1043,22 +1041,25 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
         store.close()
 
 
-async def test_an_elision_count_past_sqlites_integer_range_still_advances(
+async def test_a_tampered_elision_count_at_sqlites_ceiling_is_refused_as_corruption(
     tmp_path: Path,
 ) -> None:
-    """ADR-0252 §13's count is unbounded, so the column holds decimal text.
+    """A count no write of this store could reach is the file being corrupt, not a bug.
 
-    "It **never decreases**, and a write that drops *k* rows advances it by *k*", and
-    ``EvidenceHistory.elided`` is a Python ``int``, which has no ceiling. SQLite's
-    integers stop at 64 bits and its ``+`` **promotes to REAL rather than raising** when
-    one overflows — ``9223372036854775807 + 1`` is stored as ``9.223372036854776e+18`` of
-    type ``real`` — so an ``INTEGER`` column would commit a counter every later read
-    refuses.
+    ADR-0252 §13's counter advances by **at most one per successful write** — one row
+    appended, :data:`MAX_GOAL_EVIDENCE` bounding what is left behind — so reaching a
+    signed 64-bit ceiling takes 2**63 writes to one goal and no sequence of operations
+    this system can perform gets there. A count sitting at the ceiling therefore arrived
+    the only other way it can, from a writer outside this code, which is the case
+    :func:`~ai_assistant.planning.sqlite_store._elided_count` already refuses for a
+    negative or a REAL.
 
-    **And refusing the write is not available as the answer**: §12 rules that
-    ``record_evidence`` "refuses only for the three reasons §12 lists", so a store that
-    declined this row would be refusing for a fourth. The count advances instead, past
-    the range SQLite can hold as an integer, and reads back exactly.
+    What this pins is that the *advance* refuses it in the same words rather than
+    letting the driver's ``OverflowError`` cross the boundary raw — the hole every other
+    stored value is read through a translation to avoid (ADR-0049 §1). It is **not** a
+    fourth refusal reason for ``record_evidence``: §12's three are about the caller's
+    row, and this is the store reporting that its own file is corrupt. The write is
+    rolled back whole, so the row the caller handed in is not left half-applied.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
@@ -1073,18 +1074,17 @@ async def test_an_elision_count_past_sqlites_integer_range_still_advances(
         store.close()
 
     with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (str(2**63 - 1),))
+        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (2**63 - 1,))
 
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
+        with pytest.raises(PlanningError, match="elision count"):
+            await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
 
+        assert await store.get_evidence("ev-new") is None, "the whole write rolled back"
         history = await store.evidence_of("g1")
-        assert history.elided == 2**63, "the count advanced past SQLite's integer range"
+        assert history.elided == 2**63 - 1, "and the count is left exactly as it was found"
         assert len(history.rows) == MAX_GOAL_EVIDENCE
-        assert await store.get_evidence("ev-new") is not None
-        export = await store.export()
-        assert export.evidence[0].elided == 2**63, "and the export reads it back exactly"
     finally:
         store.close()
 
@@ -1819,14 +1819,21 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         pytest.param(
             "goals",
             "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT '0', data BLOB NOT NULL",
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL",
             "data column has BLOB affinity",
             id="goals-data-not-text",
         ),
         pytest.param(
             "goals",
             "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT '0'",
+            "evidence_elided TEXT NOT NULL DEFAULT 0, data TEXT NOT NULL",
+            "evidence_elided column has TEXT affinity",
+            id="evidence-elided-not-integer-stores-a-count-no-read-accepts",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
+            "evidence_elided INTEGER NOT NULL DEFAULT 0",
             "data column is absent",
             id="goals-missing-a-column",
         ),
@@ -1867,21 +1874,21 @@ async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
         pytest.param(
             "goals",
             "id TEXT, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT '0', data TEXT NOT NULL",
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
             "no PRIMARY KEY",
             id="goals-without-a-primary-key-breaks-on-conflict",
         ),
         pytest.param(
             "goals",
             "id TEXT PRIMARY KEY COLLATE NOCASE, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT '0', data TEXT NOT NULL",
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL",
             "NOCASE-collated id PRIMARY KEY",
             id="goals-case-insensitive-primary-key-folds-distinct-ids",
         ),
         pytest.param(
             "goals",
             "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-            "evidence_elided TEXT NOT NULL DEFAULT '0', data TEXT",
+            "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT",
             "data column is nullable",
             id="goals-nullable-data-can-store-a-null-no-decode-accepts",
         ),
@@ -1925,7 +1932,7 @@ async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) 
     try:
         raw.execute(
             "CREATE TABLE GOALS(ID TEXT PRIMARY KEY, CONVERSATION_ID TEXT, "
-            "LAST_ENGAGED_IN TEXT, EVIDENCE_ELIDED TEXT NOT NULL DEFAULT '0', "
+            "LAST_ENGAGED_IN TEXT, EVIDENCE_ELIDED INTEGER NOT NULL DEFAULT 0, "
             "DATA TEXT NOT NULL)"
         )
         raw.execute(
@@ -2711,7 +2718,7 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
             "4",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
-        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [("0",)]
+        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
 
 
 async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shape(
@@ -2772,7 +2779,7 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         # is **zero**, which is true of a store that has never dropped a row. The
         # migration converts nothing because there is nothing to convert.
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
-        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [("0",)]
+        assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
 
 
 async def test_a_migrated_goal_sorts_after_one_that_carries_an_engagement_instant(

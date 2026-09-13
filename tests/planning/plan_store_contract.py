@@ -2269,6 +2269,98 @@ class PlanStoreContract:
         assert fresh is not None
         assert fresh.standing is EvidenceStanding.STANDING
 
+    async def test_a_supersedes_given_as_a_bare_string_is_refused(self, store: PlanStore) -> None:
+        """``str`` satisfies ``Sequence[str]``, and its characters are not the ids (§12).
+
+        ``tuple("ev1")`` is ``("e", "v", "1")``. A store that snapshotted the argument
+        without checking its shape would irreversibly supersede the three single-
+        character rows this arm stands up — leaving ``ev1``, the row the caller actually
+        named, **STANDING** — and would answer with a new row's id as though the refresh
+        had landed. §12 obliges a store to mark the rows the caller named, and marking
+        three others while reporting success is worse than refusing: the history would
+        then hold a retirement nothing explains, which is exactly what ADR-0252 §1's
+        fourth axis exists to make impossible.
+
+        This is the same malformed-container failure
+        ``test_a_revision_whose_invalidates_is_not_a_tuple_is_refused`` drives one level
+        in, on a field rather than a parameter. A parameter carries no validator at all,
+        so nothing but the store checks it.
+        """
+        await _goal_with_attempt(store)
+        for index, row_id in enumerate(("e", "v", "1", "ev1")):
+            await store.record_evidence(_evidence(row_id, read_at=_WHEN + timedelta(minutes=index)))
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(
+                _evidence("ev-new", read_at=_WHEN + timedelta(hours=1)), supersedes="ev1"
+            )
+
+        for row_id in ("e", "v", "1", "ev1"):
+            untouched = await store.get_evidence(row_id)
+            assert untouched is not None
+            assert untouched.standing is EvidenceStanding.STANDING, (
+                f"{row_id} was never named and must not be marked"
+            )
+        assert await store.get_evidence("ev-new") is None, "and the append did not land"
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [7, {"ev1": True}, ("",), (7,)],
+        ids=["not-a-container", "a-mapping", "a-blank-id", "an-id-that-is-not-a-string"],
+    )
+    async def test_a_supersedes_that_is_not_a_container_of_ids_is_refused(
+        self, store: PlanStore, malformed: object
+    ) -> None:
+        """The parameter is checked, not trusted, and the whole call is refused (§12).
+
+        ``Sequence[str]`` is an annotation and nothing enforces it at the call, so what
+        arrives can be any object at all. Each of these would fail somewhere deeper —
+        a mapping iterates its keys, an ``int`` is not iterable, a blank id names no row
+        — and "somewhere deeper" is after the append in an implementation that checked
+        late, which is the state §12's indivisibility rules out. The refusal is a
+        ``PlanningError``, the class every other refusal on this member raises, rather
+        than whatever the container happened to raise on its own.
+        """
+        await _goal_with_evidence(store)
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(
+                _evidence("ev-new", read_at=_WHEN + timedelta(hours=1)),
+                supersedes=malformed,  # type: ignore[arg-type]
+            )
+
+        assert await store.get_evidence("ev-new") is None, "the append did not land"
+        standing = await store.get_evidence("ev1")
+        assert standing is not None
+        assert standing.standing is EvidenceStanding.STANDING
+
+    async def test_record_evidence_reads_its_supersedes_once(self, store: PlanStore) -> None:
+        """The set is observed at one instant, however the caller spelled it (§12).
+
+        The ``supersedes`` counterpart of
+        ``test_a_revision_reads_its_invalidation_set_once``: a one-shot iterator is what
+        separates a store that traverses the argument once from one that traverses it
+        twice. A store that drained it on the refusal pass would find it **empty** on
+        the marking pass — the row appended, the call reporting success, and the rows it
+        was told to retire still ``STANDING``. That is ``core.protocols``' second
+        standing obligation (ADR-0065 §1) read over this parameter.
+        """
+        await _goal_with_evidence(store, rows=2)
+        one_shot = iter(("ev1", "ev2"))
+
+        await store.record_evidence(
+            _evidence("ev3", read_at=_WHEN + timedelta(hours=1)),
+            supersedes=one_shot,  # type: ignore[arg-type]
+        )
+
+        for row_id in ("ev1", "ev2"):
+            marked = await store.get_evidence(row_id)
+            assert marked is not None
+            assert marked.standing is EvidenceStanding.SUPERSEDED, (
+                f"{row_id} was named and must be marked, whatever the set's spelling"
+            )
+            assert marked.superseded_by == "ev3"
+
     @pytest.mark.parametrize(
         ("named", "arrange"),
         [

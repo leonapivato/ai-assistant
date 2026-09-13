@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -56,6 +56,7 @@ from ai_assistant.core.types import (
     GoalQuestion,
     GoalQuestionDisposition,
     GoalRevision,
+    Identifier,
     PlanExport,
     PlannerOutput,
     SkipReason,
@@ -169,6 +170,45 @@ def _revalidated_evidence(row: GoalEvidence) -> GoalEvidence:
     except ValidationError as exc:
         subject = getattr(row, "id", "<no id>")
         msg = f"evidence row {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
+#: Mirror of :data:`ai_assistant.planning.goals._ROW_IDS`; see the module docstring on
+#: duplication.
+_ROW_IDS: Final[TypeAdapter[tuple[Identifier, ...]]] = TypeAdapter(tuple[Identifier, ...])
+
+
+def _revalidated_row_ids(named: Sequence[str], *, what: str) -> tuple[Identifier, ...]:
+    """Snapshot a caller's set of evidence row ids as a validated tuple, or refuse it.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph. A **parameter**
+    annotated ``Sequence[str]`` carries no validator at all, and ``str`` satisfies it:
+    ``tuple("ev1")`` is ``("e", "v", "1")``, three rows the caller never named, which a
+    store would irreversibly supersede wherever they happen to stand while leaving
+    ``ev1`` itself ``STANDING`` and answering success (ADR-0252 §12). The fake must not
+    certify a weaker contract than the real stores keep.
+
+    Args:
+        named: The ids as the caller handed them in.
+        what: What the ids are for, as the tail of "the ids to {what}" in the message.
+
+    Returns:
+        The ids, validated and detached, in the order given.
+
+    Raises:
+        PlanningError: If the argument is not a container of identifiers.
+    """
+    if isinstance(named, str | bytes):
+        msg = (
+            f"the ids to {what} were given as {named!r}, a single string rather than a "
+            f"container of ids: its characters are not the ids you named (ADR-0252 §12)"
+        )
+        raise PlanningError(msg)
+    try:
+        return _ROW_IDS.validate_python(named)
+    except ValidationError as exc:
+        msg = f"the ids to {what} are not a container of identifiers: {exc}"
         raise PlanningError(msg) from exc
 
 
@@ -1143,8 +1183,11 @@ class FakePlanStore:
         argument is a container the caller may still be holding", and this store
         suspends inside :meth:`suspend_next_operation`'s modelled resource, so reading
         it again after the suspension would let a caller add a row to the set while the
-        call is held and have it marked. ``evidence`` is snapshotted on that same line
-        too, though for a different reason: the revalidation ADR-0023 §2 obliges is what
+        call is held and have it marked. It is **revalidated** rather than merely
+        snapshotted, because ``Sequence[str]`` is satisfied by a bare ``str`` and
+        ``tuple("ev1")`` is ``("e", "v", "1")`` — three rows the caller never named.
+        ``evidence`` is snapshotted on that same line too, though for a different
+        reason: the revalidation ADR-0023 §2 obliges is what
         produces the detached value, and taking it before the first ``await`` makes it
         this method's ADR-0065 snapshot as well — the shape
         ``SqlitePlanStore.record_evidence`` already has.
@@ -1155,12 +1198,13 @@ class FakePlanStore:
         the fake does not certify a weaker contract than they keep.
 
         Raises:
-            PlanningError: If the store already holds a row under this ``id``, if
-                ``goal_id`` names no stored goal, or if a row named by ``supersedes``
-                is not this goal's, is not ``STANDING``, or is the row being written.
+            PlanningError: If ``supersedes`` is not a container of identifiers, if the
+                store already holds a row under this ``id``, if ``goal_id`` names no
+                stored goal, or if a row named by ``supersedes`` is not this goal's, is
+                not ``STANDING``, or is the row being written.
         """
+        named = _revalidated_row_ids(supersedes, what="supersede")
         snapshot = _revalidated_evidence(evidence)
-        named = tuple(supersedes)
         async with self._resource.held():
             if snapshot.id in self._evidence:
                 msg = (

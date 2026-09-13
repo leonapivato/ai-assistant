@@ -4265,18 +4265,27 @@ class PlanStore(Protocol):
         **Which rows a new row refreshes is not the store's to work out** (§12, §8): the
         six-limb test is ``orchestration``'s, and the store applies the set it is given.
 
+        **``supersedes`` is a container of ids, and a bare string is refused rather than
+        spelled out into its characters.** ``str`` satisfies ``Sequence[str]``, so
+        ``supersedes="ev1"`` would otherwise name the three rows ``e``, ``v`` and ``1``
+        — irreversibly superseding whichever of them stand under this goal while leaving
+        ``ev1`` itself ``STANDING`` and answering success. A conforming store reads the
+        argument **once**, before its first suspension, and refuses anything that is not
+        a container of identifiers (the second standing obligation above, ADR-0065 §1).
+
         Args:
             evidence: The row to persist.
             supersedes: The rows this one refreshes, each of the same goal and each
-                ``STANDING``.
+                ``STANDING``. A container of ids: a bare ``str`` is refused.
 
         Returns:
             The stored row's id.
 
         Raises:
-            PlanningError: If the store already holds a row under this ``id``, if
-                ``goal_id`` names no stored goal, or if a row named by ``supersedes``
-                is not this goal's, is not ``STANDING``, or is the row being written.
+            PlanningError: If ``supersedes`` is not a container of identifiers, if the
+                store already holds a row under this ``id``, if ``goal_id`` names no
+                stored goal, or if a row named by ``supersedes`` is not this goal's, is
+                not ``STANDING``, or is the row being written.
         """
         ...
 
