@@ -1,6 +1,13 @@
 # 259. An effect is claimed once per goal before it is dispatched, and a turn-start pass reconciles what an earlier turn left uncertain or unfinished
 
 - Status: Proposed
+- **Depends on [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md),
+  which is cited and superseded in nothing.** §6 of that decision states four obligations over *"a decision that lands
+  the claim"* — the row keyed on the goal, the intended action and the effect key; an answer for a completed act of
+  **this** intended action carrying a different key; the claiming plan's `targets_revision` on the record; and the three
+  reuse conditions stated as necessary and **not sufficient** — and this decision discharges all four (§2, §9, §13). §4
+  of that decision leaves one question here by name, *"whether an effect-bearing dispatch must name one"*, and §2
+  answers it **yes**. Every lane of ADR-0265 lands before every lane of this decision (§11).
 - **Partially supersedes [ADR-0014](0014-planning-model.md), in three scopes** — **§4's transition
   table** and **§5's `PlanStore` member enumeration, `PlanExport` shape and `delete_goal`
   cascade**, and **§3's `StepExecution` record** in the marks it requires of a `SUCCEEDED` step — and §13 shows the
@@ -15,7 +22,7 @@
   rule, its claim-before-invocation ordering, its recovery paragraph and its *"We do not claim
   exactly-once execution"* statement — which §3 of this document quotes as its own ground.
   **§5's second scope** is the roster gaining `claim_effect`, `PlanExport` gaining `effects` with
-  its `schema_version` moving from 11 to 12, §5's closure rule extending to those rows'
+  its `schema_version` moving by one, §5's closure rule extending to those rows'
   references and `delete_goal`'s cascade reaching them — the same shape ADR-0249 and ADR-0250
   each took to that enumeration. **§5's compare-and-swap discipline, its commands-not-snapshots
   rule and its local-residency, export-completeness and deletion obligations bind entire**, and
@@ -25,9 +32,12 @@
   in the identity §7's and §12's at-most-once obligation is stated over, and in nothing else.**
   §7 rules that an effect *"[is] performed **at most once across every plan of that goal**"* and
   §12 states the acceptance requirement over *"a plan whose step would perform **the same
-  effect**"*. §1 lands an identity over the **authorised call** and states that two calls meaning
-  one thing while spelling it differently carry two keys, so a reader holding only §7 reads its
-  obligation more widely than it now holds. **Every other clause of §7 and §12 binds entire** —
+  effect**"*. §§1-2 land an identity in two parts — the **intended action** the step is an attempt
+  at, which the row is scoped to, and the **authorised call** within it — so the guarantee is
+  narrower than *"the same effect"* in one direction, because two calls meaning one thing while
+  spelling it differently carry two keys, and deliberately narrower in another, because two
+  intended actions carrying one key are two acts and both happen. A reader holding only §7 reads
+  its obligation more widely than it now holds. **Every other clause of §7 and §12 binds entire** —
   §7's keeps-everything-it-recorded rule, its extension of ADR-0228 §5's not-driven rule, its
   sweep and that sweep's stated residual, its one-plan-per-walk rule and its
   no-licence-to-repeat prohibition; §12's every other entry, both acceptance requirements' other
@@ -170,7 +180,7 @@ cancellation semantics** (A9), **no user surface** for anything it records (A9),
 
 ## Decision
 
-### 1. The effect key: the authorised call's own identity, less the two ids a replan mints afresh
+### 1. The effect key: what tells same action, same arguments from same action, different ones
 
 ADR-0255 §7 states the obligation this section makes mechanical, and states honestly that it could not: *"A step whose
 effect the goal records as completed or as uncertain is never dispatched a second time … **Across two plans of one goal this
@@ -182,7 +192,11 @@ driver could compare against"*. This section mints that record.
 > annotation; **`parameters_digest: Sha256Hex`**, carrying `PermissionDecision.parameters_digest`'s; **`egress_account:
 > BoundAccount | None = None`**; **`egress_endpoint`**, the annotation `_EgressBindingBase.transport_endpoint` carries, `|
 > None = None`; and **`egress_destinations: tuple[CanonicalDestination, ...] = ()`**. **It carries no sixth field**: no step
-> id, no execution id, no plan id, no decision id, no goal id, no instant and no attempt.
+> id, no execution id, no plan id, no decision id, no goal id, no instant and no attempt — **and no intended action
+> id**, which is the row's *other half* (§2) and never a field of the key. **A reader who adds it here breaks the one case
+> this decision exists to tell apart**: the goal whose booking moves from Saturday to Sunday carries one intended action and
+> two keys, and a key that carried the action id would make the two rows unequal in the same way two unrelated acts are
+> unequal, so the revision would dispatch a second booking instead of meeting §2's `COMPLETED_OTHERWISE` answer.
 
 > **Normative — a model validator admits exactly two shapes and no mixture.** Either **`egress_account` and
 > `egress_endpoint` are both `None` and `egress_destinations` is empty** — the no-binding shape — **or both are present and
@@ -195,7 +209,11 @@ driver could compare against"*. This section mints that record.
 > the binding's provenance, and that is the rule a later conjunct is read against.** `authorises` compares five values — the
 > tool, `parameters_digest`, `step_id`, `execution_id` and `egress_binding`, the last *"compared whole and by value"*
 > (ADR-0150 §9). `EffectKey` drops `step_id` and `execution_id`, which describe **where the call was made from** and which a
-> re-plan mints anew — ADR-0253 §8's own reason, *"A re-plan mints new step ids"* — and takes from the binding **only the
+> re-plan mints anew — ADR-0253 §8's own reason, *"A re-plan mints new step ids"* — **and what those two ids could not
+> have supplied is supplied by something else rather than by nothing**: the durable identity of the *act* a step is an
+> attempt at is `IntendedAction.id` (ADR-0265 §1), minted once by `orchestration` and retained unchanged across a revision,
+> and **the row carries it** (§2). So this clause fixes the key's reach over **arguments** and nothing more, and no lane
+> reads it as the whole of the identity an at-most-once claim is scoped to. The key takes from the binding **only the
 > three facts that describe where the effect goes**: `account`, `transport_endpoint` and the derived
 > `canonical_destination_set`, each declared on `_EgressBindingBase` and therefore present on **every** member of the union
 > `PermissionDecision.egress_binding` admits. **A later decision that adds a conjunct to `authorises`, or a field to the
@@ -218,8 +236,8 @@ driver could compare against"*. This section mints that record.
 > **supplied** arguments, so two calls whose arguments differ in spelling while naming one thing — a recipient written
 > `alice@Example.com` in one plan and `alice@example.com` in the next — carry **two** digests and therefore **two keys**,
 > and the second is `CLAIMED` and dispatched. **This decision does not close that**, and §10 books it with what fires it.
-> **No lane reads the guarantee more widely than it is stated**: an effect is performed at most once per goal **per
-> authorised call**, which is the identity the permission stage already fixes and the only one this system can compute
+> **No lane reads the guarantee more widely than it is stated**: an effect is performed at most once **per intended
+> action per authorised call** within one goal, which is the identity the permission stage already fixes and the only one this system can compute
 > without interpreting a tool's arguments — which ADR-0145 §5 and ADR-0016 §2 both put outside `core`.
 
 > **Normative.** `ToolCall` gains **`effect_key`**, a **property** returning `EffectKey | None`, derived from the call and
@@ -298,42 +316,107 @@ effect twice, §10 names what they do.
 > that Protocol — whose complete signature is **`async def claim_effect(self, *, execution_id: str, step_id: str,
 > effect_key: EffectKey) -> EffectOutcome`**, taking `execution_id` and `step_id` with the annotations
 > `PlanStore.commit_transition`'s neighbours already use for them and returning an **`EffectOutcome`** and nothing else. The
-> store resolves the goal itself, from the execution's plan's `goal_id`, and **no entry point of `orchestration` gains a
-> `goal_id` argument for it**. It keeps **at most one row per `(goal_id, effect_key)`**, and that row names the
-> `(execution_id, step_id)` currently holding the key.
+> store resolves **both halves of the row's scope** itself — the goal from the execution's plan's `goal_id`, and the
+> **intended action** from `PlanStep.intended_action` of that plan's step (ADR-0265 §4) — so **no entry point of
+> `orchestration` gains a `goal_id` argument for it and none gains an intended-action one**, and the signature above carries
+> neither.
+
+> **Normative — the row's identity is ADR-0265 §6's triple, and the store keeps at most one row per goal and intended
+> action.** A row is identified by **`(goal_id, intended_action_id, effect_key)`** — §6's own keying, *"not on the pair"* —
+> and it names the `(execution_id, step_id)` currently holding it together with the key it was taken under. **The store
+> additionally keeps at most one row per `(goal_id, intended_action_id)`**, which is not a competing constraint but an
+> invariant of the write rules below: the only writes are the first claim and a **re-point onto a dead holder**, and a
+> re-point **re-keys** the row rather than leaving the dead key's row standing beside it. `claim_effect` therefore
+> **resolves the row by the pair and compares the effect key within it**, which is the lookup §6's second clause requires —
+> *"a completed effect claimed under **this** intended action whose key is **not** this call's key"* is a state a
+> triple-keyed lookup could not ask about, because it would find no row at all. **No lane scopes this claim to a goal and an
+> argument key alone** (§6), and none scopes it to the goal.
+
+> **Normative — a side-effecting call whose step names no intended action is not dispatched, and this is the answer
+> ADR-0265 §4 leaves here.** That section rules that *"a step naming no intended action is held to nothing by this
+> decision"* and that *"whether an effect-bearing dispatch must name one is decided where the effect claim is taken"*. It
+> must. Where `effect_key` is not `None` (§1) and the step's `intended_action` is `None`, **`claim_effect` is not called**,
+> nothing is committed, the step **keeps the status it was entered at**, the walk **stops**, and the stage returns
+> **`Disposition.EFFECT_UNSCOPED`**. Dispatching there would perform an effect **no row could ever recognise** — the claim
+> has nothing to be scoped to, and every later plan of the goal would answer `CLAIMED` and repeat it — which is ADR-0255
+> §7's obligation unmet for that step, and it is the fail-open direction ADR-0265 §4 refuses for a dropped condition label
+> for the same reason. **A call that is not side-effecting is untouched** and keeps §4's *"held to nothing"* exactly.
+
+> **Normative — and the window is closed at the store as well as at the stage.** `claim_effect` **raises `PlanningError`
+> and writes nothing** where the step the ids name carries no `intended_action`, beside the two reference refusals below.
+> That is ADR-0265 §4's own construction — *"a window is closed at the store rather than trusted to close itself"* — taken
+> one member over, and it is why the stage's check is a refusal to call rather than the only guard.
+
+> **Normative — the steps this reaches are bounded, and the bound is the one §9's migration already states.** Every plan
+> written before ADR-0265 lands carries `intended_action` `None` on every step, so a side-effecting step of such a plan is
+> `EFFECT_UNSCOPED` and stalls rather than dispatching. **What makes that acceptable is ADR-0255 §13's Q4 rule** — no
+> consequential capability has been wired into a production deployment — so the stalled dispatches are of controlled fakes,
+> and the alternative direction would be a silent unclaimed effect. **No lane invents an intended action for a stored plan**
+> to lift the stall, which is ADR-0265 §5's *"an act nothing declared is an act no claim was ever scoped to"* observed
+> rather than cited.
 
 > **Normative.** `core/types.py` gains **`EffectClaim`**, a `StrEnum` valued by lower-cased member name and **closed at
-> exactly four members**: `CLAIMED`, `COMPLETED`, `UNCERTAIN` and `HELD`. The vocabulary is added to and never renamed.
+> exactly five members**: `CLAIMED`, `COMPLETED`, `COMPLETED_OTHERWISE`, `UNCERTAIN` and `HELD`. The vocabulary is added to
+> and never renamed.
+
+> **Normative — `COMPLETED_OTHERWISE` is the state ADR-0265 §6 requires an answer for, and this is that answer.** It means
+> **this goal's row for this intended action names a `SUCCEEDED` holder whose key is not this call's key** — the act was
+> performed, with different arguments. §6 rules that *"the answer is neither claimed nor completed: the step is **not
+> dispatched**, and the work returns to investigation — modify-before-replace, which A8's second ADR owns"*, and that is
+> exactly what it does here: nothing is dispatched, nothing is committed, no authorisation is spent, the step keeps its
+> entry status and the walk stops. **This decision routes no investigation and opens none** — it makes the state
+> *distinguishable*, which is what §6 asks of it, and §10 books the act that consumes it with what fires it.
 
 > **Normative — the answer carries the holder where the caller must act on it, and nowhere else.** `core/types.py` gains
 > **`EffectOutcome`**, a frozen `extra="forbid"` model whose fields are exactly **`claim: EffectClaim`** and
 > **`execution_id`** and **`step_id`**, each `DurableIdentifier | None` defaulting to `None` and carrying the annotations
 > `EffectRecord` uses. **Both are non-`None` if and only if `claim` is `COMPLETED`**, enforced by a model validator, because
 > that is the one answer whose caller has work to do with the holder — §5's satisfaction reads that step's `output`.
-> **`CLAIMED`, `UNCERTAIN` and `HELD` carry neither**: a caller that cannot act on the holder is not handed one, so no lane
-> grows a habit of reading rows through this member.
+> **`CLAIMED`, `COMPLETED_OTHERWISE`, `UNCERTAIN` and `HELD` carry neither**: a caller that cannot act on the holder is
+> not handed one, so no lane grows a habit of reading rows through this member. **`COMPLETED_OTHERWISE` is deliberately
+> among them** — the modify-before-replace investigation that consumes it needs the earlier act's *arguments* and not only
+> its ids, which is a bounded lookup §10 requires A8's second ADR to add and argue for rather than inherit here unreviewed.
 
-> **Normative — what each answer means, decided by the stored status of the step the row names and by whether that step is
-> this one, in this order and over nothing else.** `claim_effect` returns:
+> **Normative — what each answer means, decided by the stored status of the step the row names, by whether that step is
+> this one, and by whether the row's key is this call's key, in this order and over nothing else.** `claim_effect` reads the
+> row for the `(goal_id, intended_action_id)` pair and returns:
 >
-> 1. **`CLAIMED`**, writing the row, where **no row exists** for the pair.
+> 1. **`CLAIMED`**, writing the row with this call's key, where **no row exists** for the pair.
 > 2. Otherwise, read the stored `StepExecution.status` of the step the row names:
->    - **`SUCCEEDED`** → **`COMPLETED`**, writing nothing.
->    - **`RUNNING`** or **`INDETERMINATE`** → **`UNCERTAIN`**, writing nothing.
->    - **`SKIPPED`** → **`CLAIMED`**, re-pointing the row at this step.
+>    - **`SUCCEEDED`** → **`COMPLETED`** where the row's key **equals** this call's key;
+>      **`COMPLETED_OTHERWISE`** where it does not. Writing nothing in either.
+>    - **`RUNNING`** or **`INDETERMINATE`** → **`UNCERTAIN`**, writing nothing, **whether or not the
+>      keys are equal**: what is uncertain is whether this intended action was performed at all, and
+>      a differently-argued call under an action that may already have been performed is the one
+>      thing a modify-before-replace investigation must not be started from.
+>    - **`SKIPPED`** → **`CLAIMED`**, re-pointing the row at this step **and re-keying it to this
+>      call's key**.
 >    - **`FAILED` on a step of a plan that a stored plan supersedes** → **`CLAIMED`**, re-pointing
->      the row at this step, whichever step asks. **The store decides the supersession itself**,
->      from the holder's execution's plan and the plans it holds, inside the same indivisible step
->      as the write — `orchestration` neither computes it nor asks for it, and **no member is
->      added** for it.
+>      the row at this step **and re-keying it**, whichever step asks. **The store decides the
+>      supersession itself**, from the holder's execution's plan and the plans it holds, inside the
+>      same indivisible step as the write — `orchestration` neither computes it nor asks for it, and
+>      **no member is added** for it.
 >    - **`FAILED`**, **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing,
->      where the row names **this same `(execution_id, step_id)`**; **`HELD`**, writing nothing,
->      where it names a **different** step.
+>      where the row names **this same `(execution_id, step_id)`** **and** its key equals this
+>      call's key; **`HELD`**, writing nothing, in every other case.
 >
-> **The second limb is total over `StepStatus`'s seven members, exactly one answer is defined for every input, and the
-> same-step case is exactly the three statuses under which the step the row names may still dispatch** — a row naming this
-> step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED` or `UNCERTAIN` like any other, because this step has
-> then already acted. **No eighth answer exists.**
+> **The second limb is total: each of `StepStatus`'s seven members, crossed with whether the row's key equals this call's
+> key and with whether the row names this step, has exactly one answer, and no input is left undecided.** The statuses under
+> which the step the row names may still dispatch are exactly three, and the exemption for them is stated over **this same
+> step** — a row naming this step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED`,
+> `COMPLETED_OTHERWISE` or `UNCERTAIN` like any other, because this step has then already acted. **No further answer
+> exists.**
+
+> **Normative — the same-step exemption is not widened to the intended action, and the ground is `StepExecutor.execute`.**
+> It would be the natural reading once steps have a stable identity — let a later plan's step inherit the claim of an
+> earlier step carrying the same intended action, and no supersession test is needed. **It is refused.** That loop commits
+> `RUNNING → FAILED` through `_run_once` and then calls `_claim` again, which is the tree's single
+> `to_status=StepStatus.RUNNING` construction, so a `FAILED` holder's next act may be **a second dispatch of the same call
+> inside the same turn**; a later plan's step that took the key on the ground that it shares the intended action would
+> dispatch beside it, on a different `ExecutionState` record that no compare-and-swap orders against the first. **Two
+> dispatches of one effect is the failure this section exists to prevent**, so the exemption stays
+> `(execution_id, step_id)` and the supersession branch above stays the route by which a later plan takes over a dead
+> holder. **The intended action scopes the row; it does not license a second holder of it.**
 
 > **Normative — the references are checked before anything is written, inside the same indivisible step.** `claim_effect`
 > **raises `PlanningError` and writes nothing** where no execution with `execution_id` is stored, or where `step_id` is not
@@ -373,8 +456,9 @@ effect twice, §10 names what they do.
 > setting `output` to **the holder's recorded `output`** and `finished_at` at this instant. **`attempts` is not
 > incremented** — nothing was attempted — and **the walk goes on to this step's dependents**, which read that `output` under
 > ADR-0253 §2 like any other. **This is the whole of what `COMPLETED` does**: it is not a skip, no `SkipReason` is written,
-> and **no lane reads it as licence to copy an output between goals** — the row is goal-scoped (§2) and the holder is an
-> execution of this same goal, kept by ADR-0255 §7.
+> and **no lane reads it as licence to copy an output between goals, or between two acts of one goal** — the row is
+> scoped to this goal **and this intended action** (§2) and the holder is an execution of this same goal, kept by
+> ADR-0255 §7.
 
 > **Normative — a satisfied step is recorded as satisfied and never as executed, and `StepExecution` gains the two fields
 > that make that representable.** `_claimed_step_is_authorised` requires of every `SUCCEEDED` step an `approval_ref`, a
@@ -388,8 +472,13 @@ effect twice, §10 names what they do.
 > goal and names where, instead of claiming a tool call this step never made. §13 carries the record that scope owes.
 
 > **Normative — the reuse is conditional, and the conditions are checked at the instant it is taken.** A `COMPLETED` answer
-> satisfies the step **only where all three hold**: the keys are equal, which `claim_effect` establishes and which is what
-> makes the completed act an answer to **this** request rather than to a neighbouring one; **every member of the step's own
+> satisfies the step **only where all three hold**: the **intended action is the same and the keys are equal**, which
+> `claim_effect` establishes together — it reads the row at the `(goal_id, intended_action_id)` pair and answers
+> `COMPLETED` only where the row's key is this call's key, so a completed act under a *different* action is never seen here
+> at all and one under **this** action with different arguments is `COMPLETED_OTHERWISE` rather than a reuse. **Both
+> conjuncts are needed and each fails differently**: without the action, *"book another one just like it"* would be
+> satisfied by the first booking (ADR-0265 §10's arm 1); without the key, a changed request would be satisfied by the
+> unchanged act; **every member of the step's own
 > `when` is satisfied** for the goal at that instant, on ADR-0252 §6's four tests as ADR-0253 §5 requires of a dispatch,
 > because a step whose evidential preconditions no longer hold must not be completed from an older act any more than it may
 > be dispatched; and the step's **`verifies` predicate holds over the borrowed `output`** (ADR-0253 §4). **Where any fails,
@@ -403,8 +492,15 @@ effect twice, §10 names what they do.
 > §6's tests would reuse a result for a changed request**; a lane that checked only the key would reuse one whose grounds
 > had since gone. Both are stated because both are required.
 
-> **Normative — `UNCERTAIN` and `HELD` dispatch nothing, commit no transition, and stop the walk.** There, and there only,
-> the stage returns **`Disposition.EFFECT_ALREADY_CLAIMED`** and the step **keeps the status it was entered at** —
+> **Normative — and all of them together are still necessary rather than sufficient, which ADR-0265 §6 states and this
+> clause adopts.** None of the three asks **whether the completed act satisfies the current interpretation**: that is
+> verification against the goal's criteria, it is **A10's by name**, and ADR-0253 §4 says in terms that `verifies` is
+> *"never verification against the goal's criteria"*. **So no lane reads this section as establishing that the reuse was
+> right** — it bounds the reuse, and the decision that verifies it is the one §10 names.
+
+> **Normative — `COMPLETED_OTHERWISE`, `UNCERTAIN` and `HELD` dispatch nothing, commit no transition, and stop the walk.**
+> There, and there only, the stage returns **`Disposition.EFFECT_ALREADY_CLAIMED`** and the step **keeps the status it was
+> entered at** —
 > **`PENDING`** where `StepRunner.run` took the claim, **`AWAITING_APPROVAL`** where `StepRunner.resume` did, which is the
 > second commit the clause above admits. **It is the entry status rather than `PENDING` because no transition is
 > committed**: a resumed step is `AWAITING_APPROVAL` in the store, and naming `PENDING` there would demand a move ADR-0014
@@ -428,8 +524,14 @@ effect twice, §10 names what they do.
 > **The wording and the channel stay A9's** (§10); what this decision fixes is the field, its type, and that a silent reuse
 > is not conforming.
 
-> **Normative.** `Disposition` gains exactly one member, **`EFFECT_ALREADY_CLAIMED`**. **Which `EffectClaim` member produced
-> it is not carried on the disposition**, and what the turn tells the user about it is **A9's report** (§10).
+> **Normative.** `Disposition` gains exactly **two** members — **`EFFECT_ALREADY_CLAIMED`**, returned for
+> `COMPLETED_OTHERWISE`, `UNCERTAIN`, `HELD` and a `COMPLETED` whose reuse conditions fail, and **`EFFECT_UNSCOPED`**,
+> returned for a side-effecting call whose step names no intended action. **Which `EffectClaim` member produced
+> `EFFECT_ALREADY_CLAIMED` is not carried on the disposition**, and what the turn tells the user about either is **A9's
+> report** (§10). They are two members and not one because they are two different facts about the world — *this goal has
+> already claimed this act* against *this plan cannot say which act this step is* — and a client that could not tell them
+> apart could not tell a user which of the two it was, while the second is a defect in the plan and the first is not.
+> Adding a member is additive on the wire under ADR-0084 §4, exactly as `INVALID_PARAMETERS` and `EGRESS_UNBINDABLE` were.
 
 > **Normative — a step already disposed of never re-claims, and the at-most-once guarantee is stated as the conjunction of
 > this section and ADR-0255 §5.** Within one execution ADR-0037 §6's *"`run` enters only at `PENDING`"* is what stops a
@@ -470,6 +572,14 @@ proceeds; and once a stored plan supersedes that plan the holder can never retry
 to whichever step asks. **A goal is therefore never stuck behind a dead claim**, and the one case that stays held is a
 `FAILED` holder on a live plan — which is exactly the case where the retry may still come.
 
+**And what `HELD` now blocks is one intended action rather than one goal, which is the whole of what the scoping buys
+here.** Before ADR-0265 the row was the goal's, so a live hold on any effect held every step of the goal carrying that key;
+now it holds only the steps that are attempts at **the same act**. A goal whose user asked for two rooms has two rows and
+neither holds the other, and a goal pursuing two unrelated acts that happen to resolve to one tool and one digest — the
+collision §1's key alone could not tell from a repeat — has two rows as well. **The live-plan hold survives unchanged
+inside an intended action**, and it is the same trade §2 fixed: a hold that can stall one act, rather than a gap that could
+double it.
+
 **The store decides it rather than the caller, for ADR-0255 §3's reason and no other.** That
 section refuses a caller-supplied revision because *"a check with an extra step"* is a check the world can move under; the
 compared value belongs where the write is. The same is true here, and the same consequence follows: the answer is a
@@ -479,11 +589,17 @@ decided, and it takes no whole `ExecutionState` and no whole row back in order t
 `COMPLETED` is not a relaxation of that**: it is two identifiers, returned on the one answer whose caller must finish work
 rather than stall, and the caller reads the execution through the store's existing members like any other reader.
 
-**What this does not buy, said plainly.** Two turns driving **two steps of one plan** that carry
-the same effect key can still each reach `claim_effect`, and the first to write wins while the second gets `HELD` — which is
-correct. What it does not close is a plan whose planner emitted the same concrete call twice **in one `steps` tuple**: the
-second step is then permanently `HELD` and the walk stops at it. That is a plan defect, it is visible in the durable record
-as a `HELD` disposition rather than as a double booking, and §10 names what would fire a plan-time refusal of it.
+**What this does not buy, said plainly — and one thing it used to not buy, which ADR-0265 has bought.** Two turns driving
+**two steps of one plan** that carry the same intended action and the same effect key can still each reach `claim_effect`,
+and the first to write wins while the second gets `HELD` — which is correct, because they are two attempts at one act.
+**What used to be a defect here and is not one now** is the plan that books two identical rooms: its two steps are two
+`PlanStep.intended_action` values, so they read **two rows**, and **both dispatch**. That is the owner's *"an earlier
+booking must not count as fulfilling 'book another one'"* met by construction rather than booked, and it is the single
+clearest thing the identity changed about this section. What **remains** unclosed is narrower and is a genuine plan defect:
+a planner that emitted the same concrete call twice **under one intended action** — two steps that are attempts at *the
+same act*, which is a plan saying the act should happen twice while saying it is one act. The second step is then
+permanently `HELD` and the walk stops at it; it is visible in the durable record as a `HELD` disposition rather than as a
+double booking, and §10 names what would fire a plan-time refusal of it.
 
 ### 3. Resolving an uncertain effect: reconciling with the tool, where the tool declared that can be done
 
@@ -912,28 +1028,46 @@ at-most-once, and which this decision now discharges the other half of.
 
 ### 9. The `core` surface, the stored shapes, and the wire
 
-> **Normative.** `core/types.py` gains exactly five declarations — **`EffectKey`** (§1), **`EffectClaim`** and
-> **`EffectOutcome`** (§2), **`EffectRecord`** (below) and **`ToolCall.effect_key`**, a property and **not a
+> **Normative.** `core/types.py` gains exactly five declarations — **`EffectKey`** (§1), **`EffectClaim`** with its five
+> members and **`EffectOutcome`** (§2), **`EffectRecord`** (below) and **`ToolCall.effect_key`**, a property and **not a
 > `computed_field`** — for `idempotency_key`'s own recorded reason, that a computed field enters `model_dump()` and ADR-0018
-> §4's registration rebuild runs against `extra="forbid"`. **`Disposition` gains exactly one member**,
-> `EFFECT_ALREADY_CLAIMED`; **`PlanExport` gains exactly one field**, `effects`; **`StepExecution` gains exactly two**,
+> §4's registration rebuild runs against `extra="forbid"`. **`Disposition` gains exactly two members**,
+> `EFFECT_ALREADY_CLAIMED` and `EFFECT_UNSCOPED` (§2); **`PlanExport` gains exactly one field**, `effects`;
+> **`StepExecution` gains exactly two**,
 > `satisfied_by_execution` and `satisfied_by_step` (§2); and **`TurnOutcome` gains exactly one**, `satisfied_from_earlier`,
 > in ADR-0242 §9's shape.
 
-> **Normative.** `EffectRecord` is a frozen model with `extra="forbid"` whose fields are exactly **`goal_id: Identifier`**,
-> carrying the annotation `ActionPlan.goal_id` uses; **`key: EffectKey`**; **`execution_id: DurableIdentifier`** and
+> **Normative.** `EffectRecord` is a frozen model with `extra="forbid"` whose fields are exactly **seven**:
+> **`goal_id: Identifier`**, carrying the annotation `ActionPlan.goal_id` uses; **`intended_action_id: Identifier`**,
+> carrying the annotation `IntendedAction.id` uses (ADR-0265 §1) and **never `None`**, since §2 refuses the claim of a step
+> that names no action; **`key: EffectKey`**; **`execution_id: DurableIdentifier`** and
 > **`step_id: DurableIdentifier`**, carrying the annotations `PermissionDecision.execution_id` and
-> `PermissionDecision.step_id` use for the same two values; and **`claimed_at`**, a `UtcInstant` **read from the store's own
-> injected clock at each write that lands** — so a first claim stamps it, a re-point after a `SKIPPED` holder **restamps**
-> it at the new holder's instant, and every no-write outcome (`COMPLETED`, `UNCERTAIN`, `HELD`, and the same-step `CLAIMED`)
-> **leaves it exactly as it stands**. **No record ever carries an instant earlier than its current holder's claim**, and the
-> clock is injected on ADR-0026's discipline rather than read from the wall. It is the row `claim_effect` keeps and the
+> `PermissionDecision.step_id` use for the same two values; **`targets_revision: int`**, constrained `ge=1` and carrying
+> `ActionPlan.targets_revision`'s own annotation less its `None`; and **`claimed_at`**, a `UtcInstant` **read from the
+> store's own injected clock at each write that lands** — so a first claim stamps it, a re-point after a `SKIPPED` holder
+> **restamps** it at the new holder's instant, and every no-write outcome (`COMPLETED`, `COMPLETED_OTHERWISE`, `UNCERTAIN`,
+> `HELD`, and the same-step `CLAIMED`) **leaves it exactly as it stands**. **No record ever carries an instant earlier than its current holder's claim**, and the
+> clock is injected on ADR-0026's discipline rather than read from the wall.
+
+> **Normative — `targets_revision` is recorded and compared by nothing, and ADR-0265 §6 is why it is on the row at all.**
+> That section rules that *"the effect record names the interpretation revision the claiming plan targeted … so that 'the
+> understanding moved since this act' is a mechanical fact a later turn reads rather than a judgement it makes"*, and that
+> **"it is not a second identity"**. So the store reads it from the claiming execution's plan itself — the same resolution
+> it already makes for `goal_id` — **no caller threads it**, **no clause of this decision compares it**, it **scopes no
+> claim**, it is **never part of the row's identity**, and it is **restamped with the row on every re-point**, because the
+> value has to describe the claim that stands rather than one that was released. `ActionPlan.targets_revision` is `None`
+> only on a plan `save_plan` would refuse, so a claiming plan always carries one and the field needs no absent case.
+> **The decision that reads it is A8's second ADR** (§10), which is the one that asks whether to modify rather than repeat.
+
+> The row is what `claim_effect` keeps and the
 > value `PlanExport.effects` carries; **no `EffectRecord` is returned by `claim_effect`**, which returns an `EffectOutcome`
 > and nothing else, and **no member of any Protocol takes or returns an `EffectRecord`** outside the export document.
 
 > **Normative.** **`ToolDefinition` gains no field**, **`ActionRequest` gains no field**, **`ToolCall` gains no field** (it
-> keeps the two ADR-0029 §2 gives it and the absences that section calls *"the design"*), **`StepExecution` gains no
-> field**, **`ExecutionState` gains no field**, **`Goal` gains no field**, **`GoalAttempt` gains no field**, and
+> keeps the two ADR-0029 §2 gives it and the absences that section calls *"the design"*),
+> **`ExecutionState` gains no field**, **`PlanStep` gains no field** — it carries `intended_action` already, from ADR-0265
+> §4, and this decision **reads** it and adds nothing beside it — **`Goal` gains no field**, **`GoalAttempt` gains no
+> field**, and
 > **`StepTransition` and `AttemptTransition` gain no field.** The effect row is the store's own record, reached only through
 > `claim_effect`.
 
@@ -948,8 +1082,12 @@ at-most-once, and which this decision now discharges the other half of.
 > possibly-empty `tuple[EffectRecord, ...]`; ADR-0014 §5's **closure rule extends to it, and it is stated over one holder
 > rather than over three ids** — an included row's `execution_id` resolves to an execution in the document, its `step_id`
 > names a step **of that execution**, and that execution's plan carries the row's **`goal_id`**, so a row cannot name a step
-> that exists only in some other execution while every id still resolves; and `PlanExport.schema_version` **moves from 11 to
-> 12**, because the document's shape changed and an older reader's `extra="forbid"` must refuse it. Rows are **deleted by
+> that exists only in some other execution while every id still resolves; and `PlanExport.schema_version` **moves by
+> exactly one**, because the document's shape changed and an older reader's `extra="forbid"` must refuse it. **The pair of
+> numbers is read off the tree by the lane that lands it and is deliberately not fixed here**: the value is **12** on
+> `origin/main` today, ADR-0265 §5 moves it once more for `Goal`'s shape, and §11 puts that decision's lanes ahead of this
+> one's — so L1 writes **13 → 14** unless a decision between moves it again, and a lane that trusted a number in this
+> sentence over the constant in front of it would ship a document two readers disagree about. Rows are **deleted by
 > `delete_goal`'s cascade** with the goal they belong to, **cleared by `clear`**, and **stored locally only**. **A row
 > references an execution and a step by id and inlines neither**, which is ADR-0014 §3's pattern.
 
@@ -972,8 +1110,10 @@ thing this document can say about itself.** The declaration that says an effect 
 possible is `ToolCall.idempotency_key`, landed by ADR-0029 §5 with recoverability as its stated purpose. The query that
 finds an unapplied ruling is `AuditTrail.resolution_of`, landed by ADR-0059 §2 *for #257 by name*. The statuses that carry
 uncertainty are `INDETERMINATE` and
-`EFFECT_UNRESOLVED`, landed by ADR-0014 §4 and ADR-0249 §5. **What was missing was a goal-scoped
-record of which effects a goal has already claimed**, and one store member and one derived property are the whole of it.
+`EFFECT_UNRESOLVED`, landed by ADR-0014 §4 and ADR-0249 §5. The identity of the **act** a step is an attempt at is
+`IntendedAction`, landed by ADR-0265 §1 because this document could not have it and could not do without it.
+**What was missing after all of those was a record of which acts a goal has already claimed, and with which
+arguments**, and one store member and one derived property are the whole of it.
 
 ### 10. What this decision does not decide, by name, each with what fires it
 
@@ -985,7 +1125,11 @@ record of which effects a goal has already claimed**, and one store member and o
   decision establishes *what happened*; that one decides *what to do next*, and the owner's addendum requirement 5 is
   its brief: *"Keep 'do not blindly retry an uncertain effect'; drop 'nothing auto-retries, ever'"*, and *"For 'make
   it Sunday', investigate **modifying** the existing reservation first"*. It inherits the vocabulary this decision
-  mints — `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable** test. **It does
+  mints — `EffectClaim`'s **five** members, `Disposition.EFFECT_ALREADY_CLAIMED`, `Disposition.EFFECT_UNSCOPED` and §3's
+  **reconcilable** test — and **`COMPLETED_OTHERWISE` is the state it is owed an act for**: this decision makes *"the
+  same intended action, different arguments"* a distinguishable answer and stops there, and ADR-0265 §6 assigns the
+  investigation that follows it to that decision by name. It also owes the reading of `EffectRecord.targets_revision`,
+  which this decision records and compares nowhere (§9). **It does
   not inherit a general way to read an effect row**: `claim_effect` returns an `EffectOutcome`, whose holder is
   populated on `COMPLETED` alone and for §2's satisfaction alone, and §9 puts `EffectRecord` on the export document
   only, so a modify-first strategy that needs to find the earlier reservation
@@ -1034,7 +1178,14 @@ record of which effects a goal has already claimed**, and one store member and o
 - **A canonical effect-input identity** — one that would recognise two authorised calls whose
   arguments mean the same thing while differing in spelling, so that `alice@Example.com` in one
   plan and `alice@example.com` in the next carried one key rather than two. **Not decided**, and
-  §1 states the limit rather than implying it away. Closing it needs a canonicalisation of a
+  §1 states the limit rather than implying it away. **This is a different question from the
+  identity of the act**, and no lane reads ADR-0265 as having closed it or this entry as
+  reopening what ADR-0265 closed: that decision fixes *which act a step is an attempt at*, and it
+  leaves *which arguments spell one call* exactly where it found it. Under one intended action
+  two equivalent-but-differently-spelled calls carry two keys and answer `COMPLETED_OTHERWISE`
+  rather than `COMPLETED` — so what the gap costs is now a spurious modify-before-replace
+  investigation rather than a duplicate act, which is a smaller and safer failure than the one
+  §1 wrote this entry against. Closing it needs a canonicalisation of a
   tool's **arguments**, which is a different thing from the canonicalisation of a **destination**
   ADR-0148 §2 already lands: arguments are arbitrary JSON against a schema ADR-0145 §5 has this
   system **read** and never interpret, so a general one would put a second canonicaliser in
@@ -1043,18 +1194,24 @@ record of which effects a goal has already claimed**, and one store member and o
   replan of one goal produces an equivalent-but-differently-spelled call**, or by a decision that
   gives a tool a way to declare its own effect identity and states how a wrong declaration is
   contained.
-- **How a user asks for the same effect twice on purpose** — a second action with the same arguments, meant rather
-  than mistaken. **A8's second ADR**, beside modify-before-replace, because *"another one just like it"* and *"change
-  the one I have"* are one user act at two settings and that decision owns the second already. It is booked as an
-  **acceptance requirement that decision owes**: *a user's request for a second action with identical arguments is
-  distinguishable from a retry of the first, by the user's recorded words and never by a model's declaration
-  (ADR-0249 §7), and is dispatched.* **Until it lands, an identical request on the same goal is satisfied by the
-  completed result** (§2) rather than refused or repeated, **and the reply says so** — which is the honest behaviour
-  of the two, not a workaround: the user asked for an outcome this goal already has. **No lane tells a user to open a
-  second goal to get a second action, and no clause of this decision offers that as a route.** **Fired by A8's second
-  ADR.**
-- **A plan-time refusal of a plan carrying the same concrete call twice.** **Not decided**, and §2
-  states what such a plan does instead: the second step is `HELD` and the walk stops. Refusing it
+- **How a user asks for the same effect twice on purpose.** **The identity half is closed and the modify half is
+  not**, and the two are separated here so that a reader does not take the booking for more than it now covers.
+  **Closed**: a second action the user asked for is a **second `IntendedAction`** (ADR-0265 §1), so it reads a second
+  row and **dispatches** (§2, arm 13) — *"an earlier booking must not count as fulfilling 'book another one'"* is met
+  by construction rather than deferred, and the acceptance requirement this entry used to carry is discharged.
+  **Still booked to A8's second ADR**: *"change the one I have"* — the same intended action with different arguments,
+  which §2 answers `COMPLETED_OTHERWISE` and which that decision must turn into a modification of the act already
+  performed rather than a repeat of it. The acceptance requirement is restated over what remains: *a request that
+  revises an act the goal has already performed reaches a modify-before-replace investigation and never a second
+  dispatch, and the investigation is opened from the recorded claim rather than from a model's declaration that the
+  two are the same act (ADR-0249 §7).* **No lane tells a user to open a second goal to get a second action, and no
+  clause of this decision offers that as a route** — it never needed to, and it needs to less now. **Fired by A8's
+  second ADR.**
+- **A plan-time refusal of a plan carrying the same concrete call twice *under one intended action*.** **Not
+  decided**, and §2 states what such a plan does instead: the second step is `HELD` and the walk stops. **The
+  qualifier is the whole of what ADR-0265 changed about this entry**: a plan carrying the same concrete call twice
+  under **two** intended actions is not a defect at all and must not be refused — it is two rooms, and refusing it is
+  the failure the identity exists to prevent. Refusing it
   at phase 4 would need the resolved arguments at validation time, which ADR-0254 §14 owns and
   ADR-0253 §6 resolves later than. **Fired by a decision that gates phase 4 on resolved values.**
 - **#257's remaining half — making the ruling and the transition atomic.** **Not decided**, on
@@ -1085,9 +1242,17 @@ record of which effects a goal has already claimed**, and one store member and o
 
 > **Normative.** This decision is implemented in **three lanes**, in this order, each one subsystem plus its tests.
 
-- **L1 — the contract and the store.** `core/types.py`'s `EffectKey`, `EffectClaim`,
-  `EffectRecord` and `ToolCall.effect_key`, `Disposition`'s member and `PlanExport`'s `effects`
-  field with its `schema_version` move, and `TurnOutcome.satisfied_from_earlier`; `core/protocols.py`'s
+> **Normative — every lane of ADR-0265 lands before L1 of this decision, and no lane of this decision implements any part
+> of that one.** `IntendedAction`, `Goal.intended_actions`, `PlanStep.intended_action`, the `A` label space and
+> `PlanStore.record_intended_actions` are ADR-0265's, cut into lanes by its own §9, and **L1 reads them and adds nothing to
+> them**. A lane of this decision that finds itself minting an intended action, resolving an `A` label or touching
+> `GoalBrief` has left its fence. **The ordering is a hard prerequisite rather than a preference**: until
+> `PlanStep.intended_action` exists and a planner can select one, §2's row cannot be scoped and §2's `EFFECT_UNSCOPED`
+> refusal stalls every side-effecting step.
+
+- **L1 — the contract and the store.** `core/types.py`'s `EffectKey`, `EffectClaim` with its five members,
+  `EffectOutcome`, `EffectRecord` with its seven fields and `ToolCall.effect_key`, `Disposition`'s **two** members and
+  `PlanExport`'s `effects` field with its `schema_version` move, and `TurnOutcome.satisfied_from_earlier`; `core/protocols.py`'s
   `claim_effect`; `planning`'s
   `PlanExecution` transition-table row (§7) and the `PlanStore` implementation with its schema
   migration, export entry and `delete_goal` cascade; the **shared conformance suite** for
@@ -1098,7 +1263,9 @@ record of which effects a goal has already claimed**, and one store member and o
   claim between the read-back and the `→ RUNNING` commit and derives the key from the `ToolCall` it holds. On
   **`CLAIMED`** it dispatches; on **`COMPLETED`** it checks §2's three reuse conditions and, where they hold,
   satisfies the step from the holder's `output` and lets the walk continue; on **`UNCERTAIN`**, **`HELD`** and a
-  `COMPLETED` whose conditions fail it returns `EFFECT_ALREADY_CLAIMED` and stops. Arms 1–3.
+  `COMPLETED` whose conditions fail it returns `EFFECT_ALREADY_CLAIMED` and stops; on **`COMPLETED_OTHERWISE`** it
+  likewise returns `EFFECT_ALREADY_CLAIMED` and stops, and it refuses to call `claim_effect` at all for a side-effecting
+  step naming no intended action, returning **`EFFECT_UNSCOPED`**. Arms 1–3 and 13–14.
 - **L3 — the reconciliation pass, the replay and the attempt's release.** `orchestration`'s pass
   (§4), the `resolution_of` replay in `StepRunner.resume` (§5), the reconciliation call (§3) and
   the release of the attempt (§7). Arms 5–12.
@@ -1113,7 +1280,7 @@ record of which effects a goal has already claimed**, and one store member and o
 
 ### 12. The arms this decision owes
 
-> **Normative.** **Exactly twelve arms** are owed, and the first three are ADR-0255 §12's acceptance requirement for
+> **Normative.** **Exactly fourteen arms** are owed. The first three are ADR-0255 §12's acceptance requirement for
 > at-most-once written as that section demands — *"demonstrated over **both** a plan that modifies the earlier one and a
 > plan produced afresh"*, and *"the paired case over an **`INDETERMINATE`** first step"*.
 
@@ -1145,13 +1312,17 @@ record of which effects a goal has already claimed**, and one store member and o
    `egress_account`, `egress_endpoint` and `egress_destinations` while **staying equal** across
    `planned_with_external_content`, `coverage`, `closed_loop` and two `spans` decompositions that canonicalise alike.
    **`claim_effect` is table-driven over §2's second limb** — each of `StepStatus`'s seven members, crossed with the
-   row naming **this** step and a **different** one — and asserts for each both the returned member **and** whether the
-   row moved. **The `FAILED` pair is what stops `StepExecutor.execute`'s retry racing a later plan**: this step answers
+   row naming **this** step and a **different** one, **and crossed again with the row's key being this call's key and
+   not being it** — and asserts for each both the returned member **and** whether the row moved **and, where it moved,
+   that its key moved with it**. **The `SUCCEEDED` pair is the Sunday case at the store**: equal keys answer
+   `COMPLETED`, unequal keys answer `COMPLETED_OTHERWISE`, and neither writes. **The `SKIPPED` and superseded-`FAILED`
+   rows are asserted to re-key**, which is what keeps at most one row per `(goal_id, intended_action_id)`. **The `FAILED` pair is what stops `StepExecutor.execute`'s retry racing a later plan**: this step answers
    `CLAIMED`, a different one `HELD`, and the row moves in neither. It adds: **durable re-pointing** after a `SKIPPED`
    holder, with `claimed_at` restamped; **`claimed_at` preserved** on every no-write outcome, under an injected clock; the
-   **refusal** paths — an unknown `execution_id`, and a `step_id` that is not a step of that execution — raising
-   `PlanningError` with **no row written**; and **atomicity under contention**, where two writers claim one
-   `(goal_id, effect_key)` concurrently, **over both write paths** — **no row**, and an existing **`SKIPPED`** holder
+   **refusal** paths — an unknown `execution_id`, a `step_id` that is not a step of that execution, and a `step_id`
+   whose stored step carries **no `intended_action`** — each raising `PlanningError` with **no row written**; and
+   **atomicity under contention**, where two writers claim one
+   `(goal_id, intended_action_id)` concurrently, **over both write paths** — **no row**, and an existing **`SKIPPED`** holder
    two callers would each re-point, because a uniqueness constraint on insertion passes the first and leaves the second
    racing. In each, **exactly one** receives `CLAIMED`, the other `HELD`, and exactly one durable row names a holder.
    The store under test is not permitted to pass either by serialising the two calls in the test's own control flow. It adds one **upgrade** case: a store written before this decision opens with an **empty**
@@ -1221,8 +1392,33 @@ record of which effects a goal has already claimed**, and one store member and o
     fail**. The store under test is not permitted to pass this row by serialising the two passes
     in the test's own control flow.
 
+13. **Two intended actions, one goal, two dispatches** — the owner's *"book two identical rooms"*, and the arm that
+    would have been impossible before ADR-0265. One goal holds **two** `IntendedAction`s; one plan carries two steps
+    naming one each, whose bound tool, resolved arguments and binding are **identical**, so their `EffectKey`s are
+    **equal**. Both steps reach `claim_effect`, **both answer `CLAIMED`**, **two durable rows** exist — one per
+    `(goal_id, intended_action_id)` — **`ToolInvoker.invoke` is reached twice**, and neither step is `HELD`,
+    satisfied, or carries `EFFECT_ALREADY_CLAIMED`. **Asserted against the negative in the same arm**: the same two
+    steps naming **one** intended action dispatch **once**, the second answering `HELD` — so the arm shows that the
+    scoping and not the key is what separates the two cases, and an implementation that keyed the row on
+    `(goal_id, effect_key)` fails the first half while passing the second.
+14. **One intended action, different arguments — the Sunday case, end to end.** A plan is driven to a **`SUCCEEDED`**
+    step under intended action `A`; the goal's interpretation is revised and a later plan carries a step naming **the
+    same `A`** whose resolved arguments differ, so its `EffectKey` differs. `claim_effect` answers
+    **`COMPLETED_OTHERWISE`**; the step is **not dispatched** — `ToolInvoker.invoke` is not reached and no invocation
+    is claimed — **no transition is committed**, the step **keeps its entry status**, the walk **stops** with
+    `Disposition.EFFECT_ALREADY_CLAIMED`, `satisfied_from_earlier` carries **nothing** for it, the holder's own record
+    is **untouched**, and **the row does not move and is not re-keyed**. **And the unscoped case is the same arm's
+    second half**: a side-effecting step whose `intended_action` is `None` reaches **no `claim_effect` call**, commits
+    nothing, keeps its entry status and returns **`Disposition.EFFECT_UNSCOPED`**, while a non-side-effecting step
+    carrying `None` is driven exactly as before. An implementation that answered `CLAIMED` to the revised step fails
+    the first half and double-books; one that answered `COMPLETED` fails it by satisfying a changed request from an
+    unchanged act.
+
 > **Normative — no arm of this decision requires a real integration, a scheduler or a restart loop.** Arms 1–3 and 10–11 are
-> stated over a controlled `ToolInvoker` whose declaration and returned outcome the arm fixes; arm 4 is stated over the
+> stated over a controlled `ToolInvoker` whose declaration and returned outcome the arm fixes, and arms 13 and 14 over
+> the same; **no arm mints an intended action outside `orchestration`** — each takes the goal's actions through
+> ADR-0265 §5's own member, so none of them is a test of this decision's that depends on a shape ADR-0265 did not land.
+> Arm 4 is stated over the
 > store alone; arm 9's residual is produced by a store failure the arm injects, and arm 11's rows are driven by a controlled
 > trail and invoker rather than by a real integration. **No arm requires a stopped walk to be re-entered**, and none asserts
 > that a dependent of a reconciled step runs — §7 adds no route to one and ADR-0255 §2's closed list is what it leaves in
@@ -1230,7 +1426,7 @@ record of which effects a goal has already claimed**, and one store member and o
 
 ### 13. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly four documents are partially superseded — ADR-0014 in two scopes, ADR-0255 in one,
+**Exactly four documents are partially superseded, in six scopes — ADR-0014 in three, ADR-0255 in one,
 ADR-0192 in one and ADR-0037 in one** — and the entries below show the working for those and for each other document a
 reader would expect to be superseded and is not. ADR-0082 §1's test is applied to each earlier ADR's **text**: would a
 reader holding only it now act differently, or read one of its clauses more widely than it holds?
@@ -1263,7 +1459,7 @@ happened elsewhere in this goal and names where, instead of claiming a call this
 and `delete_goal`'s cascade, and that scope is on this document's `Status` line too.** §5's code block enumerates the
 store's members and its `PlanExport` its document's fields; §9 adds
 `claim_effect` to the first and `effects` to the second, extends §5's closure rule to the new
-rows' three references, moves `schema_version` from 11 to 12, and reaches those rows with
+rows' three references, moves `schema_version` by one, and reaches those rows with
 `delete_goal`'s cascade. A reader holding only §5 builds a store with no member that can claim an
 effect and an export document whose `extra="forbid"` refuses the field this decision's rows are carried in, so ADR-0070 §1's
 test is met. **This is the third time that enumeration has been extended in the same shape** — ADR-0249 §12 added five
@@ -1297,11 +1493,15 @@ once"* and `PENDING`-only entry.
 stated over, and the scope is on this document's `Status` line.** §7 rules that *"an effect a
 `SUCCEEDED` and verified step produced, and an effect an `INDETERMINATE` step may have produced,
 are each performed **at most once across every plan of that goal**"*, and §12 states the acceptance requirement over
-*"a plan whose step would perform **the same effect**"*. §1 lands an identity over the **authorised call** — the tool,
-the digest of the supplied arguments, and the binding's reach — and states in terms that two calls meaning one thing while
-spelling it differently carry two keys and the second is dispatched. **A reader holding only ADR-0255 §7 therefore reads its
-obligation more widely than it now holds**: they expect A8's mechanism to make the *effect* at most once and get one that
-makes the *authorised call* at most once. That is ADR-0070 §1's test met, and
+*"a plan whose step would perform **the same effect**"*. §§1-2 land an identity in two parts — the **intended action**
+the step is an attempt at (ADR-0265 §1), which the row is scoped to, and the **authorised call** within it, identified by
+the tool, the digest of the supplied arguments and the binding's reach — and state in terms that two calls meaning one
+thing while spelling it differently carry two keys, so under one intended action the second is `COMPLETED_OTHERWISE` and
+under two it is dispatched. **A reader holding only ADR-0255 §7 therefore reads its obligation more widely than it now
+holds**: they expect A8's mechanism to make the *effect* at most once and get one that makes **one authorised call under
+one intended action** at most once — narrower than *effect* in one direction, because a differently-spelled equivalent is
+not caught, and **deliberately narrower in another**, because two intended actions carrying one key are two acts and both
+happen. That is ADR-0070 §1's test met, and
 **partial** in ADR-0070 §3's sense — the scope is the identity, and nothing else. **Every other
 clause of §7 and §12 binds entire**: §7's keeps-everything-it-recorded rule, its extension of ADR-0228 §5's not-driven rule,
 its sweep and the sweep's stated residual, its one-plan-per-walk rule and its no-licence-to-repeat prohibition; §12's every
@@ -1381,6 +1581,25 @@ routing and its `pending_confirmations` rule are untouched, because this decisio
 are relied on entire** — the binding as the unit, §2(b)'s one-resolution-per-binding rule and §3's two-step query — and §5
 is stated so that none of them is approached.
 
+**ADR-0265 — relied on entire, cited throughout, and superseded in nothing, and its §6 is the reason there is no record
+to write.** A reader would expect one, because this decision keys its row on that decision's identity, adds a member to an
+enum for a state that decision named, and takes a question §4 hands it. They get none, and the working is that **§6 is
+written as an obligation on a decision that did not yet exist**: it states that *"a decision that records a goal's
+completed effects keys its row on the `(goal, intended action, effect key)` triple"*, that *"**a decision that lands the
+claim owes an answer for this state**"*, that such a decision *"carries on that record the `targets_revision` … of the
+plan the claim was taken under"*, and that the three reuse conditions *"bound reuse and do not establish it"*. **This
+decision is that decision and it discharges all four** — §2's row and its pair-lookup, `COMPLETED_OTHERWISE`, §9's
+`targets_revision` field and §2's A10 clause — so a reader holding only ADR-0265 §6 reads that an at-most-once claim owes
+these things, watches one arrive that does, and **acts no differently**. That is ADR-0070 §1's test **failed**, which is
+what makes a record wrong rather than merely unnecessary. **§6's own prohibition is observed rather than bent**: *"No lane
+cites this section as authority for dispatching a step, for refusing one, for writing a `GoalStatus`, or for reading an
+effect row"* — every dispatch rule, every refusal and every read in this document stands on §2 and §3 of **this** decision,
+and §6 is cited only for what it obliges. **§4's last clause is answered rather than superseded**: it says in terms that
+*"whether an effect-bearing dispatch must name one is decided where the effect claim is taken"*, so answering it is the
+thing that clause asks for, and §2's `EFFECT_UNSCOPED` is the answer. **§1's three-field `IntendedAction`, §3's stale-link
+rule, §4's `A` label space, its selection-never-invention rule and its two refusals, §5's store member and its three
+refusals, and §7's deferrals all bind entire**, and §11 puts every lane of that decision ahead of every lane of this one.
+
 **ADR-0253 §5 — relied on and not superseded, and this decision is what its sentence names.** It
 rules *"**Nothing in this decision makes an act at-most-once** … Making an intended effect happen at most once is a
 different mechanism entirely — it is the idempotency key and the `INDETERMINATE` reconciliation ADR-0014 §7 defers and
@@ -1404,12 +1623,13 @@ never happened while the ruling sits durable and unread in the trail. That is AD
 instrument — as it must be in any case, since
 `core/types.py` and `core/protocols.py` both change (golden rule 5, ADR-0015).
 
-**It is a partial supersession of exactly four documents in five scopes** (ADR-0070 §3) —
-ADR-0014 in §4's transition table **and** in §5's member enumeration, `PlanExport` shape and
-`delete_goal` cascade; **ADR-0255** in the identity §7's and §12's at-most-once obligation is
-stated over; **ADR-0192** in §3's firing clause; and ADR-0037 in §4's resolution step — and §13 shows the working for each
-and for the five documents a reader would expect and that get no record — ADR-0148, ADR-0029, ADR-0250, ADR-0059 and
-ADR-0253. **Every other ADR it touches is relied on**, and what it takes it takes by **firing deferrals** rather than by
+**It is a partial supersession of exactly four documents in six scopes** (ADR-0070 §3) —
+ADR-0014 in §4's transition table, in §5's member enumeration, `PlanExport` shape and
+`delete_goal` cascade, **and** in §3's `StepExecution` record; **ADR-0255** in the identity §7's and §12's at-most-once
+obligation is stated over; **ADR-0192** in §3's firing clause; and ADR-0037 in §4's resolution step — and §13 shows the
+working for each and for the six documents a reader would expect and that get no record — ADR-0148, ADR-0029, ADR-0250,
+ADR-0059, ADR-0253 and **ADR-0265**, whose §6 states the obligations this decision discharges and whose §4 hands it one
+question, neither of which a reader acts differently on once this lands. **Every other ADR it touches is relied on**, and what it takes it takes by **firing deferrals** rather than by
 replacing clauses: ADR-0014 §7's, ADR-0255 §12's seven entries — two of which carry the acceptance requirements stated there
 — ADR-0059 §2's named later wave, and ADR-0253 §5's named mechanism.
 
@@ -1444,11 +1664,18 @@ re-asked nor doubled.
 **A replan repeating a completed effect finishes rather than either double-acting or stalling, and that is the shape
 this decision takes on purpose.** A step whose key answers **`COMPLETED`** is satisfied from the earlier step's own
 `output` and its dependents are driven, so the revised workflow completes with the work done once and the user told
-once (§2). What still stops is **`UNCERTAIN`** and **`HELD`**: there the earlier act's result is not known, or belongs to a
-step still able to use it, and there is nothing honest to inherit — the walk stops, its dependents wait, and ADR-0014 §4's
+once (§2). What still stops is **`UNCERTAIN`**, **`HELD`** and **`COMPLETED_OTHERWISE`**: there the earlier act's result is
+not known, or belongs to a step still able to use it, or was produced by different arguments under the act now being
+revisited, and there is nothing honest to inherit — the walk stops, its dependents wait, and ADR-0014 §4's
 ground is the one this decision stands on, that *"guessing would not be"* the deterministic answer.
-**The residual cost is narrower than a stall**: a user who wants a second, deliberate action with identical arguments
-on one goal gets the first one's result instead, until A8's second ADR lands the distinction §10 books.
+
+**A deliberate second action is no longer a residual, and a revision is no longer a duplicate.** The at-most-once rule is
+scoped to the intended action ADR-0265 mints, so a goal that asked for two rooms holds two rows and dispatches twice, and a
+goal whose booking moves to Sunday meets `COMPLETED_OTHERWISE` rather than a fresh claim. **What is left is one booking and
+not two residuals**: the modify-before-replace investigation that `COMPLETED_OTHERWISE` must open, which §10 books to A8's
+second ADR with the acceptance requirement it owes. The cost of the scoping is stated too, and it is ADR-0265 §6's own: an
+intended action minted **wrongly** makes an otherwise duplicate claim fresh, which is why that decision adds a sixth
+condition to ADR-0255 §15 item 19's gate rather than leaving it at five.
 
 **A second cost is that reconciliation reaches a callable, though never the designated egress
 seam.** §3's call is the one act this decision takes outside the store, it is taken only under a declaration that makes a
@@ -1523,7 +1750,7 @@ is wired and the Q4 gate is read for real.
 - **A field on `StepExecution` or `Goal` recording the effect.** Rejected. A field on
   `StepExecution` cannot be queried across plans without an index, and a field on `Goal` would
   put a compare-and-swap on the goal into every dispatch, contending with `engage_goal` and every
-  interpretation revision. The row is the store's, keyed by the pair that has to be looked up.
+  interpretation revision. The row is the store's, keyed by the goal and the intended action that have to be looked up.
 - **Blocking on `_CLAIMED_STATUSES`.** Rejected. That constant includes `FAILED`, and ADR-0034 §1 makes a `FAILED`
   step one where *"nothing could have run under it" is a fact the executor holds*. Blocking on it would answer
   `UNCERTAIN` about a proven failure and refuse the holder's own retry, which is R43 read backwards.
@@ -1564,6 +1791,25 @@ is wired and the Q4 gate is read for real.
   keyed call has, and it would make the claim's failure mode indistinguishable from a stale
   version. A separate member taken immediately before, in the safe order §2 fixes, leaves the
   transition graph exactly as it stands.
+- **Keying the row on the goal and the effect key alone.** Rejected, and it was this document's rule through eleven
+  rounds of review. It fails in two opposite directions at once, which is ADR-0265's own diagnosis: two identical rooms
+  are one tool, one digest and one binding, so the second is satisfied from the first and the user who asked twice is
+  booked once; and a booking moved to Sunday carries a different digest, so the rule sees no earlier effect, dispatches
+  a second booking and leaves the first standing. **ADR-0265 §6 forbids it in terms** — *"No lane scopes such a claim
+  to a goal and an argument key alone"* — and §2 keys on the intended action instead.
+- **Scoping the row to the goal element the step serves, rather than to an intended action.** Rejected, and the ground
+  is ADR-0253 §7: *"A **restated** element is a new element and is minted a new id"*, so *"make it Sunday"* reworded
+  into the element would mint a new id, free the key and dispatch a second booking — the modify case defeated by the
+  mechanism meant to serve it. ADR-0265 §1 mints an identity that is **retained** across a revision instead, and §3 of
+  that decision makes `serves` a link that identifies nothing.
+- **Carrying the intended action id inside `EffectKey`.** Rejected in §1. It reads like the tidier shape — one value,
+  one comparison — and it destroys the only distinction this decision was extended to make: two rows that differ only
+  in their key under one action would be as unequal as two unrelated acts, so `COMPLETED_OTHERWISE` could never be
+  answered and the Sunday case would dispatch. The action scopes the row; the key is compared **within** it.
+- **Letting a step naming no intended action dispatch unclaimed.** Rejected in §2. It is the fail-open direction: the
+  effect would be performed with no row, so every later plan of the goal would answer `CLAIMED` and repeat it, which
+  is ADR-0255 §7's obligation unmet rather than delimited. `EFFECT_UNSCOPED` stalls the step instead, and ADR-0255
+  §13's Q4 rule bounds what that can cost while no consequential capability is wired.
 - **Taking #2309 here.** Rejected in §8. Both mechanisms close a window about authority to act,
   not about an act already taken, and ADR-0255 §12 states the choice between them is a decision of
   its own.
