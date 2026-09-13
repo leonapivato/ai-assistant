@@ -5728,6 +5728,458 @@ def _refuse_mismatched_ground(  # noqa: PLR0913 — the ground, its possible arg
         raise ValueError(msg)
 
 
+# --- the evidence vocabulary and the applicability algebra (ADR-0252 §§1-3) ---
+# Declared **here**, ahead of the planning types, rather than beside `GoalEvidence`
+# where ADR-0252's own lane put them. ADR-0253 §7 gives `GoalElement` an
+# `applicability` and §5 gives `StepCondition` a `basis`, so two models declared
+# far above the old position now depend on these. That is the case the comment
+# above :data:`Identifier` already rules on, one level up from a scalar: "a forward
+# reference plus ``model_rebuild`` would have kept the old positions at the cost of
+# making two `core` types depend on an import-order side effect, so the primitives
+# moved instead of the models". Nothing about them changed.
+
+
+class EvidenceBasis(StrEnum):
+    """Which of ADR-0252 §3's two admitted sources a row's support came from (§1).
+
+    A **closed** enumeration of exactly **two** members, each valued by its
+    lower-cased member name. The vocabulary is **added to and never renamed**, on
+    :class:`Ground`'s own rule (ADR-0249 §1, itself ADR-0226 §4's): no later ADR
+    removes a member, renames one, gives one a second spelling, or replaces this
+    enum with a differently-named one for the same question.
+
+    It names which of §3's two sources the row's :attr:`GoalEvidence.supported` was
+    composed from, and therefore **which closed vocabulary its ``verdict`` is a
+    value of** (§5) — so a reader holding a row never has to guess what ``"empty"``
+    is a member of.
+    """
+
+    READ_OUTCOME = "read_outcome"
+    """A typed read outcome that carried the applicability structurally: one region
+    per record the ask **returned**, composed from that record's own values and
+    never from the ask (§3). Its ``verdict`` is a :class:`ReadOutcomeKind` value."""
+
+    INTERPRETATION = "interpretation"
+    """An interpretation verdict over exactly one recorded record: the one region
+    the interpretation step declared (§3). Its ``verdict`` is a member of the closed
+    enumeration its ``declaration`` names, and **no lane of ADR-0252 produces such a
+    row** (§14) — the basis is landed so that the lane which needs it does not have
+    to reopen a ``core`` type."""
+
+
+#: The most values one region of an applicability holds on **each** label axis
+#: (ADR-0252 §2). **A fixed constant valued 32**, and deliberately not a ``Settings``
+#: field, a constructor knob or a per-deployment value — exactly as
+#: :data:`MAX_GOAL_INTERPRETATIONS` (ADR-0249 §2) and :data:`MAX_TOPICS_PER_PROPOSAL`
+#: (ADR-0213 §4) are not, on ADR-0086 §1's own reason: "a knob that raises the ceiling
+#: is a knob that re-opens it".
+#:
+#: A composition that would exceed it **keeps the first 32 values in the order the
+#: source produced them and advances that region's** :attr:`EvidenceApplicability.elided`
+#: (§2). The truncation is the **composer's** act and is disclosed by the count beside
+#: it; this type refuses an over-long axis outright rather than trimming one silently,
+#: because a validator that repaired the value would put the disclosure nowhere.
+MAX_APPLICABILITY_VALUES: Final[int] = 32
+
+#: The most regions one row's :attr:`GoalEvidence.supported` holds (ADR-0252 §2).
+#: **A fixed constant valued 32**, on :data:`MAX_APPLICABILITY_VALUES`' own footing and
+#: for its reason. A composition that would exceed it keeps the first 32 regions in the
+#: order the servicing produced them and advances the row's
+#: :attr:`GoalEvidence.supported_elided`.
+#:
+#: **Every truncation narrows and none widens, and the direction is why they are
+#: admissible at all** (§2): a dropped region makes ``supported`` cover **less** and
+#: therefore satisfy fewer conditions (§6) and supersede fewer rows (§8), so it fails
+#: closed. ADR-0086 §4's refusal of silent truncation binds entire and the two counts
+#: are what discharge it.
+MAX_SUPPORTED_REGIONS: Final[int] = 32
+
+
+class EvidenceApplicability(BaseModel):
+    """One **region** a response establishes a proposition about (ADR-0252 §2).
+
+    **One applicability is one region, composed from exactly one returned record**
+    (§3), so a region's axes are values that record carried **together**. No lane
+    merges two regions, unions their label axes, spans their windows, or replaces a
+    tuple of them by its enclosing interval.
+
+    **Regions rather than one aggregate, and the two failures an aggregate has are
+    both manufactured coverage** (§2). Two records declaring ``[09:00, 10:00)`` and
+    ``[15:00, 16:00)`` have an enclosing window of ``[09:00, 16:00)``, and a condition
+    about noon would then pass a coverage test neither record supports. And unioning
+    the label axes across records loses which participant was in which interval, so a
+    row composed from *Alice on Saturday* and *Bob on Sunday* would cover a condition
+    naming *Alice on Sunday*. Both are the same defect: an aggregate asserts the
+    **conjunction** of what several records said, where the records only ever said
+    their own parts.
+
+    **``None`` is the one spelling of *not applied*** — exactly as it is on
+    :class:`StructuredAsk` (ADR-0240 §2) — and a value applying nothing is expressed
+    by the field holding it being absent, or by a ``supported`` tuple being empty. A
+    region applying **no** axis is refused, and so is one whose present sequence axis
+    is empty.
+
+    **The axes take the types of the fields they copy, and tighten only in ways that
+    reject** (§2, ADR-0096 §2): ``participants`` and ``about_person`` are
+    :data:`NonBlankEncodableText`, which is :class:`StructuredAsk`'s own annotation for
+    the first and a tightening of :attr:`EpisodicMemory.participants`'
+    :data:`EncodableText`; ``topics`` is :data:`TopicLabel`, which both the ask and
+    :attr:`MemoryBase.topics` already carry. **A blank value on a returned record
+    contributes nothing to its region and advances that region's ``elided``** — it is
+    dropped, never stripped, never case-folded and never repaired.
+
+    Attributes:
+        window: The interval the source declared for what it reported, where it
+            declared one expressible as a :class:`TimeWindow`. ADR-0237 §2's type is
+            used exactly as defined and is not re-expressed: the half-open
+            ``[start, end)`` reading, the unset ends, the refusal of a window with
+            both ends unset and the refusal of one whose ``end`` is not strictly
+            after its ``start`` are that ADR's and are inherited whole.
+        participants: Whom the records this region came from involved.
+        topics: What they were filed under.
+        about_person: Whose the beliefs among them were.
+        elided: How many values this region's composition dropped — a blank value on
+            a returned record, a label axis past :data:`MAX_APPLICABILITY_VALUES`, or
+            a declared interval that cannot be expressed as a ``TimeWindow``. A count
+            and never an identifier (ADR-0086 §4).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    window: TimeWindow | None = Field(
+        default=None, description="The interval the source declared, where it declared one."
+    )
+    participants: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whom the records this region came from involved."
+    )
+    topics: tuple[TopicLabel, ...] | None = Field(
+        default=None, description="What those records were filed under."
+    )
+    about_person: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whose the beliefs among them were."
+    )
+    elided: int = Field(
+        default=0, ge=0, description="How many values this region's composition dropped."
+    )
+
+    @model_validator(mode="after")
+    def _applies_something_and_nothing_empty(self) -> EvidenceApplicability:
+        """Refuse a region applying no axis, an empty axis, and an over-long one.
+
+        The first two are ADR-0252 §2's own refusals. The third is this type
+        enforcing §2's bound rather than trusting a producer's arithmetic, which is
+        ADR-0086 §1's rule for a durable sequence in ``core``; it **refuses** rather
+        than trimming, because a validator that silently kept the first 32 would
+        leave :attr:`elided` unadvanced and put the disclosure nowhere.
+
+        Raises:
+            ValueError: If no axis is applied, a present sequence axis is empty, or
+                a label axis holds more than :data:`MAX_APPLICABILITY_VALUES` values.
+        """
+        axes = (
+            ("participants", self.participants),
+            ("topics", self.topics),
+            ("about_person", self.about_person),
+        )
+        if self.window is None and all(values is None for _, values in axes):
+            msg = (
+                "an EvidenceApplicability applies at least one axis: a value applying "
+                "nothing is spelled by the field holding it being absent, or by an "
+                "empty supported tuple (ADR-0252 §2)"
+            )
+            raise ValueError(msg)
+        for name, values in axes:
+            if values is None:
+                continue
+            if not values:
+                msg = (
+                    f"{name} is applied and empty: None is the one spelling of "
+                    f"'not applied' (ADR-0252 §2, ADR-0240 §2)"
+                )
+                raise ValueError(msg)
+            if len(values) > MAX_APPLICABILITY_VALUES:
+                msg = (
+                    f"{name} holds {len(values)} values and ADR-0252 §2 bounds each "
+                    f"axis at {MAX_APPLICABILITY_VALUES}: a composition that would "
+                    f"exceed it keeps the first {MAX_APPLICABILITY_VALUES} and "
+                    f"advances this region's elided"
+                )
+                raise ValueError(msg)
+        return self
+
+    def covers(self, other: EvidenceApplicability, /) -> bool:
+        """Whether this region **covers** ``other`` (ADR-0252 §2).
+
+        For **every axis ``other`` applies**, this region applies that axis and its
+        value contains ``other``'s. **An axis this region does not apply covers no
+        applied axis of ``other``**, and an axis ``other`` does not apply is covered
+        by anything.
+
+        **The direction is stated rather than left to a reader**, because the
+        predicate is not symmetric and the two readings differ on every unbounded
+        end: ``self`` is the containing side — what a response established — and
+        ``other`` is the contained one — what a condition, or an earlier row, needs.
+
+        **An unapplied axis is not read as *everything***. That would be the same
+        substitution ADR-0240 §2 refuses at the ask — "no value of any axis means
+        'everything'" — arriving at the response instead: a value that says nothing
+        about the people a step names has established nothing about them.
+
+        Args:
+            other: The region to test for containment in this one.
+
+        Returns:
+            Whether this region covers every axis ``other`` applies.
+        """
+        return (
+            _covers_window(self.window, other.window)
+            and _covers_labels(self.participants, other.participants, fold=True)
+            and _covers_labels(self.topics, other.topics, fold=False)
+            and _covers_labels(self.about_person, other.about_person, fold=True)
+        )
+
+    def overlaps(self, other: EvidenceApplicability, /) -> bool:
+        """Whether this region **overlaps** ``other`` (ADR-0252 §2).
+
+        They overlap when they apply **at least one axis in common** and, **for every
+        axis both apply**, their values intersect: windows that share at least one
+        instant, and label sets with at least one member in common under §6's
+        per-axis comparison. An axis only one of them applies is ignored.
+
+        **Overlap requires agreement on every shared axis, and that is what keeps a
+        shared label from bypassing a disjoint period** (§2). A row about *Saturday,
+        weather* and one about *Sunday, weather* share the ``topics`` axis and both
+        apply ``window``; their windows are disjoint, so they do not overlap and
+        neither is about the other's ground. The relation is symmetric, and it is
+        **used for conflict (§7) and never for supersession** — §8 requires the
+        stronger relation for the stronger act.
+
+        Args:
+            other: The region to test against this one.
+
+        Returns:
+            Whether the two share an axis and agree on every axis both apply.
+        """
+        shared = False
+        for mine, theirs, fold in (
+            (self.participants, other.participants, True),
+            (self.topics, other.topics, False),
+            (self.about_person, other.about_person, True),
+        ):
+            if mine is None or theirs is None:
+                continue
+            shared = True
+            if not _labels_intersect(mine, theirs, fold=fold):
+                return False
+        if self.window is not None and other.window is not None:
+            shared = True
+            if not _windows_intersect(self.window, other.window):
+                return False
+        return shared
+
+
+def _covers_window(coverage: TimeWindow | None, extent: TimeWindow | None) -> bool:
+    """Whether ``extent`` lies wholly within ``coverage`` (ADR-0117 §3, ADR-0252 §2).
+
+    **ADR-0117 §3's containment predicate, reused rather than restated**, with
+    ``extent`` as that predicate's contained extent *E* and ``coverage`` as its
+    containing coverage *C*. That section states it as "*E = [ef, eu)* lies wholly
+    within *C = [cf, cu)* iff **cf is None or (ef is not None and ef >= cf)** and
+    **cu is None or (eu is not None and eu <= cu)**", together with the sentence that
+    decides the hard case: "An unbounded extent end is contained only by an unbounded
+    coverage end on the same side."
+
+    It is the same arithmetic :meth:`ReadCoverage.contains` performs, over the one
+    carrier an applicability has: :class:`ReadCoverage` and :class:`ReportedExtent`
+    are the types of ADR-0117 §3's own operands and neither is what a region holds —
+    ADR-0117 §2 is explicit that the three subjects are distinct and that naming two
+    of them with one type is the error — so the predicate is applied here to
+    :class:`TimeWindow` rather than a region being coerced into a type that says
+    something else about a different subject.
+
+    Args:
+        coverage: The containing window, or ``None`` where the axis is not applied.
+        extent: The contained window, or ``None`` where the axis is not applied.
+
+    Returns:
+        ``True`` where ``extent`` is unapplied — an axis the other side does not
+        apply is covered by anything — ``False`` where ``coverage`` is unapplied and
+        ``extent`` is not, and otherwise whether the containment holds.
+    """
+    if extent is None:
+        return True
+    if coverage is None:
+        return False
+    starts_inside = coverage.start is None or (
+        extent.start is not None and extent.start >= coverage.start
+    )
+    ends_inside = coverage.end is None or (extent.end is not None and extent.end <= coverage.end)
+    return starts_inside and ends_inside
+
+
+def _windows_intersect(one: TimeWindow, other: TimeWindow) -> bool:
+    """Whether two half-open windows share at least one instant (ADR-0252 §2).
+
+    ``[s1, e1)`` and ``[s2, e2)`` intersect exactly when each starts strictly before
+    the other ends, an unset end reading as unbounded on that side. ADR-0237 §2's
+    half-open reading is what makes the comparison strict at the ends: an instant
+    equal to a window's ``end`` is outside it, so two windows that merely touch —
+    one ending where the other begins — share nothing.
+
+    Args:
+        one: The first window.
+        other: The second window.
+
+    Returns:
+        Whether some instant lies in both.
+    """
+    first_starts_before_second_ends = (
+        one.start is None or other.end is None or one.start < other.end
+    )
+    second_starts_before_first_ends = (
+        other.start is None or one.end is None or other.start < one.end
+    )
+    return first_starts_before_second_ends and second_starts_before_first_ends
+
+
+def _label_keys(values: Sequence[str], *, fold: bool) -> set[str]:
+    """The comparison keys of one label axis (ADR-0237 §3, ADR-0252 §6).
+
+    **Label comparison is stated per axis, because the corpus already states it per
+    axis and the three axes do not agree.** ``about_person`` and ``participants``
+    match by ADR-0101 §2's rule — canonical caseless equality, ``NFD(toCasefold(NFD(x)))``,
+    which :func:`caseless_key` computes — and ``topics`` matches by **equality of the
+    stored characters and by nothing else**, which is the only relation
+    :data:`TopicLabel` has (ADR-0213 §3).
+
+    **No lane applies one rule to all three**, and folding a topic would be a wider
+    matching rule ADR-0213 §3 reserves to an ADR that is not ADR-0252: precomposed
+    ``café`` and decomposed ``cafe`` + U+0301 are both admissible ``TopicLabel``s that
+    ADR-0101 §2's fold equates and the type does not, so applying it here would let
+    evidence filed under one topic cover a condition naming the other.
+
+    Args:
+        values: The axis's values, in the order the region holds them.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        The set of keys two axes are compared as.
+    """
+    return {caseless_key(value) for value in values} if fold else set(values)
+
+
+def _covers_labels(
+    coverage: Sequence[str] | None, needed: Sequence[str] | None, *, fold: bool
+) -> bool:
+    """Whether ``coverage``'s values are a superset of ``needed``'s (ADR-0252 §2).
+
+    Args:
+        coverage: The containing axis, or ``None`` where it is not applied.
+        needed: The contained axis, or ``None`` where it is not applied.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        ``True`` where ``needed`` is unapplied, ``False`` where ``coverage`` is
+        unapplied and ``needed`` is not, and otherwise whether every value of
+        ``needed`` is a value of ``coverage`` under this axis's own rule.
+    """
+    if needed is None:
+        return True
+    if coverage is None:
+        return False
+    return _label_keys(needed, fold=fold) <= _label_keys(coverage, fold=fold)
+
+
+def _labels_intersect(one: Sequence[str], other: Sequence[str], *, fold: bool) -> bool:
+    """Whether two applied label axes share at least one value (ADR-0252 §2).
+
+    Args:
+        one: The first axis's values.
+        other: The second axis's values.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        Whether some value of one is a value of the other under this axis's rule.
+    """
+    return bool(_label_keys(one, fold=fold) & _label_keys(other, fold=fold))
+
+
+def support_covers(
+    supported: Sequence[EvidenceApplicability], /, *, required: EvidenceApplicability
+) -> bool:
+    """Whether a ``supported`` tuple covers one applicability (ADR-0252 §2).
+
+    A tuple ``S`` covers an applicability ``B`` when **some region of ``S`` covers
+    ``B``** — never by combining two, because a union asserts a conjunction neither
+    response made (§6). This is the relation §6's first test and §9's invalidation
+    predicate are stated over.
+
+    **An empty ``supported`` covers nothing**, which is ADR-0249 §10's "an absent
+    ``supported`` supports nothing" binding as a property of this function rather
+    than as a rule each caller remembers.
+
+    Args:
+        supported: The row's regions, in the order the servicing produced them.
+        required: The applicability that must be covered.
+
+    Returns:
+        Whether one region covers it.
+    """
+    return any(region.covers(required) for region in supported)
+
+
+def support_covers_support(
+    supported: Sequence[EvidenceApplicability],
+    /,
+    *,
+    earlier: Sequence[EvidenceApplicability],
+) -> bool:
+    """Whether one ``supported`` tuple covers another (ADR-0252 §2, §8 limb 4).
+
+    A tuple ``S`` covers a tuple ``T`` when **every region of ``T`` is covered by
+    some region of ``S``**, and an **empty ``T`` is covered by nothing** — an empty
+    ``supported`` supports nothing, so there is nothing for a refresh to account for.
+
+    **Coverage and not overlap, and the difference is a user's evidence quietly
+    disappearing** (§8). A fresh read of Saturday *overlaps* a standing row
+    supporting the whole week, and letting it supersede would retire the week row
+    and take its Sunday support with it. Coverage runs the other way and only the
+    other way: a refresh may only retire what it can itself account for.
+
+    Args:
+        supported: The covering tuple — the later row's regions.
+        earlier: The covered tuple — the earlier row's regions.
+
+    Returns:
+        Whether every region of ``earlier`` is covered by some region of
+        ``supported``, and ``False`` where ``earlier`` is empty.
+    """
+    if not earlier:
+        return False
+    return all(support_covers(supported, required=region) for region in earlier)
+
+
+def support_overlaps(
+    supported: Sequence[EvidenceApplicability],
+    /,
+    *,
+    other: Sequence[EvidenceApplicability],
+) -> bool:
+    """Whether two ``supported`` tuples overlap (ADR-0252 §2, §7).
+
+    Two tuples overlap when **some region of one overlaps some region of the
+    other**. Used for conflict adjudication and **never** for supersession (§8).
+
+    Args:
+        supported: One row's regions.
+        other: The other row's regions.
+
+    Returns:
+        Whether any pair of regions overlaps.
+    """
+    return any(region.overlaps(theirs) for region in supported for theirs in other)
+
+
 class Ground(StrEnum):
     """How a value of an interpretation came to be known (ADR-0249 §1).
 
@@ -7088,26 +7540,6 @@ class ProposedUnderstanding(BaseModel):
         return self
 
 
-class PlanStep(BaseModel):
-    """One step of an :class:`ActionPlan` (see ADR-0014 §2).
-
-    A step names a **capability** — what must be done — rather than a tool. That
-    keeps the pipeline's ``planning → tool selection`` boundary intact: the
-    selection stage still gets to weigh a tool's risk and reversibility, instead
-    of ratifying a choice the planner already made.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    id: Identifier
-    intent: EncodableText = Field(description="Human-readable purpose of this step.")
-    capability: Identifier = Field(description="What must be done, e.g. 'send_email'.")
-    parameters: FrozenJsonMapping = Field(
-        default=_EMPTY_PARAMS,
-        description="Capability arguments; frozen, and validated against the tool at selection.",
-    )
-
-
 # --- the fetch seam: a listing of a configured root, and one file from it ------
 # ADR-0230 §4. Five values and one enumeration, all frozen and all refusing
 # unknown fields. The pair that carries a **capability** — `SourceListingEntry`
@@ -8120,6 +8552,34 @@ class ReadRequest(BaseModel):
             msg = "a read request carries at most one ask of each kind"
             raise ValueError(msg)
         return self
+
+
+# --- the plan's shape: what a step waits on, fills and requires (ADR-0253) -----
+# `PlanStep` sits **here**, after the read seam rather than before it, because
+# ADR-0253 §5 gives it a `when` whose conditions name an `EvidenceBasis` and a
+# `ReadKind` — the second of which the fetch and read sections above declare. The
+# models it gains sit with it, so the whole of a step's declared shape reads in one
+# place and `ActionPlan`'s construction-time refusals read directly below it.
+
+
+class PlanStep(BaseModel):
+    """One step of an :class:`ActionPlan` (see ADR-0014 §2).
+
+    A step names a **capability** — what must be done — rather than a tool. That
+    keeps the pipeline's ``planning → tool selection`` boundary intact: the
+    selection stage still gets to weigh a tool's risk and reversibility, instead
+    of ratifying a choice the planner already made.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    intent: EncodableText = Field(description="Human-readable purpose of this step.")
+    capability: Identifier = Field(description="What must be done, e.g. 'send_email'.")
+    parameters: FrozenJsonMapping = Field(
+        default=_EMPTY_PARAMS,
+        description="Capability arguments; frozen, and validated against the tool at selection.",
+    )
 
 
 class ActionPlan(BaseModel):
@@ -9466,447 +9926,6 @@ class StepTransition(BaseModel):
             raise ValueError(msg)
 
         return self
-
-
-class EvidenceBasis(StrEnum):
-    """Which of ADR-0252 §3's two admitted sources a row's support came from (§1).
-
-    A **closed** enumeration of exactly **two** members, each valued by its
-    lower-cased member name. The vocabulary is **added to and never renamed**, on
-    :class:`Ground`'s own rule (ADR-0249 §1, itself ADR-0226 §4's): no later ADR
-    removes a member, renames one, gives one a second spelling, or replaces this
-    enum with a differently-named one for the same question.
-
-    It names which of §3's two sources the row's :attr:`GoalEvidence.supported` was
-    composed from, and therefore **which closed vocabulary its ``verdict`` is a
-    value of** (§5) — so a reader holding a row never has to guess what ``"empty"``
-    is a member of.
-    """
-
-    READ_OUTCOME = "read_outcome"
-    """A typed read outcome that carried the applicability structurally: one region
-    per record the ask **returned**, composed from that record's own values and
-    never from the ask (§3). Its ``verdict`` is a :class:`ReadOutcomeKind` value."""
-
-    INTERPRETATION = "interpretation"
-    """An interpretation verdict over exactly one recorded record: the one region
-    the interpretation step declared (§3). Its ``verdict`` is a member of the closed
-    enumeration its ``declaration`` names, and **no lane of ADR-0252 produces such a
-    row** (§14) — the basis is landed so that the lane which needs it does not have
-    to reopen a ``core`` type."""
-
-
-#: The most values one region of an applicability holds on **each** label axis
-#: (ADR-0252 §2). **A fixed constant valued 32**, and deliberately not a ``Settings``
-#: field, a constructor knob or a per-deployment value — exactly as
-#: :data:`MAX_GOAL_INTERPRETATIONS` (ADR-0249 §2) and :data:`MAX_TOPICS_PER_PROPOSAL`
-#: (ADR-0213 §4) are not, on ADR-0086 §1's own reason: "a knob that raises the ceiling
-#: is a knob that re-opens it".
-#:
-#: A composition that would exceed it **keeps the first 32 values in the order the
-#: source produced them and advances that region's** :attr:`EvidenceApplicability.elided`
-#: (§2). The truncation is the **composer's** act and is disclosed by the count beside
-#: it; this type refuses an over-long axis outright rather than trimming one silently,
-#: because a validator that repaired the value would put the disclosure nowhere.
-MAX_APPLICABILITY_VALUES: Final[int] = 32
-
-#: The most regions one row's :attr:`GoalEvidence.supported` holds (ADR-0252 §2).
-#: **A fixed constant valued 32**, on :data:`MAX_APPLICABILITY_VALUES`' own footing and
-#: for its reason. A composition that would exceed it keeps the first 32 regions in the
-#: order the servicing produced them and advances the row's
-#: :attr:`GoalEvidence.supported_elided`.
-#:
-#: **Every truncation narrows and none widens, and the direction is why they are
-#: admissible at all** (§2): a dropped region makes ``supported`` cover **less** and
-#: therefore satisfy fewer conditions (§6) and supersede fewer rows (§8), so it fails
-#: closed. ADR-0086 §4's refusal of silent truncation binds entire and the two counts
-#: are what discharge it.
-MAX_SUPPORTED_REGIONS: Final[int] = 32
-
-
-class EvidenceApplicability(BaseModel):
-    """One **region** a response establishes a proposition about (ADR-0252 §2).
-
-    **One applicability is one region, composed from exactly one returned record**
-    (§3), so a region's axes are values that record carried **together**. No lane
-    merges two regions, unions their label axes, spans their windows, or replaces a
-    tuple of them by its enclosing interval.
-
-    **Regions rather than one aggregate, and the two failures an aggregate has are
-    both manufactured coverage** (§2). Two records declaring ``[09:00, 10:00)`` and
-    ``[15:00, 16:00)`` have an enclosing window of ``[09:00, 16:00)``, and a condition
-    about noon would then pass a coverage test neither record supports. And unioning
-    the label axes across records loses which participant was in which interval, so a
-    row composed from *Alice on Saturday* and *Bob on Sunday* would cover a condition
-    naming *Alice on Sunday*. Both are the same defect: an aggregate asserts the
-    **conjunction** of what several records said, where the records only ever said
-    their own parts.
-
-    **``None`` is the one spelling of *not applied*** — exactly as it is on
-    :class:`StructuredAsk` (ADR-0240 §2) — and a value applying nothing is expressed
-    by the field holding it being absent, or by a ``supported`` tuple being empty. A
-    region applying **no** axis is refused, and so is one whose present sequence axis
-    is empty.
-
-    **The axes take the types of the fields they copy, and tighten only in ways that
-    reject** (§2, ADR-0096 §2): ``participants`` and ``about_person`` are
-    :data:`NonBlankEncodableText`, which is :class:`StructuredAsk`'s own annotation for
-    the first and a tightening of :attr:`EpisodicMemory.participants`'
-    :data:`EncodableText`; ``topics`` is :data:`TopicLabel`, which both the ask and
-    :attr:`MemoryBase.topics` already carry. **A blank value on a returned record
-    contributes nothing to its region and advances that region's ``elided``** — it is
-    dropped, never stripped, never case-folded and never repaired.
-
-    Attributes:
-        window: The interval the source declared for what it reported, where it
-            declared one expressible as a :class:`TimeWindow`. ADR-0237 §2's type is
-            used exactly as defined and is not re-expressed: the half-open
-            ``[start, end)`` reading, the unset ends, the refusal of a window with
-            both ends unset and the refusal of one whose ``end`` is not strictly
-            after its ``start`` are that ADR's and are inherited whole.
-        participants: Whom the records this region came from involved.
-        topics: What they were filed under.
-        about_person: Whose the beliefs among them were.
-        elided: How many values this region's composition dropped — a blank value on
-            a returned record, a label axis past :data:`MAX_APPLICABILITY_VALUES`, or
-            a declared interval that cannot be expressed as a ``TimeWindow``. A count
-            and never an identifier (ADR-0086 §4).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    window: TimeWindow | None = Field(
-        default=None, description="The interval the source declared, where it declared one."
-    )
-    participants: tuple[NonBlankEncodableText, ...] | None = Field(
-        default=None, description="Whom the records this region came from involved."
-    )
-    topics: tuple[TopicLabel, ...] | None = Field(
-        default=None, description="What those records were filed under."
-    )
-    about_person: tuple[NonBlankEncodableText, ...] | None = Field(
-        default=None, description="Whose the beliefs among them were."
-    )
-    elided: int = Field(
-        default=0, ge=0, description="How many values this region's composition dropped."
-    )
-
-    @model_validator(mode="after")
-    def _applies_something_and_nothing_empty(self) -> EvidenceApplicability:
-        """Refuse a region applying no axis, an empty axis, and an over-long one.
-
-        The first two are ADR-0252 §2's own refusals. The third is this type
-        enforcing §2's bound rather than trusting a producer's arithmetic, which is
-        ADR-0086 §1's rule for a durable sequence in ``core``; it **refuses** rather
-        than trimming, because a validator that silently kept the first 32 would
-        leave :attr:`elided` unadvanced and put the disclosure nowhere.
-
-        Raises:
-            ValueError: If no axis is applied, a present sequence axis is empty, or
-                a label axis holds more than :data:`MAX_APPLICABILITY_VALUES` values.
-        """
-        axes = (
-            ("participants", self.participants),
-            ("topics", self.topics),
-            ("about_person", self.about_person),
-        )
-        if self.window is None and all(values is None for _, values in axes):
-            msg = (
-                "an EvidenceApplicability applies at least one axis: a value applying "
-                "nothing is spelled by the field holding it being absent, or by an "
-                "empty supported tuple (ADR-0252 §2)"
-            )
-            raise ValueError(msg)
-        for name, values in axes:
-            if values is None:
-                continue
-            if not values:
-                msg = (
-                    f"{name} is applied and empty: None is the one spelling of "
-                    f"'not applied' (ADR-0252 §2, ADR-0240 §2)"
-                )
-                raise ValueError(msg)
-            if len(values) > MAX_APPLICABILITY_VALUES:
-                msg = (
-                    f"{name} holds {len(values)} values and ADR-0252 §2 bounds each "
-                    f"axis at {MAX_APPLICABILITY_VALUES}: a composition that would "
-                    f"exceed it keeps the first {MAX_APPLICABILITY_VALUES} and "
-                    f"advances this region's elided"
-                )
-                raise ValueError(msg)
-        return self
-
-    def covers(self, other: EvidenceApplicability, /) -> bool:
-        """Whether this region **covers** ``other`` (ADR-0252 §2).
-
-        For **every axis ``other`` applies**, this region applies that axis and its
-        value contains ``other``'s. **An axis this region does not apply covers no
-        applied axis of ``other``**, and an axis ``other`` does not apply is covered
-        by anything.
-
-        **The direction is stated rather than left to a reader**, because the
-        predicate is not symmetric and the two readings differ on every unbounded
-        end: ``self`` is the containing side — what a response established — and
-        ``other`` is the contained one — what a condition, or an earlier row, needs.
-
-        **An unapplied axis is not read as *everything***. That would be the same
-        substitution ADR-0240 §2 refuses at the ask — "no value of any axis means
-        'everything'" — arriving at the response instead: a value that says nothing
-        about the people a step names has established nothing about them.
-
-        Args:
-            other: The region to test for containment in this one.
-
-        Returns:
-            Whether this region covers every axis ``other`` applies.
-        """
-        return (
-            _covers_window(self.window, other.window)
-            and _covers_labels(self.participants, other.participants, fold=True)
-            and _covers_labels(self.topics, other.topics, fold=False)
-            and _covers_labels(self.about_person, other.about_person, fold=True)
-        )
-
-    def overlaps(self, other: EvidenceApplicability, /) -> bool:
-        """Whether this region **overlaps** ``other`` (ADR-0252 §2).
-
-        They overlap when they apply **at least one axis in common** and, **for every
-        axis both apply**, their values intersect: windows that share at least one
-        instant, and label sets with at least one member in common under §6's
-        per-axis comparison. An axis only one of them applies is ignored.
-
-        **Overlap requires agreement on every shared axis, and that is what keeps a
-        shared label from bypassing a disjoint period** (§2). A row about *Saturday,
-        weather* and one about *Sunday, weather* share the ``topics`` axis and both
-        apply ``window``; their windows are disjoint, so they do not overlap and
-        neither is about the other's ground. The relation is symmetric, and it is
-        **used for conflict (§7) and never for supersession** — §8 requires the
-        stronger relation for the stronger act.
-
-        Args:
-            other: The region to test against this one.
-
-        Returns:
-            Whether the two share an axis and agree on every axis both apply.
-        """
-        shared = False
-        for mine, theirs, fold in (
-            (self.participants, other.participants, True),
-            (self.topics, other.topics, False),
-            (self.about_person, other.about_person, True),
-        ):
-            if mine is None or theirs is None:
-                continue
-            shared = True
-            if not _labels_intersect(mine, theirs, fold=fold):
-                return False
-        if self.window is not None and other.window is not None:
-            shared = True
-            if not _windows_intersect(self.window, other.window):
-                return False
-        return shared
-
-
-def _covers_window(coverage: TimeWindow | None, extent: TimeWindow | None) -> bool:
-    """Whether ``extent`` lies wholly within ``coverage`` (ADR-0117 §3, ADR-0252 §2).
-
-    **ADR-0117 §3's containment predicate, reused rather than restated**, with
-    ``extent`` as that predicate's contained extent *E* and ``coverage`` as its
-    containing coverage *C*. That section states it as "*E = [ef, eu)* lies wholly
-    within *C = [cf, cu)* iff **cf is None or (ef is not None and ef >= cf)** and
-    **cu is None or (eu is not None and eu <= cu)**", together with the sentence that
-    decides the hard case: "An unbounded extent end is contained only by an unbounded
-    coverage end on the same side."
-
-    It is the same arithmetic :meth:`ReadCoverage.contains` performs, over the one
-    carrier an applicability has: :class:`ReadCoverage` and :class:`ReportedExtent`
-    are the types of ADR-0117 §3's own operands and neither is what a region holds —
-    ADR-0117 §2 is explicit that the three subjects are distinct and that naming two
-    of them with one type is the error — so the predicate is applied here to
-    :class:`TimeWindow` rather than a region being coerced into a type that says
-    something else about a different subject.
-
-    Args:
-        coverage: The containing window, or ``None`` where the axis is not applied.
-        extent: The contained window, or ``None`` where the axis is not applied.
-
-    Returns:
-        ``True`` where ``extent`` is unapplied — an axis the other side does not
-        apply is covered by anything — ``False`` where ``coverage`` is unapplied and
-        ``extent`` is not, and otherwise whether the containment holds.
-    """
-    if extent is None:
-        return True
-    if coverage is None:
-        return False
-    starts_inside = coverage.start is None or (
-        extent.start is not None and extent.start >= coverage.start
-    )
-    ends_inside = coverage.end is None or (extent.end is not None and extent.end <= coverage.end)
-    return starts_inside and ends_inside
-
-
-def _windows_intersect(one: TimeWindow, other: TimeWindow) -> bool:
-    """Whether two half-open windows share at least one instant (ADR-0252 §2).
-
-    ``[s1, e1)`` and ``[s2, e2)`` intersect exactly when each starts strictly before
-    the other ends, an unset end reading as unbounded on that side. ADR-0237 §2's
-    half-open reading is what makes the comparison strict at the ends: an instant
-    equal to a window's ``end`` is outside it, so two windows that merely touch —
-    one ending where the other begins — share nothing.
-
-    Args:
-        one: The first window.
-        other: The second window.
-
-    Returns:
-        Whether some instant lies in both.
-    """
-    first_starts_before_second_ends = (
-        one.start is None or other.end is None or one.start < other.end
-    )
-    second_starts_before_first_ends = (
-        other.start is None or one.end is None or other.start < one.end
-    )
-    return first_starts_before_second_ends and second_starts_before_first_ends
-
-
-def _label_keys(values: Sequence[str], *, fold: bool) -> set[str]:
-    """The comparison keys of one label axis (ADR-0237 §3, ADR-0252 §6).
-
-    **Label comparison is stated per axis, because the corpus already states it per
-    axis and the three axes do not agree.** ``about_person`` and ``participants``
-    match by ADR-0101 §2's rule — canonical caseless equality, ``NFD(toCasefold(NFD(x)))``,
-    which :func:`caseless_key` computes — and ``topics`` matches by **equality of the
-    stored characters and by nothing else**, which is the only relation
-    :data:`TopicLabel` has (ADR-0213 §3).
-
-    **No lane applies one rule to all three**, and folding a topic would be a wider
-    matching rule ADR-0213 §3 reserves to an ADR that is not ADR-0252: precomposed
-    ``café`` and decomposed ``cafe`` + U+0301 are both admissible ``TopicLabel``s that
-    ADR-0101 §2's fold equates and the type does not, so applying it here would let
-    evidence filed under one topic cover a condition naming the other.
-
-    Args:
-        values: The axis's values, in the order the region holds them.
-        fold: Whether ADR-0101 §2's fold applies to this axis.
-
-    Returns:
-        The set of keys two axes are compared as.
-    """
-    return {caseless_key(value) for value in values} if fold else set(values)
-
-
-def _covers_labels(
-    coverage: Sequence[str] | None, needed: Sequence[str] | None, *, fold: bool
-) -> bool:
-    """Whether ``coverage``'s values are a superset of ``needed``'s (ADR-0252 §2).
-
-    Args:
-        coverage: The containing axis, or ``None`` where it is not applied.
-        needed: The contained axis, or ``None`` where it is not applied.
-        fold: Whether ADR-0101 §2's fold applies to this axis.
-
-    Returns:
-        ``True`` where ``needed`` is unapplied, ``False`` where ``coverage`` is
-        unapplied and ``needed`` is not, and otherwise whether every value of
-        ``needed`` is a value of ``coverage`` under this axis's own rule.
-    """
-    if needed is None:
-        return True
-    if coverage is None:
-        return False
-    return _label_keys(needed, fold=fold) <= _label_keys(coverage, fold=fold)
-
-
-def _labels_intersect(one: Sequence[str], other: Sequence[str], *, fold: bool) -> bool:
-    """Whether two applied label axes share at least one value (ADR-0252 §2).
-
-    Args:
-        one: The first axis's values.
-        other: The second axis's values.
-        fold: Whether ADR-0101 §2's fold applies to this axis.
-
-    Returns:
-        Whether some value of one is a value of the other under this axis's rule.
-    """
-    return bool(_label_keys(one, fold=fold) & _label_keys(other, fold=fold))
-
-
-def support_covers(
-    supported: Sequence[EvidenceApplicability], /, *, required: EvidenceApplicability
-) -> bool:
-    """Whether a ``supported`` tuple covers one applicability (ADR-0252 §2).
-
-    A tuple ``S`` covers an applicability ``B`` when **some region of ``S`` covers
-    ``B``** — never by combining two, because a union asserts a conjunction neither
-    response made (§6). This is the relation §6's first test and §9's invalidation
-    predicate are stated over.
-
-    **An empty ``supported`` covers nothing**, which is ADR-0249 §10's "an absent
-    ``supported`` supports nothing" binding as a property of this function rather
-    than as a rule each caller remembers.
-
-    Args:
-        supported: The row's regions, in the order the servicing produced them.
-        required: The applicability that must be covered.
-
-    Returns:
-        Whether one region covers it.
-    """
-    return any(region.covers(required) for region in supported)
-
-
-def support_covers_support(
-    supported: Sequence[EvidenceApplicability],
-    /,
-    *,
-    earlier: Sequence[EvidenceApplicability],
-) -> bool:
-    """Whether one ``supported`` tuple covers another (ADR-0252 §2, §8 limb 4).
-
-    A tuple ``S`` covers a tuple ``T`` when **every region of ``T`` is covered by
-    some region of ``S``**, and an **empty ``T`` is covered by nothing** — an empty
-    ``supported`` supports nothing, so there is nothing for a refresh to account for.
-
-    **Coverage and not overlap, and the difference is a user's evidence quietly
-    disappearing** (§8). A fresh read of Saturday *overlaps* a standing row
-    supporting the whole week, and letting it supersede would retire the week row
-    and take its Sunday support with it. Coverage runs the other way and only the
-    other way: a refresh may only retire what it can itself account for.
-
-    Args:
-        supported: The covering tuple — the later row's regions.
-        earlier: The covered tuple — the earlier row's regions.
-
-    Returns:
-        Whether every region of ``earlier`` is covered by some region of
-        ``supported``, and ``False`` where ``earlier`` is empty.
-    """
-    if not earlier:
-        return False
-    return all(support_covers(supported, required=region) for region in earlier)
-
-
-def support_overlaps(
-    supported: Sequence[EvidenceApplicability],
-    /,
-    *,
-    other: Sequence[EvidenceApplicability],
-) -> bool:
-    """Whether two ``supported`` tuples overlap (ADR-0252 §2, §7).
-
-    Two tuples overlap when **some region of one overlaps some region of the
-    other**. Used for conflict adjudication and **never** for supersession (§8).
-
-    Args:
-        supported: One row's regions.
-        other: The other row's regions.
-
-    Returns:
-        Whether any pair of regions overlaps.
-    """
-    return any(region.overlaps(theirs) for region in supported for theirs in other)
 
 
 #: The most record identifiers one evidence row names (ADR-0252 §1). **A fixed
