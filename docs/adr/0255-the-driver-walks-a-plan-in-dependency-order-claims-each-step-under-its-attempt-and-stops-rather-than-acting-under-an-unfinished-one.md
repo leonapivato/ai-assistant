@@ -584,9 +584,10 @@ and ADR-0254 §14 wrote its enumeration before any lane could walk a plan and me
 
 ### 2. The stop rule and the skip rule: one stops the walk, the other disposes of a step
 
-> **Normative — the stop rule.** **The walk stops at the first step whose disposal leaves that
-> step neither terminal nor skipped**, and every step after it in `steps` order is left
-> **`PENDING`**. Five outcomes trigger it, and the driver treats them alike:
+> **Normative — the stop rule, stated as a closed list and not as a predicate over *terminal*.**
+> **The walk stops on the first of the five outcomes below**, and every step after it in `steps`
+> order is left **`PENDING`**. **The list is the whole of the rule**, the driver treats its members
+> alike, and no lane derives a sixth from a property of a status:
 >
 > - the step's dependency **fails on an `INDETERMINATE` producer** (ADR-0253 §2, §6);
 > - `StepRunner` returns **`AWAITING_CONFIRMATION`** and the step is durably `AWAITING_APPROVAL`;
@@ -595,6 +596,33 @@ and ADR-0254 §14 wrote its enumeration before any lane could walk a plan and me
 >   version;
 > - the step's own outcome is **`INDETERMINATE`** (§6);
 > - the **request deadline** has no strictly positive remainder (§9).
+
+> **Normative — a `FAILED` step does not stop the walk, and the closed list above is how that is
+> said.** An earlier revision stated the rule as a predicate — *the disposal leaves the step
+> neither terminal nor skipped* — which is **false against the only definition of *terminal* this
+> tree carries**: `TERMINAL_STEP_STATUSES` is `frozenset({SUCCEEDED, SKIPPED})` (`core/types.py`),
+> whose own comment says *"`FAILED` is not among them (it may still be retried)"*. On that
+> definition the predicate stopped the walk at every failed step, contradicting §5's pass-over and
+> the skip rule below. **It is deleted rather than repaired**, and the list is the rule.
+
+**Disposed-of and terminal are two different predicates, and this decision uses the first.**
+`TERMINAL_STEP_STATUSES` answers *may this execution still be worked on* — which is why `FAILED`
+sits outside it, why `PlanExecution.has_open_work` is true of one, and why a restarting system
+finds it through `active_executions`. **The walk asks a narrower question**: *did this step's
+disposal settle what the walk needs to know to go on*. A `FAILED` step's did — `StepExecutor`
+spent its retries inside the `run` that returned (`DEFAULT_MAX_ATTEMPTS`) and committed a
+transition — so the walk **passes over it** (§5) and its dependents are `SKIPPED`/`UNMET_DEPENDENCY`
+under the skip rule below, which is arm 3's first case. **A walk that re-dispatched one would be
+retrying past a budget the tree already enforces**, and one that stopped on one would leave every
+dependent `PENDING` with no producer that will ever run.
+
+> **Normative — this list is what a disposal *this walk performed* leaves; §5's list is what a
+> walk *finds already stored*. Both are closed, and they answer different questions.** A stored
+> **`RUNNING`** step stops a walk (§5) and appears as no trigger here, because **no disposal this
+> decision makes leaves one** — the committing-nothing limb above leaves `PENDING`, and a `RUNNING`
+> a walk meets was left by something else (ADR-0014 §4's recovery case, §5). **No lane reads §5's
+> list as a sixth trigger of this one, and no lane reads this one as licence to walk past a stored
+> `RUNNING`.**
 
 > **Normative.** **A step the walk did not reach is `PENDING` when the walk ends**, and **the
 > walk itself never skips it**. No lane sweeps the remainder of a stopped walk into `SKIPPED`,
@@ -1096,7 +1124,11 @@ only thing anyone checked.
 > **Every walk visits the plan's steps from the first position**, reading each step's stored
 > `StepExecution.status` from `PlanStore.get_execution`, and disposes of it by that status:
 > **`SUCCEEDED`, `FAILED` and `SKIPPED`** are already disposed of and are **passed over without
-> re-dispatch** — their dependents are governed by ADR-0253 §2 when the walk reaches them;
+> re-dispatch** — **`FAILED` included, and it is named rather than left to a reader, because
+> `TERMINAL_STEP_STATUSES` does not carry it** (§2): the retries are `StepExecutor`'s and were
+> spent inside the `run` that returned it, so a walk that re-dispatched one would retry past a
+> budget the tree already enforces. Their dependents are governed by ADR-0253 §2 when the walk
+> reaches them;
 > **`PENDING`** is evaluated under §1; and **`AWAITING_APPROVAL`, `RUNNING` or `INDETERMINATE`
 > stops the walk** where it stands. **No lane carries a step index across a park, a turn or a
 > restart, no lane persists one, and no lane computes a resume position at all.**
@@ -1564,13 +1596,16 @@ nothing depends on it, and no act follows — so nothing fails open.
 > is not stated and why the arm below tests a strict decrease only over a **controlled** source
 > advanced by known intervals.
 
-> **Normative — the turn's *first* `Planner.plan` call is the one unit of work the remainder does
-> not gate, and that is stated rather than left for a reader to find.** ADR-0251 §4's
+> **Normative — *two* units of work the remainder does not gate, and both are named rather than
+> left for a reader to find.** **The first is the turn's first `Planner.plan` call**: ADR-0251 §4's
 > never-gated-first-call clause is ratified, binds entire and is relied on here (§16), so a turn
-> whose routing and context assembly consumed the whole `timeout` still makes its first planner
-> call. **Everything after it is gated**: every step's disposal, every interpretation the walk
-> makes, and every **licensed** round (§10) are each admitted only on a strictly positive
-> remainder. So *"the whole request's budget"* means that this decision's driver spends nothing
+> whose routing and context assembly consumed the whole `timeout` still makes it. **The second is
+> ADR-0254 §14's optional phase-4 model call, where a deployment lands one** — the clause below
+> and **issue #2312**, which is where whether it should be gated is decided. **Everything else is
+> gated**: every step's disposal, every interpretation the walk makes, and every **licensed** round
+> (§10) are each admitted only on a strictly positive remainder. **The count is two and not one**,
+> and no lane reads the first-call clause as the whole of the exception.
+> So *"the whole request's budget"* means that this decision's driver spends nothing
 > outside it — **not** that a `converse` can never exceed it, which ADR-0228 §4 already says it
 > can: *"a planner call already begun runs to its own completion, and a turn's total duration may
 > therefore exceed its budget by one planner call and one servicing."* **This decision gates the
@@ -2298,7 +2333,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    unsatisfied `when` for the third; and each of ADR-0253 §6's **six** unresolvable-reference
    cases for the fourth — ten inputs over four rules. Each asserts the step is `SKIPPED` with
    that reason **at the
-   moment the walk reached it** and that no request was built.
+   moment the walk reached it** and that no request was built. **And the `FAILED`-producer case
+   asserts the walk did not stop there** (§2): it **reached** the dependent at all, which a walk
+   stopping on the failed step never would, and the dependent is `SKIPPED`/`UNMET_DEPENDENCY`
+   rather than `PENDING`. That single assertion is what separates the closed five-trigger stop
+   rule from the deleted *neither terminal nor skipped* predicate, under which `FAILED` — absent
+   from `TERMINAL_STEP_STATUSES` — would have stopped the walk and left this dependent untouched.
 4. **A result reference reaches the ruling as itself** — a two-step plan where step 2's
    `resolves` fills a parameter from step 1's output; the arm asserts the resolved value is in the
    `ActionRequest.parameters` **before `ActionPolicy.decide` is reached** (ADR-0148 §1) and in the
@@ -2596,12 +2636,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     first step approximately **PT1S** and not PT10S, and a second case in which that call
     consumes the whole budget **starts no step at all** — asserted against an implementation that
     fixed its deadline when driving began, which would hand that step a fresh PT10S and spend
-    PT19S against a budget of ten. **And the arm that pins the one ungated unit** (§9): a
+    PT19S against a budget of ten. **And the arms that pin the ungated units** (§9): a
     `converse(timeout=PT1S)` whose routing and context assembly consume the whole second on the
     controlled monotonic source still **makes its first `Planner.plan` call** — ADR-0251 §4's
     never-gated-first-call clause — and then **starts no step, makes no interpretation call and
-    admits no licensed round**, so the exception is exactly one call wide and is asserted as such
-    rather than left to a reader. **And the arm that pins what a long phase 4 costs** (§9): a plan
+    admits no licensed round**. **Over a fixture whose phase 4 takes no optional model call the
+    exception is exactly one call wide**, and the arm asserts that. **A paired arm over a fixture
+    that does land ADR-0254 §14's optional phase-4 call asserts it is two**, both ungated, which
+    is §9's stated count. Asserting "exactly one" unconditionally would contradict the clause the
+    arm exists to drive; which of the two a deployment sees is #2312's to settle.
+    **And the arm that pins what a long phase 4 costs** (§9): a plan
     whose ADR-0254 §14 validation consumes the whole `converse` budget on the controlled monotonic
     source **passes** phase 4, the attempt advances to `EXECUTE`, `start_execution` is called, and
     the walk **starts no step, makes no interpretation call and builds no `ActionRequest`** — the
