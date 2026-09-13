@@ -36,16 +36,18 @@ from test_runner_egress import (
     _tool,
 )
 
-from ai_assistant.core.errors import SpendCeilingError
+from ai_assistant.core.errors import ClassifiedToolError, SpendCeilingError
 from ai_assistant.core.types import (
     Disposition,
     OutboundDestination,
     OutboundReach,
     StepStatus,
+    ToolFailure,
+    ToolFailureKind,
 )
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.reads import outbound_statement
-from ai_assistant.testing import FakeToolInvoker
+from ai_assistant.testing import FakeAuditTrail, FakeToolInvoker
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ToolDefinition
@@ -332,3 +334,98 @@ def test_the_deadline_this_module_drives_under_is_the_harness_s() -> None:
     """A guard on the import above, so a rename in ``test_runner_egress`` is a failure."""
     assert timedelta(seconds=30) == PATIENT
     assert CAPABILITY == "send_email"
+
+
+# --- §2's stickiness: a retry cannot unmake what an earlier attempt reached ----
+
+
+class _RefusingAfter:
+    """A ``SpendGate`` that admits its first call and refuses every one after it.
+
+    ADR-0029 §5 re-claims only after a *result* came back, so a retried attempt is one
+    whose predecessor reached the callable — and this is what puts a pre-callable window
+    (ADR-0192 §1's second) on the **second** attempt while the first went through.
+    """
+
+    def __init__(self) -> None:
+        """Admit once, then refuse."""
+        self.asked = 0
+
+    async def admit_invocation(self, *, estimate: Any) -> Any:
+        """Admit the first attempt and refuse the rest."""
+        self.asked += 1
+        if self.asked == 1:
+            return await FakeAuditTrail().admit_invocation(estimate=estimate)
+        raise SpendCeilingError("the ceiling refused the retry")
+
+    def release_admission(self, handle: Any) -> None:
+        """Retire a handle; nothing here depends on the release."""
+
+
+class _RetryableThenNothing:
+    """A callable that fails **retryably** on its first call and is never reached again.
+
+    ``RATE_LIMITED`` is a kind ``ToolFailureKind.retryable`` answers ``True`` for and
+    ``Idempotency.NATURAL`` makes repeating safe, so ADR-0029 §5's two conjuncts hold
+    and the executor re-claims. The second attempt never gets here: the gate above
+    refuses it before the callable.
+    """
+
+    def __init__(self) -> None:
+        """Count the calls, so "the callable was reached once" is assertable."""
+        self.calls = 0
+
+    async def __call__(self, parameters: object, *, idempotency_key: str | None) -> None:
+        """Report a failure the tool itself classified as worth repeating."""
+        del parameters, idempotency_key
+        self.calls += 1
+        raise ClassifiedToolError(
+            ToolFailure(kind=ToolFailureKind.RATE_LIMITED, message="the upstream throttled us"),
+            # ADR-0032 §1's fact, stated rather than defaulted: nothing committed, so the
+            # seam rules ``FAILED`` and ADR-0029 §5's first conjunct is satisfied — an
+            # ``INDETERMINATE`` outcome is outside automatic retry and would leave this
+            # arm driving one attempt, which is the shape every other arm here already
+            # has.
+            effect_may_have_committed=False,
+        )
+
+
+async def test_a_retry_refused_before_the_callable_does_not_unmake_the_first_reach() -> None:
+    """§2's stickiness, which every other arm in this module leaves unprotected.
+
+    "**A contact is established the moment a response arrived, and nothing that happens
+    to the enclosing servicing afterwards unmakes it**" is stated over the search, and
+    §2's egress clause takes the same posture over the drive: the contribution is
+    ``INDETERMINATE`` "where the executor **reached the callable, or cannot say whether
+    it did**", and it contributes nothing only where the executor *establishes* that it
+    did not.
+
+    **A retry is where a last-attempt-only implementation gets that wrong.** ADR-0029 §5
+    re-claims after a retryable, safe result — so the second attempt follows a first that
+    reached the callable, and a pre-callable refusal on that second attempt would have
+    :class:`~ai_assistant.orchestration.executor.CallableReach` report the whole drive as
+    provably unreached. The turn would then answer ``NOT_REACHED`` about a send that may
+    well have left, which is the false statement §1 ranks below silence.
+
+    Every other arm in this module drives exactly one attempt, so each would pass
+    against a non-sticky observer. This is the one that does not.
+    """
+    definition = _tool(egress=True, discloses=())
+    callable_ = _RetryableThenNothing()
+    gate = _RefusingAfter()
+    harness = _rewired(
+        _Harness(tool=definition, binder=_bound_binder(definition)),
+        definition,
+        callable_,
+        gate=gate,
+    )
+
+    disposition = await _driven(harness)
+
+    assert callable_.calls == 1, "the first attempt reached the callable"
+    assert gate.asked == 2, "and the retry was refused at the gate, before the callable"
+    assert disposition.disposition is Disposition.EXECUTED
+    assert disposition.outbound is OutboundReach.INDETERMINATE, (
+        "the reach is sticky: a retry refused before the callable cannot unmake what "
+        "the first attempt reached (ADR-0264 §2)"
+    )
