@@ -87,6 +87,7 @@ from ai_assistant.orchestration.selection import (
     model_supplied_keys,
     select,
 )
+from ai_assistant.orchestration.validating import PhaseFour, evaluate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -101,6 +102,7 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
+        ActionPlan,
         BoundEgressCall,
         FrozenJsonMapping,
         ParameterViolation,
@@ -295,20 +297,26 @@ _PROPOSAL_LOOKBACK = 200
 
 @dataclass(frozen=True, slots=True)
 class _Planned:
-    """One stored step and the goal the plan carrying it was written against.
+    """One stored step and the stored plan it belongs to.
 
-    Two facts taken from a single read of a single stored plan
+    Both taken from a single read of a single stored plan
     (:meth:`StepRunner._planned`), because ADR-0254 §15 sources
-    ``ActionRequest.goal`` from *"the plan the execution names"* and a second read
-    could answer about a plan that moved in between.
+    ``ActionRequest.goal`` from *"the plan the execution names"* and §14 evaluates
+    phase 4 over that plan's **other** steps — two questions that must be about
+    one plan, where a second read could answer about a plan that moved in between.
 
     Attributes:
-        step: The step, detached from the store's copy.
-        goal_id: The plan's ``goal_id``, which the request carries.
+        plan: The plan the stored execution names.
+        step: The step being disposed of, detached from the store's copy.
     """
 
+    plan: ActionPlan
     step: PlanStep
-    goal_id: str
+
+    @property
+    def goal_id(self) -> str:
+        """The goal the request carries (ADR-0254 §15)."""
+        return self.plan.goal_id
 
 
 def _requested(
@@ -648,7 +656,7 @@ class StepRunner:
         self._id_factory = id_factory
         self._confirmation_ttl = confirmation_ttl
 
-    async def run(  # noqa: PLR0913 — the execution, the step, the attempt the claim is made under (ADR-0255 §3), the budget, the origin and the boundary; each is a distinct fact about the act
+    async def run(  # noqa: PLR0913, PLR0911 — one parameter per distinct fact about the act, and one return per way a step is disposed of before it dispatches; collapsing any pair would hide which stage declined
         self,
         state: ExecutionState,
         step_id: str,
@@ -738,6 +746,25 @@ class StepRunner:
         planned = await self._planned(opened, step_id)
         step = planned.step
         self._check_pending(opened, step_id)
+        # **Phase 4, before any step of this plan is dispatched** (ADR-0254 §14).
+        # A plan whose *third* step can never be given an argument it requires is one
+        # whose *first* step's irreversible act must not be performed first, and no
+        # other stage asks that question: the selection stage's own fit test
+        # (ADR-0144 §7) is about the one step being dispatched and runs after this.
+        # A failed deterministic check leaves the attempt `RUNNING` and commits
+        # nothing here — no ruling requested, no record written, the step still
+        # `PENDING` — which is `INVALID_PARAMETERS`' shape, and where no replan can
+        # satisfy the check §14 leaves the attempt for A3's `BLOCKED` producer and
+        # writes none itself.
+        gate = await self._phase_four(planned)
+        if not gate.ready:
+            _log.info(
+                "plan_step_arguments_unfillable",
+                step_id=step.id,
+                unfillable=[one.step for one in gate.unfillable],
+                deferred=len(gate.deferred),
+            )
+            return StepDisposition(Disposition.INVALID_PARAMETERS, state)
         capability = await self._resolve_capability(step)
         candidates = await self._registry.find(capability)
         if not candidates:
@@ -1544,6 +1571,28 @@ class StepRunner:
         await self._propose(request, recorded)
         return recorded
 
+    async def _phase_four(self, planned: _Planned) -> PhaseFour:
+        """Run ADR-0254 §14's checks over the whole plan this step belongs to.
+
+        The registry reads are here so that
+        :func:`~ai_assistant.orchestration.validating.evaluate` stays the total
+        function of stored values §14 asks phase 4 to be. Each step's capability is
+        normalised through ADR-0053's alias layer exactly as
+        :meth:`_resolve_capability` does for the dispatched one, so a plan naming an
+        alias is evaluated against the declarations selection would actually see.
+
+        **A capability the registry offers nothing for is passed over**, on
+        ADR-0211 §6's rule that no stage rejects a step *"on the ground that its
+        capability is outside the stated vocabulary"*; it is disposed of at its own
+        dispatch through ADR-0037 §1's ``NO_CAPABLE_TOOL``.
+        """
+        advertised = await self._registry.capabilities()
+        candidates: dict[str, Sequence[ToolDefinition]] = {}
+        for step in planned.plan.steps:
+            resolved = resolve_capability(step.capability, advertised)
+            candidates[step.id] = await self._registry.find(resolved)
+        return evaluate(planned.plan, candidates=candidates)
+
     async def _propose(self, request: ActionRequest, decision: PermissionDecision) -> None:
         """Write the `Authorization` this recorded `CONFIRM` proposes, if any.
 
@@ -1904,7 +1953,7 @@ class StepRunner:
         if planned is None:
             msg = f"plan {plan.id!r} has no step {step_id!r}"
             raise PlanningError(msg)
-        return _Planned(step=_detached_step(planned), goal_id=plan.goal_id)
+        return _Planned(plan=plan, step=_detached_step(planned))
 
     def _select(
         self,
