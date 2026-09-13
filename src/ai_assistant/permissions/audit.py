@@ -42,6 +42,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuditError,
     AuthorisationSpentError,
+    AuthorizationError,
     DuplicateDecisionError,
     InvalidAuthorisationError,
     InvalidCompletionError,
@@ -52,6 +53,7 @@ from ai_assistant.core.errors import (
     UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
+    AuthorizationDisposition,
     CoverageUnrecordedBinding,
     DurableIdentifier,
     EgressBinding,
@@ -60,6 +62,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     RecordedInvocation,
+    SpanCoverage,
     SpendAdmissionHandle,
     SpendPeriod,
     SpendTotal,
@@ -90,8 +93,11 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from decimal import Decimal
 
-    from ai_assistant.core.protocols import RecipientGrantResolution
-    from ai_assistant.core.types import RecipientGrant
+    from ai_assistant.core.protocols import (
+        AuthorizationResolution,
+        RecipientGrantResolution,
+    )
+    from ai_assistant.core.types import Authorization, RecipientGrant
 
 _log = structlog.get_logger(__name__)
 
@@ -690,7 +696,7 @@ class SqliteAuditTrail:
     clause exists for.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — a path, a spend configuration, an id factory and two narrow read seams; each is one thing a composition root decides on its own
         self,
         *,
         path: Path | str,
@@ -698,6 +704,7 @@ class SqliteAuditTrail:
         identifiers: IdentifierFactory | None = None,
         spend: SpendConfiguration | None = None,
         recipient_grants: RecipientGrantResolution | None = None,
+        authorizations: AuthorizationResolution | None = None,
     ) -> None:
         """Open (or create) the trail at ``path``.
 
@@ -758,6 +765,21 @@ class SqliteAuditTrail:
                 (ADR-0193 §1); the composition root passes **one** object to this
                 trail and to the policy, and ``tests/app/test_composition.py``
                 pins that over the object's identity.
+            authorizations: The **resolution face** of the goal-authorization
+                store, against which ``record`` resolves a route-(d)
+                ``authorised_by`` (ADR-0254 §7). One member wide, for exactly the
+                reason above: the trail holds a read and nothing else, so it cannot
+                append an authorization, revoke one, enumerate the user's goals or
+                erase the store.
+
+                ``None`` substitutes :class:`_NoAuthorizations` on
+                :class:`_NoRecipientGrants`'s pattern and for its reason, so the
+                trail always **has** a seam: every route-(d) pointer resolves to
+                ``None`` and the row is refused, which is the fail-closed direction
+                and the only answer a deployment with no authorization store can
+                give. **``ActionPolicy`` is unchanged in signature and this trail's
+                own Protocol gains no member, no argument and no widened return**
+                (§7); what ADR-0021 §4 gains is an invariant.
 
         Raises:
             AuditError: If the database cannot be opened or initialised.
@@ -771,6 +793,9 @@ class SqliteAuditTrail:
         self._spend = spend if spend is not None else SpendConfiguration()
         self._recipient_grants: RecipientGrantResolution = (
             recipient_grants if recipient_grants is not None else _NO_RECIPIENT_GRANTS
+        )
+        self._authorizations: AuthorizationResolution = (
+            authorizations if authorizations is not None else _NO_AUTHORIZATIONS
         )
         # Its own lock: ADR-0194 §3 serialises admissions against each other and
         # deliberately not against the appends, so a completion can land while an
@@ -1313,6 +1338,8 @@ class SqliteAuditTrail:
             # a read in front of ``BEGIN IMMEDIATE`` is the window #526 is about,
             # and this store pins the write lock as its *first* statement.
             refusal = await self._resolve_standing_authorisation(snapshot)
+            if refusal is None:
+                refusal = await self._resolve_goal_authorisation(snapshot)
             await _run_to_completion(self._record_sync, snapshot, refusal)
         return snapshot.id
 
@@ -1423,6 +1450,70 @@ class SqliteAuditTrail:
                 f"revoked (ADR-0193 §6)"
             )
         return _grant_covers(decision, grant, binding)
+
+    async def _resolve_goal_authorisation(
+        self, decision: PermissionDecision
+    ) -> InvalidAuthorisationError | None:
+        """Resolve a route-(d) pointer against the authorization records (ADR-0254 §7).
+
+        :meth:`_resolve_standing_authorisation`'s shape one seam over, and every
+        word of that method's reasoning about *where* the read sits and *why the
+        verdict is returned rather than raised* applies unchanged: the seam is an
+        ``await``, so the read cannot happen inside the worker thread's
+        transaction, and #526 pins ``BEGIN IMMEDIATE`` as this store's first
+        statement, so the duplicate-id read cannot be lifted out in front of it
+        either.
+
+        **The trail holds a read and nothing else.** It resolves the pointer,
+        compares the row it got back against the decision, and can append nothing.
+
+        **A revocation is prospective, and it bites twice** (ADR-0254 §13): it
+        governs every ``live_for`` read that begins after it is recorded, **and it
+        refuses the write of any route-(d) ``ALLOW`` whose resolution read inside
+        ``record`` begins after it is recorded** — which is the second bite and is
+        this method. It retracts no decision already recorded and stops no request
+        already claimed; the residual window runs from this read to the execution,
+        and no clause here rounds it to zero.
+
+        Args:
+            decision: The validated snapshot about to be appended.
+
+        Returns:
+            The refusal this decision has earned, or ``None`` where the pointer
+            resolved to a row covering it — and ``None`` too for every decision
+            outside §7's route-(d) scope, which is the majority.
+
+        Raises:
+            InvalidAuthorisationError: If the seam could not be read. **Raised**
+                rather than returned, on :meth:`_resolve_standing_authorisation`'s
+                own asymmetry: a store fault is not something a later duplicate-id
+                refusal should be allowed to mask, because the two say different
+                things to an operator and only one of them is about this decision.
+        """
+        if not _names_a_goal_authorisation(decision):
+            return None
+        binding = decision.egress_binding
+        # `_check_standing_shape` has already refused every other arm, and ran
+        # before this method on both write paths. The narrowing is repeated for
+        # `mypy`, which reads the union rather than the ordering.
+        assert isinstance(binding, EgressBinding)  # noqa: S101 — narrowing, refused above
+        named = str(decision.ruling.authorised_by)
+        try:
+            row = await self._authorizations.resolve(named)
+        except AuthorizationError as exc:
+            msg = (
+                f"decision {decision.id!r} names goal authorization {named!r} and the "
+                f"authorization store could not be read, so nothing validated it; a "
+                f"component that cannot get an answer from that seam fails closed "
+                f"(ADR-0254 §7, §16)"
+            )
+            raise InvalidAuthorisationError(msg) from exc
+        if row is None:
+            return InvalidAuthorisationError(
+                f"decision {decision.id!r} names goal authorization {named!r}, which the "
+                f"store does not hold (ADR-0254 §7)"
+            )
+        return _authorization_covers(decision, row, binding)
 
     def _record_sync(
         self, snapshot: PermissionDecision, refusal: InvalidAuthorisationError | None
@@ -3187,6 +3278,42 @@ class _NoRecipientGrants:
 _NO_RECIPIENT_GRANTS: Final = _NoRecipientGrants()
 
 
+@final
+class _NoAuthorizations:
+    """A conforming :class:`AuthorizationResolution` that holds nothing.
+
+    :class:`_NoRecipientGrants`'s shape one seam over and for its reason. ADR-0254
+    §7 is unqualified — ``AuditTrail`` implementations *"are constructed with an
+    ``AuthorizationResolution``"* — and gives the trail no counterpart to §6's
+    explicit no-source mode for a policy. So a trail always has a seam, and one
+    wired with nothing gets **this** rather than a special case in
+    :meth:`SqliteAuditTrail.record`: a deployment holding no authorization store is
+    an ordinary state to be in, and it is not a third mode of the trail.
+
+    Every route-(d) pointer therefore resolves to ``None`` and the row is refused,
+    which is the fail-closed direction and the only answer a deployment with no
+    authorization store can give — and it is the answer the corresponding policy
+    would make unreachable anyway, since a policy constructed with no
+    ``GoalAuthorizations`` authors no route-(d) ``ALLOW``.
+
+    **What it does not decide is where the seam comes from.** A trail holding this
+    one and a policy holding a real store would author ``ALLOW``s the trail
+    refuses; so would two real stores over two files. That is a property of the
+    composition root — it passes one object to both — and
+    ``tests/app/test_composition.py`` pins it there, over the object's identity,
+    which is the only place it can be pinned.
+    """
+
+    async def resolve(self, authorization_id: str) -> Authorization | None:  # noqa: ARG002
+        """Answer ``None``: this seam holds no row, whatever is asked of it."""
+        return None
+
+
+#: The one instance every trail wired with no authorization store shares.
+#: Stateless, so sharing it is free and holds nothing between trails.
+_NO_AUTHORIZATIONS: Final = _NoAuthorizations()
+
+
 def _rests_on_a_standing_authorisation(decision: PermissionDecision) -> bool:
     """The shape both standing routes share (ADR-0193 §6, ADR-0247 §2).
 
@@ -3247,6 +3374,45 @@ def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
     return (
         _rests_on_a_standing_authorisation(decision)
         and decision.ruling.authorised_subject is not None
+        and decision.ruling.authorised_goal is None
+    )
+
+
+def _names_a_goal_authorisation(decision: PermissionDecision) -> bool:
+    """Whether ADR-0254 §7's route-(d) invariant is in scope for ``decision``.
+
+    A **route-(d) egress decision**, and nothing else: the shape
+    :func:`_rests_on_a_standing_authorisation` states, **an ``authorised_subject``
+    and an ``authorised_goal``**. That is the fourth limb of §7's partition, which
+    is **total** for an ``ALLOW`` and reads **nothing but the row** — no store
+    read, and no assumption that two identifier namespaces are disjoint:
+
+    * **route (a)** — ``resolves`` set, ``authorised_by`` equal to it;
+    * **route (b)** — ``resolves`` unset, ``authorised_by`` set,
+      ``authorised_subject`` set, ``authorised_goal`` **unset**;
+    * **route (c)** — ``resolves`` unset, ``authorised_by`` set,
+      ``authorised_subject`` unset, ``authorised_goal`` unset;
+    * **route (d)** — ``resolves`` unset, ``authorised_by`` set,
+      ``authorised_subject`` set, ``authorised_goal`` **set**;
+
+    and an ``ALLOW`` with ``authorised_by`` unset is the policy's own rules
+    (ADR-0193 §11's third state).
+
+    **This narrows ADR-0247 §2's discriminator in its route-(b) limb alone, by one
+    conjunct, and breaks none of it**: that section's *"route (b) where
+    ``authorised_subject`` is set and route (c) where it is not"* becomes route (b)
+    where the digest is set **and ``authorised_goal`` is unset**, and route (c)'s
+    digest-free limb is untouched.
+
+    **No row predating ADR-0254 can be classified as route (d)**, because
+    ``authorised_goal`` did not exist to be set — so every stored route-(b) row
+    stays route (b) and ADR-0193 §11's reserved digest-free pointer stays where
+    ADR-0247 §2 left it.
+    """
+    return (
+        _rests_on_a_standing_authorisation(decision)
+        and decision.ruling.authorised_subject is not None
+        and decision.ruling.authorised_goal is not None
     )
 
 
@@ -3315,6 +3481,9 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"covers such a call (ADR-0193 §2, §6)"
         )
         raise InvalidAuthorisationError(msg)
+    if ruling.authorised_goal is not None:
+        _check_goal_authority_shape(decision, binding)
+        return
     if ruling.authorised_subject is None:
         _check_configuration_authority(decision, binding)
         return
@@ -3342,6 +3511,68 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             f"decision {decision.id!r} rests on a standing authorisation but records a "
             f"call planned over external content; route (a) — a decision of the user "
             f"about that call — is the only route to an ALLOW on one (ADR-0193 §4, §6)"
+        )
+        raise InvalidAuthorisationError(msg)
+
+
+def _check_goal_authority_shape(decision: PermissionDecision, binding: EgressBinding) -> None:
+    """The two of ADR-0254 §7's ten checks decidable from the route-(d) row alone.
+
+    **The partition first.** §7's fourth limb is *"``resolves`` unset,
+    ``authorised_by`` set, ``authorised_subject`` set, ``authorised_goal`` set"*, so
+    a row carrying a goal scope and **no** digest is in none of the four routes and
+    is refused here rather than classified as route (c) — which is what the ordering
+    in :func:`_check_standing_shape` buys, the digest-free branch running after this
+    one.
+
+    **Then the coverage floor, in its strict form, inheriting no exception**
+    (ADR-0254 §7). §6 states that route (d) relaxes ``SpanCoverage.NOT_COVERED`` for
+    nothing, and the fact is on the decision's own binding, so the trail takes it
+    with no seam, no store read and no arguments. **It takes neither ADR-0238's
+    closed-loop disjunct nor ADR-0247 §3's retirement**: route (c) retires the
+    coverage exception at the configured provider and **route (d) is not route
+    (c)** — it is a goal-scoped authority over argument values, §6's condition 4 is
+    stated over it unrelaxed, and a row claiming route (d) on a covered binding is
+    refused **whatever its ``closed_loop`` says**. *A lane that reused route (c)'s
+    eligibility here has breached this clause.*
+
+    **The lineage check is *not* taken, and that is a consequence of §6's discharge
+    stated rather than discovered.** §6 discharges ADR-0181 §5's floor exactly where
+    the row covers the request **in full**, and whether it does turns on the
+    per-argument comparison this trail cannot re-take: a ``PermissionDecision``
+    carries ``parameters_digest`` and **not** ``parameters``, deliberately. So a
+    route-(d) row whose binding carries ``planned_with_external_content`` is
+    **admitted**, and what asserts the discharge is the policy's own comparison at
+    the one seam read, taken over the concrete request at every dispatch and never
+    cached. That is a real reduction in what the trail can refuse and it is said
+    rather than implied — an earlier draft of ADR-0254 refused such a row outright,
+    and it could, because the floor then bound route (d) entire. **ADR-0193 §6's
+    origin arm is untouched on every route-(b) row**, where it binds exactly as
+    ratified.
+
+    Args:
+        decision: The validated snapshot about to be appended.
+        binding: its own binding, already narrowed to the arm that records an
+            origin.
+
+    Raises:
+        InvalidAuthorisationError: If the row carries a goal scope and no digest,
+            or if its binding's ``coverage`` is not ``SpanCoverage.NOT_COVERED``.
+    """
+    ruling = decision.ruling
+    if ruling.authorised_subject is None:
+        msg = (
+            f"decision {decision.id!r} scopes standing authorisation "
+            f"{ruling.authorised_by!r} to a goal and fingerprints none; ADR-0254 §7's "
+            f"four-route partition admits a goal scope on a route-(d) row alone, and a "
+            f"route-(d) row carries the record's coverage fingerprint (ADR-0254 §7)"
+        )
+        raise InvalidAuthorisationError(msg)
+    if binding.coverage is not SpanCoverage.NOT_COVERED:
+        msg = (
+            f"decision {decision.id!r} rests on a goal authorization but records a call "
+            f"over covered content; route (d) relaxes that floor for nothing, whatever "
+            f"the binding's closed_loop says (ADR-0233 §9, ADR-0254 §6, §7)"
         )
         raise InvalidAuthorisationError(msg)
 
@@ -3470,6 +3701,126 @@ def _grant_covers(  # noqa: PLR0911 — one return per ADR-0193 §6 comparison, 
             f"decision {decision.id!r} fingerprints a standing authorisation the store's "
             f"grant {named!r} does not match; the digest is recomputed from the record "
             f"the store returned and never taken on the decision's word (ADR-0193 §6)"
+        )
+    return None
+
+
+def _authorization_covers(  # noqa: PLR0911 — one return per ADR-0254 §7 comparison, and no fewer
+    decision: PermissionDecision, row: Authorization, binding: EgressBinding
+) -> InvalidAuthorisationError | None:
+    """Compare the resolved row against the decision it is claimed to authorise.
+
+    **Eight of ADR-0254 §7's ten checks; the other two are decidable from the row
+    alone** and are :func:`_check_goal_authority_shape`'s. Every one of these is
+    taken over the record ``resolve`` returned rather than over the decision's
+    account of it, which is the whole of what makes the pointer *verified* rather
+    than merely present.
+
+    * the row's ``disposition`` is **``ESTABLISHED``** — *"the existence, the kind,
+      the unrevoked, the unsuperseded and the answered check at once"*, since every
+      other disposition is retired and none of them is live;
+    * its ``settled_at`` is **at or before** the decision's ``decided_at``;
+    * its ``expires_at`` is **strictly after** it;
+    * its ``ToolDefinition`` equals the decision's ``tool`` **by value**;
+    * its ``BoundAccount`` equals the binding's ``account`` **by value, both facts
+      and not one**;
+    * its ``destinations`` **contain every member** of the binding's canonical
+      destination set, compared as ``CanonicalDestination`` compares — every field,
+      never across protocols;
+    * its ``goal`` equals the ruling's ``authorised_goal``;
+    * and the ruling's ``authorised_subject`` equals that row's subject digest,
+      **recomputed here over the record the store returned** and never taken on the
+      decision's word.
+
+    **``settled_at`` is the instant compared and ``proposed_at`` is not.** A row is
+    proposed before the user answers and authorises nothing until they do, so the
+    instant a decision must not predate is the instant the authority came into
+    being. A row whose ``settled_at`` is after the ruling was taken is the
+    **backdated** case ADR-0193 §6 refuses, one field over. Equality at the lower
+    end is permitted — a coarse clock stamping a settlement and the ruling that
+    spends it alike is an ordinary thing rather than a suspicious one.
+
+    **``record`` reads no clock**: both ends are decided against the decision's own
+    ``decided_at``.
+
+    **The account and destination checks are taken because both values are on the
+    row and on the decision, and omitting them would leave a gap nothing else
+    closes** (§7). A faulty policy citing an established authorization for one
+    recipient while ruling on a send to another through the same declaration would
+    otherwise pass every other check. *A lane that skipped either has breached this
+    clause.*
+
+    **What remains outside is two comparisons and one join, and all three are
+    named** (§7). The trail **cannot** re-take the per-argument comparison, the
+    arguments not being in its hand; it **cannot** re-take the recipient condition
+    on an opening-act row, holding a lookup by **id** rather than a ``covering``;
+    and it **cannot** check that the request belonged to the goal the ruling names,
+    ``ActionRequest.goal`` not being transcribed onto the decision (§16). **Neither
+    component is offered the other's job**, and a lane that let the policy skip the
+    comparison has breached §7 as surely as one that gave the trail the arguments.
+
+    A **module function** rather than a method, so it holds no store and can reach
+    none: everything it needs is in its arguments.
+
+    Args:
+        decision: The validated snapshot about to be appended.
+        row: The record its ``authorised_by`` resolved to.
+        binding: ``decision``'s own binding, already narrowed to the arm that
+            records an origin.
+
+    Returns:
+        The refusal the comparison earned, or ``None`` where the row covers the
+        decision.
+    """
+    named = row.id
+    if row.disposition is not AuthorizationDisposition.ESTABLISHED:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which stands "
+            f"{row.disposition} rather than ESTABLISHED: it was never answered, was "
+            f"declined, lapsed unanswered, was revoked, or was superseded (ADR-0254 §7)"
+        )
+    if row.settled_at is None or row.settled_at > decision.decided_at:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which was "
+            f"established after the ruling was made; the policy could not have read a "
+            f"record that did not exist when it ruled (ADR-0254 §7)"
+        )
+    if row.expires_at <= decision.decided_at:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which was "
+            f"not live when the ruling was made; a lapsed authority never sources a new "
+            f"ALLOW (ADR-0254 §7)"
+        )
+    if row.tool != decision.tool:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which was "
+            f"established about a different declaration; coverage compares the "
+            f"ToolDefinition whole and by value, so a declaration edit re-prompts "
+            f"(ADR-0254 §1, §3)"
+        )
+    if row.account != binding.account:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which was "
+            f"established against a different connected account; an account is two facts, "
+            f"identity and connection reference, and never one (ADR-0254 §3)"
+        )
+    if any(member not in row.destinations for member in binding.canonical_destination_set):
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} rests on goal authorization {named!r}, which does "
+            f"not name every recipient of this call; coverage is set membership and "
+            f"nothing looser (ADR-0254 §3)"
+        )
+    if row.goal != decision.ruling.authorised_goal:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} scopes its authorisation to a goal the store's "
+            f"authorization {named!r} is not about; the scope is read off the record the "
+            f"policy's own read returned and is carried from nowhere else (ADR-0254 §7)"
+        )
+    if decision.ruling.authorised_subject != row.subject_digest:
+        return InvalidAuthorisationError(
+            f"decision {decision.id!r} fingerprints a goal authorization the store's row "
+            f"{named!r} does not match; the digest is recomputed from the record the store "
+            f"returned and never taken on the decision's word (ADR-0254 §7)"
         )
     return None
 
