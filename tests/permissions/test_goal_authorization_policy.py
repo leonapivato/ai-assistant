@@ -20,11 +20,15 @@ from action_policy_contract import ActionPolicyContract
 from authorization_builders import (
     ACCOUNT,
     AT,
+    DECLARED_TOOL,
     EXPIRES,
     GOAL,
     NOW,
     OTHER_ACCOUNT,
     OTHER_SITE,
+    SEARCH_ACCOUNT,
+    SEARCH_ORIGIN,
+    SEARCH_TOOL,
     SHARED_CLOCK,
     SITE,
     TOOL,
@@ -33,6 +37,8 @@ from authorization_builders import (
     binding,
     member,
     request,
+    search_binding,
+    search_member,
 )
 
 from ai_assistant.core.config import Settings
@@ -978,3 +984,416 @@ class TestASourcedPolicyStaysMonotone(ActionPolicyContract):
                 (live(id="held-equal"),), now=SHARED_CLOCK.reset()
             )
         )
+
+
+class TestThePeriodReadingsGrammarIsRfc3339AndNoWider:
+    """§4 admits *"an RFC 3339 date-time carrying an offset, **or** a calendar date"*.
+
+    ``datetime.fromisoformat`` implements **ISO 8601** and is strictly wider, and
+    every form it admits beyond §4's grammar would be an argument satisfying a bound
+    in the **permissive** direction — the one direction §4 refuses: *"the answer is
+    not to round, to quantise or to pick a tolerance, it is to refuse and ask."*
+    """
+
+    @staticmethod
+    def _gate() -> ThresholdActionPolicy:
+        return policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(starts_at=AT, ends_at=AT + timedelta(hours=12)),
+                    ),
+                )
+            )
+        )[0]
+
+    @pytest.mark.parametrize(
+        "stay_from",
+        [
+            pytest.param("2026-09-13 09:00:00+00:00", id="space-separator"),
+            pytest.param("2026-09-13X09:00:00+00:00", id="arbitrary-separator"),
+            pytest.param("2026-09-13T09:00:00+0000", id="colon-free-offset"),
+            pytest.param("2026-09-13T09:00:00,5+00:00", id="comma-fraction"),
+            pytest.param("20260913T090000+0000", id="compact"),
+            pytest.param("2026-09-13T09:00+00:00", id="no-seconds"),
+        ],
+    )
+    async def test_a_date_time_outside_rfc_3339s_grammar_is_not_covered(
+        self, stay_from: str
+    ) -> None:
+        """Each of these denotes an instant **inside** the bound, so a reading that
+        parsed it would ``ALLOW``. *"A lane that delegated the grammar to
+        ``datetime.fromisoformat`` fails here."*"""
+        ruling = await self._gate().decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+    @pytest.mark.parametrize(
+        "stay_from",
+        [
+            pytest.param("2026-09-13T09:00:00+00:00", id="offset"),
+            pytest.param("2026-09-13T09:00:00Z", id="zulu"),
+            pytest.param("2026-09-13t09:00:00z", id="lower-case"),
+            pytest.param("2026-09-13T09:00:00.500+00:00", id="fraction"),
+            pytest.param("2026-09-13T10:00:00+01:00", id="non-utc-offset"),
+        ],
+    )
+    async def test_every_form_rfc_3339_admits_is_read(self, stay_from: str) -> None:
+        """The grammar is exactly as wide as §4 states it, and no narrower: a reading
+        that refused a ``Z`` or a fraction would ask about calls the user's own act
+        covers."""
+        ruling = await self._gate().decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.ALLOW
+
+    @pytest.mark.parametrize(
+        "stay_from",
+        [pytest.param("20260913", id="compact"), pytest.param("2026-W37-7", id="week-date")],
+    )
+    async def test_a_calendar_date_outside_the_full_date_grammar_is_not_covered(
+        self, stay_from: str
+    ) -> None:
+        """``date.fromisoformat`` admits both of these and §4's *"calendar date"*
+        does not: they are the same widening one arm over."""
+        gate = policy(
+            live(
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(
+                            starts_at=AT - timedelta(days=1), ends_at=AT + timedelta(days=1)
+                        ),
+                    ),
+                )
+            )
+        )[0]
+        ruling = await gate.decide(request(binding(SITE), stay_from=stay_from))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+
+class TestWhatTheRulingsReasonSaysWhenCoverageFails:
+    """§4's reason clause, and arms 8, 45, 47 and 53.
+
+    *"The three failures are told apart, whichever way the key is rendered"*, and
+    the reason **never** reproduces an argument's value, the bound, the record's id
+    or its digest: a reason is carried on a durable ``PermissionDecision`` that holds
+    ``parameters_digest`` and not ``parameters``, and quoting a value would put into
+    the trail exactly what that omission keeps out.
+    """
+
+    @staticmethod
+    def _covered() -> tuple[CoverageMember, ...]:
+        return (
+            coverage_member("site", fixed=SITE),
+            coverage_member("amount", bound=money_bound("60")),
+            coverage_member("currency", fixed="GBP"),
+        )
+
+    async def test_an_argument_the_record_names_in_no_member(self) -> None:
+        """Arm 47: *"the reason says the record names that argument in no member
+        rather than that a comparison failed"*."""
+        gate, _, _ = policy(
+            live(site=False, coverage=self._covered(), tool=DECLARED_TOOL),
+            recipients=grants(),
+        )
+        ruling = await gate.decide(
+            request(
+                binding(SITE),
+                tool=DECLARED_TOOL,
+                amount="50",
+                currency="GBP",
+                refundable_only=True,
+            )
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "covers no such argument" in ruling.reason
+        assert "'refundable_only'" in ruling.reason
+
+    async def test_an_argument_a_member_names_that_the_request_omits(self) -> None:
+        """Arm 53: *"the reason says a member names an argument the request omits"*.
+
+        *"There is no default, no wildcard, no 'not sent therefore unconstrained'
+        and no omission that reads as consent."*
+        """
+        gate, _, _ = policy(
+            live(
+                site=False,
+                coverage=(*self._covered(), coverage_member("refundable_only", fixed=True)),
+                tool=DECLARED_TOOL,
+            ),
+            recipients=grants(),
+        )
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="50", currency="GBP")
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "omits an argument" in ruling.reason
+        assert "'refundable_only'" in ruling.reason
+
+    async def test_an_argument_whose_value_the_comparison_refused(self) -> None:
+        """Arm 45: *"the reason names the argument"*, and says the value is outside
+        what the act allows rather than that the act covers no such argument."""
+        gate, _, _ = policy(
+            live(site=False, coverage=self._covered(), tool=DECLARED_TOOL),
+            recipients=grants(),
+        )
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="80", currency="GBP")
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "outside what the user's own recorded act allows" in ruling.reason
+        assert "'amount'" in ruling.reason
+        assert "covers no such argument" not in ruling.reason
+
+    async def test_the_three_failures_are_told_apart_on_one_ruling(self) -> None:
+        """§4: three different facts about what the user authorised, so a ruling
+        meeting all three says all three."""
+        gate, _, _ = policy(
+            live(
+                site=False,
+                coverage=(*self._covered(), coverage_member("refundable_only", fixed=True)),
+                tool=DECLARED_TOOL,
+            ),
+            recipients=grants(),
+        )
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="80", currency="GBP", extras="two")
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "covers no such argument" in ruling.reason
+        assert "omits an argument" in ruling.reason
+        assert "outside what the user's own recorded act allows" in ruling.reason
+
+    async def test_a_key_the_schema_does_not_name_is_counted_and_never_quoted(
+        self,
+    ) -> None:
+        """Arm 8's second test, over *"a declaration admitting additional properties
+        and a request carrying a data-bearing key such as an address"*.
+
+        ADR-0145 §8's ground is that *"a key can be data"* — a mapping the schema
+        does not describe can be keyed by an address or an identifier — so an
+        undeclared key is **counted** rather than listed, which is that section's
+        *"by keyword and location rather than by key"* read onto this message.
+        """
+        gate, _, _ = policy(
+            live(site=False, coverage=self._covered(), tool=DECLARED_TOOL),
+            recipients=grants(),
+        )
+        ruling = await gate.decide(
+            request(
+                binding(SITE),
+                tool=DECLARED_TOOL,
+                amount="50",
+                currency="GBP",
+                **{"alice@example.com": "yes", "bob@example.com": "no"},
+            )
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "alice@example.com" not in ruling.reason
+        assert "bob@example.com" not in ruling.reason
+        assert "2 further arguments" in ruling.reason
+
+    async def test_the_reason_reproduces_no_value_no_bound_and_no_record_id(self) -> None:
+        """§4: the three things a reason may never carry, asserted together.
+
+        The record's **id** is the one an auditor reads off ``authorised_by``; a
+        ``CONFIRM`` names no authorisation at all, and the reason must not
+        reintroduce one.
+        """
+        row = live(site=False, coverage=self._covered(), tool=DECLARED_TOOL, id="a-secret")
+        gate, _, _ = policy(row, recipients=grants())
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="80", currency="GBP")
+        )
+        assert "80" not in ruling.reason
+        assert "60" not in ruling.reason
+        assert "a-secret" not in ruling.reason
+        assert row.subject_digest not in ruling.reason
+
+    async def test_a_store_fault_adds_no_account_to_the_reason(self) -> None:
+        """§16: *"a store fault is an operator's fact and not something to put in
+        front of someone deciding about a call"*, so the reason the user sees is
+        unchanged and describes no coverage failure that did not happen."""
+        gate, authorizations, _ = policy(
+            live(site=False, coverage=self._covered(), tool=DECLARED_TOOL),
+            recipients=grants(),
+        )
+        assert authorizations is not None
+        authorizations.fail_live_for()
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="80", currency="GBP")
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert ruling.reason == "it may disclose personal data off-device"
+
+    async def test_a_request_with_no_record_of_that_goal_gets_no_account_either(
+        self,
+    ) -> None:
+        """There is no coverage failure to describe where the seam holds no live row
+        — the first of §6's exactly two answers a standing route may be taken on."""
+        gate, _, _ = policy(recipients=grants(covering=False))
+        ruling = await gate.decide(
+            request(binding(SITE), tool=DECLARED_TOOL, amount="50", currency="GBP")
+        )
+        assert ruling.reason == "it may disclose personal data off-device"
+
+
+class TestTheBarAndTheConfiguredProvider:
+    """Arms 31(b), 46 and 48: the bar precedes route (c), and is monotone."""
+
+    @staticmethod
+    def _configured() -> ConfiguredSearchDestination:
+        return ConfiguredSearchDestination(
+            reference=SEARCH_ACCOUNT.reference, destinations=frozenset({search_member()})
+        )
+
+    @staticmethod
+    def _searching(*members: CoverageMember, tool: ToolDefinition = SEARCH_TOOL) -> Authorization:
+        """A record of the goal about the **search** declaration.
+
+        The ``origin`` member is always carried, because the binding's own span makes
+        it a user-facing argument of every search request and §3's condition 6 is
+        over *every* one of them.
+        """
+        return live(
+            site=False,
+            tool=tool,
+            account=SEARCH_ACCOUNT,
+            destinations=(search_member(),),
+            coverage=(coverage_member("origin", fixed=SEARCH_ORIGIN), *members),
+        )
+
+    async def test_the_bar_fires_over_route_c(self) -> None:
+        """Arm 46: a record of the goal fixing an argument of a ``WEB_SEARCH``
+        declaration, and a request whose argument fails that member → **``CONFIRM``**,
+        no route-(c) ``ALLOW``, and ``authorised_by`` unset."""
+        gate, _, _ = policy(
+            self._searching(coverage_member("query", bound=terms_bound("campsites"))),
+            configured=self._configured(),
+        )
+        ruling = await gate.decide(
+            request(search_binding(), tool=SEARCH_TOOL, query="something else")
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert ruling.authorised_by is None
+
+    async def test_a_goal_holding_no_such_record_still_reaches_route_c(self) -> None:
+        """Arm 46's second half: *"route (c) ``ALLOW`` on the binding's
+        ``account.reference``, unchanged from ``origin/main``"*."""
+        gate, _, _ = policy(configured=self._configured())
+        ruling = await gate.decide(request(search_binding(), tool=SEARCH_TOOL, query="campsites"))
+        assert ruling.outcome is PermissionOutcome.ALLOW
+        assert ruling.authorised_by == SEARCH_ACCOUNT.reference
+        assert ruling.authorised_goal is None
+
+    async def test_route_c_answers_before_route_d_where_both_would(self) -> None:
+        """§6's total order: the bar, then route (c), then route (d), then route (b).
+
+        *"Where route (c) answers, ``RecipientGrants.covering`` is called **zero**
+        times and no ruling at the configured provider cites a grant"* — and it
+        carries no goal scope, which is the discriminator from the row alone.
+        """
+        gate, _, recipients = policy(
+            self._searching(coverage_member("query", fixed="campsites")),
+            configured=self._configured(),
+            recipients=grants(covering=False),
+        )
+        ruling = await gate.decide(request(search_binding(), tool=SEARCH_TOOL, query="campsites"))
+        assert ruling.outcome is PermissionOutcome.ALLOW
+        assert (ruling.authorised_by, ruling.authorised_goal) == (
+            SEARCH_ACCOUNT.reference,
+            None,
+        )
+        assert ruling.authorised_subject is None
+        assert recipients is not None
+        assert recipients.call_count == 0
+
+    async def test_covered_content_at_the_configured_provider_reaches_no_route_d(
+        self,
+    ) -> None:
+        """Arm 31(b). **A lane that read route (d)'s fourth condition off
+        ``_only_the_disclosure_floor``'s answer fails this**: that predicate carries
+        ADR-0247 §3's disjunct, so it holds here, and route (d) must re-take condition
+        4 over the binding in its **strict** form.
+
+        The ruling is route (c)'s ``ALLOW`` — which is what tells the two apart: a
+        lane that let route (d) answer would set ``authorised_goal``.
+        """
+        gate, _, _ = policy(
+            self._searching(coverage_member("query", fixed="campsites")),
+            configured=self._configured(),
+        )
+        ruling = await gate.decide(
+            request(
+                search_binding(coverage=SpanCoverage.MODEL_ON_EVERY_PATH),
+                tool=SEARCH_TOOL,
+                query="campsites",
+            )
+        )
+        assert ruling.outcome is PermissionOutcome.ALLOW
+        assert ruling.authorised_goal is None
+        assert ruling.authorised_by == SEARCH_ACCOUNT.reference
+
+    async def test_the_bar_fires_at_the_configured_provider_over_covered_content_too(
+        self,
+    ) -> None:
+        """Arm 31(b)'s *"unless §6's bar fires"*: the bar is taken **before** route
+        (c), so it refuses a request route (c) would otherwise have allowed."""
+        gate, _, _ = policy(
+            self._searching(coverage_member("query", bound=terms_bound("campsites"))),
+            configured=self._configured(),
+        )
+        ruling = await gate.decide(
+            request(
+                search_binding(coverage=SpanCoverage.MODEL_ON_EVERY_PATH),
+                tool=SEARCH_TOOL,
+                query="something else",
+            )
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+    @pytest.mark.parametrize(
+        ("stored_risk", "request_risk"),
+        [(RiskLevel.LOW, RiskLevel.MEDIUM), (RiskLevel.LOW, RiskLevel.LOW)],
+    )
+    async def test_the_bars_answer_does_not_move_with_severity_out_of_equality(
+        self, stored_risk: RiskLevel, request_risk: RiskLevel
+    ) -> None:
+        """Arm 48(a), *moving out of equality*. **A lane that keyed the lookup by
+        value fails here**: the row would match nothing and route (c) would answer
+        ``ALLOW``.
+
+        Taken over route (c) because route (b) compares the declaration itself and
+        falls away with it. The confirmation threshold is ``HIGH`` throughout, so
+        ``fired == [_DISCLOSURE_FLOOR]`` everywhere and the records are held equal.
+        """
+        stored = SEARCH_TOOL.model_copy(update={"risk_level": stored_risk})
+        asked = SEARCH_TOOL.model_copy(update={"risk_level": request_risk})
+        gate = ThresholdActionPolicy(
+            confirm_at_risk=RiskLevel.HIGH,
+            configured_search=self._configured(),
+            authorizations=seam(
+                self._searching(coverage_member("query", fixed="campsites"), tool=stored)
+            ),
+        )
+        ruling = await gate.decide(request(search_binding(), tool=asked, query="something else"))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+
+    @pytest.mark.parametrize("request_risk", [RiskLevel.LOW, RiskLevel.MEDIUM])
+    async def test_the_bars_answer_does_not_move_with_severity_into_equality(
+        self, request_risk: RiskLevel
+    ) -> None:
+        """Arm 48(b), *moving into equality*. **A lane that put §3's condition 3
+        inside the bar fails here**: the ``LOW`` request would have drawn ``CONFIRM``
+        and the ``MEDIUM`` one ``ALLOW``, which is the same violation from the other
+        side."""
+        stored = SEARCH_TOOL.model_copy(update={"risk_level": RiskLevel.MEDIUM})
+        asked = SEARCH_TOOL.model_copy(update={"risk_level": request_risk})
+        gate = ThresholdActionPolicy(
+            confirm_at_risk=RiskLevel.HIGH,
+            configured_search=self._configured(),
+            authorizations=seam(
+                self._searching(coverage_member("query", fixed="campsites"), tool=stored)
+            ),
+        )
+        ruling = await gate.decide(request(search_binding(), tool=asked, query="campsites"))
+        assert ruling.outcome is PermissionOutcome.ALLOW

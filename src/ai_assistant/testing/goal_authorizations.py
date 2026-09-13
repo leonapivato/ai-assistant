@@ -722,15 +722,42 @@ class _AuthorizationLog:
         settlements of one row cannot both win, because the second finds a
         disposition the edge does not leave.
         """
-        held = next((one for one in self._records if one.id == authorization_id), None)
-        if held is None:
+        found = next((one for one in self._records if one.id == authorization_id), None)
+        if found is None:
             return AuthorizationSettlement.NO_SUCH_AUTHORIZATION
+        # The expiry settlement is taken **first** (ADR-0254 §1), and is skipped only
+        # where the caller asked for exactly that move: there the two coincide and the
+        # ordinary edge takes it.
+        held = (
+            found
+            if to is AuthorizationDisposition.EXPIRED
+            else self._expired_first(found, settled_at)
+        )
         if to not in _EDGES.get(held.disposition, frozenset()):
             return AuthorizationSettlement.NOT_AT_SOURCE
         if to is not AuthorizationDisposition.ESTABLISHED:
             self._write_settlement(held, to=to, settled_at=settled_at)
             return AuthorizationSettlement.SETTLED
         return self._establish(held, settled_at=settled_at)
+
+    def _expired_first(self, held: Authorization, settled_at: datetime) -> Authorization:
+        """Settle a lapsed proposal ``EXPIRED`` before the requested edge is evaluated.
+
+        ADR-0254 §1's clause that ``settle`` is the second of exactly two settling
+        operations — *"a ``live_for`` read, and **the answer that names it**"* — so
+        an answer arriving at or after ``expires_at`` *"settles ``EXPIRED`` and
+        **establishes nothing**"*, because *"an expired proposal is refused as an
+        establishment at all"*. The requested move is then evaluated from where the
+        row stands, so a late approval is answered ``NOT_AT_SOURCE``: see
+        :meth:`~ai_assistant.permissions.goal_authorizations.SqliteGoalAuthorizationStore._expired_first`,
+        whose reasoning this is.
+        """
+        if held.disposition is not AuthorizationDisposition.PROPOSED:
+            return held
+        if held.expires_at > settled_at:
+            return held
+        self._write_settlement(held, to=AuthorizationDisposition.EXPIRED, settled_at=settled_at)
+        return next(one for one in self._records if one.id == held.id)
 
     def _establish(self, held: Authorization, *, settled_at: datetime) -> AuthorizationSettlement:
         """Take §1's conditional supersession and its uniqueness check in one step.

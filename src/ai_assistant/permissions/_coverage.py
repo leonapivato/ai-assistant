@@ -31,19 +31,26 @@ disagree produce a false mismatch at one end and a **false match** at the other.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ai_assistant.core.types import BoundKind, canonical_json_bytes
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.types import (
         ActionRequest,
         Authorization,
         CoverageMember,
         FrozenJson,
+        ToolDefinition,
         ValueBound,
     )
 
@@ -64,6 +71,136 @@ def user_facing(request: ActionRequest) -> frozenset[str]:
         The user-facing argument keys this call actually carries.
     """
     return frozenset(request.parameters) - frozenset(request.tool.system_supplied)
+
+
+class ArgumentFailure(StrEnum):
+    """Which of ADR-0254 §4's **three** failures one argument's coverage met.
+
+    *"The three failures are told apart, whichever way the key is rendered,
+    because they are different facts about what the user authorised and §3's
+    condition 6 keeps them apart."* A ruling that reduced them to one would tell a
+    user that their authority did not reach a call without saying in what way.
+
+    Not a ``core`` type: ADR-0254 §16's roster is closed over what ``core`` gains,
+    and this is a **rendering** detail of one policy's reason rather than a value
+    that crosses a boundary.
+    """
+
+    UNNAMED = "unnamed"
+    """The row's coverage names this user-facing argument in **no** member."""
+
+    OMITTED = "omitted"
+    """A member names this argument and the request does not carry it.
+
+    *"An act that fixed ``refundable_only`` to ``true`` authorised a call carrying
+    that value, and a call that omits it is a different call"* — ADR-0145 inserts
+    no schema default, so nothing downstream restores it."""
+
+    REFUSED = "refused"
+    """A member names it and the comparison over its value was **unproven**."""
+
+
+@dataclass(frozen=True, slots=True)
+class UncoveredArgument:
+    """One argument, and which of §4's three failures its coverage met."""
+
+    argument: str
+    failure: ArgumentFailure
+
+
+def uncovered(row: Authorization, request: ActionRequest) -> tuple[UncoveredArgument, ...]:
+    """Every way ADR-0254 §3's **condition 6** fails over this pair, told apart.
+
+    Empty exactly where :func:`covers_arguments` answers ``True``, which is what
+    keeps the predicate and the account of its failure one computation rather than
+    two that can disagree.
+
+    Args:
+        row: The live record the one ``live_for`` read returned.
+        request: The action being ruled on.
+
+    Returns:
+        The failures, ordered by :class:`ArgumentFailure` and then by argument name,
+        so a rendering of them is deterministic without the renderer sorting.
+    """
+    carried = user_facing(request)
+    named = {member.argument: member for member in row.coverage}
+    defects = [UncoveredArgument(key, ArgumentFailure.UNNAMED) for key in carried - set(named)]
+    defects += [UncoveredArgument(key, ArgumentFailure.OMITTED) for key in set(named) - carried]
+    defects += [
+        UncoveredArgument(key, ArgumentFailure.REFUSED)
+        for key in carried & set(named)
+        if not _argument_is_covered(named[key], request)
+    ]
+    return tuple(sorted(defects, key=lambda one: (one.failure.value, one.argument)))
+
+
+#: What a ruling says about each of §4's three failures, in the order they are
+#: rendered. **No value, no bound, no record id and no digest**: a reason is carried
+#: on a durable ``PermissionDecision`` that holds ``parameters_digest`` and not
+#: ``parameters``, and quoting a value would put into the trail exactly what that
+#: omission keeps out (ADR-0254 §4).
+_ACCOUNTS: Final[tuple[tuple[ArgumentFailure, str], ...]] = (
+    (
+        ArgumentFailure.UNNAMED,
+        "the user's own recorded act for this goal covers no such argument",
+    ),
+    (
+        ArgumentFailure.OMITTED,
+        "this call omits an argument the user's own recorded act covers",
+    ),
+    (
+        ArgumentFailure.REFUSED,
+        "this call is outside what the user's own recorded act allows",
+    ),
+)
+
+
+def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> str:
+    """Render ADR-0254 §4's account of why coverage failed, for the user.
+
+    **It never reproduces an argument's value, the bound, the record's id or its
+    digest** (§4). **And it names an argument's key only where the declaration's
+    ``parameters_schema`` itself names that key**: ADR-0145 §8 rules that a message
+    about arguments *"renders any part of the parameters — neither a value nor a
+    key"* except what *"the schema itself names"*, on the ground that *"a key can
+    be data"* — a mapping the schema does not describe can be keyed by an address
+    or an identifier, and ADR-0254 §2's ``argument`` is a key of ``parameters``
+    with nothing requiring the schema to declare it.
+
+    So a key the schema declares is named; **a key it does not is counted rather
+    than listed**, which is ADR-0145 §8's *"by keyword and location rather than by
+    key"* read onto this message. Where several arguments fail, they are named in
+    the **declaration's own schema order**.
+
+    Args:
+        defects: :func:`uncovered`'s answer, non-empty.
+        tool: The declaration being ruled on, whose schema decides what may be
+            named.
+
+    Returns:
+        One clause per failure that occurred, joined by ``"; "``.
+    """
+    properties = tool.parameters_schema.get("properties")
+    declared = tuple(properties) if isinstance(properties, Mapping) else ()
+    order = {name: index for index, name in enumerate(declared)}
+    clauses: list[str] = []
+    for failure, phrase in _ACCOUNTS:
+        met = [one.argument for one in defects if one.failure is failure]
+        if not met:
+            continue
+        named = sorted((key for key in met if key in order), key=lambda key: order[key])
+        hidden = len(met) - len(named)
+        rendered = phrase
+        if named:
+            rendered += ": " + ", ".join(repr(key) for key in named)
+        if hidden:
+            rendered += (
+                f", and {hidden} further argument{'s' if hidden > 1 else ''} this "
+                f"declaration's schema does not describe"
+            )
+        clauses.append(rendered)
+    return "; ".join(clauses)
 
 
 def covers_arguments(row: Authorization, request: ActionRequest) -> bool:
@@ -99,15 +236,7 @@ def covers_arguments(row: Authorization, request: ActionRequest) -> bool:
     Returns:
         Whether condition 6 holds over that pair.
     """
-    carried = user_facing(request)
-    named = {member.argument for member in row.coverage}
-    if carried != named:
-        return False
-    return all(
-        _argument_is_covered(member, request)
-        for member in row.coverage
-        if member.argument in carried
-    )
+    return not uncovered(row, request)
 
 
 def covers(row: Authorization, request: ActionRequest) -> bool:
@@ -245,28 +374,63 @@ def _satisfies_period(bound: ValueBound, value: FrozenJson) -> bool:
     return bound.starts_at <= instant < bound.ends_at
 
 
-def _instant_of(text: str, zone: str | None) -> datetime | None:
+#: RFC 3339 §5.6's ``full-date``, and nothing wider. ``date.fromisoformat`` admits
+#: more than this — the compact ``20260913`` and ISO week dates such as
+#: ``2026-W37-7`` — and ADR-0254 §4 admits *"a calendar date"* under the same
+#: grammar the date-time arm is stated in, so the wider forms are refused here.
+_FULL_DATE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+#: RFC 3339 §5.6's ``date-time``: ``full-date``, the ``T`` separator (that section's
+#: own case rule permits ``t``), ``partial-time`` with an optional fraction, and a
+#: ``time-offset`` that is ``Z``/``z`` or ``±HH:MM``.
+#:
+#: **Written out rather than delegated to** ``datetime.fromisoformat``, because that
+#: function implements **ISO 8601** and is strictly wider: it accepts *any* single
+#: character as the date/time separator — so ``2026-09-13X10:00:00+00:00`` parses —
+#: a colon-free offset (``+0000``), a comma as the fractional separator, and the
+#: compact and week-date forms. Each of those would be an argument ADR-0254 §4 does
+#: not admit **satisfying** a bound, which is the permissive direction and the one
+#: direction §4 refuses: *"the answer is not to round, to quantise or to pick a
+#: tolerance, it is to refuse and ask."*
+_DATE_TIME = re.compile(r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
+
+
+def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zone refuses
+    text: str, zone: str | None
+) -> datetime | None:
     """The instant ``text`` denotes, or ``None`` where the reading refuses it.
 
-    ``date.fromisoformat`` succeeds on a bare calendar date and refuses a full
-    date-time, which is what tells the two arms apart without inspecting the
-    string: a naive date-time reaches the second arm and is refused there.
+    **The grammar is checked before anything is parsed**, and the two arms are told
+    apart by which pattern matched rather than by which parser happened to succeed.
+    ``datetime.fromisoformat`` and ``date.fromisoformat`` are then used only to turn
+    a string already known to be in the admitted grammar into a value, which is what
+    keeps this reading exactly as wide as ADR-0254 §4 states it and no wider.
     """
-    try:
-        day = date.fromisoformat(text)
-    except ValueError:
-        day = None
-    if day is not None:
+    if _FULL_DATE.match(text):
         if zone is None:  # pragma: no cover — a PERIOD bound's model requires one
             return None
         try:
             located = ZoneInfo(zone)
         except ZoneInfoNotFoundError, ValueError:  # pragma: no cover — the model validates it
             return None
+        try:
+            day = date.fromisoformat(text)
+        except ValueError:  # pragma: no cover — an impossible date, e.g. 2026-02-31
+            return None
         return datetime.combine(day, time(), tzinfo=located)
+    if not _DATE_TIME.match(text):
+        return None
+    # **RFC 3339 §5.6's own case rule permits a lower-case ``t`` and ``z``**, and
+    # ``datetime.fromisoformat`` accepts the first and refuses the second. Upper-
+    # casing both markers before the parse is what makes the grammar above and the
+    # reading below admit exactly the same set: a regex that claimed a form the
+    # parse then refused would be a second statement of the rule, free to disagree
+    # with the first — and the disagreement would be silent, since a refusal to
+    # read is indistinguishable from a refusal to cover.
+    normalised = f"{text[:10]}T{text[11:-1]}{text[-1].upper()}"
     try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
+        parsed = datetime.fromisoformat(normalised)
+    except ValueError:  # pragma: no cover — an impossible date inside the grammar
         return None
     return parsed if parsed.utcoffset() is not None else None
 
@@ -282,4 +446,12 @@ def _satisfies_terms(bound: ValueBound, value: FrozenJson) -> bool:
     return isinstance(value, str) and value in bound.terms
 
 
-__all__ = ["covers", "covers_arguments", "user_facing"]
+__all__ = [
+    "ArgumentFailure",
+    "UncoveredArgument",
+    "account_of",
+    "covers",
+    "covers_arguments",
+    "uncovered",
+    "user_facing",
+]

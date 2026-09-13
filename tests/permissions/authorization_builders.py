@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     SpanCoverage,
+    ToolDefinition,
     canonical_json_bytes,
 )
 from ai_assistant.testing.goal_authorizations import (
@@ -47,7 +48,7 @@ from ai_assistant.testing.goal_authorizations import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import Authorization, FrozenJson, ToolDefinition
+    from ai_assistant.core.types import Authorization, FrozenJson
 
 #: The instants every case here is arranged around, re-exported from the shipping
 #: fakes so a suite and a consumer's own test cannot drift into two timelines.
@@ -74,6 +75,73 @@ SITE = "https://camp.example/book"
 OTHER_SITE = "https://other.example/book"
 
 ENDPOINT = "test://endpoint/one"
+
+#: A declaration whose ``parameters_schema`` **names** three of the arguments a
+#: booking carries and admits the rest. ADR-0254 §4 lets a ruling's reason name a
+#: key *"only where the declaration's ``parameters_schema`` itself names that key"*
+#: — ADR-0145 §8's rule, on the ground that *"a key can be data"* — so both halves
+#: of that rendering need a declaration that declares something and admits
+#: something else.
+DECLARED_TOOL: ToolDefinition = ToolDefinition.model_validate(
+    {
+        **AUTHORIZATION_TOOL.model_dump(),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "site": {"type": "string"},
+                "amount": {"type": "string"},
+                "currency": {"type": "string"},
+                "refundable_only": {"type": "boolean"},
+            },
+            "additionalProperties": True,
+        },
+    }
+)
+
+#: The account, origin and canonical form a search *at the configured provider* is
+#: arranged around (ADR-0247 §1). The canonical form is what the HTTPS canonicaliser
+#: answers for the origin — port made explicit — reproduced rather than imported,
+#: because nothing here canonicalises: there is one canonicaliser and it is at the
+#: seam.
+SEARCH_ACCOUNT = BoundAccount(identity="Example Search", reference="conn-search")
+SEARCH_ORIGIN = "https://search.example.com"
+SEARCH_CANONICAL = "https://search.example.com:443"
+
+#: The declaration a search is ruled over: :data:`TOOL`'s fields but for the id and
+#: the capability, so route (c)'s eligibility is about the **binding** rather than
+#: about a second declaration's severity.
+SEARCH_TOOL: ToolDefinition = ToolDefinition.model_validate(
+    {**AUTHORIZATION_TOOL.model_dump(), "id": "web_search", "capability": "web_search"}
+)
+
+
+def search_member(canonical: str = SEARCH_CANONICAL) -> CanonicalDestination:
+    """One destination member of the configured provider's own set."""
+    return CanonicalDestination(protocol=DestinationProtocol.HTTPS, canonical=canonical)
+
+
+def search_binding(
+    *,
+    account: BoundAccount = SEARCH_ACCOUNT,
+    closed_loop: bool = True,
+    external: bool = False,
+    coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
+) -> EgressBinding:
+    """A binding ADR-0247 §2's derived fact holds of, unless a case moves one value.
+
+    Three conjuncts and no more: the binding carries ``closed_loop``, its
+    ``account.reference`` equals the configured connection reference, and its
+    canonical destination set equals the configured one. A case asking what happens
+    *off* the configured provider moves one of them.
+    """
+    return EgressBinding(
+        spans=(span(SEARCH_ORIGIN, argument="origin"),),
+        account=account,
+        transport_endpoint=ENDPOINT,
+        planned_with_external_content=external,
+        coverage=coverage,
+        closed_loop=closed_loop,
+    )
 
 
 def member(canonical: str = SITE) -> CanonicalDestination:
@@ -105,7 +173,9 @@ def span(supplied: str, index: int | None = None, *, argument: str = "site") -> 
         provenance=DiscloserProvenance.SYSTEM_SELECTED,
         extent=len(supplied),
         destination=EgressDestination(
-            protocol=DestinationProtocol.HTTPS, supplied=supplied, canonical=supplied
+            protocol=DestinationProtocol.HTTPS,
+            supplied=supplied,
+            canonical=SEARCH_CANONICAL if supplied == SEARCH_ORIGIN else supplied,
         ),
     )
 
@@ -316,6 +386,7 @@ SHARED_CLOCK: Final = MovableClock()
 __all__ = [
     "ACCOUNT",
     "AT",
+    "DECLARED_TOOL",
     "ENDPOINT",
     "EXPIRES",
     "GOAL",
@@ -323,6 +394,10 @@ __all__ = [
     "OTHER_ACCOUNT",
     "OTHER_GOAL",
     "OTHER_SITE",
+    "SEARCH_ACCOUNT",
+    "SEARCH_CANONICAL",
+    "SEARCH_ORIGIN",
+    "SEARCH_TOOL",
     "SHARED_CLOCK",
     "SITE",
     "TOOL",
@@ -332,5 +407,7 @@ __all__ = [
     "member",
     "request",
     "route_d_decision",
+    "search_binding",
+    "search_member",
     "span",
 ]
