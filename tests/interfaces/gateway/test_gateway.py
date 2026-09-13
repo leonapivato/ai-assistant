@@ -606,6 +606,11 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     is the decision the roster assertion below was waiting on. ``search_not_serviced``
     is still absent, and that too is a decision: see
     ``test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed``.
+
+    **ADR-0250's four join it for the same reason, one decision on**: §15 places this
+    surface by name — "the command line and the browser both implement this decision" —
+    and its last clause makes a member given but not rendered a section not implemented
+    rather than a permissible degradation.
     """
     cookie_half, header_half = await _start_session(harness)
     head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
@@ -627,6 +632,10 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "routed",
         "read_confirmation",
         "read_answer",
+        "goal_engagement",
+        "clarification",
+        "reference",
+        "disambiguation",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
 

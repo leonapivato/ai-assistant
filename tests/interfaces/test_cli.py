@@ -8210,6 +8210,12 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     ``--conversation`` is — has to be recognised by name here, and a second such
     spelling would slip the walk. That residual is why the behavioural cases above
     enumerate the six explicitly rather than deriving them from this.
+
+    **ADR-0250 §11's two keywords are the second and third such spellings**, and they
+    are named below rather than left to slip: ``ask --answering`` names a question and
+    ``ask --goal`` names a goal, because the flag reads as what it does to the turn
+    rather than as what kind of record it carries. Naming them here is the whole of what
+    the residual above asks an author to do.
     """
     group = typer.main.get_command(cli.app)
     assert isinstance(group, TyperGroup)
@@ -8224,14 +8230,17 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         and unwrap(param.callback) in id_callbacks
         for name, command in sorted(group.commands.items())
         for param in command.params
-        if str(param.name).endswith("_id") or param.name == "conversation"
+        if str(param.name).endswith("_id") or param.name in {"answering", "conversation", "goal"}
     }
 
     # Asserted as a mapping rather than with `all(...)`, so a failure names the
     # parameter that is missing its callback instead of reporting `False`.
     assert carried == {
+        "abandon-goal:goal_id": True,
         "answer:question_id": True,
+        "ask:answering": True,
         "ask:conversation": True,
+        "ask:goal": True,
         "dismiss:notification_id": True,
         "forget:belief_id": True,
         "forget-conversation:conversation_id": True,
@@ -8242,6 +8251,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "revoke-destination-trust:record_id": True,
         "revoke-recipient-grant:grant_id": True,
         "trust-destinations:decision_id": True,
+        "withdraw-clarification:question_id": True,
     }
 
 

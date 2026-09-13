@@ -993,15 +993,24 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    All **thirty-two** operations §1 admits are served here. Thirty are §1's own — the
-    CONFIRM pair joined those once ADR-0178's merge discharged §8's precondition — the
-    thirty-first is ``converse_spoken``, and the thirty-second is ``cancel_read``.
-    ADR-0200 §12(a) partially supersedes §1's enumeration for exactly the first of those,
-    "the addition being ``converse_spoken`` and nothing else", and §10 gives it the path;
-    ADR-0244 §13 adds the second in its own text — "the command line and the browser each
-    render the pending read, collect the answer, and **offer the cancellation act**" —
-    which is the route §1's third clause fixes for widening it. Every other clause of §1
-    binds both exactly as it binds the thirty. ``next_notification`` —
+    Every operation §1 admits is served here. Thirty are §1's own — the CONFIRM pair
+    joined those once ADR-0178's merge discharged §8's precondition — and each addition
+    since arrived by the route §1's third clause fixes, a ratified decision's own text.
+    ADR-0200 §12(a) partially supersedes §1's enumeration for ``converse_spoken`` and
+    "nothing else", and §10 gives it the path; ADR-0244 §13 adds ``cancel_read`` — "the
+    command line and the browser each render the pending read, collect the answer, and
+    **offer the cancellation act**"; and **ADR-0250's ``- Status:`` line records "§1's
+    thirty-operation enumeration alone, which gains ``goals``,
+    ``withdraw_clarification`` and ``abandon_goal``"**, which §15 places on this surface
+    by name. Every other clause of §1 binds each of them exactly as it binds the thirty.
+
+    **The count is not written down here, and that is ADR-0177's own instruction rather
+    than an omission.** Its third dated note retires the figure — "do not read that as
+    the number to fix next time … a later lane adding to the promoted surface owes this
+    document nothing at all" — because what §1's clause obliges is that a method is
+    outside the browser's reach until an ADR puts it inside, which the set below states
+    exactly. A number in this docstring would be the stale citation this corpus rules
+    against, refreshed by hand on every lane. ``next_notification`` —
     the gateway's **own** poll — is none of them "because no browser request resolves
     to it: the gateway's own poll originates it under ADR-0175 §4, no browser request
     names it, and no browser argument reaches it" (§1's second clause, bound
@@ -1045,6 +1054,9 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "pending_confirmations",
         "resume",
         "cancel_read",
+        "goals",
+        "withdraw_clarification",
+        "abandon_goal",
         "delivery-stream",
     }
 
