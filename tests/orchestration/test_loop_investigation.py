@@ -249,9 +249,18 @@ async def test_a_round_after_an_unproductive_one_is_admitted_and_the_run_resets(
     The first round's hop reaches a record the supply already holds, so it admits
     nothing and the round is unproductive; §4 admits the next round anyway, because
     (e) is dissolved and §3's carrier hands that round ``DUPLICATE`` rather than
-    nothing. The second round asks a **different** source, admits a record, and the run
-    resets — so the third round is admitted too, and the attempt answers rather than
-    stopping at a guard.
+    nothing. The second round asks a **different** source and admits a record, so §7's
+    "A productive round resets the count to zero" fires — and the **third** round is
+    unproductive again and is still admitted, because the run restarted at that reset.
+
+    **The sequence is unproductive, productive, unproductive, and that is what makes
+    this arm detect the reset's removal rather than merely accompany it.** A loop that
+    kept the count across a productive round would hold 1 after round 1, keep it
+    through round 2, reach 2 at round 3 and stop there with ``UNPRODUCTIVE`` — three
+    calls. The reset is exactly the difference between that and the fourth call this
+    asserts. A pair like unproductive-then-productive cannot see it, because the turn
+    settles before the retained count could bind; nor can productive-then-unproductive,
+    because the count is already zero when it starts.
     """
     memory = _Journal()
     await memory.add(_belief("belief-1", "the lease question", evidence=("belief-2",)))
@@ -259,18 +268,22 @@ async def test_a_round_after_an_unproductive_one_is_admitted_and_the_run_resets(
     # reaches nothing the supply does not already hold.
     await memory.add(_belief("belief-2", "the lease was signed in March"))
     await memory.add(_belief("deposit-1", "the deposit was four hundred"))
-    planner = _Script(requests=[_hop("M1"), _query("deposit"), None])
+    planner = _Script(requests=[_hop("M1"), _query("deposit"), _hop("M1"), None])
 
     with structlog.testing.capture_logs() as captured:
         responded = await _turn(memory, planner)
 
     record = _record(captured)
-    assert [entry["new"] for entry in record["servicings"]] == [0, 1], "then the run reset"
+    assert [entry["new"] for entry in record["servicings"]] == [0, 1, 0], "the run reset"
     assert [entry["outcomes"] for entry in record["servicings"]] == [
         ("duplicate",),
         ("returned_records",),
+        ("duplicate",),
     ], "§17 arm 12: a serviced duplicate is reported as one"
-    assert len(planner.calls) == 3, "the round after the unproductive one was admitted"
+    assert len(planner.calls) == 4, (
+        "the round after each unproductive one was admitted — three calls is the "
+        "answer a loop that never reset the run would give"
+    )
     assert record["stop"] == StopReason.SETTLED.value, "and the attempt answered"
     assert "deposit-1" in _ids(responded.turn.memories)
     assert responded.stopped_while_asking is False
@@ -889,3 +902,40 @@ async def test_a_turn_that_dies_carries_no_attempt_out_of_the_loop_to_persist() 
         await _turn(memory, planner)
 
     assert len(planner.calls) == 1, "and the turn produced no carrier to persist"
+
+
+async def test_a_clock_that_steps_back_never_lowers_the_ledger_a_boundary_observed() -> None:
+    """§12: ``working`` is accumulated at each round boundary and never subtracted from.
+
+    ADR-0249 §5's monotonicity "binds entire: **no replan, branch, recovery or phase
+    transition resets either, and no implementation subtracts from one**", and §12
+    accumulates the figure "at each round boundary from the injected clock".
+
+    **Flooring one subtraction at zero satisfies the type and not the clause**, which
+    is the regression this arm pins. The injected clock supplies wall-clock instants
+    and guarantees no monotonicity (ADR-0009), so a reading taken after a higher one
+    can be lower while still being positive: here the turn's first gate observes ten
+    seconds consumed and the clock then steps back to five during the second planner
+    call. An implementation that recomputed the ledger from the turn's entry would hand
+    the store five — **below a figure it had already gated on**, which no ``ge=0``
+    bound on :class:`~ai_assistant.core.types.AttemptEffort` can catch, and which would
+    quietly return to a later turn an interval this one had already spent.
+
+    Raised as a ``blocker`` by adversarial round 3 and fixed rather than waived.
+    """
+    memory = await _chain()
+    stepping = _Elapsed(timedelta(seconds=10))
+
+    def _steps_back(ordinal: int) -> None:
+        """Walk the clock backwards **during** the second call, after the first gate."""
+        if ordinal == 2:
+            stepping.elapsed = timedelta(seconds=5)
+
+    planner = _Script(requests=[_hop("M1"), _hop("M2"), None], on_call=_steps_back)
+
+    responded = await _turn(memory, planner, now=stepping, attempt=_carried(timedelta(minutes=1)))
+
+    assert len(planner.calls) == 3, "the turn ran its rounds and settled"
+    assert _left(responded).effort.working == timedelta(minutes=1, seconds=10), (
+        "the highest figure a boundary observed, and never the later lower reading"
+    )
