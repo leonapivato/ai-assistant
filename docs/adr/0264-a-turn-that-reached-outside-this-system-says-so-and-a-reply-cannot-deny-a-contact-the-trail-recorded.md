@@ -276,12 +276,19 @@ instead.
 
 > **Normative.** **This decision establishes a contact from a `WEB_SEARCH` call and from
 > nothing else.** A driven step establishes none, whatever its binding, its disposition or
-> its addressed status; no component mints an `OutboundStatement` from an `EgressBinding`,
-> from `Disposition.EXECUTED`, from `StepStatus.SUCCEEDED` or from any combination of them;
-> and no turn is `REACHED` on a send's account. **But such a turn is not `NOT_REACHED`
-> either** (§2): `EXECUTED` is consistent with a byte on the wire and with none, so a turn
-> whose only outbound act was a driven send is `INDETERMINATE`, and the statement says this
-> system cannot tell rather than that nothing was reached.
+> its addressed status. **The prohibition is over `REACHED` and over `destinations`, and
+> over nothing else**: no component derives `REACHED`, and none adds an
+> `OutboundDestination`, from an `EgressBinding`, from `Disposition.EXECUTED`, from
+> `StepStatus.SUCCEEDED` or from any combination of them, so no turn is `REACHED` on a
+> send's account and no class is named on one.
+
+> **Normative.** **But such a turn is not `NOT_REACHED` either, and §2's fold is where that
+> is decided** (§2's egress clause). `EXECUTED` is consistent with a byte on the wire and
+> with none, so a turn whose only outbound act was a driven send is `INDETERMINATE` with
+> `destinations` empty — the statement saying this system cannot tell, rather than that
+> nothing was reached. **That is this section working and not an exception to it**: what
+> §2 takes from the step is the *absence* of a ground for either answer, which is the one
+> thing `EXECUTED` does establish.
 
 > **Normative.** **The reason is that no value this system holds establishes it**, and
 > ADR-0192 §4 says so in terms: `SUCCEEDED` is *"bounded by ADR-0031 §4 to exactly three
@@ -428,10 +435,14 @@ seam's addition cheap — a second member rather than a second carrier minted fr
 
 > **Normative.** The value is assembled **once per turn**, inside
 > `ai_assistant.orchestration`, from the carriers §2 and §4 name and from nothing
-> else — the contact classification each performing site computed (§2), and the
-> admitted ids each admitting site recorded (§4). On ADR-0244 §7's resume those are two
-> different sites and the engine is where the pair is brought together; no site
-> recomputes another's fact, and nothing is inferred at the assembly point. It travels to
+> else — the contact classification each performing site computed (§2), the
+> admitted ids each admitting site recorded (§4), and **the executed-egress fact the
+> component that drove the step computed** (§2's egress clause), which is a typed
+> classification carried out of the drive like the other two and never an
+> `EgressBinding`, a `Disposition` or a `StepExecution` read at the fold. On ADR-0244 §7's
+> resume the first two are two different sites and the engine is where they are brought
+> together; no site recomputes another's fact, and nothing is inferred at the assembly
+> point. It travels to
 > the composing stage as data — the shape ADR-0242 §7 fixes for its
 > own carrier and ADR-0228 §10 for its own — adds no member to any Protocol, and is
 > **never recomputed downstream**.
@@ -539,8 +550,8 @@ when they do not, the user can see it.
 
 > **Normative.** **A surface renders one statement composed from the value**, one per
 > `OutboundReach` member — **beside the reply where one exists and never in place of it,
-> and standing alone on a pass that composed none**, which on that pass can only be
-> `REACHED` or a contact-carrying `INDETERMINATE`. On `REACHED`: that
+> and standing alone on a pass that composed none**, where by §1 and §7's `None` rule the
+> only value such a pass can carry is `REACHED`. On `REACHED`: that
 > this turn reached outside this system, naming each class in `destinations` in the
 > vocabulary's declared order, and how many records that **brought into this turn's supply**
 > — including that it brought none, where `records` is `0`. On `NOT_REACHED`: that this turn
@@ -656,12 +667,14 @@ this here would reach into a decision this ADR has not read.
 >
 > 1. **Contract and `orchestration`.** `OutboundReach`, `OutboundDestination`,
 >    `OutboundStatement` and `TurnOutcome.outbound_statement` in `core/types.py`; §2's establishment at every site
->    that performs a `WEB_SEARCH` call and its fold, the driven egress step included; §4's
->    admitted sets and §6's assembly; the three composing fragments and
+>    that performs a `WEB_SEARCH` call, and its fold — including the executed-egress
+>    classification, which `orchestration.runner`'s `StepRunner` computes and carries out of
+>    the drive; §4's admitted sets and §6's assembly; the three composing fragments and
 >    `_PLAN_IS_ABOUT_ACTING`'s widened condition.
 >    **It is one lane under ADR-0137 §1 and expressly not under §2**: every piece of new
->    machinery this decision builds — the establishment, the carriers, the assembly, the
->    fragment — is in `ai_assistant.orchestration` and in no other subsystem, and what
+>    machinery this decision builds — the establishment, the egress classification, the
+>    carriers, the assembly, the fragments — is in `ai_assistant.orchestration` and in no
+>    other subsystem, `StepRunner` included, and what
 >    lands in `core/types.py` is three type declarations and a `None`-defaulting field,
 >    which is not *"a store, a loop, a codec, a producer, a policy engine"* but the
 >    adaptation §1 puts outside its bound. §2 is unavailable here and is not invoked: it
@@ -806,12 +819,16 @@ this here would reach into a decision this ADR has not read.
 >    servicing's record rather than at the performing site cannot tell the first from the
 >    third (§2).
 > 8. **A driven egress step establishes no contact and is not nothing either** (§3): a step
->    whose `ActionRequest` carried an `EgressBinding`, whose disposition is `EXECUTED` and
->    whose addressed `StepExecution` is `SUCCEEDED` carries `reach` **`INDETERMINATE`** on a
->    turn with no established search contact, with `destinations` empty. An implementation
->    that mints a contact from that triple fails this arm, **and so does one that answers
->    `NOT_REACHED`** — the send may have left, and saying it did not would be the false
->    statement §1 ranks below silence.
+>    whose `ActionRequest` carried an `EgressBinding` and whose disposition is `EXECUTED`
+>    carries `reach` **`INDETERMINATE`** on a turn with no established search contact, with
+>    `destinations` empty — **asserted across every addressed `StepExecution` status
+>    `EXECUTED` admits and not on `SUCCEEDED` alone**, because §2 keys the fold on the
+>    disposition and an implementation gating on `SUCCEEDED` would answer `NOT_REACHED` for
+>    a failed send that may still have transmitted. A step that was refused, denied or never
+>    driven contributes nothing and leaves the turn `NOT_REACHED`. An implementation that
+>    mints a contact from the executed step fails this arm, **and so does one that answers
+>    `NOT_REACHED`** for it — the send may have left, and saying it did not would be the
+>    false statement §1 ranks below silence.
 > 9. **A turn that made no call at all** — #2365's shape, `servicing=not_asked`. The
 >    statement is carried with `reach` `NOT_REACHED`, `destinations` **empty** and `records`
 >    `0`; `search_not_serviced` is `None`; the prompt carries the `NOT_REACHED` fragment and
