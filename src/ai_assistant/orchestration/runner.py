@@ -56,6 +56,7 @@ from pydantic import ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuditError,
+    AuthorizationError,
     EgressBindingError,
     PermissionDeniedError,
     PlanningError,
@@ -63,6 +64,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionRequest,
+    AuthorizationDisposition,
     CarriedProvenance,
     CoverageUnrecordedBinding,
     Disposition,
@@ -77,6 +79,7 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolCall,
 )
+from ai_assistant.orchestration.authorizing import proposal_of, proposed_authorization
 from ai_assistant.orchestration.capability_alias import resolve_capability
 from ai_assistant.orchestration.selection import (
     Preference,
@@ -93,6 +96,7 @@ if TYPE_CHECKING:
         ActionPolicy,
         AuditTrail,
         EgressBinder,
+        GoalAuthorizationStore,
         PlanStore,
         ToolRegistry,
     )
@@ -275,6 +279,18 @@ def _detached_state(state: ExecutionState) -> ExecutionState:
     except ValidationError as exc:
         msg = "the execution state did not survive revalidation, so it is not the one named"
         raise PlanningError(msg) from exc
+
+
+#: How far back :meth:`StepRunner._settle` reads for the proposal an answer names.
+#:
+#: ADR-0254 §16 closes the store at eight signatures and none of them is keyed on
+#: `confirmation`, so the row a `CONFIRM` proposed is found by reading `recent`,
+#: which is newest-first. A proposal is by construction recent relative to the
+#: answer it waits for — a `CONFIRM` carries its own `expires_at` and a stale one is
+#: refused before the settlement is reached — and **not finding it establishes
+#: nothing and retracts nothing** (:meth:`StepRunner._settle`), so the figure bounds
+#: a read rather than an authority.
+_PROPOSAL_LOOKBACK = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +565,8 @@ class StepRunner:
         trail: AuditTrail,
         executor: StepExecutor,
         binder: EgressBinder | None = None,
+        authorizations: GoalAuthorizationStore | None = None,
+        episode_retention: timedelta | None = None,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
         confirmation_ttl: timedelta | None = None,
@@ -571,6 +589,18 @@ class StepRunner:
         rather than recomputed when an answer arrives, so a question is answered
         under the lifetime it was asked under and a later change to this setting
         leaves already-parked confirmations alone.
+
+        ``authorizations`` is the seam ADR-0254 §15 names as the **only** writer of
+        an `Authorization`: *"An `Authorization` is written and settled by
+        `orchestration` and by nothing else"*. **A stage constructed without one
+        proposes nothing and settles nothing**, which is the fail-closed default and
+        the shape ADR-0254 §6 gives a policy holding no `GoalAuthorizations` — every
+        `CONFIRM` then resolves exactly as it does today and the one call is
+        authorised by ADR-0148 §3's route (a). ``episode_retention`` rides beside it
+        because ADR-0256 §1 makes the ladder's third rung read that one deployment
+        value; ADR-0256 §2 adds **no `Settings` field** for an authorization and this
+        stage invents none either, and ``None`` there is *"keep forever"*, on which
+        no row is written at all (ADR-0256 §3).
 
         ``tool_preference`` is the other one, and it is ADR-0144 §4's preference
         sequence: the ordered tool ids that break a tie **key 6 has reached** —
@@ -612,6 +642,8 @@ class StepRunner:
         self._trail = trail
         self._executor = executor
         self._binder = binder
+        self._authorizations = authorizations
+        self._episode_retention = episode_retention
         self._clock = checked_clock(now, owner="StepRunner")
         self._id_factory = id_factory
         self._confirmation_ttl = confirmation_ttl
@@ -974,6 +1006,11 @@ class StepRunner:
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         decision = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
+        # ADR-0254 §1: the answer settles the row the question was proposed with.
+        # It runs after the resolving decision is recorded, so ``settled_at`` is that
+        # decision's own instant and the two records agree; and before the claim, so
+        # nothing is dispatched under an authority the settlement then refused.
+        await self._settle(confirmed, decision, approved=approved)
         # ADR-0249 §12's boundary: the answer is recorded and the step is not yet claimed
         # under it. Every refusal this method can still raise has already fired above — a
         # stale confirmation, a mismatched binding, an ungrantable act — so past this line
@@ -1499,7 +1536,133 @@ class StepRunner:
                 "recorded, so it is not a record of what happened"
             )
             raise AuditError(msg)
+        # The proposal is taken against the **trail's own copy**, so the row's
+        # `confirmation` and `proposed_at` name a decision that demonstrably exists
+        # and carries those instants. ADR-0254 §1 writes the record "before the
+        # question is put, not after the answer", and this is the last point before
+        # the caller renders one.
+        await self._propose(request, recorded)
         return recorded
+
+    async def _propose(self, request: ActionRequest, decision: PermissionDecision) -> None:
+        """Write the `Authorization` this recorded `CONFIRM` proposes, if any.
+
+        ADR-0254 §1's **path (i)**, and §15's writer clause — an `Authorization` is
+        *"written and settled by `orchestration` and by nothing else"*. Which
+        `CONFIRM` proposes a row is :func:`~ai_assistant.orchestration.authorizing.
+        proposed_authorization`'s four conditions; this method supplies what those
+        are taken against and writes what they yield.
+
+        **Only a question proposes a row.** A ruling that is not a `CONFIRM` puts no
+        question, and a `CONFIRM` recorded with ``resolves`` set is the *resolution*
+        of one — :meth:`resume`'s own record — so neither proposes. A second row
+        against a decision that was itself an answer would be a proposal nobody was
+        ever shown.
+
+        **A stage holding no store proposes nothing**, which is the fail-closed
+        default (:meth:`__init__`).
+
+        **A refusal or a fault withholds the row and nothing else.** ADR-0254 §1
+        already rules the outcome of proposing none: *"`Confirmation.authorization`
+        is absent (§11), and the answer establishes nothing: the `CONFIRM` is
+        resolved and the one call is authorised by ADR-0148 §3's route (a)"*. So the
+        cost of a store that refused or could not be written is an authority the
+        user has to grant again, never one granted without them, and failing the
+        dispatch instead would refuse a call the policy allowed on the strength of a
+        second store. The refusal is logged **by class and by no value** (ADR-0145
+        §8), the store's messages being about rows rather than about arguments.
+        """
+        if self._authorizations is None or request.goal is None:
+            return
+        if decision.ruling.outcome is not PermissionOutcome.CONFIRM:
+            return
+        if decision.resolves is not None:
+            return
+        goal = await self._plans.get_goal(request.goal)
+        try:
+            standing = await self._authorizations.standing(request.goal)
+            row = proposed_authorization(
+                request,
+                decision,
+                goal=goal,
+                retention=self._episode_retention,
+                standing=standing,
+                id_factory=self._id_factory,
+            )
+            if row is None:
+                return
+            await self._authorizations.record(row)
+        except AuthorizationError as exc:
+            _log.warning(
+                "authorization_not_proposed",
+                confirmation_id=decision.id,
+                tool_id=decision.tool.id,
+                refused_by=type(exc).__name__,
+            )
+            return
+        _log.info(
+            "authorization_proposed",
+            confirmation_id=decision.id,
+            tool_id=decision.tool.id,
+            authorization_id=row.id,
+            supersedes=row.supersedes is not None,
+        )
+
+    async def _settle(
+        self, confirmed: PermissionDecision, resolving: PermissionDecision, *, approved: bool
+    ) -> None:
+        """Settle the row ``confirmed`` proposed, by the answer just recorded.
+
+        ADR-0254 §1's five edges, of which an answer takes two: *"An approval
+        settles `ESTABLISHED`; a refusal settles `DECLINED`"*. **An answer arriving
+        at or after `expires_at` establishes nothing** — the store settles such a
+        row `EXPIRED` first, being one of exactly two operations that settle a
+        lapsed proposal, and the requested edge is then evaluated from where the row
+        stands, so a late approval is answered `NOT_AT_SOURCE` (§1, §12).
+
+        ``settled_at`` is the **resolving decision's own ``decided_at``**, so the
+        row and the trail agree about when the authority came into being. ADR-0254
+        §7's trail check refuses a route-(d) row whose ``settled_at`` is *after* the
+        ruling's ``decided_at``, and §1 permits equality at the lower end — *"a
+        record is live when … the clock stands at or after its ``settled_at``"* — so
+        taking a second, later reading here would be the one value that could put
+        the two out of step for no gain.
+
+        **The store carries no lookup by `confirmation`** (ADR-0254 §16's eight
+        signatures), so the row is found by reading back over `recent`; not finding
+        it settles nothing, which loses the standing authority and leaves the
+        answered call authorised by route (a) exactly as §12 rules for an answer that
+        establishes nothing. That is the safe direction in both halves: nothing is
+        established that the user did not answer, and nothing already recorded is
+        retracted.
+        """
+        if self._authorizations is None:
+            return
+        settled_to = (
+            AuthorizationDisposition.ESTABLISHED if approved else AuthorizationDisposition.DECLINED
+        )
+        try:
+            rows = await self._authorizations.recent(limit=_PROPOSAL_LOOKBACK)
+            row = proposal_of(rows, confirmed.id)
+            if row is None:
+                return
+            settlement = await self._authorizations.settle(
+                row.id, to=settled_to, settled_at=resolving.decided_at
+            )
+        except AuthorizationError as exc:
+            _log.warning(
+                "authorization_not_settled",
+                confirmation_id=confirmed.id,
+                refused_by=type(exc).__name__,
+            )
+            return
+        _log.info(
+            "authorization_settled",
+            confirmation_id=confirmed.id,
+            authorization_id=row.id,
+            to=settled_to,
+            settlement=settlement,
+        )
 
     def _deadline(self, ruling: PermissionRuling, decided_at: datetime) -> datetime | None:
         """The instant past which this ruling, if a ``CONFIRM``, stops being answerable.
