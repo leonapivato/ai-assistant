@@ -724,9 +724,13 @@ The owner's two cases are arms 1 and 2.
    Assert that each refusal writes nothing, that the **last two carry a class distinct from the
    stale-write class** (§5), and that a goal at the bound holds every action it held before the
    refusal — **no member elided, no count advanced**. An `IntendedActionMinting` two of whose
-   `actions` carry one `id` is **not constructible** (§5). And `record_intended_actions` refuses,
-   writing nothing, an action whose `serves` names an identifier of **no** element of the goal's
-   current interpretation and one whose `serves` names an element of a **different** goal.
+   `actions` carry one `id` is **not constructible** (§5). And `record_intended_actions` refuses a
+   `serves` value naming an identifier of **no** element of the goal's current interpretation, and
+   one naming an element of a **different** goal — each asserted over a **two-action** command
+   whose **second** action carries the bad value, so that the refusal is shown to be
+   all-or-nothing rather than a partial append: the goal's `intended_actions` and its `version`
+   are **byte-for-byte what they were**, and the raised class is the same non-stale
+   `PlanningError` the three refusals above carry and **not** the stale-write class.
 6. **The record round-trips and the export closes.** A goal carrying two intended actions
    round-trips through `model_dump()` and construction; `PlanExport` carries them inside `goals`
    with no new member; `delete_goal` removes them with the goal; and a stored goal written before
