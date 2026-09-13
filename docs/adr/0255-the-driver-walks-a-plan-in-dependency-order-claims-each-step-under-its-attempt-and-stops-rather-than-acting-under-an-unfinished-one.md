@@ -291,22 +291,45 @@ per dispatch and not per plan.
 
 > **Normative — a check whose operands a later step will produce is *deferred*, and a deferred
 > check is not a failed one. This partially supersedes ADR-0254 §14** in the one scope §16
-> states. A phase-4 check **of a step** is **deferred** where any operand it reads is a value a
-> step of the **same plan** that appears **earlier in `steps`** will produce and **has not been
-> disposed of**: a `depends_on` member still `PENDING`, a `when` over an element an interpretation
-> of this plan settles from such a step's output, a `resolves` naming such a step's `output`, and
-> the coverage comparison over a request such a reference completes. **A deferred check neither
-> blocks the advance to `AttemptPhase.EXECUTE` nor triggers a replan**, and it is decided at that
-> step's own dispatch, by §1's evaluation, on ADR-0252 §6's *"at the moment of dispatch"*.
+> states. A phase-4 check **of a step** is **deferred** where any operand it reads is a value
+> **this same plan will produce before that step is dispatched** and has not produced yet. There
+> are exactly two such producers, and both are the plan's own:
+>
+> - **a step of this plan appearing earlier in `steps`** that has not been disposed of — a
+>   `depends_on` member still `PENDING`, a `resolves` naming such a step's `output`, a `when` over
+>   an element an interpretation settles from such a step's output, and the coverage comparison
+>   over a request such a reference completes;
+> - **an interpretation of this plan that has not been performed** — including one carrying a
+>   **`record`**, which ADR-0253 §8 performs *"before the plan's first step is dispatched"* and
+>   which §1 places **inside the walk** and therefore **after** phase 4. A `when` over an element
+>   such an interpretation settles is deferred **on the first step of the plan** exactly as it is
+>   on a later one.
+>
+> **A deferred check neither blocks the advance to `AttemptPhase.EXECUTE` nor triggers a
+> replan**, and it is decided at that step's own dispatch, by §1's evaluation, on ADR-0252 §6's
+> *"at the moment of dispatch"*.
 
-> **Normative — every other check keeps ADR-0254 §14's rule entire.** A check whose operands are
-> all available at phase 4 and that **fails** is a failed deterministic check and §14's limb binds
-> unchanged: *"the attempt stays `RUNNING` and the plan is replanned within the attempt … Where no
-> replan can satisfy the check, the attempt is left for A3's `BLOCKED` producer."* A plan whose
-> **first** step's `when` no row satisfies, a `resolves` naming a step outside its `depends_on`, an
-> argument neither literal nor referenced nor system-supplied, and an uncovered argument on a step
-> waiting for nothing are each **failures** and none is deferred. **The advance to `EXECUTE` is
-> therefore: every check either passed or deferred.**
+> **Normative — every other check keeps ADR-0254 §14's rule entire, and an uncovered argument
+> keeps its own limb.** A check whose operands are all available at phase 4 and that **fails** is
+> a failed deterministic check, and §14's limb binds unchanged: *"the attempt stays `RUNNING` and
+> the plan is replanned within the attempt … Where no replan can satisfy the check, the attempt is
+> left for A3's `BLOCKED` producer."* A `when` that **no row of the goal satisfies** on a step
+> waiting for nothing this plan will produce, a `resolves` naming a step outside its `depends_on`,
+> and an argument neither literal nor referenced nor system-supplied are each **failures** and none
+> is deferred.
+
+> **Normative — an uncovered argument is neither a failure nor a deferral, and ADR-0254 §14's
+> coverage limb binds entire.** That section rules it separately and this decision does not touch
+> it: *"**A step's arguments are not covered** — the user is asked through the ordinary `CONFIRM`
+> park (ADR-0037 §4), and the attempt's move to `AttemptState.AWAITING_AUTHORIZATION` is **the one
+> ADR-0249's own lane already makes**."* **No lane replans on an uncovered argument**, and no
+> clause of this decision routes one to §14's failure limb — replanning could not supply the
+> authorization the check is missing, so it would loop on a question only the user can answer.
+
+> **Normative — phase 4 therefore has four dispositions and not two.** A check **passed**; a check
+> **deferred** (above); a check **failed**, which is §14's replan limb; and an argument **not
+> covered**, which is §14's `CONFIRM` limb. **The attempt advances to `AttemptPhase.EXECUTE` where
+> every check either passed or was deferred**, and not otherwise.
 
 **Without this scope ADR-0254 §14 refuses every dependent plan there is, which is the one thing
 it cannot have meant.** Step 2's dependency on step 1 is unsatisfied at phase 4 for *every* plan
@@ -451,6 +474,24 @@ was settled about the step rather than by where in the plan it sat.
 > append-only — *"an `add_*` member appends its identifier … and no member of `AttemptTransition`
 > removes, reorders or replaces an identifier"* — and membership in it is a comparison against
 > one stored row rather than a scan.
+
+> **Normative — an execution belongs to exactly one attempt, and `commit_attempt` is where that
+> is made true.** `PlanStore.commit_attempt` **refuses an `add_execution_id` naming an execution
+> that any attempt of that goal already carries**, with the error class §3's conjunct raises. This
+> is a second **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
+> what makes §3's conjunct a binding rather than a coincidence: ADR-0249 §12's append-only rule —
+> *"an identifier the tuple already holds is ignored rather than duplicated or refused"* — governs
+> a **repeat of the same append on the same attempt** and says nothing about two attempts, so
+> without this clause one execution could sit in both an ended attempt A and a live attempt B and
+> a claim naming B would pass every stated check. **Append-only prevents removal, not multiple
+> ownership**, and the conjunct needs the second.
+
+> **Normative — the exclusivity is what makes §5's recovered resume total.** That section resolves
+> a parked step's attempt as *"the attempt whose `execution_ids` names that execution"*; with
+> ownership exclusive there is **exactly one** such attempt or none, so the resolution is a
+> function rather than a choice and §5's refusal covers the only other case. **No lane resolves an
+> ambiguous ownership by picking the live one, the newest one or any one**, and a store that
+> somehow holds two is a store this clause makes unreachable through `commit_attempt`.
 
 > **Normative — the append precedes the first claim, and a lane that reverses the order finds
 > every claim refused rather than a gap.** `orchestration` commits `add_execution_id` for an
@@ -1062,14 +1103,39 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > direction and the one a reader cannot mistake.
 
 > **Normative — an unexpected finding licenses one further investigation round within the same
-> attempt, and this partially supersedes ADR-0251 §4's condition (j).** That condition reads *"The
-> attempt's `phase` is `AttemptPhase.INVESTIGATE`"* and bars iteration anywhere else. It gains one
-> alternative: **(j) is satisfied where the attempt's phase is `INVESTIGATE`, or where the turn
-> holds a walk outcome carrying an unexpected finding.** **Every other condition of ADR-0251 §4
-> binds verbatim and is checked unchanged** — (a), (b), (c), (d) and (g) as ADR-0228 §2 wrote
-> them, **(f′)'s planner-call allowance**, **(h)'s working allowance less the reserve**, and
-> **(i)'s unproductive-rounds test** — so the licensed round is admitted only while the attempt's
-> own ledger admits it.
+> attempt, and it satisfies ADR-0251 §4's whole trigger group in place of a serviced read.**
+> ADR-0251 §4 admits a further round on a **read** trigger — (b) *"The plan carried a
+> `read_request`"*, (c) it was serviced, (d) the servicing completed — and on (j) *"The attempt's
+> `phase` is `AttemptPhase.INVESTIGATE`"*. **A re-investigation licence satisfies (b), (c), (d)
+> and (j) together**, because the fact it carries is of the same kind those four exist to
+> establish: **this attempt has learned something since it last planned**, here from a completed
+> walk rather than from a serviced read.
+
+> **Normative — every guard of ADR-0251 §4 binds verbatim and is checked unchanged.** **(a)** the
+> turn's operation declares a planning budget; **(g)** the turn is within that budget at the
+> moment of the check; **(f′)** the attempt has made fewer `Planner.plan` calls than its kind's
+> planner-call allowance; **(h)** its `working` is strictly below the working allowance **less the
+> reserve**; **(i)** it has not just completed its second consecutive unproductive round. **A
+> licence lifts no budget and no allowance**, and an attempt whose ledger is spent gets no
+> licensed round.
+
+> **Normative — the licence admits one round, and what follows is ADR-0251's own loop unchanged.**
+> A round the licence admitted returns a plan that may itself carry a `read_request`; where it
+> does and the servicing completes, **further rounds are admitted by (b), (c) and (d) as written**
+> and the licence is spent. **No licence admits two rounds**, and no implementation re-derives one
+> from the same walk.
+
+> **Normative — ADR-0251 §1's occupancy clause is partially superseded in the same scope.** That
+> section rules *"**Every round of one attempt's investigation sits inside one occupancy of
+> `AttemptPhase.INVESTIGATE`**"* and *"There is no re-entry into `INVESTIGATE` from a later phase,
+> and no clause of this decision creates one."* **A round sits inside one occupancy of
+> `INVESTIGATE` *or* under a re-investigation licence**, and **no round moves the phase in either
+> case** — §1's own rule, and the clause forbidding re-entry into `INVESTIGATE` binds **verbatim**
+> and is obeyed rather than lifted: a licensed round **does not re-enter that phase**, which is
+> exactly why the licence and not the phase is what places it. **§1's every other clause binds
+> entire**: a round is one planner call with its servicing, the turn is assembled once, the supply
+> stays monotone across a turn's rounds and is inherited by no later turn, and each round's call
+> receives the `GoalBrief` as it stands.
 
 > **Normative — the allowance is charged and never reset, and no attempt is opened.** ADR-0251
 > §13 binds entire: *"**A replan never resets an allowance.** A revision within an attempt
@@ -1347,7 +1413,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    the arm that pins the binding**: with execution E opened under attempt A, A committed `ENDED`,
    and a second attempt **B non-terminal on the same goal**, a claim for E naming **B** is
    **refused** — every goal-level fact about B is satisfactory and B's `execution_ids` does not
-   carry E, which is the only thing that decides it (§3).
+   carry E, which is the only thing that decides it (§3). **And the arm that closes the bypass**,
+   in the shared `PlanStore` conformance suite: `commit_attempt(add_execution_id=E)` on **B**
+   after A already holds E is **refused**, so the state in which E belongs to two attempts —
+   under which a claim naming B would pass every conjunct — **cannot be reached through the
+   store** (§3). A paired arm asserts the append is still idempotent on the attempt that owns it,
+   which is ADR-0249 §12's own clause and is untouched.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
    goal revision is not the stored one, and none whose attempt is absent, does not carry this
@@ -1387,12 +1458,19 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     answerable, and the walk stopped. The paired arm answers **`approved=False`** on the same
     state and asserts the opposite: `resume` **is** called and the step is
     `SKIPPED`/`APPROVAL_DENIED`, because a denial is gated on nothing (§5).
-12. **Phase 4 admits a deferred check and refuses a failed one** — the two-step dependent plan of
+12. **Phase 4's four dispositions, one arm each.** **Deferred**: the two-step dependent plan of
     arm 1 passes phase 4 and the attempt advances to `AttemptPhase.EXECUTE`, **with step 2's
-    dependency and `when` both unsatisfied at that moment**; and a one-step plan whose `when` no
-    row satisfies, waiting on no earlier step, **fails** phase 4 and is replanned under ADR-0254
-    §14's unchanged limb. The arm is what separates the scope this decision supersedes from the
-    rule it leaves standing, and arm 1's plan is driven **through** phase 4 rather than around it.
+    dependency and `when` both unsatisfied at that moment**; and — the case a step-only rule
+    misses — a **one-step** plan whose single step's `when` requires the verdict of an
+    interpretation of that same plan carrying a **`record`**, over a goal holding **no**
+    qualifying row, **also passes**, because ADR-0253 §8 performs that interpretation before the
+    first step is dispatched and §1 places it inside the walk. **Failed**: a one-step plan whose
+    `when` no row satisfies and which waits on nothing this plan produces is replanned under
+    ADR-0254 §14's unchanged limb. **Not covered**: a one-step transmitting plan with complete
+    literal arguments and no covering authorization takes §14's `CONFIRM` park and the attempt
+    commits `AWAITING_AUTHORIZATION` — **and is not replanned**, which is the disposition this
+    decision routes nothing away from. **Passed**: a one-step plan needing none of it advances.
+    Arm 1's plan is driven **through** phase 4 rather than around it.
 
 13. **An unexpected finding is investigated inside the same attempt, and the ledger is charged**
     — the concrete case, end to end on fakes. A goal to book a campsite; a plan whose step 1
@@ -1409,7 +1487,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     is admitted and the turn composes instead; with the walk **stopped** rather than skipped — a
     park, an `INDETERMINATE`, a deadline — **no licence is carried and no round is admitted**; and
     with the attempt's phase at `INVESTIGATE`, the round is admitted by (j)'s original limb with no
-    licence needed.
+    licence needed. **And the arm that pins the trigger group**: the driven plan carries
+    **`read_request=None`**, so ADR-0251 §4's (b), (c) and (d) are each unsatisfied on their own
+    terms and the round is admitted by the licence alone — which is what a supersession of (j)
+    by itself would not have bought. A further paired arm asserts the licence admits **one** round:
+    where the round it admitted returns a plan carrying a `read_request` that is serviced, the next
+    round is admitted by (b), (c) and (d) as written, and where it returns none, no second round
+    is admitted.
 
 **Full — M34, owed there and not established here.**
 
@@ -1591,8 +1675,12 @@ clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, a
 questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
 than leaving a reader to check.
 
-**The records it owes are dated notes and no `Status` line moves** (ADR-0082 §7): the entries §16
-states are written with this document and not after it.
+**The records it owes land in the same change as this document** (ADR-0082 §7): **ADR-0254's and
+ADR-0251's `Status` pairs** — each carrying its scope, each dropping `Accepted` so a prefix match
+cannot misread the replaced part as live (ADR-0070 §3, ADR-0001) — are written with it and not
+after it, and so are the dated notes §16 states. That is the atomic pair ADR-0082 §7 permits while
+this decision stands `Proposed`, and it is why this PR touches three files where its predecessors
+touched one.
 
 ## Consequences
 
