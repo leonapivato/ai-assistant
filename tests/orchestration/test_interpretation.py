@@ -1,5 +1,12 @@
 """ADR-0249 §7's ground resolution and its refusals, at the one place they live.
 
+**ADR-0253 §7's identity rides the same resolution**, so its arms are here too: an
+element recorded anew is minted a ``GoalElement.id`` and composed an ``applicability``
+from the four axes the planner proposed, a **retained** element keeps both in the copy
+retention makes, and a **restated** one is a different proposition and is minted another.
+The plan-side half of that decision — §9's substitution of a condition label for the id
+this module minted — is ``test_loop_plan_labels.py``.
+
 ``orchestration`` **refuses a ground it cannot resolve**, and
 :func:`~ai_assistant.orchestration.interpretation.recorded_revision` is where that
 refusal is taken. What lives here is every arm of §16 that is a statement about the
@@ -26,6 +33,8 @@ import pytest
 from test_loop_reads import _belief
 
 from ai_assistant.core.types import (
+    MAX_APPLICABILITY_VALUES,
+    EvidenceApplicability,
     Goal,
     GoalBrief,
     GoalElement,
@@ -35,6 +44,7 @@ from ai_assistant.core.types import (
     ProposedElement,
     ProposedUnderstanding,
     Provenance,
+    TimeWindow,
 )
 from ai_assistant.orchestration.interpretation import RecordedUnderstanding, recorded_revision
 
@@ -560,3 +570,137 @@ def test_a_dropped_element_is_a_none_and_its_siblings_keep_their_positions() -> 
         "quiet after ten",
     ]
     assert understood.positions["criteria"] == (0, None, 1)
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0253 §7 — the element gains an identity and an applicability             #
+# --------------------------------------------------------------------------- #
+
+
+def test_every_element_a_revision_records_anew_carries_a_minted_id() -> None:
+    """§7: ``orchestration`` mints the id "once, at the instant the element is first
+    recorded", and "every element of every revision ``orchestration`` records after this
+    decision carries one" — across all three tuples, not only ``conditions``.
+    """
+    revision = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            constraints=(ProposedElement(text="under $100", ground=Ground.INFERRED),),
+            criteria=(ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),),
+            conditions=(ProposedElement(text="the forecast is dry", ground=Ground.INFERRED),),
+        )
+    )
+
+    minted = [
+        element.id
+        for group in (revision.constraints, revision.criteria, revision.conditions)
+        for element in group
+    ]
+    assert minted == ["e-1", "e-2", "e-3"], "one id per new element, from the loop's own factory"
+    assert len(set(minted)) == len(minted), (
+        "and distinct, which is what GoalInterpretation's own uniqueness validator needs"
+    )
+
+
+def test_a_retained_element_keeps_its_id_and_a_restated_one_is_minted_another() -> None:
+    """§14 arm 12's retention half: retention copies the identity, restatement mints one.
+
+    §7: the id is "**not** re-minted on a later revision that **retains** the element …
+    the id and the applicability travel in that copy", because ADR-0249 §7's retention
+    copies an element whole. "A **restated** element is a new element and is minted a new
+    id, because a revision that restates a proposition has stated a different one."
+    """
+    held = GoalElement(
+        text="under $100",
+        ground=Ground.USER_STATED,
+        span="under $100",
+        id="e-original",
+        applicability=EvidenceApplicability(topics=("budget",)),
+    )
+    goal = _goal(_opened(constraints=(held,)))
+
+    retained = _revised(
+        ProposedUnderstanding(retains_outcome=True, constraints=(ProposedElement(retains="C1"),)),
+        goal=goal,
+    )
+    restated = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            constraints=(ProposedElement(text="under $100", ground=Ground.INFERRED),),
+        ),
+        goal=goal,
+    )
+
+    assert retained.constraints == (held,), "copied whole: the id and the region travel with it"
+    assert restated.constraints[0].id == "e-1", "a restatement is a different proposition"
+    assert restated.constraints[0].applicability is None, "and states its own region, or none"
+
+
+def test_an_element_proposing_no_axis_is_recorded_with_no_applicability() -> None:
+    """§7, §14 arm 18's first half: "declaring nothing … records an absent applicability".
+
+    Such an element "is a legal element that imposes no coverage requirement" (ADR-0252
+    §6 test 1) — which is what every element written before this decision is.
+    """
+    revision = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(ProposedElement(text="the forecast is dry", ground=Ground.INFERRED),),
+        )
+    )
+
+    assert revision.conditions[0].applicability is None
+
+
+def test_the_four_axes_a_planner_proposes_compose_the_elements_region() -> None:
+    """§7: "the planner proposes the applicability and ``orchestration`` records it".
+
+    The axes are the ones ADR-0252 §2 already spells, composed under that section's own
+    validator — the region a condition's coverage test then reads (ADR-0252 §6 test 1).
+    """
+    window = TimeWindow(start=_NOW, end=_LATER)
+    revision = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(
+                ProposedElement(
+                    text="the forecast over the trip is dry",
+                    ground=Ground.INFERRED,
+                    window=window,
+                    participants=("Ada",),
+                    topics=("weather",),
+                    about_person=("Ada",),
+                ),
+            ),
+        )
+    )
+
+    assert revision.conditions[0].applicability == EvidenceApplicability(
+        window=window, participants=("Ada",), topics=("weather",), about_person=("Ada",)
+    )
+
+
+def test_a_label_axis_past_the_bound_keeps_the_first_values_and_discloses_the_rest() -> None:
+    """ADR-0252 §2's own composition rule for the one case ADR-0253 §7 does not enumerate.
+
+    §7 lists what "does not compose an ``EvidenceApplicability``" as an empty sequence
+    axis and two malformed windows, each refused before ``orchestration`` composes
+    anything. An axis longer than ``MAX_APPLICABILITY_VALUES`` is admitted by
+    ``ProposedElement`` and refused by ``EvidenceApplicability``, so composition takes
+    that type's own stated disposal — "a composition that would exceed it keeps the first
+    … and advances this region's elided". The widening it leaves is filed as #2349.
+    """
+    topics = tuple(f"t{index}" for index in range(MAX_APPLICABILITY_VALUES + 3))
+    revision = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(
+                ProposedElement(text="the forecast is dry", ground=Ground.INFERRED, topics=topics),
+            ),
+        )
+    )
+
+    applicability = revision.conditions[0].applicability
+    assert applicability is not None
+    assert applicability.topics == topics[:MAX_APPLICABILITY_VALUES]
+    assert applicability.elided == 3, "ADR-0086 §4: a count, and the disclosure of what went"
