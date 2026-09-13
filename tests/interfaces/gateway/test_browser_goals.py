@@ -570,6 +570,132 @@ async def test_a_gateway_that_went_away_leaves_the_reference_offered_again(
         await expect(drive.page.locator("#clear-reference")).to_be_visible()
 
 
+async def test_giving_a_goal_up_takes_the_reference_to_it_with_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """An abandoned goal must not come back on the owner's next sentence.
+
+    Press "Answer this", then "Give this up", then ask about anything at all: without
+    this the question's id was still attached, ADR-0250 §11 makes a settled question's
+    ``goal_id`` resolve "in every case" so the turn engages that goal, and §13 **reopens**
+    a closed goal that a turn associates to. The owner gave the work up and their next
+    sentence silently took it back. Adversarial review, round 4, ``major``.
+
+    Nothing is lost by dropping it: "the handle is the question's own durable ``id`` and
+    needs no re-minting" (§11), and the listing this act re-reads is where it is read
+    again.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+        drive.engine.abandonment = GoalAbandonment.ABANDONED
+        _answering(drive, accept=True)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await drive.page.click("text=Give this up")
+        await expect(drive.page.locator("#goal-said")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
+        await drive.page.fill("#utterance", "what is on today")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert turns[-1][1]["reference"] is None
+
+
+async def test_withdrawing_a_question_takes_the_reference_to_it_with_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The same clause one act over: there is no longer a question to answer.
+
+    A withdrawal settles the question and clears the words it held (ADR-0250 §12), so a
+    hint still promising that the next thing typed answers it is a sentence the page
+    cannot stand behind — and the turn would engage the goal on the settled question's
+    own ``goal_id`` (§11). Adversarial review, round 4, ``major``.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+        drive.engine.withdrawal = ClarificationWithdrawal.WITHDRAWN
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await drive.page.click("text=Take the question back")
+        await expect(drive.page.locator("#goal-said")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
+
+
+async def test_an_act_on_one_goal_leaves_a_reference_to_another_alone(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The identity check, which is what stops the clause above becoming a sweep.
+
+    Two goals; a reference taken on the first, an act performed on the second. The act
+    establishes nothing about the first, so the reference it carries stays exactly where
+    the owner put it.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [
+            _summary(),
+            _summary(asking=False).model_copy(update={"id": OTHER_ID}),
+        ]
+        drive.engine.abandonment = GoalAbandonment.ABANDONED
+        _answering(drive, accept=True)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.locator("#goal-list > div").nth(1).get_by_text("Give this up").click()
+        await expect(drive.page.locator("#goal-said")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert turns[-1][1]["reference"] == TurnReference(question_id=QUESTION_ID)
+
+
+async def test_a_stream_that_ended_without_an_outcome_leaves_the_reference_offered_again(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The last ending of the reference's lifecycle, enumerated rather than waited for.
+
+    A body that ends without a terminal value is a transport failure (ADR-0175 §2), and
+    one that ends before its first chunk establishes nothing about the assistant at all:
+    ``waiting.ran`` is set by an ok head on the whole entry, by the first chunk, and by a
+    terminal outcome, and this ending reaches none of the three.
+
+    **The reference is kept, which is the conservative direction and is stated as a
+    cost.** Such a turn may have run — ADR-0175 §10 declines resuming a cut stream, so
+    what the page knows is only that it read no ending — and a second send of the same
+    reference is answered ``ALREADY_SETTLED`` and rendered as its own fixed statement
+    (ADR-0250 §11). That is an honest sentence; consuming it would be an answer that
+    silently went nowhere.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+
+        async def cut(route: Route) -> None:
+            await route.fulfill(status=200, content_type="application/x-ndjson", body="")
+
+        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", cut)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await expect(drive.page.locator("#console .fault")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_contain_text(
+            "answers the clarification"
+        )
+        await expect(drive.page.locator("#clear-reference")).to_be_visible()
+
+
 async def test_a_reference_can_be_given_up_before_it_is_sent(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
