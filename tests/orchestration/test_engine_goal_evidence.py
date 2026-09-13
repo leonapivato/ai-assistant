@@ -13,6 +13,7 @@ other disagree" — read one level up at the consumer that drives them.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -255,3 +256,69 @@ async def test_a_later_turn_is_handed_the_digest_of_what_an_earlier_turn_wrote()
     latest = planner.evidence[-1]
     assert digest_of(written) in latest, "the row the earlier turn wrote, projected"
     assert written.id not in repr(latest), "§11: the digest carries no identifier of any kind"
+
+
+async def test_two_concurrent_writes_on_one_goal_still_supersede(
+    sqlite_plans: SqlitePlanStore,
+) -> None:
+    """§8 holds when two of this engine's turns write one goal's evidence at once.
+
+    **The store's indivisible write is not enough on its own, and §12 is why.** It puts
+    the refresh predicate in ``orchestration`` and the atomicity in the store, so the
+    ``supersedes`` a write carries was computed from an ``evidence_of`` read taken
+    *before* that write. Two turns that both read the history before either writes each
+    compute their set against the same older history, and the later covering row is
+    then written with an empty ``supersedes`` — leaving the earlier row ``STANDING``
+    where §8's six limbs require it ``SUPERSEDED``, which is the "retained historical
+    disagreement" correction 1 exists to remove.
+
+    **The interleaving this arm reaches is the harder of the two**, and it was worth
+    finding out which: both writes compute a set naming the row the turn wrote, the
+    first applies its mark, and the second is then refused **whole** on §12's rule that
+    a mark is never re-applied — so without the lock the second turn does not merely
+    miss a retirement, it fails with a ``PlanningError``. Removing the
+    ``_evidence_lock`` fails this arm on exactly that.
+
+    ``Engine._record_evidence`` is entered directly because that is the section under
+    test: driving two ``converse`` calls would have both rows take the harness's one
+    fixed instant, and §8 limb 6 then refuses the supersession for the **right** reason
+    — equal effective instants supersede in neither direction — so the arm could not
+    tell the race from the rule. The two rows here differ only in ``read_at``.
+
+    The residual a process-local lock cannot close — a second process over one data
+    directory — is #2339.
+    """
+    harness, _, goal_id, _ = await _drive(sqlite_plans)
+    written = await _assert_round_trip(sqlite_plans, goal_id)
+
+    def _covering(row_id: str, minutes: int) -> GoalEvidence:
+        """A row covering everything written before it, read ``minutes`` later."""
+        return written.model_copy(
+            update={
+                "id": row_id,
+                "read_at": written.read_at + timedelta(minutes=minutes),
+                "standing": EvidenceStanding.STANDING,
+                "superseded_by": None,
+            }
+        )
+
+    await asyncio.gather(
+        harness.engine._record_evidence((_covering("row-a", 1),)),
+        harness.engine._record_evidence((_covering("row-b", 2),)),
+    )
+
+    history = await sqlite_plans.evidence_of(goal_id)
+    standing = [row.id for row in history.rows if row.standing is EvidenceStanding.STANDING]
+    assert standing == ["row-b"], (
+        "one row stands: each write's predicate saw the marks the write before it "
+        "applied, so the newest covering row retired every older one rather than "
+        "standing beside a row a stale read had left alone"
+    )
+    displaced = await sqlite_plans.get_evidence(written.id)
+    assert displaced is not None
+    assert displaced.standing is EvidenceStanding.SUPERSEDED
+    assert displaced.superseded_by == "row-a", "retired by the first of the two to run"
+    middle = await sqlite_plans.get_evidence("row-a")
+    assert middle is not None
+    assert middle.standing is EvidenceStanding.SUPERSEDED
+    assert middle.superseded_by == "row-b", "and that one by the second, in its turn"
