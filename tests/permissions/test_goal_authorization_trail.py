@@ -27,7 +27,7 @@ from authorization_builders import (
     request,
     route_d_decision,
 )
-from permission_builders import decision, ruling
+from permission_builders import action, decision, ruling
 from recipient_builders import binding as smtp_binding
 from recipient_builders import route_b_decision
 
@@ -231,6 +231,44 @@ class TestTheFourRouteDiscriminator:
                         decided_at=NOW,
                     )
                 )
+        finally:
+            held.close()
+
+    @pytest.mark.parametrize(
+        ("named", "subject"),
+        [("g-1", "0" * 64), ("g-1", None)],
+        ids=["with a digest", "without one"],
+    )
+    async def test_a_goal_scope_on_a_decision_recording_no_egress_call_is_refused(
+        self, path: Path, named: str, subject: str | None
+    ) -> None:
+        """§7: route (d) is an **egress** route, so a non-egress row is in no route.
+
+        ``_rests_on_a_standing_authorisation`` is deliberately narrow — *"a decision
+        with no ``egress_binding`` is not an egress call"* — and returns ``False``
+        here, so without a refusal the row would be written carrying a goal scope
+        nothing resolved and nothing compared. ``PermissionRuling`` cannot take this
+        check: it refuses a scope with no pointer and leaves *"which of the four
+        shapes is owed"* to ``record``, *"the only component that can see
+        ``resolves`` and ``egress_binding``"*.
+        """
+        held = _Trail(path)
+        try:
+            await _refuses(
+                held,
+                decision(
+                    "d-no-egress",
+                    request=action(),
+                    ruled=ruling(
+                        PermissionOutcome.ALLOW,
+                        authorised_by=named,
+                        authorised_subject=subject,
+                        authorised_goal=GOAL,
+                    ),
+                    decided_at=NOW,
+                ),
+                "in none of ADR-0254",
+            )
         finally:
             held.close()
 

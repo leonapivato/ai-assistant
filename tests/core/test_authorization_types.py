@@ -267,6 +267,32 @@ def test_a_period_bounds_timezone_is_a_name_the_tz_database_knows(zone: str) -> 
         period_bound(timezone=zone)
 
 
+@pytest.mark.parametrize("zone", ["localtime", "posixrules", "Localtime", "POSIXRULES"])
+def test_a_period_bounds_timezone_is_never_the_hosts_own_configuration(zone: str) -> None:
+    """§§2 and 4: the zone is **recorded** so that the comparison reads none.
+
+    ``localtime`` and ``posixrules`` resolve through ``ZoneInfo`` on a stock Linux
+    install and name the machine rather than a zone — ``localtime`` is a copy of
+    whatever the operator configured. A bound recording one would mean a different
+    interval on a different host, and a different one on the same host after
+    ``timedatectl set-timezone``, while the stored string and the row's
+    ``subject_digest`` stayed identical: a calendar date outside the bound could
+    start drawing an ``ALLOW`` with no further act of the user's.
+
+    The folded spellings are here because the tz lookup is a **file** lookup: on a
+    case-insensitive filesystem they reach the same host-local file, and no IANA
+    zone is spelled either way.
+    """
+    with pytest.raises(ValidationError, match="host's own configuration rather than a zone"):
+        period_bound(timezone=zone)
+
+
+def test_a_period_bounds_timezone_is_still_an_ordinary_iana_name() -> None:
+    """The control: the refusal above narrows nothing a user could have meant."""
+    for zone in ("UTC", "Europe/London", "Australia/Sydney", "Factory"):
+        assert period_bound(timezone=zone).timezone == zone
+
+
 def test_a_terms_bound_is_non_empty_duplicate_free_and_keeps_the_users_order() -> None:
     """§2: the set the user named, and membership is equality of stored characters."""
     assert terms_bound("free cancellation", "flexible").terms == (

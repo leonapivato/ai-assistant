@@ -3462,9 +3462,23 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     second refusal a durable row would carry a goal scope on a route no clause of
     §7 validates a scope on, and the four-route partition would stop being one.
 
+    **And a goal scope outside the standing shape altogether is refused with it**,
+    which is the same clause reaching the *other* way out of this function. A
+    decision that records **no egress call**, or an ``ALLOW`` naming no
+    authorisation at all, is in none of §7's four routes — route (d) is an egress
+    route — yet :func:`_rests_on_a_standing_authorisation` is deliberately narrow
+    and returns ``False`` on it, so the early exit below would write a durable row
+    asserting a goal scope that nothing resolved and nothing compared.
+    :class:`~ai_assistant.core.types.PermissionRuling` cannot take this check
+    itself: it refuses a scope with no pointer and says in terms that *"which of
+    the four shapes is owed is decided at ``record``, the only component that can
+    see ``resolves`` and ``egress_binding``"*. This is that decision.
+
     Raises:
         InvalidAuthorisationError: If a **resolving** ``ALLOW`` carries an
-            ``authorised_subject`` or an ``authorised_goal``; if a standing egress
+            ``authorised_subject`` or an ``authorised_goal``; if a decision outside
+            the standing shape — one recording no egress call, or naming no
+            authorisation — carries an ``authorised_goal``; if a standing egress
             decision's binding records no origin; if a route-(b) decision's binding
             records that the call was planned over external content **without
             recording that it was closed-loop** (ADR-0238 §6); or if a digest-free
@@ -3490,6 +3504,14 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             raise InvalidAuthorisationError(msg)
         return
     if not _rests_on_a_standing_authorisation(decision):
+        if ruling.authorised_goal is not None:
+            msg = (
+                f"decision {decision.id!r} scopes its authorisation to a goal but is in none "
+                f"of ADR-0254 §7's four routes; authorised_goal is set only on a route-(d) "
+                f"ALLOW — a non-resolving ALLOW that records an egress call and names the "
+                f"record it rests on (ADR-0254 §7)"
+            )
+            raise InvalidAuthorisationError(msg)
         return
     binding = decision.egress_binding
     if not isinstance(binding, EgressBinding):
