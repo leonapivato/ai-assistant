@@ -1195,31 +1195,32 @@ def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 10
+    assert export.schema_version == 11
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_nine() -> None:
+def test_export_pins_the_schema_version_to_exactly_eleven() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[9]`` refuses an explicit ``8`` — a document of the shape this export
-    had before ``AttemptEffort`` gained ``kind`` does not validate against this
-    contract at all (ADR-0251 §5, §16), exactly as a ``7`` stopped validating when
-    this document gained ``attempts`` and ``ActionPlan`` gained ``targets_revision``,
-    a ``6`` when ``ReadKind`` gained ``STRUCTURED_READ``, a ``5`` when it gained
+    ``Literal[11]`` refuses an explicit ``10`` — a document of the shape this export
+    had before it gained ``evidence`` does not validate against this contract at all
+    (ADR-0252 §13), exactly as a ``9`` stopped validating when this document gained
+    ``questions``, an ``8`` when ``AttemptEffort`` gained ``kind``, a ``7`` when this
+    document gained ``attempts`` and ``ActionPlan`` gained ``targets_revision``, a
+    ``6`` when ``ReadKind`` gained ``STRUCTURED_READ``, a ``5`` when it gained
     ``WEB_SEARCH``, a ``4`` when it gained ``LOCAL_FILE`` and ``ReadAsk`` gained
     ``entry``, a ``3`` when ``ActionPlan`` gained ``supersedes`` and a ``2`` when it
     gained ``read_request`` — and any other value, so the advertised version cannot be
     mislabelled. The positive default is what a producer gets for free; only the
     rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``9`` is
-    the shape this contract had one decision ago and ``11`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``10`` is
+    the shape this contract had one decision ago and ``12`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=10).schema_version == 10
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 11):
+    assert PlanExport(exported_at=_WHEN, schema_version=11).schema_version == 11
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1264,7 +1265,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
 
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(first, revision))
 
-    assert export.schema_version == 10
+    assert export.schema_version == 11
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1345,7 +1346,7 @@ def test_export_round_trips_through_json() -> None:
     export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 10
+    assert restored.schema_version == 11
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

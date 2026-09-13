@@ -40,11 +40,15 @@ from pydantic import ValidationError
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
+    MAX_GOAL_EVIDENCE,
     ActionPlan,
+    EvidenceHistory,
+    EvidenceStanding,
     ExecutionState,
     Goal,
     GoalAttempt,
     GoalDeletion,
+    GoalEvidence,
     GoalInterpretation,
     GoalQuestion,
     GoalQuestionDisposition,
@@ -52,6 +56,8 @@ from ai_assistant.core.types import (
     PlanExport,
     StepStatus,
     ground_of,
+    marked_inapplicable,
+    marked_superseded,
 )
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
@@ -59,7 +65,7 @@ from ai_assistant.planning.goals import advanced, appended, bounded, capped, eng
 from ai_assistant.planning.goals import with_status as _with_status
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.clock import Clock
@@ -102,14 +108,25 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: candidate-set query would be a raw "no such column" on every conversation. The
 #: marker is what makes the upgrade in place possible, exactly as at 2, and §1's loud
 #: refusal of a **newer** label binds entire.
-_SCHEMA_VERSION = 3
+#: **Version 4 is ADR-0252 §13's migration**: the ``goal_evidence`` table, and the
+#: per-goal elision count beside the ``goals`` blob. A version 3 store's ``goals``
+#: blobs still **decode** — ``GoalElement.evidence_row_id`` and
+#: ``GoalInterpretation.outcome_evidence_row_id`` are optional with an absent default
+#: and ADR-0252 §10's validator *adds* a shape while leaving ADR-0249 §1's three
+#: untouched — so no row is rewritten; but the column beside them does not exist and
+#: the evidence table does not either. The marker is what makes the upgrade in place
+#: possible, exactly as at 2 and at 3, and ADR-0049 §1's loud refusal of a **newer**
+#: label binds entire.
+_SCHEMA_VERSION = 4
 
-#: The versions a database this code can upgrade carries. Two members since ADR-0250:
-#: version 1 is ADR-0049 §1's original shape and version 2 is ADR-0249 §12's, and the
-#: two need different work — a version 1 store's ``goals`` blobs are rewritten
-#: (:meth:`SqlitePlanStore._upgrade_goal_rows`) where a version 2 store's are not,
-#: while **both** gain the new columns and the questions table.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2})
+#: The versions a database this code can upgrade carries. Three members since
+#: ADR-0252: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's and
+#: version 3 is ADR-0250 §9's. Only the first needs its ``goals`` blobs rewritten
+#: (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all three** gain whichever of the
+#: :data:`_GOAL_COLUMNS` they lack and whichever record tables they do not hold, which
+#: ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier store holds a
+#: question or an evidence row.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -144,11 +161,25 @@ _UPDATE_HIGH_WATER = "UPDATE meta SET value = ? WHERE key = 'exec_high_water'"
 #: (§1's one route to a ``None``). The **order** the set is then put in is
 #: :func:`~ai_assistant.planning.goals.capped`'s, over the decoded rows, so §1's key
 #: is stated once for both stores rather than once here in SQL and once in Python.
-_GOAL_COLUMNS: Final[tuple[str, ...]] = ("conversation_id", "last_engaged_in")
+#: ADR-0252 §13 adds the third, whose job is different: it is not a projection of the
+#: blob but the goal's **evidence elision count**, a value the store holds and returns
+#: and which is "not recomputed at read time, not derived from a row count, and not
+#: reset by a deletion of any row". It is ``NOT NULL DEFAULT 0`` so that the migration
+#: sets every existing goal's count to **zero** without a pass of its own — which is
+#: true of a store that has never dropped a row — and so that a row written before this
+#: version reads as a history that has lost nothing rather than as a ``NULL`` every
+#: reader has to interpret. ``delete_goal`` removes the count with the goal because the
+#: count *is* a column of the goal.
+_GOAL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
+    ("conversation_id", "TEXT"),
+    ("last_engaged_in", "TEXT"),
+    ("evidence_elided", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
-    "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, data TEXT NOT NULL)",
+    "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
+    "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS executions("
@@ -174,6 +205,20 @@ _RECORD_SCHEMA = (
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
     "attempt_id TEXT NOT NULL, asked_at TEXT NOT NULL, disposition TEXT NOT NULL, "
     "data TEXT NOT NULL)",
+    # ADR-0252 §13's evidence table, with the foreign key onto `goals` ADR-0049 §1's
+    # schema discipline requires. **Exactly three of the row's values are columns
+    # rather than blob members, because three contracted behaviours key on them**:
+    # `goal_id`, which `evidence_of` and `delete_goal`'s cascade select on and which
+    # carries the key; `read_at`, which decides `evidence_of`'s contractual order and
+    # §13's elision; and `standing`, which is §12's compare-and-swap token. **No other
+    # value is promoted**, and in particular no applicability axis is — a schema that
+    # indexed the label axes would be a second retrieval surface over the owner's
+    # records, which ADR-0208 §1 and ADR-0226 §13 govern and ADR-0252 does not open.
+    # On any earlier database this table is **created empty**, because no earlier store
+    # holds a row and the migration "writes no value this system did not record".
+    "CREATE TABLE IF NOT EXISTS goal_evidence("
+    "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
+    "read_at TEXT NOT NULL, standing TEXT NOT NULL, data TEXT NOT NULL)",
 )
 
 #: ``created_seq`` is unique by construction — every allocation takes it from the
@@ -222,6 +267,7 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": ("TEXT", False),
         "conversation_id": ("TEXT", False),
         "last_engaged_in": ("TEXT", False),
+        "evidence_elided": ("INTEGER", True),
         "data": ("TEXT", True),
     },
     "plans": {
@@ -251,6 +297,13 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "disposition": ("TEXT", True),
         "data": ("TEXT", True),
     },
+    "goal_evidence": {
+        "id": ("TEXT", False),
+        "goal_id": ("TEXT", True),
+        "read_at": ("TEXT", True),
+        "standing": ("TEXT", True),
+        "data": ("TEXT", True),
+    },
 }
 
 #: The single column every record table's ``PRIMARY KEY`` is, checked against
@@ -270,6 +323,7 @@ _RECORD_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
     "executions": ("plan_id", "plans", "id"),
     "attempts": ("goal_id", "goals", "id"),
     "goal_questions": ("goal_id", "goals", "id"),
+    "goal_evidence": ("goal_id", "goals", "id"),
 }
 
 
@@ -697,7 +751,7 @@ class SqlitePlanStore:
             )
 
     def _add_missing_goal_columns(self, conn: sqlite3.Connection) -> None:
-        """Add ADR-0250 §9's two ``goals`` columns to an older file, in place.
+        """Add the ``goals`` columns an older file lacks, in place (ADR-0250 §9, ADR-0252 §13).
 
         **The second half of this store's second migration**, and the half a
         ``CREATE TABLE IF NOT EXISTS`` cannot do: that statement is a no-op against
@@ -717,10 +771,14 @@ class SqlitePlanStore:
         if self._upgrade_from is None:
             return
         held = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
-        for column in _GOAL_COLUMNS:
+        for column, declaration in _GOAL_COLUMNS:
             if column not in held:
-                # `column` is a fixed literal of `_GOAL_COLUMNS`, never caller input.
-                conn.execute(f"ALTER TABLE goals ADD COLUMN {column} TEXT")
+                # Both halves are fixed literals of `_GOAL_COLUMNS`, never caller input.
+                # ADR-0252 §13's count is added `NOT NULL DEFAULT 0`, which SQLite
+                # admits on an `ALTER TABLE` precisely because the default supplies the
+                # value every existing row needs — so the migration "sets every goal's
+                # elision count to zero" without a row pass of its own.
+                conn.execute(f"ALTER TABLE goals ADD COLUMN {column} {declaration}")
 
     def _backfill_goal_columns(self, conn: sqlite3.Connection) -> None:
         """Write the two ``goals`` columns from the rows themselves (ADR-0250 §9).
@@ -1335,10 +1393,16 @@ class SqlitePlanStore:
         ADR-0014 §5's discipline, on the construction ADR-0049 §1 already uses for
         ``commit_transition``.
 
+        **``invalidates`` is applied in that same transaction** (ADR-0252 §9, §12), so
+        there is no window in which a recorded revision stands beside evidence its own
+        change invalidated, and a call that cannot mark every row it named appends
+        nothing.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
-            PlanningError: If ``goal_id`` names no stored goal, or the revision does
-                not follow the goal's current one.
+            PlanningError: If ``goal_id`` names no stored goal, the revision does not
+                follow the goal's current one, or a row named by ``invalidates`` is not
+                this goal's or is not ``STANDING``.
         """
         async with self._lock:
             return await _run_to_completion(self._record_interpretation_sync, revision)
@@ -1359,14 +1423,28 @@ class SqlitePlanStore:
                     f"{revision.expected_version}: re-read it and recompute the revision"
                 )
                 raise StaleExecutionError(msg)
+            # Before the append, so a call that cannot mark every row it named leaves
+            # the goal exactly as it found it (§12).
+            self._refuse_unmarkable(
+                conn, revision.goal_id, revision.invalidates, being_written=None, what="invalidate"
+            )
             updated = appended(stored, revision.interpretation)
-            # The two columns are unmoved by a revision — `record_interpretation`
-            # leaves both engagement fields exactly as it found them (ADR-0250 §1) and
-            # `conversation_id` is never rewritten — so only the blob is written here.
+            # The three columns are unmoved by a revision — `record_interpretation`
+            # leaves both engagement fields exactly as it found them (ADR-0250 §1),
+            # `conversation_id` is never rewritten, and ADR-0252 §13's count moves only
+            # where a row is dropped — so only the blob is written here.
             conn.execute(
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
+            for row_id in revision.invalidates:
+                self._mark_evidence(
+                    conn,
+                    marked_inapplicable(
+                        self._evidence_row(conn, row_id),
+                        at_revision=revision.interpretation.revision,
+                    ),
+                )
         return updated
 
     # --- engagement, status and the candidate set (ADR-0250 §§1, 2, 9) -----
@@ -1671,6 +1749,230 @@ class SqlitePlanStore:
         return True
 
     # --- attempts ---------------------------------------------------------
+
+    # --- evidence (ADR-0252 §12, §13) -------------------------------------
+
+    async def record_evidence(
+        self, evidence: GoalEvidence, /, *, supersedes: Sequence[str] = ()
+    ) -> str:
+        """Persist a **new** evidence row, applying its refresh marks (ADR-0252 §12).
+
+        The refusals, the append, the marks and §13's elision all run inside one
+        ``BEGIN IMMEDIATE`` transaction, so a second writer cannot interleave and a
+        failure anywhere rolls the whole call back — a caller never has to ask which of
+        its marks landed.
+
+        The input is **revalidated before it is persisted**, not merely copied, for
+        :meth:`save_goal`'s reason: a caller can build a valid row, reach past its
+        validators and hand it here, and storing that unchecked would write a record
+        every later ``get_evidence``/``export`` fails to decode. That revalidation is
+        also this method's ADR-0065 snapshot — it runs before the first ``await`` and
+        the id returned is read from **it**.
+
+        Raises:
+            PlanningError: If the store already holds a row under this ``id``, if
+                ``goal_id`` names no stored goal, if a row named by ``supersedes`` is
+                not this goal's, is not ``STANDING``, or is the row being written, or
+                if the row does not revalidate.
+        """
+        snapshot = _revalidated_evidence(evidence)
+        named = tuple(supersedes)
+        async with self._lock:
+            await _run_to_completion(self._record_evidence_sync, snapshot, named)
+        return snapshot.id
+
+    def _record_evidence_sync(self, evidence: GoalEvidence, supersedes: tuple[str, ...]) -> None:
+        with self._transaction(f"record evidence {evidence.id!r}") as conn:
+            held = conn.execute(
+                "SELECT 1 FROM goal_evidence WHERE id = ?", (evidence.id,)
+            ).fetchone()
+            if held is not None:
+                msg = (
+                    f"evidence row {evidence.id} already exists: record_evidence persists "
+                    f"a new row and no member replaces a stored one (ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            if (
+                conn.execute("SELECT 1 FROM goals WHERE id = ?", (evidence.goal_id,)).fetchone()
+                is None
+            ):
+                msg = f"cannot record evidence for unknown goal {evidence.goal_id}"
+                raise PlanningError(msg)
+            # Validated against the history **as it stood before the call**, which is
+            # why this runs before the insert: a call is never refused because its own
+            # write displaced its own operand (§12).
+            self._refuse_unmarkable(
+                conn, evidence.goal_id, supersedes, being_written=evidence.id, what="supersede"
+            )
+            self._insert_evidence(conn, evidence)
+            for row_id in supersedes:
+                self._mark_evidence(
+                    conn, marked_superseded(self._evidence_row(conn, row_id), by=evidence.id)
+                )
+            self._elide_evidence(conn, evidence.goal_id, keep=evidence.id)
+
+    def _insert_evidence(self, conn: sqlite3.Connection, evidence: GoalEvidence) -> None:
+        """Write one row, with its three columns beside the blob (§13)."""
+        conn.execute(
+            "INSERT INTO goal_evidence(id, goal_id, read_at, standing, data) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                evidence.id,
+                evidence.goal_id,
+                evidence.read_at.isoformat(),
+                evidence.standing.value,
+                evidence.model_dump_json(),
+            ),
+        )
+
+    def _mark_evidence(self, conn: sqlite3.Connection, marked: GoalEvidence) -> None:
+        """Write a marked row back, blob and ``standing`` column together (§12).
+
+        ``read_at`` and ``goal_id`` are unmoved by a mark — a marking changes exactly
+        one field of the record and the argument that field's mark travels with — so
+        only the two that can have changed are written.
+        """
+        conn.execute(
+            "UPDATE goal_evidence SET standing = ?, data = ? WHERE id = ?",
+            (marked.standing.value, marked.model_dump_json(), marked.id),
+        )
+
+    def _evidence_row(self, conn: sqlite3.Connection, evidence_id: str) -> GoalEvidence:
+        """The stored row under that id, inside an open transaction.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            evidence_id: The row to read.
+
+        Returns:
+            The decoded row.
+
+        Raises:
+            PlanningError: If no row holds that id — unreachable from either mutation,
+                each of which validates every id it marks first.
+        """
+        row = conn.execute("SELECT data FROM goal_evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if row is None:  # pragma: no cover - the refusals above run first
+            msg = f"evidence row {evidence_id} is no longer stored"
+            raise PlanningError(msg)
+        return _decode_evidence(str(row[0]))
+
+    def _refuse_unmarkable(
+        self,
+        conn: sqlite3.Connection,
+        goal_id: str,
+        named: Sequence[str],
+        *,
+        being_written: str | None,
+        what: str,
+    ) -> None:
+        """Refuse the whole call where a named row cannot take its mark (§12).
+
+        The three refusals are stated once for both marking writes: a row of another
+        goal — which includes one this store does not hold at all — a row that is not
+        ``STANDING``, and, on :meth:`record_evidence` alone, the row the call is
+        writing. It reads the ``goal_id`` and ``standing`` **columns**, which is what
+        those columns are promoted for, so a refusal costs no decode.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            goal_id: The goal whose rows may be marked.
+            named: The ids the caller asked to mark.
+            being_written: The row this call is appending, or ``None``.
+            what: The verb for the message.
+
+        Raises:
+            PlanningError: If any named row cannot take the mark.
+        """
+        for row_id in named:
+            if being_written is not None and row_id == being_written:
+                msg = (
+                    f"cannot {what} evidence row {row_id} with itself: a row is validated "
+                    f"against the history as it stood before the call (ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            row = conn.execute(
+                "SELECT goal_id, standing FROM goal_evidence WHERE id = ?", (row_id,)
+            ).fetchone()
+            if row is None or str(row[0]) != goal_id:
+                msg = (
+                    f"cannot {what} evidence row {row_id}: it is not goal {goal_id}'s "
+                    f"(ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            if str(row[1]) != EvidenceStanding.STANDING.value:
+                msg = (
+                    f"cannot {what} evidence row {row_id}: it is {row[1]} and a mark is "
+                    f"never un-marked and never re-applied (ADR-0252 §8, §9)"
+                )
+                raise PlanningError(msg)
+
+    def _elide_evidence(self, conn: sqlite3.Connection, goal_id: str, *, keep: str) -> None:
+        """Hold the goal's history to :data:`MAX_GOAL_EVIDENCE`, disclosing the drop.
+
+        **By age and by nothing else** (§13), over the history as the marks have just
+        left it — a row this call marked ``SUPERSEDED`` is an ordinary candidate — and
+        **never the row being written**, whatever place §12's order gives it. The count
+        advances in this same transaction, so a reader can never see a shortened history
+        without the count that explains it.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            goal_id: The goal whose history to bound.
+            keep: The row this write appended, which is never dropped.
+        """
+        ordered = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT id FROM goal_evidence WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
+                (goal_id,),
+            ).fetchall()
+        ]
+        excess = len(ordered) - MAX_GOAL_EVIDENCE
+        if excess <= 0:
+            return
+        doomed = [row_id for row_id in ordered if row_id != keep][:excess]
+        conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
+        conn.execute(
+            "UPDATE goals SET evidence_elided = evidence_elided + ? WHERE id = ?",
+            (len(doomed), goal_id),
+        )
+
+    async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
+        """Return the evidence row under that id, or ``None`` (ADR-0252 §12)."""
+        async with self._lock:
+            row = await _run_to_completion(self._read_one, "goal_evidence", evidence_id)
+        return None if row is None else _decode_evidence(row)
+
+    async def evidence_of(self, goal_id: str, /) -> EvidenceHistory:
+        """Return one goal's history in §12's total order, with its count.
+
+        The rows and the count are read in **one** transaction, so a concurrent writer
+        cannot drop a row between the two reads and leave a history shorter than its
+        count explains.
+        """
+        async with self._lock:
+            rows, elided = await _run_to_completion(self._evidence_of_sync, goal_id)
+        return EvidenceHistory(
+            goal_id=goal_id, rows=tuple(_decode_evidence(data) for data in rows), elided=elided
+        )
+
+    def _evidence_of_sync(self, goal_id: str) -> tuple[list[str], int]:
+        with self._transaction(f"read evidence of goal {goal_id!r}") as conn:
+            rows = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT data FROM goal_evidence WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
+                    (goal_id,),
+                ).fetchall()
+            ]
+            # `None` for a goal this store does not hold, which reads as a history with
+            # nothing in it and nothing lost — an absent goal is not a fault to raise on
+            # a read that is already a lookup.
+            held = conn.execute(
+                "SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)
+            ).fetchone()
+        return rows, int(held[0]) if held is not None else 0
 
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
@@ -2183,7 +2485,7 @@ class SqlitePlanStore:
         exported_at = self._now()
         async with self._lock:
             snapshot = await _run_to_completion(self._export_sync)
-        goals, plans, executions, attempts, questions = snapshot
+        goals, plans, executions, attempts, questions, evidence = snapshot
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
@@ -2191,9 +2493,30 @@ class SqlitePlanStore:
             executions=tuple(_decode_execution(data) for data in executions),
             attempts=tuple(_decode_attempt(data) for data in attempts),
             questions=tuple(_decode_question(data) for data in questions),
+            # ADR-0252 §13: exactly one history per goal the export carries, each with
+            # its rows **and its elision count** — "a document holding 64 rows and no
+            # count would say *this is the evidence*, where the truth is *this is the
+            # evidence that was kept*".
+            evidence=tuple(
+                EvidenceHistory(
+                    goal_id=goal_id,
+                    rows=tuple(_decode_evidence(data) for data in rows),
+                    elided=elided,
+                )
+                for goal_id, rows, elided in evidence
+            ),
         )
 
-    def _export_sync(self) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+    def _export_sync(
+        self,
+    ) -> tuple[
+        list[str],
+        list[str],
+        list[str],
+        list[str],
+        list[str],
+        list[tuple[str, list[str], int]],
+    ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
         # between the goals read and the plans read and leave the export with a
@@ -2223,7 +2546,23 @@ class SqlitePlanStore:
                     "SELECT data FROM goal_questions ORDER BY asked_at ASC, id ASC"
                 ).fetchall()
             ]
-        return goals, plans, executions, attempts, questions
+            # Read in the same transaction as the rest, so the document cannot carry a
+            # goal whose history a concurrent writer added between the two reads — the
+            # dangling, `PlanExport`-rejected state ADR-0004 §6's "internally
+            # consistent" forbids, arriving through the member ADR-0252 §13 adds.
+            by_goal: dict[str, list[str]] = {
+                str(r[0]): [] for r in conn.execute("SELECT id FROM goals").fetchall()
+            }
+            for row in conn.execute(
+                "SELECT goal_id, data FROM goal_evidence ORDER BY read_at ASC, id ASC"
+            ).fetchall():
+                by_goal[str(row[0])].append(str(row[1]))
+            elided = {
+                str(r[0]): int(r[1])
+                for r in conn.execute("SELECT id, evidence_elided FROM goals").fetchall()
+            }
+            evidence = [(goal_id, rows, elided[goal_id]) for goal_id, rows in by_goal.items()]
+        return goals, plans, executions, attempts, questions, evidence
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal, its plan history, its attempts and its questions.
@@ -2290,12 +2629,21 @@ class SqlitePlanStore:
             # record carries no count for either. Before the goal, so the foreign key
             # holds at each step.
             conn.execute("DELETE FROM goal_questions WHERE goal_id = ?", (goal_id,))
+            # ADR-0252 §12: and it reaches that goal's evidence, **of every standing**.
+            # No row blocks a deletion — the live-step refusal above is unchanged and
+            # keys on a RUNNING step — and the elision count goes with the goal because
+            # the count is a column of the goal's own row. Before the goal, so the
+            # foreign key holds at each step.
+            evidence_removed = conn.execute(
+                "DELETE FROM goal_evidence WHERE goal_id = ?", (goal_id,)
+            ).rowcount
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
             deleted=True,
             plans_removed=len(plan_ids),
             executions_removed=len(executions),
             indeterminate_steps=indeterminate,
+            evidence_removed=evidence_removed,
         )
 
     async def clear(self) -> int:
@@ -2326,6 +2674,7 @@ class SqlitePlanStore:
             removed += conn.execute("DELETE FROM plans").rowcount
             removed += conn.execute("DELETE FROM attempts").rowcount
             removed += conn.execute("DELETE FROM goal_questions").rowcount
+            removed += conn.execute("DELETE FROM goal_evidence").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed
 
@@ -2471,6 +2820,40 @@ def _migrated_goal(row_id: str, data: str) -> str:
     held["last_engaged_at"] = None
     held["version"] = 0
     return json.dumps(held)
+
+
+def _revalidated_evidence(evidence: GoalEvidence) -> GoalEvidence:
+    """Re-run ``GoalEvidence``'s validators before the row is persisted.
+
+    :func:`_revalidated_goal`'s reason, over the record ADR-0252 §1 adds: the model is
+    mutable and does not validate on assignment, so a caller can build a valid row,
+    reach past its validators and hand it here — and storing that unchecked would write
+    a record every later ``get_evidence``/``export`` fails to decode, so the store would
+    poison its own reads.
+
+    Args:
+        evidence: The row as handed in.
+
+    Returns:
+        The row, revalidated.
+
+    Raises:
+        PlanningError: If it no longer satisfies its own contract.
+    """
+    try:
+        return GoalEvidence.model_validate(evidence.model_dump())
+    except ValidationError as exc:
+        msg = f"evidence row {evidence.id!r} is not a valid record: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _decode_evidence(data: str) -> GoalEvidence:
+    """Decode one stored evidence row, or fail loudly (ADR-0252 §12)."""
+    try:
+        return GoalEvidence.model_validate_json(data)
+    except ValidationError as exc:
+        msg = f"stored evidence row is not a valid record: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def _decode_goal(data: str) -> Goal:

@@ -5648,7 +5648,7 @@ class GoalStatus(StrEnum):
 # exactly the move ADR-0230 §4 makes for `ShownFile`.
 
 
-def _refuse_mismatched_ground(  # noqa: PLR0913 — the ground, its two possible arguments, and three facts about the caller that shape the message; every one is a distinct value and a bundle would mint a type for a message
+def _refuse_mismatched_ground(  # noqa: PLR0913 — the ground, its possible arguments, and three facts about the caller that shape the message; every one is a distinct value and a bundle would mint a type for a message
     *,
     ground: Ground,
     reference: str | None,
@@ -5656,47 +5656,74 @@ def _refuse_mismatched_ground(  # noqa: PLR0913 — the ground, its two possible
     what: str,
     reference_name: str,
     bare_user_stated: bool,
+    row_reference: str | None = None,
+    row_reference_name: str | None = None,
 ) -> None:
-    """Refuse every ground-and-argument shape ADR-0249 §1 does not admit.
+    """Refuse every ground-and-argument shape ADR-0249 §1 and ADR-0252 §10 admit.
 
-    Stated **once** and read by both validators that need it, so a
-    :class:`GoalElement` and a :class:`GoalInterpretation`'s outcome cannot drift on
-    what a ground means. The one difference between them is ``bare_user_stated``:
-    an interpretation's outcome admits a ``USER_STATED`` carrying neither argument,
-    whose one origin is ADR-0249 §12's migration and whose one further route is §7's
-    retention copying it forward (§1's fourth absence).
+    Stated **once** and read by every validator that needs it, so a
+    :class:`GoalElement`, a :class:`GoalInterpretation`'s outcome and the two
+    planner-facing proposals cannot drift on what a ground means. The one difference
+    between the first two is ``bare_user_stated``: an interpretation's outcome admits a
+    ``USER_STATED`` carrying neither argument, whose one origin is ADR-0249 §12's
+    migration and whose one further route is §7's retention copying it forward (§1's
+    fourth absence).
+
+    **ADR-0252 §10 adds a fourth admitted shape to the two durable values and widens no
+    other.** A ``FROM_EVIDENCE`` :class:`GoalElement` carries **exactly one** of
+    ``evidence_id`` — the record of the labelled supply ADR-0249 §7 stamps — and
+    ``evidence_row_id``, a :class:`GoalEvidence` row of the same goal; neither, and
+    both, are refused. The three shapes ADR-0249 §1 admits are untouched, which is why
+    every goal blob an earlier version wrote decodes unchanged (ADR-0252 §13).
+
+    **The two proposals pass no row reference and gain no field**, which is §10's own
+    clause: a planner names an evidence row **by label, never by identifier**, and the
+    prefix of the one ``evidence_label`` decides which sequence ``orchestration``
+    resolves it against — "a second field would let a planner emit both and the loop
+    choose, which is the *two carriers for one fact* defect". So ``row_reference_name``
+    absent means *this value has one carrier*, and the widened arm does not reach it.
 
     Args:
         ground: The ground the value declares.
-        reference: The record identifier beside it, or ``None``.
+        reference: The record identifier or label beside it, or ``None``.
         span: The span of the request beside it, or ``None``.
         what: What is being validated, for the message.
         reference_name: The field name the reference sits on, for the message.
         bare_user_stated: Whether ``USER_STATED`` with neither argument is admitted.
+        row_reference: The evidence row identifier beside it, or ``None``.
+        row_reference_name: The field name the row reference sits on, or ``None`` on a
+            value that has no second carrier.
 
     Raises:
         ValueError: If the shape is not one this ground admits.
     """
+    carriers = [(reference_name, reference)]
+    if row_reference_name is not None:
+        carriers.append((row_reference_name, row_reference))
+    names = " and ".join(name for name, _ in carriers)
+    empty = all(value is None for _, value in carriers)
     if ground is Ground.FROM_EVIDENCE:
-        wanted = reference is not None and span is None
-        expected = f"{reference_name} and no span"
+        held_one = sum(value is not None for _, value in carriers) == 1
+        wanted = held_one and span is None
+        expected = (
+            f"{reference_name} and no span"
+            if row_reference_name is None
+            else f"exactly one of {names}, and no span"
+        )
     elif ground is Ground.USER_STATED:
-        wanted = reference is None and (span is not None or bare_user_stated)
-        expected = f"a span and no {reference_name}"
+        wanted = empty and (span is not None or bare_user_stated)
+        expected = f"a span and no {names}"
         if bare_user_stated:
             expected += " — or neither, on a value ADR-0249 §12 migrated"
     else:
-        wanted = reference is None and span is None
+        wanted = empty and span is None
         expected = "neither"
     if not wanted:
-        held = ", ".join(
-            name
-            for name, value in ((reference_name, reference), ("span", span))
-            if value is not None
-        )
+        held = ", ".join(name for name, value in (*carriers, ("span", span)) if value is not None)
+        decisions = "ADR-0249 §1" if row_reference_name is None else "ADR-0249 §1 with ADR-0252 §10"
         msg = (
             f"{what} grounded {ground.value} carries {held or 'neither argument'}, "
-            f"and ADR-0249 §1 admits {expected}"
+            f"and {decisions} admits {expected}"
         )
         raise ValueError(msg)
 
@@ -5773,12 +5800,22 @@ class GoalElement(BaseModel):
     Attributes:
         text: What the element says, in the system's own words.
         ground: How it came to be known.
-        evidence_id: The record of the labelled supply that establishes it, present
-            exactly on a ``FROM_EVIDENCE`` element. It is the identifier of the
-            record **the loop itself labelled** (ADR-0249 §7); no identifier crosses
-            the planning seam in either direction.
+        evidence_id: The record of the labelled supply that establishes it. It is
+            the identifier of the record **the loop itself labelled** (ADR-0249 §7);
+            no identifier crosses the planning seam in either direction.
+        evidence_row_id: The :class:`GoalEvidence` row **of the same goal** that
+            establishes it (ADR-0252 §10). A ``FROM_EVIDENCE`` element carries
+            **exactly one** of this and ``evidence_id``.
         span: The span of the turn's own request that states it, present exactly on
             a ``USER_STATED`` element.
+
+    **An element grounded on a row survives that row's marking** (ADR-0252 §10):
+    a row later marked ``INAPPLICABLE`` or ``SUPERSEDED`` does not rewrite, drop or
+    re-ground the element, and no revision is recorded on account of a mark. What a
+    mark changes is **sufficiency**, evaluated at dispatch against the row. And an
+    ``evidence_row_id`` that resolves in no row — whose one route is ADR-0252 §13's
+    elision — is **answerable and never repaired**: the element still states what it
+    says and ``EvidenceHistory.elided`` discloses the missing warrant.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -5788,13 +5825,17 @@ class GoalElement(BaseModel):
     evidence_id: Identifier | None = Field(
         default=None, description="The record establishing it, on a FROM_EVIDENCE element."
     )
+    evidence_row_id: Identifier | None = Field(
+        default=None,
+        description="The evidence row of this goal establishing it (ADR-0252 §10).",
+    )
     span: EncodableText | None = Field(
         default=None, description="The span of the request stating it, on a USER_STATED element."
     )
 
     @model_validator(mode="after")
     def _ground_carries_its_own_argument(self) -> GoalElement:
-        """Admit exactly ADR-0249 §1's three shapes and refuse every other.
+        """Admit ADR-0249 §1's three shapes and ADR-0252 §10's fourth, and no other.
 
         Raises:
             ValueError: If the ground and the arguments beside it disagree.
@@ -5802,9 +5843,11 @@ class GoalElement(BaseModel):
         _refuse_mismatched_ground(
             ground=self.ground,
             reference=self.evidence_id,
+            row_reference=self.evidence_row_id,
             span=self.span,
             what="a goal element",
             reference_name="evidence_id",
+            row_reference_name="evidence_row_id",
             bare_user_stated=False,
         )
         return self
@@ -5850,6 +5893,10 @@ class GoalInterpretation(BaseModel):
             forward.
         outcome_evidence_id: The record establishing the outcome, on a
             ``FROM_EVIDENCE`` outcome.
+        outcome_evidence_row_id: The :class:`GoalEvidence` row of the same goal
+            establishing the outcome (ADR-0252 §10). A ``FROM_EVIDENCE`` outcome
+            carries **exactly one** of this and ``outcome_evidence_id``, because §1
+            validates the outcome's arguments "as a ``GoalElement``'s are".
         outcome_span: The span of the turn's request stating the outcome, on a
             ``USER_STATED`` outcome this system authored.
         outcome: The understood outcome, as a statement.
@@ -5871,6 +5918,10 @@ class GoalInterpretation(BaseModel):
     outcome_evidence_id: Identifier | None = Field(
         default=None, description="The record establishing the outcome, on a FROM_EVIDENCE one."
     )
+    outcome_evidence_row_id: Identifier | None = Field(
+        default=None,
+        description="The evidence row of this goal establishing the outcome (ADR-0252 §10).",
+    )
     outcome_span: EncodableText | None = Field(
         default=None, description="The span of the request stating it, on a USER_STATED one."
     )
@@ -5884,7 +5935,7 @@ class GoalInterpretation(BaseModel):
 
     @model_validator(mode="after")
     def _outcome_ground_carries_its_own_argument(self) -> GoalInterpretation:
-        """Admit ADR-0249 §1's three shapes plus the bare ``USER_STATED`` one.
+        """Admit ADR-0249 §1's three shapes, the bare ``USER_STATED`` one, and §10's.
 
         Raises:
             ValueError: If the ground and the arguments beside it disagree.
@@ -5892,9 +5943,11 @@ class GoalInterpretation(BaseModel):
         _refuse_mismatched_ground(
             ground=self.outcome_ground,
             reference=self.outcome_evidence_id,
+            row_reference=self.outcome_evidence_row_id,
             span=self.outcome_span,
             what="an interpretation's outcome",
             reference_name="outcome_evidence_id",
+            row_reference_name="outcome_evidence_row_id",
             bare_user_stated=True,
         )
         return self
@@ -6078,6 +6131,12 @@ class GoalRevision(BaseModel):
         expected_version: The :attr:`Goal.version` this revision was computed
             against. The read, the comparison and the write are **one indivisible
             step**, and there is no separate read on which a decision is taken.
+        invalidates: The :class:`GoalEvidence` rows of this goal the revision marks
+            ``INAPPLICABLE`` (ADR-0252 §9, §12), applied **in the same indivisible
+            step** as the append, the elision and the version advance. The predicate
+            that computes the set is ``orchestration``'s and the atomicity is the
+            store's: "a crash between two calls would leave exactly that state, and
+            it is the state correction 1's whole purpose is to make unreachable".
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -6085,6 +6144,10 @@ class GoalRevision(BaseModel):
     goal_id: Identifier
     interpretation: GoalInterpretation
     expected_version: int = Field(ge=0, description="The Goal.version this was computed against.")
+    invalidates: tuple[Identifier, ...] = Field(
+        default=(),
+        description="Evidence rows of this goal this revision marks INAPPLICABLE (ADR-0252 §9).",
+    )
 
 
 #: How many goals a conversation's candidate set renders to the associator
@@ -9405,6 +9468,881 @@ class StepTransition(BaseModel):
         return self
 
 
+class EvidenceBasis(StrEnum):
+    """Which of ADR-0252 §3's two admitted sources a row's support came from (§1).
+
+    A **closed** enumeration of exactly **two** members, each valued by its
+    lower-cased member name. The vocabulary is **added to and never renamed**, on
+    :class:`Ground`'s own rule (ADR-0249 §1, itself ADR-0226 §4's): no later ADR
+    removes a member, renames one, gives one a second spelling, or replaces this
+    enum with a differently-named one for the same question.
+
+    It names which of §3's two sources the row's :attr:`GoalEvidence.supported` was
+    composed from, and therefore **which closed vocabulary its ``verdict`` is a
+    value of** (§5) — so a reader holding a row never has to guess what ``"empty"``
+    is a member of.
+    """
+
+    READ_OUTCOME = "read_outcome"
+    """A typed read outcome that carried the applicability structurally: one region
+    per record the ask **returned**, composed from that record's own values and
+    never from the ask (§3). Its ``verdict`` is a :class:`ReadOutcomeKind` value."""
+
+    INTERPRETATION = "interpretation"
+    """An interpretation verdict over exactly one recorded record: the one region
+    the interpretation step declared (§3). Its ``verdict`` is a member of the closed
+    enumeration its ``declaration`` names, and **no lane of ADR-0252 produces such a
+    row** (§14) — the basis is landed so that the lane which needs it does not have
+    to reopen a ``core`` type."""
+
+
+#: The most values one region of an applicability holds on **each** label axis
+#: (ADR-0252 §2). **A fixed constant valued 32**, and deliberately not a ``Settings``
+#: field, a constructor knob or a per-deployment value — exactly as
+#: :data:`MAX_GOAL_INTERPRETATIONS` (ADR-0249 §2) and :data:`MAX_TOPICS_PER_PROPOSAL`
+#: (ADR-0213 §4) are not, on ADR-0086 §1's own reason: "a knob that raises the ceiling
+#: is a knob that re-opens it".
+#:
+#: A composition that would exceed it **keeps the first 32 values in the order the
+#: source produced them and advances that region's** :attr:`EvidenceApplicability.elided`
+#: (§2). The truncation is the **composer's** act and is disclosed by the count beside
+#: it; this type refuses an over-long axis outright rather than trimming one silently,
+#: because a validator that repaired the value would put the disclosure nowhere.
+MAX_APPLICABILITY_VALUES: Final[int] = 32
+
+#: The most regions one row's :attr:`GoalEvidence.supported` holds (ADR-0252 §2).
+#: **A fixed constant valued 32**, on :data:`MAX_APPLICABILITY_VALUES`' own footing and
+#: for its reason. A composition that would exceed it keeps the first 32 regions in the
+#: order the servicing produced them and advances the row's
+#: :attr:`GoalEvidence.supported_elided`.
+#:
+#: **Every truncation narrows and none widens, and the direction is why they are
+#: admissible at all** (§2): a dropped region makes ``supported`` cover **less** and
+#: therefore satisfy fewer conditions (§6) and supersede fewer rows (§8), so it fails
+#: closed. ADR-0086 §4's refusal of silent truncation binds entire and the two counts
+#: are what discharge it.
+MAX_SUPPORTED_REGIONS: Final[int] = 32
+
+
+class EvidenceApplicability(BaseModel):
+    """One **region** a response establishes a proposition about (ADR-0252 §2).
+
+    **One applicability is one region, composed from exactly one returned record**
+    (§3), so a region's axes are values that record carried **together**. No lane
+    merges two regions, unions their label axes, spans their windows, or replaces a
+    tuple of them by its enclosing interval.
+
+    **Regions rather than one aggregate, and the two failures an aggregate has are
+    both manufactured coverage** (§2). Two records declaring ``[09:00, 10:00)`` and
+    ``[15:00, 16:00)`` have an enclosing window of ``[09:00, 16:00)``, and a condition
+    about noon would then pass a coverage test neither record supports. And unioning
+    the label axes across records loses which participant was in which interval, so a
+    row composed from *Alice on Saturday* and *Bob on Sunday* would cover a condition
+    naming *Alice on Sunday*. Both are the same defect: an aggregate asserts the
+    **conjunction** of what several records said, where the records only ever said
+    their own parts.
+
+    **``None`` is the one spelling of *not applied*** — exactly as it is on
+    :class:`StructuredAsk` (ADR-0240 §2) — and a value applying nothing is expressed
+    by the field holding it being absent, or by a ``supported`` tuple being empty. A
+    region applying **no** axis is refused, and so is one whose present sequence axis
+    is empty.
+
+    **The axes take the types of the fields they copy, and tighten only in ways that
+    reject** (§2, ADR-0096 §2): ``participants`` and ``about_person`` are
+    :data:`NonBlankEncodableText`, which is :class:`StructuredAsk`'s own annotation for
+    the first and a tightening of :attr:`EpisodicMemory.participants`'
+    :data:`EncodableText`; ``topics`` is :data:`TopicLabel`, which both the ask and
+    :attr:`MemoryBase.topics` already carry. **A blank value on a returned record
+    contributes nothing to its region and advances that region's ``elided``** — it is
+    dropped, never stripped, never case-folded and never repaired.
+
+    Attributes:
+        window: The interval the source declared for what it reported, where it
+            declared one expressible as a :class:`TimeWindow`. ADR-0237 §2's type is
+            used exactly as defined and is not re-expressed: the half-open
+            ``[start, end)`` reading, the unset ends, the refusal of a window with
+            both ends unset and the refusal of one whose ``end`` is not strictly
+            after its ``start`` are that ADR's and are inherited whole.
+        participants: Whom the records this region came from involved.
+        topics: What they were filed under.
+        about_person: Whose the beliefs among them were.
+        elided: How many values this region's composition dropped — a blank value on
+            a returned record, a label axis past :data:`MAX_APPLICABILITY_VALUES`, or
+            a declared interval that cannot be expressed as a ``TimeWindow``. A count
+            and never an identifier (ADR-0086 §4).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    window: TimeWindow | None = Field(
+        default=None, description="The interval the source declared, where it declared one."
+    )
+    participants: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whom the records this region came from involved."
+    )
+    topics: tuple[TopicLabel, ...] | None = Field(
+        default=None, description="What those records were filed under."
+    )
+    about_person: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whose the beliefs among them were."
+    )
+    elided: int = Field(
+        default=0, ge=0, description="How many values this region's composition dropped."
+    )
+
+    @model_validator(mode="after")
+    def _applies_something_and_nothing_empty(self) -> EvidenceApplicability:
+        """Refuse a region applying no axis, an empty axis, and an over-long one.
+
+        The first two are ADR-0252 §2's own refusals. The third is this type
+        enforcing §2's bound rather than trusting a producer's arithmetic, which is
+        ADR-0086 §1's rule for a durable sequence in ``core``; it **refuses** rather
+        than trimming, because a validator that silently kept the first 32 would
+        leave :attr:`elided` unadvanced and put the disclosure nowhere.
+
+        Raises:
+            ValueError: If no axis is applied, a present sequence axis is empty, or
+                a label axis holds more than :data:`MAX_APPLICABILITY_VALUES` values.
+        """
+        axes = (
+            ("participants", self.participants),
+            ("topics", self.topics),
+            ("about_person", self.about_person),
+        )
+        if self.window is None and all(values is None for _, values in axes):
+            msg = (
+                "an EvidenceApplicability applies at least one axis: a value applying "
+                "nothing is spelled by the field holding it being absent, or by an "
+                "empty supported tuple (ADR-0252 §2)"
+            )
+            raise ValueError(msg)
+        for name, values in axes:
+            if values is None:
+                continue
+            if not values:
+                msg = (
+                    f"{name} is applied and empty: None is the one spelling of "
+                    f"'not applied' (ADR-0252 §2, ADR-0240 §2)"
+                )
+                raise ValueError(msg)
+            if len(values) > MAX_APPLICABILITY_VALUES:
+                msg = (
+                    f"{name} holds {len(values)} values and ADR-0252 §2 bounds each "
+                    f"axis at {MAX_APPLICABILITY_VALUES}: a composition that would "
+                    f"exceed it keeps the first {MAX_APPLICABILITY_VALUES} and "
+                    f"advances this region's elided"
+                )
+                raise ValueError(msg)
+        return self
+
+    def covers(self, other: EvidenceApplicability, /) -> bool:
+        """Whether this region **covers** ``other`` (ADR-0252 §2).
+
+        For **every axis ``other`` applies**, this region applies that axis and its
+        value contains ``other``'s. **An axis this region does not apply covers no
+        applied axis of ``other``**, and an axis ``other`` does not apply is covered
+        by anything.
+
+        **The direction is stated rather than left to a reader**, because the
+        predicate is not symmetric and the two readings differ on every unbounded
+        end: ``self`` is the containing side — what a response established — and
+        ``other`` is the contained one — what a condition, or an earlier row, needs.
+
+        **An unapplied axis is not read as *everything***. That would be the same
+        substitution ADR-0240 §2 refuses at the ask — "no value of any axis means
+        'everything'" — arriving at the response instead: a value that says nothing
+        about the people a step names has established nothing about them.
+
+        Args:
+            other: The region to test for containment in this one.
+
+        Returns:
+            Whether this region covers every axis ``other`` applies.
+        """
+        return (
+            _covers_window(self.window, other.window)
+            and _covers_labels(self.participants, other.participants, fold=True)
+            and _covers_labels(self.topics, other.topics, fold=False)
+            and _covers_labels(self.about_person, other.about_person, fold=True)
+        )
+
+    def overlaps(self, other: EvidenceApplicability, /) -> bool:
+        """Whether this region **overlaps** ``other`` (ADR-0252 §2).
+
+        They overlap when they apply **at least one axis in common** and, **for every
+        axis both apply**, their values intersect: windows that share at least one
+        instant, and label sets with at least one member in common under §6's
+        per-axis comparison. An axis only one of them applies is ignored.
+
+        **Overlap requires agreement on every shared axis, and that is what keeps a
+        shared label from bypassing a disjoint period** (§2). A row about *Saturday,
+        weather* and one about *Sunday, weather* share the ``topics`` axis and both
+        apply ``window``; their windows are disjoint, so they do not overlap and
+        neither is about the other's ground. The relation is symmetric, and it is
+        **used for conflict (§7) and never for supersession** — §8 requires the
+        stronger relation for the stronger act.
+
+        Args:
+            other: The region to test against this one.
+
+        Returns:
+            Whether the two share an axis and agree on every axis both apply.
+        """
+        shared = False
+        for mine, theirs, fold in (
+            (self.participants, other.participants, True),
+            (self.topics, other.topics, False),
+            (self.about_person, other.about_person, True),
+        ):
+            if mine is None or theirs is None:
+                continue
+            shared = True
+            if not _labels_intersect(mine, theirs, fold=fold):
+                return False
+        if self.window is not None and other.window is not None:
+            shared = True
+            if not _windows_intersect(self.window, other.window):
+                return False
+        return shared
+
+
+def _covers_window(coverage: TimeWindow | None, extent: TimeWindow | None) -> bool:
+    """Whether ``extent`` lies wholly within ``coverage`` (ADR-0117 §3, ADR-0252 §2).
+
+    **ADR-0117 §3's containment predicate, reused rather than restated**, with
+    ``extent`` as that predicate's contained extent *E* and ``coverage`` as its
+    containing coverage *C*. That section states it as "*E = [ef, eu)* lies wholly
+    within *C = [cf, cu)* iff **cf is None or (ef is not None and ef >= cf)** and
+    **cu is None or (eu is not None and eu <= cu)**", together with the sentence that
+    decides the hard case: "An unbounded extent end is contained only by an unbounded
+    coverage end on the same side."
+
+    It is the same arithmetic :meth:`ReadCoverage.contains` performs, over the one
+    carrier an applicability has: :class:`ReadCoverage` and :class:`ReportedExtent`
+    are the types of ADR-0117 §3's own operands and neither is what a region holds —
+    ADR-0117 §2 is explicit that the three subjects are distinct and that naming two
+    of them with one type is the error — so the predicate is applied here to
+    :class:`TimeWindow` rather than a region being coerced into a type that says
+    something else about a different subject.
+
+    Args:
+        coverage: The containing window, or ``None`` where the axis is not applied.
+        extent: The contained window, or ``None`` where the axis is not applied.
+
+    Returns:
+        ``True`` where ``extent`` is unapplied — an axis the other side does not
+        apply is covered by anything — ``False`` where ``coverage`` is unapplied and
+        ``extent`` is not, and otherwise whether the containment holds.
+    """
+    if extent is None:
+        return True
+    if coverage is None:
+        return False
+    starts_inside = coverage.start is None or (
+        extent.start is not None and extent.start >= coverage.start
+    )
+    ends_inside = coverage.end is None or (extent.end is not None and extent.end <= coverage.end)
+    return starts_inside and ends_inside
+
+
+def _windows_intersect(one: TimeWindow, other: TimeWindow) -> bool:
+    """Whether two half-open windows share at least one instant (ADR-0252 §2).
+
+    ``[s1, e1)`` and ``[s2, e2)`` intersect exactly when each starts strictly before
+    the other ends, an unset end reading as unbounded on that side. ADR-0237 §2's
+    half-open reading is what makes the comparison strict at the ends: an instant
+    equal to a window's ``end`` is outside it, so two windows that merely touch —
+    one ending where the other begins — share nothing.
+
+    Args:
+        one: The first window.
+        other: The second window.
+
+    Returns:
+        Whether some instant lies in both.
+    """
+    first_starts_before_second_ends = (
+        one.start is None or other.end is None or one.start < other.end
+    )
+    second_starts_before_first_ends = (
+        other.start is None or one.end is None or other.start < one.end
+    )
+    return first_starts_before_second_ends and second_starts_before_first_ends
+
+
+def _label_keys(values: Sequence[str], *, fold: bool) -> set[str]:
+    """The comparison keys of one label axis (ADR-0237 §3, ADR-0252 §6).
+
+    **Label comparison is stated per axis, because the corpus already states it per
+    axis and the three axes do not agree.** ``about_person`` and ``participants``
+    match by ADR-0101 §2's rule — canonical caseless equality, ``NFD(toCasefold(NFD(x)))``,
+    which :func:`caseless_key` computes — and ``topics`` matches by **equality of the
+    stored characters and by nothing else**, which is the only relation
+    :data:`TopicLabel` has (ADR-0213 §3).
+
+    **No lane applies one rule to all three**, and folding a topic would be a wider
+    matching rule ADR-0213 §3 reserves to an ADR that is not ADR-0252: precomposed
+    ``café`` and decomposed ``cafe`` + U+0301 are both admissible ``TopicLabel``s that
+    ADR-0101 §2's fold equates and the type does not, so applying it here would let
+    evidence filed under one topic cover a condition naming the other.
+
+    Args:
+        values: The axis's values, in the order the region holds them.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        The set of keys two axes are compared as.
+    """
+    return {caseless_key(value) for value in values} if fold else set(values)
+
+
+def _covers_labels(
+    coverage: Sequence[str] | None, needed: Sequence[str] | None, *, fold: bool
+) -> bool:
+    """Whether ``coverage``'s values are a superset of ``needed``'s (ADR-0252 §2).
+
+    Args:
+        coverage: The containing axis, or ``None`` where it is not applied.
+        needed: The contained axis, or ``None`` where it is not applied.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        ``True`` where ``needed`` is unapplied, ``False`` where ``coverage`` is
+        unapplied and ``needed`` is not, and otherwise whether every value of
+        ``needed`` is a value of ``coverage`` under this axis's own rule.
+    """
+    if needed is None:
+        return True
+    if coverage is None:
+        return False
+    return _label_keys(needed, fold=fold) <= _label_keys(coverage, fold=fold)
+
+
+def _labels_intersect(one: Sequence[str], other: Sequence[str], *, fold: bool) -> bool:
+    """Whether two applied label axes share at least one value (ADR-0252 §2).
+
+    Args:
+        one: The first axis's values.
+        other: The second axis's values.
+        fold: Whether ADR-0101 §2's fold applies to this axis.
+
+    Returns:
+        Whether some value of one is a value of the other under this axis's rule.
+    """
+    return bool(_label_keys(one, fold=fold) & _label_keys(other, fold=fold))
+
+
+def support_covers(
+    supported: Sequence[EvidenceApplicability], /, *, required: EvidenceApplicability
+) -> bool:
+    """Whether a ``supported`` tuple covers one applicability (ADR-0252 §2).
+
+    A tuple ``S`` covers an applicability ``B`` when **some region of ``S`` covers
+    ``B``** — never by combining two, because a union asserts a conjunction neither
+    response made (§6). This is the relation §6's first test and §9's invalidation
+    predicate are stated over.
+
+    **An empty ``supported`` covers nothing**, which is ADR-0249 §10's "an absent
+    ``supported`` supports nothing" binding as a property of this function rather
+    than as a rule each caller remembers.
+
+    Args:
+        supported: The row's regions, in the order the servicing produced them.
+        required: The applicability that must be covered.
+
+    Returns:
+        Whether one region covers it.
+    """
+    return any(region.covers(required) for region in supported)
+
+
+def support_covers_support(
+    supported: Sequence[EvidenceApplicability],
+    /,
+    *,
+    earlier: Sequence[EvidenceApplicability],
+) -> bool:
+    """Whether one ``supported`` tuple covers another (ADR-0252 §2, §8 limb 4).
+
+    A tuple ``S`` covers a tuple ``T`` when **every region of ``T`` is covered by
+    some region of ``S``**, and an **empty ``T`` is covered by nothing** — an empty
+    ``supported`` supports nothing, so there is nothing for a refresh to account for.
+
+    **Coverage and not overlap, and the difference is a user's evidence quietly
+    disappearing** (§8). A fresh read of Saturday *overlaps* a standing row
+    supporting the whole week, and letting it supersede would retire the week row
+    and take its Sunday support with it. Coverage runs the other way and only the
+    other way: a refresh may only retire what it can itself account for.
+
+    Args:
+        supported: The covering tuple — the later row's regions.
+        earlier: The covered tuple — the earlier row's regions.
+
+    Returns:
+        Whether every region of ``earlier`` is covered by some region of
+        ``supported``, and ``False`` where ``earlier`` is empty.
+    """
+    if not earlier:
+        return False
+    return all(support_covers(supported, required=region) for region in earlier)
+
+
+def support_overlaps(
+    supported: Sequence[EvidenceApplicability],
+    /,
+    *,
+    other: Sequence[EvidenceApplicability],
+) -> bool:
+    """Whether two ``supported`` tuples overlap (ADR-0252 §2, §7).
+
+    Two tuples overlap when **some region of one overlaps some region of the
+    other**. Used for conflict adjudication and **never** for supersession (§8).
+
+    Args:
+        supported: One row's regions.
+        other: The other row's regions.
+
+    Returns:
+        Whether any pair of regions overlaps.
+    """
+    return any(region.overlaps(theirs) for region in supported for theirs in other)
+
+
+#: The most record identifiers one evidence row names (ADR-0252 §1). **A fixed
+#: constant valued 32**, on :data:`MAX_APPLICABILITY_VALUES`' own footing: not a
+#: ``Settings`` field, not a constructor knob and not a per-deployment value.
+#:
+#: A row whose ask returned more keeps the **first 32** identifiers in the order the
+#: servicing produced them, and :attr:`GoalEvidence.returned` **continues to carry the
+#: true count** — so the truncation needs no second counter, because the figure that
+#: discloses it is the field beside it. ADR-0226 §6's budget of ten is counted *after*
+#: ADR-0226 §7's deduplication, so it bounds ``admitted`` and not ``returned``, and a
+#: durable sequence in ``core`` left to be bounded by a producer's arithmetic is
+#: exactly what ADR-0086 §1 refuses.
+MAX_EVIDENCE_RECORDS: Final[int] = 32
+
+#: The most evidence rows one goal's history holds (ADR-0252 §13). **A fixed constant
+#: valued 64**, and deliberately not a ``Settings`` field, a constructor knob or a
+#: per-deployment value, on ADR-0213 §4's and ADR-0086 §1's own rule: "a knob that
+#: raises the ceiling is a knob that re-opens it".
+#:
+#: A goal whose history would exceed it **drops its oldest row on the write that would
+#: exceed it**, by :func:`evidence_order`'s total order and **by age and by nothing
+#: else** — not by standing, not by verdict, not by whether a row is referenced, and
+#: not by any judgement of usefulness. A rule that kept ``STANDING`` rows preferentially
+#: would make the history a curated selection rather than a record, "and the one thing
+#: an audit trail must not be is edited toward the answer".
+#:
+#: **Why 64 and not a tuned figure, and it is a first declaration labelled as one**
+#: (§13). ADR-0251 §5 declares a planner-call allowance of four per attempt and
+#: ADR-0226 §2 admits at most one ask of each kind per request, so an attempt reading
+#: as hard as the corpus permits records on the order of twenty rows; 64 admits roughly
+#: three such attempts on one goal before anything is dropped, and the drop is disclosed
+#: by :attr:`EvidenceHistory.elided` rather than silent, so a deployment that hits it
+#: **learns that it did**.
+MAX_GOAL_EVIDENCE: Final[int] = 64
+
+
+class GoalEvidence(BaseModel):
+    """One durable record of what a servicing established about a goal (ADR-0252 §1).
+
+    **A row is provenance and never a second copy of what was read.** It carries no
+    record text, no snippet, no title, no excerpt, no query, no label, no rendered
+    result and no prose of any kind: what it carries of the world is exactly the
+    applicabilities of §2 and the two instants of §4. ADR-0226 §1's
+    record-not-payload rule is the ground, read one level down — at the durable record
+    *about* a servicing rather than at the servicing's yield — and ADR-0052 §3 is why
+    it matters, since a row carrying the records' text would be a durable copy of Tier 1
+    content written at a second site and retained on a second rule.
+
+    **The mark and its argument travel together or the value does not construct**,
+    which is ADR-0249 §1's own move one type over: a row marked ``SUPERSEDED`` whose
+    :attr:`superseded_by` was left absent is exactly the half-state that rule exists to
+    make unreachable, and it is what makes ADR-0252's correction 1 auditable —
+    "retained historical disagreements do not permanently block progress" is only
+    checkable if every retirement names what did it.
+
+    **Sufficiency never reads a count** (§1), and that is a prohibition rather than an
+    observation: §6's four tests, §8's six refresh limbs and §9's invalidation predicate
+    read neither :attr:`returned` nor :attr:`admitted`. *Whether a source answered in a
+    way that supports a proposition is not whether a turn learned something new* — the
+    second question is ADR-0251 §7's progress fold, is evaluated over the turn's own
+    servicings, and stays there.
+
+    Attributes:
+        id: This row's own identifier, minted by ``orchestration``'s injected id
+            factory (§14).
+        goal_id: The goal whose history it belongs to.
+        attempt_id: The attempt that recorded it.
+        basis: Which of §3's two sources ``supported`` was composed from.
+        read_kind: What was read, on a ``READ_OUTCOME`` row; absent on every other.
+        source: The reading's own declared identity where the servicing has one, and
+            **absent on every row ADR-0252's producers write** (§1). No lane fills it
+            with a provider name, a host, an address, a path, a ``Settings`` field name
+            or a credential identity — ADR-0231 §13's bar, which binds this field
+            because a durable row is a worse place for one of those than a log is.
+        declaration: The interpretation step's declaration, **required on an
+            ``INTERPRETATION`` row and absent on every other**. It is durable, stable
+            across turns, and what §7 and §8 compare so that two interpretation steps
+            examining the same record about **different propositions** are never
+            mistaken for one another. It is never a ``MemoryStore`` identifier and
+            never a minted one.
+        requested: What the ask named, composed by ``orchestration`` from the **typed**
+            part of the ask and from nothing else, and absent where the ask has no
+            typed part (§3) — which is every kind but ``STRUCTURED_READ``.
+        supported: What the response establishes a proposition about: one region per
+            record, **never derived from** ``requested``, from the ask, from the query,
+            from the fact that a read completed, from a :class:`ReadOutcomeKind` member
+            on its own, from a model's sentence, or from any inspection of a record's
+            text (§3). **An empty ``supported`` supports nothing.**
+        supported_elided: How many regions the composition dropped at
+            :data:`MAX_SUPPORTED_REGIONS`.
+        read_at: The instant **this system** performed the read, from the injected
+            clock, always present (§4).
+        as_of: The instant **the source itself declares** for that reading, absent
+            where it declares none. ADR-0096 §2's prohibition binds verbatim: it "may
+            never be filled from the filesystem, from the clock, from ``read_at``, or
+            from one entry's stamp applied to the rest".
+        records: The identifiers of the records the ask returned, which **resolve in
+            the owner's** :class:`~ai_assistant.core.protocols.MemoryStore` **and hold
+            nothing else** — never a record ADR-0231 §1's search minted, and never one
+            ADR-0230 §5's fetch minted, each of which "resolves in no store".
+        returned: How many records the ask handed back **before** ADR-0226 §7's
+            deduplication. Persisted rather than recomputed, because the supply it was
+            counted over is ephemeral (ADR-0052 §3).
+        admitted: How many of those the supply did **not** already hold, which is
+            ADR-0226 §9's ``new``. Persisted for the same reason.
+        verdict: The **value of a typed outcome** and never a prose summary a model
+            wrote about one (ADR-0249 §10). Which vocabulary it is drawn from is
+            decided by :attr:`basis` and by nothing else (§5).
+        standing: Whether this row still bears on the goal.
+        inapplicable_at_revision: The revision that marked it ``INAPPLICABLE`` (§9).
+        superseded_by: The row that refreshed it (§8).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="This row's own identifier.")
+    goal_id: Identifier = Field(description="The goal whose history it belongs to.")
+    attempt_id: Identifier = Field(description="The attempt that recorded it.")
+    basis: EvidenceBasis = Field(description="Which of §3's two sources composed supported.")
+    read_kind: ReadKind | None = Field(
+        default=None, description="What was read, on a READ_OUTCOME row."
+    )
+    source: EncodableText | None = Field(
+        default=None, description="The reading's own declared identity, where it has one."
+    )
+    declaration: Identifier | None = Field(
+        default=None, description="The interpretation step's declaration, on an INTERPRETATION row."
+    )
+    requested: EvidenceApplicability | None = Field(
+        default=None, description="What the ask named, from its typed part alone."
+    )
+    supported: tuple[EvidenceApplicability, ...] = Field(
+        default=(), description="What the response establishes a proposition about."
+    )
+    supported_elided: int = Field(ge=0, description="How many regions the composition dropped.")
+    read_at: UtcInstant = Field(description="When this system performed the read (tz-aware).")
+    as_of: UtcInstant | None = Field(
+        default=None, description="What instant the source declares for the reading."
+    )
+    records: tuple[Identifier, ...] = Field(
+        default=(), description="The store-resident records the ask returned."
+    )
+    returned: int = Field(ge=0, description="How many records came back, before deduplication.")
+    admitted: int = Field(ge=0, description="How many of those the supply did not already hold.")
+    verdict: EncodableText = Field(description="The typed outcome's own value.")
+    standing: EvidenceStanding = Field(description="Whether it still bears on the goal.")
+    inapplicable_at_revision: int | None = Field(
+        default=None, ge=1, description="The revision that marked it INAPPLICABLE."
+    )
+    superseded_by: Identifier | None = Field(default=None, description="The row that refreshed it.")
+
+    @model_validator(mode="after")
+    def _row_is_a_shape_this_decision_admits(self) -> GoalEvidence:
+        """Refuse every shape but ADR-0252 §1's, on all four of its axes.
+
+        Raises:
+            ValueError: If the basis, the kind, the counts or the standing and the
+                fields beside them disagree.
+        """
+        self._refuse_a_basis_mismatch()
+        self._refuse_a_kind_mismatch()
+        self._refuse_a_count_mismatch()
+        self._refuse_a_standing_mismatch()
+        return self
+
+    def _refuse_a_basis_mismatch(self) -> None:
+        """ADR-0252 §1's first axis: what each basis carries.
+
+        A ``READ_OUTCOME`` row carries a ``read_kind`` and no ``declaration``. An
+        ``INTERPRETATION`` row carries **no** ``read_kind``, a **required**
+        ``declaration``, **exactly one** member of ``records``, and ``returned`` and
+        ``admitted`` both ``0`` — the interpretation call's whole input is one recorded
+        record, it reads no source and admits nothing, and a verdict over two records
+        is not one ADR-0252 admits.
+
+        Raises:
+            ValueError: If the row's fields are not what its basis admits.
+        """
+        if self.basis is EvidenceBasis.READ_OUTCOME:
+            if self.read_kind is None or self.declaration is not None:
+                msg = (
+                    "a READ_OUTCOME evidence row carries a read_kind and no declaration "
+                    "(ADR-0252 §1)"
+                )
+                raise ValueError(msg)
+            return
+        if self.read_kind is not None or self.declaration is None:
+            msg = (
+                "an INTERPRETATION evidence row carries no read_kind and a required "
+                "declaration (ADR-0252 §1)"
+            )
+            raise ValueError(msg)
+        if len(self.records) != 1 or self.returned or self.admitted:
+            msg = (
+                "an INTERPRETATION evidence row carries exactly one record and "
+                "returned and admitted both 0: the call's whole input is one recorded "
+                "record, it reads no source and admits nothing (ADR-0252 §1)"
+            )
+            raise ValueError(msg)
+
+    def _refuse_a_kind_mismatch(self) -> None:
+        """ADR-0252 §1's second axis: durable kinds name, ephemeral kinds count.
+
+        On a ``READ_OUTCOME`` row whose ``read_kind`` is ``SIGHTED_QUERY``,
+        ``STRUCTURED_READ`` or ``CITATION_HOP``, ``len(records)`` **equals**
+        ``returned``, or equals :data:`MAX_EVIDENCE_RECORDS` where ``returned``
+        exceeds it. On one whose ``read_kind`` is ``WEB_SEARCH`` or ``LOCAL_FILE``,
+        ``records`` is **empty** and the count stands alone — their records are minted
+        for one turn and resolve in no store (ADR-0231 §16, ADR-0230 §10), so **the
+        split is by where the record lives and not by which ADR minted it**.
+
+        Raises:
+            ValueError: If the kind and the identifiers beside it disagree.
+        """
+        if self.read_kind is None:
+            return
+        if self.read_kind in (ReadKind.WEB_SEARCH, ReadKind.LOCAL_FILE):
+            if self.records:
+                msg = (
+                    f"a {self.read_kind.value} evidence row names no record: its records "
+                    f"are minted for one turn and resolve in no store, so the count "
+                    f"stands alone (ADR-0252 §1)"
+                )
+                raise ValueError(msg)
+            return
+        expected = min(self.returned, MAX_EVIDENCE_RECORDS)
+        if len(self.records) != expected:
+            msg = (
+                f"a {self.read_kind.value} evidence row names {expected} records for "
+                f"returned={self.returned}, not {len(self.records)}: a durable kind names "
+                f"what it returned, bounded at {MAX_EVIDENCE_RECORDS} with returned still "
+                f"carrying the true count (ADR-0252 §1)"
+            )
+            raise ValueError(msg)
+
+    def _refuse_a_count_mismatch(self) -> None:
+        """ADR-0252 §1's third axis, and the bound on ``supported``.
+
+        ``admitted <= returned`` on every row. **No inequality is stated over**
+        ``len(records)``, because the two clauses above already fix it exactly: one
+        read over *every* row would demand ``1 <= 0`` of an ``INTERPRETATION`` row and
+        make that basis unconstructible.
+
+        The ``supported`` bound is §2's, enforced here rather than trusted to a
+        producer's arithmetic, and **refused rather than trimmed** for
+        :class:`EvidenceApplicability`'s own reason: a validator that silently kept the
+        first 32 regions would leave :attr:`supported_elided` unadvanced.
+
+        Raises:
+            ValueError: If more was admitted than returned, or ``supported`` holds
+                more than :data:`MAX_SUPPORTED_REGIONS` regions.
+        """
+        if self.admitted > self.returned:
+            msg = (
+                f"admitted={self.admitted} exceeds returned={self.returned}: admitted "
+                f"counts how many of the returned records were new (ADR-0252 §1)"
+            )
+            raise ValueError(msg)
+        if len(self.supported) > MAX_SUPPORTED_REGIONS:
+            msg = (
+                f"supported holds {len(self.supported)} regions and ADR-0252 §2 bounds it "
+                f"at {MAX_SUPPORTED_REGIONS}: a composition that would exceed it keeps "
+                f"the first {MAX_SUPPORTED_REGIONS} and advances supported_elided"
+            )
+            raise ValueError(msg)
+
+    def _refuse_a_standing_mismatch(self) -> None:
+        """ADR-0252 §1's fourth axis: a mark and its argument travel together.
+
+        ``STANDING`` carries neither ``inapplicable_at_revision`` nor
+        ``superseded_by``; ``INAPPLICABLE`` carries the first and not the second;
+        ``SUPERSEDED`` carries the second and not the first. Every other combination
+        is refused, so **a row that says it was displaced without saying by what is
+        not constructible**.
+
+        Raises:
+            ValueError: If the standing and the arguments beside it disagree.
+        """
+        wanted = {
+            EvidenceStanding.STANDING: (False, False),
+            EvidenceStanding.INAPPLICABLE: (True, False),
+            EvidenceStanding.SUPERSEDED: (False, True),
+        }[self.standing]
+        held = (self.inapplicable_at_revision is not None, self.superseded_by is not None)
+        if held != wanted:
+            expected = {
+                EvidenceStanding.STANDING: "neither argument",
+                EvidenceStanding.INAPPLICABLE: "inapplicable_at_revision and no superseded_by",
+                EvidenceStanding.SUPERSEDED: "superseded_by and no inapplicable_at_revision",
+            }[self.standing]
+            msg = (
+                f"a {self.standing.value} evidence row carries {expected} (ADR-0252 §1): "
+                f"a row that says it was displaced without saying by what is not "
+                f"constructible"
+            )
+            raise ValueError(msg)
+
+
+def evidence_order(row: GoalEvidence) -> tuple[datetime, str]:
+    """The **total** order one goal's evidence history is returned in (ADR-0252 §12).
+
+    ``read_at`` oldest first, **ties broken by ``id`` ascending**. Stated once here
+    because three things read it and each would otherwise re-derive it: the order
+    :meth:`~ai_assistant.core.protocols.PlanStore.evidence_of` contractually returns,
+    the ordinal ADR-0252 §10's ``E`` label is an index into, and the row ADR-0252 §13's
+    elision drops.
+
+    **The order is total rather than merely by instant**, because two rows written
+    from one servicing can share a ``read_at`` to the microsecond: an order stated on
+    that field alone leaves two conforming stores free to return them either way round,
+    which makes the label space differ between implementations and makes the elision
+    drop different rows. Breaking the tie on ``id`` costs nothing and makes both
+    testable in the shared conformance suite.
+
+    Args:
+        row: The row to key.
+
+    Returns:
+        Its sort key.
+    """
+    return (row.read_at, row.id)
+
+
+def marked_superseded(row: GoalEvidence, *, by: str) -> GoalEvidence:
+    """``row`` marked ``SUPERSEDED``, naming the row that displaced it (ADR-0252 §8).
+
+    **Revalidated rather than copied**, on ADR-0023 §2's rule that
+    ``model_copy(update=...)`` skips validators and "a write that reaches past it must
+    re-validate" — which is what keeps §1's fourth axis in force over a value no
+    constructor built. Stated once so the three conforming stores cannot drift on what
+    a mark is.
+
+    **Supersession never un-marks** (§8): a row that is ``SUPERSEDED`` is never
+    returned to ``STANDING``, by a later revision, by a later refresh, by the deletion
+    of the row that displaced it, or by any other route. ADR-0252 §12's three refusals
+    — the row is not this goal's, is not ``STANDING``, or is the row being written —
+    are the **store's** and run before this.
+
+    Args:
+        row: The ``STANDING`` row being displaced.
+        by: The id of the row that refreshed it.
+
+    Returns:
+        The row as it stands after the mark.
+    """
+    return GoalEvidence.model_validate(
+        row.model_copy(
+            update={"standing": EvidenceStanding.SUPERSEDED, "superseded_by": by}
+        ).model_dump()
+    )
+
+
+def marked_inapplicable(row: GoalEvidence, *, at_revision: int) -> GoalEvidence:
+    """``row`` marked ``INAPPLICABLE`` against a revision (ADR-0252 §9).
+
+    **Invalidation is a marking and never a deletion**: the row is kept with its
+    applicabilities, its instants, its verdict and its references intact, it is still
+    exported, still reachable through ``get_evidence`` and ``evidence_of``, and still
+    in the digest the planner sees. **What changes is exactly one field**, plus the
+    argument that field's mark travels with.
+
+    **Invalidation never un-marks** (§9): a later revision that restores the old
+    requirement does not return the row to ``STANDING`` — it is read again or it is not
+    used — because un-marking would make a goal's evidence state depend on the **order**
+    of its revisions rather than on what is known.
+
+    Revalidated for :func:`marked_superseded`'s reason, and ADR-0252 §12's two
+    refusals — the row is not this goal's, or is not ``STANDING`` — are the store's.
+
+    Args:
+        row: The ``STANDING`` row the revision no longer covers.
+        at_revision: The revision being appended, which did it.
+
+    Returns:
+        The row as it stands after the mark.
+    """
+    return GoalEvidence.model_validate(
+        row.model_copy(
+            update={
+                "standing": EvidenceStanding.INAPPLICABLE,
+                "inapplicable_at_revision": at_revision,
+            }
+        ).model_dump()
+    )
+
+
+class EvidenceHistory(BaseModel):
+    """One goal's evidence rows, and how many the bound has dropped (ADR-0252 §12).
+
+    **The count is what makes the history a record rather than a curated selection.**
+    Silent truncation is not available, and ADR-0086 §4's reason is the reason here: "a
+    displaced citation that leaves no trace would make a belief report a narrower
+    warrant than it has, which is a *false* answer to the one question the provenance
+    display exists to answer".
+
+    Carrying the count on this value rather than returning a bare tuple of rows is also
+    what lets an export disclose it (§13), and it is the **one** nesting
+    :class:`PlanExport` takes: ADR-0014 §5's "flat, not nested: relationships travel as
+    the ids already on the records" still holds entire, because the history carries its
+    ``goal_id`` and every row carries its own.
+
+    Attributes:
+        goal_id: The goal whose history this is.
+        rows: Its rows, in :func:`evidence_order`'s total order where a store returns
+            them. Possibly empty — a goal that has recorded none, or one whose every
+            row the bound has since dropped.
+        elided: How many rows this goal's history has dropped at
+            :data:`MAX_GOAL_EVIDENCE`. A count and never an identifier, it **never
+            decreases**, it is **not recomputed from the row count**, and a write that
+            drops *k* rows advances it by *k* in the same indivisible step (§13).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier = Field(description="The goal whose history this is.")
+    rows: tuple[GoalEvidence, ...] = Field(default=(), description="Its rows, oldest first.")
+    elided: int = Field(default=0, ge=0, description="How many rows the bound has dropped.")
+
+    @model_validator(mode="after")
+    def _every_row_is_this_goals(self) -> EvidenceHistory:
+        """Refuse a history whose rows are not the goal it names (ADR-0252 §12).
+
+        Raises:
+            ValueError: If some row carries another ``goal_id``.
+        """
+        strays = sorted({row.goal_id for row in self.rows} - {self.goal_id})
+        if strays:
+            msg = (
+                f"an evidence history of goal {self.goal_id} holds rows of "
+                f"{', '.join(strays)} (ADR-0252 §12)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class GoalQuestionDisposition(StrEnum):
     """The state of one clarification bound to a goal (ADR-0250 §8).
 
@@ -9591,6 +10529,16 @@ class GoalDeletion(BaseModel):
     deleted: bool
     plans_removed: int = Field(default=0, ge=0)
     executions_removed: int = Field(default=0, ge=0)
+    evidence_removed: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Evidence rows the cascade removed (ADR-0252 §12). ADR-0014 §5's rule — "
+            "'a goal the user deletes must not leave its plan history behind' — is "
+            "extended rather than re-promised, and no row of any standing blocks a "
+            "deletion."
+        ),
+    )
     blocked_by: tuple[EncodableText, ...] = Field(
         default=(),
         description="Ids of still-active executions; non-empty exactly when refused.",
@@ -9620,7 +10568,30 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 10 because this document gained ``questions`` and
+    **``schema_version`` is 11 because this document gained ``evidence``**
+    (ADR-0252 §13). ``tuple[EvidenceHistory, ...]`` is a member an earlier reading of
+    this document has no field for, and ``model_dump()`` emits it on **every**
+    document — refused by an older reader's ``extra="forbid"`` exactly as
+    ``targets_revision`` is. ``Goal`` changes shape in the same decision too, which is
+    an independent ground over ``tuple[Goal, ...]``: ADR-0252 §10 gives
+    ``GoalElement`` an ``evidence_row_id`` and ``GoalInterpretation`` an
+    ``outcome_evidence_row_id``, both emitted on every element and every revision a
+    document carries. ADR-0014 §5's closure rule reaches the new member as it reaches
+    every other: **a history whose ``goal_id`` the export does not carry does not
+    validate as a ``PlanExport`` at all**, and no goal the export carries is without
+    one. ADR-0004 §6's export right is what obliges the member — a goal's evidence is
+    the user's data and an export that omitted it would be an incomplete one — and the
+    **elision count travels with the rows**, because a document holding 64 rows and no
+    count would say *this is the evidence* where the truth is *this is the evidence
+    that was kept*.
+
+    **An element whose ``evidence_row_id`` names an elided row does not make the
+    document invalid** (§10, §13). That reference is "an identifier and not a
+    resolution guarantee": the element still states what it says, the missing warrant
+    is disclosed by ``EvidenceHistory.elided``, and no lane repairs, back-fills or
+    refuses it. The same is true of a ``superseded_by`` the bound has dropped (§12).
+
+    **It was 10 because this document gained ``questions`` and
     ``Goal`` gained ``last_engaged_in``** (ADR-0250 §9, §19). Either would oblige the
     move on its own, and they reach different populations: ``tuple[GoalQuestion, ...]``
     is a member an earlier reading of this document has no field for and which
@@ -9716,12 +10687,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[10] = Field(
-        default=10,
+    schema_version: Literal[11] = Field(
+        default=11,
         description=(
-            "Shape of this export, pinned to exactly 10 (ADR-0039 §10, ADR-0250 §9): an "
+            "Shape of this export, pinned to exactly 11 (ADR-0039 §10, ADR-0252 §13): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[10]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[11]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -9733,6 +10704,7 @@ class PlanExport(BaseModel):
     executions: tuple[ExecutionState, ...] = ()
     attempts: tuple[GoalAttempt, ...] = ()
     questions: tuple[GoalQuestion, ...] = ()
+    evidence: tuple[EvidenceHistory, ...] = ()
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:
@@ -9809,6 +10781,7 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         self._questions_close_over_their_records(goal_ids, attempt_ids)
+        self._evidence_closes_over_its_goals(goal_ids)
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -9822,6 +10795,40 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         return self
+
+    def _evidence_closes_over_its_goals(self, goal_ids: set[str]) -> None:
+        """Enforce ADR-0252 §13's extension of ADR-0014 §5's closure rule.
+
+        **Exactly one entry per goal the export carries**, so a reader holding the
+        document can answer *what did this goal know* for every goal in it — including
+        with an empty history and a zero count, which is a true answer and not an
+        omission. A history whose ``goal_id`` the export does not carry does not
+        validate at all, which is §5's own promise stated over one more reference.
+
+        Nothing here looks at whether a row's ``records``, a ``superseded_by`` or an
+        element's ``evidence_row_id`` resolves: those are ``MemoryStore`` identifiers
+        and elidable row references respectively, and §10 and §12 both rule such a
+        reference "an identifier and not a resolution guarantee".
+
+        Args:
+            goal_ids: The ids of the goals this export carries.
+
+        Raises:
+            ValueError: If a history names a goal the export does not carry, if two
+                histories name one goal, or if a goal has no history.
+        """
+        named = [history.goal_id for history in self.evidence]
+        if len(set(named)) != len(named):
+            msg = "export contains duplicate evidence histories"
+            raise ValueError(msg)
+        dangling = sorted(set(named) - goal_ids)
+        if dangling:
+            msg = f"export has evidence whose goal is missing: {', '.join(dangling)}"
+            raise ValueError(msg)
+        missing = sorted(goal_ids - set(named))
+        if missing:
+            msg = f"export has goals carrying no evidence history: {', '.join(missing)}"
+            raise ValueError(msg)
 
     def _questions_close_over_their_records(
         self, goal_ids: set[str], attempt_ids: set[str]
