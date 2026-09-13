@@ -2795,33 +2795,29 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     **advanced by the interval consumed up to the cancellation** — or **raises**, in which case
     §1's precedence binds and the ledger undercounts; the `CancelledError` **propagates to the
     caller as the same instance**, not converted to a value and not replaced by a failure of the
-    accounting; and **no later step is dispatched and none is skipped**. **Those five seams fall
-    into three cases and not two**, because what is assertable depends on what had been dispatched
-    when the cancellation arrived: ADR-0034 §1 separates *"a cancellation absorbed while the
-    **claim itself** was in flight"* from *"Everything else that happens once `invoke` has been
-    entered"*, and the two halves do not take the same rule. **The first case is the entry-status
-    assertion, and it is made at two of the five seams — the ones whose cancellation is delivered
-    before any write of that seam is dispatched**: the **interpretation call**, which claims
-    nothing and writes no row, and a **`StepRunner.run` cancelled before its own claim** — the
-    pre-write half of that seam, which the fixture reaches by delivering into the runner before
-    `StepExecutor._claim`. At both the step stands at its **entry** status (§3), **`PENDING`**,
-    both being reached from a walk. **The second case is a `StepRunner.run` cancelled *after* its
-    claim, inside `ToolInvoker.invoke`** — the post-claim half of that seam, and a case of its own
-    rather than a sixth seam. The claim has certainly landed there, and ADR-0029 §4 binds what the
-    record says, so the arm asserts that the step's **declared
-    `ToolDefinition.interrupted_outcome` is committed before the cancellation propagates** —
-    `INDETERMINATE` for a side-effecting non-`NATURAL` tool and `FAILED` otherwise — and **not**
-    the permitted pair, which an implementation leaving the step merely `RUNNING` would satisfy
-    while violating that contract. **The third case is the permitted pair, and it is reserved for
-    a cancellation delivered during a write — inside `commit_transition` (§3), inside `resume`
-    past ADR-0037 §4's step 5 (§5), and inside §6's `commit_attempt`**: ADR-0060 §1 lets a
-    cancelled write have committed or not, so the write either landed or did not, **both outcomes
-    are legal**, and what is asserted is that the durable state is one of the two and that no lane
-    reports the other. **Where the write did not land the step stands at §3's entry status for the
-    path that entered that seam** — `PENDING` from a walk and **`AWAITING_APPROVAL` from a
-    `resume`**, which is where that clause belongs rather than on the two pre-write seams, both of
-    which a walk enters. A stricter assertion at those three would be one no implementation could
-    satisfy, which is the defect this replaces. **What each arm
+    accounting; and **no later step is dispatched and none is skipped**. **What is committed before
+    a cancellation propagates is fixed by the interval it was absorbed in, and this arm states that
+    rule once rather than once per seam.** ADR-0034 §1 divides these paths by interval and not by
+    call: *"a cancellation absorbed while the **claim itself** was in flight"* is one thing, and
+    *"Everything else that happens once `invoke` has been entered"* is another. **From the instant
+    a cancellation is absorbed, the durable state this arm asserts is (a), (b) or (c) by where it
+    landed.** **(a) Where no write of that seam has begun**, the step stands at its **entry**
+    status (§3) — **`PENDING`** where a walk entered the seam and **`AWAITING_APPROVAL`** where a
+    `resume` did, §3's two and only two. **(b) Where `ToolInvoker.invoke` has been entered**, the
+    step's **declared `ToolDefinition.interrupted_outcome` is committed before the cancellation
+    propagates** — `INDETERMINATE` for a side-effecting non-`NATURAL` tool and `FAILED` otherwise
+    (ADR-0029 §4, ADR-0034 §1). **(c) Where a write was in flight**, ADR-0060 §1's **permitted
+    pair**: the write either landed or did not, **both outcomes are legal**, so what is asserted
+    is that the durable state is one of the two and that no lane reports the other. **The five
+    seams above are named as the set this arm drives and are not classified into (a), (b) and
+    (c)**: each is driven at **every interval it contains**, so a seam that reaches a claim and
+    then a call is driven at all three, and a seam that is one write is driven at (c) alone. The
+    fixture picks the interval by where it delivers — into the runner before `StepExecutor._claim`
+    for (a), past the committed claim for (b), inside the write for (c). **Classifying seam by
+    seam is the defect this replaces**: a seam spanning more than one interval asserts too little
+    at the ones its classification omits — a step left merely `RUNNING` after an invocation
+    cancellation satisfies (c) while violating ADR-0029 §4 — and asserting (a) or (b) of a seam
+    that is only a write would be an assertion no implementation could satisfy. **What each arm
     refutes is an implementation that catches `Exception`**: `CancelledError` is a
     `BaseException`, so such an implementation lets it past the accounting untouched, charges
     nothing, and passes every other arm of this list — none of which delivers one. **And the
