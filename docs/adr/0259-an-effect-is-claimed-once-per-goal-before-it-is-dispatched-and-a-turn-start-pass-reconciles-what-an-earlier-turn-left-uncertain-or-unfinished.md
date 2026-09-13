@@ -528,6 +528,23 @@ implements the **first** route and explains why the second is not taken here.
 > the turn's own deadline (ADR-0255 §9). **No lane loops, backs off, schedules a second, or
 > re-calls a step the same turn already reconciled.**
 
+> **Normative — the reconciliation call takes no step claim, ADR-0014 §4's
+> claim-before-invocation rule is untouched, and the concurrency this leaves is bounded rather
+> than denied.** That rule is stated over the **`→ RUNNING` transition** — *"The `→ RUNNING`
+> transition is a claim, and must be committed before the tool is invoked"* — and a
+> reconciliation **makes no such transition**: the step is `INDETERMINATE`, it stays
+> `INDETERMINATE` until the call returns, and §7 admits only `INDETERMINATE → SUCCEEDED` out of
+> it. **No lane invents a claim for it, moves the step to `RUNNING` first, or reads this as
+> licence to invoke a `PENDING` step without one.** Two turns engaging one goal at once can
+> therefore each make the call, and **that is admitted rather than overlooked**: the
+> authorisations §3 admits are exactly the ones ADR-0192 §1 rules non-spendable, where *"no claim
+> under it is ever refused on the ground that it is spent"* — the corpus already contemplating
+> the same authorised read being made as often as the pipeline needs it — and where ADR-0029 §4
+> rules a repeat changes nothing. **What is not concurrent is the record**: both turns'
+> `→ SUCCEEDED` commits are compare-and-swaps on one `ExecutionState`, so **exactly one lands**
+> and the loser writes nothing, which is ADR-0014 §5's discipline doing here what it does
+> everywhere else.
+
 > **Normative — an uncheckable effect stays uncertain, is told once, and is never repeated.** Its
 > step stays **`INDETERMINATE`**, its attempt stays **`EFFECT_UNRESOLVED`** (§4), its effect key
 > answers **`UNCERTAIN`** to every later claim (§2), and **no lane moves it to `SUCCEEDED`,
@@ -1133,7 +1150,12 @@ property are the whole of it.
    discovered.
 5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**:
    the `ALLOW` is **replayed**, no second permission record is authored, and the step reaches its
-   dispatch exactly once.
+   dispatch exactly once. **And the replay is withheld wherever it must be**, in a table over
+   ADR-0255 §5's three predicates — a dependency that no longer holds, a `when` member that no
+   longer holds, an unresolvable `resolves` — each asserting that **`StepRunner.resume` is not
+   called**, `ToolInvoker.invoke` is not reached, **no transition lands**, no effect is claimed,
+   and the step stays **`AWAITING_APPROVAL`** at its stored version with its resolution still
+   unspent.
 6. The **`DENY`** counterpart: §4's act 2 commits `AWAITING_APPROVAL → SKIPPED` with
    `APPROVAL_DENIED` naming the recorded decision, and nothing is authored.
 7. A supersession sweep that landed one step and not the rest is **completed** by the pass, from
@@ -1155,9 +1177,13 @@ property are the whole of it.
     take **no call at all**; a reconcilable step whose `approval_ref` is absent, whose decision the
     trail cannot return, or whose rebuilt request `PermissionDecision.authorises` rejects takes
     **no call**; and a reconcilable step whose call returns a failure, a timeout or an
-    `INDETERMINATE` of its own takes **one**. In every row the step stays **`INDETERMINATE`**, `attempts` is **unchanged**, no
-    transition is committed, the attempt stays **`EFFECT_UNRESOLVED`**, the key answers
-    **`UNCERTAIN`** to a later plan's claim, and **no second call is made in that turn**.
+    `INDETERMINATE` of its own takes **one**. In **every** row the step stays
+    **`INDETERMINATE`**, `attempts` is **unchanged**, no transition is committed, the attempt
+    stays **`EFFECT_UNRESOLVED`**, and **no second call is made in that turn**. **The key is
+    asserted per row rather than across them**, because §1 gives one only to a side-effecting
+    tool: a **side-effecting** row's key answers **`UNCERTAIN`** to a later plan's claim, and a
+    **non-`side_effecting`** row's `ToolCall.effect_key` is **`None`** and `claim_effect` is
+    **never called for it**.
 12. The pass's **boundaries**, in one arm. It touches **only the goal the turn engaged**: a
     second goal carrying the same three residuals is **unchanged**, and nothing runs for it until
     a turn engages it. And a **store failure injected at each act boundary** stops it there: what
