@@ -283,8 +283,9 @@ refuses, and it would be bought to keep a field nothing reads accurate.
 > ASCII string `A` followed by *n* in decimal with no padding.** That is the whole of the scheme,
 > it is the same on both sides of the seam, both sides derive it from the value they hold and
 > neither consults the other, and **no label survives the call that rendered it and none is
-> persisted as a reference.** It is ADR-0226 §3's scheme applied to an eighth sequence, and `A`
-> collides with none of `M`, `F`, `C`, `S`, `D`, `E` or `G`.
+> persisted as a reference.** It is ADR-0226 §3's scheme applied to one more sequence, and **`A`
+> is not `M`, `F`, `C`, `S`, `D`, `E` or `G`** — the seven letters this corpus has already spent, so
+> no lane spells this space with one of them and no later lane spells another space `A`.
 
 > **Normative — the brief renders the action's `intent` and its live links and nothing else.** It
 > carries **no `IntendedAction.id`**, no effect, no execution, no step, no outcome and no
@@ -509,7 +510,7 @@ else (ADR-0082 §1). ADR-0252 §12's `GoalRevision` widening is the precedent §
 and §2 states why.
 
 **ADR-0226, ADR-0228 and ADR-0230 — relied on and not superseded.** ADR-0226 §3's label scheme is
-applied to an eighth sequence without alteration; ADR-0228 §8's namer rule binds every field this
+applied to one more sequence without alteration; ADR-0228 §8's namer rule binds every field this
 decision adds, and §5's authored-at-the-seam discipline is what §4's substitution observes.
 ADR-0230 §4's *"a property of the types rather than a rule a planner is trusted to keep"* is the
 ground `BriefAction` carries no identifier on.
@@ -587,10 +588,11 @@ drives a message into a running turn.
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
 A **new decision** that partially supersedes ADR-0249 in three scopes and ADR-0253 in one, each
-named on the header and shown in §8. Against every other ADR it cites it is a **stacked
-addition**: no sentence of ADR-0014, ADR-0226, ADR-0228, ADR-0230, ADR-0250, ADR-0252 or ADR-0255
-becomes false or over-wide, and each is joined by an obligation stated here. It is **marked** under
-ADR-0089.
+named on the header and shown in §8. **Against every other ADR it cites, without exception, it is
+a stacked addition** — no sentence of any of them becomes false or over-wide, and each is joined
+by an obligation stated here; §8 shows the working for the ones a reader would expect to be
+superseded, ADR-0014, ADR-0226, ADR-0228, ADR-0230, ADR-0249 §12, ADR-0250, ADR-0252 and ADR-0255
+among them. It is **marked** under ADR-0089, and every obligation it imposes is inside a mark.
 
 ## Consequences
 
