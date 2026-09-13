@@ -99,7 +99,9 @@ from ai_assistant.core.types import (
     EgressBinding,
     FetchRefusal,
     MemoryKind,
+    OutboundDestination,
     OutboundReach,
+    OutboundStatement,
     ParkedRead,
     ParkedReadDisposition,
     PermissionDecision,
@@ -679,6 +681,66 @@ def folded_reach(carried: OutboundReach | None, one: OutboundReach | None) -> Ou
     if carried is None:
         return one
     return one if _REACH_RANK[one] > _REACH_RANK[carried] else carried
+
+
+def outbound_statement(
+    *,
+    search: OutboundReach | None,
+    egress: OutboundReach | None,
+    records: int,
+    composed: bool,
+) -> OutboundStatement | None:
+    """Assemble one turn's statement, once, from the carriers §2 and §4 name (ADR-0264 §6).
+
+    **Nothing is inferred at the assembly point** (§6). Every input is a fact some
+    other site computed and carried here as data: the contact classification each
+    performing site computed (§2), the admitted count each admitting site recorded (§4),
+    and the executed-egress fact the component that drove the step computed — never an
+    ``EgressBinding``, a ``Disposition`` or a ``StepExecution`` read here.
+
+    **The destination class is derived from the *search* reach and from nothing else**,
+    which is §3 written as code rather than as a rule to remember: this decision
+    establishes a contact from a ``WEB_SEARCH`` call and from nothing else, so
+    ``egress`` can make a turn ``INDETERMINATE`` and can never name a class or make it
+    ``REACHED``. A turn that contacted one class through three servicings names it once,
+    because the classes are a set of kinds and never an enumeration of servicings (§4).
+
+    **A turn that carries nothing carries** ``NOT_REACHED`` **and not** ``None``
+    (§1, §7): #2365's shape is a turn that made no call at all, and leaving the member
+    absent there is exactly what let a reply date its material to *"this turn's
+    searches"* unremarked.
+
+    Args:
+        search: What this turn's ``WEB_SEARCH`` calls established, folded by
+            :func:`folded_reach`, or ``None`` where it performed none.
+        egress: What the driven egress step established, or ``None`` where the turn
+            drove none, the step carried no ``EgressBinding``, or the executor proved
+            the callable was never reached (ADR-0192 §1's three windows).
+        records: How many records this turn's established contacts put into its supply
+            (§4). Read only where a contact was established, because §4 couples the
+            two and the model refuses an uncoupled value.
+        composed: Whether this pass reached the composing stage at all. ``False`` on a
+            routed park and on every other pass ADR-0170 §4 composes nothing for, which
+            with no contact established is §7's one ``None`` case.
+
+    Returns:
+        The statement this turn carries, or ``None`` on a pass that **neither
+        established a contact nor composed a reply** (§7).
+    """
+    reach = folded_reach(search, egress) or OutboundReach.NOT_REACHED
+    if reach is OutboundReach.REACHED:
+        # Only a `WEB_SEARCH` call reaches this member (§3), so the class is known by
+        # construction and the model's own coupling check cannot be tripped here.
+        return OutboundStatement(
+            reach=reach,
+            destinations=(OutboundDestination.SEARCH_PROVIDER,),
+            records=records,
+        )
+    if composed:
+        # §4: on `NOT_REACHED` and `INDETERMINATE` the classes are empty and the count
+        # is `0` — there is no contact for a record to have entered the supply on.
+        return OutboundStatement(reach=reach)
+    return None
 
 
 class StructuredAxis(StrEnum):

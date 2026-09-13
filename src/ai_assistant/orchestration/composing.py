@@ -92,6 +92,8 @@ from ai_assistant.core.types import (
     EpisodicMemory,
     ExchangeDisposition,
     Message,
+    OutboundReach,
+    OutboundStatement,
     ReplyChunk,
     Role,
     RoutableOperation,
@@ -636,6 +638,7 @@ class ComposingStage:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        outbound: OutboundStatement | None = None,
         goal: GoalFacts | None = None,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
@@ -725,6 +728,19 @@ class ComposingStage:
                 nothing. What it names is the *class of act* that would change the
                 answer, and the fragment it selects carries no destination, host,
                 query, record, count, figure, duration or command name (§7).
+            outbound: ADR-0264 §7's carrier: what this turn did about reaching outside
+                this system, or ``None`` where the caller has none to give — a
+                **routed** pass and nothing else, since §6 gives every other composing
+                pass a fragment whatever the value. **Supplied, not inferred**, on
+                ``hop_reached``'s and ``search_not_serviced``'s reasoning: it is
+                assembled once per turn in :mod:`ai_assistant.orchestration` from the
+                fact each performing site computed, and this stage derives it from
+                nothing — not from a latency, not from the supply's length, not from a
+                record's shape, and not from the audit. The fragment it selects carries
+                no destination, host, origin, provider name, query, record, title,
+                snippet, figure, duration or command name (§6), and **it does not say
+                what the reply should do with the records**: ``records`` says they
+                entered this turn's supply and no more.
 
             goal: ADR-0250 §10's and §14's two facts about this turn's goal, or
                 ``None`` where the caller has neither to give (:func:`_system_prompt`).
@@ -753,6 +769,7 @@ class ComposingStage:
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
                     search_not_serviced=search_not_serviced,
+                    outbound=outbound,
                     goal=goal,
                 ),
             ),
@@ -765,7 +782,6 @@ class ComposingStage:
                     withheld=withheld,
                     deliveries=deliveries,
                     hop_reached=hop_reached,
-                    search_unserviced=search_not_serviced is not None,
                     clarification=None if goal is None else goal.clarification,
                 ),
             ),
@@ -930,6 +946,7 @@ class ComposingStage:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        outbound: OutboundStatement | None = None,
         goal: GoalFacts | None = None,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
@@ -1000,6 +1017,9 @@ class ComposingStage:
                 streamed turn's channel audience is bounded, so a search is serviced on
                 it exactly as on a whole turn and the fact is not decorative here
                 either.
+            outbound: ADR-0264 §7's carrier, as :meth:`compose` takes it. A streamed
+                pass composes and is not routed, so §6's fragment is owed here exactly
+                as it is there.
 
             goal: ADR-0250 §10's and §14's two facts about this turn's goal, or
                 ``None`` where the caller has neither to give, as :meth:`compose`
@@ -1032,6 +1052,7 @@ class ComposingStage:
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
                     search_not_serviced=search_not_serviced,
+                    outbound=outbound,
                     goal=goal,
                 ),
             ),
@@ -1044,7 +1065,6 @@ class ComposingStage:
                     withheld=False,
                     deliveries=deliveries,
                     hop_reached=hop_reached,
-                    search_unserviced=search_not_serviced is not None,
                     clarification=None if goal is None else goal.clarification,
                 ),
             ),
@@ -1288,6 +1308,64 @@ at a reason, do not name anything or anyone, and do not tell the person to do \
 something about it: there may be nothing for them to do."""
 
 
+_REACHED_PROMPT: Final = """\
+While answering this, this assistant reached outside this system, and it took in \
+{records} record(s) from doing so. Do not deny that the reach happened, do not say that \
+nothing was looked up this turn, and do not present the answer as resting on what was \
+already held. Equally, do not say that the answer is more current, more reliable or \
+better for it, do not say what was reached or where, and do not say what came back: \
+none of that is a thing you have been told. A reach that brought nothing back is still \
+a reach, and a record taken in is not a record you were given."""
+
+
+_NOT_REACHED_PROMPT: Final = """\
+While answering this, this assistant reached nothing outside this system. Do not claim \
+a lookup, a search, a fetch or any fresh read **this turn**, and do not attribute any \
+part of your answer to one — not in passing, not as a flourish, and not as an \
+explanation of where a figure came from. You may of course say where material you hold \
+came from, provided you do not date it to this turn. Do not offer this as a fault or \
+as a limit, and do not guess at why: you have not been told any of that."""
+
+
+_INDETERMINATE_PROMPT: Final = """\
+While answering this, this system cannot say whether it reached outside itself. Do not \
+assert that it did and do not assert that it did not, and in particular do not \
+attribute any part of your answer to a lookup this turn. Do not guess, do not explain \
+the uncertainty, do not name anything or anyone, and do not tell the person to do \
+something about it: there may be nothing for them to do, and you have not been told \
+what happened."""
+
+
+#: ADR-0264 §6's three, keyed by member, so that :func:`_system_prompt` picks one
+#: **literal** rather than assembling text — ``_SEARCH_NOT_SERVICED_PROMPTS``'s own rule
+#: one vocabulary over, and for its reason: a fourth member of
+#: :class:`~ai_assistant.core.types.OutboundReach` joins nothing silently, and the arm
+#: over the enumeration fails rather than a template quietly widening.
+#:
+#: **Only** :attr:`~ai_assistant.core.types.OutboundReach.REACHED` **interpolates, and
+#: it interpolates** ``records`` **and nothing else** (§6). The `REACHED` fragment states
+#: the two facts every contact has and no others — that this turn reached outside this
+#: system, and how many records it took in from doing so, which may be none and which
+#: the fragment says where it is none.
+#:
+#: **Each forbids the reply from contradicting the value it carries, in whichever
+#: direction that value points** (§6), and each carries no destination, host, origin,
+#: provider name, connection reference, account identity, query or fragment of one,
+#: record, title, snippet, monetary figure, duration, ``Settings`` field name,
+#: ``SearchDisposition`` value, id or command name — ADR-0242 §7's bar, binding here
+#: unchanged. `_STOPPED_ASKING_PROMPT`'s own "you have not been told any of that" is the
+#: form, and the fragment is stated at both ends: the model is told the fact so that it
+#: need not guess, and told what the fact does not license so that it does not embroider
+#: it.
+_OUTBOUND_PROMPTS: Final[Mapping[OutboundReach, str]] = MappingProxyType(
+    {
+        OutboundReach.REACHED: _REACHED_PROMPT,
+        OutboundReach.NOT_REACHED: _NOT_REACHED_PROMPT,
+        OutboundReach.INDETERMINATE: _INDETERMINATE_PROMPT,
+    }
+)
+
+
 #: The seven, keyed by member, so that :func:`_system_prompt` picks one **literal**
 #: rather than assembling text.
 #:
@@ -1316,7 +1394,7 @@ _SEARCH_NOT_SERVICED_PROMPTS: Final[Mapping[SearchNotServiced, str]] = MappingPr
 )
 
 
-def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one keyword per fact a clause is appended on; ADR-0228 §10, ADR-0240 §8 and ADR-0242 §7 each add one and none is derivable from another
+def _system_prompt(  # noqa: C901, PLR0913 — the pass's own instruction plus one keyword per fact a clause is appended on; ADR-0228 §10, ADR-0240 §8, ADR-0242 §7 and ADR-0264 §6 each add one, none is derivable from another, and one `if` per clause is the decision rather than a shape to fold
     base: str,
     *,
     unbounded_audience: bool,
@@ -1324,6 +1402,7 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
     stopped_while_asking: bool = False,
     structured: StructuredFacts | None = None,
     search_not_serviced: SearchNotServiced | None = None,
+    outbound: OutboundStatement | None = None,
     goal: GoalFacts | None = None,
 ) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
@@ -1373,6 +1452,16 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
             made checkable. Never a member beside ``unbounded_audience``, for
             ``stopped_while_asking``'s reason one clause over: ADR-0226 §5 declines to
             service a read request on such a channel, so no search is serviced there.
+        outbound: ADR-0264 §6's carrier — what this turn did about reaching outside this
+            system — or ``None`` where the caller has none to give, which is a **routed**
+            pass and nothing else. Unlike every keyword above it, a member here is the
+            ordinary case rather than the exceptional one: §6 gives an unrouted
+            composing pass one fixed fragment per :class:`OutboundReach` member
+            *whatever the statement's value*, so **no turn that composes an unrouted
+            reply keeps a byte-identical assembled prompt**. That is a cost taken
+            deliberately and recorded against ADR-0242 §6's byte-identity sentence in
+            ADR-0264's header. A routed pass is given nothing here, so ADR-0197 §6's
+            closure of the routed composer's inputs at "exactly two" stands unnarrowed.
 
     Returns:
         The system message's content.
@@ -1401,6 +1490,14 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
     # other (ADR-0242 §16).
     if search_not_serviced is not None:
         clauses.append(_SEARCH_NOT_SERVICED_PROMPTS[search_not_serviced])
+    # ADR-0264 §6's fragment, **one literal per member**, appended after ADR-0242 §7's
+    # because the two answer different questions and a turn may carry both: §7's says
+    # what act would change what a lookup produced, and this says what the turn actually
+    # did about reaching the world. Neither is read off the other (§8), and the
+    # `REACHED` fragment is the only one that interpolates — `records`, and nothing
+    # else.
+    if outbound is not None:
+        clauses.append(_OUTBOUND_PROMPTS[outbound.reach].format(records=outbound.records))
     # ADR-0250 §10 and §14, appended last because each is a fact about *what the turn
     # did with the user's objective* rather than about the material it composed over —
     # which a reader has to have met the material to place. The clarification clause is
@@ -1421,7 +1518,6 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
     withheld: bool,
     deliveries: Mapping[str, SpokenDelivery],
     hop_reached: Sequence[str] = (),
-    search_unserviced: bool = False,
     clarification: str | None = None,
 ) -> str:
     """Render the whole of what the stage was given into the user-turn prompt.
@@ -1461,10 +1557,6 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
             reached, in ADR-0229 §3's order (ADR-0227 §3) — each record a label named
             followed by that record's own evidence, deduplicated to the first
             occurrence.
-        search_unserviced: Whether this turn carries ADR-0242 §7's member at all, so
-            that the plan block can say it is an account of no lookup (#2213). The
-            **bare fact**: which member it is stays at :func:`_system_prompt`, and
-            this block never sees it.
         clarification: The text of the question this turn raised (ADR-0250 §10), or
             ``None`` on every turn that raised none. Rendered under a heading of this
             assembler's own and quoted by :func:`_quoted_span`, because it is the
@@ -1499,7 +1591,7 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
         lines.append("")
         lines.append(_WITHHELD_LINE)
     lines.append("")
-    lines += _render_plan(turn.plan, step, undriven, search_unserviced=search_unserviced)
+    lines += _render_plan(turn.plan, step, undriven)
     lines.append("")
     lines += _render_step_account(step)
     # ADR-0250 §10: the question this turn raised, **quoted** like every other span
@@ -2330,8 +2422,6 @@ def _render_plan(
     plan: ActionPlan,
     step: StepOutcome | None,
     undriven: Sequence[PlanStep],
-    *,
-    search_unserviced: bool = False,
 ) -> list[str]:
     """Render what the assistant decided to do, marking what was never driven.
 
@@ -2380,33 +2470,34 @@ def _render_plan(
     envelope's structure, so the rationale is the only place the difference is
     stated and this function has nothing else to read.
 
-    **On a turn that did not service a search the block closes on one more line of
-    this assembler's own text** (:data:`_PLAN_IS_ABOUT_ACTING`, #2213), saying that
-    everything above it is about acting and is therefore an account of no lookup.
-    It is appended **last** on both shapes, after the rationale and after the step
-    lines, because it is a statement about the block rather than a part of it — and
-    appended on both because a plan with steps names capabilities too.
+    **The block closes on one more line of this assembler's own text**
+    (:data:`_PLAN_IS_ABOUT_ACTING`, #2213), saying that everything above it is about
+    acting and is therefore an account of no lookup. It is appended **last** on both
+    shapes, after the rationale and after the step lines, because it is a statement
+    about the block rather than a part of it — and appended on both because a plan with
+    steps names capabilities too.
+
+    **It is appended on every composing pass that renders a plan block, which a routed
+    pass does not** (ADR-0264 §6). #2213 added the line on a turn that did not service a
+    search, to stop the plan block being read as an account of lookups; on a turn that
+    *did* reach outside, and on #2365's turn whose planner named no capability at all,
+    the same block says the same misleading thing and the same line answers it. So the
+    condition is now *the pass composes* — this function is reached only from
+    :func:`_render_request`, which a routed pass does not reach — and **the line's own
+    text is unchanged**. No ADR clause fixed when it was appended, so widening the
+    condition falsifies no ratified sentence (ADR-0264 §14).
 
     Args:
         plan: What the planner decided.
         step: What became of the step the turn drove, or ``None``.
         undriven: The plan's steps that were not driven at all (ADR-0170 §5).
-        search_unserviced: Whether this turn carries ADR-0242 §7's member at all —
-            **the bare fact and never the member**. This block is told *that* the
-            instruction accounts for a lookup and is never told which class of act
-            would have let it happen: the member selects one of §7's eight fragments
-            at one site (:func:`_system_prompt`) and reaches no second one, so
-            nothing here can come apart from that table or grow a ninth arm.
-            ``False`` on every turn carrying no member, where this function's output
-            is byte-identical to what it was before #2213 — which is ADR-0242 §6's
-            guarantee, unweakened by a second consumer of the same condition.
     """
     rationale = (
         []
         if plan.rationale is None
         else [f"  the planner's stated rationale: {_quoted_span(plan.rationale)}"]
     )
-    scope = [_PLAN_IS_ABOUT_ACTING] if search_unserviced else []
+    scope = [_PLAN_IS_ABOUT_ACTING]
     if not plan.steps:
         return [
             "What the assistant decided to do:",

@@ -153,6 +153,8 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     OperationConfirmation,
     OriginUnrecordedBinding,
+    OutboundReach,
+    OutboundStatement,
     ParkedBinding,
     ParkedRead,
     PermissionOutcome,
@@ -233,7 +235,7 @@ from ai_assistant.orchestration.payloads import (
     utc_instant,
 )
 from ai_assistant.orchestration.questions import question_state
-from ai_assistant.orchestration.reads import StructuredFacts
+from ai_assistant.orchestration.reads import StructuredFacts, outbound_statement
 from ai_assistant.orchestration.routing import (
     FORGET_LOOKUP_KINDS,
     Resolved,
@@ -1731,6 +1733,22 @@ def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
 #: :meth:`Engine._compose_routed_streaming` — and it is a parameter rather than a flag
 #: for :meth:`Engine._run_turn`'s own reason: a second copy of the routing driver would
 #: be two places for the reservation's release and the capture point to drift apart.
+#: ADR-0264 §7's value for a pass that composed a reply and reached nothing at all.
+#:
+#: **One literal rather than a call per site**, because every producer of it is a pass
+#: that cannot have reached anything: a routed pass that is not a park (ADR-0197 §10's
+#: "an answer is owed"), ADR-0198 §1's restatement, and ADR-0250 §3's ``UNDECIDED``
+#: turn. None of the three assembles a supply, services a read or drives a step, so
+#: there is no carrier for :func:`~ai_assistant.orchestration.reads.outbound_statement`
+#: to fold and the value is settled by the shape of the pass.
+#:
+#: **It is not ``None``** (§7). Leaving the member absent on a pass that composed a
+#: reply is exactly what issue #2365 records: a turn whose trail said ``not_asked``
+#: telling the user its figures were "already in front of me from this turn's searches",
+#: with nothing beside the reply to contradict it.
+_REACHED_NOTHING: Final = OutboundStatement(reach=OutboundReach.NOT_REACHED)
+
+
 type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable[ComposedReply | None]]
 
 
@@ -1785,6 +1803,7 @@ type _Composer = Callable[
         bool,
         StructuredFacts,
         SearchNotServiced | None,
+        OutboundStatement | None,
         _GoalPass,
     ],
     Awaitable[ComposedReply | None],
@@ -4470,6 +4489,7 @@ class Engine:
         stopped_while_asking: bool,
         structured: StructuredFacts,
         search_not_serviced: SearchNotServiced | None,
+        outbound: OutboundStatement | None,
         goal: _GoalPass,
         *,
         supply: UnboundedAudienceSupply,
@@ -4572,6 +4592,15 @@ class Engine:
                 **withheld** on such a channel is a trust record, a canonical
                 destination set, a connection reference and a connected account's
                 identity — none of which any fragment carries.
+            outbound: ADR-0264 §7's carrier, passed on exactly as a bounded pass
+                passes it. **A spoken turn carries the statement and an unrouted one
+                gets §6's fragment**, so the reply for the ear is composed under the
+                same instruction as any other; what that surface does without is the
+                **rendering**, because ADR-0200 §4 makes ``spoken`` "the rendering of
+                ``outcome.reply`` and of nothing else" and §7 adds nothing to
+                ``SpokenTurn``. ADR-0264 §12 books that as a stated cost and §9 says in
+                terms that the spoken surface "is not in default" of the rendering
+                clause.
             supply: The applier this call minted, read for the bare fact of whether
                 anything was held back. Bound by :meth:`converse_spoken` rather than
                 passed by :meth:`_run_turn`, which knows nothing of disclosure.
@@ -4607,6 +4636,16 @@ class Engine:
             # bounded-audience pass produces one (ADR-0242 §5): §8 fixes it as a closed
             # vocabulary carrying no destination, account, query, figure or command.
             search_not_serviced=search_not_serviced,
+            # ADR-0264 §6's fragment, on this pass exactly as on a bounded one. **A
+            # spoken turn still carries the statement and an unrouted one still gets the
+            # fragment**, so that reply is composed under the same instruction (§7) —
+            # what the spoken surface does without is the *rendering*, which ADR-0200 §4
+            # makes impossible because ``spoken`` is "the rendering of ``outcome.reply``
+            # and of nothing else". That is ADR-0264 §12's stated cost, booked rather
+            # than a gap, and it is the reason the fragment is given here and not
+            # dropped: the reply composed for the ear is the only thing that user hears,
+            # so it is the one place the instruction can still do any work at all.
+            outbound=outbound,
             # ADR-0250 §15: a turn of this operation builds no candidacy and makes no
             # `associate` call, so no elision can be disclosed here and the value's
             # elision half is always clear. A **clarification this turn's own planner
@@ -8579,6 +8618,7 @@ class Engine:
             stopped_while_asking: bool,
             structured: StructuredFacts,
             search_not_serviced: SearchNotServiced | None,
+            outbound: OutboundStatement | None,
             goal: _GoalPass,
         ) -> ComposedReply | None:
             return await self._compose_streaming(
@@ -8591,6 +8631,7 @@ class Engine:
                 stopped_while_asking,
                 structured,
                 search_not_serviced,
+                outbound,
                 goal,
             )
 
@@ -8631,6 +8672,7 @@ class Engine:
         stopped_while_asking: bool,
         structured: StructuredFacts,
         search_not_serviced: SearchNotServiced | None,
+        outbound: OutboundStatement | None,
         goal: _GoalPass,
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
@@ -8662,6 +8704,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            outbound=outbound,
             goal=goal,
         )
 
@@ -8730,6 +8773,11 @@ class Engine:
             # §11: "An ``UNKNOWN`` reference is reported whatever the association then
             # does", which is the whole reason `reference` is a member of its own.
             reference=association.reference,
+            # ADR-0264 §7: an `UNDECIDED` turn composes a reply — deterministically, from
+            # the disambiguation — and takes "no relevance read, no episodic supplement
+            # and no `Planner.plan` call", so it reached nothing and says so. §7 names
+            # this turn among the three that carry `NOT_REACHED` rather than `None`.
+            outbound_statement=_REACHED_NOTHING,
         )
 
     async def _engagement(
@@ -10274,6 +10322,14 @@ class Engine:
         # from, which is what makes those two the same member rather than two that
         # agree (ADR-0242 §9).
         search_not_serviced = responded.search_not_serviced
+        # ADR-0264 §2's fold over this turn's `WEB_SEARCH` calls and §4's count over
+        # what they admitted, threaded exactly as the carriers above are and **never
+        # inferred here** — not from the supply's length, not from a latency, not from
+        # a record's shape and not from the audit. The **statement** is assembled below,
+        # because this pass's other input is the executed-egress classification, which
+        # only the branch that drives a step has (§6).
+        searched_reach = responded.outbound_reach
+        searched_records = responded.outbound_records
         # ADR-0244 §9: the question **this turn parked**, assembled once here so it
         # appears in the exchange that raised it. Threaded exactly as the four carriers
         # above are and never inferred: the servicing site wrote the park and carried
@@ -10388,6 +10444,17 @@ class Engine:
                 # through all six.
                 attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
                 attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
+            # ADR-0264 §6's assembly, once for this pass. This branch drove no step, so
+            # the egress contribution is `None` — a turn that drove nothing reached
+            # nothing on a send's account — and the pass composes, which is what makes
+            # the member present rather than `None` even where the turn reached nothing.
+            # That is #2365's shape: `servicing=not_asked`, and the member it needed.
+            outbound = outbound_statement(
+                search=searched_reach,
+                egress=None,
+                records=searched_records,
+                composed=True,
+            )
             composed = await compose(
                 turn,
                 None,
@@ -10397,6 +10464,7 @@ class Engine:
                 stopped_while_asking,
                 structured,
                 search_not_serviced,
+                outbound,
                 _GoalPass(
                     facts=GoalFacts(
                         # ADR-0250 §10: "**The turn still declines to act in that
@@ -10456,6 +10524,9 @@ class Engine:
                 # ADR-0242 §9's field, folded in at the one place a ``TurnOutcome`` is
                 # built. It is the member the servicing site computed, by value.
                 search_not_serviced=search_not_serviced,
+                # ADR-0264 §7's field, on the same terms: the value assembled above,
+                # by value and never a second computation.
+                outbound_statement=outbound,
                 # ADR-0244 §9's first member, on the same terms.
                 read_confirmation=read_confirmation,
                 # ADR-0250 §5's members, each computed above by the site that knows it.
@@ -10603,6 +10674,28 @@ class Engine:
         # (#1314) — so composing first is chosen for the reason that the capture
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
+        # ADR-0264 §6's assembly, once for this pass and from three carriers no site
+        # here recomputes: the turn's folded search reach, what its contacts admitted,
+        # and **the executed-egress classification the component that drove the step
+        # computed** — carried out of the drive on `StepDisposition.outbound` and never
+        # an `EgressBinding`, a `Disposition` or a `StepExecution` read at this fold.
+        #
+        # **A step's send establishes no contact and is not nothing either** (§3): it
+        # can make this turn `INDETERMINATE` and can never make it `REACHED` or name a
+        # destination class, and where the executor proved the callable was never
+        # reached it contributes nothing at all and leaves the search's own answer
+        # standing (§13 item 8).
+        outbound = outbound_statement(
+            search=searched_reach,
+            egress=disposition.outbound,
+            records=searched_records,
+            # ADR-0170 §4: a pass whose step parked for confirmation owes no answer, and
+            # `_compose` declines on exactly that shape — so what is true here is that
+            # the composing stage is reached wherever an answer is owed. A parked pass
+            # that established a contact still carries the statement (§7); one that did
+            # not carries `None`.
+            composed=step.confirmation is None,
+        )
         composed = await compose(
             turn,
             step,
@@ -10612,6 +10705,7 @@ class Engine:
             stopped_while_asking,
             structured,
             search_not_serviced,
+            outbound,
             # ADR-0250 §10, §14: a turn that reached this branch drove a step, so it
             # raised no question; and §14's disclosure is keyed on the disposition,
             # which is what `elided` already is. The outcome's own members ride here
@@ -10669,6 +10763,8 @@ class Engine:
             # ADR-0242 §9's field, as on the branch above and for its reason: the same
             # member, by value, and never a second computation.
             search_not_serviced=search_not_serviced,
+            # ADR-0264 §7's field, on the same terms and from the same assembly.
+            outbound_statement=outbound,
             # ADR-0244 §9's first member, on the same terms. **A turn may park a read
             # and drive a step**: the two are independent facts about one pass, and the
             # outcome carries both — what ADR-0244 §9's validator refuses is a read
@@ -11186,6 +11282,13 @@ class Engine:
             # than a default it falls back on — stated in code exactly as
             # `origin.NOTHING_EXTERNAL` has a caller state it.
             derived_from_external=False,
+            # ADR-0264 §7: this pass composes a reply and reached nothing — a routed
+            # resumption assembles no supply, services no read and drives no step — so
+            # the member is `NOT_REACHED` and not `None`. It is **not** the routed park
+            # §7 leaves `None`: that is the pass that *parked*, on which ADR-0197 §10
+            # rules "the composing stage is not reached"; this is the pass that answered
+            # it, and an answer is owed here.
+            outbound_statement=_REACHED_NOTHING,
         )
 
     async def _finish_route(
@@ -11239,6 +11342,19 @@ class Engine:
             # pass sits in the third case here and in the first case there, and the
             # two partitions are not one table.
             derived_from_external=False,
+            # ADR-0264 §7's two routed shapes, decided by the one boolean that already
+            # tells them apart. **A routed pass that is not a park carries
+            # `NOT_REACHED`**, because ADR-0197 §10 rules that on it "the composing
+            # stage runs on §6's two inputs and an answer is owed" — so there is prose,
+            # and §1's condition binds on it like any other. **A routed park carries
+            # `None`**: the composing stage is not reached and the pass established no
+            # contact, which is §7's one `None` case.
+            #
+            # **And no routed composer is given a fragment** (§6), which is what keeps
+            # ADR-0197 §6's closure of the routed composer's inputs at "exactly two"
+            # unnarrowed: the member is carried and the statement is rendered, and the
+            # instruction the guarantee does not rest on is what the pass does without.
+            outbound_statement=None if compose is None else _REACHED_NOTHING,
         )
 
     async def _composed_routed_whole(
@@ -11364,6 +11480,12 @@ class Engine:
             reply=_ROOM_PROBE,
             reply_degraded=False,
             routed=routed,
+            # ADR-0264 §7: a routed pass that is not a park carries `NOT_REACHED`, and
+            # a routed park owes no answer and reaches no stream — so the probe for a
+            # composing routed pass measures the member it will carry. Omitting it
+            # would over-state the room by exactly the bytes the terminal frame spends
+            # on it.
+            outbound_statement=_REACHED_NOTHING,
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
@@ -11415,6 +11537,7 @@ class Engine:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        outbound: OutboundStatement | None = None,
         goal: _GoalPass | None = None,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
@@ -11487,6 +11610,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            outbound=outbound,
             goal=carried.facts,
         )
         # ADR-0250 §5's announcement, placed in the reply here and at the streaming
@@ -11504,6 +11628,7 @@ class Engine:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        outbound: OutboundStatement | None = None,
         goal: _GoalPass | None = None,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
@@ -11539,7 +11664,13 @@ class Engine:
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
         carried = goal or _GoalPass()
-        room = self._reply_room(turn=turn, step=step, conversation_id=conversation_id, goal=goal)
+        room = self._reply_room(
+            turn=turn,
+            step=step,
+            conversation_id=conversation_id,
+            goal=goal,
+            outbound=outbound,
+        )
         # ADR-0250 §5's sentence is part of the terminal ``reply``, so it is part of
         # what ADR-0173 §3's ceiling bounds: the room the stage is given is the room
         # left **after** it. Escaping is additive over concatenation, which is what
@@ -11570,6 +11701,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            outbound=outbound,
             goal=carried.facts,
         )
         async with closing_stream(stream) as composing:
@@ -11617,6 +11749,7 @@ class Engine:
         step: StepOutcome | None,
         conversation_id: str,
         goal: _GoalPass | None = None,
+        outbound: OutboundStatement | None = None,
     ) -> int:
         """How many escaped bytes the terminal outcome has left for its reply (§3).
 
@@ -11650,6 +11783,8 @@ class Engine:
                 to the terminal frame, and a probe that left them out would reserve
                 room for an outcome smaller than the one it is reserving for — which is
                 the one thing ADR-0173 §3's ceiling exists to prevent.
+            outbound: ADR-0264 §7's member the outcome will carry, on the same terms
+                and for the same reason.
 
         Returns:
             The escaped byte budget for the reply. Zero or negative means no chunk
@@ -11668,6 +11803,13 @@ class Engine:
             goal_engagement=carried.engagement,
             clarification=carried.clarification,
             reference=carried.reference,
+            # ADR-0264 §7's member, **measured and not omitted**, for the reason the
+            # four above it are: it adds bytes to the terminal frame, and a probe that
+            # left it out would reserve room for an outcome smaller than the one it is
+            # reserving for — the one thing ADR-0173 §3's ceiling exists to prevent.
+            # The value is this pass's own, assembled before composing begins, so the
+            # probe carries what the outcome will carry rather than an estimate of it.
+            outbound_statement=outbound,
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
@@ -11785,7 +11927,7 @@ class Engine:
         # is the ruling it was recorded under rather than the moved row — the finishing
         # commit reads the attempt itself, which is what lets it record the facts a
         # refused boundary write did not (:meth:`_finished_attempt`).
-        parked, step, establishing, allowed_by = await self._resolve_park(
+        parked, step, establishing, allowed_by, egress = await self._resolve_park(
             token,
             approved=approved,
             timeout=timeout,
@@ -11801,7 +11943,14 @@ class Engine:
             # and a second episode under one answer is a binding ADR-0074 §3 cannot
             # describe. ``turn`` ``None`` beside ``reply`` ``None`` and
             # ``reply_degraded`` ``False`` is ADR-0170 §4's second shape exactly.
-            return TurnOutcome(turn=None, step=step)
+            #
+            # **ADR-0264 §7 gives it `NOT_REACHED` and not `None`**, which is the one
+            # value §7 names for it: a restatement "drives nothing and searches
+            # nothing", and §14 records that this "adds a value to ADR-0198 §2's
+            # enumeration without changing any value it fixes". It composes no prose of
+            # its own, but §7's rendering asymmetry is the *surface's* rule and not a
+            # reason to leave the member absent here.
+            return TurnOutcome(turn=None, step=step, outbound_statement=_REACHED_NOTHING)
         # **No delivery facts on this path, and none is fetched to make some**
         # (ADR-0205 §5). The facts ride the replay tail
         # ``ConversationLifecycle.history`` reads, and a resume reads none: it is
@@ -11823,12 +11972,21 @@ class Engine:
         recipient_grant = await self._establish_recipients(
             establishing, approved=approved, remember_recipients_until=remember_recipients_until
         )
-        composed = await self._compose(parked.turn, step, deliveries={})
+        # ADR-0264 §6's assembly for a resolved step. This pass services no read, so
+        # there is no search reach to fold — what it holds is the drive's own
+        # classification, which §3 makes `INDETERMINATE` or nothing and never a contact.
+        # It **composes** wherever the parked turn survived: `_compose` declines on a
+        # pass whose `turn` is `None`, which is a park recovered after a restart
+        # (ADR-0052 §3), and a resolving disposition is never `AWAITING_CONFIRMATION`.
+        outbound = outbound_statement(
+            search=None, egress=egress, records=0, composed=parked.turn is not None
+        )
+        composed = await self._compose(parked.turn, step, deliveries={}, outbound=outbound)
         # `resumed_from` is read above the resolution, so the ledger counts this pass's
         # own work and not the interval the park spent waiting for the user (§5).
         await self._finished_attempt(step, composed, since=resumed_from, allowed_by=allowed_by)
         return await self._capture_resumption(
-            parked, step, composed, recipient_grant=recipient_grant
+            parked, step, composed, recipient_grant=recipient_grant, outbound_statement=outbound
         )
 
     async def _resume_read(
@@ -12022,7 +12180,7 @@ class Engine:
         # from a rendering that may have been assembled over material ADR-0199 §3 holds
         # back.
         supply = BoundedAudienceSupply(speakable_attested_sources=self._speakable_attested_sources)
-        turn = await self._loop.resumed_read(
+        resumed = await self._loop.resumed_read(
             goal,
             plan,
             # ADR-0248 §3: the **parked** pass's request, taken from the park above
@@ -12039,6 +12197,20 @@ class Engine:
             history_degraded=history.degraded,
             narrow=supply,
         )
+        turn = resumed.turn
+        # ADR-0264 §6's assembly on ADR-0244 §7's resume, which is the shape §6 names
+        # in terms: "the first two are two different sites and the engine is where they
+        # are brought together". The **contact** is the dispatch's, computed at the site
+        # that performed the call; the **count** is the resume's own admission, which
+        # applied ADR-0226 §7's deduplication and §6's budget. Neither is recomputed
+        # here, and nothing is inferred at this point. This pass drives no step, so the
+        # egress contribution is `None`, and it composes.
+        outbound = outbound_statement(
+            search=answered.contact,
+            egress=None,
+            records=resumed.admitted,
+            composed=True,
+        )
         composed = await self._compose(
             turn,
             None,
@@ -12048,6 +12220,9 @@ class Engine:
             # member exactly as it does on any other turn". The member is the one the
             # dispatch computed, by value and never a second computation.
             search_not_serviced=answered.not_serviced,
+            # ADR-0264 §6's fragment on this pass exactly as on any other unrouted one:
+            # it composes, so it is given one.
+            outbound=outbound,
         )
         return await self._capture(
             park.conversation_id,
@@ -12073,6 +12248,8 @@ class Engine:
             # ADR-0242 §9's field, on the resumed turn exactly as on any other: the
             # member the dispatch computed, by value.
             search_not_serviced=answered.not_serviced,
+            # ADR-0264 §7's field, on the same terms and from the assembly above.
+            outbound_statement=outbound,
             read_answer=answered.outcome,
         )
 
@@ -12114,7 +12291,9 @@ class Engine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         remember_recipients_until: UtcInstant | None = None,
-    ) -> tuple[_Parked | None, StepOutcome, EstablishingAnswer | None, str | None]:
+    ) -> tuple[
+        _Parked | None, StepOutcome, EstablishingAnswer | None, str | None, OutboundReach | None
+    ]:
         """Record the answer and drive it, or restate an answer already recorded.
 
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
@@ -12169,7 +12348,7 @@ class Engine:
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
             if parked is None:
-                return None, await self._restate(token), None, None
+                return None, await self._restate(token), None, None, None
             state = await self._plans.get_execution(parked.execution_id)
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
@@ -12244,7 +12423,10 @@ class Engine:
             # one. Advancing it here would stamp `EXECUTE` over a live question, and the
             # approval that then arrives would meet §6's monotonic phase rule and be
             # consumed without executing.
-            return parked, step, disposition.establishing, allowed_by
+            # ADR-0264 §2's egress contribution, carried out of the drive on the
+            # disposition and never recomputed here — a resolved step is a driven step,
+            # and §3's rule binds on it exactly as on one driven inside a turn.
+            return parked, step, disposition.establishing, allowed_by, disposition.outbound
 
     def _retain(self, handle: str, settled: _Settled) -> None:
         """Record one answered binding under its handle, within §4's bound.
@@ -12387,6 +12569,7 @@ class Engine:
         composed: ComposedReply | None,
         *,
         recipient_grant: RecipientGrantOutcome | None = None,
+        outbound_statement: OutboundStatement | None = None,
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
@@ -12416,6 +12599,10 @@ class Engine:
                 reply=None if composed is None else composed.text,
                 reply_degraded=composed is not None and composed.degraded,
                 recipient_grant=recipient_grant,
+                # ADR-0264 §7, on the same terms as the captured path below: the value
+                # this pass assembled, by value. A capture that could not be written
+                # leaves what the turn *did* exactly as true as it was.
+                outbound_statement=outbound_statement,
             )
         return await self._capture(
             origin.conversation_id,
@@ -12428,6 +12615,9 @@ class Engine:
             # touches it: an episode that failed to write leaves the standing outcome
             # exactly as true as it was, which is why it rides both return paths here.
             recipient_grant=recipient_grant,
+            # ADR-0264 §7's field, on the same terms: the value assembled by the pass
+            # that drove the step, by value and never a second computation.
+            outbound_statement=outbound_statement,
             # **No user words**, and this is ADR-0225 §1's own clause rather than an
             # absence of data: the parked turn is right here, and its utterance was
             # archived at its own address by the pass that parked. Repeating it here
@@ -12479,6 +12669,7 @@ class Engine:
         spoken: _SpokenCapture | None = None,
         recipient_grant: RecipientGrantOutcome | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        outbound_statement: OutboundStatement | None = None,
         read_confirmation: Confirmation | None = None,
         read_answer: ReadAnswerOutcome | None = None,
         goal_engagement: GoalEngagement | None = None,
@@ -12642,6 +12833,13 @@ class Engine:
             # ``converse_streaming`` and ``resume``, and ADR-0198 §1's restatement,
             # which drives nothing and searches nothing.
             search_not_serviced=search_not_serviced,
+            # ADR-0264 §7: **the same value ADR-0264 §6 assembled, by value, and never
+            # a second computation.** The capture point is the one place a
+            # ``TurnOutcome`` is built, so folding the already-assembled statement in
+            # here is what keeps the reply's fragment and the surface's statement the
+            # same value rather than two that agree. ``None`` on exactly the passes that
+            # neither established a contact nor composed a reply.
+            outbound_statement=outbound_statement,
             # ADR-0244 §9's two members, folded in at the one place a ``TurnOutcome``
             # is built and **mutually exclusive** — the model validator refuses an
             # outcome carrying both, and this method is handed at most one because a
