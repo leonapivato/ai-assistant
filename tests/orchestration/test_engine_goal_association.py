@@ -539,6 +539,12 @@ async def test_a_goal_is_resumed_from_another_conversation_by_explicit_reference
     from_second = await harness.plans.candidates_for(second, limit=8)
     assert [goal.id for goal in from_first.goals] == [campsite.id]
     assert [goal.id for goal in from_second.goals] == [campsite.id], "a candidate in both"
+    third = (await harness.conversations.begin(None)).id
+    from_third = await harness.plans.candidates_for(third, limit=8)
+    assert from_third.goals == (), (
+        "arm 10 fails 'if the goal appears in a third conversation's candidate set' — a "
+        "resumption widens the set by one conversation and never globally"
+    )
 
     next_turn = await harness.engine.converse(
         "and a river pitch", timeout=PATIENT, conversation_id=second
