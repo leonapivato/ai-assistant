@@ -85,6 +85,7 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryRecord,
     MemorySource,
+    OutboundReach,
     PlannerOutput,
     Provenance,
     SearchNotServiced,
@@ -107,6 +108,7 @@ from ai_assistant.orchestration.reads import (
     TurnReadAudit,
     admitted_fourth_group,
     earliest,
+    folded_reach,
     service_read_request,
 )
 from ai_assistant.orchestration.retrieval import assemble_by_band
@@ -378,6 +380,28 @@ class RespondedTurn:
             planner's report *"on this call"* and a later call that raised none is a
             call that no longer reports an ambiguity — which is what makes ADR-0250 §11's
             late answer able to *"proceed"* rather than re-ask what it just resolved.
+        outbound_reach: ADR-0264 §2's carrier, folded over **this turn's**
+            ``WEB_SEARCH`` calls with ``REACHED`` outranking ``INDETERMINATE`` and that
+            outranking ``NOT_REACHED`` — ``None`` where no servicing performed a call at
+            all, which is every turn that did not fire, whose servicing was declined,
+            and whose planner asked for no search.
+
+            **The fold accumulates and never replaces** (§6). A servicing that
+            establishes no contact clears nothing an earlier one established, and one
+            that fails contributes its own zero without resetting what an earlier one
+            admitted: §1's condition is *at least one*, and a last-writer-wins assembly
+            is the defect that clause names.
+
+            **Supplied and never inferred**, exactly as :attr:`search_not_serviced` is:
+            each performing site computed its own fact and this loop folds the computed
+            values rather than recomputing one. The turn's **statement** is not
+            assembled here — the executed-egress classification is the engine's other
+            input (§6), and this loop drives no step.
+        outbound_records: ADR-0264 §4's count, summed over this turn's servicings —
+            "one population over the turn", which is why two servicings that both
+            admitted records report the **sum** and not the later one's figure.
+            Zero on every turn whose contacts brought nothing into the supply, which
+            §4 rules never suppresses the statement.
         evidence: ADR-0252 §14's carrier: the ``GoalEvidence`` rows this turn's
             servicings composed, in the order they were composed — **one per outcome
             entry** ADR-0251 §2's classifier produced, the ``EMPTY``, ``REFUSED``,
@@ -408,6 +432,8 @@ class RespondedTurn:
     parked_decision: PermissionDecision | None = None
     raised: RaisedSubject | None = None
     evidence: tuple[GoalEvidence, ...] = ()
+    outbound_reach: OutboundReach | None = None
+    outbound_records: int = 0
 
 
 #: ADR-0251 §5's planner-call allowance for
@@ -1479,6 +1505,28 @@ def _check_tuning(
         raise ValueError(msg)
 
 
+@dataclass(frozen=True, slots=True)
+class ResumedRead:
+    """What ADR-0244 §7's resume assembled, and what its contact admitted.
+
+    Two facts of one pass, returned together because the second is **recorded by the
+    site that performs the admission and never reconstructed** (ADR-0264 §4) and this
+    is that site. A caller handed only the turn would have to count
+    ``AnsweredRead.records`` — which is what the *call* returned, before ADR-0226 §7's
+    deduplication over the whole union and §6's budget — and §4 refuses that population
+    by name.
+
+    Attributes:
+        turn: The resumed turn, three of whose members are the parked pass's and two
+            of which this pass assembled (:meth:`LearningLoop.resumed_read`).
+        admitted: How many of the dispatched read's records entered **this** turn's
+            supply, which is ADR-0264 §4's count for a resume.
+    """
+
+    turn: TurnResult
+    admitted: int
+
+
 class LearningLoop:
     """Runs a conversational turn, and folds the user's correction back in.
 
@@ -2319,6 +2367,13 @@ class LearningLoop:
         # and whose planner asked for no search carries out of here, and on which §6's
         # byte-identity guarantee holds.
         search_not_serviced: SearchNotServiced | None = None
+        # ADR-0264 §2's fold and §4's count, `None` and zero until a servicing performs
+        # a call — the values a turn that did not fire, one whose servicing was declined
+        # and one whose planner asked for no search carry out of here, and which §1
+        # folds to `NOT_REACHED` at the assembly point rather than here. **Accumulated
+        # and never replaced** (§6).
+        outbound_reach: OutboundReach | None = None
+        outbound_records = 0
         # ADR-0244 §1's carrier, ``None`` on every turn no servicing of which wrote a
         # park — which is every turn on a deployment that wired no ``ParkedReads``, and
         # every turn whose search was not ruled a ``CONFIRM``.
@@ -2622,6 +2677,17 @@ class LearningLoop:
             # first-computed-wins implementation respectively fail. A servicing that
             # yielded contributes `None` and clears nothing.
             search_not_serviced = earliest(search_not_serviced, carried.not_serviced)
+            # ADR-0264 §2's fold, by the ordering §2 fixes and **never** by encounter
+            # order: one call that established a contact makes the turn `REACHED`
+            # however many others did not, and a later servicing that refused before the
+            # send leaves that contact standing (§13 item 5). A servicing that performed
+            # no call contributes `None` and clears nothing.
+            outbound_reach = folded_reach(outbound_reach, carried.contact)
+            # ADR-0264 §4: one population over the turn, so the two servicings of §13
+            # item 5 report the **sum** of what they admitted. A failed servicing
+            # contributes its own zero — ADR-0226 §5 left the supply as planning saw it
+            # — without resetting what an earlier one admitted (§6).
+            outbound_records += carried.contact_records
             # ADR-0244 §1, §3: **the first park a servicing of this turn wrote, kept.**
             # A second servicing's `park` cannot have answered `True` while this one
             # stands — one `OPEN` park per conversation is the store's own indivisible
@@ -2869,6 +2935,12 @@ class LearningLoop:
             # here, and the write itself is the engine's because ADR-0249 §11 forbids
             # this loop a store.
             evidence=recorded_evidence,
+            # ADR-0264 §2 and §4, on ADR-0242 §7's terms exactly: computed at each
+            # performing site, folded here, and carried inside `orchestration` as data.
+            # The **statement** is assembled by the engine, which is where this turn's
+            # calls and its driven step's classification are brought together (§6).
+            outbound_reach=outbound_reach,
+            outbound_records=outbound_records,
         )
 
     async def resumed_read(  # noqa: PLR0913 — the parked turn's three persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
@@ -2882,7 +2954,7 @@ class LearningLoop:
         history: Sequence[MemoryRecord] = (),
         history_degraded: bool = False,
         narrow: SupplyFilter | None = None,
-    ) -> TurnResult:
+    ) -> ResumedRead:
         """Assemble the supply an approved read's continuation composes over (ADR-0244 §8).
 
         **Three members are the parked turn's and two are the resumed turn's, and the
@@ -2975,9 +3047,10 @@ class LearningLoop:
                 one that withheld nothing.
 
         Returns:
-            The resumed turn's result: the parked turn's request, goal and plan, this
+            The resumed turn's result — the parked turn's request, goal and plan, this
             instant's context and supply, and the approved read's records at the end of
-            it.
+            it — beside ADR-0264 §4's count of how many of those records this
+            admission actually took (:class:`ResumedRead`).
         """
         # **One footing per pass**, built here and for this conversation, exactly as
         # :meth:`respond` builds one per turn — because what it carries is per-pass
@@ -3019,15 +3092,25 @@ class LearningLoop:
         # operation, so the filter subtracts nothing and the records reach the
         # composing stage exactly as the other three groups do.
         context, memories = _narrowed(narrow, context, memories + fourth, retrieved_ids)
-        return TurnResult(
-            # ADR-0248 §3: the **parked** pass's request, threaded from the park the
-            # caller read it out of — never this instant's, and never `goal.outcome`.
-            utterance=utterance,
-            goal=goal,
-            context=context,
-            memories=memories,
-            plan=plan,
-            memory_degraded=degraded or history_degraded,
+        return ResumedRead(
+            turn=TurnResult(
+                # ADR-0248 §3: the **parked** pass's request, threaded from the park the
+                # caller read it out of — never this instant's, and never `goal.outcome`.
+                utterance=utterance,
+                goal=goal,
+                context=context,
+                memories=memories,
+                plan=plan,
+                memory_degraded=degraded or history_degraded,
+            ),
+            # ADR-0264 §4: "on ADR-0244 §7's resume it is **the admission in**
+            # ``LearningLoop.resumed_read``", which is the line above — where
+            # `admitted_fourth_group` applied ADR-0226 §7's deduplication and §6's
+            # budget, and which is a **different site** from the dispatch that
+            # classified the contact. The count is what that site admitted and is never
+            # reconstructed from `answered.records` at the engine: a call returning two
+            # records under one id admits one, and this reports one (§13 item 4).
+            admitted=len(fourth),
         )
 
     def _spent(self, worked: _Working) -> _Spent:
