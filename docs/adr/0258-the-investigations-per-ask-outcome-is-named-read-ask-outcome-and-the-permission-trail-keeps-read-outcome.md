@@ -17,16 +17,20 @@
   one-entry-per-serviced-ask-in-servicing-order clause and its `()` reading, the
   nothing-the-source-said clause, the ask-carried-back-unaltered clause, the
   carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the planner-is-not-told-which-round clause — and
-  §§1-2 and §§4-18 are untouched. §3 loses no obligation and gains none; one identifier moves,
-  and §6 shows the working.
+  §§1-2 and §§4-18 are untouched. **§3 loses no obligation and gains none**; one identifier
+  moves, this ADR imposes nothing beside it, and §6 shows the working.
 - **No other ADR is superseded in whole or in part**, and §5 shows the working for each one a
   reader would expect to be — ADR-0185, ADR-0240, ADR-0249 and ADR-0015. **ADR-0185 is the one
   to check first**: its §1 `ReadOutcome` is the whole reason this decision exists, and it is untouched
   in name, in members and in every reader of it.
 - **Names symbols in `src/ai_assistant/core/types.py` and
-  `src/ai_assistant/core/protocols.py`**, so it is a contract-surface decision and takes both
-  review lenses (ADR-0015 §1). It is **not** a breaking change and it authorises no
-  implementation work: the name it rules is already on the tree, which §4 owns.
+  `src/ai_assistant/core/protocols.py`**, so it is a **`core` contract-surface decision under
+  golden rule 5** and is flagged as one; it takes both review lenses, which is more than
+  ADR-0015 §5 asks of a supersession. **It neither adds a break nor discharges one**: ADR-0251
+  §3's own BREAKING flag on the parameter replacement binds verbatim (§2), and this decision
+  moves an identifier *inside* the break §3 already declared rather than declaring a second. It
+  authorises no implementation work, because the name it rules is what the tree already carries
+  (§4).
 - Date: 2026-09-13
 
 ## Context
@@ -52,9 +56,13 @@ reader would act on differently"* — that is a change to what was decided and n
 so only a superseding ADR can make it, reviewed while `Proposed` and merged on its own
 (golden rule 5, ADR-0015 §5). PR #2315 instead left a note that **records the divergence and
 decides nothing**, states that §3 binds as ratified, directs a reader to neither name, and says
-the reconciliation is owed. **This ADR is that reconciliation.** PR #2315 is not merged at this
-ADR's base (`origin/main` `2ce4c193`), and its merge is sequenced ahead of this one, so the
-record §5 lays on ADR-0251 is written to stand beside that note and to replace what it records.
+the reconciliation is owed. **This ADR is that reconciliation.**
+
+**PR #2315 is not merged at this ADR's base** (`origin/main` `2ce4c193`), so nothing described in
+the paragraph above is on the tree this ADR is reviewed against; ADR-0251 carries no note there
+at all, and the note §5 adds is its first. The merge order puts #2315 ahead of this lane, and
+where it lands first its note stands unrewritten above this ADR's — the two are compatible,
+because one records what the other decides.
 
 ### The tree, read rather than assumed, at `origin/main` `2ce4c193`
 
@@ -102,6 +110,10 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 - **Anything of ADR-0185.** §5 shows why no record is owed there.
 - **Whether the implementation's order was acceptable.** §4 records what happened and what it
   does not license; it rules nothing about ADR-0015 §5, which is untouched.
+- **Whether an implementation may conflate the two vocabularies.** They overlap on two string
+  values and nothing today stops the conversion; §3 names that, files it as #2320 and rules
+  nothing about it. A guard is code, and the clause that would demand one is a decision this lane
+  is not fenced for.
 
 ## Decision
 
@@ -133,18 +145,32 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 > values and meanings. Nothing in this decision reaches it, and the `outcome` field's type is
 > `ReadOutcomeKind` exactly as §3 states.
 
-### 3. ADR-0185 §1's `ReadOutcome` keeps the name, and the two are never conflated
+### 3. Why the name was taken, and what this ADR deliberately does not decide about it
 
-> **Normative.** ADR-0185 §1's `ReadOutcome` — the `StrEnum` over how one gated source read
-> ended — keeps its name, its six members and their values and meanings. No implementation and
-> no later lane renames it, re-homes it, folds it into another vocabulary or re-uses it for
-> anything but the record ADR-0185 §1 gives it.
+**This section is unmarked and binds nothing** (ADR-0089 §3). It is the ground for §1's choice
+of identifier, not a second decision riding beside it, and it is unmarked on purpose: §§1-2
+change one identifier, and an ADR whose header says so may not quietly add an obligation four
+lines lower.
 
-> **Normative.** No implementation compares a member of one vocabulary with a member of the
-> other, converts between them, or reads a value of one as a value of the other. `ReadOutcome`
-> and `ReadOutcomeKind` are both `StrEnum`s whose values intersect in `refused` and `failed`,
-> so such a comparison succeeds at run time and means nothing; the annotation is what keeps
-> them apart.
+**The ground.** `core/types.py` has held ADR-0185 §1's `ReadOutcome` since 2026-08-23 — the
+`StrEnum` over how one gated source read ended — and nothing in this ADR reaches it. It keeps
+its name, its six members and their meanings for the ordinary reason that no decision has
+superseded it, and §5 shows that none is owed. The Context above says why the two cannot share
+one name: they are different facts about different acts, one durable on `SourceReadRecord` and
+rendered to an operator, the other an in-process argument discarded with its turn. That is why
+§1 moves the newer name and not the older one, and the Alternatives section takes the other
+option seriously before rejecting it.
+
+**What this ADR does not decide, and why it declines to.** The two vocabularies' values
+intersect in `refused` and `failed`, so an implementation *can* conflate them — pydantic
+validates a `StrEnum` by value, and `ReadAskOutcome(ask=…, outcome=ReadOutcome.REFUSED)` is
+accepted today and silently becomes `ReadOutcomeKind.REFUSED`. **That is a real defect and it is
+filed as #2320**, not ruled here. An earlier draft of this section marked a clause forbidding the
+conversion; both review lenses were right to block it. A prohibition no code enforces is worth
+less than the validator and the regression arm #2320 asks for, the enforcement is `src/` and
+`tests/` work this docs-only lane is not fenced for, and imposing a new obligation would have
+made this ADR's own header false. Whoever takes #2320 may want a clause; that clause is theirs to
+propose.
 
 ### 4. The implementation preceded this decision, and this ADR records that rather than curing it
 
@@ -154,11 +180,23 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 > this ADR alters no file under `src/`, and no lane cites this ADR as ground for one.
 
 **What happened, stated plainly.** ADR-0251 was ratified and merged as its own PR before its
-implementation, exactly as golden rule 5 and ADR-0015 §5 require. Its §3 then turned out to be
-unimplementable as written, and the L1 lane could not both implement §3's clause and leave
-ADR-0185 §1's ratified, wire-visible, audit-read enum standing. It chose the second, spelled the
-new model in full, and filed #2281. So the *name* on the tree has run ahead of the decision that
-rules it since PR #2287 merged, and this ADR is the decision catching up.
+implementation, exactly as golden rule 5 and ADR-0015 §5 require of a substantive contract ADR.
+Its §3 then turned out to be unimplementable as written, and the L1 lane could not both implement
+§3's clause and leave ADR-0185 §1's ratified, wire-visible, operator-rendered enum standing. It
+chose the second, spelled the new model in full, and filed #2281. So since PR #2287 merged, the
+*identifier* on the tree has run ahead of the decision that rules it, and this ADR is that
+decision.
+
+**ADR-0015 §5 does not put this ADR out of order, and its own words are why.** §5's rule attaches
+to *"a substantive contract ADR — one adding or changing a Protocol or a `core/` type crossing
+subsystem boundaries"*, which **ships as its own PR, ratified before the implementation PR that
+depends on it**. ADR-0251 was that ADR and it obeyed the rule. §5 then names its exemption in the
+same breath: *"Trivial ADRs (amendments, status changes, supersessions) are exempt, as they
+already were from architecture review."* **This is a supersession**, so the before-the-
+implementation ordering is not asked of it — and this lane takes the architecture lens anyway,
+which is strictly more than §5 requires. What §5 does *not* supply is a remedy for an
+implementation that has already departed from a ratified clause; ADR-0070 §1 supplies the only
+one there is, and it is the superseding ADR.
 
 **Why that is recorded here and not quietly fixed.** The order ADR-0015 §5 fixes exists so that
 nothing implements against an unreviewed contract, and the exposure here is real but bounded:
@@ -168,6 +206,15 @@ The alternative available to that lane was to implement §3 literally and shadow
 which is the outcome ADR-0015 §5 exists to prevent, reached by obeying it. Recording the
 irregularity is the remedy that is actually available once the code has merged; pretending the
 decision came first is not.
+
+**Unwinding is not the remedy, and no text asks for it.** The other direction available on
+paper — revert `ReadAskOutcome` from `main`, merge this ADR, re-land the identical code — would
+revert a contract that has shipped (ADR-0251 §16 moved `PROTOCOL_VERSION` to 38 on it), across
+`core`, `orchestration`, `wire`, the CLI and the fakes, to arrive at a tree byte-identical to the
+one that exists. It buys no review that this ADR does not buy: what was never reviewed is one
+identifier, and it is what §1 reviews. ADR-0015 §5 does not require it, ADR-0070 does not
+contemplate it, and it is far outside a docs-only lane's fence. The append-only corpus's answer
+to "the record and the world disagree" is to move the record, which is what this is.
 
 **And it licenses nothing.** ADR-0015 §5 is untouched by this ADR (§5), and nothing here is a
 precedent for landing a contract surface no ADR has ruled. What PR #2287 did *right* is the part
@@ -190,10 +237,12 @@ only that ADR now act differently, or read one of its clauses more widely than i
   amendment, and it is **partial** — one clause's identifier, nothing else (§3 of ADR-0070
   makes the partial form first-class). ADR-0251's `Status` takes the leading
   `Partially superseded by` token with the scope naming exactly what was replaced (ADR-0070
-  §4), and the record itself lives in the appended dated note (ADR-0082 §2, ADR-0070 §1). That
-  note replaces what PR #2315's note of 2026-09-13 records — that note states the divergence and
-  decides nothing, and this one decides it — and where both stand, the earlier note's text is
-  left unrewritten beside it, which is what the append-only mechanism requires (ADR-0070 §1).
+  §4), and the record itself lives in the appended dated note this change adds (ADR-0082 §2,
+  ADR-0070 §1). **On this ADR's base that note is the only one ADR-0251 carries.** PR #2315's
+  note of 2026-09-13 — which records the divergence and decides nothing — is not merged at
+  `2ce4c193`; where it lands first, it stands unrewritten above this one and this note is what
+  decides what that one could only record. Either way no earlier note is edited, which is what
+  the append-only mechanism requires (ADR-0070 §1).
 - **ADR-0185 — nothing is recorded, and nothing is owed.** No clause of ADR-0185 §1 becomes
   false or over-wide. Its enum keeps its name, its six members, its totality claim, its
   `SourceReadRecord` home and every consumer rule §1 states about it; a reader holding ADR-0185
@@ -231,20 +280,25 @@ Two files change, and both edits are the permitted shapes:
   leading token. ADR-0001's own header is the precedent for the form.
 
 **No ratified decision text is rewritten anywhere.** ADR-0251's Context, Decision and
-Consequences are byte-identical after this change, PR #2315's note is left standing and
-superseded rather than edited, and no mark is added to any ratified ADR (ADR-0089 §5).
+Consequences are byte-identical after this change, every header note it already carries is left
+unedited, and no mark is added to any ratified ADR (ADR-0089 §5).
 
 ### 7. Marking, review and ratification
 
-This ADR is **marked** (ADR-0089): §§1-4 carry `> **Normative.**` clauses, and under ADR-0089 §3
-those clauses are the whole of what it obligates — the prose beside them is read to determine
-what they mean and supplies no obligation of its own. §§5-6 are classification of this change
-and are deliberately unmarked (ADR-0089 §1).
+This ADR is **marked** (ADR-0089), and it carries **five** clauses: two in §1, two in §2 and one
+in §4. Under ADR-0089 §3 those five are the whole of what it obligates — the prose beside them is
+read to determine what they mean and supplies no obligation of its own. **§3 is unmarked on
+purpose** (§3 says why), and §§5-6 are classification of this change, which ADR-0089 §1 puts
+outside the normative set.
 
-It names symbols in `core/types.py` and `core/protocols.py`, so it is a **contract-surface
-decision**: it takes both the adversarial and the architecture lens (ADR-0015 §1), is reviewed
-while `Proposed`, and is ratified in this same PR by the isolated one-line `Proposed` →
-`Accepted` flip ADR-0165 exempts from a fresh round.
+It names symbols in `core/types.py` and `core/protocols.py` — a **contract surface** — so this
+lane runs **both** the adversarial and the architecture lens on every round, reviews the ADR
+while it stands `Proposed`, and ratifies it in this same PR by the isolated one-line `Proposed` →
+`Accepted` flip ADR-0165 exempts from a fresh round. **Both lenses is more than is owed**, and
+deliberately: ADR-0015 §1 attaches the architecture lens to a change *touching*
+`core/protocols.py` or `core/types.py`, which this docs-only diff does not, and §5 exempts a
+supersession from architecture review by name. A decision whose whole content is the identifier
+on a `core` type is worth the lens whether or not a rule compels it.
 
 ## Consequences
 
@@ -259,7 +313,12 @@ partial supersession and is why ADR-0070 §4 requires the scope to be specific. 
 greps the corpus for `ReadOutcome` still finds §3's ratified sentences saying `ReadOutcome` about
 the model; the `Status` line and the dated note are what point them here.
 
-**Follow-on work.** Two docstrings on the tree say the name is "this lane's" and that the ADR's
+**Follow-on work.** #2320 is the substantive one: the two vocabularies overlap on `refused` and
+`failed`, and `ReadAskOutcome.outcome` accepts ADR-0185 §1's member on those two values today.
+This ADR names the hazard (§3) and rules nothing about it; the validator and its regression arm
+are `src/` and `tests/` work.
+
+Two docstrings on the tree say the name is "this lane's" and that the ADR's
 is `ReadOutcome` — `ReadAskOutcome`'s own docstring in `core/types.py`, and the module header of
 `tests/core/test_read_outcome_types.py`. Those sentences go stale the moment this ADR is
 accepted, and correcting them is outside this docs-only change's fence; it is filed as its own
