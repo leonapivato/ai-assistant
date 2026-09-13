@@ -444,8 +444,8 @@ intended action, the same tool called with the same concrete arguments under the
 
 > **Normative — `COMPLETED` dispatches nothing and **satisfies** the step from the work the goal already did, and the walk
 > continues.** The stage makes **no call**, claims no invocation and spends no authorisation; it reads the holder the answer
-> names through the `PlanStore` it already holds and commits that step **`→ SUCCEEDED`** from the status it was entered at,
-> setting `output` to **the holder's recorded `output`** and `finished_at` at this instant. **`attempts` is not incremented**
+> names through the `PlanStore` it already holds and commits that step **`→ SUCCEEDED`** from the status it was entered at;
+> **the store sets `output` from the holder's own row and `finished_at` at that instant** (§9), and the stage neither. **`attempts` is not incremented**
 > and **the walk goes on to this step's dependents**, which read that `output` under ADR-0253 §2 like any other. **This is the
 > whole of what `COMPLETED` does**: it is not a skip, no `SkipReason` is written, and **no lane reads it as licence to copy an
 > output between goals, or between two acts of one goal** — the row is scoped to this goal **and this intended action** (§2)
@@ -1099,27 +1099,31 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > **`satisfied_by_key`, an `EffectKey | None` defaulting to `None`** — the key of the call this step is being satisfied
 > from. **The validator requires all three non-`None` together and only on a `→ SUCCEEDED` transition**, refusing any of
 > them on a transition to any other status and refusing a transition carrying some but not all — ADR-0255 §11's constructor
-> limb for `attempt_id`, applied to this trio; and **`commit_transition` persists the two identifiers exactly as given onto
-> the committed `StepExecution`**, the strengthening of an existing member §11 itself distinguishes from a new one.
+> limb for `attempt_id`, applied to this trio, **and forbidding `output` on a transition carrying them** because the store
+> writes it (below); and **`commit_transition` persists the two identifiers exactly as given onto the committed
+> `StepExecution`**, the strengthening of an existing member §11 itself distinguishes from a new one.
 > **`satisfied_by_key` is compared and not stored**: the row carries the key already, so `StepExecution` gains two and not three.
 
 > **Normative — `commit_transition` gains one further claim condition, decided in the store atomically with the write, and
-> it has four limbs.** A `→ SUCCEEDED` transition carrying the trio is accepted **only where** the named **execution is an
+> it has five limbs.** A `→ SUCCEEDED` transition carrying the trio is accepted **only where** the named **execution is an
 > execution of this step's own goal**, the named **step is a step of that execution and stands `SUCCEEDED`**, the goal's
-> **effect row for the target step's intended action names that execution and step as its holder**, and **that row's `key`
-> equals `satisfied_by_key`**. It refuses on the **non-stale `PlanningError`** ADR-0255 §3 fixes for its own conjuncts, for
-> that section's own reason: no re-read makes another goal's execution this goal's, nor one key another. **The fourth limb
-> closes the same-action, different-arguments case at the store**: without it a step whose resolved arguments changed — the
-> Sunday request against a Saturday booking — could be satisfied from a holder `claim_effect` would have answered
-> `COMPLETED_OTHERWISE` for, which §2 forbids and arm 14 asserts only at the stage. **This is verification of what
-> the caller asserts and not derivation** — the store checks values it was handed against a row it holds, and computes
-> none of them — and with the fourth limb §2's reuse identity is **mechanical rather than advisory** in all three of its
-> directions. The stage is the trio's only holder, from the `EffectOutcome` §2 returns and the `ToolCall` it derived the
-> key from, and `commit_transition` takes a `StepTransition` and nothing else: without these fields they reach the store by
-> no stated route. **The store derives neither, and that is refused rather
-> than merely not taken** — deriving would need it to know which `→ SUCCEEDED` commits are satisfactions and which are
-> ordinary, and to hold the `ToolCall` the key comes from, neither of which is the store's. **This reopens ADR-0255 §11's *"Nothing
-> else"* closure in that one scope** (§13).
+> **effect row for the target step's intended action names that execution and step as its holder**, **that row's `key`
+> equals `satisfied_by_key`**, and the **stored source status is `PENDING` or `AWAITING_APPROVAL`** — §2's two entry
+> statuses and the two rows §4's table gains for this route, so a **`RUNNING` or `INDETERMINATE` source is refused** and no
+> row carries execution marks and satisfaction marks together. It refuses on the **non-stale `PlanningError`** ADR-0255 §3
+> fixes for its own conjuncts, for that section's own reason: no re-read makes another goal's execution this goal's, nor
+> one key another, nor a run that happened one that did not. **The fourth limb closes the same-action, different-arguments
+> case** — the Sunday request against a Saturday booking, which §2 forbids and arm 14 asserted only at the stage.
+
+> **Normative — and on a satisfaction the store writes `output` and `finished_at` itself.** It copies `output` from the
+> **holder row it has just verified** and stamps `finished_at` from its own injected clock; the transition carries neither
+> and the validator refuses one that does. **A value the caller never supplies cannot be mis-stated**, which is why §2's
+> copy-the-holder's-output rule needs no further limb, and it is **not the derivation refused next**: that is the store
+> deciding *which* commits are satisfactions, a question the trio answers and the store never asks. **So every value a
+> satisfaction lands is verified against a store row or written by the store**, and §2's reuse identity is **mechanical
+> rather than advisory** in all three of its directions. **The satisfaction itself is never derived** — that would need the
+> store to know which commits are satisfactions and to hold the `ToolCall` the key comes from, neither of which is its.
+> **This reopens ADR-0255 §11's *"Nothing else"* closure in that one scope** (§13).
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is flagged here rather than inferred from a
 > version number.** `PlanStore` gains exactly one member, **`claim_effect`** (§2), so **every implementation and every fake
@@ -1227,6 +1231,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   §12's for the same class of question. §3 fixes that the record is preserved and *"told once"* is
   a property of the report; this decision fixes no reply, no phrasing and no channel. **Fired by
   this ADR landing.**
+- **A dedicated `satisfy_step` store member.** **Not decided.** Satisfaction is committed above as a `StepTransition` the
+  store validates in five limbs; a member taking the execution, step, expected version and trio would make the invalid
+  states **unrepresentable** rather than refused, drop all three fields from `StepTransition` and **retire this decision's
+  ADR-0255 §11 scope**. **Fired by** a finding that the five limbs still admit a satisfaction §2 forbids.
 - **A canonical effect-input identity** — one that would recognise two authorised calls whose
   arguments mean the same thing while differing in spelling, so that `alice@Example.com` in one
   plan and `alice@example.com` in the next carried one key rather than two. **Not decided**, and
@@ -1395,10 +1403,12 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying `satisfied_by_execution` and
    `satisfied_by_step` persists **both exactly as given** onto the committed `StepExecution`, leaving `attempts`,
    `started_at`, `approval_ref` and `bound_tool` untouched — the validator's own refusals sitting in `core`'s
-   construction table (§9) — **and the claim condition's five refusals**: a trio naming **another goal's** execution, a
+   construction table (§9) — **and the claim condition's six refusals**: a trio naming **another goal's** execution, a
    step **not of** that execution, a step **not standing `SUCCEEDED`**, one the goal's **effect row does not name as
-   holder**, and one whose **`satisfied_by_key` is not the row's key** — the Sunday case at the store — each raising the
-   **non-stale `PlanningError`** with **no write**, and staying refused across a re-read. **The export closure is armed
+   holder**, one whose **`satisfied_by_key` is not the row's key** — the Sunday case at the store — and one whose **stored
+   source status is `RUNNING` or `INDETERMINATE`**, each raising the **non-stale `PlanningError`** with **no write**, and
+   staying refused across a re-read, **and the store's own writes**: the row's `output` is the **holder's**, its
+   `finished_at` the injected clock's, and the claim marks absent. **The export closure is armed
    too**: a valid satisfaction pair resolves, while a **dangling** `satisfied_by_execution`, a `satisfied_by_step` of
    **another execution**, and an execution of **another goal** are each **rejected**; and
    **atomicity under contention**, where two writers claim one
