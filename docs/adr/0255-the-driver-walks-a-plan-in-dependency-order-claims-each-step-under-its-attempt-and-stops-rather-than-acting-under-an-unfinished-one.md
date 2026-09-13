@@ -2795,30 +2795,33 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     **advanced by the interval consumed up to the cancellation** — or **raises**, in which case
     §1's precedence binds and the ledger undercounts; the `CancelledError` **propagates to the
     caller as the same instance**, not converted to a value and not replaced by a failure of the
-    accounting; and **no later step is dispatched and none is skipped**. **What is committed before
-    a cancellation propagates is fixed by the interval it was absorbed in, and this arm states that
-    rule once rather than once per seam.** ADR-0034 §1 divides these paths by interval and not by
-    call: *"a cancellation absorbed while the **claim itself** was in flight"* is one thing, and
-    *"Everything else that happens once `invoke` has been entered"* is another. **From the instant
-    a cancellation is absorbed, the durable state this arm asserts is (a), (b) or (c) by where it
-    landed.** **(a) Where no write of that seam has begun**, the step stands at its **entry**
-    status (§3) — **`PENDING`** where a walk entered the seam and **`AWAITING_APPROVAL`** where a
-    `resume` did, §3's two and only two. **(b) Where `ToolInvoker.invoke` has been entered**, the
-    step's **declared `ToolDefinition.interrupted_outcome` is committed before the cancellation
-    propagates** — `INDETERMINATE` for a side-effecting non-`NATURAL` tool and `FAILED` otherwise
-    (ADR-0029 §4, ADR-0034 §1). **(c) Where a write was in flight**, ADR-0060 §1's **permitted
-    pair**: the write either landed or did not, **both outcomes are legal**, so what is asserted
-    is that the durable state is one of the two and that no lane reports the other. **The five
-    seams above are named as the set this arm drives and are not classified into (a), (b) and
-    (c)**: each is driven at **every interval it contains**, so a seam that reaches a claim and
-    then a call is driven at all three, and a seam that is one write is driven at (c) alone. The
-    fixture picks the interval by where it delivers — into the runner before `StepExecutor._claim`
-    for (a), past the committed claim for (b), inside the write for (c). **Classifying seam by
-    seam is the defect this replaces**: a seam spanning more than one interval asserts too little
-    at the ones its classification omits — a step left merely `RUNNING` after an invocation
-    cancellation satisfies (c) while violating ADR-0029 §4 — and asserting (a) or (b) of a seam
-    that is only a write would be an assertion no implementation could satisfy. **What each arm
-    refutes is an implementation that catches `Exception`**: `CancelledError` is a
+    accounting; and **no later step is dispatched and none is skipped**. **One further assertion is
+    made at every one of the five seams, and what is committed inside the call one of them makes is
+    cited rather than restated.** §4 is the ground: *"The driver introduces no second boundary, no
+    pre-claim reservation, no post-claim window and no reachability fact."* **The further
+    assertion is the entry status: where no write of that seam has begun**, the step stands at
+    its **entry** status (§3) — **`PENDING`** where a walk entered the seam and
+    **`AWAITING_APPROVAL`** where a `resume` did, §3's two and only two — which the fixture
+    reaches by delivering before that seam's first write is dispatched. **What is committed once
+    a write has begun, inside `StepExecutor.execute`, this arm cites by clause and does not
+    restate**: **ADR-0034 §1** for the window between the committed claim and entering `invoke`,
+    **ADR-0029 §4** for the interrupted-call classification once `invoke` has been entered, and
+    **ADR-0014 §4** for what recovery reads from a durable `RUNNING`. Those three are ratified,
+    their arms are owed on their own lanes, and **this decision adds no interval inside that call
+    and asserts no durable state there** — which is §4's clause above, applied to the arm that
+    drives these seams rather than stated only of the boundary. **The one interval this decision
+    does own it asserts, and it is `resume`'s**: a cancellation absorbed **after ADR-0037 §4's
+    step 5 has recorded the resolving decision and before the claim its step 6 makes begins**.
+    There the arm asserts that the ruling is **durably recorded**, the confirmation is
+    **resolved** and no longer returned by `AuditTrail.pending_confirmation`, the step still
+    stands **`AWAITING_APPROVAL` at its stored version**, and **nothing is invoked** — which is
+    **the same durable state §3 states for a refused claim**, reached by a cancellation instead.
+    **It establishes that state and nothing about repairing it**: the durable recovery of a
+    **resolved-but-unapplied** answer is **A8's** by §12, and because the state is the same one,
+    the recovery A8 owes — *"the step is re-askable or the answer is re-appliable"* — recovers
+    it whichever produced it. **So §12's acceptance requirement is unchanged and no second one is
+    minted here**, and no lane of this decision re-asks the question or re-applies the answer.
+    **What each arm refutes is an implementation that catches `Exception`**: `CancelledError` is a
     `BaseException`, so such an implementation lets it past the accounting untouched, charges
     nothing, and passes every other arm of this list — none of which delivers one. **And the
     converse arm**: with the charging `commit_attempt` itself raising under the cancellation, the
