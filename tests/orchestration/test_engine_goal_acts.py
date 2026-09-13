@@ -661,6 +661,26 @@ async def test_a_lifetime_with_no_representable_deadline_is_refused_before_any_w
     assert export.questions == (), "and of course no question"
 
 
+@pytest.mark.parametrize(
+    "ttl",
+    [
+        pytest.param(timedelta(0), id="zero"),
+        pytest.param(timedelta(seconds=-1), id="a negative duration"),
+    ],
+)
+def test_a_non_positive_lifetime_is_refused_at_construction(ttl: timedelta) -> None:
+    """§8: the lifetime is "required, positive, with no disable spelling".
+
+    ``Settings`` refuses it at load (``gt=timedelta(0)``), and the façade refuses it at
+    construction too — exactly as it already does for ``routed_confirmation_ttl``, and
+    for the same reason. A lifetime of zero or less produces a clarification already
+    expired at the instant it is asked: the user is shown a question that the very next
+    read settles ``EXPIRED``, and no answer can ever reach it.
+    """
+    with pytest.raises(ConfigurationError, match="goal_question_ttl must be positive"):
+        Harness(planner=NoStepPlanner(), goal_question_ttl=ttl)
+
+
 def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> None:
     """The other half of that boundary is ADR-0026's, and it is already closed.
 
