@@ -607,6 +607,39 @@ def _instant(value: datetime | None) -> str:
     return "" if value is None else value.isoformat()
 
 
+def _counted(value: str) -> str:
+    r"""One label value, rendered so that its own bytes can carry any delimiter.
+
+    **The count is what makes the rendering unambiguous, and it is what lets the value
+    stay byte for byte.** ADR-0252 §11 requires both at once — label values render
+    "**byte for byte** in the order the region holds them", and a ``supported`` renders
+    its regions "each delimited from the next … so that a reader can tell two regions
+    from one" — and a bare delimiter cannot give both. Every label axis here carries
+    **model-reachable text**: ``participants`` and ``about_person`` are
+    :data:`~ai_assistant.core.types.NonBlankEncodableText`, which admits commas,
+    semicolons, parentheses and newlines, and a ``TopicLabel`` admits every one of
+    those but the newline (ADR-0213 §3 constrains case, length and whitespace runs and
+    nothing else). So a value is free to *contain* the separators, and one region
+    holding ``"x) (topics=y"`` would otherwise render exactly as two regions holding
+    ``"x"`` and ``"y"`` — a **manufactured conjunction** arriving at the seam through
+    the rendering, which is the failure §2's regions exist to prevent and §11 restates
+    at the projection.
+
+    The form is the netstring's, taken whole rather than invented: the value's **UTF-8
+    byte length**, a colon, then the value's own bytes, unaltered. Escaping was the
+    alternative and is refused: an escape rewrites the value, so ``"a,b"`` and
+    ``"a\\,b"`` would reach the planner as one string, and §11's *byte for byte* would
+    be false of exactly the values that need it.
+
+    Args:
+        value: The record's own value, untouched.
+
+    Returns:
+        Its counted rendering.
+    """
+    return f"{len(value.encode())}:{value}"
+
+
 def rendered_region(region: EvidenceApplicability) -> str:
     """Render one region, deterministically and by field name (ADR-0252 §11).
 
@@ -615,13 +648,18 @@ def rendered_region(region: EvidenceApplicability) -> str:
     name; unapplied axes are omitted; … label values render **byte for byte** in the
     order the region holds them; and a non-zero ``elided`` renders as a count."
 
-    **The region is delimited by parentheses so that a reader can tell two regions
-    from one** even where a label value carries the axis or region separator. §11
-    requires regions to stay distinguishable on the seam, and the reason is stated
-    there: a rendering that concatenated two regions' axes would show the planner one
-    applicability spanning both, which is the manufactured conjunction §2 exists to
-    prevent — arriving at the model, where it would be *worse*, because a model is
-    exactly the reader that will reason from it.
+    **The region is delimited by parentheses and every label value is length-counted
+    (**:func:`_counted`**), so that a reader can tell two regions from one whatever the
+    values contain.** §11 requires regions to stay distinguishable on the seam, and the
+    reason is stated there: a rendering that concatenated two regions' axes would show
+    the planner one applicability spanning both, which is the manufactured conjunction
+    §2 exists to prevent — arriving at the model, where it would be *worse*, because a
+    model is exactly the reader that will reason from it. A delimiter alone does not
+    give that, because the values are model-reachable text and may carry the delimiter.
+
+    The window's ends and ``elided`` need no count: an
+    :data:`~ai_assistant.core.types.UtcInstant` renders as ISO-8601 and a count as
+    digits, neither of which a producer can put a delimiter into.
 
     **No model writes this rendering, no lane substitutes a prose summary for it, and
     no lane makes it configurable** (§11).
@@ -641,7 +679,7 @@ def rendered_region(region: EvidenceApplicability) -> str:
         ("about_person", region.about_person),
     ):
         if values is not None:
-            axes.append(f"{name}={', '.join(values)}")
+            axes.append(f"{name}={','.join(_counted(value) for value in values)}")
     if region.elided:
         axes.append(f"elided={region.elided}")
     return f"({'; '.join(axes)})"
