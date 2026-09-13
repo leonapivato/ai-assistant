@@ -339,27 +339,48 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > fails as it would have anyway, **no lane retries it from a later turn**, and A8 owns the repair:
 > §6's residual one field over, and stated rather than inherited.
 
-> **Normative — which failure surfaces when both do, and *neither* exception's own cause chain is
-> replaced.** Where the interpretation raised **and** the `commit_attempt` that charges the
-> interval then raises too, **the interpretation's exception is the one that propagates, and it
-> propagates unmodified**: its `__cause__` and `__context__` stay exactly as they stood, so a
-> transport failure underneath a provider error is still the cause a reader sees. **The ledger
-> failure is carried beside it and never inside its chain** — attached to the propagating
-> exception as a **note** (`BaseException.add_note`), which adds no cause, replaces none and
-> preserves the ledger exception's own chain in the text it carries. **The turn failed on the
-> interpretation**, and an implementation whose accounting cleanup masked that cause would report
-> a store problem for a provider outage and send the next reader to the wrong subsystem. **No lane
-> swallows either, and no lane rewrites either.**
+> **Normative — which failure surfaces when both do, and the driver writes on neither exception.**
+> Where the interpretation raised **and** the `commit_attempt` that charges the interval then
+> raises too, **the interpretation's exception is the one that propagates, and the driver does not
+> touch it at all**: it is not wrapped, not re-raised, not given a cause, and **no attribute of it
+> is set — `BaseException.add_note` included**. Its `__cause__`, `__context__` and `__notes__`
+> stay exactly as they stood, so a transport failure underneath a provider error is still the
+> cause a reader sees. **The ledger failure is recorded where the driver owns the state**: a
+> structured log warning, carrying the **class** of each failure and **neither message**. **The
+> turn failed on the interpretation**, and an implementation whose accounting cleanup masked that
+> cause would report a store problem for a provider outage and send the next reader to the wrong
+> subsystem. **No lane swallows either, and no lane rewrites either.**
 
-**`raise … from` is the wrong instrument here and the reason is mechanical.** `raise
-interpretation from ledger` **overwrites** the interpretation's own `__cause__`, destroying the
-transport failure underneath it; `raise ledger from interpretation` propagates the wrong exception
-and makes every caller's `except` clause see a store error for a provider outage. The corpus uses
-`raise … from` where one failure genuinely **caused** another — ADR-0029 §4's digest case — and
-these two did not cause each other: they are **two independent failures of one turn**, and the
-representation has to say so rather than invent a causal edge. A note says it and costs nothing;
-an `ExceptionGroup` would say it too and would change what every caller catches, which is a
-contract change this decision has no reason to make.
+> **Normative — what that warning may carry, and it is ADR-0013 §5's own rule taken rather than
+> restated.** The ledger failure's class is **this project's** (`PlanningError`) and is named as
+> it stands. The interpretation failure's class is the **provider's** and is **never** named as it
+> stands: it is mapped through this project's own taxonomy first — ADR-0013 §5's `_classify`
+> against a set frozen at import, *"the nearest ancestor in the exception's MRO that is one of our
+> `ModelError` subclasses, matched by **object identity**"* — because *"a route may be any
+> `ModelProvider`, so `type(exc).__name__` is provider-controlled text"*. **Neither message, and
+> no `str()`, `repr()`, `args`, `__notes__`, `__cause__` or `__context__` of either, reaches the
+> warning** (ADR-0004 §5, and ADR-0029 §3's channel enumeration as ADR-0032 §5 and ADR-0145 §7
+> restate it), and §10's rule that the driver renders no plan, no step, no execution, no
+> `SkipReason` and no verdict to a log binds entire.
+
+**Every instrument that writes on the caught exception is refused, and ADR-0013 §5 is where this
+project already worked that out.** That section records `add_note` on a caught provider exception
+as one of two wrong turns found by adversarial review — *"mutates an exception the router does not
+own. A provider that raises a cached instance accumulates one note per call, unbounded, and
+concurrent routers sharing that object leak each other's route labels into it"* — and states the
+through-line this decision adopts word for word: the caught exception *"belongs to the provider
+that raised it, and may be shared, cached, or concurrently in flight elsewhere."* **The driver is
+in exactly the router's position.** `raise … from` is refused for its own two reasons besides:
+`raise interpretation from ledger` **overwrites** the interpretation's own `__cause__`, destroying
+the transport failure underneath it, and `raise ledger from interpretation` propagates the wrong
+exception so that every caller's `except` clause sees a store error for a provider outage. The
+corpus uses `raise … from` where one failure genuinely **caused** another — ADR-0029 §4's digest
+case — and these two did not cause each other: they are **two independent failures of one turn**,
+so the representation must not invent a causal edge. An `ExceptionGroup` would say that correctly
+and would change what every caller catches, which is a contract change this decision has no reason
+to make. **So the diagnostics go where the driver owns the state**, which is ADR-0013 §5's own
+resolution: *"the diagnostics go where the router does own the state — a structured log
+warning."*
 
 > **Normative — a failed interpretation is never defaulted, and this is not a sixth stop trigger.**
 > **No lane substitutes `INCONCLUSIVE`, `DOES_NOT_QUALIFY` or any other member for a call that did
@@ -2168,7 +2189,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    two arms over the double failure** (§1): with the interpretation raising and the charging
    `commit_attempt` then raising too — once on a stale `expected_version`, once on a store
    failure — the arm asserts that **the interpretation's failure is the exception that reaches the
-   caller**, that the ledger failure is **chained to it and not discarded**, and that the residual
+   caller**, that the ledger failure is **not discarded but recorded in the driver's own
+   structured log warning** — carrying both classes, the provider's mapped through this project's
+   taxonomy, and neither message — and that the residual
    is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
    skipped and nothing is re-dispatched. **And each is run with *both* exceptions already carrying
    a cause** — a transport error under the interpretation's, a database error under the ledger's —
@@ -2502,7 +2525,7 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly three documents are partially superseded — ADR-0254 in one scope, ADR-0251 in two and
+**Exactly three documents are partially superseded — ADR-0254 in two scopes, ADR-0251 in two and
 ADR-0228 in three** — and the entries below
 show the working for it and for each other document a reader would expect to be superseded and is
 not: ADR-0037, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them — the same list the `Status`
