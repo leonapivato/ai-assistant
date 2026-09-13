@@ -1275,7 +1275,13 @@ you are sending no `understanding`, it is a label printed under "What this goal 
 depends on" in the next message — `D1`, `D2`, and so on. Where you ARE sending an \
 `understanding`, it is instead the 1-based position within that reply's own \
 `conditions` list — `D1` for the first one you wrote, `D2` for the second — \
-retained and new elements alike, in the order you wrote them."""
+retained and new elements alike, in the order you wrote them.
+
+A condition label is always a `D` label, and this is not the same `about` a \
+`questions` entry carries. A question may be about a constraint, a criterion, a \
+condition or the objective itself, so its `about` may be `C1`, `S1`, `D1` or \
+null; a step's `when` and an interpretation's `settles` are about a CONDITION and \
+nothing else, so `C1`, `S1` and null are wrong there."""
 
 
 def _system_prompt(
