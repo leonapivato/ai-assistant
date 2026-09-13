@@ -5,10 +5,11 @@
 - **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
   — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
   other turn it is given nothing, and the assembled prompt is byte-identical to what it is
-  today"*, and it is false of a turn §6 below's carrier covers: a search that reached the
-  provider and was answered records no `SearchDisposition`, so that turn carries no
-  `SearchNotServiced` member and is one of the "every other" turns — and §6 below gives
-  the composing stage a fragment on it. **The first sentence binds entire**: a turn on which
+  today"*, and §6 below falsifies it for **every turn that composes a reply**: the composing
+  stage is given one fragment of this decision's own on each of them, the turns carrying no
+  `SearchNotServiced` member included — a search that reached the provider and was answered,
+  which records no `SearchDisposition`, and a turn that asked for no search at all (#2365).
+  **The first sentence binds entire**: a turn on which
   at least one servicing recorded a disposition is still given one member of §8's vocabulary
   and still composes an answer that says so. §6's eligibility condition, its
   `NO_RESULT` clause, its notification clause and its `reply_degraded` clause bind entire,
@@ -37,11 +38,25 @@ and names what is owed:
 > statement that it did — the mirror of ADR-0242 §6 — so the trail and the reply
 > cannot disagree about whether the world was contacted.
 
-The owner's 2026-09-13 note lists *contradictory reporting* among milestone 31's
-remaining failures. **What this decision supplies against it is an authoritative
-counterstatement and not a prevention**: §7's statement is composed by code from a typed
-value and stands beside the reply whatever the reply says, so a denial is **exposed** on
-the surfaces that render it. No clause here stops a model writing one, and §10 says why.
+**And the same milestone's run found the inverse, which widens what is owed.** Issue
+[#2365](https://github.com/leonapivato/ai-assistant/issues/2365), from the M32 acceptance
+run driving the browser against the production hub on 2026-09-13: a turn whose trail records
+`servicing=not_asked`, `servicings=()` and `stop=not_iterated` told the user its forecast
+*"is already in front of me from **this turn's searches**"*. The figures came from retrieved
+memory of earlier conversations — a legitimate source, and not what the reply said it was.
+#2365 states why an earlier draft of this decision did not refuse it — *"a turn with no
+servicing has no statement to render, so there is nothing for the surface to contradict"* —
+and why it is the worse half of the pair: *"it is not a missing acknowledgement but a false
+provenance claim"*, on exactly the class of fact whose value is its freshness.
+
+**So the requirement is two-directional, and this decision is stated that way.** The owner's
+2026-09-13 note lists *contradictory reporting* among milestone 31's remaining failures, and
+the trail and the reply disagree in both directions: a reply denying a contact the trail
+records (#2268), and one claiming a contact the trail does not (#2365). **What this decision
+supplies against both is an authoritative counterstatement and not a prevention**: §7's
+statement is composed by code from a typed value and stands beside the reply whatever the
+reply says, so a denial and a false claim are each **exposed** on the surfaces that render
+it. No clause here stops a model writing either, and §10 says why.
 
 ### The tree, read rather than assumed, at `origin/main` `a520b891`
 
@@ -75,13 +90,11 @@ the surfaces that render it. No clause here stops a model writing one, and §10 
   ask and on one whose search did not yield. Its own docstring states this decision's
   premise — *"a minted record sits in `memories` beside every other, which is the whole
   point of ADR-0226 §7's fourth group"*.
-- **`ServicedRead.supplied` is a count in the *other* direction.** `_serviced_search`
-  assigns ADR-0238 §11's count from `_search_supply`'s result before the query is composed
-  and before anything is sent, so it says what left and not what came back (§4).
-- **`Disposition.EXECUTED` is the gate's verdict and not the call's result.**
-  `StepOutcome`'s own docstring is explicit: *"a client that renders success from
-  `disposition` alone is wrong — `EXECUTED` says the permission gate let the call through
-  and the executor committed **something**, not that the something succeeded"*.
+- **`ServicedRead.supplied` is a count in the *other* direction**, assigned from
+  `_search_supply`'s result before the query is composed and before anything is sent (§4);
+  and **`Disposition.EXECUTED` is the gate's verdict and not the call's result** —
+  `StepOutcome`'s own docstring says *"a client that renders success from `disposition`
+  alone is wrong"* (§3).
 - **And the servicing is not the only site that performs the call.** ADR-0244 §7's
   resume runs the parked read's one call from `ParkedReadOperations._dispatched`, which is
   no servicing and drives no step; the records it returns are admitted later, by
@@ -114,13 +127,22 @@ model infers — and #2268 records it inferring the opposite of the truth.
 
 ## Decision
 
-### 1. The eligibility condition: this turn reached outside itself, and the trail is what establishes it
+### 1. The condition, in both directions: what this turn did about reaching outside itself
 
-> **Normative.** A turn carries the statement this decision mints on, and only on, a
-> turn for which **at least one outbound contact is established** by §2. On every
-> other turn it carries nothing, the composing stage is given nothing, and the assembled
-> prompt is byte-identical to what it is without this decision — the guarantee ADR-0242
-> §6 makes for its own carrier, ADR-0228 §10 for its own and ADR-0227 §3 for its own.
+> **Normative.** **The statement this decision mints is three-valued, and it is carried on
+> every pass that composes a reply.** Its value is **`REACHED`** where **at least one
+> outbound contact is established** by §2; **`INDETERMINATE`** where none is and at least one
+> call established nothing either way; and **`NOT_REACHED`** otherwise — which includes the
+> turn that made no call at all, #2365's shape. A pass that establishes a contact carries the
+> statement whether or not it composes; a pass that neither establishes one nor composes
+> carries nothing (§7).
+
+> **Normative.** **There is therefore no turn on which the assembled prompt stays
+> byte-identical, and that is a cost taken deliberately** — recorded against ADR-0242 §6 in
+> the header, where an earlier draft of this decision took that guarantee over for its own
+> carrier as ADR-0228 §10 and ADR-0227 §3 have for theirs. #2365 is a turn that would have
+> had the byte-identity, and a reply claiming a reach that never happened is what the
+> silence bought.
 
 > **Normative.** **The condition is stated over what the trail establishes and never
 > over what the turn produced.** It does not turn on whether records reached the supply,
@@ -129,11 +151,13 @@ model infers — and #2268 records it inferring the opposite of the truth.
 > with nothing is a contact, and a turn that searched and then answered from memory
 > alone still made one.
 
-> **Normative.** **Establishment is one-directional and the residue is silence.** Where
-> the trail does not establish a contact the turn carries no statement, and no component
-> infers one from a latency, a supply that grew, a record's shape, a provider's name in
-> a configuration, or the absence of a refusal. A statement that might be false is worse
-> than none, because its whole value is that a reader may rely on it.
+> **Normative.** **Neither direction is inferred, and the third value is what keeps that
+> true.** No component infers `REACHED` from a latency, a supply that grew, a record's
+> shape, a provider's name in a configuration, or the absence of a refusal; and none infers
+> `NOT_REACHED` from a supply that did not grow, from a reply naming no source, or from any
+> call §2 places in its third group. A value that might be false is worse than none in
+> either direction, because the statement's whole value is that a reader may rely on it —
+> which is why `INDETERMINATE` exists rather than being folded into `NOT_REACHED`.
 
 **This is the mirror stated at ADR-0242 §6's own strength, and the two conditions do not
 overlap by construction.** §6's is *the disposition's presence*; this one is *the contact's
@@ -215,66 +239,61 @@ a user reading one has not been told the other.
 > way** unless that ADR's own text places it, which is the least-claiming direction and
 > ADR-0242 §8's own default read on this question.
 
+> **Normative.** **The turn's value is folded from its calls, `REACHED` outranking
+> `INDETERMINATE` and `INDETERMINATE` outranking `NOT_REACHED`.** One call that established
+> a contact makes the turn `REACHED` however many others did not; failing that, one call
+> that established nothing either way makes it `INDETERMINATE`; and a turn every one of
+> whose calls fell before the send — **and a turn that performed no call at all** — is
+> `NOT_REACHED`. The order is the least-claiming one available: a turn is never reported as
+> having reached nothing while one of its own calls may have reached something.
+
 > **Normative.** **No component re-derives the partition from a member's name, its
 > value, its declaration order or its docstring.** It is a mapping stated here and
 > written once in `orchestration`, and a member added without an arm fails rather than
 > falling to a default — the discipline `QUERY_DISPOSITIONS` and `SEARCH_DISPOSITIONS`
 > already hold in that module.
 
-**Three groups and not two, because the vocabulary genuinely holds three answers.**
+**Three groups and not two, because each member was read from the code that produces it.**
 `SearchDisposition` names *the stage that produced the outcome*, and a stage is not a wire
-fact: an outage, an expiry, a raised fault and a provider's refusal are each recorded
-without recording whether anything crossed the wire, because each is reached from more
-than one producing path and the paths disagree. Forcing that third group into either of
-the others would be this decision asserting a fact its inputs do not establish, which is
-exactly what ADR-0242 §8 refuses when it states each member *"over what its inputs
-establish and never over a cause they do not"*. **The user is not left silent there**:
-every member of the third group already carries a `SearchNotServiced` member under
-ADR-0242 §8 — `INTERRUPTED` for `DEADLINE_EXPIRED`, `UNAVAILABLE` for the other three —
-and §6's third clause already forbids `UNAVAILABLE`'s statement from saying that no
-request was made.
+fact: four members are reached from more than one producing path and the paths disagree,
+which is why they establish neither side. `_result_of`'s own docstring states both of the
+other halves — `SPEND_REFUSED` *"reaches no claim at all and so reaches this function
+never"*, while `NO_RESULT` and `UNATTESTED` are *"answers a provider gave: the call was
+made, it completed, and what came back is not something this system will carry"* — and for
+`DEADLINE_EXPIRED` it gives the third group its reason, a search *"whose query may have
+left the machine and may have been served and billed"* being *"the one direction ADR-0014
+§4 refuses to guess in"*.
 
-**The tree states both halves of that partition already, in `tools/web_search.py`, and
-this section is that statement read for a different consumer.** `_result_of`'s docstring
-puts `SPEND_REFUSED` before the send in terms — it *"reaches no claim at all and so reaches
-this function never"* — and puts `NO_RESULT` and `UNATTESTED` after a response in terms:
-*"answers a provider gave: the call was made, it completed, and what came back is not
-something this system will carry"*. For `DEADLINE_EXPIRED` it gives the third group its
-reason: a search *"whose query may have left the machine and may have been served and
-billed"* is *"the one direction ADR-0014 §4 refuses to guess in"*.
-
-**Two readings of that docstring have to be kept apart.** It also groups
-`RESPONSE_TOO_LARGE` with `TRANSPORT_FAILED` and `PROVIDER_REFUSED` as *"calls that did
-not complete as calls"* — a statement about the **invocation's** outcome, which is what
-the ledger row and ADR-0192 §3's completion are written from. It is not a statement about
-whether bytes crossed the wire, and this section asks only that. A response too large to
-carry is a response that arrived, because that member is reached only from a reader
-counting octets off the channel; a refused connection is not, and a provider refusal is
-recorded for both.
-
-**And absence here asserts nothing, which is why the third group is not the guess ADR-0014
-§4 refuses.** That rule bites where a record must take one of several values and one of
-them would be false; `INDETERMINATE` is what it buys. Here the statement is present or it
-is not, and an absent one claims nothing about the wire — so the user is told the honest
-indeterminate rather than a sentence this system cannot support.
+**One reading of that docstring has to be kept out.** It also groups `RESPONSE_TOO_LARGE`
+with `TRANSPORT_FAILED` and `PROVIDER_REFUSED` as *"calls that did not complete as
+calls"* — a statement about the **invocation's** outcome, which the ledger row and ADR-0192
+§3's completion are written from, and not about whether bytes crossed the wire, which is
+all this section asks. A response too large to carry arrived, because that member is
+reached only from a reader counting octets off the channel; a refused connection did not;
+and a provider refusal is recorded for both, which is what puts it in the third group.
+Forcing any of the four into one of the other groups would be this decision asserting a
+fact its inputs do not establish — what ADR-0242 §8 refuses when it states each member
+*"over what its inputs establish and never over a cause they do not"*, and what ADR-0014 §4
+refuses when it will not guess. `INDETERMINATE` is what §1 buys instead, and the user is
+told it rather than a sentence this system cannot support.
 
 ### 3. No other outbound seam establishes a contact here, and the egress one expressly does not
 
 > **Normative.** **This decision establishes a contact from a `WEB_SEARCH` call and from
 > nothing else.** A driven step establishes none, whatever its binding, its disposition or
-> its addressed status; no component mints an `OutboundContact` from an `EgressBinding`,
+> its addressed status; no component mints an `OutboundStatement` from an `EgressBinding`,
 > from `Disposition.EXECUTED`, from `StepStatus.SUCCEEDED` or from any combination of them;
-> and a turn whose only outbound act was a send carries no member and leaves the assembled
-> prompt byte-identical to what it is without this decision.
+> and a turn whose only outbound act was a send is `NOT_REACHED` like any other turn that
+> performed no `WEB_SEARCH` call, which is this decision saying it cannot see that send.
 
 > **Normative.** **The reason is that no value this system holds establishes it**, and
-> ADR-0192 §4 says so in terms. `SUCCEEDED` is *"bounded by ADR-0031 §4 to exactly three
+> ADR-0192 §4 says so in terms: `SUCCEEDED` is *"bounded by ADR-0031 §4 to exactly three
 > facts — a validated callable return, an unexpired deadline, and no increase in the
-> cancellation count — and none of them is a transmission"*; *"an egress callable that
+> cancellation count — and none of them is a transmission"*, *"an egress callable that
 > returns normally without putting a byte on the wire produces `SUCCEEDED` like any
-> other"*; and *"nothing available today could carry it"*, because *"a transmission fact
-> would have to come from the integration, and `ToolImplementation` returns `FrozenJson`
-> with no channel for one"*. An earlier draft of this decision established an egress
+> other"*, and *"a transmission fact would have to come from the integration, and
+> `ToolImplementation` returns `FrozenJson` with no channel for one"*.
+> An earlier draft of this decision established an egress
 > contact from exactly that triple and would have rendered *"this turn reached outside this
 > system"* on a call that provably never left — the false statement §1 ranks below silence.
 
@@ -282,19 +301,33 @@ indeterminate rather than a sentence this system cannot support.
 > has the composing stage told what became of each step, so the reply has an account of the
 > *act*; what it lacks is an account of the *wire*.
 
-### 4. `OutboundContact`: what it carries, and the one count it carries
+### 4. `OutboundStatement`: what it carries, and the one count it carries
 
-> **Normative.** `core/types.py` gains **`OutboundContact`**, a frozen pydantic model with
-> `extra="forbid"` whose fields are exactly: **`destinations`**, a **non-empty**
-> `tuple[OutboundDestination, ...]`; and **`records`**, an `int` with `ge=0`. It carries
+> **Normative.** `core/types.py` gains **`OutboundReach`**, a `StrEnum` valued by
+> lower-cased member name and **closed at exactly three members** — **`REACHED`**,
+> **`NOT_REACHED`** and **`INDETERMINATE`** — which are §2's three groups folded to the turn
+> and nothing else. **`INDETERMINATE` is ADR-0014 §4's own word in its own sense**: the
+> system holds no value that decides the question and says so rather than guessing. The
+> vocabulary is added to and never renamed, and no fourth member arrives without its ADR.
+
+> **Normative.** `core/types.py` gains **`OutboundStatement`**, a frozen pydantic model with
+> `extra="forbid"` whose fields are exactly: **`reach`**, an `OutboundReach`;
+> **`destinations`**, a `tuple[OutboundDestination, ...]`; and **`records`**, an `int` with
+> `ge=0`. It carries
 > **no destination, no host, no origin, no provider name, no connection reference, no
 > account identity, no tool identifier, no query and no fragment of one, no record, no
 > title, no snippet, no monetary figure, no duration, no `Settings` field name, no
 > `SearchDisposition` value, no record id, no decision id and no instant.**
 
+> **Normative.** **The three fields are coupled, and the model refuses an uncoupled
+> value.** On `REACHED` `destinations` is **non-empty**; on `NOT_REACHED` and
+> `INDETERMINATE` it is **empty** and `records` is `0`. A value carrying a destination
+> beside a `NOT_REACHED`, or a count beside an `INDETERMINATE`, is refused rather than
+> accepted and rendered as a reach nothing established.
+
 > **Normative.** **`destinations` holds each class contacted once, in
 > `OutboundDestination`'s declared order and never in encounter order**, and the model
-> **refuses** a value that is empty or that carries a class twice rather than accepting
+> **refuses** one that carries a class twice rather than accepting
 > one a surface would then render as a contact naming nothing. A turn that contacted one
 > class through three servicings carries that class once. **It is not an
 > enumeration of a turn's servicings**, which is the direction ADR-0226 §9's
@@ -340,16 +373,14 @@ only place a statement about a model's own prompt is made.
 
 **The count is stated over admission because that is the fact its own site holds, and no
 clause here asserts of any bound that it cannot bite.** Where one response carries two
-records under one id the supply takes one and `records` is `1`: ADR-0226 §7's
-deduplication is over the whole union, which `admitted_fourth_group` states in terms —
-*"two records of one batch sharing an id enter once, and the second consumes no slot"*.
-**Neither that case nor a budget truncation is claimed unreachable**, because neither
-claim can be made from the seam: `SearchOutcome` constrains a record's provenance and its
-attestation and constrains neither identifier uniqueness nor record count, putting
-`search_max_results` outside itself as a field *"the configured searcher enforces"*. An
-unreachability argued from `tools/web_search.py` would be about the shipped searcher and
-not about the seam every `WebSearcher` is wired through; stated over admission the count
-needs no such argument.
+records under one id the supply takes one and `records` is `1` — ADR-0226 §7's
+deduplication is over the whole union, which `admitted_fourth_group` states in terms.
+**Neither that case nor a budget truncation is claimed unreachable**: `SearchOutcome`
+constrains neither identifier uniqueness nor record count, putting `search_max_results`
+outside itself as a field *"the configured searcher enforces"*, so an unreachability
+argued from `tools/web_search.py` would be about the shipped searcher and not about the
+seam every `WebSearcher` is wired through. Stated over admission the count needs no such
+argument.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
 > contact, and a turn that reached outside itself and brought nothing into its supply
@@ -417,31 +448,40 @@ rather than collapsed into the member's absence.
 > one*, and §4's count is one population over the turn. A last-writer-wins assembly is
 > the defect this clause names.
 
-> **Normative.** **The fragment obligation binds on a contact-carrying pass that
-> composes a reply, and on no other.** ADR-0170 §4 requires no composition on a pass whose
-> step parked for confirmation or whose `turn` is `None`, and a turn that serviced a
-> search and then parked its step for confirmation is exactly such a pass. On it the
-> member is carried and the surface statement is rendered exactly as §7 fixes, and there
-> is no fragment because there is nothing to give one to — which is not a degradation,
+> **Normative.** **The fragment obligation binds on every pass that composes a reply**,
+> whatever the statement's value, and on no other. ADR-0170 §4 requires no composition on a
+> pass whose step parked for confirmation or whose `turn` is `None`, and a turn that
+> serviced a search and then parked its step for confirmation is exactly such a pass. On it
+> the member is carried and §7's statement is rendered exactly as that section fixes, and
+> there is no fragment because there is nothing to give one to — which is not a degradation,
 > because the reply the fragment guards does not exist.
 
-> **Normative.** Where the pass composes, the composing stage is given **one fixed
-> fragment**, written in
-> `ai_assistant.orchestration`, interpolating **`records` and nothing else**. The
-> fragment states the two facts every contact has and no others: that **this turn reached
-> outside this system**, and **how many records it took in from doing so — which may be
-> none, and the fragment says so where it is none**. It asserts nothing about what was
-> reached and nothing about material having arrived, because a contact that came back with
-> nothing is still a contact and a record in the supply is not a record in the answer. It
+> **Normative.** Where the pass composes, the composing stage is given **one fixed fragment
+> per `OutboundReach` member**, written in
+> `ai_assistant.orchestration`, interpolating **`records` and nothing else, and only on
+> `REACHED`**. The `REACHED` fragment states the two facts every contact has and no others:
+> that **this turn reached outside this system**, and **how many records it took in from
+> doing so — which may be none, and the fragment says so where it is none**. The
+> `NOT_REACHED` fragment states that **this turn reached nothing outside this system**, and
+> the `INDETERMINATE` fragment that **this system cannot say whether it did**. None of the
+> three asserts anything about what was reached or about material having arrived, because a
+> contact that came back with nothing is still a contact and a record in the supply is not a
+> record in the answer. Each
 > carries no destination, no host, no origin, no provider name, no connection
 > reference, no account identity, no query or fragment of one, no record, no title, no
 > snippet, no monetary figure, no duration, no `Settings` field name, no
 > `SearchDisposition` value, no id and no command name — ADR-0242 §7's bar, binding here
 > unchanged.
 
-> **Normative.** The fragment **forbids the reply from denying that this turn reached
-> outside this system**, and forbids it from saying that the answer is more current, more
-> reliable or better for it. **The prohibition is stated over the contact**, which on this
+> **Normative.** **Each fragment forbids the reply from contradicting the value it
+> carries, in whichever direction that value points.** On `REACHED` it forbids denying that
+> this turn reached outside this system, and forbids saying the answer is more current, more
+> reliable or better for it. On `NOT_REACHED` it forbids claiming a lookup, a search, a
+> fetch or any fresh read **this turn**, and forbids attributing any part of the answer to
+> one — #2365's *"already in front of me from this turn's searches"* is the sentence this
+> half exists to refuse, and a reply may of course still say where material it holds came
+> from, provided it does not date it to this turn. On `INDETERMINATE` it forbids asserting
+> either. **The prohibition is stated over the reach**, which on this
 > decision's one established seam is a lookup, and a later seam's member takes the
 > prohibition in whatever terms its own ADR fixes rather than inheriting this one's.
 > `_STOPPED_ASKING_PROMPT`'s own bar is the form — *"you have not been
@@ -449,13 +489,12 @@ rather than collapsed into the member's absence.
 > so that it need not guess, and told what the fact does not license so that it does not
 > embroider it.
 
-> **Normative.** **`_PLAN_IS_ABOUT_ACTING` is appended on a turn carrying an
-> `OutboundContact` too.** #2213 added that line on a turn that did not service a search,
-> to stop the plan block being read as an account of lookups; on a turn that *did* reach
-> outside, the same block says the same misleading thing and the same line answers it.
-> The condition becomes *the turn carries either statement*, the line's own text is
-> unchanged, and on a turn carrying neither the block is byte-identical to what it is
-> today.
+> **Normative.** **`_PLAN_IS_ABOUT_ACTING` is appended on every composing pass.** #2213
+> added that line on a turn that did not service a search, to stop the plan block being read
+> as an account of lookups; on a turn that *did* reach outside, and on #2365's turn whose
+> planner named no capability at all, the same block says the same misleading thing and the
+> same line answers it. The condition becomes *the pass composes*, and the line's own text
+> is unchanged.
 
 > **Normative.** **No lane widens the carrier to free text.** `destinations` is a closed
 > vocabulary and `records` is an integer; a message, a provider response, a query, a
@@ -471,17 +510,19 @@ is there so that when they do not, the user can see it.
 
 ### 7. `TurnOutcome` gains one member, and a surface renders it from the value
 
-> **Normative.** `TurnOutcome` gains exactly one field, **`outbound_contact`**, typed
-> `OutboundContact | None` and defaulting to `None`, whose docstring names this ADR as
+> **Normative.** `TurnOutcome` gains exactly one field, **`outbound_statement`**, typed
+> `OutboundStatement | None` and defaulting to `None`, whose docstring names this ADR as
 > the decision that added it. It carries **the value §6 computed, by value, and never a
 > second computation**.
 
-> **Normative.** `outbound_contact` is `None` on **every** outcome of a turn that
-> established no contact: every such `converse`, `converse_streaming`, `converse_spoken`
-> and `resume`; every routed pass (ADR-0197 §7), which ends the pipeline where it routed;
-> ADR-0198 §1's **restatement**, which drives nothing and reaches nothing; and ADR-0250
-> §3's `UNDECIDED` turn, which takes no read at all. That adds a value to ADR-0198 §2's
-> enumeration without changing any value it fixes.
+> **Normative.** `outbound_statement` is `None` on exactly the passes that **neither
+> established a contact nor composed a reply**: every routed pass (ADR-0197 §7), which ends
+> the pipeline where it routed, and every pass ADR-0170 §4 composes nothing for that
+> established none. **It is not `None` on an ordinary turn that reached nothing** —
+> ADR-0198 §1's **restatement**, ADR-0250 §3's `UNDECIDED` turn and every `converse` whose
+> planner asked for no search each carry `NOT_REACHED`, which is the value #2365 needed and
+> did not have. That adds a value to ADR-0198 §2's enumeration without changing any value it
+> fixes.
 
 > **Normative.** **A widening and not a change.** ADR-0170 §4's three `reply`-`None`
 > shapes and its one `reply_degraded` shape are untouched, no new outcome shape is
@@ -494,18 +535,30 @@ is there so that when they do not, the user can see it.
 > and of nothing else"*, so the spoken reply is the whole of what that user is told.
 > **What is therefore not available on the spoken surface is this decision's guarantee**,
 > and that is a stated cost rather than a gap (§12), taking ADR-0250 §15's shape. A spoken
-> turn still carries `outbound_contact` and still gets §6's fragment, so the reply is
+> turn still carries `outbound_statement` and still gets §6's fragment, so the reply is
 > composed under the same instruction — but no code-composed statement stands beside it.
 > **This decision's title is bounded by that**: a reply cannot deny a contact **on a surface
 > that renders the statement**, and the spoken one does not.
 
 > **Normative.** **A surface renders, beside the reply and never in place of it, one
-> statement composed from the value**: that this turn reached outside this system, naming
-> each class in `destinations` in the vocabulary's declared order, and how many records
-> that **brought into this turn's supply** — including that it brought none, where
-> `records` is `0`. The exact wording is the lane's; what is fixed is that the statement is built
-> from the value, that a `0` is stated rather than elided, and that no surface renders a
-> statement for a value it was not given.
+> statement composed from the value**, one per `OutboundReach` member. On `REACHED`: that
+> this turn reached outside this system, naming each class in `destinations` in the
+> vocabulary's declared order, and how many records that **brought into this turn's supply**
+> — including that it brought none, where `records` is `0`. On `NOT_REACHED`: that this turn
+> reached nothing outside this system. On `INDETERMINATE`: that this system cannot say
+> whether it did. The exact wording is the lane's; what is fixed is that the statement is
+> built from the value, that a `0` is stated rather than elided, and that no surface renders
+> a statement for a value it was not given.
+
+> **Normative.** **`REACHED` renders on every pass that carries it; `NOT_REACHED` and
+> `INDETERMINATE` render only on a pass that composed a reply.** The asymmetry is principled
+> and not economical: `REACHED` reports an **act this system performed**, which the user is
+> owed whether or not prose was written — ADR-0227's posture that the audit records acts —
+> while the other two report **nothing having happened**, whose only function is to stop a
+> reply being read as claiming otherwise, so where there is no reply they answer a question
+> nobody asked. **The condition is the reply's existence and never its content**: no surface
+> reads the prose to decide whether to render, which would be the model judgement §10
+> refuses.
 
 > **Normative.** **No statement says a record reached, entered, supported or affected the
 > answer.** `records` establishes that the records entered this turn's supply and nothing
@@ -527,11 +580,13 @@ is there so that when they do not, the user can see it.
 
 ### 8. Both statements ride together, and neither is read off the other
 
-> **Normative.** A turn may carry **both** `search_not_serviced` and `outbound_contact`,
+> **Normative.** A turn may carry **both** `search_not_serviced` and `outbound_statement`,
 > and where it does **both are rendered**, each in its own statement, neither suppressing
 > nor qualifying the other. The reachable shape is one turn with two servicings — one
 > refused before it sent, one answered — and it is a turn on which both sentences are
-> true.
+> true. **A turn whose every servicing refused before the send carries both too**:
+> `search_not_serviced` names the act that would help, `NOT_REACHED` states that nothing
+> left, and neither is read off the other.
 
 > **Normative.** **Neither member is computed from the other, and no clause of ADR-0242
 > §§6-9 is narrowed, widened or re-read here — save the one sentence the header records as
@@ -601,7 +656,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > **Normative.** The implementation is **two lanes**, in this order, and neither may
 > absorb the other's paths.
 >
-> 1. **Contract and `orchestration`.** `OutboundDestination`, `OutboundContact` and
+> 1. **Contract and `orchestration`.** `OutboundDestination`, `OutboundStatement` and
 >    `TurnOutcome.outbound_contact` in `core/types.py`; §2's establishment at every site
 >    that performs a `WEB_SEARCH` call; §4's admitted sets and §6's
 >    assembly; the composing fragment and `_PLAN_IS_ABOUT_ACTING`'s widened condition.
@@ -621,7 +676,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > **Normative.** **Each arm of §13 is owed by the lane that owns the code it asserts
 > over, and no arm obliges a lane to touch the other's paths.** Every arm's assertions
 > about the member, the establishment, the admitted count, the composing prompt and
-> `OutboundContact`'s own construction are lane 1's; every arm's assertions about a
+> `OutboundStatement`'s own construction are lane 1's; every arm's assertions about a
 > **rendered statement** are lane 2's, landed with the renderer they are about — arm 2's
 > stated `0` and arm 3's two statements among the arms listed, and equally every rendering
 > assertion §13's floor obliges beyond them. **The rule is stated over the assertion and
@@ -667,13 +722,19 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > refuses the enumeration and this ADR mints no route back to one. **Fires** with a
 > decision that argues the case ADR-0226 §9 and ADR-0228 §10 argue against.
 
+> **Normative.** **Whether a surface may abbreviate or suppress the `NOT_REACHED`
+> statement.** §7 renders it on every composing pass, which puts one line about the world on
+> every reply that reached nothing; that is the price of a statement a reader may rely on
+> from its absence as well as from its presence (§1). **Fires** when a deployment reports
+> the line read as noise, or when a surface gains a compact indicator it could ride.
+
 > **Normative.** **A notification.** No lane mints a `Notification`, a notification kind,
 > a delivery or a poll result for an outbound contact — ADR-0235 §8's second clause, binding here as ADR-0242 §6 made it bind
 > there.
 
 ### 13. The arms this decision owes
 
-> **Normative.** The implementing lanes owe these eight arms **between them**, each over
+> **Normative.** The implementing lanes owe these ten arms **between them**, each over
 > representative input and split by §11's ownership rule. A lane that lands fewer of the
 > assertions it owns has not implemented this decision.
 
@@ -698,7 +759,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    the response carried fails the arm. No arm asserts that a searcher cannot return such
 >    a response (§4).
 > 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`),
->    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
+>    on a turn whose pre-existing supply is **non-empty**. `outbound_statement` is set with
 >    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
 >    rendered statement states the `0` rather than eliding it.
 > 3. **The partition, asserted over the enumeration itself and then over its two
@@ -708,12 +769,12 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    `SEARCH_DISPOSITIONS` — and it asserts that `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`,
 >    `SEARCH_FAILED` and `PROVIDER_REFUSED` establish nothing either way, the last over
 >    **both** its causes, because an implementation reading it as a response is what this
->    arm exists to catch. Then the two sides in a turn: a
->    search refused before the send (`RULING_DENY`) carries **no** contact, carries
->    `search_not_serviced` `DECLINED`, and leaves the composing prompt byte-identical to
->    what it is without this decision; a response received and then refused (`UNATTESTED`)
->    carries **both** members — `outbound_contact` with `records` `0`, and
->    `search_not_serviced` `UNAVAILABLE` — and renders both statements (§8).
+>    arm exists to catch. Then the three sides in a turn: a
+>    search refused before the send (`RULING_DENY`) carries `reach` `NOT_REACHED` and
+>    `search_not_serviced` `DECLINED`; one that established nothing either way
+>    (`TRANSPORT_FAILED`) carries `INDETERMINATE`; and a response received and then refused
+>    (`UNATTESTED`) carries `REACHED` with `records` `0` **and**
+>    `search_not_serviced` `UNAVAILABLE`, and renders both statements (§8).
 > 4. **A parked read the user approved, dispatched on the resume** (ADR-0244 §7), in two
 >    shapes: one whose call returns records, **two of them under one id**, so `records` is
 >    what `admitted_fourth_group` admitted at the resume's own site and not what the call
@@ -726,7 +787,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    not twice (§4). **A later servicing that refuses before the send (`RULING_DENY`), and
 >    one that fails after a response, each leave the contact and the count standing** (§6),
 >    and §6's one fragment is given once.
-> 6. **`OutboundContact`'s own construction invariants, asserted on the model and not on
+> 6. **`OutboundStatement`'s own construction invariants, asserted on the model and not on
 >    its producer**, because it is a boundary-crossing value a wire decode also builds: an
 >    empty `destinations`, one carrying a class twice, one carrying a **negative**
 >    `records` and one carrying an **unknown field** are each refused rather than accepted.
@@ -745,9 +806,20 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    third (§2).
 > 8. **A driven egress step establishes nothing** (§3): a step whose `ActionRequest`
 >    carried an `EgressBinding`, whose disposition is `EXECUTED` and whose addressed
->    `StepExecution` is `SUCCEEDED` carries **no** `outbound_contact`, gets **no** fragment,
->    and leaves the composing prompt byte-identical to what it is without this decision. An
->    implementation that mints a contact from that triple fails this arm.
+>    `StepExecution` is `SUCCEEDED` carries `reach` **`NOT_REACHED`** and not `REACHED`, and
+>    gets the `NOT_REACHED` fragment. An implementation that mints a contact from that
+>    triple fails this arm.
+> 9. **A turn that made no call at all** — #2365's shape, `servicing=not_asked`. The
+>    statement is carried with `reach` `NOT_REACHED`, `destinations` **empty** and `records`
+>    `0`; `search_not_serviced` is `None`; the prompt carries the `NOT_REACHED` fragment and
+>    `_PLAN_IS_ABOUT_ACTING`; and the rendered statement says this turn reached nothing
+>    outside this system. **An implementation that leaves the member `None` on such a turn
+>    fails this arm**, which is the whole of what #2365 records.
+> 10. **The rendering asymmetry** (§7): a pass that composed **no** reply renders neither
+>    the `NOT_REACHED` nor the `INDETERMINATE` statement, while a `REACHED` pass in that
+>    same shape renders its own. An implementation that conditions any of the three on what
+>    the reply says fails this arm, and one that renders `NOT_REACHED` with no reply beside
+>    it fails it too.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
@@ -824,23 +896,28 @@ condition falsifies no ratified sentence.
 
 ## Consequences
 
-- **A turn that reached the world now says so, in a statement the reply cannot talk out
-  of.** It is composed from a typed value by code and renders beside the reply on the
-  surfaces §7 binds, so a reply that denies the contact is contradicted in front of the
-  user rather than believed. **The denial is not prevented**: a model may still write one,
-  and what changes is that it no longer stands alone (§10, and §7's spoken limit).
+- **A turn now says what it did about reaching the world, in both directions, in a
+  statement the reply cannot talk out of.** It is composed from a typed value by code and
+  renders beside the reply on the surfaces §7 binds, so a reply that denies a contact
+  (#2268) and one that claims a contact that never happened (#2365) are each contradicted in
+  front of the user rather than believed. **Neither is prevented**: a model may still write
+  either, and what changes is that it no longer stands alone (§10, and §7's spoken limit).
+- **Every reply now carries one line about the world, and that is the price of the
+  guarantee.** A statement rendered only sometimes teaches a reader nothing from its
+  absence, which is exactly how #2365's turn passed unremarked; §12 books the question of
+  abbreviating it once a deployment reports the line as noise.
 - **A `0` becomes sayable.** *I reached outside this system and nothing came back that
   this turn could use* is a sentence the system has never been able to make; it is the
   honest account of a search that found nothing, and it is the sentence whose absence made #2268 read as a
   contradiction rather than as a thin reply.
-- **Four dispositions stay silent, on purpose.** A transport failure, a deadline expiry,
-  a raised fault and a provider refusal carry no contact statement, because each is
-  reached from producing paths that disagree about the wire — `PROVIDER_REFUSED` covers an
-  account change that opened no channel as well as a response the provider gave. Each
-  already carries a `SearchNotServiced` member whose statement is true, so the user is
-  told something rather than nothing. The cost is under-inclusion — a genuine provider
-  refusal stops carrying a contact — which is a statement withheld and not a false one
-  (§1), and §12 says what would make the honest sentence available.
+- **Four dispositions answer `INDETERMINATE` rather than either side.** A transport
+  failure, a deadline expiry, a raised fault and a provider refusal are each reached from
+  producing paths that disagree about the wire — `PROVIDER_REFUSED` covers an account change
+  that opened no channel as well as a response the provider gave — so the turn says this
+  system cannot tell. **That third value is what the two-directional requirement forced**:
+  with only `REACHED` and `NOT_REACHED` those four would have had to claim one, and
+  `NOT_REACHED` on a call that may well have left is the false statement §1 ranks below
+  silence. §12 says what would make the honest sentence available.
 - **An egress send says nothing at all, and that is the honest position.** ADR-0192 §4
   rules that `SUCCEEDED` is consistent with no byte on the wire and that nothing available
   today carries the transmission fact, so §3 refuses the contact rather than approximating
@@ -848,7 +925,7 @@ condition falsifies no ratified sentence.
 - **The spoken surface does not carry the guarantee.** `SpokenTurn` gains nothing, so a
   spoken reply that denies a contact is contradicted by nothing the user hears (§7). The
   title is bounded to the surfaces that render the statement, and §12 books the rest.
-- **`TurnOutcome` grows to sixteen members**, and `outbound_contact` is the **tenth** a
+- **`TurnOutcome` grows to sixteen members**, and `outbound_statement` is the **tenth** a
   later ADR has added as a `None`-defaulting fact a client renders on its own. That is
   ADR-0244 §9's rule working as designed and also the thing to watch: an eleventh and a
   twelfth make a client's rendering order a decision nobody has taken.
