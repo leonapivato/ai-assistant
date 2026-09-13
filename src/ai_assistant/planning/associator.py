@@ -505,16 +505,46 @@ def _render_candidates(candidacy: GoalCandidacy) -> str:
     ]
     lines.append("")
     if candidacy.elided:
-        lines.append(
-            f"{candidacy.elided} further objective(s) of this conversation are not "
-            f"listed above. If the request is about one of those, you cannot tell "
-            f"which objective it is about."
-        )
+        lines.append(_elision(candidacy.elided))
     if candidacy.focused is not None:
         lines.append(f"This conversation was last working on {candidacy.focused}.")
     else:
         lines.append("This conversation has not worked on any of them yet.")
     return "\n".join(lines)
+
+
+def _elision(elided: int) -> str:
+    """The sentence disclosing what the cap dropped (ADR-0250 §2).
+
+    **The count is rendered where it has a decimal form, and the elision is disclosed
+    either way.** CPython declines to convert an integer with more digits than
+    ``sys.get_int_max_str_digits()``, and :class:`~ai_assistant.core.types.GoalCandidacy`
+    bounds ``elided`` only at zero — it is a count of rows a store held, so no reachable
+    value comes near the limit, but the type admits one and this module must not raise a
+    ``ValueError`` for a rendering reason: :meth:`ModelBackedGoalAssociator.associate`
+    documents exactly one exception and it is the provider being unreachable (§4).
+
+    So the figure is dropped and the disclosure is kept, which is the direction §2
+    fixes: "the elision is disclosed and never silent", and "no lane raises the cap to
+    avoid disclosing an elision". A sentence without the number still tells the model
+    the list is not the whole set, which is the one thing the disclosure is for at this
+    seam; a call that failed would disclose nothing at all.
+
+    Args:
+        elided: How many goals the cap dropped. Non-zero — the caller renders no line
+            at all for a set that lost nothing, so this never states an elision of zero.
+
+    Returns:
+        The sentence, with the count where the interpreter can render one.
+    """
+    try:
+        count = f"{elided} further objectives"
+    except ValueError:
+        count = "Further objectives"
+    return (
+        f"{count} of this conversation are not listed above. If the request is about "
+        f"one of those, you cannot tell which objective it is about."
+    )
 
 
 def _read(content: str) -> GoalAssociation:
