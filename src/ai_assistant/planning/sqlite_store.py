@@ -1850,6 +1850,10 @@ class SqlitePlanStore:
 
     def _record_evidence_sync(self, evidence: GoalEvidence, supersedes: tuple[str, ...]) -> None:
         with self._transaction(f"record evidence {evidence.id!r}") as conn:
+            # The **key**, not a promoted column: this asks whether the id is taken,
+            # which is a fact about the primary key and cannot disagree with any record.
+            # Decoding the incumbent to answer it would also make a corrupt row block a
+            # write that never touches it.
             held = conn.execute(
                 "SELECT 1 FROM goal_evidence WHERE id = ?", (evidence.id,)
             ).fetchone()
@@ -1879,7 +1883,12 @@ class SqlitePlanStore:
             self._elide_evidence(conn, evidence.goal_id, keep=evidence.id)
 
     def _insert_evidence(self, conn: sqlite3.Connection, evidence: GoalEvidence) -> None:
-        """Write one row, with its three columns beside the blob (§13)."""
+        """Write one row, with its three columns beside the blob (§13).
+
+        **The one writer of the columns, and it takes all of them from one validated
+        record**, which is why nothing this store wrote can disagree with itself: every
+        row :func:`_checked_evidence` refuses came from somewhere else.
+        """
         conn.execute(
             "INSERT INTO goal_evidence(id, goal_id, read_at, standing, data) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -1965,7 +1974,12 @@ class SqlitePlanStore:
         goal — which includes one this store does not hold at all — a row that is not
         ``STANDING``, and, on :meth:`record_evidence` alone, the row the call is
         writing. It reads the ``goal_id`` and ``standing`` **columns**, which is what
-        those columns are promoted for, so a refusal costs no decode.
+        those columns are promoted for — but the row is **reconciled against its record**
+        first (:func:`_checked_evidence`), so the refusals and the mark that follows them
+        are decided over the same values. Reading the columns alone would cost no decode
+        and would be the one place that saving is not available: §12's refusals are the
+        whole of what decides *which* rows may be marked, and deciding them over columns
+        the record contradicts is deciding them about a different row.
 
         Args:
             conn: The connection the write transaction is running on.
@@ -1984,19 +1998,24 @@ class SqlitePlanStore:
                     f"against the history as it stood before the call (ADR-0252 §12)"
                 )
                 raise PlanningError(msg)
-            row = conn.execute(
-                "SELECT goal_id, standing FROM goal_evidence WHERE id = ?", (row_id,)
-            ).fetchone()
-            if row is None or str(row[0]) != goal_id:
+            row = conn.execute(_EVIDENCE_COLUMNS + " WHERE id = ?", (row_id,)).fetchone()
+            if row is None:
                 msg = (
                     f"cannot {what} evidence row {row_id}: it is not goal {goal_id}'s "
                     f"(ADR-0252 §12)"
                 )
                 raise PlanningError(msg)
-            if str(row[1]) != EvidenceStanding.STANDING.value:
+            stored = _checked_evidence(str(self._path), row)
+            if stored.goal_id != goal_id:
                 msg = (
-                    f"cannot {what} evidence row {row_id}: it is {row[1]} and a mark is "
-                    f"never un-marked and never re-applied (ADR-0252 §8, §9)"
+                    f"cannot {what} evidence row {row_id}: it is not goal {goal_id}'s "
+                    f"(ADR-0252 §12)"
+                )
+                raise PlanningError(msg)
+            if stored.standing is not EvidenceStanding.STANDING:
+                msg = (
+                    f"cannot {what} evidence row {row_id}: it is {stored.standing.value} "
+                    f"and a mark is never un-marked and never re-applied (ADR-0252 §8, §9)"
                 )
                 raise PlanningError(msg)
 
@@ -2016,16 +2035,30 @@ class SqlitePlanStore:
             goal_id: The goal whose history to bound.
             keep: The row this write appended, which is never dropped.
         """
+        # The count first, and the rows only where there is something to drop. The
+        # common write is inside the bound and pays one `COUNT(*)`; the reconciling read
+        # below decodes the whole history, which is worth doing only when a row is
+        # actually about to be destroyed.
+        held_rows = conn.execute(
+            "SELECT COUNT(*) FROM goal_evidence WHERE goal_id = ?", (goal_id,)
+        ).fetchone()[0]
+        excess = int(held_rows) - MAX_GOAL_EVIDENCE
+        if excess <= 0:
+            return
+        # **Every candidate is reconciled with its record before one of them is
+        # destroyed** (:func:`_checked_evidence`). §13 drops the **oldest** row and the
+        # order is the promoted ``read_at``'s, so a column the record contradicts would
+        # choose a different victim — and unlike a read, this one **commits**: the row
+        # is gone before any later read can report the disagreement. Reconciling first
+        # makes the SQL order provably the records' own order, which is what §13's rule
+        # is stated over.
         ordered = [
-            str(row[0])
+            _checked_evidence(str(self._path), row).id
             for row in conn.execute(
-                "SELECT id FROM goal_evidence WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
+                _EVIDENCE_COLUMNS + " WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
                 (goal_id,),
             ).fetchall()
         ]
-        excess = len(ordered) - MAX_GOAL_EVIDENCE
-        if excess <= 0:
-            return
         doomed = [row_id for row_id in ordered if row_id != keep][:excess]
         conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
         # **Read, add and write, rather than `evidence_elided + ?` in SQL.** SQLite's `+`
@@ -2097,10 +2130,14 @@ class SqlitePlanStore:
 
     def _evidence_of_sync(self, goal_id: str) -> tuple[list[Sequence[Any]], int]:
         with self._transaction(f"read evidence of goal {goal_id!r}") as conn:
-            # The order is the **columns'**, and every row returned is reconciled against
-            # them (:func:`_checked_evidence`) — otherwise a disagreeing `read_at` would
-            # hand a caller §12's total order over values the rows themselves contradict,
-            # and §10's `E` label is an ordinal into exactly this sequence.
+            # The filter and the order are the **columns'**, and every row returned is
+            # reconciled against them (:func:`_checked_evidence`) — otherwise a
+            # disagreeing `read_at` would hand a caller §12's total order over values the
+            # rows themselves contradict, and §10's `E` label is an ordinal into exactly
+            # this sequence. A row whose promoted `goal_id` disagrees is not silently
+            # dropped from this answer: it is refused on the read of the goal its column
+            # names, and `export` refuses it outright, so no read reports a history as
+            # complete while a row of it is unaccounted for.
             rows: list[Sequence[Any]] = list(
                 conn.execute(
                     _EVIDENCE_COLUMNS + " WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
@@ -2639,11 +2676,7 @@ class SqlitePlanStore:
             # count would say *this is the evidence*, where the truth is *this is the
             # evidence that was kept*".
             evidence=tuple(
-                EvidenceHistory(
-                    goal_id=goal_id,
-                    rows=tuple(_checked_evidence(str(self._path), row) for row in rows),
-                    elided=elided,
-                )
+                EvidenceHistory(goal_id=goal_id, rows=tuple(rows), elided=elided)
                 for goal_id, rows, elided in evidence
             ),
         )
@@ -2656,7 +2689,7 @@ class SqlitePlanStore:
         list[str],
         list[str],
         list[str],
-        list[tuple[str, list[Sequence[Any]], int]],
+        list[tuple[str, list[GoalEvidence], int]],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -2691,11 +2724,25 @@ class SqlitePlanStore:
             # goal whose history a concurrent writer added between the two reads — the
             # dangling, `PlanExport`-rejected state ADR-0004 §6's "internally
             # consistent" forbids, arriving through the member ADR-0252 §13 adds.
-            by_goal: dict[str, list[Sequence[Any]]] = {
+            by_goal: dict[str, list[GoalEvidence]] = {
                 str(r[0]): [] for r in conn.execute("SELECT id FROM goals").fetchall()
             }
             for row in conn.execute(_EVIDENCE_COLUMNS + " ORDER BY read_at ASC, id ASC").fetchall():
-                by_goal[str(row[1])].append(row)
+                # Reconciled **before** its promoted `goal_id` is used to group it, and
+                # an orphan is refused rather than indexed with: the foreign key onto
+                # `goals` is enforced for this connection, so a row naming no goal can
+                # only come from a writer that turned it off, and `by_goal[...]` on it
+                # would leave a raw `KeyError` past the boundary every other stored value
+                # is read through.
+                stored = _checked_evidence(str(self._path), row)
+                if stored.goal_id not in by_goal:
+                    msg = (
+                        f"the plan store at {str(self._path)!r} holds evidence row "
+                        f"{stored.id} under goal {stored.goal_id}, which it does not hold; "
+                        f"the store is corrupt"
+                    )
+                    raise PlanningError(msg)
+                by_goal[stored.goal_id].append(stored)
             elided = {
                 str(r[0]): _elided_count(str(self._path), str(r[0]), r[1])
                 for r in conn.execute("SELECT id, evidence_elided FROM goals").fetchall()
@@ -2774,7 +2821,16 @@ class SqlitePlanStore:
             # the count is a column of the goal's own row. Before the goal, so the
             # foreign key holds at each step.
             evidence_removed = conn.execute(
-                "DELETE FROM goal_evidence WHERE goal_id = ?", (goal_id,)
+                # Keyed on the **promoted** `goal_id` and deliberately not reconciled:
+                # the foreign key onto `goals` is declared over that column, so deleting
+                # by it removes exactly the rows SQLite holds as this goal's children and
+                # leaves nothing orphaned. A record that disagreed would go with them,
+                # which is the safe direction — and refusing a deletion on a corrupt row
+                # would trap a user's ADR-0004 data-rights call behind a fault they
+                # cannot clear. `evidence_removed` counts rows removed, not records
+                # decoded.
+                "DELETE FROM goal_evidence WHERE goal_id = ?",
+                (goal_id,),
             ).rowcount
             conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         return GoalDeletion(
@@ -2813,6 +2869,8 @@ class SqlitePlanStore:
             removed += conn.execute("DELETE FROM plans").rowcount
             removed += conn.execute("DELETE FROM attempts").rowcount
             removed += conn.execute("DELETE FROM goal_questions").rowcount
+            # No column is read at all — the whole table goes — so there is nothing
+            # here for a record and a projection to disagree about.
             removed += conn.execute("DELETE FROM goal_evidence").rowcount
             removed += conn.execute("DELETE FROM goals").rowcount
         return removed

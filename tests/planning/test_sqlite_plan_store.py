@@ -1042,6 +1042,152 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
         store.close()
 
 
+async def test_a_mark_is_refused_where_the_standing_column_hides_an_already_marked_row(
+    tmp_path: Path,
+) -> None:
+    """§12's refusals decide over the record, not over the column that summarises it.
+
+    ``_refuse_unmarkable`` reads the promoted ``goal_id`` and ``standing`` — that is what
+    those columns are promoted for — and it is the one place the saving is not available:
+    those two refusals are the whole of what decides **which** rows may be marked. A row
+    whose column says ``standing`` while its record says ``superseded`` would pass the
+    refusal and then be marked a second time, which ADR-0252 §8 and §9 forbid in terms —
+    "a marking never un-marks" — and the second mark would overwrite the first row's
+    ``superseded_by``, erasing which row displaced it. That is the audit trail §1's fourth
+    axis exists to keep.
+
+    Reconciling the row against its record first refuses the whole call instead, before
+    anything is appended.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(
+            _evidence_row("ev2", read_at=_AT + timedelta(minutes=1)), supersedes=("ev1",)
+        )
+    finally:
+        store.close()
+
+    # `ev1` is genuinely SUPERSEDED by `ev2`; only the column is walked back.
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE goal_evidence SET standing = ? WHERE id = 'ev1'",
+            (EvidenceStanding.STANDING.value,),
+        )
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="record and columns disagree"):
+            await store.record_evidence(
+                _evidence_row("ev3", read_at=_AT + timedelta(hours=1)), supersedes=("ev1",)
+            )
+
+        assert await store.get_evidence("ev3") is None, "the append did not land"
+        with sqlite3.connect(path) as conn:
+            (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
+        assert json.loads(raw)["superseded_by"] == "ev2", "and the first mark is intact"
+    finally:
+        store.close()
+
+
+async def test_an_elision_reconciles_every_candidate_before_it_destroys_one(
+    tmp_path: Path,
+) -> None:
+    """§13 drops the **oldest** row, and that order is the records', not the columns'.
+
+    The elision reads ``ORDER BY read_at ASC, id ASC`` over the promoted column and then
+    **deletes**, which is what separates this site from every other projection read in
+    this store: a read that trusted a lying column returns a wrong answer a later call
+    can still correct, while this one commits and the row is gone. Moving the logically
+    oldest row's promoted ``read_at`` into the future would otherwise make the next
+    write destroy a different row — permanently, and with the count still saying one row
+    was dropped.
+
+    Every candidate is reconciled first, so the write refuses whole and nothing is
+    destroyed: the history keeps all 64 rows, the elision count does not move, and the
+    row the caller was recording did not land.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        for index in range(MAX_GOAL_EVIDENCE):
+            await store.record_evidence(
+                _evidence_row(f"ev{index:03d}", read_at=_AT + timedelta(minutes=index))
+            )
+    finally:
+        store.close()
+
+    # `ev000` is the logically oldest row and the one the next write would drop. Its
+    # column now says it is the newest; its record still says it is the oldest.
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE goal_evidence SET read_at = ? WHERE id = 'ev000'",
+            ((_AT + timedelta(days=365)).isoformat(),),
+        )
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="record and columns disagree"):
+            await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
+
+        assert await store.get_evidence("ev001") is not None, "no row was destroyed"
+        assert await store.get_evidence("ev-new") is None, "and the write rolled back whole"
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone()[0] == (
+                MAX_GOAL_EVIDENCE
+            )
+            assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
+    finally:
+        store.close()
+
+
+async def test_an_export_refuses_an_evidence_row_whose_goal_it_does_not_hold(
+    tmp_path: Path,
+) -> None:
+    """An orphaned projection is corruption, not a ``KeyError`` (ADR-0049 §1).
+
+    The export groups rows by the promoted ``goal_id`` into a mapping built from the
+    goals the store holds. The foreign key onto ``goals`` is enforced for this store's
+    own connection, so a row naming no goal can only come from a writer that turned it
+    off — which is exactly the premise every other corruption arm here assumes. Indexing
+    the mapping with it would leave a raw ``KeyError`` past the boundary every stored
+    value is read through, from a member ADR-0004 §6 makes a user-facing right.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+    finally:
+        store.close()
+
+    # The column **and** the record both name the missing goal, so the row is internally
+    # consistent and reaches the grouping: this arm is about the orphan, not about a
+    # projection disagreement the arms above already drive.
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
+        held = json.loads(raw)
+        held["goal_id"] = "ghost"
+        conn.execute(
+            "UPDATE goal_evidence SET goal_id = 'ghost', data = ? WHERE id = 'ev1'",
+            (json.dumps(held),),
+        )
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="which it does not hold"):
+            await store.export()
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     "read",
     ["get_evidence", "evidence_of", "export"],
