@@ -16,6 +16,18 @@
   for an intent-match assessment, the `AWAITING_AUTHORIZATION` limb and its single-writer clause,
   the failed-check limb for every check that is **not** deferred, the no-phase-moves-backwards
   clause, and the supplying-an-authorization-opens-no-attempt clause.
+- **Partially supersedes [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md),
+  in one narrowly stated scope**, and §16 shows the working.
+  **§4's condition (j)** — *"The attempt's `phase` is `AttemptPhase.INVESTIGATE`"* — gains one
+  alternative: it is also satisfied where the turn holds a walk outcome carrying an **unexpected
+  finding** (§10), so an attempt that executed and learned something may investigate again inside
+  itself under its remaining allowance. **The phase still never moves backwards**, which is the
+  first of the two hazards (j) names, and the loop is placed by the licence rather than by a phase
+  it does not occupy, which is the second. **§4's every other clause binds verbatim** — (a), (b),
+  (c), (d) and (g) as ADR-0228 §2 wrote them, the never-gated first call, (f′)'s planner-call
+  allowance, (h)'s working allowance less the reserve, (i)'s unproductive-rounds test, (e)'s
+  dissolution and (j)'s own `NOT_ITERATED` record — and so does every other clause of ADR-0251,
+  §5's figures and §13's no-reset rule among them.
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
   reader would expect to be — ADR-0014, ADR-0037, ADR-0228, ADR-0249, ADR-0042 and ADR-0253 among
   them.
@@ -807,26 +819,50 @@ composed is a state the answer could not mention.
 > and that refusal is ADR-0249 §8's.** The driver adds no second check of it: the claim is
 > refused inside `commit_transition` where the compared value lives, and §3's stop applies.
 
-> **Normative — the driver enforces at-most-once within one execution and nothing wider, and this
-> decision states the limit rather than claiming the property.** Within one `ExecutionState`, a
-> step already `RUNNING`, `SUCCEEDED`, `FAILED`, `SKIPPED` or `INDETERMINATE` is **never
-> re-dispatched by the walk**, which is `StepRunner`'s existing guard — ADR-0037 §6's *"`run`
-> enters only at `PENDING`"* — relied on rather than re-implemented. **Across two plans of one
-> goal, nothing in this system prevents an effect being performed twice**, and no clause here
-> creates such a prevention.
+> **Normative — returning to planning never automatically repeats completed work, and that is a
+> requirement on the driver rather than a property of the records.** **A step whose effect the
+> goal records as completed or as uncertain is never dispatched a second time**: an effect a
+> `SUCCEEDED` and verified step produced, and an effect an `INDETERMINATE` step may have produced,
+> are each performed **at most once across every plan of that goal**, whether the later plan
+> modifies the earlier one or is planned afresh. **No lane reads a replan as licence to repeat
+> an act.**
 
-**This corrects revision 1 §K.2 step 6 against the tree, and the correction is that the record it
-names does not exist.** That step reads *"the driver refuses to plan or drive a step whose effect
-the goal records as completed"*. **A goal records no completed effect.** What the store holds is a
-`StepExecution` whose `status` is `SUCCEEDED` and whose `output` is a `JsonValue`, keyed on a
-`step_id` that a **re-plan mints afresh** — ADR-0253 §8's own reason for refusing a step id as a
-durable declaration, *"A re-plan mints new step ids, so a fresh reading of the same proposition in
-a later plan would carry a different declaration"*, applies identically here. So *the same
-effect* has no name: two plans that both book a campsite carry two step ids, two capabilities that
-may be spelled the same, and two parameter mappings that may or may not be equal, and nothing in
-`Goal`, `GoalAttempt`, `ActionPlan` or `ExecutionState` says they are one act. A driver that
-compared capability and parameters would be inventing an identity nobody declared, and would
-refuse a legitimate second booking of two different nights as readily as it refused a duplicate.
+> **Normative — the driver discharges it within one execution today, and the mechanism that
+> discharges it across plans is A8's, by name.** Within one `ExecutionState` a step already
+> `RUNNING`, `SUCCEEDED`, `FAILED`, `SKIPPED` or `INDETERMINATE` is **never re-dispatched by the
+> walk**, which is `StepRunner`'s existing guard — ADR-0037 §6's *"`run` enters only at
+> `PENDING`"* — relied on rather than re-implemented. **Across two plans of one goal this decision
+> lands no mechanism**, and §12 carries the obligation to **A8** with its acceptance requirement.
+> **No lane reads this decision as having discharged the requirement across plans**, and no lane
+> reads the gap as permission to repeat an act.
+
+**Stating it as an obligation rather than as a description is the point, and the reason is that
+the record the obvious mechanism would read does not exist.** #2255's requirement is about the
+world — *preserve the real booking* — and it is not satisfied by preserving the **records** of
+what happened, which is all §7's other clauses do. So the requirement is written here as what the
+driver owes, and the honest part is stated beside it: **a goal records no completed effect** that
+a driver could compare against. What the store holds is a `StepExecution` whose `status` is
+`SUCCEEDED` and whose `output` is a `JsonValue`, keyed on a `step_id` that a **re-plan mints
+afresh** — ADR-0253 §8's own reason for refusing a step id as a durable declaration, *"A re-plan
+mints new step ids, so a fresh reading of the same proposition in a later plan would carry a
+different declaration"*, applying identically. Two plans that both book a campsite carry two step
+ids, two capabilities that may be spelled the same, and two parameter mappings that may or may not
+be equal, and nothing in `Goal`, `GoalAttempt`, `ActionPlan` or `ExecutionState` says they are one
+act. **A driver that compared capability and parameters would be inventing an identity nobody
+declared**, and would refuse a legitimate second booking of two different nights as readily as a
+duplicate.
+
+**Planner visibility of what already ran is a help and never the guarantee.** A projection of the
+attempt's executions into the planner's input would let a planner *avoid* planning the repeat, and
+that is worth having; it is not the property, because a planner is a model and ADR-0249 §7's
+asymmetry forbids taking a prerequisite on a model's word — *"A model may never clear a
+permission, a coverage test, a prerequisite or a **dependency**"*. **The guarantee has to be
+mechanical**, which is what makes it A8's idempotency key rather than a brief widening.
+
+**This is where revision 1 §K.2 step 6 is corrected against the tree.** That step reads *"the
+driver refuses to plan or drive a step whose effect the goal records as completed"* — the
+requirement is right and the mechanism it names is not available, which is why the clauses above
+separate the two.
 
 **ADR-0253 §5 already says this in terms, and this decision does not reach past it.** That section
 rules: *"**Nothing in this decision makes an act at-most-once**, and no lane reads a condition as
@@ -835,14 +871,14 @@ is the idempotency key and the `INDETERMINATE` reconciliation ADR-0014 §7 defer
 takes."* The driver is not that mechanism either, and saying so here is cheaper than discovering
 it in A8.
 
-> **Normative — the two routes that would buy the property are named rather than opened.** Making
-> a replan not redo a completed effect needs **either** an idempotency key the tool dedupes
-> against — **A8's**, on ADR-0014 §7's own deferral — **or** the planner being able to see what
-> already ran, which needs a projection of the attempt's executions into the planner's input and
-> is a widening against ADR-0253 §10's *"**`GoalBrief` and `BriefElement` gain nothing** … The
-> brief carries an element's text and the **kind** of its ground and nothing else"* — a brief
-> renders no execution and no step outcome at all. **Neither route is taken here**, and §12
-> carries both with their triggers.
+> **Normative — the route that buys it is A8's idempotency key, and the other is an aid.** The
+> mechanical guarantee needs a key the tool dedupes against, which is **A8's** on ADR-0014 §7's
+> own deferral. A projection of the attempt's executions into the planner's input would help a
+> planner avoid planning the repeat and is a widening against ADR-0253 §10's *"**`GoalBrief` and
+> `BriefElement` gain nothing** … The brief carries an element's text and the **kind** of its
+> ground and nothing else"* — a brief renders no execution and no step outcome at all. **Neither
+> is taken here**, and §12 carries the obligation, A8's acceptance requirement, and the aid's
+> trigger.
 
 **What the goal does preserve is progress, which is the requirement #2255 actually states.**
 *"Preserve the real booking"* and *"preserve progress"* are requirements about **not discarding
@@ -950,7 +986,7 @@ attempt.
 > is the caller's budget (ADR-0029 §4, ADR-0042 §3), **no `Settings` field is added**, no
 > per-step minimum is declared, and no deployment flag is read.
 
-### 10. The writer clauses
+### 10. The writer clauses, and how an attempt investigates again after it has executed
 
 > **Normative.** **The driver stamps no `AttemptPhase`.** It receives the attempt at
 > `AttemptPhase.EXECUTE`, which ADR-0254 §14 stamps when phase 4's checks pass, and leaves it
@@ -1001,6 +1037,83 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > `SkipReason` and no verdict to a log: ADR-0004 §5's rule that Tier 0/1 data must never be logged
 > binds unchanged.
 
+> **Normative — the furthest phase an attempt reached and what it is doing now are two facts,
+> and only the first is `AttemptPhase`.** The stamp stays exactly what §10's clauses above make
+> it: monotone, never moved backwards, a high-water mark. **What licenses work is the attempt's
+> current activity**, which is not on the stamp and is not derived from it. **No lane reads
+> `AttemptPhase` as naming the work an attempt may now do**, and no lane moves it to license any.
+
+> **Normative — the walk returns a typed outcome, and one member of it is an unexpected finding.**
+> `orchestration` gains a **frozen stage type carrying the walk's outcome**, on ADR-0037 §4's own
+> precedent for `StepDisposition` — *"a frozen dataclass in `orchestration` … it crosses no
+> subsystem boundary"* — so **no `core` type is added, `GoalAttempt` gains no field, and nothing
+> durable is minted**. A walk ended with an **unexpected finding** when it **ran to the end of
+> the plan** and moved **at least one step `PENDING → SKIPPED` under §2's skip rule**: the plan
+> declared a requirement about the world — a dependency, a `verifies`, a `when`, a resolvable
+> reference — and the world did not meet it.
+
+> **Normative — a walk that stopped carries no licence, whatever it skipped before stopping.**
+> Each of §2's five stop triggers leaves a question outstanding or an effect unaccounted for — a
+> park the user has not answered, an `INDETERMINATE` nobody has resolved, a disposition that
+> committed nothing, a budget that ran out — and **investigating alternatives while one of those
+> stands is the hazard §2's park argument names**, reached from the other side: the turn would be
+> asking the user about one act and planning a replacement for another in the same breath.
+> **The licence is therefore carried only by a walk that finished**, which is the fail-closed
+> direction and the one a reader cannot mistake.
+
+> **Normative — an unexpected finding licenses one further investigation round within the same
+> attempt, and this partially supersedes ADR-0251 §4's condition (j).** That condition reads *"The
+> attempt's `phase` is `AttemptPhase.INVESTIGATE`"* and bars iteration anywhere else. It gains one
+> alternative: **(j) is satisfied where the attempt's phase is `INVESTIGATE`, or where the turn
+> holds a walk outcome carrying an unexpected finding.** **Every other condition of ADR-0251 §4
+> binds verbatim and is checked unchanged** — (a), (b), (c), (d) and (g) as ADR-0228 §2 wrote
+> them, **(f′)'s planner-call allowance**, **(h)'s working allowance less the reserve**, and
+> **(i)'s unproductive-rounds test** — so the licensed round is admitted only while the attempt's
+> own ledger admits it.
+
+> **Normative — the allowance is charged and never reset, and no attempt is opened.** ADR-0251
+> §13 binds entire: *"**A replan never resets an allowance.** A revision within an attempt
+> consumes from the same `AttemptEffort`; so does a recovery, a branch, a phase transition and a
+> later turn of the same attempt."* ADR-0250 §12 binds entire: **no act of this decision opens an
+> attempt**, and a licensed round runs inside the attempt that executed. **An attempt whose
+> allowance is spent gets no licensed round**, and what it does instead is compose and report.
+
+> **Normative — the phase does not move, and nothing about §10's monotonicity is weakened.** An
+> attempt that investigates again after executing stays stamped at the furthest phase it reached;
+> **it does not return to `INVESTIGATE`**, no lane re-stamps a phase it has left, and ADR-0249 §6
+> binds exactly as §10 states it. **The licence is the carrier and the phase is the record**, and
+> keeping them apart is the whole of this section.
+
+> **Normative — what is preserved across a licensed round.** Every `GoalEvidence` row the attempt
+> holds, every `ExecutionState` it drove, and every `SUCCEEDED` step's `output` **stay exactly as
+> they stand**; ADR-0252 §§8–9 alone decide which rows are superseded or invalidated, and §7's
+> clauses decide what becomes of the executions. **A licensed round discards nothing and re-runs
+> nothing.**
+
+**This is ADR-0253 §9's re-entry, stated in the one form the corpus admits.** That section rules
+*"An unexpected finding returns the work to an earlier phase rather than improvising in this
+one"*, and §10's clauses above decline to move the attempt backwards because ADR-0249 §6 forbids
+it and §12's derivation depends on it. The resolution is that *"returns the work"* is about **what
+the attempt may do next**, not about **which stamp it carries** — and once those are two facts,
+both clauses hold at once. ADR-0251 §4(j)'s own reasoning is what makes the scope narrow rather
+than invented: it bars iteration outside `INVESTIGATE` because *"iterating there would either run
+the loop in a phase §1 does not place it in, or move the phase backwards, which ADR-0249 §6
+forbids"*, and it reserves the rest in terms — *"**How a later turn's planning relates to an
+attempt that is authorizing, executing or verifying is A7's and A9's**"*. Neither of its two
+hazards is reached here: the phase does not move, and the loop is placed by the licence rather
+than by a phase it does not occupy.
+
+**Without this an attempt that acts and learns something is finished, and the system's own rules
+would make it so.** The campsite case is the ordinary one: the walk checks availability, the
+interpretation returns `DOES_NOT_QUALIFY`, the booking step is `SKIPPED`/`UNMET_DEPENDENCY`, and
+the attempt now knows something it did not know when it planned. Under (j) unamended it may make
+its turn's one ungated planner call and then **may not iterate over what it just learned** — so
+*investigate alternative sites* is unreachable inside that attempt, while ADR-0249 §5 and
+ADR-0250 §12 forbid the system opening a new attempt to escape the bar. The user would have to
+ask again to get a system that had already found the answer. **The bound that matters is not lost
+by lifting it**: (f′), (h) and (i) all still bind, so a licensed round is spent from the same
+ledger and stops on the same three guards.
+
 > **Normative.** **The driver edits no plan.** ADR-0253 §10's four-field clause is untouched:
 > `supersedes`, `targets_revision` and each `StepCondition.about` and `PlanInterpretation.settles`
 > are the fields another component sets, all four at the `Planner.plan` seam's return, and **the
@@ -1012,7 +1125,10 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 ### 11. The `core` surface, the wire, the stored shapes, and the export
 
 > **Normative — what `core/types.py` gains.** **One field**: `StepTransition.attempt_id`, an
-> `Identifier | None` defaulting to `None`, with the model validator §3 states. **Nothing else.**
+> `Identifier | None` defaulting to `None`, with the model validator §3 states. **Nothing else** —
+> and in particular **§10's walk outcome is an `orchestration` stage type and not a `core` one**,
+> on ADR-0037 §4's precedent for `StepDisposition`, so it crosses no subsystem boundary, rides no
+> frame, enters no export and is not persisted.
 > No new model, no new enumeration, no new constant, and no widening of `StepExecution`,
 > `ExecutionState`, `ActionPlan`, `PlanStep`, `GoalAttempt` or `Goal`.
 
@@ -1171,8 +1287,10 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   `orchestration/`, the walk, §1's three driver evaluations and **`StepRunner`'s resolution of a
   step's `resolves` from the stored plan and execution while it builds the request** (§1), §2's
   stop and skip rules, §5's park re-evaluation and the fresh walk that follows it, §6's
-  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call, and the
-  retirement of `engine.py`'s single-step path. **It adds no `core` type and no field**, both
+  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call, **§10's
+  walk outcome and the licensed investigation round it admits — which is where ADR-0251 §4's (j)
+  is read with its new alternative** — and the retirement of `engine.py`'s single-step path.
+  **It adds no `core` type and no field**, both
   being L1's, and **it gives no entry point a parameter for a resolved value** (ADR-0253 §6).
 
 > **Normative — L2 lands after ADR-0253's L1 and L2 and after ADR-0254's Lane 1 and Lane 2.** The
@@ -1188,8 +1306,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 > **Normative — what M33 demonstrates and what M34 owes, and the division is the owner's Q4
 > ruling applied rather than invented.** **M33 demonstrates dependent execution on controlled
-> fakes**: the arms 1–12 below, every one over `ai_assistant.testing`'s canonical fakes with no
-> consequential integration wired. **M34 owes arms 13–17**, and no lane reads an M33 arm as having
+> fakes**: the arms 1–13 below, every one over `ai_assistant.testing`'s canonical fakes with no
+> consequential integration wired. **M34 owes arms 14–18**, and no lane reads an M33 arm as having
 > established one of them.
 
 **Thin — M33, on controlled fakes.**
@@ -1276,20 +1394,40 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     §14's unchanged limb. The arm is what separates the scope this decision supersedes from the
     rule it leaves standing, and arm 1's plan is driven **through** phase 4 rather than around it.
 
+13. **An unexpected finding is investigated inside the same attempt, and the ledger is charged**
+    — the concrete case, end to end on fakes. A goal to book a campsite; a plan whose step 1
+    checks availability, whose interpretation settles *the site is available* and whose step 2
+    books it. Step 1 succeeds, the interpretation returns `DOES_NOT_QUALIFY`, and step 2 is
+    `SKIPPED`/`UNMET_DEPENDENCY` — so the walk's outcome carries an **unexpected finding** (§10).
+    The arm asserts, in this order: the investigation loop **runs again inside the same attempt**,
+    admitted by ADR-0251 §4 with (j) satisfied by the licence; **`AttemptEffort.planner_calls` and
+    `working` both advanced and neither was reset** (ADR-0251 §13); **no new attempt was opened**
+    (ADR-0250 §12), asserted against `attempts_of(goal_id)`; the attempt's `phase` is **still**
+    where it stood and did **not** return to `INVESTIGATE` (ADR-0249 §6, §10); and **every
+    `GoalEvidence` row and every `ExecutionState` the attempt already held is unchanged**,
+    including step 1's `output`. Three paired arms: with the allowance **spent**, no further round
+    is admitted and the turn composes instead; with the walk **stopped** rather than skipped — a
+    park, an `INDETERMINATE`, a deadline — **no licence is carried and no round is admitted**; and
+    with the attempt's phase at `INVESTIGATE`, the round is admitted by (j)'s original limb with no
+    licence needed.
+
 **Full — M34, owed there and not established here.**
 
-13. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
+14. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
     the walk stops, step 3 stays **`PENDING`** whether or not it depends on step 2, **no step is
     `SKIPPED`**, and the attempt's `state` is `EFFECT_UNRESOLVED` **before** the turn composes. A
     paired arm asserts a plan superseded in that state moves **no** step to `SKIPPED`/`SUPERSEDED`
     (§6's override of §7).
-14. **Replan after partial execution** — a plan driven to its second step, superseded on a later
+15. **Replan after partial execution** — a plan driven to its second step, superseded on a later
     turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's `output` are unchanged, the
-    attempt's `execution_ids` names both executions, the superseded plan's still-`PENDING` steps
-    are `SKIPPED`/`SUPERSEDED`, and **the new plan's booking step dispatches** — which is the arm
-    that records §7's stated limit rather than a property, and is why it is M34's beside A8's
-    idempotency work.
-15. **The deadline, decremented across steps and not replenished by a resume** — a three-step
+    attempt's `execution_ids` names both executions, and the superseded plan's still-`PENDING`
+    steps are `SKIPPED`/`SUPERSEDED`. **This arm records the obligation §7 states and the interval
+    in which it is undischarged**: without A8's key the new plan's booking step **does** dispatch,
+    which is the duplicate §7 forbids and which A8's own acceptance requirement (§12) is what
+    closes — over a plan that modifies the earlier one and a plan produced afresh alike. The arm
+    is M34's because the guarantee is, and it is written now so the lane that lands the key
+    inherits the case rather than invents it.
+16. **The deadline, decremented across steps and not replenished by a resume** — a three-step
     plan under a budget that two steps exhaust: each `StepRunner.run` receives a **strictly
     smaller and strictly positive** remainder, the third step is never started, it is `PENDING`
     and not `SKIPPED`, and a step already begun ran to completion past the deadline. **The arm
@@ -1297,13 +1435,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     following walk's first step approximately **PT1S** and not PT30S, so one adapter call spends
     one budget (§9). A paired arm asserts `AttemptEffort.working` advanced by the walk and
     `planner_calls` did not.
-16. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
-17. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
+17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
+18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly one document is partially superseded — ADR-0254, in one scope** — and the entries below
+**Exactly two documents are partially superseded — ADR-0254 and ADR-0251, in one scope each** —
+and the entries below
 show the working for it and for each other document a reader would expect to be superseded and is
 not: ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them. ADR-0082 §1's test
 is applied to each earlier ADR's **text**.
@@ -1407,15 +1546,31 @@ stage, and is named here as a follow-on rather than pretended to be solved"*. §
 `timeout`'s keyword-only, no-default, caller's-budget character is unchanged, and nothing about
 §3's two call shapes moves.
 
-**ADR-0251, ADR-0252, ADR-0253 and ADR-0254 — relied on and not superseded.** ADR-0251 §5's
-figures and §6's ungated-composing clause are read as written in §9 and no figure moves;
-ADR-0252 §6's four tests are evaluated by §1 and not restated; ADR-0253's §§1, 2, 4, 5, 6, 8 and 9
-are each taken as the contract this lane was handed, and **the three questions ADR-0253 hands here
-by name are answered** — the moment a never-eligible step is skipped (§2), the mechanism by which
-an attempt re-enters an earlier phase (§10), and the driver's performance of the plan's
-interpretations (§1). ADR-0254 §13's recheck, §14's phase-4 evaluation and its no-backwards-phase
-clause, and §17's Q4 rule are each relied on; §13's reservation of *"What happens to a call already
-claimed when a revocation lands"* to A9 is untouched.
+**ADR-0251 §4 — partially superseded in condition (j) alone, and the scope is on this document's
+`Status` line.** A reader holding only (j) builds an attempt that executes, learns from a
+`SKIPPED`/`UNMET_DEPENDENCY` step that the world is not as it planned, makes its turn's one
+ungated call, and **cannot iterate over what it just learned** — while ADR-0249 §5 and ADR-0250
+§12 forbid opening a fresh attempt to escape the bar, so *investigate alternatives* is unreachable
+inside that attempt without the user asking again. That is ADR-0070 §1's test met and **partial**
+in ADR-0070 §3's sense: the scope is (j)'s single condition and nothing else. §10 states the
+alternative and the typed walk outcome that carries it, and **(j)'s own two hazards are each
+avoided rather than accepted** — the phase does not move, and the loop is placed by the licence
+rather than by a phase it does not occupy. **(j)'s own reservation is the warrant**: *"**How a
+later turn's planning relates to an attempt that is authorizing, executing or verifying is A7's
+and A9's**"*. §10 takes the **executing** limb; §12 leaves the authorizing and verifying limbs to
+A9. **Every other clause of ADR-0251 binds entire and is relied on** — §4's (a) to (i), its
+never-gated first call and its `NOT_ITERATED` record, §5's figures, §6's reserve and its
+ungated-composing clause (§9), and §13's *"A replan never resets an allowance"*, which is what
+makes a licensed round **charge** rather than refresh.
+
+**ADR-0252, ADR-0253 and ADR-0254's remainder — relied on and not superseded.**
+ADR-0252 §6's four tests are evaluated by §1 and §5 and not restated; ADR-0253's §§1, 2, 4, 5, 6,
+8 and 9 are each taken as the contract this lane was handed, and **the three questions ADR-0253
+hands here by name are answered** — the moment a never-eligible step is skipped (§2), the
+mechanism by which the work returns to an earlier phase (§10), and the driver's performance of the
+plan's interpretations (§1). ADR-0254 §13's recheck and §17's Q4 rule are relied on entire, §14 is
+superseded in the one scope above and relied on in every other, and §13's reservation of *"What
+happens to a call already claimed when a revocation lands"* to A9 is untouched.
 
 ### 17. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1427,9 +1582,10 @@ terms is *"the system as ratified"* — leaves `depends_on`, `when`, `resolves`,
 after a park, an uncertain effect or an expired budget. That is ADR-0070 §1's test met, and a new
 ADR is the instrument.
 
-**It is a partial supersession of exactly one document** (ADR-0070 §3) — **ADR-0254**, in §14's
-two-case enumeration alone — and the `Status` line names the scope without an `ADR-NNNN` token
-inside the parentheses, so ADR-0070 §4's extraction invariant holds. Every other ADR it touches is
+**It is a partial supersession of exactly two documents** (ADR-0070 §3) — **ADR-0254**, in §14's
+two-case enumeration alone, and **ADR-0251**, in §4's condition (j) alone — and the `Status` line
+names each scope without an `ADR-NNNN` token inside the parentheses, so ADR-0070 §4's extraction
+invariant holds. Every other ADR it touches is
 **relied on**, and what it takes it takes by **firing deferrals** rather than by replacing
 clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, and the three
 questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
