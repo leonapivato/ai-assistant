@@ -201,6 +201,7 @@ from ai_assistant.orchestration.evidence import refresh_set
 from ai_assistant.orchestration.goals import (
     GoalFacts,
     RaisedSubject,
+    announcement_of,
     candidacy_of,
     disambiguation_of,
     disambiguation_reply,
@@ -2015,6 +2016,53 @@ class _SpokenCapture:
         default_factory=lambda: SpokenDelivery(state=SpokenDeliveryState.UNKNOWN)
     )
     episode_id: str | None = None
+
+
+def _announcement_lead(engagement: GoalEngagement | None) -> str | None:
+    """ADR-0250 §5's sentence and the break after it, or ``None`` where none is owed.
+
+    **The sentence goes first, on §5's own words**: *"A reply carries one sentence
+    naming the goal it is about"*, and *"the user sees what the assistant now thinks
+    they asked for, on the turn it changed"* — which a reader has to meet before the
+    answer that was written under that understanding, not after it. A blank line
+    separates it from the composed prose so that neither reads as a continuation of
+    the other: nothing here rewrites, trims or re-registers a word the stage wrote,
+    and nothing the stage wrote can move the sentence.
+
+    Args:
+        engagement: What this turn did with its goal, or ``None``.
+
+    Returns:
+        The lead, or ``None`` where §5 owes no announcement.
+    """
+    announcement = announcement_of(engagement)
+    return None if announcement is None else f"{announcement}\n\n"
+
+
+def _announced(
+    composed: ComposedReply | None, engagement: GoalEngagement | None
+) -> ComposedReply | None:
+    """Put ADR-0250 §5's sentence in the reply this turn was composing anyway.
+
+    **A pass that composed no text carries no announcement.** §5 places the sentence
+    *"in a reply the turn was composing anyway"*; where composing produced none at all
+    — ADR-0170 §8's classified failure — there is no reply for it to be a statement
+    in, and manufacturing one would turn ADR-0170 §4's *"composing it produced none"*
+    shape into an answer. The engagement itself still crosses the wire on
+    ``TurnOutcome.goal_engagement``, so nothing about what the turn did is lost.
+
+    Args:
+        composed: What the stage produced, or ``None`` where no answer was owed.
+        engagement: What this turn did with its goal, or ``None``.
+
+    Returns:
+        The reply, with the sentence ahead of it where §5 owes one, or ``None``
+        unchanged where no answer was owed at all.
+    """
+    lead = _announcement_lead(engagement)
+    if composed is None or lead is None or composed.text is None:
+        return composed
+    return ComposedReply(text=lead + composed.text, degraded=composed.degraded)
 
 
 def _spoken_text(outcome: TurnOutcome) -> str | None:
@@ -4537,7 +4585,7 @@ class Engine:
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
-        return await self._composing.compose(
+        composed = await self._composing.compose(
             turn=turn,
             step=step,
             undriven=undriven,
@@ -4567,6 +4615,14 @@ class Engine:
             # crosses none of the line §15 draws, which is about *stored* goal content.
             goal=goal.facts,
         )
+        # ADR-0250 §5's announcement, taken through the same helper the other two
+        # composers take it through. §15 makes it **always** ``None`` here — no
+        # disposition of a stored goal is reachable by voice, so the goal this turn
+        # opened carries ``OPENED`` with ``revised`` ``False`` and owes no sentence —
+        # and the call is made rather than omitted for the reason one clause up: the
+        # composers keep one shape, and a later lane cannot make them differ by
+        # forgetting one.
+        return _announced(composed, goal.engagement)
 
     async def resume(
         self,
@@ -8606,7 +8662,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
-            goal=goal.facts,
+            goal=goal,
         )
 
     async def _undecided(
@@ -11359,7 +11415,7 @@ class Engine:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
-        goal: GoalFacts | None = None,
+        goal: _GoalPass | None = None,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -11404,6 +11460,15 @@ class Engine:
         and there is nothing about a lookup to say. On such a pass the assembled prompt
         is byte-identical to what it is without ADR-0242 (§6).
 
+        **And ADR-0250's members default to none given**, for the same reason a third
+        time: a pass that planned nothing associated to nothing, so it raised no
+        question, elided no candidate and engaged no goal. Its two halves are read at
+        different seams and neither is derived from the other — the facts go to the
+        stage, which puts them in the register of the answer it is writing, and the
+        engagement stays here, because §5's sentence *"is composed by ``orchestration``
+        from the typed value and by no model's decision"* and reaches the reply only
+        after the stage has finished with it.
+
         Returns:
             What the stage composed, or ``None`` where no answer was owed.
         """
@@ -11412,7 +11477,8 @@ class Engine:
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
-        return await self._composing.compose(
+        carried = goal or _GoalPass()
+        composed = await self._composing.compose(
             turn=turn,
             step=step,
             undriven=undriven,
@@ -11421,8 +11487,11 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
-            goal=goal,
+            goal=carried.facts,
         )
+        # ADR-0250 §5's announcement, placed in the reply here and at the streaming
+        # twin, which are the two seams every composed answer passes through.
+        return _announced(composed, carried.engagement)
 
     async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
         self,
@@ -11469,22 +11538,56 @@ class Engine:
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
+        carried = goal or _GoalPass()
+        room = self._reply_room(turn=turn, step=step, conversation_id=conversation_id, goal=goal)
+        # ADR-0250 §5's sentence is part of the terminal ``reply``, so it is part of
+        # what ADR-0173 §3's ceiling bounds: the room the stage is given is the room
+        # left **after** it. Escaping is additive over concatenation, which is what
+        # makes the subtraction exact rather than an estimate (:meth:`_reply_room`).
+        # Where it will not fit beside an answer the ceiling wins and nothing is
+        # announced — "No ``ReplyChunk`` is yielded whose text the engine is not
+        # already able to carry in the terminal ``TurnOutcome``".
+        pending = _announcement_lead(carried.engagement)
+        if pending is not None:
+            cost = encoded_text_bytes(pending)
+            if cost < room:
+                room -= cost
+            else:  # pragma: no cover — a ceiling smaller than one sentence
+                pending = None
+        lead = pending
         composed: ComposedReply | None = None
         stream = self._composing.compose_streaming(
             turn=turn,
             step=step,
             undriven=undriven,
-            room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id, goal=goal),
+            room=room,
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
-            goal=None if goal is None else goal.facts,
+            goal=carried.facts,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
                 if isinstance(produced, ReplyChunk):
+                    # **Published as its own chunk, and only once the answer has
+                    # actually begun.** Its own chunk because every frame is measured
+                    # on its own (ADR-0173 §11), so folding it into the stage's first
+                    # one could breach a frame the stage had already fitted; and only
+                    # beside a chunk because §5's sentence "is a statement in a reply
+                    # the turn was composing anyway" — a pass that published nothing
+                    # has no reply to carry it, and publishing one would leave a
+                    # terminal ``reply`` the chunks do not join to (ADR-0173 §3).
+                    if pending is not None:
+                        opening = ReplyChunk(text=pending)
+                        check_payload(
+                            opening,
+                            max_bytes=self._max_payload_bytes,
+                            subject="a chunk of the reply to converse_streaming()",
+                        )
+                        chunks.put_nowait(opening)
+                        pending = None
                     check_payload(
                         produced,
                         max_bytes=self._max_payload_bytes,
@@ -11496,7 +11599,12 @@ class Engine:
         if composed is None:  # pragma: no cover — the stage always reports last
             msg = "the composing stage ended without reporting what it composed"
             raise RuntimeError(msg)
-        return composed
+        # "Where the exchange streamed chunks, ``reply`` is the text those chunks
+        # conveyed, joined in the order they were written" (ADR-0173 §3) — so the
+        # terminal text gains the lead exactly where the lead was published.
+        if lead is None or pending is not None or composed.text is None:
+            return composed
+        return ComposedReply(text=lead + composed.text, degraded=composed.degraded)
 
     def _reply_room(
         self,
