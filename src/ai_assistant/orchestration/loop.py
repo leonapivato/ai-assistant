@@ -59,7 +59,7 @@ production.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -93,6 +93,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
+from ai_assistant.orchestration.goals import RaisedSubject, taken_question
 from ai_assistant.orchestration.interpretation import recorded_revision
 from ai_assistant.orchestration.reads import (
     SearchFooting,
@@ -126,6 +127,7 @@ if TYPE_CHECKING:
         FeedbackEvent,
         ParkedRead,
         PermissionDecision,
+        PlannerOutput,
         ProposedUnderstanding,
         ReadAskOutcome,
         SourceListing,
@@ -133,6 +135,30 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
+
+#: What this loop calls immediately before each :meth:`Planner.plan` call on an
+#: attempt the store **already holds** (ADR-0251 §12, #2294).
+#:
+#: §12 keeps two cases of the charge apart. An attempt **this turn opened** is charged
+#: on the in-memory ledger and reaches the store *"with everything else the turn
+#: produced"*. An attempt **an earlier turn persisted** — which ADR-0250 §12's
+#: association makes reachable for the first time — takes each charge as *"an
+#: ``AttemptTransition`` through ``commit_attempt``, under §12's compare-and-swap,
+#: **issued immediately and buffered for nothing**"*.
+#:
+#: **It is a one-member callable and never a store.** ADR-0249 §11 is absolute — *"No
+#: lane gives ``LearningLoop`` a ``PlanStore``"* — and this loop is given none: it
+#: holds a function that takes a count, the write is issued by ``Engine`` from
+#: ``Engine``'s own code through ``commit_attempt``, and ADR-0249 §12 makes that member
+#: the route for *"every change … in this turn as in any later one"* rather than a
+#: second persistence site. ADR-0228 §5's *"second persistence site"* is about the
+#: turn's **records** — the goal row, the plan rows, the attempt's first write — and a
+#: transition on a row that already exists is none of them.
+#:
+#: The argument is the attempt's **cumulative** ``planner_calls`` after this call is
+#: charged, so the caller writes a total rather than an increment: ADR-0249 §5's
+#: monotonicity is then a property of the value rather than of the arithmetic.
+type PlannerCharge = Callable[[int], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,10 +225,20 @@ class OpenedAttempt:
             of them travels here. It is **not** the per-phase event log §12 defers: it
             carries no instant, it never reaches a store, and no lane infers one from a
             :class:`~ai_assistant.core.types.GoalAttempt`.
+        opened: Whether this turn **opened** the attempt, which is
+            :attr:`RecordedGoal.opened`'s distinction one record over and says which
+            of ADR-0249 §12's two persistence routes it takes. ``True`` — an attempt
+            no row holds yet — reaches the store through ``open_attempt``, *"carrying
+            the phase and state it stands at and the references it has accumulated by
+            that moment"*. ``False`` — an attempt an earlier turn persisted, which
+            ADR-0250 §12 makes reachable for the first time — reaches it through
+            ``commit_attempt``, because *"after the first write, every change goes
+            through ``commit_attempt``, in this turn as in any later one"*.
     """
 
     attempt: GoalAttempt
     phases: tuple[AttemptPhase, ...] = ()
+    opened: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +363,18 @@ class RespondedTurn:
             with no store read of its own — ADR-0244 §1's "the turn does not park, is
             not suspended and does not fail", which a trail read taken after the park
             was written could break between the park and the reply.
+        raised: The question this turn's **last** planner call raised, whose subject
+            resolved and is material (ADR-0250 §6, §7), or ``None`` where it raised
+            none. It carries the two content fields and **no id, no instant, no
+            deadline and no disposition**: every one of those is ``Engine``'s, stamped
+            from the injected clock and the injected id factory at the site that
+            writes the record (§16), which is also the site that can report a question
+            only where ``record_question`` accepted it (§10).
+
+            **The last call and not the first**, because §6's conditions are the
+            planner's report *"on this call"* and a later call that raised none is a
+            call that no longer reports an ambiguity — which is what makes ADR-0250 §11's
+            late answer able to *"proceed"* rather than re-ask what it just resolved.
     """
 
     turn: TurnResult
@@ -339,6 +387,7 @@ class RespondedTurn:
     search_not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
     parked_decision: PermissionDecision | None = None
+    raised: RaisedSubject | None = None
 
 
 #: ADR-0251 §5's planner-call allowance for
@@ -935,6 +984,39 @@ class _Spent:
     elapsed: timedelta
 
 
+def _brief_of(goal: Goal, open_question: str | None) -> GoalBrief:
+    """Project the goal onto a brief, carrying its open question (ADR-0250 §8).
+
+    ADR-0249 §9's projection is :meth:`GoalBrief.of`, which carries no question
+    because no question existed when it was written. ADR-0250 §8 gives the field its
+    one value: *"``GoalBrief.open_questions`` carries at most one text — the goal's
+    open question's ``text`` where one stands, and nothing where none does. It
+    carries no id, no subject, no deadline and no disposition."*
+
+    **It is there so that a planner does not raise a question the system is already
+    asking** (§8), and for nothing else: *"The planner is not asked to answer it and
+    no implementation reads its presence as an instruction to answer, to re-raise, or
+    to plan differently."*
+
+    **The text is read from the store by ``Engine`` and passed in.** This loop holds
+    no ``PlanStore`` (ADR-0249 §11) and acquires none here; what it is handed is a
+    string, exactly as it is handed the conversation's history.
+
+    Args:
+        goal: The goal to project.
+        open_question: The text of the goal's open question, or ``None`` where none
+            stands — which is every turn of a goal this turn opened, and every turn
+            on a channel of unbounded audience (ADR-0250 §15).
+
+    Returns:
+        The brief the planner receives.
+    """
+    projected = GoalBrief.of(goal)
+    if open_question is None:
+        return projected
+    return projected.model_copy(update={"open_questions": (open_question,)})
+
+
 def _advanced(
     attempt: GoalAttempt, phases: tuple[AttemptPhase, ...], to: AttemptPhase
 ) -> tuple[GoalAttempt, tuple[AttemptPhase, ...]]:
@@ -1527,6 +1609,8 @@ class LearningLoop:
         conversation_id: str | None = None,
         continuing: Goal | None = None,
         continuing_attempt: GoalAttempt | None = None,
+        open_question: str | None = None,
+        charge: PlannerCharge | None = None,
     ) -> RespondedTurn:
         """Run one turn, and record what its planner asked to have read.
 
@@ -1563,11 +1647,12 @@ class LearningLoop:
                 keyed on it here, no record carries it, and it reaches no prompt, no
                 audit event and no model.
             continuing: The goal this turn continues, or ``None`` where it opens one
-                (ADR-0249 §3, §13). **Which goal a turn continues is A2's**: association
-                over candidates, focus and what moves ``last_engaged_at`` are all
-                deferred by name, and no caller of this lane supplies one — so every
-                production turn opens a goal, exactly as it does today. The parameter is
-                the seam that decision fills, and it is here rather than in A2 because
+                (ADR-0249 §3, §13). **Which goal a turn continues is A2's**, and
+                ADR-0250 §19's M3 is the lane that decides it: ``Engine`` resolves the
+                association before this loop is entered — a reply reference, then an
+                empty candidate set, then one ``GoalAssociator.associate`` call (§3) —
+                and hands the goal over as data. This parameter is the seam that
+                decision fills, and it is here rather than in A2 because
                 what a *continued* goal costs this loop — a revision recorded against a
                 goal the store already holds, under §12's compare-and-swap, and a **new
                 attempt on the same goal** (§5) — is this lane's to build and §16's arm 2
@@ -1579,8 +1664,9 @@ class LearningLoop:
                 so the ledger §5's gates read spans the attempt's turns rather than
                 restarting at each. **Which attempt a turn continues is A2's**, exactly
                 as ``continuing`` is: association, focus and what makes an attempt
-                runnable are ADR-0250's, no caller of this lane supplies one, and this
-                parameter is the seam that decision fills. It is here rather than in A2
+                runnable are ADR-0250's, ``Engine`` reads the goal's attempts and
+                decides which of §12's three acts applies, and this parameter is the
+                seam that decision fills. It is here rather than in A2
                 because what a continued attempt costs this loop — a ledger that is not
                 reset, a ``kind`` that is not re-stamped, a phase that does not move
                 backwards, and §4(j)'s refusal to investigate outside ``INVESTIGATE`` —
@@ -1590,9 +1676,9 @@ class LearningLoop:
                 and open an attempt on it, which is what passing ``continuing`` alone
                 means and what every turn of this lane does today.
 
-                **The ledger this turn charges is the in-memory one, and ADR-0251
-                §12's *persisted-attempt* case is not reached from here.** §12 keeps
-                two cases apart and rules that a charge on an attempt an **earlier turn
+                **Which ledger this turn charges depends on which of §12's two cases
+                it is in, and ``charge`` is how the second one is reached.** §12 keeps
+                them apart and rules that a charge on an attempt an **earlier turn
                 persisted** is an ``AttemptTransition`` through ``commit_attempt``,
                 "issued immediately and buffered for nothing" — and in the same breath
                 that the section "adds no persistence site, moves none, and supersedes
@@ -1604,16 +1690,26 @@ class LearningLoop:
                 ``commit_attempt`` issued from here — directly or through an injected
                 writer — is the site §11 forbids and §12 disclaims adding.
 
-                **Nothing is lost today, because no persisted attempt reaches this
-                seam.** Which attempt a turn continues is A2's, no caller of this lane
-                supplies one, and a turn that opens an attempt writes its row at
-                ADR-0249 §11's one site with everything else the turn produced — which
-                is §12's **first** case, implemented here entire: the charge is on the
-                in-memory attempt, a replan within the turn is charged by it, and a
-                turn that dies before that site charges nothing, "exactly as it records
-                no goal and no plan". The persisted case becomes reachable with the
-                association that produces a persisted attempt, and is deferred to the
-                lane that lands it.
+                **An attempt this turn opened is still §12's first case, entire.** It
+                is given no ``charge``, the charge is on the in-memory attempt, a
+                replan within the turn is charged by it, it reaches the store at
+                ADR-0249 §11's one site with everything else the turn produced, and a
+                turn that dies before that site charges nothing — "exactly as it
+                records no goal and no plan".
+            open_question: The text of the goal's **open question**, where one stands,
+                which :func:`_brief_of` puts on the brief (ADR-0250 §8). ``None`` on
+                every goal holding none, on every goal this turn opens, and on every
+                turn of an operation whose channel audience is unbounded — §15 admits
+                **no** stored goal value to such a turn. Read from the store by
+                ``Engine`` and handed over as a string: this loop holds no
+                ``PlanStore`` (ADR-0249 §11) and acquires none for it.
+            charge: What to call immediately before each ``Planner.plan`` call, on an
+                attempt the store **already holds** (ADR-0251 §12, #2294,
+                :data:`PlannerCharge`). ``None`` on an attempt this turn opened, which
+                is §12's first case and writes nothing durable. It is a one-member
+                callable and **never a store**: the write is ``Engine``'s, issued
+                through ``commit_attempt``, which ADR-0249 §12 makes the route for
+                "every change … in this turn as in any later one".
 
         Returns:
             The turn — its goal's **brief**, context, assembled memories and last plan
@@ -1650,6 +1746,8 @@ class LearningLoop:
                 conversation_id=conversation_id,
                 continuing=continuing,
                 continuing_attempt=continuing_attempt,
+                open_question=open_question,
+                charge=charge,
             )
         finally:
             audit.emit()
@@ -1673,6 +1771,8 @@ class LearningLoop:
         conversation_id: str | None,
         continuing: Goal | None = None,
         continuing_attempt: GoalAttempt | None = None,
+        open_question: str | None = None,
+        charge: PlannerCharge | None = None,
     ) -> RespondedTurn:
         """Run one turn: intent, context, memory retrieval, planning.
 
@@ -1932,6 +2032,20 @@ class LearningLoop:
                 opens one (ADR-0251 §13, :meth:`respond`). Its consumed figures and its
                 stamped ``kind`` are what §4's gates read, and its ``phase`` is what
                 §4(j) tests.
+            open_question: The text of the goal's **open question**, where one stands,
+                which :func:`_brief_of` puts on the brief (ADR-0250 §8). ``None`` on
+                every goal holding none, on every goal this turn opens, and on every
+                turn of an operation whose channel audience is unbounded — §15 admits
+                **no** stored goal value to such a turn. Read from the store by
+                ``Engine`` and handed over as a string: this loop holds no
+                ``PlanStore`` (ADR-0249 §11) and acquires none for it.
+            charge: What to call immediately before each ``Planner.plan`` call, on an
+                attempt the store **already holds** (ADR-0251 §12, #2294,
+                :data:`PlannerCharge`). ``None`` on an attempt this turn opened, which
+                is §12's first case and writes nothing durable. It is a one-member
+                callable and **never a store**: the write is ``Engine``'s, issued
+                through ``commit_attempt``, which ADR-0249 §12 makes the route for
+                "every change … in this turn as in any later one".
 
         **And which records the hop reached rides out beside the turn** (ADR-0227
         §3). The servicer is the one component that can distinguish a
@@ -2068,7 +2182,7 @@ class LearningLoop:
         # of the new revision. The record stays here, inside `orchestration`, and travels
         # to the engine on `RespondedTurn` as data (§11); what crosses the planning seam
         # and the wire is this value, which carries no ground reference at all.
-        brief = GoalBrief.of(goal)
+        brief = _brief_of(goal, open_question)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
         preceding = recent + retrieved
@@ -2175,6 +2289,8 @@ class LearningLoop:
             # widening the compatibility break §3 flags it as.
             read_outcomes=(),
             audit=audit,
+            charge=charge,
+            charged=opened_calls,
         )
         # ADR-0249 §7: the understanding this call proposed, resolved against the
         # brief and the supply **this call** was handed, and recorded before the plan
@@ -2192,7 +2308,15 @@ class LearningLoop:
             at=turn_at,
             raised_by=raised_by,
             brief=brief,
+            open_question=open_question,
         )
+        # ADR-0250 §6, §7: what this call raised, if anything, resolved against the
+        # proposal it came back on and the revision that proposal produced. Recomputed
+        # at **every** call and never accumulated, so a later call that raised none
+        # leaves the turn raising none — §6's conditions are the planner's report "on
+        # this call", and a turn that carried an earlier call's question forward would
+        # re-ask what its own re-plan had just resolved (§11's late answer).
+        raised = await self._raised(produced, goal=goal)
         # ADR-0249 §8: the stamp is the goal's revision **after this call's
         # understanding, if any, has been recorded**. Stamping the *input* revision
         # would leave every turn on which the planner revised its understanding holding
@@ -2430,6 +2554,8 @@ class LearningLoop:
                 files=files,
                 read_outcomes=read_outcomes,
                 audit=audit,
+                charge=charge,
+                charged=opened_calls,
             )
             # §7, §8: the second call's understanding is recorded on the same terms as
             # the first's, and against the supply **this** call was handed — ADR-0228 §8
@@ -2446,7 +2572,11 @@ class LearningLoop:
                 at=turn_at,
                 raised_by=raised_by,
                 brief=brief,
+                open_question=open_question,
             )
+            # §6, §7 again, on the same terms as the first call's: this call's own
+            # report, over this call's own plan, replacing whatever the last one said.
+            raised = await self._raised(revised, goal=goal)
             plan = _stamped(
                 revised.plan,
                 targets_revision=goal.revision,
@@ -2517,7 +2647,9 @@ class LearningLoop:
             # stamped on the way — persisted at the same site as the goal and the
             # plans, and **after** them, because `open_attempt` refuses an attempt whose
             # `plan_ids` its goal does not hold (§12).
-            attempt=OpenedAttempt(attempt=attempt, phases=phases),
+            attempt=OpenedAttempt(
+                attempt=attempt, phases=phases, opened=continuing_attempt is None
+            ),
             turn=TurnResult(
                 # ADR-0248 §1: the request this pass received, which is the same
                 # string `_request_of` stripped once above and `goal` was minted from.
@@ -2556,6 +2688,13 @@ class LearningLoop:
             # nothing re-read at the render site.
             parked_read=parked_read,
             parked_decision=parked_decision,
+            # ADR-0250 §6, §7: the question this turn's **last** planner call raised,
+            # already resolved to its subject's own text and already tested for
+            # materiality. Carried inside `orchestration` as data on the same terms as
+            # the park above, because the record it becomes is `Engine`'s to mint: this
+            # loop holds no `PlanStore`, no clock the question's deadline is computed
+            # from, and no way to know whether the one-open-question gate accepted it.
+            raised=raised,
         )
 
     async def resumed_read(  # noqa: PLR0913 — the parked turn's three persisted members, the read's records, and the three things every turn's supply is assembled against; each is a distinct fact and none is derivable from another
@@ -2754,6 +2893,8 @@ class LearningLoop:
         files: Sequence[ShownFile],
         read_outcomes: Sequence[ReadAskOutcome],
         audit: TurnReadAudit,
+        charge: PlannerCharge | None = None,
+        charged: int = 0,
     ) -> PlannerOutput:
         """Read the capability vocabulary, then plan over it (ADR-0211 §3).
 
@@ -2801,6 +2942,12 @@ class LearningLoop:
                 reason: ADR-0240 §7, which §3 widens rather than relaxes, has the loop
                 pass it on every call, and a defaulted parameter on this side would let
                 a call site forget it silently.
+            charge: What to call immediately before the planner, on an attempt the
+                store already holds (ADR-0251 §12, :data:`PlannerCharge`), or ``None``
+                on one this turn opened — which is §12's first case and writes nothing.
+            charged: What that attempt's ledger stood at when this turn began, so the
+                charge is issued as a **cumulative total** rather than an increment
+                and ADR-0249 §5's monotonicity is a property of the value.
             audit: This turn's record, whose ``planner_calls`` this method advances.
                 **Counted here and nowhere else**, between the vocabulary read and the
                 call, which is what makes the field say what ADR-0228 §9 asks of it:
@@ -2841,6 +2988,17 @@ class LearningLoop:
         # line is a call this turn genuinely made, and it is counted whether or not
         # it returns (ADR-0228 §9).
         audit.planner_calls += 1
+        # ADR-0251 §12's second case, at the **only** ordering under which a call that
+        # raises is charged: "It is issued first because that is the only ordering
+        # under which a call that raises is charged". On an attempt this turn opened
+        # there is no callable and nothing durable is written, which is §12's first
+        # case — "the charge is on the in-memory attempt". A cancellation delivered
+        # while this commit is in flight leaves the slot consumed and `Planner.plan`
+        # never entered, which §12 permits in terms and no lane closes: "No lane
+        # re-invokes the planner after a cancellation to 'use' a charged slot, and
+        # none subtracts from the ledger to return one."
+        if charge is not None:
+            await charge(charged + audit.planner_calls)
         return await self._planner.plan(
             goal,
             utterance=utterance,
@@ -3075,6 +3233,78 @@ class LearningLoop:
             raise PlanningError(msg)
         return request
 
+    async def _raised(self, produced: PlannerOutput, *, goal: Goal) -> RaisedSubject | None:
+        """Take at most one question from one planner call (ADR-0250 §6, §7).
+
+        **§6's three conditions, and the two this method can check.** Condition 1 —
+        *"the planner reported the interpretation ambiguous — it returned a
+        ``ProposedQuestion`` (§7) on this call"* — is the ``questions`` tuple being
+        non-empty. Condition 3 — *"no evidence or established preference resolved it"*
+        — is *"the planner raised the question having been given this turn's supply, so
+        a question it still raises is one the supply did not resolve for it"*, which is
+        that same fact read a second way and is **taken on the model's word**, as §6
+        says in terms. Condition 2, materiality, is code's and is
+        :func:`~ai_assistant.orchestration.goals.is_material`'s.
+
+        **Neither condition the model supplies clears anything** (§6): *"a model that
+        reports no ambiguity does not thereby authorise an act, satisfy a prerequisite
+        or establish coverage, and no lane reads the absence of a ``ProposedQuestion``
+        as any of the three."*
+
+        **The registry read happens only where a question came back**, which costs a
+        turn that raised none nothing at all: §6's second limb is a fact about the plan
+        and is only ever a *reason to ask*, never a reason to do anything else, so a
+        turn with nothing to ask has no use for it.
+
+        Args:
+            produced: The envelope this call returned, whose ``plan`` §6's second
+                materiality limb is read over — *"The ``ActionPlan`` the **same**
+                ``PlannerOutput`` carries"*.
+            goal: The goal as it stands **after** this call's understanding was
+                recorded, so ``interpretation[-1]`` is the revision §7 resolves the
+                subject's text out of.
+
+        Returns:
+            The question to raise, or ``None``.
+        """
+        understanding = produced.understanding
+        if understanding is None or not understanding.questions:
+            return None
+        return taken_question(
+            understanding,
+            recorded=goal.interpretation[-1],
+            side_effecting=await self._side_effecting(produced.plan),
+        )
+
+    async def _side_effecting(self, plan: ActionPlan) -> bool:
+        """ADR-0250 §6's second materiality limb, over this plan's own capabilities.
+
+        *"The ``ActionPlan`` the **same** ``PlannerOutput`` carries proposes at least
+        one step whose capability the ``ToolRegistry`` declares
+        ``ToolDefinition.side_effecting``."*
+
+        **It is a read of a declaration** (§6): *"not of a risk level, not of a
+        reversibility, not of a tier reach and not of a policy ruling. **No permission
+        is consulted, cleared or implied by this test**."* The registry
+        *"holds configuration, not personal data"* (ADR-0016 §6), so nothing is placed,
+        withheld or provenanced by reading it.
+
+        **Any tool advertising the capability is enough**, which is the conservative
+        direction: a capability several tools advertise is one selection may resolve to
+        any of them, so a capability that *can* change something outside itself is
+        treated as one that will.
+
+        Args:
+            plan: The plan this call proposed.
+
+        Returns:
+            Whether at least one step's capability is declared side-effecting.
+        """
+        for step in plan.steps:
+            if any(one.side_effecting for one in await self._registry.find(step.capability)):
+                return True
+        return False
+
     def _recorded(  # noqa: PLR0913 — the goal, what the planner proposed, what has been recorded so far, and one parameter per thing a ground is resolved against; every one is a distinct fact and a bundle would mint a type for an argument list
         self,
         goal: Goal,
@@ -3088,6 +3318,7 @@ class LearningLoop:
         at: datetime,
         raised_by: str,
         brief: GoalBrief,
+        open_question: str | None,
     ) -> tuple[Goal, tuple[GoalInterpretation, ...], GoalBrief]:
         """Record one planner call's understanding onto the goal, if it proposed one.
 
@@ -3132,6 +3363,9 @@ class LearningLoop:
             at: This turn's own instant.
             raised_by: The turn whose message caused this revision — one value per turn
                 (§1), minted by the caller and shared with its opening revision.
+            open_question: The text of the goal's open question, where one stands
+                (ADR-0250 §8), so that the brief this method re-projects carries it
+                exactly as the one :meth:`_turn` built did. ``None`` where none does.
             brief: The brief this call received, returned unchanged where nothing was
                 recorded so that the value is taken once per revision rather than once
                 per call.
@@ -3157,7 +3391,11 @@ class LearningLoop:
         moved = goal.model_copy(update={"interpretation": (*goal.interpretation, revision)})
         # An opened goal carries its revisions to the store on `save_goal` itself, so a
         # second copy here would be two records of one fact.
-        return moved, recorded if opened else (*recorded, revision), GoalBrief.of(moved)
+        return (
+            moved,
+            recorded if opened else (*recorded, revision),
+            _brief_of(moved, open_question),
+        )
 
     def _goal_from(self, request: str, *, conversation_id: str | None) -> Goal:
         """Open the turn's goal, carrying revision 1, from what the user said.
@@ -3203,8 +3441,19 @@ class LearningLoop:
                 none, which no production path does: ``Engine._run_turn`` begins the
                 conversation before the turn and passes its id.
 
+        **It stamps neither engagement field, and that is ADR-0250 §1 rather than an
+        omission** (#2297). That section gives ``last_engaged_at`` and
+        ``last_engaged_in`` *"exactly one writer,
+        ``PlanStore.engage_goal``"*, and makes the opening turn one of its four
+        engaging acts — *"a turn that associates to it under §3, **including the turn
+        that opens it**"*. A stamp applied here would be a second writer, and would
+        leave every minted row carrying an instant and no conversation, which is the
+        one shape §1 reserves for a row written before that decision. ``Engine``
+        engages the goal at the site that persists it, which is also the one place
+        holding the conversation the second field names.
+
         Returns:
-            The opened goal, at ``version`` 0 and revision 1.
+            The opened goal, at ``version`` 0 and revision 1, engaged by nothing.
 
         Raises:
             PlanningError: If the injected clock's reading is not conforming — see
@@ -3234,7 +3483,6 @@ class LearningLoop:
                 last_updated=now,
             ),
             created_at=now,
-            last_engaged_at=now,
         )
 
     async def _retrieve(self, query: str) -> tuple[tuple[MemoryRecord, ...], bool]:
