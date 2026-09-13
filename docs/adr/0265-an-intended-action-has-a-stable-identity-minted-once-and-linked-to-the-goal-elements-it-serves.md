@@ -736,9 +736,10 @@ The owner's two cases are arms 1 and 2.
    compare-and-swap, and refuses a stale `expected_version`, an `id` the goal already holds, and a
    minting that would carry the goal past `MAX_INTENDED_ACTIONS` — the last over a goal at 63
    handed **two** actions, so the all-or-nothing limb is exercised and **neither** is recorded.
-   Assert **before** that refusal that the same goal at 63 handed **one** action **records** it
-   and reaches exactly `MAX_INTENDED_ACTIONS`, which is the last legal mint and which a
-   `>=`-shaped comparison refuses while every refusal named here still passes. Assert that each
+   Assert over a **separate goal at 63**, never the one that refusal is taken over, that one
+   action handed to it **records** and carries it to exactly `MAX_INTENDED_ACTIONS` — the last
+   legal mint, which a `>=`-shaped comparison refuses while every refusal named here still
+   passes, and which a fixture shared with the refusal above could not reach. Assert that each
    refusal writes nothing, that the **last two carry a class distinct from the
    stale-write class** (§5), and that a goal at the bound holds every action it held before the
    refusal — **no member elided, no count advanced**. An `IntendedActionMinting` two of whose
