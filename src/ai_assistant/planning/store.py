@@ -37,6 +37,7 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    revalidated_evidence,
     settled,
     superseded,
 )
@@ -420,28 +421,36 @@ class InMemoryPlanStore:
         the three routes it names: this store does not suspend, so it cannot read
         ``supersedes`` twice across a suspension and see two different sets.
 
+        **The row is revalidated before it is kept**, not merely copied, so the three
+        conforming implementations admit the same rows: ADR-0023 §2's "a write that
+        reaches past [the validators] must re-validate", over a record a caller can
+        reach past with ``model_copy``. A row copied to ``SUPERSEDED`` with no
+        ``superseded_by`` is refused here exactly as ``SqlitePlanStore`` refuses it.
+
         Raises:
-            PlanningError: If the store already holds a row under this ``id``, if
-                ``goal_id`` names no stored goal, or if a row named by ``supersedes``
-                is not this goal's, is not ``STANDING``, or is the row being written.
+            PlanningError: If the row does not revalidate, if the store already holds a
+                row under this ``id``, if ``goal_id`` names no stored goal, or if a row
+                named by ``supersedes`` is not this goal's, is not ``STANDING``, or is
+                the row being written.
         """
-        if evidence.id in self._evidence:
+        stored = revalidated_evidence(evidence)
+        if stored.id in self._evidence:
             msg = (
-                f"evidence row {evidence.id} already exists: record_evidence persists a "
+                f"evidence row {stored.id} already exists: record_evidence persists a "
                 f"new row and no member replaces a stored one (ADR-0252 §12)"
             )
             raise PlanningError(msg)
-        if evidence.goal_id not in self._goals:
-            msg = f"cannot record evidence for unknown goal {evidence.goal_id}"
+        if stored.goal_id not in self._goals:
+            msg = f"cannot record evidence for unknown goal {stored.goal_id}"
             raise PlanningError(msg)
         self._refuse_unmarkable(
-            evidence.goal_id, supersedes, being_written=evidence.id, what="supersede"
+            stored.goal_id, supersedes, being_written=stored.id, what="supersede"
         )
-        self._evidence[evidence.id] = evidence.model_copy(deep=True)
+        self._evidence[stored.id] = stored
         for row_id in supersedes:
-            self._evidence[row_id] = superseded(self._evidence[row_id], by=evidence.id)
-        self._elide_evidence(evidence.goal_id, keep=evidence.id)
-        return evidence.id
+            self._evidence[row_id] = superseded(self._evidence[row_id], by=stored.id)
+        self._elide_evidence(stored.goal_id, keep=stored.id)
+        return stored.id
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
         """Return the evidence row under that id, or ``None`` (ADR-0252 §12)."""

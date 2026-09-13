@@ -115,6 +115,34 @@ def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
 
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
+def _revalidated_evidence(row: GoalEvidence) -> GoalEvidence:
+    """Rebuild ``row`` as a validated, detached :class:`GoalEvidence`, or refuse it.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives for the transition graph. ADR-0023 §2's words
+    are why it exists: "``model_copy(update=...)`` skips validators … and **a write that
+    reaches past it must re-validate**" — and a caller holding a stored row can reach
+    past them, so a row copied to ``SUPERSEDED`` with no ``superseded_by`` arrives here
+    as a value ADR-0252 §1's fourth axis says is not constructible. The fake must not
+    certify a weaker contract than the real stores keep.
+
+    Args:
+        row: The row as the caller handed it in.
+
+    Returns:
+        The row, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return GoalEvidence.model_validate(row.model_dump())
+    except ValidationError as exc:
+        subject = getattr(row, "id", "<no id>")
+        msg = f"evidence row {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def _marked_evidence(row: GoalEvidence, mark: dict[str, object], *, what: str) -> GoalEvidence:
     """Apply one of ADR-0252's two marks to ``row`` and revalidate it (ADR-0023 §2).
 
@@ -1082,42 +1110,50 @@ class FakePlanStore:
         argument is a container the caller may still be holding", and this store
         suspends inside :meth:`suspend_next_operation`'s modelled resource, so reading
         it again after the suspension would let a caller add a row to the set while the
-        call is held and have it marked. ``evidence`` needs no snapshot on that clause's
-        own terms — it is a frozen model whose every member is frozen or a tuple, so it
-        is "immutable all the way down" — but the set the call marks is not.
+        call is held and have it marked. ``evidence`` is snapshotted on that same line
+        too, though for a different reason: the revalidation ADR-0023 §2 obliges is what
+        produces the detached value, and taking it before the first ``await`` makes it
+        this method's ADR-0065 snapshot as well — the shape
+        ``SqlitePlanStore.record_evidence`` already has.
+
+        **The row is revalidated before it is kept**, so the three conforming
+        implementations admit the same rows: a row copied to ``SUPERSEDED`` with no
+        ``superseded_by`` is refused here exactly as the two real stores refuse it, and
+        the fake does not certify a weaker contract than they keep.
 
         Raises:
             PlanningError: If the store already holds a row under this ``id``, if
                 ``goal_id`` names no stored goal, or if a row named by ``supersedes``
                 is not this goal's, is not ``STANDING``, or is the row being written.
         """
+        snapshot = _revalidated_evidence(evidence)
         named = tuple(supersedes)
         async with self._resource.held():
-            if evidence.id in self._evidence:
+            if snapshot.id in self._evidence:
                 msg = (
-                    f"evidence row {evidence.id} already exists: record_evidence "
+                    f"evidence row {snapshot.id} already exists: record_evidence "
                     f"persists a new row and no member replaces a stored one "
                     f"(ADR-0252 §12)"
                 )
                 raise PlanningError(msg)
-            if evidence.goal_id not in self._goals:
-                msg = f"cannot record evidence for unknown goal {evidence.goal_id}"
+            if snapshot.goal_id not in self._goals:
+                msg = f"cannot record evidence for unknown goal {snapshot.goal_id}"
                 raise PlanningError(msg)
             self._refuse_unmarkable_locked(
-                evidence.goal_id, named, being_written=evidence.id, what="supersede"
+                snapshot.goal_id, named, being_written=snapshot.id, what="supersede"
             )
-            self._evidence[evidence.id] = evidence.model_copy(deep=True)
+            self._evidence[snapshot.id] = snapshot
             for row_id in named:
                 self._evidence[row_id] = _marked_evidence(
                     self._evidence[row_id],
                     {
                         "standing": EvidenceStanding.SUPERSEDED,
-                        "superseded_by": evidence.id,
+                        "superseded_by": snapshot.id,
                     },
                     what="the supersession",
                 )
-            self._elide_evidence_locked(evidence.goal_id, keep=evidence.id)
-            return evidence.id
+            self._elide_evidence_locked(snapshot.goal_id, keep=snapshot.id)
+            return snapshot.id
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
         """Return the evidence row under that id, or ``None`` — under the resource."""
