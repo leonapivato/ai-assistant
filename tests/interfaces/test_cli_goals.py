@@ -245,10 +245,15 @@ def test_the_listing_renders_the_two_ids_its_acts_take_and_no_other(
     assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
 
     screen = _flat(output.getvalue())
-    assert GOAL_ID in screen
-    assert QUESTION_ID in screen
+    assert f"--goal {GOAL_ID}" in screen
+    assert f"assistant abandon-goal {GOAL_ID}" in screen
     assert f"--answering {QUESTION_ID}" in screen
     assert f"assistant withdraw-clarification {QUESTION_ID}" in screen
+    # **And neither id appears anywhere else**, which is what makes them handles rather
+    # than internals on display: the outcome statement heads the row, and an id printed
+    # as a heading would be lossy for exactly the values the acts most need (round 7).
+    assert screen.count(GOAL_ID) == 2
+    assert screen.count(QUESTION_ID) == 2
 
 
 @pytest.mark.parametrize(
@@ -361,6 +366,79 @@ def test_the_commands_this_listing_offers_are_never_folded_into_two(
     lines = buffer.getvalue().splitlines()
     assert any(f"assistant withdraw-clarification {long_id}" in line for line in lines)
     assert any(f"--answering {long_id}" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("goal_id", "argument"),
+    [("g 1", "'g 1'"), ("g;rm -rf /", "'g;rm -rf /'"), ("it's-mine", "'it'\"'\"'s-mine'")],
+)
+def test_the_resume_command_parses_back_to_the_goal_it_names(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO, goal_id: str, argument: str
+) -> None:
+    """Round 6's clause on the **goal** id, which round 7 found it missing.
+
+    ADR-0250 §13 makes this listing the sole route to a cross-conversation resumption —
+    "a goal is resumed from another conversation by explicit reference and by that
+    alone", "performed from a surface listing the user was shown (§15)" — so a goal whose
+    id this surface cannot hand back is a goal that cannot be resumed at all.
+    Adversarial review, round 7, ``blocker``.
+    """
+    _wire(monkeypatch, _listing(_summary(asking=False).model_copy(update={"id": goal_id})))
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert f"--goal {argument}" in screen
+    assert f"assistant abandon-goal {argument}" in screen
+    resume = shlex.split(screen[screen.index("--goal") :].split("Or give it up")[0])
+    assert resume == ["--goal", goal_id]
+
+
+def test_a_goal_id_this_terminal_cannot_show_withholds_the_command_and_not_the_act(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """#1013's clause on the goal id: a wrong command is worse than no command.
+
+    ``_safe`` **replaces** a character a terminal must not be handed, so an id carrying
+    one rendered — as a heading, and inside correct shell quotes — as something naming a
+    different goal. ``"g\x1b[2J1"`` is an admissible ``Identifier``. Round 7,
+    ``blocker``.
+    """
+    _wire(monkeypatch, _listing(_summary(asking=False).model_copy(update={"id": "g\x1b[2J1"})))
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert "no command here to copy" in screen
+    assert "--goal" in screen
+    assert "assistant abandon-goal" in screen
+    assert "\x1b" not in screen
+
+
+def test_a_closed_goal_is_offered_the_resume_and_not_the_abandonment(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0250 §12 answers ``ALREADY_CLOSED`` there, so the command would do nothing.
+
+    And §13 is why the *resume* is still offered: "a closed goal is reopened by a turn
+    that associates to it, by any path of §3: a ``TurnReference`` naming it" — and an
+    abandoned goal is a candidate in no conversation, so the reference is its only route
+    back. The browser hides the same control for the same reason, stated once per surface
+    rather than derived from the other.
+    """
+    _wire(
+        monkeypatch,
+        _listing(
+            _summary(paused=False, asking=False).model_copy(update={"status": GoalStatus.ABANDONED})
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert "State: given up" in screen
+    assert f"--goal {GOAL_ID}" in screen
+    assert "abandon-goal" not in screen
 
 
 def test_the_listing_renders_the_engines_paused_and_derives_nothing(
