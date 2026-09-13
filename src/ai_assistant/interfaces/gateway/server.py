@@ -4032,6 +4032,23 @@ def _reference(payload: Mapping[str, Any]) -> TurnReference | None:
     shape belongs. Refusing it *here* rather than letting a ``ValidationError`` escape
     is what keeps the boundary's refusals one kind.
 
+    **And a member the object does not declare is refused rather than ignored**, which
+    is the type's own ``extra="forbid"`` reaching the one seam that would otherwise
+    strip it. Reading two names out of the object and discarding the rest would answer a
+    **different** well-formed question: ``{"goal_id": "g", "question_idd": "q"}`` is a
+    caller naming both records — a shape §11's validator exists to refuse — and two
+    reads by name would run an ordinary turn against ``g`` and report success.
+    :func:`_optional_string` states the same rule one level out for the same reason,
+    refusing a member that is present and wrong rather than reading it as an absence.
+    Adversarial review, round 1, ``blocker``.
+
+    **This is not the ``timeout``-is-never-read posture** :meth:`_ask_spoken` records,
+    and the difference is which object the member sits in. That clause is about a member
+    of the *request body*, where "no other assistant handler inspects a member it does
+    not use" and where a stray key changes nothing about the call. This is a member of
+    one declared argument, whose type closes its own field set — so a key here is not a
+    member nothing reads, it is a member of a value that has none.
+
     **Nothing about it is resolved, defaulted or composed here.** ADR-0177 §1 makes
     every argument but the deadline the browser's own, and §11 puts the resolution in
     ``orchestration`` — "a reference is never rendered to a model and never accepted
@@ -4051,7 +4068,7 @@ def _reference(payload: Mapping[str, Any]) -> TurnReference | None:
     value = payload.get("reference")
     if value is None:
         return None
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or set(value) - {"question_id", "goal_id"}:
         raise _malformed()
     try:
         return TurnReference(

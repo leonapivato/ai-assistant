@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import expect
+from test_browser_conversations import _holding
 
 from ai_assistant.core.types import (
     Clarification,
@@ -55,6 +56,7 @@ pytestmark = [
 ]
 
 GOAL_ID: Final = "goal-zzqq-7741"
+OTHER_ID: Final = "goal-wwvv-3320"
 QUESTION_ID: Final = "question-xxpp-9930"
 OUTCOME: Final = "Book the usual campsite for the last weekend of August."
 QUESTION: Final = "Which campsite do you mean — Ericeira or Melides?"
@@ -341,6 +343,54 @@ async def test_a_goal_is_taken_up_here_by_pointing_at_it(
 
         turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
         assert turns[-1][1]["reference"] == TurnReference(goal_id=GOAL_ID)
+
+
+async def test_a_reference_chosen_while_a_turn_is_out_survives_that_turn(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A turn drops the reference it carried and never a later one.
+
+    The ask control is disabled while a turn is out, but the goals panel's are not — so
+    an owner can pick a second goal while the first answer is still in flight, and a
+    clear that ran on completion whatever was attached by then would undo an act they
+    had just taken, silently, one turn later. Adversarial review, round 1, ``major``.
+
+    Driven as the owner reaches it: attach a question, send, and — while that request is
+    held — attach a goal instead. The turn then lands, and what the next question carries
+    is the goal.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [
+            _summary(),
+            _summary(asking=False).model_copy(update={"id": OTHER_ID}),
+        ]
+        # The turn's request is stopped before it goes out, so the second choice lands
+        # **inside** the window rather than by luck of scheduling (ADR-0216 §7).
+        # ``_holding`` is ``test_browser_conversations``' own device, imported rather
+        # than restated: a second implementation of "one request stopped in flight" is a
+        # second thing a flake could be about.
+        held = await _holding(drive, "/ask/stream", at=1)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await held.reached.wait()
+        # The second choice, taken while the first turn's request is still outstanding.
+        await drive.page.locator("#goal-list > div").nth(1).get_by_text("Take this up here").click()
+        await held.release()
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await drive.page.fill("#utterance", "and make it Monday")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_function(
+            "() => document.querySelectorAll('#answer-body p').length > 0"
+        )
+
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert turns[-2][1]["reference"] == TurnReference(question_id=QUESTION_ID)
+        assert turns[-1][1]["reference"] == TurnReference(goal_id=OTHER_ID)
 
 
 async def test_a_reference_can_be_given_up_before_it_is_sent(
