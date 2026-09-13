@@ -126,10 +126,11 @@ class TestFakeAuthorizationResolutionContract(AuthorizationResolutionContract):
         authorization_id: str,
         *,
         to: AuthorizationDisposition,
+        settled_at: datetime = NOW,
     ) -> AuthorizationSettlement:
         """Settle through the fake's own test-only hook."""
         assert isinstance(resolution, FakeAuthorizationResolution)
-        return resolution.settle(authorization_id, to=to, settled_at=NOW)
+        return resolution.settle(authorization_id, to=to, settled_at=settled_at)
 
 
 class TestFakeGoalAuthorizationStoreContract(GoalAuthorizationStoreContract):
