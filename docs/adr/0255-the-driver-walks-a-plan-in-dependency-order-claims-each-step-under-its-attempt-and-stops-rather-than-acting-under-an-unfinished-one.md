@@ -2125,11 +2125,18 @@ ledger and stops on the same three guards.
 > request and the ruling — and returns none because it **raises**. **Neither is carried here**:
 > `Disposition` is the gate's verdict and holds no member for either, so naming one would fabricate
 > a verdict no gate gave — and **what they cause at the user's surface is A9's**, which §12 books
-> by name and this decision does not take. **No step's outcome is lost**: every step's
-> `status`, `skip_reason`, `failure` and
-> `output` are on the `ExecutionState` that `StepOutcome.state` already carries, addressable by
-> `step_id`, which is that model's own documented idiom — so the singular field is a projection of
-> a walk the returned state already records in full. **This mints no `core` shape, no field and no
+> by name and this decision does not take. **No step's outcome is lost from the record**: every
+> step's `status`, `skip_reason`, `failure` and `output` is on the `ExecutionState` its own walk
+> opened, every one of those is durable in the plan store, and all of them are reachable from the
+> goal — `attempts_of` to the attempt, its `execution_ids` to each execution its walks opened, and
+> `get_execution` to the state — addressable within one by `step_id`, which is that model's own
+> documented idiom. **What the returned
+> `StepOutcome` carries is the projection**: `TurnOutcome.step` is the turn's last step to return
+> a disposition and `StepOutcome.state` is that step's own execution, so where a turn made two
+> walks (§10) the other walk's execution is read from the store rather than from the result.
+> **Widening the result to carry both is refused here** — it is the sequence-valued `TurnOutcome`
+> the Alternatives entry rejects as a breaking `core` change under golden rule 5, owed its own
+> ADR. **This mints no `core` shape, no field and no
 > enumeration, and supersedes nothing**: `StepOutcome`'s clauses bind verbatim — the disposition is
 > still the gate's verdict and not the step's own result, and `step_id` is still required and still
 > addresses a step of the returned `state`.
@@ -3210,13 +3217,14 @@ and every spoke reads, which is a **breaking `core` change under golden rule 5**
 own ADR, ratified and merged before anything implements against it** (ADR-0015 §5) — and this
 decision is about walking a plan, not about what a turn reports. It costs nothing to defer:
 §11's rule loses no step's **outcome**, since every step's `status`, `skip_reason`, `failure` and
-`output` are on the persisted `ExecutionState` the returned `StepOutcome.state` carries,
-addressable by `step_id` — and **not** on a `StepTransition`, which §11 records the plan store
-persists nowhere. What the singular field leaves unsurfaced is the other steps' **dispositions**,
-which are the gate's verdicts rather than the steps' own results and which no stored row holds —
-and a commits-nothing disposition writes no transition at all, so there is nothing there to read
-either. That, and not the outcomes, is what a sequence would buy: a later decision that gives a
-surface the whole walk reads every step's outcome from the store as things stand.
+`output` are on the persisted `ExecutionState` its own walk opened, addressable by `step_id` and
+reachable from the goal by §11's route — and **not** on a `StepTransition`, which §11 records the
+plan store persists nowhere. What the singular field leaves unsurfaced is the other steps'
+**dispositions**, which are the gate's verdicts rather than the steps' own results and which no
+stored row holds — and a commits-nothing disposition writes no transition at all, so there is
+nothing there to read either. That, and not the outcomes, is what a sequence would buy: a later
+decision that gives a surface the whole walk reads every step's outcome from the store as things
+stand.
 **Fired by a surface that needs the sequence.**
 
 **The store derives the attempt itself, by searching `attempts_of(goal_id)` for the row whose
