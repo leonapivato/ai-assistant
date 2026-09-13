@@ -501,18 +501,28 @@ was settled about the step rather than by where in the plan it sat.
 > be a rule no conforming implementation could be shown to obey, and would put the boundary in
 > two places — which is the `to_status` shape the store already declines to re-check.
 
-> **Normative — the refusal takes one of two classes, and which it takes is decided by whether a
-> corrected claim or a later turn could ever satisfy the limb.** A claim naming an **unknown**
-> attempt, an attempt that **did not open this execution**, or an attempt whose `state` is
-> **`CANCELLED` or `ENDED`**, is **refused with the
-> error class a stale `expected_version` already raises** (`StaleExecutionError`), which is
-> ADR-0249 L1's precedent for the revision conjunct: each of those three names a row the caller
-> could have named correctly, or a state a later turn under a live attempt reaches. A claim
-> against an execution **more than one attempt names** is refused with the **non-stale
-> `PlanningError`** the two ownership refusals below take, because that limb is **permanent** and
-> no re-read, corrected claim or later turn makes it claimable. This is a **strengthening of an
+> **Normative — every limb of this conjunct raises a `PlanningError` that is *not*
+> `StaleExecutionError`, and the class is decided by what the class means rather than by which
+> refusal it sits beside.** `StaleExecutionError` means *"the stored execution has advanced since
+> the caller read it"* and directs a caller to **re-read and retry** (`core/errors.py`, ADR-0014
+> §5). **No limb of this conjunct is that**: an unknown attempt stays unknown however many times
+> the caller re-reads; an attempt that did not open this execution can **never** acquire it, since
+> `execution_ids` is append-only and §3 makes ownership exclusive; a `CANCELLED` or `ENDED`
+> attempt never becomes live again; and a duplicated ownership is refused whichever attempt is
+> supplied. **Naming a different attempt or acting on a later turn is a different claim, not a
+> retry of this one** — so a caller obeying the stale class's contract would loop against a write
+> that cannot land, on every limb and not only on the duplicate. This is a **strengthening of an
 > existing member** rather than a new one, exactly as ADR-0249 §12 classifies the first added
 > condition.
+
+> **Normative — ADR-0249 §8's stale-revision refusal keeps `StaleExecutionError` and is not
+> touched, and the two are different questions.** That refusal compares a value the store derives
+> — execution → plan → goal — against one that **moves**, so a claim refused there was computed
+> against a state that has genuinely advanced and re-reading is exactly what a caller should do.
+> The attempt conjunct compares a claim's own named row against membership and a state that **do
+> not move under it**. **ADR-0249 L1 is this decision's precedent for where the conjunct lives —
+> inside `commit_transition`, in the same indivisible step — and not for which class it
+> raises**, and no lane reads the two refusals as one class because they sit in one member.
 
 > **Normative — the binding is the execution's membership and never the goal's, and this is the
 > conjunct's whole strength.** A goal may carry many attempts (ADR-0249 §5, ADR-0250 §12), so a
@@ -534,24 +544,13 @@ was settled about the step rather than by where in the plan it sat.
 > and defeat the conjunct without ever calling `commit_attempt`. **Each decides it in the same
 > indivisible step as its own write.**
 
-> **Normative — an ownership conflict raises `PlanningError` and never `StaleExecutionError`, and
-> the distinction is what the class means to a caller.** `StaleExecutionError` is *"A write [that]
-> lost the optimistic-concurrency race"* (ADR-0014 §5), and its whole contract is that re-reading
-> and retrying can succeed. **An ownership conflict is permanent**: no re-read makes an execution
-> owned by attempt A valid for attempt B, so a caller conforming to that class's contract would
-> retry a write that can never land. **Three refusals therefore raise a `PlanningError` that is
-> **not** the stale class** — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
-> **duplicate-ownership limb** — and §3's `→ RUNNING` conjunct keeps `StaleExecutionError` for its
-> **other three** limbs alone, each of which **is** retryable in the sense that class names: a
-> claim naming an unknown attempt or an attempt that did not open this execution succeeds when
-> corrected, and a claim under an ended attempt succeeds on a later turn under a live one. **The
-> absent-attempt case is not among them**, because §3's validator makes that transition
-> unconstructible and the store never receives one. **The duplicate is the one limb no
-> correction reaches**: with execution E named by attempts A and B, every claim for E is refused
-> whichever attempt it supplies (below), so handing the caller a class whose contract is *re-read
-> and retry* would be telling it to loop forever against a state this decision deliberately
-> refuses to repair. This
-> is a second **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
+> **Normative — the two attempt-writing members refuse on the same class, for the same reason.**
+> `commit_attempt`'s and `open_attempt`'s ownership refusals raise the same non-stale
+> `PlanningError` the conjunct above does: no re-read makes an execution owned by attempt A valid
+> for attempt B, so **all six refusals this decision adds are permanent and none of them is an
+> optimistic-concurrency loss**. The absent-attempt case is not among them at all, because §3's
+> validator makes that transition unconstructible and the store never receives one. Each is
+> a **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
 > what makes §3's conjunct a binding rather than a coincidence: ADR-0249 §12's append-only rule —
 > *"an identifier the tuple already holds is ignored rather than duplicated or refused"* — governs
 > a **repeat of the same append on the same attempt** and says nothing about two attempts, so
@@ -1147,10 +1146,10 @@ nothing depends on it, and no act follows — so nothing fails open.
 
 > **Normative.** **ADR-0042 §3's per-request deadline is attached here, and it is the driver's.**
 > The `timeout` an adapter supplies to `converse` or `resume` is the **whole request's** budget.
-> **The deadline is fixed once per adapter call**, from the **monotonic** source §9 names below
-> at the instant
-> `orchestration` enters that call's driving — **before** the resumed step's disposal on a
-> `resume`, and before the first step's on a `converse` — and every disposal that call makes,
+> **The deadline is fixed once per adapter call**, from the **monotonic** source §9 names below,
+> **at the entry to that call and immediately after the `timeout` is validated** — before
+> routing, before context assembly, before the turn's first `Planner.plan` call, and therefore
+> long before anything is driven — and every disposal that call makes,
 > **the resumed one and every step of every walk that follows it**, is passed the **remaining**
 > duration rather than the whole figure. **No lane passes the adapter's figure unchanged to more
 > than one disposal, and no lane fixes a second deadline inside one call.**
@@ -1184,8 +1183,14 @@ nothing depends on it, and no act follows — so nothing fails open.
 > routing, context assembly and `Planner.plan` before anything is driven: a check placed at the
 > driver would let a zero budget spend a model call first, which is the outcome the arm below
 > forbids, and a path that restates or routes without entering the driver would bypass it
-> altogether. **So it runs before routing, before planning and before any I/O**, and the monotonic
-> deadline is then fixed when driving begins (above). **The two cases are
+> altogether. **So it runs before routing, before planning and before any I/O**, and **the
+> monotonic deadline is fixed at that
+> same instant** (above) — so the planning the turn does before it drives **consumes** the user's
+> budget rather than preceding it. **A deadline fixed when driving began would replenish it**: a
+> `converse(timeout=PT1S)` whose first planner call took twenty seconds would then hand its first
+> step a fresh second, and the call would spend twenty-one against a budget of one, which is false
+> of *"the **whole request's** budget"* and of the one-user's-wait quantity §9 keeps apart from
+> the other two. **The two cases are
 > not the same and must not collapse into one**: a budget that **expires during** the walk stops
 > it and leaves the remaining steps `PENDING` (§2), while a budget that was **never** positive —
 > `timedelta(0)`, a negative one, or a value that is not a `timedelta` at all — is a caller fault
@@ -1204,8 +1209,10 @@ nothing depends on it, and no act follows — so nothing fails open.
 > or an NTP step is a different contract this one does not provide and should not be stretched
 > to"*. **A wall-clock reading moved backwards by NTP or an operator would make the computed
 > remainder larger**, topping the request's budget up for as long as the correction lasted and
-> making a later step's remainder **not** strictly smaller — the two things the clauses above
-> forbid, reached through the instrument meant to enforce them.
+> making a later remainder **exceed** an earlier one — the two things the clauses above forbid,
+> reached through the instrument meant to enforce them. **The monotonic source is what makes the
+> non-increasing rule true**; it does not make the sequence strictly decreasing, and nothing here
+> asks it to.
 
 > **Normative — and no seam, type or collaborator is added for it.** The source is read from the
 > running loop at the point of use: **no `core` type is added, no `Clock` is injected for it, no
@@ -1214,6 +1221,19 @@ nothing depends on it, and no act follows — so nothing fails open.
 > injected `Clock` is still read for is unchanged and is not this section's**: an instant a rule
 > compares against a stored one — ADR-0253 §5's `evidence_recency` among them (§1, §5) — where a
 > wall-clock instant is exactly the right contract.
+
+> **Normative — the remainders are *non-increasing*, and the strictness lives on the gate rather
+> than on the sequence.** Every remainder is computed from **one** deadline fixed once per adapter
+> call, so no later one exceeds an earlier one; **two consecutive ones may be equal**, because a
+> monotonic source guarantees only that it does not go backwards and a platform whose resolution
+> is coarser than the work between two readings — or a conversion that lands both in the same
+> microsecond — returns the same figure twice. **What is strict is the gate**: a step or an
+> interpretation starts only on a remainder that is **strictly positive** (above), which is
+> ADR-0029 §4's requirement and does not depend on the sequence decreasing at all. **A
+> requirement that each remainder be strictly smaller would be a platform-dependent contract**
+> — true on one host and false on another for the same correct implementation — which is why it
+> is not stated and why the arm below tests a strict decrease only over a **controlled** source
+> advanced by known intervals.
 
 > **Normative.** **A step the deadline stopped is `PENDING` and is never `SKIPPED`** (§2), and the
 > remainder is never rounded up, clamped to a minimum, borrowed from a later turn or topped up.
@@ -1777,15 +1797,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    in the shared `PlanStore` conformance suite: `commit_attempt(add_execution_id=E)` on **B**
    after A already holds E is **refused**, so the state in which E belongs to two attempts —
    under which a claim naming B would pass every conjunct — **cannot be reached through the
-   store** (§3). **And every ownership refusal asserts its class, not merely that it refused**:
-   `StaleExecutionError` **subclasses** `PlanningError` (`core/errors.py`), so an arm asserting
-   only `PlanningError` is satisfied by the retryable class §3 forbids here — a caller obeying
-   that class's contract would then retry a permanently invalid write forever. Each of the three
-   ownership paths — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
-   duplicate-ownership limb, the seeded legacy claim included — asserts a `PlanningError` that is
-   **not** a `StaleExecutionError`, and the three retryable limbs of §3's conjunct assert
-   `StaleExecutionError` positively, so an implementation cannot satisfy the set by collapsing the
-   two. **And the same case through the other door**: `open_attempt` with a
+   store** (§3). **And every refusal this decision adds asserts its class, not merely that it
+   refused**: `StaleExecutionError` **subclasses** `PlanningError` (`core/errors.py`), so an arm
+   asserting only `PlanningError` is satisfied by the retryable class §3 forbids — a caller
+   obeying that class's contract would then retry a permanently invalid write forever. **All six**
+   — `commit_attempt`'s and `open_attempt`'s ownership refusals, and each of the conjunct's four
+   limbs, the seeded legacy claim included — assert a `PlanningError` that is **not** a
+   `StaleExecutionError`. **And the arm that keeps the two questions apart**: ADR-0249 §8's
+   stale-revision refusal, reached through the same member, still raises `StaleExecutionError`,
+   so an implementation cannot satisfy the set by making `commit_transition` raise one class for
+   everything. **And the same case through the other door**: `open_attempt` with a
    `GoalAttempt` whose `execution_ids` already names E is **refused** on the same terms, because
    that member takes a whole attempt and the tuple may arrive non-empty — a caller could otherwise
    reach the forbidden state without calling `commit_attempt` at all. A paired arm asserts the
@@ -1934,8 +1955,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     or retried**. They are what stop an implementation rolling the sweep back, sweeping again
     from a later turn, or reading the mixed state as a plan still driving.
 16. **The deadline, decremented across steps and not replenished by a resume** — a three-step
-    plan under a budget that two steps exhaust: each `StepRunner.run` receives a **strictly
-    smaller and strictly positive** remainder, the third step is never started, it is `PENDING`
+    plan under a budget that two steps exhaust, **over a controlled monotonic source advanced by
+    known intervals**: each `StepRunner.run` receives a remainder that is **strictly positive**
+    and **no larger than the previous one**, and — because the source is controlled and advanced
+    between the steps — **strictly smaller** here; the third step is never started, it is
+    `PENDING`
     and not `SKIPPED`, and a step already begun ran to completion past the deadline. **The arm
     that pins the resume**: a `resume(timeout=PT30S)` whose parked step takes PT29S leaves the
     following walk's first step approximately **PT1S** and not PT30S, so one adapter call spends
@@ -1946,9 +1970,10 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     `AttemptEffort.working` advanced by both walks and by the licensed round, and `planner_calls`
     by the round alone. **And the arm that pins which clock is read** (§9): with the injected
     `Clock` moved **backwards** between two steps — and, on a paired case, returning the **same**
-    instant twice — the second step's remainder is still **strictly smaller** than the first's and
-    the budget is **not** topped up, so a driver that computed the remainder from the wall clock
-    fails it. It is what stops ADR-0026's reserved contract being reached for here by accident.
+    instant twice — the second step's remainder is still **no larger** than the first's, and
+    strictly smaller where the controlled monotonic source was advanced between them: **the budget
+    is not topped up**, so a driver that computed the remainder from the wall clock fails it. It
+    is what stops ADR-0026's reserved contract being reached for here by accident.
     **And the arm that pins what the budget gates** (§9): a two-step plan with an interpretation
     between the steps, where the budget expires during step 1 — the **interpretation call is
     never made**, its row is unwritten, step 2 is `PENDING` and **not** `SKIPPED`, and the walk
