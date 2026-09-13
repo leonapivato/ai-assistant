@@ -646,6 +646,16 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > **Normative.** The implementing lanes owe these seven arms **between them**, each over
 > representative input and split by §11's ownership rule. A lane that lands fewer of the
 > assertions it owns has not implemented this decision.
+
+> **Normative.** **The enumeration below is a floor and not a ceiling**, on ADR-0219 §7's
+> ground and in its words. **Every normative clause of this decision that an implementation
+> can fail is owed an arm**; the list below names *"the ones whose absence would otherwise
+> be non-obvious, each with the failure it exists to catch"*, and it is written that way
+> deliberately, because *"a conformance list read as exhaustive is ADR-0108 §4's
+> 'false-shelter shape' at one more remove, this time in the suite rather than in the
+> contract"*. So a lane **adds the arm a normative clause needs whether or not that clause
+> is listed here**, and no implementation is conformant on the ground that a rule it
+> breaches has no arm below.
 >
 > 1. **A search that brought records into the supply, over a turn whose pre-existing
 >    supply is non-empty.** `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the
