@@ -342,6 +342,53 @@ _BY_ID = "SELECT data FROM goal_authorizations WHERE id = ?"
 _ID_IS_HELD = "SELECT 1 FROM goal_authorizations WHERE id = ?"
 
 
+def _checked_target(to: AuthorizationDisposition) -> None:
+    """Hold ``to`` to the exact member before any settlement branches on it.
+
+    **The annotation is the contract** — ADR-0254 §16 signs ``settle`` with
+    ``to: AuthorizationDisposition``, and ``mypy --strict`` runs over ``src`` and
+    ``tests``, so every caller in this tree is already held to it. This is the
+    guard for the one caller a type cannot reach, which is
+    :meth:`SqliteGoalAuthorizationStore.recent`'s own ground for its ``limit``
+    allowlist: *"reachable only from untyped code"*.
+
+    **It refuses rather than normalising, and the direction is the point.** A
+    ``StrEnum`` member's own value is **equal** to it and is not **identical** to
+    it, and a settlement asks both questions — *"is this an edge"* against a
+    ``frozenset`` of members, by equality; *"is this the establishment"* against one
+    member, by identity. A ``"established"`` reaching from untyped code passes the
+    first and fails the second, taking the direct write and skipping ADR-0254 §1's
+    uniqueness check entirely: **two ``ESTABLISHED`` rows of one pair, which is the
+    state §1 forbids.** Refusing closes that at the door and is strictly **narrower**
+    than the ratified signature; coercing the value would have widened what the
+    contract admits, which is a change to it rather than an implementation of it
+    (golden rule 5).
+
+    **An allowlist of the exact type**, which is
+    :meth:`SqliteGoalAuthorizationStore.recent`'s own shape for its ``limit`` and
+    ``core.config``'s for an integer setting (issue #471): *"every value this
+    refuses … is precisely an ``isinstance`` match"*. Here the match is the other
+    way round and the exact test is what a narrowing type checker leaves
+    reachable — an ``Enum`` with members cannot be subclassed, so exact-type and
+    membership are the same set and nothing conforming is refused by it.
+
+    Raises:
+        ValueError: If ``to`` is not an ``AuthorizationDisposition`` member. The
+            untrusted value is described through
+            :func:`~ai_assistant.core.types.describe_untrusted` rather than
+            ``repr``, so a hostile ``__repr__`` cannot replace the documented
+            refusal with its own exception.
+    """
+    if type(to) is not AuthorizationDisposition:
+        msg = (
+            f"to must be an AuthorizationDisposition member, got "
+            f"{describe_untrusted(to)}; a settlement asks which member it is by both "
+            f"equality and identity, and a value that answers those differently skips "
+            f"the uniqueness check (ADR-0254 §1, §16)"
+        )
+        raise ValueError(msg)
+
+
 def _sort_key(instant: datetime) -> int:
     """Return ``instant`` as whole microseconds since the epoch.
 
@@ -1030,35 +1077,24 @@ class SqliteGoalAuthorizationStore:
         **It reads no clock**: ``settled_at`` is the caller's, as ``record``'s
         instants are (ADR-0021 §3).
 
-        **``to`` is coerced to the member before anything branches on it**, and the
-        reason is that this method asks *"which member is this"* twice, in two ways:
-        the edge lookup compares by **equality** and the establishment branch by
-        **identity**. :class:`~ai_assistant.core.types.AuthorizationDisposition` is a
-        ``StrEnum``, so its own value is equal to it and is not it — and a caller
-        reaching this from untyped code with ``"established"`` would have passed the
-        first test and failed the second, taking the direct write and skipping §1's
-        uniqueness check entirely: **two ``ESTABLISHED`` rows of one pair, which is
-        the state §1 forbids**. The annotation is the contract and ``mypy --strict``
-        holds every caller in ``src`` and ``tests`` to it; this is
-        :meth:`recent`'s own guard on the same ground — *"reachable only from
-        untyped code"* — taken as a normalisation rather than a refusal, because
-        there is exactly one right answer for a value that names a member.
+        **``to`` is held to the exact member before anything branches on it**
+        (:func:`_checked_target`), and the reason is that this method asks *"which
+        member is this"* twice, in two ways: the edge lookup compares by
+        **equality** and the establishment branch by **identity**.
 
         Raises:
             ValueError: If ``to`` is not a member of
-                :class:`~ai_assistant.core.types.AuthorizationDisposition` or a
-                value naming one. Raised **locally and before any I/O**, and it is a
-                wiring bug rather than a settlement outcome: the four outcomes are
-                total over what the step can answer *about a row*, and a value that
-                names no disposition asks about no edge at all.
+                :class:`~ai_assistant.core.types.AuthorizationDisposition`. Refused
+                **locally and before any I/O** — before the lock, before the
+                connection and before any scripted fault a double could raise — so
+                the guard cannot be sequenced behind a store's own failure.
             AuthorizationError: If the store cannot be read or written. **A refusal
                 is not this**: the four outcomes are total over what the step can
                 answer, and a refusal that raised would make one an exception.
         """
+        _checked_target(to)
         async with self._lock:
-            return await _run_to_completion(
-                self._settle_sync, authorization_id, AuthorizationDisposition(to), settled_at
-            )
+            return await _run_to_completion(self._settle_sync, authorization_id, to, settled_at)
 
     def _settle_sync(
         self, authorization_id: str, to: AuthorizationDisposition, settled_at: datetime

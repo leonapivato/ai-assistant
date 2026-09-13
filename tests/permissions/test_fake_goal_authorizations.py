@@ -17,7 +17,7 @@ from one shared log and a future lane could easily give one of them its own.
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from authorization_builders import AT, EXPIRES, GOAL, NOW, SHARED_CLOCK, TOOL
@@ -226,3 +226,51 @@ class TestTwoLiveRowsPlantedBehindTheStoresBack:
         held = await store.resolve("p1")
         assert held is not None
         assert held.disposition is AuthorizationDisposition.PROPOSED
+
+
+class TestTheFakeRefusesAnInvalidTargetBeforeItsOwnScriptedFault:
+    """ADR-0084 §4's substitutability, in the one place a double can get it wrong.
+
+    The durable store refuses an invalid ``to`` *"locally and before any I/O"*, so a
+    double that raised its **own** scripted store fault first would report a
+    different class for the same call — and a consumer's fail-closed branch would be
+    written against whichever one its tests happened to see.
+
+    The shared suite cannot state this: a scripted fault is a capability only a
+    double has, so the ordering between it and a contract refusal is this file's.
+    """
+
+    async def test_the_value_error_precedes_a_scripted_write_fault(self) -> None:
+        """With ``fail_writes()`` armed **and** an invalid target, the refusal wins."""
+        store = FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
+        await store.record(authorization(id="a1"))
+        store.fail_writes()
+        with pytest.raises(ValueError, match="AuthorizationDisposition"):
+            await store.settle(
+                "a1",
+                to=cast("AuthorizationDisposition", "established"),
+                settled_at=NOW,
+            )
+
+    async def test_a_valid_target_still_reaches_the_scripted_fault(self) -> None:
+        """The guard is a gate and not a swallow: an armed fault still fires."""
+        store = FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
+        await store.record(authorization(id="a1"))
+        store.fail_writes()
+        with pytest.raises(AuthorizationError):
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+
+    @pytest.mark.parametrize(
+        "face",
+        [FakeGoalAuthorizations, FakeAuthorizationResolution],
+        ids=["query-face", "resolution-face"],
+    )
+    async def test_the_narrow_fakes_seeding_hook_takes_the_same_guard(
+        self, face: type[FakeGoalAuthorizations] | type[FakeAuthorizationResolution]
+    ) -> None:
+        """Their test-only ``settle`` writes through the same log, so a target the
+        store refuses must not reach it by a side door."""
+        seam = face()
+        seam.hold(authorization(id="a1"))
+        with pytest.raises(ValueError, match="AuthorizationDisposition"):
+            seam.settle("a1", to=cast("AuthorizationDisposition", "established"), settled_at=NOW)
