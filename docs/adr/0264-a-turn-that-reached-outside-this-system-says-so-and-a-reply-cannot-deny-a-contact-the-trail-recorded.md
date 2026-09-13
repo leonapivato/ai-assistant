@@ -5,8 +5,9 @@
 - **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
   — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
   other turn it is given nothing, and the assembled prompt is byte-identical to what it is
-  today"*, and §6 below falsifies it for **every turn that composes a reply**: the composing
-  stage is given one fragment of this decision's own on each of them, the turns carrying no
+  today"*, and §6 below falsifies it for **every turn that composes an unrouted reply** —
+  a routed pass gets no fragment and keeps the byte-identity: the composing stage is given
+  one fragment of this decision's own on each of the rest, the turns carrying no
   `SearchNotServiced` member included — a search that reached the provider and was answered,
   which records no `SearchDisposition`, and a turn that asked for no search at all (#2365).
   **The first sentence binds entire**: a turn on which
@@ -132,12 +133,14 @@ told whatever the model infers — #2268 records it inferring the opposite of th
 > statement whether or not it composes; a pass that neither establishes one nor composes
 > carries nothing (§7).
 
-> **Normative.** **There is therefore no turn on which the assembled prompt stays
-> byte-identical, and that is a cost taken deliberately** — recorded against ADR-0242 §6 in
-> the header, where an earlier draft of this decision took that guarantee over for its own
-> carrier as ADR-0228 §10 and ADR-0227 §3 have for theirs. #2365 is a turn that would have
-> had the byte-identity, and a reply claiming a reach that never happened is what the
-> silence bought.
+> **Normative.** **No turn that composes an unrouted reply keeps a byte-identical assembled
+> prompt, and that is a cost taken deliberately** — recorded against ADR-0242 §6 in the
+> header, where an earlier draft of this decision took that guarantee over for its own
+> carrier as ADR-0228 §10 and ADR-0227 §3 have for theirs. **The routed pass is the one
+> exception and keeps its byte-identity**, because §6 gives it no fragment and ADR-0197 §6's
+> two-input closure therefore stands (§14). #2365 is a turn that would have had the
+> byte-identity, and a reply claiming a reach that never happened is what the silence
+> bought.
 
 > **Normative.** **The condition is stated over what the trail establishes and never
 > over what the turn produced.** It does not turn on whether records reached the supply,
@@ -477,8 +480,8 @@ seam's addition cheap — a second member rather than a second carrier minted fr
 > guarantee is therefore whole on a routed pass; what it does without is the instruction the
 > guarantee does not rest on.
 
-> **Normative.** Where the pass composes, the composing stage is given **one fixed fragment
-> per `OutboundReach` member**, written in
+> **Normative.** Where the pass composes **and is not routed**, the composing stage is given
+> **one fixed fragment per `OutboundReach` member**, written in
 > `ai_assistant.orchestration`, interpolating **`records` and nothing else, and only on
 > `REACHED`**. The `REACHED` fragment states the two facts every contact has and no others:
 > that **this turn reached outside this system**, and **how many records it took in from
@@ -560,8 +563,9 @@ when they do not, the user can see it.
 > and of nothing else"*, so the spoken reply is the whole of what that user is told.
 > **What is therefore not available on the spoken surface is this decision's guarantee**,
 > and that is a stated cost rather than a gap (§12), taking ADR-0250 §15's shape. A spoken
-> turn still carries `outbound_statement` and still gets §6's fragment, so the reply is
-> composed under the same instruction — but no code-composed statement stands beside it.
+> turn still carries `outbound_statement`, and an **unrouted** one still gets §6's fragment,
+> so that reply is composed under the same instruction — but no code-composed statement
+> stands beside it. A **routed** spoken pass gets no fragment either, for §6's reason.
 > **This decision's title is bounded by that**: a reply cannot deny a contact **on a surface
 > that renders the statement**, and the spoken one does not.
 
@@ -860,9 +864,9 @@ this here would reach into a decision this ADR has not read.
 >    same shape renders its own. An implementation that conditions any of the three on what
 >    the reply says fails this arm, and one that renders `NOT_REACHED` with no reply beside
 >    it fails it too.
-> 11. **A routed pass that is not a park**, whole-reply and streaming, which are separate
->    composers from the conversational one and the path an implementation updating only the
->    latter would leave behind. It carries `NOT_REACHED`, renders §7's statement, and its
+> 11. **A routed pass that is not a park**, whole-reply, streaming **and spoken**, which are
+>    separate composers from the conversational one and the path an implementation updating
+>    only the latter would leave behind. It carries `NOT_REACHED`, renders §7's statement, and its
 >    composer is given **neither** §6's fragment **nor** `_PLAN_IS_ABOUT_ACTING` — ADR-0197
 >    §6's two inputs unchanged, which is the assertion that keeps that closure true. A
 >    **routed park** carries `None` and renders nothing. An implementation that gives the
