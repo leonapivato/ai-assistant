@@ -260,9 +260,11 @@
   unchanged, and **ADR-0228 §4's** PT20S gate that the first limb names. §5's per-search
   clause is **ADR-0241 §1's** deadline and **ADR-0231 §5's** ceilings; its per-money
   clause is **ADR-0194's** ceiling and **ADR-0016 §4's** unknown-cost floor. **ADR-0251
-  §11** answers §13's first deferral. The two deferrals §5 dissolves are **ADR-0238's**.
-  Nothing in that list is a supersession target of this ADR, and none of it was ever
-  offered as one.
+  §11** answers §13's first deferral. The two deferrals §5 dissolves are **ADR-0238's**. Of
+  that list, only **ADR-0251** is a supersession target of this ADR — by its own
+  `(<scope>)` pair, which is the very scope this note is about. **ADR-0016**,
+  **ADR-0194**, **ADR-0228**, **ADR-0231**, **ADR-0238** and **ADR-0241** supersede no
+  part of this ADR, and none of them was ever offered as doing so.
   ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
   lines for this same invariant, ruling that a line written *after* ADR-0070 under a
   reading its own §4 does not support is corrected rather than grandfathered. Appended
