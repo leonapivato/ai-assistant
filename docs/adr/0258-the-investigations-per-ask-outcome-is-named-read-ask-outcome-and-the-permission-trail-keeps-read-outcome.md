@@ -15,13 +15,13 @@
   `extra="forbid"`, the carries-nothing-else clause, the parameter's name, its default, its
   keyword position and its additive-in-shape character, the breaking-change flag, the
   one-entry-per-serviced-ask-in-servicing-order clause and its `()` reading, the
-  nothing-the-source-said clause, the ask-never-edited clause, the separately-governed-audit
-  clause, the mints-nothing-durable clause and the planner-is-not-told-which-round clause — and
+  nothing-the-source-said clause, the ask-carried-back-unaltered clause, the
+  carrier-and-audit-governed-separately clause, the mints-nothing-durable clause and the planner-is-not-told-which-round clause — and
   §§1-2 and §§4-18 are untouched. §3 loses no obligation and gains none; one identifier moves,
   and §6 shows the working.
-- **No other ADR is superseded in whole or in part**, and §5 shows the working for the three a
-  reader would check — ADR-0185, ADR-0240 and ADR-0249. **ADR-0185 is the one to check
-  first**: its §1 `ReadOutcome` is the whole reason this decision exists, and it is untouched
+- **No other ADR is superseded in whole or in part**, and §5 shows the working for each one a
+  reader would expect to be — ADR-0185, ADR-0240, ADR-0249 and ADR-0015. **ADR-0185 is the one
+  to check first**: its §1 `ReadOutcome` is the whole reason this decision exists, and it is untouched
   in name, in members and in every reader of it.
 - **Names symbols in `src/ai_assistant/core/types.py` and
   `src/ai_assistant/core/protocols.py`**, so it is a contract-surface decision and takes both
@@ -58,7 +58,7 @@ record §5 lays on ADR-0251 is written to stand beside that note and to replace 
 
 ### The tree, read rather than assumed, at `origin/main` `2ce4c193`
 
-Three types, one file, and neither name is a draft:
+Three types, one file, and not one of them is a draft:
 
 ```python
 class ReadOutcomeKind(StrEnum):
@@ -87,8 +87,7 @@ already on the tree as an assertion rather than as prose.
 
 A **gated read's** `REFUSED` says the first `SourceGrants.live` check answered `None`, so the
 source "is not resolved, not opened and not parsed" (ADR-0097 §5, ADR-0185 §1). An **ask's**
-`REFUSED` says a source that was reached decided not to answer, on a ground it owns (ADR-0251
-§2). ADR-0185 §1's enum is the permission trail's record, durable on `SourceReadRecord` and read
+`REFUSED` says *"the source **decided** not to answer, on a ground it owns"* (ADR-0251 §2). ADR-0185 §1's enum is the permission trail's record, durable on `SourceReadRecord` and read
 by an operator; ADR-0251 §3's model is an in-process argument built from one turn's servicings
 and discarded with the turn, minting nothing durable by its own clause. Neither is derivable
 from the other. One name cannot carry both, and no reading of either ADR asks it to.
@@ -170,10 +169,14 @@ which is the outcome ADR-0015 §5 exists to prevent, reached by obeying it. Reco
 irregularity is the remedy that is actually available once the code has merged; pretending the
 decision came first is not.
 
-**And it licenses nothing.** ADR-0015 §5 is untouched by this ADR (§5). A lane that finds a
-ratified contract clause unimplementable still stops, records what it found and asks — which is
-what PR #2287 did — rather than reading this ADR as permission to land a contract surface no
-ADR has ruled.
+**And it licenses nothing.** ADR-0015 §5 is untouched by this ADR (§5), and nothing here is a
+precedent for landing a contract surface no ADR has ruled. What PR #2287 did *right* is the part
+worth copying: it did not improvise silently. It made the minimal choice the collision left open,
+spelled the divergence out in the type's own docstring, pinned the hazard in a test, and filed
+#2281 the same day — so the gap was visible, bounded and closable, which is why it could be
+closed by this ADR rather than discovered later. What it could have done instead is stop and ask
+before landing the contract, and a lane that meets the same wall should prefer that; the record
+here is the remedy for having gone the other way, not an endorsement of it.
 
 ### 5. What this records against earlier ADRs, under ADR-0082 §1
 
@@ -219,7 +222,7 @@ Two files change, and both edits are the permitted shapes:
 - **ADR-0251's `Status` line**, `Accepted` → `Partially superseded by ADR-0258 (<scope>)`.
   ADR-0070 §1 permits "recording a supersession that has landed" as an in-place header edit, and
   presupposes the superseding ADR exists — it does, it is this file, and the edit lands in the
-  same change that ratifies it. The line is one physical line, the leading token leads,
+  same PR that ratifies it. The line is one physical line, the leading token leads,
   `Accepted` is dropped, and the scope names a clause and carries no `ADR-NNNN` token, so
   ADR-0070 §4's extraction invariant holds (every `ADR-NNNN` after the leading token is a
   target).
@@ -256,11 +259,11 @@ partial supersession and is why ADR-0070 §4 requires the scope to be specific. 
 greps the corpus for `ReadOutcome` still finds §3's ratified sentences saying `ReadOutcome` about
 the model; the `Status` line and the dated note are what point them here.
 
-**Follow-on work.** Two docstrings and one test module docstring on the tree say the name is
-"this lane's and the ADR's is `ReadOutcome`" — `ReadAskOutcome`'s own docstring in
-`core/types.py`, and the header of `tests/core/test_read_outcome_types.py`. Those sentences go
-stale the moment this ADR is accepted, and correcting them is outside this docs-only change's
-fence; it is filed as its own issue rather than folded in.
+**Follow-on work.** Two docstrings on the tree say the name is "this lane's" and that the ADR's
+is `ReadOutcome` — `ReadAskOutcome`'s own docstring in `core/types.py`, and the module header of
+`tests/core/test_read_outcome_types.py`. Those sentences go stale the moment this ADR is
+accepted, and correcting them is outside this docs-only change's fence; it is filed as its own
+issue (#2319) rather than folded in.
 
 **What would trigger revisiting this.** A decision that gives the two vocabularies one home, or
 an ADR that retires ADR-0185 §1's enum, would make the collision this ADR routes around
@@ -272,11 +275,12 @@ it freely.
 **Rename ADR-0185 §1's enum instead, and give §3 the name it asked for. Rejected.** It is the
 only other way to seat both types in one module, and it is worse on every count. ADR-0185 §1's
 `ReadOutcome` is **ratified, implemented and wire-visible**: it is a field type on
-`SourceReadRecord`, it is read by the audit path and by an operator-facing surface, and its six
-members are asserted total over ADR-0097 §5 and ADR-0093 §8's outcomes. Renaming it would be a
+`SourceReadRecord`, `wire/envelope.py` records that "``SourceReadRecord`` and ``ReadOutcome``
+were promoted by ADR-0185", `interfaces/cli.py`'s `_read_ending` renders every member to an
+operator, and its six members are asserted total over ADR-0097 §5 and ADR-0093 §8's outcomes. Renaming it would be a
 breaking contract change touching a persisted record's type, owed its own migration reasoning,
 in order to free a name for a model that is an in-process argument discarded with the turn. And
-the collision was **the later ADR's to avoid**: ADR-0185 held the name for eleven weeks and
+the collision was **the later ADR's to avoid**: ADR-0185 has held the name since 2026-08-23 and
 ADR-0251 §3 minted over it without noticing, so the cost of the mistake belongs where the
 mistake was made. The deciding argument is smallness — renaming the *newer*, non-durable,
 non-wire-visible type is the change that moves the fewest readers, and it is the change the tree
