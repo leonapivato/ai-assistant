@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     PermissionOutcome,
     PermissionRuling,
     SpanCoverage,
+    canonical_json_bytes,
 )
 from ai_assistant.testing.goal_authorizations import (
     AUTHORIZATION_ACCOUNT,
@@ -80,8 +81,24 @@ def member(canonical: str = SITE) -> CanonicalDestination:
     return CanonicalDestination(protocol=DestinationProtocol.HTTPS, canonical=canonical)
 
 
-def span(supplied: str, index: int, *, argument: str = "site") -> EgressSpan:
-    """One span selecting ``supplied`` under HTTPS's rules."""
+def account_member(account: BoundAccount = ACCOUNT) -> CanonicalDestination:
+    """The **account member** a binding with no selected recipient derives.
+
+    ADR-0148 §2's third clause: the canonical destination set is never empty, and a
+    call selecting nothing reaches the connected account itself. That is the one
+    request an empty ``coverage`` covers (ADR-0254 §1, arm 54).
+    """
+    return CanonicalDestination(account=account)
+
+
+def span(supplied: str, index: int | None = None, *, argument: str = "site") -> EgressSpan:
+    """One span selecting ``supplied`` under HTTPS's rules.
+
+    ``index`` is ``None`` for the single-destination case, where the argument's own
+    value is the string rather than a one-element array — which is the ordinary
+    shape of a booking call and the one ADR-0254 §3's per-argument rule is easiest
+    to read over.
+    """
     return EgressSpan(
         argument=argument,
         index=index,
@@ -109,8 +126,13 @@ def binding(
     discharges the first exactly where a row covers in full and relaxes the second
     for nothing, so a case varies them separately (ADR-0254 §6, arms 31 and 67).
     """
+    spans = (
+        (span(supplied[0]),)
+        if len(supplied) == 1
+        else tuple(span(value, index) for index, value in enumerate(supplied))
+    )
     return EgressBinding(
-        spans=tuple(span(value, index) for index, value in enumerate(supplied)),
+        spans=spans,
         account=account,
         transport_endpoint=ENDPOINT,
         planned_with_external_content=external,
@@ -136,17 +158,58 @@ def request(
     ``goal`` defaults to :data:`GOAL` and is set to ``None`` by the case that asks
     what a request carrying none reaches (arm 9).
     """
-    supplied: dict[str, list[str]] = {}
+    listed: dict[str, list[str]] = {}
+    single: dict[str, str] = {}
     for occurrence in bound.spans:
-        if occurrence.destination is not None:
-            supplied.setdefault(occurrence.argument, []).append(occurrence.destination.supplied)
-    carried: dict[str, FrozenJson] = {**supplied, **parameters}
+        if occurrence.destination is None:
+            continue
+        if occurrence.index is None:
+            single[occurrence.argument] = occurrence.destination.supplied
+        else:
+            listed.setdefault(occurrence.argument, []).append(occurrence.destination.supplied)
+    carried: dict[str, FrozenJson] = {**listed, **single, **parameters}
+    described = EgressBinding(
+        # Ordered by argument and then by index, absent first, which
+        # ``EgressBinding`` refuses otherwise (ADR-0150 §4).
+        spans=tuple(
+            sorted(
+                (
+                    *bound.spans,
+                    *(
+                        EgressSpan(
+                            argument=key,
+                            provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                            extent=_extent(value),
+                        )
+                        for key, value in parameters.items()
+                    ),
+                ),
+                key=lambda one: (one.argument, one.index if one.index is not None else -1),
+            )
+        ),
+        account=bound.account,
+        transport_endpoint=bound.transport_endpoint,
+        planned_with_external_content=bound.planned_with_external_content,
+        coverage=bound.coverage,
+        closed_loop=bound.closed_loop,
+    )
     return ActionRequest(
         tool=tool,
         parameters=carried,
-        egress_binding=bound,
+        egress_binding=described,
         goal=goal,
     )
+
+
+def _extent(value: FrozenJson) -> int:
+    """The code-point count ADR-0150 §4 fixes, for a span carrying no destination.
+
+    A JSON string is counted directly; every other value in the canonical JSON
+    encoding, which is the one ``parameters_digest`` is taken over — the same rule
+    ``core`` applies, reproduced here because nothing outside ``core`` may import
+    its private counter.
+    """
+    return len(value) if isinstance(value, str) else len(canonical_json_bytes(value).decode())
 
 
 def route_d_decision(  # noqa: PLR0913 — one knob per field ADR-0254 §7's ten checks read
@@ -264,6 +327,7 @@ __all__ = [
     "SITE",
     "TOOL",
     "MovableClock",
+    "account_member",
     "binding",
     "member",
     "request",
