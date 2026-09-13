@@ -6,10 +6,8 @@
   — **six limbs, all about one field, `Authorization.expires_at`.** **§12's ladder rung 3
   entire**, its *"no row at all"* and its *"Nothing is invented, nothing is defaulted and
   nothing falls back to a configuration"* included: where the recorded act states no instant and
-  the goal carries no `deadline`, `expires_at` is now the **earliest instant among the recorded
-  turns the row's coverage rests on** advanced by the deployment's turn-retention window and a
-  row **is** written, where that window is finite and that sum is strictly after `proposed_at`
-  (§1).
+  the goal carries no `deadline`, `expires_at` is now `proposed_at` advanced by the deployment's
+  turn-retention window and a row **is** written, where that window is finite (§1).
   **§12's stated cost of that rung** — *"a goal carrying no `deadline` whose user stated no
   horizon has no route (d) at all, and every call of it asks"* — which is true only where that
   window is set to keep turns forever, and there the ratified rung stands verbatim as the
@@ -156,70 +154,54 @@ an instant, and it does not take that decision by another route.
 > **Normative.** **ADR-0254 §12's ladder is taken exactly as it stands, and its third rung is
 > replaced.** Where the recorded act states no instant that ADR-0254 §10's resolutions take
 > (rung 1), and the goal carries no `deadline` or carries one at or before `proposed_at`
-> (rung 2), `expires_at` is **the row's basis instant advanced by the deployment's
-> turn-retention window** — `core.config.Settings.episode_retention` (ADR-0074 §7) — **where
-> that window is finite**. The rung is taken **on paths (i) and (iii) alone and at the instant
-> the row is written**, which is ADR-0254 §12's own rule for the ladder; **path (ii) takes none
-> of the ladder**, and §5 below is the one motion a correction may make on this field.
+> (rung 2), `expires_at` is **`proposed_at` advanced by the deployment's turn-retention
+> window** — `core.config.Settings.episode_retention` (ADR-0074 §7) — **where that window is
+> finite**. The rung is taken **on paths (i) and (iii) alone and at the instant the row is
+> written**, which is ADR-0254 §12's own rule for the ladder; **path (ii) takes none of the
+> ladder**, and §5 below is the one motion a correction may make on this field.
 
-> **Normative.** **The row's basis instant is the earliest recorded-turn instant its coverage
-> rests on, and it is `proposed_at` where the row carries no coverage at all.** Every
-> `CoverageMember` carries an `AuthorizationBasis` naming a recorded turn (ADR-0254 §8, §9
-> clause (i)); the basis instant is **the earliest of those turns' own instants**, taken over
-> every member of the row being written. A path-(i) proposal about an argument-free call carries
-> `coverage=()` (ADR-0254 §11), rests on no act but the recorded `CONFIRM` itself, and takes
-> **`proposed_at`**. A path-(iii) row's coverage is minted from its own act, so its basis
-> instant **is** `proposed_at` and the two readings coincide.
-
-> **Normative.** **That instant is resolved by the rule ADR-0254 already requires of every
-> member, and this decision adds no reader.** ADR-0254 §9 clause (i) makes an `Authorization`
-> constructible *"**only** with a basis naming a recorded turn and a span inside that turn's
-> stored utterance, on **every** coverage member"*, and §16 assigns that comparison in terms —
-> *"a rule comparing a basis against a **recorded turn** is **`orchestration`'s** … before the
-> row is built"*. So the turn each member rests on is in `orchestration`'s hand at the write
-> already, and its instant is the same value ADR-0254 §1 reads off a recorded turn for
-> `proposed_at` on paths (ii) and (iii). **No store, seam, field, type or contract is added for
-> it**, and **where the instant of any basis act cannot be resolved at the write — the turn is
-> gone — no row is written**, the ladder falls to §3's last rung and the concrete call is
-> confirmed under ADR-0148 §3's route (a).
+> **Normative.** **The rung reads `proposed_at` and no other instant of any record, and this
+> decision adds no reader to any store.** It does not read an episode's stamp, a conversation's
+> `last_active_at`, or the `occurred_at` of the recorded turn any coverage member's basis names.
+> `proposed_at` is already on the row being written — ADR-0254 §1 makes it the recorded
+> `CONFIRM`'s `decided_at` on path (i) and the recorded turn's instant on path (iii) — so the
+> rung is arithmetic over one value in hand and one `Settings` duration, and **no store, seam,
+> field, type, member or cross-store contract is added for it**. The title of this decision names
+> the **window** the act's own record is kept for, which is a duration; it does not claim that
+> the row and any particular record expire together, and the bound clause below is what it does
+> claim.
 
 **The window, and not the act's episode's own stamp, and the reason is that the stamp is not
 reachable.** ADR-0074 §3 captures one `EpisodicMemory` per turn *outcome*, so on path (i) — where
 `proposed_at` is the recorded `CONFIRM`'s `decided_at` — the episode of the turn the act rode may
 not have been written when the row is. A rung that could not be taken on one of its two paths
 would not be a rung of a total ladder, and reading one would put a `MemoryStore` read on the
-write path of a permissions record, which ADR-0254 §16's roster does not contemplate. **The
-recorded turn and the episode of that turn are two different records and only one of them is
-already in hand**: the turn is what §9 clause (i)'s own resolution reaches for on every member,
-and the episode is a `MemoryStore` record nothing on this path reads. So the row takes the
-**same window** as the act's record, measured from the act's own recorded instant rather than
-from that record's stamp.
+write path of a permissions record, which ADR-0254 §16's roster does not contemplate. **The same
+answer disposes of the recorded turn's own `occurred_at`, which is a second record and not a
+value in hand**: ADR-0254 §8 closes `AuthorizationBasis` at `act`, `span` and `resolution`, so a
+basis names a turn and carries no instant of it; `TurnResult` carries the utterance §9 clause (i)
+checks a span against and no instant either; and the only place the instant exists is
+`ConversationTurn.occurred_at`, reachable through `ConversationStore.turn_of_episode` — a second
+store read on the write path of a permissions record, with its own absent-versus-failed
+distinction to rule on. **That read is not minted here** (`Alternatives considered`), and §8
+books what would fire a decision that mints it. So the row takes the **same window** as the act's
+record, measured from the row's own instant.
 
-> **Normative.** **A row outlives the episode of an act it rests on in exactly two cases, and
-> both are named rather than hidden.** An episode is stamped at capture from the same setting
-> (ADR-0074 §7), so a row taking the window from the **earliest** turn its coverage rests on
-> expires at or before that act's episode wherever the window is unchanged **and** that episode's
-> capture is at or after its turn's own instant. The two cases are exactly the two ways that
-> fails: **`episode_retention` widened between an act's capture and the row's write**, the
-> episode carrying the window in force when it was captured and the row the window in force when
-> it was written; and **the clock moving backwards between an act's turn and that act's episode
-> capture**, which this corpus admits in terms — ADR-0254 §1 states its own lower bound *"because
-> the clock can move backwards — an operator correction, an NTP step"* — and which stamps the
-> episode from a reading earlier than the instant the row measures from. **Neither is repaired
-> here and neither is hidden**: the row is bounded by the window in force at its own write and by
-> nothing longer, §4's rendering shows the instant it actually carries, and §9's arms pin both.
-
-> **Normative.** **An authority is never granted on an act the deployment's own horizon has
-> already passed.** Where the basis instant advanced by the window is at or before
-> `proposed_at` — which is exactly the case where the oldest act the row would rest on is older
-> than the window itself — the row would be born expired, ADR-0254 §1's construction refuses it,
-> and **no row is written**: the ladder falls to §3's last rung and the concrete call is
-> confirmed under ADR-0148 §3's route (a). Nothing is clamped to make such a row
-> constructible. **This is the clause that makes ADR-0254 §8's per-member basis safe here** — a
-> path-(i) proposal may carry members resting on acts far older than the `CONFIRM` it rides
-> (§8's *"Two members of one record may name two different acts"*), and a window measured from
-> the write would hand such a row a full horizon past the point at which the evidence for it
-> stopped being kept.
+> **Normative.** **The bound, which is what this rung guarantees, and it is not a coincidence.**
+> **A row written on this rung is bounded by the turn-retention window in force at its own write,
+> measured from `proposed_at`, and by nothing longer. No clause of this decision asserts that the
+> row and the record of any act it rests on expire together, and a row may outlive such a
+> record.** It does so, among other ways, where the row rests on an act older than the write —
+> ADR-0254 §8 makes the basis **per member**, so a path-(i) proposal may carry a member resting on
+> an earlier turn and the row then outlives that act's episode by the act's age; where
+> `episode_retention` was **widened** between an act's capture and the row's write; where the
+> clock **moved backwards** before an episode was captured, which ADR-0254 §1 admits in terms
+> (*"the clock can move backwards — an operator correction, an NTP step"*); and immediately, where
+> the **user deleted** the episode or its conversation under ADR-0074 §8, which §6 rules leaves
+> the row standing. **That list is illustrative and the bound is the rule**: nothing here is
+> repaired and nothing is hidden — §4's rendering shows the instant the row actually carries, §9's
+> arms pin the cases above, and §8 books the decision that would couple an authority's liveness to
+> the record of its act.
 
 **What the rung does claim, and it is exactly decision 4's.** It is **not a separate arbitrary
 timer**: no figure is minted for this record, no `Settings` field is added for it, and the
@@ -234,20 +216,21 @@ history"* (ADR-0074 §7) — the turn a basis names is gone from retrieval and f
 survives is the row's own transcription of the user's words, and what does not is the
 independently recorded turn that transcription could be checked against**: ADR-0254 §11 puts the
 span on the row, so a listing never loses the ability to say what the user said, and the `act`
-the basis carries is what stops pointing at anything. An authority granted for materially longer
-than the acts it rests on are kept would be an authority whose own account of itself had become
-uncheckable, and that is what this rung declines to write — which is why the window runs from the
-**earliest** act the row rests on rather than from the row's own instant.
+the basis carries is what stops pointing at anything. So the claim this rung makes is about the
+**duration** and not about a coincidence of instants: an authority lasts no longer than this
+deployment keeps a recorded turn, and where it rests on an act older than the grant it can
+outlive that act's record by the act's age — which the bound clause above states, §9's arm pins,
+and §8 books for the decision that would close it.
 
-**It is shorter than the conversation's own reclaim, which is the fail-closed direction, and it
-is now so across conversations too.** A conversation is reclaimed only when it has no live turns
-**and** `last_active_at` is past the horizon, and `last_active_at` is at or after the instant of
-every turn that conversation holds — so a conversation holding a basis act survives at least
-until that act's instant advanced by the window, which is at or after this rung's answer. The
-comparison held before only for the conversation the row was written in; measuring from the
-earliest basis act makes it hold for every conversation the row rests on. Taking the window
-rather than the conversation's eligibility also keeps the instant **fixed**: the conversation's
-is a moving target, and §2's read-once rule could not be stated over one.
+**It is shorter than the reclaim of the conversation the row is written in, which is the
+fail-closed direction.** That conversation is reclaimed only when it has no live turns **and**
+`last_active_at` is past the horizon, and `last_active_at` is at or after the instant of the turn
+this row is written against — so it survives at least as long as this rung's answer and usually
+far longer. **The comparison is stated over that conversation and no other**: a row resting on a
+member whose act belongs to an earlier conversation says nothing about *that* conversation's
+reclaim, which the bound clause above is what governs. Taking the window rather than the
+conversation's eligibility also keeps the instant **fixed**: the conversation's is a moving
+target, and §2's read-once rule could not be stated over one.
 
 ### 2. `Settings` gains nothing, the one deployment value read is recorded, and the arithmetic is fail-closed
 
@@ -286,12 +269,10 @@ argued away.
 > `deadline` moves no row already written"* — read onto the one further input this rung takes,
 > and a widened window neither extends a live row nor revives a lapsed one.
 
-> **Normative.** **The arithmetic is fail-closed, and wherever it does not yield a usable
-> instant no row is written.** `episode_retention` is refused at load unless it is strictly
-> positive, so the sum is **strictly after the basis instant** — but it is **not** thereby
-> strictly after `proposed_at`, the basis instant being at or before the write, and §1's clause
-> on that case governs: the row is not clamped to satisfy ADR-0254 §1's construction, it is not
-> written. Where the addition cannot be taken at all — a clock reading near
+> **Normative.** **The arithmetic is fail-closed, and where it cannot be taken no row is
+> written.** `episode_retention` is refused at load unless it is strictly positive, so a horizon
+> taken from it is **strictly after** `proposed_at` and ADR-0254 §1's construction refusal never
+> fires on this rung. Where the addition cannot be taken at all — a clock reading near
 > `datetime.max`, which `checked_clock` admits (ADR-0026 §3) and which `SqliteConversationStore`
 > already guards its own comparison against — **no row is written**, the ladder falls to §3's
 > last rung, and the concrete call is confirmed under ADR-0148 §3's route (a). **Nothing is
@@ -452,9 +433,8 @@ other value the act states.
 > conversation reclaim rule and §8's deletion all stand exactly as ratified. **This decision adds
 > no reader to the episode store or the conversation store and no cross-store contract of any
 > kind**: the one value it reads from ADR-0074's side of the corpus is the `Settings` duration
-> (§1), and the recorded-turn instant §1's rung measures from is reached by ADR-0254 §9 clause
-> (i)'s own basis resolution, which `orchestration` performs on every member of every row it
-> builds whether or not this decision exists.
+> (§1). It reads no episode's stamp, no conversation's `last_active_at` and no recorded turn's
+> `occurred_at`, and §8 books the decision that would read the last of those.
 
 > **Normative.** **No row is moved, shortened or settled by anything that happens to the act's
 > own record.** A row whose act's episode has lapsed, or whose act's conversation was deleted
@@ -481,10 +461,8 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    the goal carries no `deadline` … **no path-(i) proposal and no path-(iii) row is written**"*,
    and with it that rung's *"Nothing is invented, nothing is defaulted and nothing falls back to
    a configuration"*. A reader holding only ADR-0254 writes no row for every deadline-free goal;
-   after this decision they write one wherever the turn-retention window is finite — which is the
-   default — **and the earliest act the row rests on is still inside it**. **Superseded, narrowed
-   to where a window exists and the row's basis instant advanced by it is strictly after
-   `proposed_at`** (§1, §3).
+   after this decision they write one wherever the turn-retention window is finite, which is the
+   default. **Superseded, narrowed to where a window exists** (§1, §3).
 2. **§12's stated cost.** *"a goal carrying no `deadline` whose user stated no horizon has no
    route (d) at all, and every call of it asks"*. Over-wide as it stands: true only under a
    deployment that keeps turns forever. **Superseded in scope, and verbatim where §3 fires.**
@@ -540,10 +518,14 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 - **Asking the user for a horizon at the act.** ADR-0254 §19's booked decision, **still booked
   and still not taken**; this decision exists to make the question unnecessary in the ordinary
   case, not to answer it. Fired exactly as §19 says.
-- **Coupling an authority's liveness to the actual lifecycle of its act's record.** §6 keeps a
-  row standing when the act's episode lapses or its conversation is deleted; §1 states the one
-  case in which the row outlives that episode at all, and refuses the row outright where the act
-  is already older than the window. Fired by a decision that lands a
+- **Coupling an authority's liveness to the actual lifecycle of its act's record, and reading
+  any instant of that record.** §6 keeps a row standing when the act's episode lapses or its
+  conversation is deleted, and §1's bound clause states that the row may outlive such a record
+  rather than claiming it does not. The same entry books **reading a basis act's own
+  `occurred_at`** — through `ConversationStore.turn_of_episode`, the only place it exists — so
+  that a row could be bounded by the horizon of the oldest act it rests on instead of by its own
+  write; that decision must rule on absent-versus-failed for the read and on what a lane does
+  with each. Fired by a decision that lands a
   cross-store read or deletion between this store and the conversation store — which ADR-0254
   §16's roster does not contain and §19 books next door.
 - **Recording on the row which rung set its expiry.** §4 adds no member and forbids one. Fired by
@@ -583,8 +565,8 @@ what forbids joining them into one.
 
 > **Normative.** **The ordinary case.** A finite `episode_retention`; a goal with no `deadline`;
 > an act naming no instant → a row **is** written on path (i) and on path (iii), `expires_at`
-> equals the row's basis instant advanced by that window, and the goal's **second** call inside
-> the coverage reaches route (d) with **no `CONFIRM`**.
+> equals `proposed_at` advanced by that window, and the goal's **second** call inside the
+> coverage reaches route (d) with **no `CONFIRM`**.
 
 > **Normative.** **`episode_retention = None`.** The same inputs → **no row on either path**,
 > `Confirmation.authorization` absent, route (a), and no deployment value read for anything else.
@@ -599,35 +581,27 @@ what forbids joining them into one.
 > **Normative.** **Prospectivity after the write.** Widen `episode_retention` between the write
 > and a later read → the row's `expires_at` is **unchanged**, and a lapsed row is not revived.
 
-> **Normative.** **The capture-to-write interval, the first divergence §1 admits.** Widen
-> `episode_retention` between an act's capture and a path-(i) row's write → the row carries the
-> window in force **at the write**, so it outlives that act's episode, and that is the ruled
-> behaviour rather than a defect the lane repairs.
+> **Normative.** **The capture-to-write interval.** Widen `episode_retention` between an act's
+> capture and a path-(i) row's write → the row carries the window in force **at the write**, so
+> it outlives that act's episode, and that is the ruled behaviour rather than a defect the lane
+> repairs.
 
-> **Normative.** **A clock rollback before capture, the second divergence §1 admits.** Move the
-> injected clock backwards between a basis act's turn and that act's episode capture, with
-> `episode_retention` unchanged → the episode is stamped from the earlier reading and the row
-> outlives it, and that too is the ruled behaviour rather than a defect the lane repairs. Nothing
-> in the row is clamped, re-stamped or recomputed for it.
+> **Normative.** **A clock rollback before capture.** Move the injected clock backwards between an
+> act's turn and that act's episode capture, with `episode_retention` unchanged → the episode is
+> stamped from the earlier reading and the row outlives it, which is again §1's bound and not a
+> defect. Nothing in the row is clamped, re-stamped or recomputed for it.
 
-> **Normative.** **An older basis act shortens the row.** A path-(i) proposal whose coverage
-> carries a member resting on a recorded turn materially older than the `CONFIRM` it rides →
-> `expires_at` is **that turn's instant** advanced by the window, **not** `proposed_at` advanced
-> by it, so the row expires strictly earlier than one resting on the confirming turn alone. The
-> arm takes the **earliest** of several bases, not the latest and not the row's own instant.
+> **Normative.** **An older basis act does not shorten the row, and the row then outlives that
+> act's record.** A path-(i) proposal whose coverage carries a member resting on a recorded turn
+> materially older than the `CONFIRM` it rides — an act retained but near its own horizon →
+> `expires_at` is **`proposed_at`** advanced by the window, unshortened, so the row stands after
+> that act's episode has lapsed. That is §1's bound clause and the ruled behaviour, **not** a
+> defect the lane repairs and **not** a case in which the lane reads the act's own `occurred_at`.
 
-> **Normative.** **An act older than the window writes no row.** A path-(i) proposal whose
-> earliest basis act's instant advanced by the window is at or before `proposed_at` → **no row is
-> written**, `Confirmation.authorization` is absent, route (a), and **no clamped, saturated or
-> minimum-length instant is produced anywhere**.
-
-> **Normative.** **An unresolvable basis act writes no row.** A row whose members are complete but
-> the instant of some basis act cannot be resolved at the write → **no row is written**, route
-> (a), and the lane does not substitute `proposed_at` for the instant it could not read.
-
-> **Normative.** **An argument-free call takes `proposed_at`.** A path-(i) proposal about a call
-> carrying no arguments, whose row carries `coverage=()` (ADR-0254 §11) → the rung takes
-> `proposed_at` advanced by the window, there being no basis act to measure from.
+> **Normative.** **A deleted act leaves the row exactly as it stands.** Delete the act's episode,
+> or its whole conversation, under ADR-0074 §8 → the row keeps the `expires_at` it was written
+> with, stays live until that instant, and is settled by nothing (§6). No sweep, no reclaim and
+> no cross-store deletion touches it.
 
 > **Normative.** **A correction stating an earlier admissible instant narrows.** A path-(ii)
 > correction whose span states an instant strictly after the new row's `proposed_at` and strictly
@@ -692,9 +666,9 @@ a date.
 
 **The window is longer than most goals, and that is the trade.** A default `episode_retention` of
 thirty days means an ordinary authority runs for thirty days rather than for the weekend it was
-about — **thirty days from the act, not from the grant**, so a goal picked up again three weeks
-later gets what is left of the window and not a fresh one. Three things bound what that costs
-and each is already ratified: the coverage is narrow —
+about, counted from the grant — so a goal picked up again three weeks later, on acts three weeks
+old, gets a fresh window rather than what is left of theirs (§1's bound clause, §8's booking).
+Three things bound what that costs and each is already ratified: the coverage is narrow —
 one goal, one declaration, one account, one destination set, fixed values and bounded ranges, and
 **anything outside it asks** (ADR-0254 §6, §9 clause (iii)); the row is revocable at any moment
 and its handle is put in front of the user **at the act** (§11); and a user who wants less says so
@@ -762,15 +736,23 @@ and a computation**: the act's *recorded turn* is what §9 clause (i) already ma
 second record nothing on this path reads. The cost of not reading the episode is stated in §1 and
 pinned by §9's capture-to-write arm rather than left for a reader to find.
 
-**Taking the window from the row's own `proposed_at`.** This decision's own first draft, and
-rejected on ADR-0254 §8's *"The basis is per member and never per record. Two members of one
-record may name two different acts"*. A path-(i) proposal may carry members resting on acts far
-older than the `CONFIRM` it rides, so a window measured from the write would hand a row written
-on the twenty-ninth day of a thirty-day horizon a further thirty days of authority over an act
-whose record dies the next day — the authority outliving its evidence by almost a full window,
-which is exactly what §1 claims it does not do. Measuring from the **earliest** basis act costs
-no new machinery, collapses the divergence to the single widened-window case, and turns the same
-arithmetic into §1's refusal for an act already past the horizon.
+**Measuring the window from the earliest recorded turn the row's coverage rests on, rather than
+from `proposed_at`.** A draft of this decision did that, to bound the row by the horizon of the
+oldest act it stands on: ADR-0254 §8 makes the basis **per member**, so a path-(i) proposal
+written on the twenty-ninth day of a thirty-day horizon may rest on an act whose episode dies the
+next day, and a window measured from the write gives that row a further thirty days. **Rejected
+because the instant is not a value this decision has, and reaching it is a decision of its own.**
+`AuthorizationBasis`'s field list is closed at `act`, `span` and `resolution` (ADR-0254 §8), so a
+basis names a turn and carries no instant of it; the utterance §9 clause (i) checks a span
+against, `TurnResult`, carries none either; and the instant exists only as
+`ConversationTurn.occurred_at`, reachable through `ConversationStore.turn_of_episode`. Taking it
+would put a **second store read on the write path of a permissions record** — one ADR-0254 §16's
+roster does not contemplate — and would oblige this ADR to rule on that read's
+absent-versus-failed distinction and to arm both. That is a larger decision than one rung's
+value, so §1 states the **bound** it can actually guarantee, §9 arms the case, and §8 books the
+decision that would read the instant. The honest form of the claim is that an authority lasts no
+longer than this deployment keeps a recorded turn, counted from the grant — not that it dies with
+any particular record.
 
 **Taking the earliest admissible reading of an instant the span does not settle, and putting no
 question.** A draft of this decision did exactly that, on the argument that the earliest reading
