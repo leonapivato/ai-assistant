@@ -9757,6 +9757,24 @@ function renderGoalQuestion(item, clarification) {
   line(item, `question id: ${clarification.question_id}`, "hint");
 }
 
+// The statuses ADR-0250 §1 calls **closed**, which are the ones the abandonment is not
+// offered on.
+//
+// **§1 states the rule and it names two open statuses, not one**: *"A goal is **open**
+// where its `GoalStatus` is `ACTIVE` or `BLOCKED`, and **closed** where it is `ACHIEVED`
+// or `ABANDONED`. No lane reads a third state off the status, and **`BLOCKED` is
+// open**"*. This page previously tested `status === "active"`, which withheld the control
+// from a blocked goal — one that "cannot **currently** be achieved", which is the kind an
+// owner most wants to give up — while `abandon_goal`, which tests
+// `orchestration.goals.is_open` over `{ACTIVE, BLOCKED}`, would have abandoned it.
+// Adversarial review, round 8, `blocker`.
+//
+// **Keyed on the closed pair rather than the open one, because the two fail
+// differently.** A status this build does not know — a member from a hub at another
+// version, which `GOAL_STATUS_WORDS` already exists for — is then offered the control and
+// answered honestly by the engine, rather than having the act silently withheld.
+const CLOSED_GOAL_STATUSES = ["achieved", "abandoned"];
+
 // The acts one row offers (ADR-0250 §11, §12, §13).
 //
 // **Answering and taking up are the same control in two wordings**, because they are
@@ -9806,7 +9824,7 @@ function offerGoalActs(item, goal) {
     );
   });
   row.appendChild(take);
-  if (goal.status === "active") {
+  if (!CLOSED_GOAL_STATUSES.includes(goal.status)) {
     const give = document.createElement("button");
     give.type = "button";
     give.textContent = "Give this up";
