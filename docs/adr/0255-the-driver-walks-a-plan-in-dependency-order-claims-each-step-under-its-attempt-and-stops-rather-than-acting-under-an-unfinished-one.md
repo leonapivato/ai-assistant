@@ -2109,18 +2109,23 @@ ledger and stops on the same three guards.
 
 > **Normative — a walk drives several steps and `TurnOutcome.step` stays the one field `core`
 > already has, so this states which step it carries.** `StepOutcome` is singular and **gains no
-> member and loses none**. **`TurnOutcome.step` carries the step that stopped the walk** — the
-> step that parked, the step that returned `INDETERMINATE`, the step whose claim was refused, or
-> the `SKIPPED`/`UNMET_DEPENDENCY` step that ended it — **and where no step stopped the walk, the
-> last step the walk dispatched**; it is `None` only where the walk dispatched none, exactly as it
-> is today. **The ground is what a spoke renders: where the goal stands.** That is the step the
-> user must act on, and it is the stopping step wherever there is one. **No earlier step's
-> disposition is lost and none is carried here**: each is on the plan's `StepTransition` record
-> (§3, §10) and is reachable from the goal surfaces, so the singular field is a projection of a
-> walk that is fully recorded rather than the only account of it. **This mints no `core` shape, no
-> field and no enumeration, and supersedes nothing**: `StepOutcome`'s clauses bind verbatim — the
-> disposition is still the gate's verdict and not the step's own result, and `step_id` is still
-> required and still addresses a step of the returned `state`.
+> member and loses none**. **`TurnOutcome.step` carries the last step the walk *dispatched*** — the
+> last step that reached `StepRunner` and produced a `StepDisposition` — and is **`None` where the
+> walk dispatched none**, exactly as it is today. **Where the walk stopped at a dispatched step,
+> that step is the last dispatched one**, so the stopping step is what the field carries: the step
+> that parked, the step that returned `INDETERMINATE`, the step whose disposition commits nothing
+> (§2). **The ground is what a spoke renders: where the goal stands**, which is the step the user
+> must act on. **A step the driver skipped and a claim `commit_transition` refused reach no
+> `StepRunner` and dispatch nothing, so neither is carried here**: `Disposition` is the gate's
+> verdict and holds no member for either, so naming one would fabricate a verdict no gate gave —
+> and **what they cause at the user's surface is A9's**, which §12 books by name and this decision
+> does not take. **No step's outcome is lost**: every step's `status`, `skip_reason`, `failure` and
+> `output` are on the `ExecutionState` that `StepOutcome.state` already carries, addressable by
+> `step_id`, which is that model's own documented idiom — so the singular field is a projection of
+> a walk the returned state already records in full. **This mints no `core` shape, no field and no
+> enumeration, and supersedes nothing**: `StepOutcome`'s clauses bind verbatim — the disposition is
+> still the gate's verdict and not the step's own result, and `step_id` is still required and still
+> addresses a step of the returned `state`.
 
 > **Normative.** **The composing stage's `undriven` argument keeps its meaning and gains no
 > member.** After a walk it is the steps the walk left `PENDING` and the steps it skipped, which
@@ -2591,7 +2596,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    sought to the first `PENDING` step would dispatch step 3, which is the defect §5's
    start-at-position-one rule makes unreachable rather than checks for. **And the arm that pins
    which step the turn reports** (§11): over that same plan, with step 1 `SUCCEEDED` and step 2
-   parked, the turn's `TurnOutcome.step` names **step 2** — the step that stopped the walk — and
+   parked, the turn's `TurnOutcome.step` names **step 2** — the last step the walk dispatched,
+   and the one it stopped at — and
    **not** step 1, against an implementation that kept the retired single-step path's habit of
    reporting the first step it drove.
 9. **"Restart during approval"** — the same plan parked at its second step; a **fresh** engine over
@@ -3184,7 +3190,7 @@ read and the caller's claim moves the stored revision while the copy the caller 
 matching itself. §H.1's property is right and its construction spends it; deriving the revision in
 the store buys the property outright.
 
-**`TurnOutcome` reports the walk's steps as a sequence rather than the one stopping step.**
+**`TurnOutcome` reports the walk's steps as a sequence rather than the one step §11 projects.**
 Rejected **here**, and not on the merits — it is the better shape for a surface that wants to
 render a whole walk, and §11's projection is chosen because it is available without moving a
 `core` model. Making `TurnOutcome` sequence-valued replaces a cross-boundary shape every adapter
