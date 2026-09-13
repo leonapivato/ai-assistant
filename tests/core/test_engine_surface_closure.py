@@ -1151,6 +1151,21 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``PlanStore`` gains no member at all. §10 fixes no numeral and says why: "the figure
     is the tree's and not this decision's".
 
+    **42 is ADR-0254 §16 and §20's Lane 1, and it is under the second limb twice
+    over.** ``PermissionRuling`` gains ``authorised_goal`` and ``ToolDefinition``
+    gains ``system_supplied``; a ``PermissionRuling`` rides inside a
+    ``PermissionDecision``, a ``ToolDefinition`` rides inside the same decision, a
+    decision crosses the promoted surface today, both models are ``extra="forbid"``
+    and ``project`` renders a model by ``model_dump()`` — so a hub at 42 emits both
+    members on every decision it sends and a client at 41 fails each with
+    ``extra_forbidden``. ``ActionRequest`` gaining ``goal`` is **not** a third
+    ground: it crosses no frame. The method set does **not** move and stands at
+    sixty-one: Lane 1 adds three Protocols — BREAKING under golden rule 5 — and none
+    of them is promoted; ``AssistantEngine``'s two new members are **Lane 3's** and
+    move it then. §20 fixes no numeral and says why — other lanes of that batch move
+    the same constant, so "a number written in this document would be a claim about
+    an order nobody controls".
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1159,7 +1174,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 41), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 42), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

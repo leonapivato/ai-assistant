@@ -1691,7 +1691,71 @@ from ai_assistant.wire.errors import (
 #: is registered, and the error mapping is untouched — ADR-0250's M1 mints no error class
 #: and removes none. ``wire/surface.py`` reads the three new methods and the new keyword
 #: off the Protocol itself, which is what that module exists for.
-PROTOCOL_VERSION: Final[int] = 41
+#: **42 since ADR-0254 §16, §20 — Lane 1**, and the grounds are **two**, each
+#: independently ADR-0124 §9's second limb: *"a change to a wire-carried `core` type
+#: that makes a value one peer emits invalid for the other, whether the change widens
+#: or narrows the type"*.
+#:
+#: 1. :class:`~ai_assistant.core.types.PermissionRuling` gains ``authorised_goal``
+#:    (§7). A ruling is carried **inside** a
+#:    :class:`~ai_assistant.core.types.PermissionDecision`, and a decision crosses the
+#:    promoted surface today. That model sets ``extra="forbid"`` and ``wire/codec.py``
+#:    renders a model by ``model_dump()``, so a hub at 42 emits the member on every
+#:    ruling it sends and a client at 41 fails it with ``extra_forbidden``.
+#: 2. :class:`~ai_assistant.core.types.ToolDefinition` gains ``system_supplied`` (§3),
+#:    and a declaration crosses inside that same decision. §20 names this as Lane 1's
+#:    **second** ground beside the one §16 states, so neither is left resting on the
+#:    other.
+#:
+#: **A defaulted member is still a shape change**, as the entries at 39 and 40 state:
+#: ``authorised_goal`` defaults to ``None`` and ``system_supplied`` to the empty tuple,
+#: and both are emitted on **every** value of their type, so every frame carrying one
+#: moves together.
+#:
+#: **No lane defers its own bump to a later one** (§16), which is the defect that clause
+#: is stated against. ADR-0254 §20 cuts three lanes and **two** of them carry a bump:
+#: this one, and Lane 3's for the promoted surface's two new methods and
+#: ``Confirmation.authorization`` / ``TurnOutcome.authorizations``. **Lane 2 changes no
+#: `core` type at all** and bumps nothing — ``ActionRequest``, whose ``goal`` it sets,
+#: crosses no frame in any case.
+#:
+#: **No integer was fixed in the ADR** (§16, §20), because ADR-0249 §12 already
+#: scheduled a bump and other lanes of this batch may land before or after: 41 is what
+#: the tree held when this lane rebased, and 42 is one more.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 41 and a peer at 42 refuse each other and say so.
+#:
+#: **No `Authorization` crosses whole and no member of the three new Protocols is
+#: promoted** (§16). The listing, the revocation, ``Confirmation.authorization`` and the
+#: announcement are **Lane 3's** four carriages, and each is a **projection** rather than
+#: the record: no client holds a row's basis, its resolution, its digest, its
+#: ``confirmation``, its ``supersedes``, its account or its ``destinations``.
+#: :class:`~ai_assistant.core.types.ActionRequest` gains ``goal`` here and crosses no
+#: frame, and ``PermissionDecision`` gains no field — ``from_request`` transcribes the
+#: ruling whole, so ``authorised_goal`` reaches the durable record along the path that
+#: exists today.
+#:
+#: **No stored-record version moves for this lane and no migration is owed.** The
+#: authorization store is **new**, so its own ``schema_version`` starts at 1 with no
+#: population of earlier files to bring forward. The audit trail's schema is unchanged:
+#: ``authorised_goal`` rides inside the decision's existing ``data`` blob, and a stored
+#: decision written before this decision decodes as exactly the decision it was — with
+#: the field absent, which is what makes ADR-0254 §7's *"no row predating this decision
+#: can be classified as route (d)"* true of the store as well as of the reader. The plan
+#: store's ``schema_version`` stays at **4**, ``PlanExport.schema_version`` at **10**,
+#: the parked-read store's at **3**, and ``ConversationExport.schema_version`` at **2**.
+#: **`core.config.Settings` gains nothing at all** (§12, ADR-0256 §2).
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — Lane 1 mints two error classes,
+#: :class:`~ai_assistant.core.errors.AuthorizationError` and
+#: :class:`~ai_assistant.core.errors.InvalidAuthorizationError`, and **neither crosses a
+#: frame**: no member of any of the three new Protocols is promoted, so no call that can
+#: raise one reaches a client.
+PROTOCOL_VERSION: Final[int] = 42
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
