@@ -51,6 +51,9 @@ from ai_assistant.core.types import (
     ProposedUnderstanding,
     Provenance,
     ReferenceOutcome,
+    RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     StepExecution,
     StepOutcome,
     TurnOutcome,
@@ -493,6 +496,44 @@ def test_an_undecided_turn_may_report_that_the_handle_it_was_given_resolved_to_n
 
     assert asking.reference is ReferenceOutcome.UNKNOWN
     assert asking.goal_engagement is None, "and no engagement was constructed to hold it"
+
+
+def test_a_routed_pass_carries_no_engagement_either() -> None:
+    """§5: ``goal_engagement`` is ``None`` "on an outcome that engaged none".
+
+    That clause names three shapes and the type can see two of them. A **routed
+    operation** is the first, and it is structural rather than a convention: ADR-0197
+    §7 ends the pipeline where it routed, before any association runs, so there is no
+    goal to engage — an outcome claiming both that a route ended the pass *and* that a
+    goal was opened is describing two passes, which is the same thing §8 already
+    refuses of a route beside a driven step.
+
+    The third shape §5 names, ADR-0198 §1's restated settled binding, is **not**
+    asserted here and cannot be: a restatement is not distinguishable from this type's
+    members, so it stays a rule about the site that builds one.
+    """
+    engagement = GoalEngagement(disposition=EngagementDisposition.OPENED, outcome="book a campsite")
+
+    with pytest.raises(ValidationError, match="routed pass engaged no goal"):
+        TurnOutcome(
+            turn=None,
+            routed=RoutedOperation(
+                operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED
+            ),
+            reply="I forgot it.",
+            goal_engagement=engagement,
+        )
+
+    assert (
+        TurnOutcome(
+            turn=None,
+            routed=RoutedOperation(
+                operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED
+            ),
+            reply="I forgot it.",
+        ).goal_engagement
+        is None
+    ), "and the same outcome without one is exactly what ADR-0197 §8 admits"
 
 
 def test_a_disambiguation_names_at_least_one_goal() -> None:

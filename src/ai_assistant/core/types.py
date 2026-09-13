@@ -20150,6 +20150,15 @@ class TurnOutcome(BaseModel):
         so one method holding both would be two rulesets behind one name, and the
         branch count would say so.
 
+        **It carries no** :attr:`goal_engagement` **either** (ADR-0250 §5). That
+        section rules the member ``None`` "on an outcome that engaged none — a routed
+        operation (ADR-0197 §7), a restated settled binding (ADR-0198 §1), and the
+        ``UNDECIDED`` turn of §3", and the first of those is structural rather than a
+        convention: §7 ends the pipeline where it routed, before any association, so
+        there is no goal to engage and nothing to announce. The third is not a shape
+        this type can see — a restatement is not distinguishable from its members — so
+        it stays a rule about the site that builds one.
+
         Raises:
             ValueError: If the outcome describes a routed pass that could not have
                 happened.
@@ -20157,6 +20166,14 @@ class TurnOutcome(BaseModel):
         routed = self.routed
         if routed is None:  # pragma: no cover - the caller tests this before delegating
             return self
+        if self.goal_engagement is not None:
+            msg = (
+                "a routed pass engaged no goal, so this outcome must carry no "
+                "goal_engagement: a taken route ends the pipeline before any goal work, "
+                "so there is no association, no revision and nothing to announce "
+                "(ADR-0250 §5, ADR-0197 §7)"
+            )
+            raise ValueError(msg)
         if self.step is not None:
             msg = (
                 "an outcome carries a routed operation or a driven step, never both: a "

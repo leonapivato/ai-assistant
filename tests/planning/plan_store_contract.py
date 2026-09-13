@@ -1505,6 +1505,81 @@ class PlanStoreContract:
             f"g{index:02d}" for index in range(1, MAX_ASSOCIATION_CANDIDATES + 1)
         ]
 
+    async def test_the_tie_break_is_applied_only_to_instants_that_are_equal(
+        self, store: PlanStore
+    ) -> None:
+        """§1: "the ``goal_id`` **ascending** as the tie-break" — for a *tie*.
+
+        Two instants a microsecond apart are not a tie, and ordering them by a float of
+        the datetime makes them one: ``datetime.timestamp()`` returns seconds as a
+        ``float``, and from about 2262 two instants a microsecond apart compare **equal**
+        as floats while comparing correctly as datetimes. A store sorting on the float
+        would then fall through to the id, returning the *older* goal first whenever the
+        ids happened to run that way — which is §1's key inverted, silently, on a pair it
+        does not tie.
+
+        Driven at a far-future instant rather than a 2026 one because that is where the
+        collision is reachable at all; the ids are chosen so the wrong answer and the
+        right one differ.
+        """
+        far = datetime(2263, 1, 1, tzinfo=UTC)
+        await store.save_goal(_goal("a-earlier"))
+        await store.save_goal(_goal("z-later"))
+        await store.engage_goal("a-earlier", at=far, conversation_id="c1", expected_version=0)
+        await store.engage_goal(
+            "z-later",
+            at=far + timedelta(microseconds=1),
+            conversation_id="c1",
+            expected_version=0,
+        )
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert [one.id for one in page.goals] == ["z-later", "a-earlier"], (
+            "the later instant leads; the id decides nothing here because this is no tie"
+        )
+
+    async def test_goals_engaged_in_the_same_instant_are_ordered_by_id_ascending(
+        self, store: PlanStore
+    ) -> None:
+        """§1: and where the instants *are* equal, the id is what decides.
+
+        "Two goals engaged in the same instant is reachable — a clock with millisecond
+        resolution and a turn that engages two goals is not, but a migrated pair
+        carrying no instant at all is — so the order is stated rather than left to a
+        store's row order." This is the other half of the case above: the tie-break
+        exists and applies exactly here.
+        """
+        same = datetime(2026, 5, 1, tzinfo=UTC)
+        for name in ("g-zulu", "g-alpha"):
+            await store.save_goal(_goal(name))
+            await store.engage_goal(name, at=same, conversation_id="c1", expected_version=0)
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES)
+
+        assert [one.id for one in page.goals] == ["g-alpha", "g-zulu"]
+
+    async def test_a_limit_above_the_cap_is_held_to_the_cap(self, store: PlanStore) -> None:
+        """§2: the ceiling is fixed and a caller asking for more gets it, not a raise.
+
+        "Truncated to ``MAX_ASSOCIATION_CANDIDATES``, and carrying the count of goals
+        the truncation dropped" — the cap is the rule and ``limit`` is the caller's
+        narrower request, so a larger one is held down rather than refused. What it must
+        **not** do is hand the type more than it admits: that surfaces as a raw
+        ``ValidationError`` escaping the store, which is neither this subsystem's error
+        class nor an answer a caller can act on.
+
+        ``elided`` is counted against what was actually returned, so it stays the true
+        remainder whichever of the two bounds applied.
+        """
+        for index in range(1, MAX_ASSOCIATION_CANDIDATES + 3):
+            await store.save_goal(_goal(f"g{index:02d}"))
+
+        page = await store.candidates_for("c1", limit=MAX_ASSOCIATION_CANDIDATES + 5)
+
+        assert len(page.goals) == MAX_ASSOCIATION_CANDIDATES
+        assert page.elided == 2, "the true remainder against the bound that applied"
+
     async def test_a_candidate_set_is_read_with_a_positive_limit(self, store: PlanStore) -> None:
         """§9: ``limit`` is what the caller truncates to, and zero truncates to nothing.
 
