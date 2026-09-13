@@ -1257,8 +1257,9 @@ string — `PT15M`, `PT2H`, `P1D` — and applies to every entry of that step's 
 `when`. Leave it out to require no particular freshness, which is the ordinary \
 case. Do not send a number, a zero duration or a negative one.
 
-Beside `steps`, a PLAN may carry `interpretations` — at most FOUR — each reading \
-ONE thing and settling ONE condition of this goal:
+Beside `steps`, a PLAN — and only a PLAN, never a DECLINE — may carry \
+`interpretations`, at most FOUR, each reading ONE thing and settling ONE \
+condition of this goal:
 
  "interpretations": [{"settles": "D1", "record": "M2"},
                      {"settles": "D2", "reads": {"step": 1, "field": "summary"}}]
@@ -1841,11 +1842,21 @@ class ModelBackedPlanner:
                     "created_at": self._now(),
                     "rationale": rationale,
                     "read_request": _optional_read_request(envelope),
+                    # **On the plan shape alone** (ADR-0253 §9: the member sits
+                    # "beside ``steps``", and every interpretation §8 describes is
+                    # about a plan's own steps or about a record a plan will act on).
+                    # A decline is a reply that has said what it meant (ADR-0176 §5),
+                    # so a member that is not part of the shape it sent is stepped
+                    # over rather than made to cost a repair round — ADR-0226 §3's
+                    # posture for an emission that resolves to nothing: "not an error,
+                    # not a park, not a degradation of the turn".
                     "interpretations": self._plan_interpretations(
                         envelope,
                         ids=[step.id for step in step_payloads],
                         memories=memories,
-                    ),
+                    )
+                    if step_payloads
+                    else [],
                 }
             )
         except ValidationError as exc:
@@ -1952,6 +1963,17 @@ class ModelBackedPlanner:
         interpretation no ``when`` and no ``verifies``, and "its eligibility is its
         input's availability and nothing else".
 
+        **Called on the plan shape alone**, which is the caller's guard rather than
+        this method's: §9 puts the member "beside ``steps``", the prompt asks for it
+        inside the PLAN shape, and §8's two inputs are a record this plan will act on
+        and the output of a step this plan carries. A decline carries no step, so its
+        ``reads`` form is unconstructible and its ``record`` form would settle a
+        proposition on a turn that decided to do nothing — a claim §8 nowhere
+        authorises. The member is **stepped over** there rather than refused, because
+        ADR-0176 §5 makes a reply carrying the decline marker one that "has said what
+        it meant", and spending a repair round on a key beside it would ask a model to
+        re-decide a judgement that was never in question.
+
         Args:
             envelope: The decoded model envelope.
             ids: The ids minted for **every** step of this envelope, in order — a
@@ -2011,13 +2033,33 @@ _MEMORY_LABEL: Final = re.compile(r"M[1-9][0-9]{0,8}")
 
 #: ADR-0253 §9's ``evidence_recency``, read as the one form that section admits.
 #:
-#: A ``TypeAdapter`` rather than the field's own coercion, and guarded by the
-#: ``"P"`` test at :func:`_iso_duration`, because pydantic reads a bare number as
-#: **seconds** and reads ``"1 day, 0:00:00"`` and ``"00:15:00"`` as durations too —
-#: so ``{"evidence_recency": 900}`` would become fifteen minutes by a route §9
-#: forbids in terms: "a value that is not one … is an extraction failure for that
-#: envelope rather than a figure rounded, clamped or defaulted into range".
+#: A ``TypeAdapter`` rather than the field's own coercion, and guarded by
+#: :data:`_ISO_DURATION` at :func:`_iso_duration`, because pydantic reads a bare
+#: number as **seconds** and reads ``"1 day, 0:00:00"`` and ``"00:15:00"`` as
+#: durations too — so ``{"evidence_recency": 900}`` would become fifteen minutes by a
+#: route §9 forbids in terms: "a value that is not one … is an extraction failure for
+#: that envelope rather than a figure rounded, clamped or defaulted into range".
 _DURATION: Final = TypeAdapter(timedelta)
+
+#: ISO-8601's duration grammar, which is what §9 names and is **narrower than what
+#: pydantic reads**.
+#:
+#: Its parser sums repeated designators and accepts them out of order — ``P1D2D`` is
+#: three days, ``PT1H2H`` is three hours and ``PT1M1H`` is a minute and an hour — and
+#: none of those three is an ISO-8601 duration. Reading one would be exactly the
+#: repair §9 forbids: a figure a model did not write, standing as the freshness a
+#: dispatch is later tested against. So the **form** is decided by this pattern and
+#: the arithmetic is left to the parser, which is :func:`_iso_instant`'s division one
+#: field over.
+#:
+#: The two lookaheads refuse the empty designators: ``P`` and ``PT`` carry no
+#: component, and ``P1DT`` opens a time part it never fills. ``[.,]`` is the decimal
+#: separator ISO-8601 admits in either spelling. Nothing here judges the **value**:
+#: ``PT0S`` matches the grammar and is refused by ``PlanStep.evidence_recency``'s own
+#: ``gt``, because a bound is the field's to state and a form is not.
+_ISO_DURATION: Final = re.compile(
+    r"P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?!$)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?"
+)
 
 
 def _step_shape(
@@ -2342,14 +2384,18 @@ def _iso_duration(value: object, *, ordinal: int) -> timedelta:
     envelope rather than a figure rounded, clamped or defaulted into range."
 
     **The form is decided here and the bound is the field's**, which is
-    :func:`_iso_instant`'s division one field over. The leading ``P`` is what carries
-    the form: pydantic reads a bare number as *seconds*, reads ``"00:15:00"`` and
-    ``"1 day, 0:00:00"`` as durations, and reads ``"-PT5M"`` as a negative one — so
-    ``{"evidence_recency": 900}`` would otherwise become fifteen minutes by a route
-    §9 refuses, and a negative would reach a field whose ``gt`` would then report a
-    bound rather than a form. What survives the test is judged by
-    ``PlanStep.evidence_recency``'s own ``gt=timedelta(0)``, so ``"PT0S"`` is refused
-    as the zero it is.
+    :func:`_iso_instant`'s division one field over. :data:`_ISO_DURATION` is what
+    carries the form, and it is narrower than pydantic's reading in two directions:
+    that parser takes a bare number as *seconds*, takes ``"00:15:00"`` and
+    ``"1 day, 0:00:00"`` as durations and ``"-PT5M"`` as a negative one — so
+    ``{"evidence_recency": 900}`` would otherwise become fifteen minutes — and it also
+    **sums repeated designators and accepts misordered ones**, reading ``P1D2D`` as
+    three days and ``PT1M1H`` as an hour and a minute. Neither is an ISO-8601
+    duration, and §9 makes a value that is not one an extraction failure "rather than
+    a figure rounded, clamped or defaulted into range": a summed one is that figure,
+    arriving as a freshness requirement no model wrote. What survives the test is
+    judged by ``PlanStep.evidence_recency``'s own ``gt=timedelta(0)``, so ``"PT0S"``
+    is refused as the zero it is.
 
     Args:
         value: What the model wrote at ``evidence_recency``.
@@ -2361,7 +2407,7 @@ def _iso_duration(value: object, *, ordinal: int) -> timedelta:
     Raises:
         _ExtractionError: If it is not an ISO-8601 duration string.
     """
-    if not isinstance(value, str) or not value.startswith("P"):
+    if not isinstance(value, str) or _ISO_DURATION.fullmatch(value) is None:
         msg = (
             f"the step at position {ordinal} has an 'evidence_recency' of {value!r}: "
             f"it is an ISO-8601 duration written as a string, such as 'PT15M'"
