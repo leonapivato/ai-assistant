@@ -1,8 +1,9 @@
 # 259. An effect is claimed once per goal before it is dispatched, and a turn-start pass reconciles what an earlier turn left uncertain or unfinished
 
 - Status: Proposed
-- **Partially supersedes [ADR-0014](0014-planning-model.md),
-  in §4's transition table alone**, and §13 shows the working. That table gains one row —
+- **Partially supersedes [ADR-0014](0014-planning-model.md), in two scopes** — **§4's transition
+  table** and **§5's `PlanStore` member enumeration, `PlanExport` shape and `delete_goal`
+  cascade** — and §13 shows the working for both. That table gains one row —
   `INDETERMINATE → SUCCEEDED`, triggered by a reconciliation that established the effect, also
   setting `output` and `finished_at` — because a reader holding only §4, which states that *"every
   legal move is enumerated in §4 and enforced by `PlanExecution`"*, builds a tracker that refuses
@@ -10,9 +11,14 @@
   binds entire**, and so do §4's terminal `SUCCEEDED`/`SKIPPED` rule, its *"`FAILED` is terminal
   unless retried"* rule and `FAILED → RUNNING` row, its every-claim-carries-an-`approval_ref`
   rule, its claim-before-invocation ordering, its recovery paragraph and its *"We do not claim
-  exactly-once execution"* statement — which §3 of this document quotes as its own ground. §§1-3
-  and §§5-7 are untouched, and §7's deferral of idempotency keys and `INDETERMINATE` resolution is
-  **fired rather than replaced**, which earns no record (§13).
+  exactly-once execution"* statement — which §3 of this document quotes as its own ground.
+  **§5's second scope** is the roster gaining `claim_effect`, `PlanExport` gaining `effects` with
+  its `schema_version` moving from 11 to 12, §5's closure rule extending to those rows'
+  references and `delete_goal`'s cascade reaching them — the same shape ADR-0249 and ADR-0250
+  each took to that enumeration. **§5's compare-and-swap discipline, its commands-not-snapshots
+  rule and its local-residency, export-completeness and deletion obligations bind entire**, and
+  **§§1-3, §6 and §7 are untouched**. §7's deferral of idempotency keys and `INDETERMINATE`
+  resolution is **fired rather than replaced**, which earns no record (§13).
 - **Partially supersedes [ADR-0037](0037-joining-selection-permission-and-execution.md),
   in steps 4 and 5 of §4's resume sequence alone**, and only where the binding already carries a
   recorded resolution. There `resume` takes neither step — it calls no `ActionPolicy.resolve` and
@@ -153,25 +159,45 @@ Its reason is the record that did not exist — *"a goal records no completed ef
 could compare against"*. This section mints that record.
 
 > **Normative.** `core/types.py` gains **`EffectKey`**, a frozen model with `extra="forbid"`
-> whose fields are exactly **`tool_id`**, **`parameters_digest`** and **`egress_binding`**, an
-> `EgressBinding | None`. **It carries no fourth field**: no step id, no execution id, no plan
-> id, no decision id, no goal id, no instant and no attempt.
+> whose fields are exactly **`tool_id`**, **`parameters_digest`**, **`egress_account`**,
+> **`egress_endpoint`** and **`egress_destinations`** — the last three absent, and
+> `egress_destinations` empty, where the decision carries no binding. **It carries no sixth
+> field**: no step id, no execution id, no plan id, no decision id, no goal id, no instant and no
+> attempt.
 
 > **Normative — the key is what `PermissionDecision.authorises` compares, less the two ids a
-> replan mints afresh, and that is the rule a later conjunct is read against.** `authorises`
-> compares five values — the tool, `parameters_digest`, `step_id`, `execution_id` and
-> `egress_binding`, the last *"compared whole and by value"* (ADR-0150 §9). `EffectKey` carries
-> the three that describe **what is done**, and drops `step_id` and `execution_id`, which
-> describe **where it was done from** and which a re-plan mints anew — ADR-0253 §8's own reason,
-> *"A re-plan mints new step ids"*. **A later decision that adds a sixth conjunct to `authorises`
-> adds the matching field to `EffectKey` in the same change**, unless it states in its own text
-> why that conjunct does not bear on what effect is performed.
+> replan mints afresh and less the binding's provenance, and that is the rule a later conjunct is
+> read against.** `authorises` compares five values — the tool, `parameters_digest`, `step_id`,
+> `execution_id` and `egress_binding`, the last *"compared whole and by value"* (ADR-0150 §9).
+> `EffectKey` drops `step_id` and `execution_id`, which describe **where the call was made from**
+> and which a re-plan mints anew — ADR-0253 §8's own reason, *"A re-plan mints new step ids"* —
+> and takes from the binding **only the three facts that describe where the effect goes**:
+> `account`, `transport_endpoint` and the derived `canonical_destination_set`, each declared on
+> `_EgressBindingBase` and therefore present on **every** member of the union
+> `PermissionDecision.egress_binding` admits. **A later decision that adds a conjunct to
+> `authorises`, or a field to the binding, adds the matching field to `EffectKey` in the same
+> change unless it states in its own text why that value does not change what the remote system
+> does.**
+
+> **Normative — the binding's provenance and authorisation-posture fields are excluded by name,
+> and the exclusion errs toward blocking.** `planned_with_external_content`, `coverage`,
+> `closed_loop` and `spans` are **not** in the key. The first three record how the call was
+> reasoned about rather than what it does, so two replans of one goal that differ only in them
+> would otherwise carry two keys and **dispatch the same effect twice** — the failure this
+> section exists to stop. `spans` is excluded because `canonical_destination_set` is its
+> canonicalisation: ADR-0150 §9 names that set as a thing `authorises` deliberately does *not*
+> compare, precisely because *two different decompositions can canonicalise to one destination
+> set*, and for effect identity that is the property wanted rather than the one refused.
+> **Where the projection is wrong it is wrong toward `HELD`, `COMPLETED` or `UNCERTAIN`** — two
+> distinct effects treated as one, which stalls a plan — and never toward a second dispatch,
+> which is the asymmetry ADR-0014 §4 chooses in every other place it is faced with one.
 
 > **Normative.** `ToolCall` gains **`effect_key`**, a **property** returning `EffectKey | None`,
 > derived from the call and **never minted, supplied, configured or carried as a field**. It is
 > **`None` if and only if `decision.tool.side_effecting` is false**, and otherwise an `EffectKey`
-> built from **`decision.tool.id`**, **`request.parameters_digest`** and
-> **`request.egress_binding`**.
+> built from **`decision.tool.id`**, **`decision.parameters_digest`** and, where
+> `decision.egress_binding` is not `None`, that binding's `account`, `transport_endpoint` and
+> `canonical_destination_set`.
 
 > **Normative — the `None` limb is `side_effecting` alone, and it is deliberately not
 > `ToolDefinition.interrupted_outcome`'s two-limb test.** That test asks what an **interrupted**
@@ -191,18 +217,25 @@ could compare against"*. This section mints that record.
 > other, neither is substituted for the other, and no seam is passed `effect_key`** — it never
 > leaves this system and is never transmitted.
 
-> **Normative — it is read from the decision's copy of the declaration, never from
-> `call.request.tool`.** `ToolCall.idempotency_key`'s reason binds here verbatim — the decision's
-> copy is *"the one the trail holds, which is the copy a restart reconstructs from"* — and
-> ADR-0034 §1's direction of caution binds too: a declaration mutated mid-flight must not be able
-> to turn a side-effecting call into one this section exempts.
+> **Normative — every value is read from the `PermissionDecision` and none from
+> `ToolCall.request`.** `PermissionDecision` carries `tool`, `parameters_digest` and
+> `egress_binding` as its own fields, so the key needs nothing from the request at all.
+> `ToolCall.idempotency_key`'s reason binds here verbatim — the decision's copy is *"the one the
+> trail holds, which is the copy a restart reconstructs from"* — and it answers the same threat
+> in the same way: ADR-0018 §3 puts a post-construction `__dict__` mutation inside this
+> repository's threat model, `ToolCall`'s own docstring records that `frozen=True` *"does nothing
+> about `call.__dict__["request"]`"*, and a key derived from the mutable half could be persisted
+> for one effect while another was invoked. **Reading the decision closes that**, because the
+> decision is the value `ToolInvoker.invoke` re-runs `authorises` against and the value the trail
+> holds. ADR-0034 §1's direction of caution binds too: a declaration mutated mid-flight must not
+> be able to turn a side-effecting call into one this section exempts.
 
 > **Normative — no digest of the key is minted, and none is pinned.** `EffectKey` is compared
 > **by value**, field by field, exactly as `authorises` compares the values it is built from.
-> **No clause of this decision composes, concatenates or hashes those three fields into a single
+> **No clause of this decision composes, concatenates or hashes its fields into a single
 > string**, so there is no encoding for two implementations to disagree about and no algorithm to
-> pin: `parameters_digest` is ADR-0021 §1's `sha256`, already fixed, and `egress_binding` is a
-> value. **How a store indexes the key is below this contract** and is the implementation's, so
+> pin: `parameters_digest` is ADR-0021 §1's `sha256`, already fixed, and the three egress fields
+> are values. **How a store indexes the key is below this contract** and is the implementation's, so
 > long as two equal keys are the same row and two unequal keys are not.
 
 **Deriving it rather than declaring it is what makes it a key nobody can get wrong, and the
@@ -257,19 +290,24 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > member name and **closed at exactly four members**: `CLAIMED`, `COMPLETED`, `UNCERTAIN` and
 > `HELD`. The vocabulary is added to and never renamed.
 
-> **Normative — what each answer means, stated over the stored status of the step the row
-> names, and over nothing else.** `claim_effect` returns:
+> **Normative — what each answer means, decided by the stored status of the step the row names
+> and by whether that step is this one, in this order and over nothing else.** `claim_effect`
+> returns:
 >
-> - **`CLAIMED`**, writing the row, where **no row exists** for the pair; or where the stored row
->   names **this same `(execution_id, step_id)`**; or where it names a step whose stored
->   `StepExecution.status` is **`FAILED`** or **`SKIPPED`**.
-> - **`COMPLETED`**, writing nothing, where the stored row names a step whose status is
->   **`SUCCEEDED`**.
-> - **`UNCERTAIN`**, writing nothing, where that status is **`RUNNING`** or **`INDETERMINATE`**.
-> - **`HELD`**, writing nothing, where that status is **`PENDING`** or **`AWAITING_APPROVAL`**
->   and the row names a **different** step.
+> 1. **`CLAIMED`**, writing the row, where **no row exists** for the pair.
+> 2. Otherwise, read the stored `StepExecution.status` of the step the row names:
+>    - **`SUCCEEDED`** → **`COMPLETED`**, writing nothing.
+>    - **`RUNNING`** or **`INDETERMINATE`** → **`UNCERTAIN`**, writing nothing.
+>    - **`FAILED`** or **`SKIPPED`** → **`CLAIMED`**, re-pointing the row at this step.
+>    - **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing, where the row
+>      names **this same `(execution_id, step_id)`**; **`HELD`**, writing nothing, where it names
+>      a **different** step.
 >
-> **The enumeration is total over `StepStatus`'s seven members** and no eighth answer exists.
+> **The second limb is total over `StepStatus`'s seven members, exactly one answer is defined for
+> every input, and the same-step case is confined to the two statuses a failed claim leaves** —
+> a row naming this step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED` or
+> `UNCERTAIN` like any other, because this step has then already acted. **No eighth answer
+> exists.**
 
 > **Normative — the read, the comparison and the write are one indivisible step**, on ADR-0014
 > §5's existing compare-and-swap discipline and for ADR-0255 §3's reason: two turns of one
@@ -293,11 +331,15 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > `PlanStore` it already holds, which is ADR-0058's rule observed rather than bent, and
 > `ToolRegistry`, `ActionPolicy` and `AuditTrail` each keep exactly the role they have.
 
-> **Normative — the ordering is effect-claim-then-step-claim, and it is fixed rather than left
-> to an implementation.** A failure between them leaves a row naming a step that is still
-> `PENDING`, which the first limb above re-claims on the next walk and which **blocks nothing
-> else**, because that same step may re-claim its own key. The reverse order would leave a
-> dispatched effect with no row, which is the one residual that would let a later plan repeat it.
+> **Normative — the ordering is effect-claim-then-step-claim, it is fixed rather than left to an
+> implementation, and what its failure leaves is stated rather than glossed.** A failure between
+> the two leaves a row naming a step still `PENDING`. **That step re-claims its own key on the
+> next walk** and dispatches; **every other step of that goal carrying the same key is `HELD`
+> until that step is disposed of** — by its own dispatch, or by §4's sweep once its plan is
+> superseded — and **where its plan is never superseded and never driven again, that hold does
+> not lift**. The reverse order would leave a dispatched effect with **no row at all**, which is
+> the one residual that would let a later plan repeat it, so the ordering trades a hold that can
+> stall a plan for a gap that could double an act.
 
 > **Normative — a non-`CLAIMED` answer dispatches nothing, commits no transition, and stops the
 > walk.** The stage returns the disposition **`Disposition.EFFECT_ALREADY_CLAIMED`**, the step
@@ -801,8 +843,11 @@ this decision now discharges the other half of.
 
 > **Normative — the effect rows are the goal's durable data and carry its obligations.**
 > `PlanExport` gains **`effects`**, a possibly-empty `tuple[EffectRecord, ...]`; ADR-0014 §5's
-> **closure rule extends to it** — every `goal_id`, `execution_id` and `step_id` an included row
-> names resolves inside the document — and `PlanExport.schema_version` **moves from 11 to 12**,
+> **closure rule extends to it, and it is stated over one holder rather than over three ids** —
+> an included row's `execution_id` resolves to an execution in the document, its `step_id` names
+> a step **of that execution**, and that execution's plan carries the row's **`goal_id`**, so a
+> row cannot name a step that exists only in some other execution while every id still resolves;
+> and `PlanExport.schema_version` **moves from 11 to 12**,
 > because the document's shape changed and an older reader's `extra="forbid"` must refuse it.
 > Rows are **deleted by `delete_goal`'s cascade** with the goal they belong to, **cleared by
 > `clear`**, and **stored locally only**. **A row references an execution and a step by id and
@@ -836,9 +881,12 @@ property are the whole of it.
   next*, and the owner's addendum requirement 5 is its brief: *"Keep 'do not blindly retry an
   uncertain effect'; drop 'nothing auto-retries, ever'"*, and *"For 'make it Sunday', investigate
   **modifying** the existing reservation first"*. It inherits the vocabulary this decision mints —
-  `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED`, §3's **reconcilable** test —
-  and the record §2 keeps, which is what lets a modify-first strategy see the reservation it would
-  modify. **Fired by this ADR landing.**
+  `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable**
+  test. **It does not inherit a way to read an effect row**: `claim_effect` returns an
+  `EffectClaim` and nothing else, and §9 puts `EffectRecord` on the export document alone, so a
+  modify-first strategy that needs to find the earlier reservation adds the bounded lookup it
+  needs and argues for it there rather than inheriting one nobody has reviewed. **Fired by this
+  ADR landing.**
 - **Resolving an uncertain effect on the user's word.** **Not decided**, and §3 states the ground:
   a `SUCCEEDED` step carries an `output` its dependents read under ADR-0253 §2, and a user cannot
   supply one. **Fired by a decision that states what `output` such a resolution carries and where
@@ -946,8 +994,10 @@ property are the whole of it.
    state.
 10. A **`KEYED`**, in-window `INDETERMINATE` step is reconciled to **`SUCCEEDED`** under the
     **same** derived idempotency key, over a request **rebuilt from stored plan and execution
-    state after a restart** and accepted by `PermissionDecision.authorises`; the attempt returns
-    to `RUNNING`, and the turn's walk then dispatches its dependent.
+    state after a restart** and accepted by `PermissionDecision.authorises`, and the attempt
+    returns to **`RUNNING`**. **The arm asserts nothing about a later walk**: the reconciled step
+    belongs to the earlier execution, ADR-0255 §2 sends the later turn to plan again over a new
+    one (§7), and what that turn's plan meets is arms 1–3's subject.
 11. An **uncheckable** `INDETERMINATE` step — `Idempotency.NONE`, or `KEYED` past its window —
     takes **no** reconciliation call, stays `INDETERMINATE`, keeps its attempt
     `EFFECT_UNRESOLVED`, and its key answers `UNCERTAIN` to a later plan's claim. A
@@ -959,8 +1009,9 @@ property are the whole of it.
 > **Normative — no arm of this decision requires a real integration, a scheduler or a restart
 > loop.** Arms 1–3 and 10–11 are stated over a controlled `ToolInvoker` whose declaration and
 > returned outcome the arm fixes; arm 4 is stated over the store alone; arm 9's residual is
-> produced by a store failure the arm injects. **Arm 10's dependent is dispatched by the walk of
-> whichever plan that turn holds** (§7), and no arm requires a stopped walk to be re-entered.
+> produced by a store failure the arm injects. **No arm requires a stopped walk to be
+> re-entered**, and none asserts that a dependent of a reconciled step runs — §7 adds no route to
+> one and ADR-0255 §2's closed list is what it leaves in place.
 
 ### 13. Records owed on earlier ADRs, under ADR-0082 §1
 
@@ -1155,8 +1206,8 @@ is wired and the Q4 gate is read for real.
   ground — *"A driver that compared capability and parameters would be inventing an identity
   nobody declared"* — and on ADR-0249 §7's asymmetry, since a capability string is the planner's
   word. §1 takes the **bound tool's id**, the **canonicalised arguments a policy ruled on** and
-  the **egress binding it ruled under** instead, which are values code fixed rather than a model
-  proposed.
+  the **account, endpoint and canonical destination set it ruled under** instead, which are
+  values code fixed rather than a model proposed.
 - **A single hashed string as the key.** Rejected in §1. A composed digest needs an algorithm, a
   byte encoding, a domain separator and an output representation pinned, and every one of those is
   a thing two conforming implementations could differ on — after which a restart misses a row and
@@ -1172,6 +1223,18 @@ is wired and the Q4 gate is read for real.
   fifth conjunct, *"compared whole and by value"*, so two calls of one tool with identical
   parameters under different connected accounts are two different authorised calls — and a key
   that collapsed them would refuse the second as a duplicate of the first.
+- **Taking the whole `EgressBinding` into the key.** Rejected, and it was the second draft's
+  rule. The binding carries `planned_with_external_content`, `coverage` and `closed_loop`, which
+  record how a call was reasoned about rather than what it does; two replans of one goal
+  differing only in those would carry two keys and dispatch one effect twice — the failure the
+  key exists to stop, reintroduced by being too faithful to a comparison written for a different
+  question. §1 projects the three facts that describe where the effect goes instead, and states
+  which way the projection errs.
+- **Deriving the key from `ToolCall.request`.** Rejected. `frozen=True` *"does nothing about
+  `call.__dict__["request"]`"*, and ADR-0018 §3 puts that mutation inside the threat model, so a
+  key read from the request could be persisted for one effect while another was invoked.
+  `PermissionDecision` carries every value the key needs, and it is the copy the trail holds and
+  the copy `invoke` re-checks against.
 - **A durable carrier for the authorised parameter mapping.** Rejected. `ActionRequest.parameters`
   is not stored, and adding a field to carry it would duplicate, in a second place free to drift,
   something ADR-0253 §6 already makes *"a total function of two values both read from the
