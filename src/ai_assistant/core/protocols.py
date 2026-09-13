@@ -8048,7 +8048,22 @@ class GoalAuthorizationStore(Protocol):
             exception**, and a ``bool`` cannot tell an unknown id from a row that
             was not at the source.
 
+        **``to`` is a member of
+        :class:`~ai_assistant.core.types.AuthorizationDisposition` and an
+        implementation normalises a value naming one before anything branches on
+        it.** That vocabulary is a ``StrEnum``, so its own value is **equal** to the
+        member and is not **identical** to it — and a settlement asks both questions,
+        *"is this an edge"* by equality and *"is this the establishment"* by
+        identity. An implementation that let the two disagree would take the direct
+        write on ``"established"`` and skip ADR-0254 §1's uniqueness check, leaving
+        two ``ESTABLISHED`` rows of one pair: the state §1 forbids.
+
         Raises:
+            ValueError: If ``to`` names no member of that vocabulary, refused
+                **locally and before any I/O**. A wiring bug rather than a
+                settlement outcome — the four outcomes are total over what the step
+                can answer *about a row*, and a value naming no disposition asks
+                about no edge at all.
             AuthorizationError: If the store cannot be read or written. A refusal
                 is **not** this: the four outcomes are total over what the step can
                 answer.

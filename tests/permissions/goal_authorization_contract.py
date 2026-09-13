@@ -1606,3 +1606,54 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         held = await store.resolve("a2")
         assert held is not None
         assert held.origin is AuthorizationOrigin.OPENING_ACT
+
+    async def test_a_settlement_target_naming_a_member_is_normalised_to_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: the uniqueness check is not skippable by spelling the target.
+
+        :class:`~ai_assistant.core.types.AuthorizationDisposition` is a ``StrEnum``,
+        so its own value is **equal** to the member and is not **identical** to it —
+        and a settlement asks both questions, *"is this an edge"* by equality and
+        *"is this the establishment"* by identity. An implementation that let the two
+        disagree would take the direct write on ``"established"`` and skip §1's
+        uniqueness check, leaving **two ``ESTABLISHED`` rows of one pair**, which is
+        the state §1 forbids and what arm 56 requires ``WOULD_DUPLICATE`` for.
+
+        **A lane that branched on identity without normalising fails this arm.**
+        """
+        await store.record(authorization(id="a1"))
+        await store.record(authorization(id="a2", confirmation="confirm-0002"))
+        spelled = cast("AuthorizationDisposition", "established")
+        assert (
+            await store.settle("a1", to=spelled, settled_at=NOW) is AuthorizationSettlement.SETTLED
+        )
+        assert (
+            await store.settle("a2", to=spelled, settled_at=NOW)
+            is AuthorizationSettlement.WOULD_DUPLICATE
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    async def test_a_spelled_target_reaches_the_same_edge_check_as_the_member(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """The normalisation moves nothing else: a non-edge is still refused."""
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=cast("AuthorizationDisposition", "revoked"), settled_at=NOW)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+
+    async def test_a_settlement_target_naming_no_member_is_refused_before_any_io(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """A wiring bug rather than a settlement outcome: the four outcomes are total
+        over what the step can answer **about a row**, and a value naming no
+        disposition asks about no edge at all."""
+        await store.record(authorization(id="a1"))
+        before = await store.export()
+        with pytest.raises(ValueError, match="nonsense"):
+            await store.settle(
+                "a1", to=cast("AuthorizationDisposition", "nonsense"), settled_at=NOW
+            )
+        assert await store.export() == before

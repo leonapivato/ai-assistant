@@ -1014,7 +1014,7 @@ class FakeGoalAuthorizations:
         Returns:
             Which of the four outcomes the step answered.
         """
-        return self._log.settle(authorization_id, to, settled_at)
+        return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
 
     def fail_live_for(self, error: Exception | None = None) -> None:
         """Arm every subsequent :meth:`live_for` to raise a store fault.
@@ -1121,7 +1121,7 @@ class FakeAuthorizationResolution:
         Returns:
             Which of the four outcomes the step answered.
         """
-        return self._log.settle(authorization_id, to, settled_at)
+        return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
 
     def fail_resolve(self, error: Exception | None = None) -> None:
         """Arm every subsequent :meth:`resolve` to raise a store fault.
@@ -1312,12 +1312,20 @@ class FakeGoalAuthorizationStore:
         members are returned rather than raised; the only raise here is the scripted
         store fault.
 
+        **``to`` is coerced to the member before anything branches on it**, which is
+        the durable store's guard and is held here for ADR-0084 §4's substitutability
+        — in **both** directions: a double that admitted ``"established"`` where the
+        store normalises it would let a consumer's tests pass over a call production
+        reads differently. See
+        :meth:`~ai_assistant.permissions.goal_authorizations.SqliteGoalAuthorizationStore.settle`.
+
         Raises:
+            ValueError: If ``to`` names no member, locally and before any I/O.
             AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
         """
         self._refuse_write()
         async with self._resource.held():
-            return self._log.settle(authorization_id, to, settled_at)
+            return self._log.settle(authorization_id, AuthorizationDisposition(to), settled_at)
 
     async def live_for(self, goal: str, tool_id: str) -> Authorization | None:
         """The live row of ``goal`` through ``tool_id``, or ``None``.
