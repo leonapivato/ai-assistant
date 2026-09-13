@@ -44,6 +44,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AssociationVerdict,
     AttemptPhase,
+    AttemptState,
     EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
@@ -287,6 +288,17 @@ _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.SKIPPED: frozenset(),
     StepStatus.INDETERMINATE: frozenset(),
 }
+
+#: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 derives
+#: *paused* from, which ADR-0255 §3 makes as disqualifying of a claim as the two
+#: terminal ones. Mirrored here rather than imported, as the transition graph above is.
+_PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
+    {
+        AttemptState.AWAITING_CLARIFICATION,
+        AttemptState.AWAITING_AUTHORIZATION,
+        AttemptState.BLOCKED,
+    }
+)
 
 #: Which skip reasons are truthful from which status; mirrors ADR-0014 §4 as
 #: widened by ADR-0041 — ``APPROVAL_DENIED`` is legal from ``PENDING`` too, for
@@ -1365,9 +1377,15 @@ class FakePlanStore:
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
 
+        **An execution belongs to exactly one attempt** (ADR-0255 §3), and this member
+        is half of where that is made true: the tuple may arrive non-empty, so a caller
+        could otherwise open a live attempt carrying an ended attempt's execution and
+        defeat the claim conjunct without ever calling :meth:`commit_attempt`.
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, or the store already
-                holds an attempt under this ``id``.
+            PlanningError: If ``goal_id`` names no stored goal, the store already holds
+                an attempt under this ``id``, or any ``execution_ids`` member is already
+                carried by another attempt of that goal (ADR-0255 §3).
         """
         async with self._resource.held():
             if attempt.goal_id not in self._goals:
@@ -1383,6 +1401,7 @@ class FakePlanStore:
                 self._refuse_a_dangling_plan(attempt, plan_id)
             for execution_id in attempt.execution_ids:
                 self._refuse_a_dangling_execution(attempt, execution_id)
+                self._refuse_a_second_owner(attempt.id, attempt.goal_id, execution_id)
             self._attempts[attempt.id] = attempt.model_copy(deep=True)
         return attempt.id
 
@@ -1406,11 +1425,17 @@ class FakePlanStore:
     async def commit_attempt(self, transition: AttemptTransition) -> GoalAttempt:
         """Apply one attempt transition, compare-and-swap (ADR-0249 §12).
 
+        **An ``add_execution_id`` naming an execution another attempt of that goal
+        already carries is refused** (ADR-0255 §3), which is the other half of
+        :meth:`open_attempt`'s invariant. ADR-0249 §12's append-only rule is untouched:
+        a repeat of the same append **on the owning attempt** is still ignored.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from where it stands.
-            PlanningError: If the attempt does not exist, or the result is not a shape
-                ADR-0249 §5 admits.
+            PlanningError: If the attempt does not exist, the result is not a shape
+                ADR-0249 §5 admits, or the execution it names is already another
+                attempt's (ADR-0255 §3).
         """
         async with self._resource.held():
             stored = self._attempts.get(transition.attempt_id)
@@ -1427,6 +1452,7 @@ class FakePlanStore:
                 self._refuse_a_dangling_plan(stored, transition.add_plan_id)
             if transition.add_execution_id is not None:
                 self._refuse_a_dangling_execution(stored, transition.add_execution_id)
+                self._refuse_a_second_owner(stored.id, stored.goal_id, transition.add_execution_id)
             updated = self._advanced_attempt(stored, transition)
             self._attempts[updated.id] = updated
             return updated.model_copy(deep=True)
@@ -1455,6 +1481,59 @@ class FakePlanStore:
                 "not carry does not validate (ADR-0014 §5, ADR-0249 §11)"
             )
             raise PlanningError(msg)
+
+    def _refuse_a_second_owner(self, attempt_id: str, goal_id: str, execution_id: str) -> None:
+        """Refuse an execution reference a **different** attempt already carries (§3).
+
+        ADR-0255 §3's execution-ownership invariant, on both attempt-writing members:
+        an execution belongs to exactly one attempt, so without it one execution could
+        sit in an ended attempt A and a live attempt B and a claim naming B would pass
+        every other condition. **ADR-0249 §12's append-only rule is untouched** — "an
+        identifier the tuple already holds is ignored rather than duplicated or
+        refused" governs a repeat on the *same* attempt and says nothing about two, so
+        a repeat on the owner still lands.
+
+        Spelled out here rather than imported from ``ai_assistant.planning``, for the
+        reason this module's docstring gives for the transition graph.
+
+        Args:
+            attempt_id: The attempt the reference is being written onto.
+            goal_id: That attempt's goal.
+            execution_id: The execution the write names.
+
+        Raises:
+            PlanningError: If any other attempt of that goal already carries it — never
+                ``StaleExecutionError``, since no re-read makes an execution owned by
+                attempt A valid for attempt B.
+        """
+        other = sorted(
+            one.id for one in self._owners_of(goal_id, execution_id) if one.id != attempt_id
+        )
+        if other:
+            msg = (
+                f"attempt {attempt_id} names execution {execution_id}, which attempt "
+                f"{other[0]} of that goal already carries: an execution belongs to "
+                f"exactly one attempt, so a second owner is refused rather than "
+                f"recorded (ADR-0255 §3)"
+            )
+            raise PlanningError(msg)
+
+    def _owners_of(self, goal_id: str, execution_id: str) -> list[GoalAttempt]:
+        """Every attempt of ``goal_id`` whose ``execution_ids`` names ``execution_id``.
+
+        Args:
+            goal_id: The goal whose attempts are searched.
+            execution_id: The execution being claimed or referenced.
+
+        Returns:
+            The attempts naming it — exactly one in any store written since ADR-0255
+            §3, and more only in one written before it.
+        """
+        return [
+            one
+            for one in self._attempts.values()
+            if one.goal_id == goal_id and execution_id in one.execution_ids
+        ]
 
     def _refuse_a_dangling_execution(self, attempt: GoalAttempt, execution_id: str) -> None:
         """Refuse an execution reference that does not resolve under this goal (§11).
@@ -1768,6 +1847,9 @@ class FakePlanStore:
                     f"the goal's current understanding is not driven (ADR-0249 §8)"
                 )
                 raise StaleExecutionError(msg)
+            if plan is not None:
+                self._refuse_an_unclaimable_attempt(stored, transition, goal_id=plan.goal_id)
+                self._refuse_a_superseded_plan(stored.plan_id)
 
         updated = self._advance(current, transition)
         state = ExecutionState.model_validate(
@@ -1784,6 +1866,93 @@ class FakePlanStore:
         )
         self._executions[state.id] = state
         return state
+
+    def _refuse_an_unclaimable_attempt(
+        self, stored: ExecutionState, transition: StepTransition, *, goal_id: str
+    ) -> None:
+        """Refuse a claim whose attempt cannot carry it (ADR-0255 §3).
+
+        The attempt conjunct, read inside the same step as the claim: there is no
+        ``await`` between this read and the write, so no decision is taken on a
+        separate read. **Four limbs** — the attempt is unknown, it did not open this
+        execution, its state is terminal or one of the three ADR-0249 §5 derives
+        *paused* from, or the execution is named by more than one attempt of the goal.
+        ``EFFECT_UNRESOLVED`` is **accepted**: the limb is not a ``RUNNING`` whitelist
+        (ADR-0255 §6). The fifth case a reader expects — a claim carrying no
+        ``attempt_id`` — is unconstructible, so no store refuses it.
+
+        Spelled out here rather than imported from ``ai_assistant.planning``, for the
+        reason this module's docstring gives for the transition graph.
+
+        Args:
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+            goal_id: The goal its plan is under.
+
+        Raises:
+            PlanningError: On any of the four limbs — never ``StaleExecutionError``,
+                because no re-read makes any of them land.
+        """
+        attempt_id = transition.attempt_id
+        assert attempt_id is not None  # noqa: S101 — the validator's guarantee (ADR-0255 §3)
+        named = self._attempts.get(attempt_id)
+        if named is None:
+            msg = (
+                f"the claim on execution {stored.id} names attempt {attempt_id}, which "
+                f"this store does not hold: a step is claimed under an attempt that "
+                f"exists (ADR-0255 §3)"
+            )
+            raise PlanningError(msg)
+        if stored.id not in named.execution_ids:
+            msg = (
+                f"attempt {attempt_id} did not open execution {stored.id}, so it cannot "
+                f"claim a step of it: `execution_ids` is the binding, and it is "
+                f"append-only (ADR-0255 §3, ADR-0249 §12)"
+            )
+            raise PlanningError(msg)
+        if named.state in TERMINAL_ATTEMPT_STATES or named.state in _PAUSED_ATTEMPT_STATES:
+            msg = (
+                f"attempt {attempt_id} stands at {named.state}, so no step is claimed "
+                f"under it: a terminal attempt never lives again, and a paused one "
+                f"lives again only by a user act answering what it is paused on "
+                f"(ADR-0255 §3)"
+            )
+            raise PlanningError(msg)
+        owners = self._owners_of(goal_id, stored.id)
+        if len(owners) != 1:
+            held = ", ".join(sorted(one.id for one in owners))
+            msg = (
+                f"execution {stored.id} is named by {len(owners)} attempts of its goal "
+                f"({held}), so no claim on it lands whichever one it names: nothing in "
+                f"the record says which owns it, and picking one would invent an "
+                f"ownership nobody recorded (ADR-0255 §3)"
+            )
+            raise PlanningError(msg)
+
+    def _refuse_a_superseded_plan(self, plan_id: str) -> None:
+        """Refuse a claim on a plan a stored plan supersedes (ADR-0255 §3).
+
+        The successor conjunct, derived by the store and supplied by no caller, in the
+        same step as the write — because §7's sweep cannot be atomic with a claim
+        another turn is making, and a driver-side check would be the
+        time-of-check-to-time-of-use gap §3 refuses. Its ground is permanent: a
+        persisted successor is never un-persisted.
+
+        Args:
+            plan_id: The plan the claimed execution runs.
+
+        Raises:
+            PlanningError: If any stored plan names it in ``supersedes`` — never
+                ``StaleExecutionError``.
+        """
+        successors = sorted(one.id for one in self._plans.values() if one.supersedes == plan_id)
+        if successors:
+            msg = (
+                f"plan {plan_id} is superseded by {successors[0]}, so no further step of "
+                f"it is claimed: a persisted successor is never un-persisted, and a "
+                f"superseded plan drives nothing further (ADR-0255 §3, ADR-0228 §5)"
+            )
+            raise PlanningError(msg)
 
     def _advance(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Build the step's next value, re-validating so invariants still bite."""

@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
     AttemptPhase,
+    AttemptState,
     EvidenceStanding,
     Goal,
     GoalAttempt,
@@ -731,3 +732,168 @@ def _condition_element_ids(goal: Goal, revision: int | None) -> frozenset[str]:
         if held.revision == revision:
             return frozenset(element.id for element in held.conditions if element.id is not None)
     return frozenset()
+
+
+#: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 derives
+#: *paused* from — "a goal is **paused** when its status is ``ACTIVE`` and its current
+#: attempt's state is ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or
+#: ``BLOCKED``". Stated here so the two stores in this package cannot disagree about
+#: which states refuse a claim.
+_PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
+    {
+        AttemptState.AWAITING_CLARIFICATION,
+        AttemptState.AWAITING_AUTHORIZATION,
+        AttemptState.BLOCKED,
+    }
+)
+
+
+def refuse_an_unclaimable_attempt(
+    *,
+    attempt_id: str,
+    execution_id: str,
+    named: GoalAttempt | None,
+    owners: Sequence[GoalAttempt],
+) -> None:
+    """Refuse a claim the attempt it names cannot carry (ADR-0255 §3).
+
+    The attempt conjunct, over values the caller has already read **inside the same
+    indivisible step as the write**: there is no separate read of the attempt on
+    which a decision is taken, which is ADR-0249 §8's clause for the revision bound
+    one conjunct over.
+
+    **Four limbs, and the fifth a reader expects is removed at construction rather
+    than refused here**: a ``→ RUNNING`` transition carrying no ``attempt_id`` does
+    not validate (:class:`~ai_assistant.core.types.StepTransition`), so no store ever
+    receives one.
+
+    **The state limb disqualifies five of the seven members**, because *paused* is as
+    disqualifying as *ended*: the two terminal members and the three ADR-0249 §5
+    derives *paused* from. ``EFFECT_UNRESOLVED`` is **accepted** — it is neither, and
+    an attempt holding an effect it cannot account for is neither finished nor waiting
+    on anybody (ADR-0255 §6). **This is not a ``RUNNING`` whitelist.**
+
+    **Every limb raises a ``PlanningError`` that is not a ``StaleExecutionError``**,
+    and the class is decided by what the class means: that one directs a caller to
+    re-read and retry, and no limb here is that. An unknown attempt stays unknown, an
+    attempt that did not open this execution can never acquire it, a terminal one
+    never lives again, a paused one lives again only by a **user act**, and a
+    duplicated ownership is refused whichever attempt is supplied.
+
+    Args:
+        attempt_id: The attempt the claim names.
+        execution_id: The execution the claim is against.
+        named: The attempt stored under ``attempt_id``, or ``None`` where the store
+            holds none.
+        owners: Every attempt **of the execution's own goal** whose ``execution_ids``
+            names ``execution_id``. The binding is the execution's membership and
+            never the goal's: a goal may carry many attempts, so a check that the
+            attempt merely belongs to the same goal would let a claim naming a live
+            attempt B run a step of an **ended** attempt A's execution.
+
+    Raises:
+        PlanningError: On any of the four limbs. Never ``StaleExecutionError``.
+    """
+    if named is None:
+        msg = (
+            f"the claim on execution {execution_id} names attempt {attempt_id}, which "
+            f"this store does not hold: a step is claimed under an attempt that exists "
+            f"(ADR-0255 §3)"
+        )
+        raise PlanningError(msg)
+    if execution_id not in named.execution_ids:
+        msg = (
+            f"attempt {attempt_id} did not open execution {execution_id}, so it cannot "
+            f"claim a step of it: `execution_ids` is the binding, and it is append-only "
+            f"(ADR-0255 §3, ADR-0249 §12)"
+        )
+        raise PlanningError(msg)
+    if named.state in TERMINAL_ATTEMPT_STATES or named.state in _PAUSED_ATTEMPT_STATES:
+        msg = (
+            f"attempt {attempt_id} stands at {named.state}, so no step is claimed under "
+            f"it: a terminal attempt never lives again, and a paused one lives again "
+            f"only by a user act answering what it is paused on (ADR-0255 §3)"
+        )
+        raise PlanningError(msg)
+    if len(owners) != 1:
+        held = ", ".join(sorted(one.id for one in owners))
+        msg = (
+            f"execution {execution_id} is named by {len(owners)} attempts of its goal "
+            f"({held}), so no claim on it lands whichever one it names: nothing in the "
+            f"record says which owns it, and picking one would invent an ownership "
+            f"nobody recorded (ADR-0255 §3)"
+        )
+        raise PlanningError(msg)
+
+
+def refuse_a_second_owner(
+    *, attempt_id: str, execution_id: str, owners: Sequence[GoalAttempt]
+) -> None:
+    """Refuse an execution reference a **different** attempt already carries (§3).
+
+    An execution belongs to exactly one attempt, and both attempt-writing members are
+    where that is made true: ``commit_attempt`` refuses an ``add_execution_id`` naming
+    an execution any attempt of that goal already carries, and ``open_attempt``
+    refuses a whole :class:`~ai_assistant.core.types.GoalAttempt` whose
+    ``execution_ids`` names one — because that member takes a tuple that may arrive
+    non-empty, so a caller could otherwise open a live attempt carrying an ended
+    attempt's execution and defeat the claim conjunct without ever calling
+    ``commit_attempt``.
+
+    **ADR-0249 §12's append-only rule is untouched**: "an identifier the tuple already
+    holds is ignored rather than duplicated or refused" governs a repeat of the same
+    append **on the same attempt**, and says nothing about two attempts. Append-only
+    prevents removal, not multiple ownership, and the conjunct needs the second — so a
+    repeat on the owning attempt still lands.
+
+    Args:
+        attempt_id: The attempt the reference is being written onto.
+        execution_id: The execution the write names.
+        owners: Every attempt of that goal whose ``execution_ids`` already names it.
+
+    Raises:
+        PlanningError: If any attempt **other than** this one already carries it.
+            Never ``StaleExecutionError``: no re-read makes an execution owned by
+            attempt A valid for attempt B.
+    """
+    other = sorted(one.id for one in owners if one.id != attempt_id)
+    if other:
+        msg = (
+            f"attempt {attempt_id} names execution {execution_id}, which attempt "
+            f"{other[0]} of that goal already carries: an execution belongs to exactly "
+            f"one attempt, so a second owner is refused rather than recorded "
+            f"(ADR-0255 §3)"
+        )
+        raise PlanningError(msg)
+
+
+def refuse_a_superseded_plan(*, plan_id: str, successors: Sequence[str]) -> None:
+    """Refuse a claim on a plan a stored plan supersedes (ADR-0255 §3).
+
+    ``commit_transition``'s second added claim condition, and §7's supersession made
+    atomic with the claim. **The store derives it and no caller supplies it**, exactly
+    as ADR-0249 §8 derives the revision, and it is decided in the same indivisible
+    step as the write — because §7's sweep is several compare-and-swaps over the old
+    plan's steps and cannot be atomic with a claim another turn is making, and a
+    driver-side check would be the time-of-check-to-time-of-use gap §3 refuses.
+
+    **It is one condition and not a fifth limb of the attempt conjunct**: it compares
+    a different row — the plan's, not the attempt's — and the two are refused
+    independently. Its ground is permanent in the plainest way, a persisted successor
+    never being un-persisted, so the class is the same non-stale ``PlanningError``.
+
+    Args:
+        plan_id: The plan the claimed execution runs, reached by the execution → plan
+            chain the store already follows for the revision.
+        successors: The ids of the stored plans naming it in their ``supersedes``.
+
+    Raises:
+        PlanningError: If any plan supersedes it. Never ``StaleExecutionError``.
+    """
+    if successors:
+        msg = (
+            f"plan {plan_id} is superseded by {sorted(successors)[0]}, so no further "
+            f"step of it is claimed: a persisted successor is never un-persisted, and a "
+            f"superseded plan drives nothing further (ADR-0255 §3, ADR-0228 §5)"
+        )
+        raise PlanningError(msg)
