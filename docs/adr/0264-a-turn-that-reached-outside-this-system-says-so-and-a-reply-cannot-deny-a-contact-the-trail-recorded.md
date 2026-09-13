@@ -602,8 +602,12 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > over, and no arm obliges a lane to touch the other's paths.** Every arm's assertions
 > about the member, the establishment, the admitted count, the composing prompt and
 > `OutboundContact`'s own construction are lane 1's; every arm's assertions about a
-> **rendered statement** — arm 2's stated `0` and arm 3's two statements, which are the
-> only two — are lane 2's, landed with the renderer they are about. Lane 1 is complete when it owes no rendering assertion, and a lane that lands an
+> **rendered statement** are lane 2's, landed with the renderer they are about — arm 2's
+> stated `0` and arm 3's two statements among the arms listed, and equally every rendering
+> assertion §13's floor obliges beyond them. **The rule is stated over the assertion and
+> never as a count of arms**, because §13 is a floor: a clause fixing which arms carry a
+> rendering assertion would go stale the moment the floor obliged one it had not named.
+> Lane 1 is complete when it owes no rendering assertion, and a lane that lands an
 > assertion over code it does not own has broken the cut rather than honoured §13.
 
 > **Normative.** Lane 1 changes `core/types.py`, so **this ADR is ratified and merged as
