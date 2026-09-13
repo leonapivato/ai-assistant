@@ -345,12 +345,51 @@ def eligible_candidates(
     return Eligibility(tuple(eligible), tuple(reported))
 
 
+def model_supplied_keys(
+    parameters: Mapping[str, FrozenJson], candidate: ToolDefinition, /
+) -> tuple[str, ...]:
+    """The keys ``parameters`` names that ``candidate`` classifies system-supplied.
+
+    ADR-0254 §3: *"a system-supplied argument is filled by the system, never by the
+    model, and one the model could influence is refused rather than asked about …
+    **Where a plan step's own arguments name such a key at all, the request is not
+    built**"*. A plan step's parameters are a model's output, so a key this answers
+    with is one the model reached for and `orchestration` owns.
+
+    **The refusal is a fault and never a question.** *"A user is never asked to
+    approve an idempotency key"* — it is ADR-0249 §7's *"A model may never clear a
+    permission, a coverage test, a prerequisite or a dependency"* read at the other
+    end, where it may not **supply** one either. ADR-0148 §1 is what puts it before
+    the ruling: a request that cannot be completed is refused with no ruling sought.
+
+    **It is asked per candidate**, because the classification is a field of the
+    declaration and two candidates for one capability may classify differently. The
+    same step is a fault against a declaration that classifies the key and is
+    ordinary against one that does not.
+
+    A declaration classifying nothing answers the empty tuple for every step, which
+    is ADR-0254 §3's *"Every key it does not name is user-facing"* and the behaviour
+    of every declaration on the tree before that decision.
+
+    Args:
+        parameters: The step's own arguments.
+        candidate: The declaration they would be sent under.
+
+    Returns:
+        The offending keys, in the declaration's own order; empty where there are
+        none.
+    """
+    named = frozenset(parameters)
+    return tuple(key for key in candidate.system_supplied if key in named)
+
+
 __all__ = [
     "Eligibility",
     "Preference",
     "Selection",
     "SelectionKey",
     "eligible_candidates",
+    "model_supplied_keys",
     "select",
     "selection_key",
 ]
