@@ -38,9 +38,12 @@ and names what is owed:
 > cannot disagree about whether the world was contacted.
 
 The owner's 2026-09-13 note lists *contradictory reporting* among milestone 31's
-remaining failures. This decision closes that one.
+remaining failures. **What this decision supplies against it is an authoritative
+counterstatement and not a prevention**: §7's statement is composed by code from a typed
+value and stands beside the reply whatever the reply says, so a denial is **exposed** on
+the surfaces that render it. No clause here stops a model writing one, and §10 says why.
 
-### The tree, read rather than assumed, at `origin/main` `05656952`
+### The tree, read rather than assumed, at `origin/main` `a520b891`
 
 - **The negative half is built and the positive half is not.** `TurnOutcome`
   carries `search_not_serviced` (ADR-0242 §9), `orchestration.composing` holds
@@ -161,9 +164,8 @@ a user reading one has not been told the other.
 > **completed and recorded no `SearchDisposition`** — which is a search
 > that reached the provider and was answered, records or none, because
 > `SearchRefusal.NO_RESULT` maps to no disposition (ADR-0231 §13) — **or** where the
-> disposition it recorded is one of
-> `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE` and `UNATTESTED`, each of which is a response
-> this system received and then refused.
+> disposition it recorded is `RESPONSE_TOO_LARGE` or `UNATTESTED`, each of which this
+> system reaches only from octets the provider's channel had already returned.
 
 > **Normative.** A call whose disposition is `NOT_CONFIGURED`, `NO_BUDGET`,
 > `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`,
@@ -173,13 +175,16 @@ a user reading one has not been told the other.
 > ceiling, and `NO_BUDGET`'s own definition is that *"no request is composed, no ruling
 > is sought and no channel is opened"*.
 
-> **Normative.** A call whose disposition is `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`
-> or `SEARCH_FAILED` establishes **nothing either way**, and the turn carries no
-> statement on its account. A refused connection, an expiry of `search_call_deadline` and
-> a fault raised out of `WebSearcher.search` are each consistent with a request that left
-> and with one that did not, and the site holds no value that separates them. **The
-> non-asserting direction is taken deliberately**, and §12 defers the finer answer with
-> its trigger.
+> **Normative.** A call whose disposition is `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`,
+> `SEARCH_FAILED` or `PROVIDER_REFUSED` establishes **nothing either way**, and the turn
+> carries no statement on its account. A refused connection, an expiry of
+> `search_call_deadline` and a fault raised out of `WebSearcher.search` are each
+> consistent with a request that left and with one that did not; and `PROVIDER_REFUSED`
+> is recorded **both** for a response the provider gave and this system refused **and**
+> for an account that changed across the credential read, whose limbs *"discarded the
+> credential and wrote nothing to any channel — none was opened"* (ADR-0148 §6). None of
+> the four carries a value separating its causes. **The non-asserting direction is taken
+> deliberately**, and §12 defers the finer answer with its trigger.
 
 > **Normative.** **A contact is established the moment a response arrived, and nothing
 > that happens to the enclosing servicing afterwards unmakes it.** The discriminator is
@@ -217,16 +222,17 @@ a user reading one has not been told the other.
 > already hold in that module.
 
 **Three groups and not two, because the vocabulary genuinely holds three answers.**
-`SearchDisposition` names *the stage that produced the outcome*, and its members divide
-cleanly into stages before the send, stages after a response arrived, and the send itself
-— where an outage, an expiry and a raised fault are all recorded without recording whether
-anything crossed the wire. Forcing that third group into either of the others would be
-this decision asserting a fact its inputs do not establish, which is exactly what ADR-0242
-§8 refuses when it states each member *"over what its inputs establish and never over a
-cause they do not"*. **The user is not left silent there**: every member of the third group
-already carries a `SearchNotServiced` member under ADR-0242 §8 — `INTERRUPTED` for
-`DEADLINE_EXPIRED`, `UNAVAILABLE` for the other two — and §6's third clause already
-forbids `UNAVAILABLE`'s statement from saying that no request was made.
+`SearchDisposition` names *the stage that produced the outcome*, and a stage is not a wire
+fact: an outage, an expiry, a raised fault and a provider's refusal are each recorded
+without recording whether anything crossed the wire, because each is reached from more
+than one producing path and the paths disagree. Forcing that third group into either of
+the others would be this decision asserting a fact its inputs do not establish, which is
+exactly what ADR-0242 §8 refuses when it states each member *"over what its inputs
+establish and never over a cause they do not"*. **The user is not left silent there**:
+every member of the third group already carries a `SearchNotServiced` member under
+ADR-0242 §8 — `INTERRUPTED` for `DEADLINE_EXPIRED`, `UNAVAILABLE` for the other three —
+and §6's third clause already forbids `UNAVAILABLE`'s statement from saying that no
+request was made.
 
 **The tree states both halves of that partition already, in `tools/web_search.py`, and
 this section is that statement read for a different consumer.** `_result_of`'s docstring
@@ -238,12 +244,13 @@ reason: a search *"whose query may have left the machine and may have been serve
 billed"* is *"the one direction ADR-0014 §4 refuses to guess in"*.
 
 **Two readings of that docstring have to be kept apart.** It also groups
-`PROVIDER_REFUSED` and `RESPONSE_TOO_LARGE` with `TRANSPORT_FAILED` as *"calls that did
+`RESPONSE_TOO_LARGE` with `TRANSPORT_FAILED` and `PROVIDER_REFUSED` as *"calls that did
 not complete as calls"* — a statement about the **invocation's** outcome, which is what
 the ledger row and ADR-0192 §3's completion are written from. It is not a statement about
-whether bytes crossed the wire, and this section asks only that. A provider that refused
-answered, and a response too large to carry is a response that arrived; a refused
-connection is neither.
+whether bytes crossed the wire, and this section asks only that. A response too large to
+carry is a response that arrived, because that member is reached only from a reader
+counting octets off the channel; a refused connection is not, and a provider refusal is
+recorded for both.
 
 **And absence here asserts nothing, which is why the third group is not the guess ADR-0014
 §4 refuses.** That rule bites where a record must take one of several values and one of
@@ -412,11 +419,11 @@ rather than collapsed into the member's absence.
 
 > **Normative.** **The fragment obligation binds on a contact-carrying pass that
 > composes a reply, and on no other.** ADR-0170 §4 requires no composition on a pass whose
-> step parked for confirmation or whose `turn` is `None`, and a recovered resume can
-> step parked for confirmation, with the member carried and no composing stage in the pass.
-> On such a pass the member is carried and the surface statement is rendered exactly as
-> §7 fixes, and there is no fragment because there is nothing to give one to — which is
-> not a degradation, because the reply the fragment guards does not exist.
+> step parked for confirmation or whose `turn` is `None`, and a turn that serviced a
+> search and then parked its step for confirmation is exactly such a pass. On it the
+> member is carried and the surface statement is rendered exactly as §7 fixes, and there
+> is no fragment because there is nothing to give one to — which is not a degradation,
+> because the reply the fragment guards does not exist.
 
 > **Normative.** Where the pass composes, the composing stage is given **one fixed
 > fragment**, written in
@@ -538,8 +545,8 @@ is there so that when they do not, the user can see it.
 > still do not overlap and neither member is read off the other.
 
 > **Normative.** **One turn's `UNAVAILABLE` now rides beside a contact, and that is the
-> design.** Where a response arrived and was refused — `PROVIDER_REFUSED`,
-> `RESPONSE_TOO_LARGE`, `UNATTESTED` — ADR-0242 §8 maps it to `UNAVAILABLE`, whose
+> design.** Where a response arrived and was refused — `RESPONSE_TOO_LARGE` or
+> `UNATTESTED` — ADR-0242 §8 maps it to `UNAVAILABLE`, whose
 > statement §9 fixes as saying the lookup produced nothing usable and expressly **not**
 > saying that no request was made. This decision supplies the other half of that
 > sentence, which §9 declined to assert because it had nothing establishing it. Read
@@ -631,11 +638,14 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 
 ### 12. What this decision does not decide, by name, each with what fires it
 
-> **Normative.** **Whether a `TRANSPORT_FAILED`, `DEADLINE_EXPIRED` or `SEARCH_FAILED`
-> servicing reached the world** (§2). Deciding it needs a fact from below the
-> `WebSearcher` seam — whether bytes were written — which no value the site holds today
-> carries. **Fires** when a seam records it, or when a deployment reports a user misled
-> by the silence on one of those three.
+> **Normative.** **Whether a `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`, `SEARCH_FAILED` or
+> `PROVIDER_REFUSED` servicing reached the world** (§2). For the first three, deciding it
+> needs a fact from below the `WebSearcher` seam — whether bytes were written — which no
+> value the site holds today carries. For `PROVIDER_REFUSED` it needs less and still more
+> than exists: a typed seam value separating a provider's answer from an account change
+> that opened no channel, which is a `core` change and takes its own ADR. **Fires** when a
+> seam records either, or when a deployment reports a user misled by the silence on one of
+> those four.
 
 > **Normative.** **Whether an egress send establishes an outbound contact** (§3). §3
 > refuses it because nothing this system holds establishes it, and ADR-0192 §4 states the
@@ -695,8 +705,10 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    reachable sides.** The arm walks **every member of `SearchDisposition`** and asserts
 >    the group §2 places it in, so a member added without an arm **fails** rather than
 >    falling to a default — the discipline §18 item 9a of ADR-0231 already holds over
->    `SEARCH_DISPOSITIONS` — and it asserts that `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`
->    and `SEARCH_FAILED` establish nothing either way. Then the two sides in a turn: a
+>    `SEARCH_DISPOSITIONS` — and it asserts that `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`,
+>    `SEARCH_FAILED` and `PROVIDER_REFUSED` establish nothing either way, the last over
+>    **both** its causes, because an implementation reading it as a response is what this
+>    arm exists to catch. Then the two sides in a turn: a
 >    search refused before the send (`RULING_DENY`) carries **no** contact, carries
 >    `search_not_serviced` `DECLINED`, and leaves the composing prompt byte-identical to
 >    what it is without this decision; a response received and then refused (`UNATTESTED`)
@@ -812,19 +824,23 @@ condition falsifies no ratified sentence.
 
 ## Consequences
 
-- **The system can no longer tell a user it reached nothing on a turn it reached the
-  world.** The statement is composed from a typed value by code, renders beside the
-  reply, and cannot be talked out of by the prose next to it. That is the whole of what
-  #2268 asks for and the whole of what this decision claims.
+- **A turn that reached the world now says so, in a statement the reply cannot talk out
+  of.** It is composed from a typed value by code and renders beside the reply on the
+  surfaces §7 binds, so a reply that denies the contact is contradicted in front of the
+  user rather than believed. **The denial is not prevented**: a model may still write one,
+  and what changes is that it no longer stands alone (§10, and §7's spoken limit).
 - **A `0` becomes sayable.** *I reached outside this system and nothing came back that
   this turn could use* is a sentence the system has never been able to make; it is the
   honest account of a search that found nothing, and it is the sentence whose absence made #2268 read as a
   contradiction rather than as a thin reply.
-- **Three dispositions stay silent, on purpose.** A transport failure, a deadline expiry
-  and a raised fault carry no contact statement, because the system does not know. Each
+- **Four dispositions stay silent, on purpose.** A transport failure, a deadline expiry,
+  a raised fault and a provider refusal carry no contact statement, because each is
+  reached from producing paths that disagree about the wire — `PROVIDER_REFUSED` covers an
+  account change that opened no channel as well as a response the provider gave. Each
   already carries a `SearchNotServiced` member whose statement is true, so the user is
-  told something rather than nothing — but the honest sentence about the wire is not
-  available, and §12 says what would make it so.
+  told something rather than nothing. The cost is under-inclusion — a genuine provider
+  refusal stops carrying a contact — which is a statement withheld and not a false one
+  (§1), and §12 says what would make the honest sentence available.
 - **An egress send says nothing at all, and that is the honest position.** ADR-0192 §4
   rules that `SUCCEEDED` is consistent with no byte on the wire and that nothing available
   today carries the transmission fact, so §3 refuses the contact rather than approximating
