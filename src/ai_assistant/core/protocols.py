@@ -115,6 +115,9 @@ if TYPE_CHECKING:
         ActionRequest,
         AnswerOutcome,
         AttemptTransition,
+        Authorization,
+        AuthorizationDisposition,
+        AuthorizationSettlement,
         BatchHandle,
         BatchItemOutcome,
         BatchRequest,
@@ -243,6 +246,7 @@ if TYPE_CHECKING:
         TurnOutcome,
         TurnReference,
         UtcInstant,
+        VisibleIdentifier,
         WalkPosition,
     )
 
@@ -7607,6 +7611,557 @@ class RecipientGrantStore(Protocol):
 
         Raises:
             RecipientGrantError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class GoalAuthorizations(Protocol):
+    """The live authorization of one goal and one declaration, or none (ADR-0254 §16).
+
+    The **policy's** query face, and the narrow one. An ``ActionPolicy``
+    implementation is given this and never :class:`GoalAuthorizationStore`: a
+    component handed the whole store is one ``record`` call away from authorising
+    the call it is ruling on, and nothing about the resulting row would look wrong
+    afterwards. That is ADR-0097 §3's argument transferred without modification and
+    ADR-0193 §1's split one store over, and it is a **static** guarantee — a
+    concrete store satisfies this Protocol structurally, so a composition root may
+    pass one object to each seam; what a policy cannot do is *name* ``record``,
+    because ``mypy --strict`` runs over ``src`` and ``tests``.
+
+    **:meth:`live_for` is the only member and no lane adds a second.** A policy
+    asks about the one request it is ruling on. ``standing``, ``recent`` and
+    ``export`` are on the wider face, for the surface that shows the user what they
+    have authorised, and the member that resolves an id is
+    :meth:`AuthorizationResolution.resolve`, held by the trail alone.
+
+    **It is keyed and never asked** (§16). It takes the goal and the declaration's
+    **id** and returns the live row of that pair, so the policy holds the record
+    itself and takes §3's declaration-by-value comparison and its conditions 4, 5
+    and 6 over it. That is what lets the policy distinguish *no record* from *a
+    record that did not cover* — the distinction §6's argument-authority bar is
+    stated over, and one a ``covering(request) -> Authorization | None`` could not
+    give it, both answers being ``None``.
+
+    **A component that cannot get an answer here fails closed, and the direction is
+    the opposite of the grant seam's** (§6, §16). An
+    :class:`~ai_assistant.core.errors.AuthorizationError` is **not an absence**: it
+    takes §6's bar, so no standing route is taken at all and the ruling is the
+    ``CONFIRM`` the request would have drawn had the user authorised nothing. This
+    seam discovers **restrictions** as well as permissions, so a fault read as
+    ``None`` would turn a refusal the user's own act earned into an ``ALLOW`` — the
+    one direction nothing in this corpus may fail in.
+
+    Cancelling :meth:`live_for` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous** here: both
+    arguments are ``str``.
+    """
+
+    async def live_for(self, goal: Identifier, tool_id: VisibleIdentifier) -> Authorization | None:
+        """The live authorization of ``goal`` through the declaration ``tool_id``, or ``None``.
+
+        **Three of ADR-0254 §3's six conditions, and the other three are the
+        policy's.** This member answers conditions **1 and 2** and the **id half**
+        of condition 3: it returns the row of that ``goal`` whose declaration's
+        ``id`` equals ``tool_id``, whose ``disposition`` is ``ESTABLISHED`` and
+        whose ``expires_at`` is strictly after the one instant it read, with the
+        clock also at or after that row's ``settled_at``. The policy takes the rest
+        of condition 3 — the declaration compared **by value** — and conditions
+        **4, 5 and 6**, over the row returned. **Coverage is still their
+        conjunction and no component treats either half as the whole.**
+
+        **The key is the declaration's id and not the declaration by value**
+        (ADR-0254 §1, §6). That is *stricter* than a value key for the store's
+        uniqueness rule, and for the bar it is what keeps the answer **monotone**:
+        the row is still found when a ``risk_level``, a ``reversibility`` or a
+        ``discloses`` edit moves the request out of — or into — equality with the
+        stored declaration, so §6's bar neither appears nor disappears on a
+        severity edit (ADR-0021 §5). **The id is a lookup key and is never an
+        authority**: no coverage is taken over it, no ``ALLOW`` rests on it, and a
+        request whose declaration the row's does not equal by value reaches route
+        (d) in no case.
+
+        **Liveness, on one clock read** (§16, ADR-0193 §9's discipline). This is
+        the **only** member of any of the three faces that evaluates liveness, and
+        the only one that reads a clock; it reads it **exactly once per call** and
+        measures every row it considers against that one instant, because a query
+        reading an advancing clock per row could answer over a set true at no real
+        instant. The interval is **closed below and open above** — at or after
+        ``settled_at`` and strictly before ``expires_at``. **The lower end is
+        stated because the clock can move backwards** (§1): a row this seam called
+        live whose ``settled_at`` is after the ruling's ``decided_at`` is one §7's
+        trail then refuses as **backdated**, so the policy would report an
+        authority the dispatch could not use and the step would die at the write
+        rather than at the ruling. Equality is permitted at the lower end, which is
+        §7's own discipline for the same comparison one component over.
+
+        **A ``PROPOSED`` row is never live and is never returned** (§1). No clause
+        of ADR-0254 reads a proposal as an authority: a row the user has not
+        answered authorises nothing whatever else is true of it. **It does settle
+        an expired one** — a ``PROPOSED`` row whose ``expires_at`` is at or before
+        this call's own reading is settled ``EXPIRED`` by this read, which is
+        ADR-0244 §10's mechanism and is one of exactly two operations that perform
+        it, the other being the answer that names the row (§1, §15).
+
+        **The answer is a detached snapshot** — the record and everything mutable
+        it reaches — on ADR-0018 §3's rule and ADR-0097 §3's. ``frozen=True`` does
+        not close the bypass: a caller could rewrite ``coverage`` or ``expires_at``
+        through ``__dict__`` on a shared object, which is a widening of what the
+        user authorised, reached through the gate's own answer.
+
+        Args:
+            goal: The goal the request being ruled on belongs to —
+                ``ActionRequest.goal``, which ``orchestration`` sets. A request
+                carrying ``None`` never reaches this seam at all (§6).
+            tool_id: The ``id`` of the declaration being ruled on, read off the
+                request's own ``tool``.
+
+        Returns:
+            A detached snapshot of the live row of that pair, or ``None`` where the
+            store holds none. ``None`` means exactly that and **never** that the
+            store could not be read, and never that two rows would have answered.
+
+        Raises:
+            AuthorizationError: If the store cannot be read, **or if more than one
+                live row of that goal and declaration id would answer** — a state
+                :meth:`GoalAuthorizationStore.record`'s uniqueness refusal makes
+                unreachable, refused at the read as well because a query that chose
+                between two would be the composition ADR-0254 §5 declines, and
+                **raised rather than answered ``None``** because ``None`` is this
+                seam's word for *"the store holds no live record"* and two rows are
+                not none of them. The policy's fault clause then takes §6's bar, so
+                an integrity failure asks rather than authorising a request neither
+                row covers.
+        """
+        ...
+
+
+@runtime_checkable
+class AuthorizationResolution(Protocol):
+    """Resolves a recorded route-(d) ``authorised_by`` against the rows (ADR-0254 §7, §16).
+
+    The **trail's** face, and it carries one member. An :class:`AuditTrail`
+    implementation is constructed with one of these beside the
+    :class:`RecipientGrantResolution` it already takes, and never with a
+    :class:`GoalAuthorizationStore`, so the trail holds a **read and nothing else**:
+    it cannot append an authorization, revoke one, enumerate the user's goals or
+    erase the store. A trail that could append one would be one ``record`` call
+    away from authorising the row it is about to validate, which is the capability
+    ADR-0097 §3 removes by splitting.
+
+    **Given to** :class:`AuditTrail` **implementations and to nothing else.** No
+    ``ActionPolicy``, no surface, no :class:`EgressBinder` and no ``interfaces/``
+    adapter holds one. The policy's face carries no ``resolve`` and this face
+    carries no ``live_for``, so neither component can ask the other's question, and
+    :meth:`AuditTrail.record` is the only place a recorded route-(d)
+    ``authorised_by`` is ever resolved against this store — never at render time
+    and never at any later read.
+
+    **``ActionPolicy`` is unchanged in signature, and ``AuditTrail``'s own Protocol
+    gains no member, no argument and no widened return** (§7). What ADR-0021 §4
+    gains is an invariant.
+
+    Cancelling :meth:`resolve` is governed by this module's cancellation clause
+    (ADR-0060); its input-observation clause (ADR-0065) is **vacuous**, the one
+    argument being a ``str``.
+    """
+
+    async def resolve(self, authorization_id: DurableIdentifier) -> Authorization | None:
+        """The row with ``authorization_id``, **whatever its disposition**, or ``None``.
+
+        **It returns the row in every disposition**, because the trail's own check
+        reads that field: ADR-0254 §7's first of ten is that the resolved row's
+        ``disposition`` is ``ESTABLISHED``, which is *"the existence, the kind, the
+        unrevoked, the unsuperseded and the answered check at once"*. A member that
+        withheld a retired row would move that check inside the seam and leave the
+        trail unable to say which of the five it refused on.
+
+        **It reads no clock.** Both ends of liveness are decided by
+        :meth:`AuditTrail.record` against the **decision's own** ``decided_at``,
+        which is what makes the check a comparison of two recorded values rather
+        than a reading of the present (§7, §16).
+
+        It evaluates no coverage, ranks nothing, settles nothing, and returns a
+        detached snapshot as every other query on this seam does.
+
+        Args:
+            authorization_id: The id a decision's ``authorised_by`` carries on a
+                route-(d) row.
+
+        Returns:
+            A detached snapshot of the row, or ``None`` where the store holds none
+            with that id. ``None`` means exactly that and **never** that the store
+            could not be read.
+
+        Raises:
+            AuthorizationError: If the store cannot be read. The trail refuses the
+                write rather than proceeding, chaining this as ``__cause__`` of an
+                :class:`~ai_assistant.core.errors.InvalidAuthorisationError` —
+                :meth:`RecipientGrantResolution.outstanding`'s discipline one seam
+                over.
+        """
+        ...
+
+
+@runtime_checkable
+class GoalAuthorizationStore(Protocol):
+    """The durable record of what each goal's acts authorised (ADR-0254 §1, §16).
+
+    The durable face, and the widest of the three. It satisfies
+    :class:`GoalAuthorizations` and :class:`AuthorizationResolution` structurally,
+    so one implementation serves all three seams and a composition root may pass
+    one object to each. **Nothing but ``orchestration`` and the hub's authorization
+    operations holds one** — no ``ActionPolicy``, no ``AuditTrail``, no surface, no
+    :class:`EgressBinder`.
+
+    **An ``Authorization`` is written and settled by ``orchestration`` and by
+    nothing else** (§15), on exactly three paths and **there is no fourth**:
+    proposed on path (i) when a ``CONFIRM`` is put and settled by the answer to it;
+    written already ``ESTABLISHED`` on path (ii) from a recorded turn whose span
+    names an argument a live row already carries; and written already
+    ``ESTABLISHED`` on path (iii) from a recorded turn whose span opens the
+    authority where no row of that pair stands ``ESTABLISHED``. No ``ActionPolicy``,
+    no ``AuditTrail``, no interface adapter, no reader, no tool and no model output
+    writes or settles one. **The one exception is the expiry settlement**, which any
+    read of an expired ``PROPOSED`` row performs inside the store (§1) — ADR-0244
+    §10's mechanism, which is the store settling a deadline it can see rather than a
+    component deciding anything.
+
+    **A settlement is the store's single mutation, and there is no ``update``**
+    (§1). :meth:`settle` moves one field and its instant, exactly as
+    :meth:`ParkedReadStore.settle` does, and the record's coverage, basis, account,
+    destinations and expiry are never edited. **No row is deleted** — not by expiry,
+    not by a settlement, not by supersession, not by revocation, and by no operation
+    but :meth:`clear` — so a user can see what they once authorised, what they
+    declined and what lapsed. **There is no ``delete(id)``**, exactly as there is
+    none on the recipient-grant store and for its reason: a store from which a row
+    can be removed is one whose history can be rewritten.
+
+    **A Tier 1 local store** (ADR-0004 §1, §7, ADR-0155 §1): a goal statement, an
+    argument value and a span of the user's words are the user's personal data, so
+    implementations persist **locally only**, under ``Settings.data_dir``, with
+    owner-only file permissions, and none of this may be written to a remote
+    service.
+
+    **`core.config.Settings` gains nothing for this store** (ADR-0254 §12,
+    ADR-0256 §2): no deployment-wide expiry, no field, no default, no ceiling and
+    no sentinel. The one deployment value ADR-0256 §1's rung 3 reads is
+    ``episode_retention``, read by ``orchestration`` at the write and never by a
+    store.
+
+    **Clock disciplines** (§16, ADR-0193 §9's, adopted). :meth:`live_for` is the
+    only query that evaluates liveness and the only one that reads a clock;
+    :meth:`standing` evaluates no liveness, reports none and reads none — it
+    returns the rows, each carrying its own ``expires_at``, and **the caller
+    compares**, against one reading of the injected clock (ADR-0026). :meth:`resolve`,
+    :meth:`recent`, :meth:`export`, :meth:`record` and :meth:`settle` evaluate no
+    liveness: ``settle`` takes its ``settled_at`` from the caller as ``record``
+    takes its instants, because a store neither mints ids nor reads a clock
+    (ADR-0021 §3).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous**: the one
+    caller-owned argument is an
+    :class:`~ai_assistant.core.types.Authorization`, which is immutable all the way
+    down. What a caller *can* still do is write past the frozen model through
+    ``__dict__``, which is what :meth:`record`'s detachment obligation closes.
+    """
+
+    async def record(self, authorization: Authorization) -> str:
+        """Append ``authorization`` to the store and return its id.
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting, for :meth:`AuditTrail.record`'s reason — a store that upserts
+        is one where history can be rewritten by replaying a write.
+
+        **Atomic**: the duplicate-id check, the uniqueness refusal, the path rules,
+        the transcription and non-widening checks, the path-(ii) supersession and
+        the append are **one** operation, not a read followed by a write.
+
+        **Stores a detached, validated snapshot**, recursively over reachable
+        state, and never retains the caller's object. ``frozen=True`` refuses
+        ``row.coverage = …`` and does not refuse ``row.__dict__["coverage"] = …``,
+        so a store keeping the caller's object would let an authority be **widened
+        after it was appended**.
+
+        **It reads no clock**, so every rule it applies is a fact about one record
+        or about two. In particular the uniqueness refusal below is stated over the
+        **disposition** rather than over liveness.
+
+        **The three write paths, and what each does** (ADR-0254 §1, §16):
+
+        * **path (i), a proposal against a ``CONFIRM``** — ``confirmation`` set —
+          is written ``PROPOSED`` and **retires nothing**. Its ``supersedes`` is a
+          statement about what approving it would replace, and §§1 and 5 put that
+          retirement in the same write as the ``ESTABLISHED`` settlement, not in
+          the proposal. *A proposal that retired its predecessor would leave the
+          user with **neither** authority while the question stood, and with
+          neither after they declined it.*
+        * **path (ii), a correction** — ``confirmation`` unset, ``supersedes`` set,
+          written ``ESTABLISHED`` with ``settled_at`` equal to ``proposed_at`` —
+          **settles the row its ``supersedes`` names ``SUPERSEDED`` in the same
+          indivisible write**.
+        * **path (iii), an opening act** — both pointers unset, written
+          ``ESTABLISHED`` the same way — **retires nothing, there being nothing to
+          retire**, and the uniqueness refusal is what holds it to a pair no row is
+          established for.
+
+        **The write-path rules, which are deliberately not model validators** (§1):
+        a row carrying ``confirmation`` is written ``PROPOSED``; a row carrying
+        ``confirmation`` **unset** is written ``ESTABLISHED`` with ``settled_at``
+        equal to ``proposed_at``. The same row is later persisted ``ESTABLISHED``
+        with that same ``confirmation``, so a validator stating the first would
+        refuse to decode the row it had just written.
+
+        **The uniqueness refusal, enforced without a clock** (§1). A write that
+        would leave two rows of one ``goal`` and one declaration **``id``** both
+        ``ESTABLISHED`` is refused. **The key is the id and not the declaration by
+        value**, which is *stricter* than a value key: every pair the value key
+        would refuse the id key refuses too, and it additionally refuses a second
+        row about an **edited** declaration of the same id. That is what makes
+        :meth:`live_for` answer with one row or none, and it is what §6's bar rests
+        on.
+
+        **What a path-(ii) correction may change, and what it may never touch**
+        (§1, §5, ADR-0256 §5). It may **replace a fixed value** for an argument the
+        superseded row already fixed, and **narrow a bound** for an argument it
+        already bounded. It may **never** add a member for an argument the
+        superseded row does not name, **widen** a bound — a raised ``maximum``, a
+        lowered ``minimum``, an added term, a longer period — or change ``goal``,
+        ``tool``, ``account``, ``destinations`` or ``origin``, each of which is
+        transcribed unchanged. **A change to a destination-bearing argument takes
+        path (i)**, and **a widening of any kind takes path (i) and is confirmed**.
+
+        **``expires_at`` on a path-(ii) row moves in exactly one direction and by
+        exactly one rule** (ADR-0256 §5, §9). It is **accepted** where it is
+        strictly after this row's own ``proposed_at`` **and** strictly before the
+        superseded row's ``expires_at`` — a correcting act that states an earlier
+        instant narrows the horizon — and **every other movement of that field is
+        refused**, in either direction. **Nothing lengthens a horizon on any path
+        but (i)**, so *"No sequence of corrections outlives the confirmation that
+        began it"* holds a fortiori, and the bound is the **superseded** row's
+        instant and never a chain's first. **A path-(i) proposal carrying
+        ``supersedes`` is subject to none of this**: §1 lets it set ``expires_at``
+        and §5 has it compute a fresh one, so it may carry a **later** instant than
+        the row it names, which is what renews an authority whose expiry has passed.
+
+        Args:
+            authorization: The row to append.
+
+        Returns:
+            The recorded id.
+
+        Raises:
+            InvalidAuthorizationError: If the id is already recorded; if the write
+                would leave two ``ESTABLISHED`` rows of one goal and declaration
+                id; if a path-(ii) row fails the transcription, the non-widening or
+                the ``expires_at`` check; if a row carrying ``confirmation`` is
+                written in any disposition but ``PROPOSED``; if a row carrying
+                ``confirmation`` unset is written in any disposition but
+                ``ESTABLISHED`` or with ``settled_at`` unequal to ``proposed_at``;
+                or if ``supersedes`` resolves to no ``ESTABLISHED`` row of that goal
+                and declaration id.
+            AuthorizationError: If the store cannot be written.
+        """
+        ...
+
+    async def settle(
+        self,
+        authorization_id: DurableIdentifier,
+        /,
+        *,
+        to: AuthorizationDisposition,
+        settled_at: UtcInstant,
+    ) -> AuthorizationSettlement:
+        """Move one row along one of ADR-0254 §1's five edges, or say why not.
+
+        **The read, the comparisons and the writes are one indivisible step**,
+        which is :meth:`ParkedReadStore.settle`'s own construction and
+        ``PlanStore``'s compare-and-swap argument (ADR-0014 §5): **no caller reads a
+        row, decides, and writes back.**
+
+        **The compare-and-swap is on the ``disposition`` itself** (§1). The move
+        succeeds only where the row currently stands at that edge's source, so **no
+        version token is added to the type** and two racing settlements cannot both
+        win: the second finds a disposition the edge does not leave and is answered
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NOT_AT_SOURCE`.
+        **Every move that is not one of the five edges is refused**, including any
+        move out of a retired disposition.
+
+        **A settlement to ``ESTABLISHED`` takes §1's uniqueness check and the
+        supersession inside that same step.** Where the row carries ``supersedes``
+        naming a row that **still stands ``ESTABLISHED``**, that row is settled
+        ``SUPERSEDED`` in the same write — which is what §5's *"in one write"* means
+        and why there is never an instant at which two rows of one pair are
+        established. Where the named row has **already left ``ESTABLISHED``** — the
+        user revoked it, or a third row superseded it — **it is left exactly as it
+        stands**, in whatever retired disposition it reached, and this row is
+        established all the same: the approval is the user's later and more explicit
+        act, the uniqueness the supersession protects is already satisfied, and
+        refusing instead would let an earlier revocation silently void the answer to
+        a question still standing. **That arm writes nothing to the named row at
+        all**, so no edge leaves a retired disposition and the graph is unamended.
+
+        The uniqueness check is then taken over **what would remain after that
+        supersession**: the settlement succeeds only where no other ``ESTABLISHED``
+        row of that goal and declaration id survives the step, and answers
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.WOULD_DUPLICATE`
+        where one would.
+
+        **It reads no clock** and takes ``settled_at`` from the caller, as
+        :meth:`record` takes its instants (ADR-0021 §3).
+
+        Args:
+            authorization_id: The row to settle.
+            to: The disposition to move it to — the target of one of §1's five
+                edges.
+            settled_at: The instant the caller took the settlement at, written to
+                the row's ``settled_at``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.AuthorizationSettlement`'s
+            four members this step answered. **A refusal is a result and never an
+            exception**, and a ``bool`` cannot tell an unknown id from a row that
+            was not at the source.
+
+        Raises:
+            AuthorizationError: If the store cannot be read or written. A refusal
+                is **not** this: the four outcomes are total over what the step can
+                answer.
+        """
+        ...
+
+    async def live_for(self, goal: Identifier, tool_id: VisibleIdentifier) -> Authorization | None:
+        """The live authorization of ``goal`` through the declaration ``tool_id``, or ``None``.
+
+        Exactly :meth:`GoalAuthorizations.live_for`'s semantics — the same member,
+        on the wider seam: ADR-0254 §3's conditions 1 and 2 and the id half of
+        condition 3, liveness evaluated against one clock read with both ends
+        stated, an expired ``PROPOSED`` row settled ``EXPIRED`` by the read, and a
+        detached snapshot.
+
+        Raises:
+            AuthorizationError: If the store cannot be read, or if more than one
+                live row of that pair would answer.
+        """
+        ...
+
+    async def resolve(self, authorization_id: DurableIdentifier) -> Authorization | None:
+        """The row with ``authorization_id``, whatever its disposition, or ``None``.
+
+        Exactly :meth:`AuthorizationResolution.resolve`'s semantics — the same
+        member, on the wider seam. It reads no clock and settles nothing.
+
+        Raises:
+            AuthorizationError: If the store cannot be read.
+        """
+        ...
+
+    async def standing(self, goal: Identifier) -> tuple[Authorization, ...]:
+        """Every ``ESTABLISHED`` row of ``goal``, live **and** lapsed (ADR-0254 §16).
+
+        **It reports no liveness and carries no evaluation instant**, because
+        :class:`~ai_assistant.core.types.Authorization`'s field list is closed and a
+        result type wrapping one would be a second carrier for a fact the row
+        already determines: each row carries its own ``expires_at``, and **whether
+        it has passed is the caller's comparison against one reading of the injected
+        clock** (ADR-0026). The engine takes that reading when it assembles the
+        listing and hands the surface the answer as data, which is ADR-0042 §6's
+        division — an adapter reads no store and holds no clock.
+
+        **It never returns a ``PROPOSED`` row**, so the listing never renders a
+        question the user has not answered as an authority they hold; and it **does**
+        return a lapsed one, so a user can see and revoke what they once authorised
+        — which is ADR-0193 §9's own reason for keeping an expired grant visible and
+        revocable, one store over, and it is why the withdrawal path needs no
+        history query. A ``DECLINED``, ``EXPIRED``, ``REVOKED`` or ``SUPERSEDED``
+        row is absent; :meth:`recent` and :meth:`export` are where those are read.
+
+        **Complete or nothing**, and no implementation truncates, samples or elides:
+        a page of what the user authorises reads as complete while omitting an
+        authorisation.
+
+        Args:
+            goal: The goal whose rows to list. **An authorization of one goal is
+                never returned for another** (§1).
+
+        Returns:
+            A detached snapshot of every ``ESTABLISHED`` row of that goal. An empty
+            tuple means the store holds none, never that it could not be read.
+
+        Raises:
+            AuthorizationError: If the store cannot be read, or holds a row that no
+                longer validates.
+        """
+        ...
+
+    async def recent(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[Authorization, ...]:
+        """Return the most recent rows, newest first (ADR-0254 §16).
+
+        Ordered by ``proposed_at`` **descending**, ties broken by ``id``
+        ascending — :meth:`RecipientGrantStore.recent`'s order one store over, and
+        for its reason: *"newest first"* is ambiguous between insertion order and
+        decision time, which disagree whenever rows are appended out of order, and
+        an ``id`` tie-break makes the order total rather than merely mostly
+        determined.
+
+        **Rows of every disposition are returned**, a declined and a superseded one
+        included: this is the history read, and it settles nothing and evaluates no
+        liveness.
+
+        Args:
+            limit: The most rows to return.
+
+        Returns:
+            A detached snapshot of at most ``limit`` rows.
+
+        Raises:
+            ValueError: If ``limit`` is not a strictly positive ``int``, refused
+                **locally and before any I/O**, exactly as
+                :meth:`RecipientGrantStore.recent` refuses it.
+            AuthorizationError: If the store cannot be read.
+        """
+        ...
+
+    async def export(self) -> tuple[Authorization, ...]:
+        """A portable snapshot of **every** row (ADR-0004 §6, ADR-0254 §16).
+
+        Proposed, established, declined, expired, revoked and superseded — the data
+        right, and it carries **each member's basis whole**, act, span and
+        resolution. It settles nothing and evaluates no liveness.
+
+        Returns:
+            A detached snapshot of every row the store holds.
+
+        Raises:
+            AuthorizationError: If the store cannot be read.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Erase every row and return the count (ADR-0004 §6, ADR-0254 §16).
+
+        The wholesale erase, and the **only** operation that removes a row. There is
+        no ``delete(id)``: a store from which one row can be removed is one whose
+        history can be rewritten.
+
+        **It retracts, invalidates and re-opens nothing.** A recorded ``ALLOW``
+        stays recorded, stays true about the moment it was made, and still names the
+        row it rested on; the row's rendering under ADR-0193 §11 does not change.
+        What is lost is the record's **own** text — its coverage, its basis, its
+        expiry — because the decision carries a pointer and a digest and never the
+        record by value.
+
+        **No lane makes this conditional on, coordinated with, or transactional
+        against the audit trail's ``clear``** — ADR-0007 §4's deferred coordinator
+        is where cross-tier erasure is decided, and what is decided here is that
+        each store's own wholesale erase is the user's to perform.
+
+        Returns:
+            The number of rows erased.
+
+        Raises:
+            AuthorizationError: If the store cannot be written.
         """
         ...
 
