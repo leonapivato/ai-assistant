@@ -12,6 +12,7 @@ from ai_assistant.planning import InMemoryPlanStore
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.types import GoalAttempt
 
 
 def _fixed_now() -> datetime:
@@ -31,6 +32,16 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> PlanStore:
         return InMemoryPlanStore(now=_fixed_now)
+
+    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
+        """Write the row into the dict, beneath ADR-0255 §3's refusal on both members.
+
+        A store written before that decision could hold it; ``open_attempt`` cannot
+        produce it any more, which is the whole of what the arm is about.
+        """
+        assert isinstance(store, InMemoryPlanStore)
+        # A pre-decision row, by construction: the public members refuse it now.
+        store._attempts[attempt.id] = attempt
 
 
 async def _seed_and_start(store: InMemoryPlanStore) -> str:

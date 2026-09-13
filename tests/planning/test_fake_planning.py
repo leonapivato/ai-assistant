@@ -22,6 +22,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
     Goal,
+    GoalAttempt,
     GoalBrief,
     GoalInterpretation,
     Ground,
@@ -54,6 +55,12 @@ class TestFakePlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> PlanStore:
         return FakePlanStore(now=_fixed_now)
+
+    async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
+        """Write the row into the dict, beneath ADR-0255 §3's refusal on both members."""
+        assert isinstance(store, FakePlanStore)
+        # A pre-decision row, by construction: the public members refuse it now.
+        store._attempts[attempt.id] = attempt
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
