@@ -14,17 +14,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from authorizing_builders import AT, GOAL, a_tool
 
 from ai_assistant.core.types import (
     ActionPlan,
+    EvidenceBasis,
     PlanStep,
     ResultReference,
+    StepCondition,
     StepOutputRef,
+    StepStatus,
 )
 from ai_assistant.orchestration.validating import (
     PhaseFour,
     UnfillableStep,
+    UnmetDependency,
     evaluate,
     fillable,
     required_arguments,
@@ -50,6 +55,7 @@ def a_step(
     parameters: Mapping[str, str] | None = None,
     resolves: tuple[ResultReference, ...] = (),
     depends_on: tuple[str, ...] = (),
+    when: tuple[StepCondition, ...] = (),
 ) -> PlanStep:
     """One planned step."""
     return PlanStep(
@@ -59,7 +65,13 @@ def a_step(
         parameters={} if parameters is None else parameters,
         resolves=resolves,
         depends_on=depends_on,
+        when=when,
     )
+
+
+def a_condition(about: str = "element-1") -> StepCondition:
+    """One ``when`` member, so a step can declare a sufficiency requirement."""
+    return StepCondition(about=about, basis=EvidenceBasis.READ_OUTCOME)
 
 
 def a_plan(*steps: PlanStep) -> ActionPlan:
@@ -192,7 +204,7 @@ def test_a_capability_the_registry_offers_nothing_for_is_passed_over() -> None:
 # --- ADR-0255's deferral -------------------------------------------------
 
 
-def test_a_step_declaring_a_dependency_is_deferred_and_does_not_fail() -> None:
+def test_a_dependency_on_an_undisposed_producer_is_deferred_and_does_not_fail() -> None:
     """ADR-0255's third case added to §14's enumeration.
 
     "Without it every plan carrying a `depends_on` replans forever, because a
@@ -204,15 +216,90 @@ def test_a_step_declaring_a_dependency_is_deferred_and_does_not_fail() -> None:
     gate = evaluate(plan, candidates=_offered(plan, a_tool()))
 
     assert gate.deferred == ("step-2",)
+    assert gate.unmet == ()
     assert gate.ready
 
 
-def test_a_known_failure_dominates_a_deferral() -> None:
-    """ADR-0255: "a known failure dominating a deferral".
+def test_a_step_declaring_a_when_is_deferred() -> None:
+    """ADR-0252 §6's four tests have no evaluator here; the driver decides them.
 
-    A check with an operand available now and failing now "stays a failed check
-    whatever else it waits on".
+    ADR-0255 puts that decision "at the moment of dispatch, in the words the
+    sufficiency decision fixes".
     """
+    conditional = a_step("step-2", when=(a_condition(),))
+    plan = a_plan(a_step(), conditional)
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()))
+
+    assert gate.deferred == ("step-2",)
+    assert gate.ready
+
+
+@pytest.mark.parametrize(
+    "status",
+    [StepStatus.FAILED, StepStatus.SKIPPED, StepStatus.INDETERMINATE],
+    ids=["failed", "skipped", "indeterminate"],
+)
+def test_a_dependency_on_a_disposed_producer_fails_and_is_never_deferred(
+    status: StepStatus,
+) -> None:
+    """ADR-0253 §2's rule, and ADR-0255's "a known failure dominating a deferral".
+
+    A producer that is `FAILED` or `SKIPPED` fails the dependency, and one that is
+    `INDETERMINATE` "fails it and stops the branch". Each is an operand **already
+    available at phase 4 and not satisfied**, so the check is a failure whatever
+    else that step waits on — a lane that deferred unconditionally lets the
+    dependent step dispatch over a producer the store says did not deliver.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), disposed={"step-1": status})
+
+    assert gate.unmet == (UnmetDependency(step="step-2", producer="step-1", status=status),)
+    assert not gate.ready
+
+
+def test_a_succeeded_producer_defers_rather_than_passing() -> None:
+    """ADR-0253 §2's rule is a conjunction and this stage sees one conjunct.
+
+    A dependency is satisfied only where the producer is `SUCCEEDED` **and** its
+    `verifies` predicate holds over its output. That second conjunct's evaluator is
+    A7's, so asserting the dependency satisfied on the status alone would report the
+    permissive half of a conjunction as the whole of it.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(
+        plan,
+        candidates=_offered(plan, a_tool()),
+        disposed={"step-1": StepStatus.SUCCEEDED},
+    )
+
+    assert gate.deferred == ("step-2",)
+    assert gate.unmet == ()
+    assert gate.ready
+
+
+def test_a_failed_dependency_dominates_a_second_outstanding_one() -> None:
+    """ADR-0255: "a check with an operand available now and failing now stays a
+    failed check whatever else it waits on"."""
+    plan = a_plan(
+        a_step(),
+        a_step("step-2"),
+        a_step("step-3", depends_on=("step-1", "step-2")),
+    )
+
+    gate = evaluate(
+        plan, candidates=_offered(plan, a_tool()), disposed={"step-1": StepStatus.FAILED}
+    )
+
+    assert gate.deferred == ("step-3",)  # step-2 is still outstanding
+    assert [one.producer for one in gate.unmet] == ["step-1"]
+    assert not gate.ready
+
+
+def test_a_known_check_2_failure_dominates_a_deferral() -> None:
+    """The same dominance one check over: a deferred step does not rescue a plan."""
     plan = a_plan(
         a_step(parameters={"to": "a@example.com", "idempotency_key": "k-1"}),
         a_step("step-2", depends_on=("step-1",)),

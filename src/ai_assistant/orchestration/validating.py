@@ -45,7 +45,9 @@ asking mechanism"*, so nothing here writes it and nothing here asks.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+
+from ai_assistant.core.types import StepStatus
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -67,6 +69,41 @@ class UnfillableStep:
 
 
 @dataclass(frozen=True, slots=True)
+class UnmetDependency:
+    """A step whose dependency on an already-disposed producer has **failed**.
+
+    ADR-0253 §2: a dependency is satisfied only where the producing step is
+    ``SUCCEEDED`` **and** its ``verifies`` predicate holds over its output; a
+    producer that is ``FAILED`` or ``SKIPPED`` **fails** it, and one that is
+    ``INDETERMINATE`` *"fails it and stops the branch"*.
+
+    Attributes:
+        step: The dependent step's id.
+        producer: The step it depends on.
+        status: How that producer was disposed of.
+    """
+
+    step: str
+    producer: str
+    status: StepStatus
+
+
+#: The dispositions that **fail** a dependency where phase 4 can already see them
+#: (ADR-0253 §2).
+#:
+#: ``INDETERMINATE`` is among them for that section's own reason, and with a
+#: different consequence further on: skipping the dependent step *"would record that
+#: the producer did not act, which is exactly the half of the ambiguity that state
+#: refuses to pick; driving it would record that the producer did"*. **At phase 4
+#: both answers are the same** — the plan is not ready and nothing is dispatched —
+#: and *which* disposal the branch then takes, and when, is A7's and A8's (§2, §11).
+#: Nothing here writes a ``SkipReason``, which §2 forbids this lane in terms.
+_FAILS_A_DEPENDENCY: Final = frozenset(
+    {StepStatus.FAILED, StepStatus.SKIPPED, StepStatus.INDETERMINATE}
+)
+
+
+@dataclass(frozen=True, slots=True)
 class PhaseFour:
     """Where phase 4's checks leave the plan (ADR-0254 §14).
 
@@ -81,12 +118,17 @@ class PhaseFour:
             and the plan is replanned within the attempt, and where no replan can
             satisfy the check the attempt is left for A3's ``BLOCKED`` producer,
             which this decision does not write.
+        unmet: The steps check 1 failed on — a dependency whose producer has
+            already been disposed of in a way ADR-0253 §2 says fails it. **A failure
+            here is available at phase 4 and is never deferred**, which is ADR-0255's
+            *"a known failure dominating a deferral"*.
         deferred: The steps carrying a check whose operands this same plan will
             produce, deferred to their own dispatch (ADR-0255). A deferral neither
             blocks the advance to ``EXECUTE`` nor triggers a replan.
     """
 
     unfillable: tuple[UnfillableStep, ...] = ()
+    unmet: tuple[UnmetDependency, ...] = ()
     deferred: tuple[str, ...] = ()
 
     @property
@@ -94,9 +136,11 @@ class PhaseFour:
         """Whether every check passed or was deferred.
 
         ADR-0255: *"The attempt advances to `EXECUTE` where every check either
-        **passed or was deferred**"*, a known failure dominating a deferral.
+        **passed or was deferred**"*, a known failure dominating a deferral — *"so
+        a check with an operand available now and failing now stays a failed check
+        whatever else it waits on"*.
         """
-        return not self.unfillable
+        return not self.unfillable and not self.unmet
 
 
 def required_arguments(candidate: ToolDefinition, /) -> tuple[str, ...]:
@@ -155,8 +199,55 @@ def fillable(step: PlanStep, candidate: ToolDefinition, /) -> bool:
     return all(key in available for key in required_arguments(candidate))
 
 
+def _dependency_defects(
+    step: PlanStep, disposed: Mapping[str, StepStatus], /
+) -> tuple[tuple[UnmetDependency, ...], bool]:
+    """ADR-0254 §14's check 1 over one step, and whether it is deferred.
+
+    ADR-0255 makes the deferral **conditional**, and the condition is the half a
+    lane most easily drops: a check is deferred only where at least one operand
+    *"this same plan will produce"* is outstanding **and** *"every one of whose
+    operands already available at phase 4 is satisfied"*. So a producer already
+    disposed of in a way ADR-0253 §2 says fails the dependency is a **failure**, not
+    a deferral — *"a known failure dominating a deferral, so a check with an operand
+    available now and failing now stays a failed check whatever else it waits on"*.
+
+    **A `SUCCEEDED` producer defers rather than passing**, because ADR-0253 §2's
+    rule is a conjunction — ``SUCCEEDED`` **and** the producer's ``verifies``
+    predicate holding over its output — and the second conjunct's evaluator is A7's
+    (§2: *"No lane of this decision … **evaluates this rule**"*, and ADR-0255 §1
+    gives the driver its four evaluations per step). Deferring the half this stage
+    cannot see is what keeps a deferral honest; asserting the dependency satisfied
+    on the status alone would be the permissive half of a conjunction reported as
+    the whole of it.
+
+    Args:
+        step: The step whose ``depends_on`` is read.
+        disposed: The stored execution's step statuses, by step id. A step the
+            execution does not name is outstanding.
+
+    Returns:
+        The failed dependencies, and whether any operand is still outstanding.
+    """
+    defects: list[UnmetDependency] = []
+    outstanding = False
+    for producer in step.depends_on:
+        status = disposed.get(producer)
+        if status is None or status not in _FAILS_A_DEPENDENCY:
+            # Either not yet disposed of, or `SUCCEEDED` with a `verifies` half
+            # this stage does not evaluate: an operand this plan will produce.
+            outstanding = True
+            continue
+        defects.append(UnmetDependency(step=step.id, producer=producer, status=status))
+    return tuple(defects), outstanding
+
+
 def evaluate(
-    plan: ActionPlan, /, *, candidates: Mapping[str, Sequence[ToolDefinition]]
+    plan: ActionPlan,
+    /,
+    *,
+    candidates: Mapping[str, Sequence[ToolDefinition]],
+    disposed: Mapping[str, StepStatus] | None = None,
 ) -> PhaseFour:
     """Run phase 4's checks over ``plan`` and say where they leave it.
 
@@ -182,32 +273,44 @@ def evaluate(
     that through ADR-0037 §1's `NO_CAPABLE_TOOL`"*. So an empty candidate list is
     passed over here and disposed of there.
 
-    **Checks 1 and 3 are deferred wherever the step declares one**, and are
-    decided at that step's own dispatch (module docstring).
+    **Check 1 fails where it can already see a failure and defers otherwise**
+    (:func:`_dependency_defects`). **Check 3 is deferred wherever a step declares a
+    `when`**, because ADR-0252 §6's four tests have no evaluator on this tree and
+    are the sufficiency decision's own lane's; a deferral is ADR-0255's ruled
+    treatment for a check this plan's own work will settle, and the driver decides
+    it *"at the moment of dispatch, in the words the sufficiency decision fixes"*.
 
     Args:
         plan: The plan about to be driven.
         candidates: Each step's id mapped to the declarations its capability
             resolves to. The caller performs the registry reads, so this function
             stays a total function of stored values (§14).
+        disposed: The stored execution's step statuses, by step id, for check 1.
+            ``None`` is an execution none of whose steps has been disposed of,
+            which is every plan at its first drive.
 
     Returns:
         Where the checks leave the plan.
     """
+    statuses: Mapping[str, StepStatus] = {} if disposed is None else disposed
     unfillable: list[UnfillableStep] = []
+    unmet: list[UnmetDependency] = []
     deferred: list[str] = []
     for step in plan.steps:
         offered = candidates.get(step.id, ())
         if offered and not any(fillable(step, candidate) for candidate in offered):
             unfillable.append(UnfillableStep(step=step.id, capability=step.capability))
-        if step.depends_on or step.when:
+        defects, outstanding = _dependency_defects(step, statuses)
+        unmet.extend(defects)
+        if outstanding or step.when:
             deferred.append(step.id)
-    return PhaseFour(unfillable=tuple(unfillable), deferred=tuple(deferred))
+    return PhaseFour(unfillable=tuple(unfillable), unmet=tuple(unmet), deferred=tuple(deferred))
 
 
 __all__ = [
     "PhaseFour",
     "UnfillableStep",
+    "UnmetDependency",
     "evaluate",
     "fillable",
     "required_arguments",
