@@ -7,9 +7,10 @@
   entire**, its *"no row at all"* and its *"Nothing is invented, nothing is defaulted and
   nothing falls back to a configuration"* included: where the recorded act states no instant and
   the goal carries no `deadline`, `expires_at` is now `proposed_at` advanced by the deployment's
-  turn-retention window and a row **is** written, where that window is finite; with it **§20's
-  arm 69 in its two rung-3 cases alone**, every other case of that arm standing verbatim (§1,
-  §7).
+  turn-retention window and a row **is** written, where that window is finite; with it **§1's
+  fourth proposal condition**, *"§12's ladder yields an `expires_at` … There is no deployment
+  figure to fall back on and none is invented"*, which governs path (iii) too, and **§20's arm
+  69 in its two rung-3 cases alone**, every other case of that arm standing verbatim (§1, §7).
   **§12's stated cost of that rung** — *"a goal carrying no `deadline` whose user stated no
   horizon has no route (d) at all, and every call of it asks"* — which is true only where that
   window is set to keep turns forever, and there the ratified rung stands verbatim as the
@@ -17,12 +18,16 @@
   third rung reads one deployment value, `core.config.Settings.episode_retention`**, together
   with **§12's justification clause in its limb *"and in neither case by a deployment"***; every
   other limb of both stands, `Settings` gains nothing and no figure bounds rung 1 or rung 2 (§2,
-  §7). **The path-(ii) transcription rule in all four places ADR-0254 states it** — §12's
+  §7). **The path-(ii) transcription rule in all five places ADR-0254 states it** — §12's
   path-(ii) transcription clause, §1's path-(ii) *"transcribed unchanged"* list, §1's path-(i)
-  *"the only path that may … set `expires_at`"* and §5's *"`expires_at` is transcribed from the
-  row it supersedes"* — **together with §20's arm 17 in its `expires_at` field alone**, each in
-  the `expires_at` limb and in the **narrowing direction alone** (§5). **§9 clause (ii)'s
-  bar limb *"move `expires_at`"***, in that same narrowing direction alone. **§9 clause (iii)
+  *"the only path that may … set `expires_at`"*, §1's *"what path (ii) may change"* clause in its
+  limb *"or move `expires_at`"*, and §5's *"`expires_at` is transcribed from the row it
+  supersedes"* — **together with §20's arm 17 in its `expires_at` field alone and §20's arm 25
+  in its *"carry one `expires_at`"* limb alone**, each in the `expires_at` limb and in the
+  **narrowing direction alone** (§5). **§9 clause (ii)'s
+  bar limb *"move `expires_at`"*, and §20's arm 20 which tests it***, in that same narrowing
+  direction alone — arm 20 standing entire on its own terms, its subject being a widening.
+  **§9 clause (iii)
   stands entire and no limb of it is superseded** — an instant a correction's span does not
   settle to one value is not taken and the user is asked, exactly as ratified (§5). And **§19's
   entry *"What the user is shown where §12's ladder yields no instant"***,
@@ -31,8 +36,9 @@
   `Authorization` and shown when it is granted, no ceiling over rung 1 or rung 2, the expiry
   taken once and never recomputed, an answer arriving at or after it establishing nothing, the
   recipient-grant and configured-provider exclusions, the visible-at-the-act rule and the
-  no-deletion rule. §§1–11 and §§13–22 stand as they are, but for the limbs of §1 and §9 named
-  above.
+  no-deletion rule. **§§1–11 and §§13–22 stand as they are, but for the limbs of §1, §5, §9, §19
+  and §20 named above** — those five sections and §12 are the whole of what this decision
+  reaches, and §7 is the inventory.
 
 ## Context
 
@@ -464,8 +470,15 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
 1. **§12's ladder, rung 3, entire.** *"**no row at all.** Where the act states no instant **and**
    the goal carries no `deadline` … **no path-(i) proposal and no path-(iii) row is written**"*,
    and with it that rung's *"Nothing is invented, nothing is defaulted and nothing falls back to
-   a configuration"*. With it, **§20's arm 69** in its two rung-3 cases alone — *"An act naming
-   none on a goal carrying **no** `deadline`, and one carrying a `deadline` at or before
+   a configuration"*. **With it, §1's fourth proposal condition** — *"**§12's ladder yields an
+   `expires_at`** — the act states an instant, or the goal carries a `deadline` strictly after
+   `proposed_at`. **There is no deployment figure to fall back on and none is invented**"*,
+   which §1 makes govern **path (iii) too** and whose failure is *"no row is proposed"*. It
+   enumerates the ladder's first two rungs as the whole of it and denies the fallback this
+   decision takes, so it is the same supersession stated in a second place and is
+   **superseded on the same narrowing** — a third case now satisfies it, and the figure is not
+   invented but read (§2). And with both, **§20's arm 69** in its two rung-3 cases alone — *"An
+   act naming none on a goal carrying **no** `deadline`, and one carrying a `deadline` at or before
    `proposed_at` → **no path-(i) proposal and no path-(iii) row is written** … one test each"* —
    which a lane must now ship as §9's arms instead. A reader holding only ADR-0254 writes no row
    for every deadline-free goal and ships a test asserting that; after this decision they write
@@ -484,12 +497,18 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    for an expiry at all. **Superseded in the single respect that §1's rung reads
    `episode_retention`**, and in no other: `Settings` gains nothing, the expiry stays per
    `Authorization` and shown when granted, and no figure bounds rung 1 or rung 2 (§2, §6).
-4. **The path-(ii) transcription rule, in all four places ADR-0254 states it, and the arm that
-   tests it.** §12's path-(ii) transcription clause; §1's path-(ii) *"`expires_at` … transcribed
+4. **The path-(ii) transcription rule, in all five places ADR-0254 states it, and the two arms
+   that test it.** §12's path-(ii) transcription clause; §1's path-(ii) *"`expires_at` … transcribed
    unchanged"*; §1's path-(i) *"the only path that may … set `expires_at`"*; and **§5's
-   *"`expires_at` is transcribed from the row it supersedes"***, which states the same rule a
-   fourth time and would on its own refuse the narrowing. With them, **§20's arm 17** — *"`goal`,
-   `tool`, `account`, `destinations` and `expires_at` altered on an otherwise valid superseding
+   *"`expires_at` is transcribed from the row it supersedes"***; and **§1's *"what path (ii)
+   may change, and what it may never touch"* clause, in its limb *"or move `expires_at`"***,
+   which is the flattest statement of the rule and would on its own refuse the narrowing. Each
+   states the same rule, and any one of them left standing would refuse it. With them, **§20's
+   arm 25** — *"Three successive superseding records carry **one** `expires_at`"* — **in that
+   limb alone**, a chain that narrows carrying two or three; arm 25's own headline, *"A chain of
+   corrections does not outlive the first act's expiry"*, and its *"the third covers nothing
+   after it"* both stand and hold **a fortiori**. And **§20's arm 17** — *"`goal`, `tool`,
+   `account`, `destinations` and `expires_at` altered on an otherwise valid superseding
    record → the store refuses the transcription, one test per field"* — **in its `expires_at`
    field alone**, which a lane must now test as an acceptance for a narrowing and a refusal for
    everything else (§9). A reader holding only ADR-0254 refuses every movement of that field on
@@ -499,9 +518,13 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    *"A path-(ii) correction never extends authority in time"* headline and its *"No sequence of
    corrections outlives the confirmation that began it"*, and the whole of path (ii)'s
    carry-forward rule all stand entire.
-5. **§9 clause (ii)'s bar limb *"move `expires_at`"*.** **Superseded in the narrowing direction
-   alone** (§5), on that clause's own stated principle. Clause (i) and the no-model-output rule
-   stand entire.
+5. **§9 clause (ii)'s bar limb *"move `expires_at`"*, and §20's arm 20 which tests it.**
+   **Superseded in the narrowing direction alone** (§5), on that clause's own stated principle.
+   Arm 20 — *"An interpretation that would widen — … a moved `expires_at` → each **refused at
+   construction**"* — **stands entire on its own terms**, its subject being a widening, and is
+   named here only because a lane reading *"a moved `expires_at`"* as *any* move would fail the
+   narrowing §5 requires; read that way it is superseded in the same direction and in no other.
+   Clause (i) and the no-model-output rule stand entire.
 6. **§19's entry *"What the user is shown where §12's ladder yields no instant"*.** **Narrowed in
    application and not replaced.** The entry books a decision — *"a decision that would ask
    'until when?' at the act"* — and **this is not that decision and does not take it**. What
@@ -580,6 +603,16 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 > member reaches the promoted surface and no wire-carried value changes shape, so ADR-0124 §9 is
 > not engaged.
 
+> **Normative.** **One Protocol's behavioural contract does change, and it is flagged as
+> breaking under golden rule 5.** `GoalAuthorizationStore.record`, which ADR-0254 §16 puts on
+> `core/protocols.py`, is defined there to refuse a superseding row whose `expires_at` was
+> altered, and §20's arm 17 tests that refusal. After §5 it must **accept** exactly one such
+> alteration — the narrowing — and refuse every other. **No member is added, removed or
+> re-signed, and no argument or return type changes**; what changes is the refusal the
+> implementation and its conformance suite assert. ADR-0254's own lane cut lands that store, so
+> **the change is to a contract that has not yet been written** and is carried by Lane 2's arms
+> rather than by a migration; the flag is owed regardless, and this clause is it.
+
 **Lane 2 owes the arms below for this decision**, and they **replace ADR-0254 §20's arm 69 in
 its two rung-3 cases and its arm 17 in the `expires_at` field alone** (§7 limbs 1 and 4); every
 other case of both stands and is still owed. Each is a representative-input test shipped with it,
@@ -633,10 +666,11 @@ what forbids joining them into one.
 > **accepts** it where ADR-0254 §20's arm 17 would have refused the altered field.
 
 > **Normative.** **The store refuses every other movement of a transcribed field, exactly as
-> before.** A superseding record altering `goal`, `tool`, `account`, `destinations` or `origin`
-> → **refused**, one test per field, which is ADR-0254 §20's arm 17 standing in those fields; and
-> one altering `expires_at` in any direction but the single narrowing §5 permits → **refused**
-> too.
+> before.** A superseding record altering `goal`, `tool`, `account` or `destinations` →
+> **refused**, one test per field, which is ADR-0254 §20's arm 17 standing entire in its other
+> four fields; one altering **`origin`** → **refused** too, on ADR-0254 §1's path-(ii)
+> transcription list, which names `origin` where arm 17 does not; and one altering `expires_at`
+> in any direction but the single narrowing §5 permits → **refused**.
 
 > **Normative.** **A correction stating a later instant does not lengthen.** An instant at or
 > after the superseded row's `expires_at` → `expires_at` **transcribed unchanged**.
@@ -680,8 +714,11 @@ means and supplies no obligation of its own. Quoted marks from other ADRs appear
 marks in running prose rather than as marks of this document.
 
 **It owes both review lenses** — adversarial and architecture — on one tree. It decides the value
-of a field on `core/types.py`'s contract surface and partially supersedes a contract ADR, and
-ADR-0015 §1 makes that true of a prose-only PR.
+of a field on `core/types.py`'s contract surface, changes the behavioural contract of one
+`core/protocols.py` member — `GoalAuthorizationStore.record`'s refusal of an altered
+`expires_at` (§9) — and partially supersedes a contract ADR. **That Protocol change is breaking
+under golden rule 5 and is flagged here as well as in §9**, and ADR-0015 §1 makes the both-lens
+requirement true of a prose-only PR.
 
 **It merges as its own PR, ratified, before anything implements against it** (golden rule 5,
 ADR-0015). It briefs no lane of its own; ADR-0254 §20's Lane 2 takes it, and the ratification
