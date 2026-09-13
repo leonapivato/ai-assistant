@@ -704,6 +704,14 @@ The owner's two cases are arms 1 and 2.
    **wholly** to nothing is recorded with `serves` **empty**, which §3 makes a well-formed action
    rather than a degraded one. And a `PlannerOutput` whose `actions` is **empty** records none,
    raises nothing and re-plans nothing (§2).
+   And it carries §2's ordering on a **combined first turn**, which the arms otherwise split
+   across two: one `PlannerOutput` whose `understanding` proposes one new constraint, whose
+   single `ProposedAction` names that constraint's label in the **understanding's own**
+   sequence, and whose plan step names `A1` records the revision and mints that element's `id`
+   first — so the action's stored `serves` holds **that** id and not nothing, the
+   `expected_version` the minting carries is the one the revision left and the append is not
+   refused stale, and `targets_revision` and the resolved `intended_action` both name records
+   this same call wrote.
 2. **"Change our booking to Sunday" mints no second action.** From arm 1's goal at a revision
    whose element reads Saturday, record a revision restating it Sunday. Assert: the element's `id`
    is **new** (ADR-0253 §7); `Goal.intended_actions` is **byte-identical** before and after; the
