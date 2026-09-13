@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - **Partially supersedes [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md),
-  in one narrowly stated scope**, and §16 shows the working.
+  in two narrowly stated scopes**, and §16 shows the working for both.
   **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
   check passed** — the attempt's `phase` advances to `AttemptPhase.EXECUTE`"* and *"**A
   deterministic check failed on the plan** — the attempt stays `RUNNING` and the plan is replanned
@@ -24,6 +24,15 @@
   and its `CONFIRM` park**, which is neither a deferral nor a failure and which this decision
   routes nothing away from, the failed-check limb for every check that is **not** deferred, the
   no-phase-moves-backwards clause and the supplying-an-authorization-opens-no-attempt clause.
+  **And §17's carried-and-discharged sentence**, in the **discharge** half alone: *"it is carried
+  by A5, A6 and A7 and **discharged by A8, A9 and A10**"* gains a **fourth** condition, because
+  §13 forbids wiring a consequential capability until the **evidence-to-claim window** §1 states
+  is closed — a window assigned to none of those three lanes, so a reader holding only §17 would
+  read A8's, A9's and A10's guarantees landing as releasing a deployment §13 still refuses.
+  **§17's rule itself is untouched and is quoted verbatim** — the verification, uncertain-outcome
+  and cancellation guarantees, the milestone clause and the *"wiring one is what this rule binds"*
+  sentence — as is the **carry** half naming A5, A6 and A7, and §17's second normative clause that
+  that decision's own lane wires nothing.
 - **Partially supersedes [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md),
   in two narrowly stated scopes**, and §16 shows the working for both.
   **§4's trigger group** — the read conditions **(b)**, **(c)** and **(d)** together with **(j)**,
@@ -330,16 +339,27 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > fails as it would have anyway, **no lane retries it from a later turn**, and A8 owns the repair:
 > §6's residual one field over, and stated rather than inherited.
 
-> **Normative — which failure surfaces when both do, and the accounting write never replaces the
-> cause.** Where the interpretation raised **and** the `commit_attempt` that charges the interval
-> then raises too, **the interpretation's failure is the exception that propagates** and the
-> ledger write's failure is **chained to it** rather than substituted for it — Python's
-> `raise … from` shape, which the corpus already relies on for `StaleExecutionError`'s cause
-> (ADR-0029 §4's *"not as a raw serialisation error from the digest"*). **The turn failed on the
+> **Normative — which failure surfaces when both do, and *neither* exception's own cause chain is
+> replaced.** Where the interpretation raised **and** the `commit_attempt` that charges the
+> interval then raises too, **the interpretation's exception is the one that propagates, and it
+> propagates unmodified**: its `__cause__` and `__context__` stay exactly as they stood, so a
+> transport failure underneath a provider error is still the cause a reader sees. **The ledger
+> failure is carried beside it and never inside its chain** — attached to the propagating
+> exception as a **note** (`BaseException.add_note`), which adds no cause, replaces none and
+> preserves the ledger exception's own chain in the text it carries. **The turn failed on the
 > interpretation**, and an implementation whose accounting cleanup masked that cause would report
 > a store problem for a provider outage and send the next reader to the wrong subsystem. **No lane
-> swallows either**: the ledger failure is not discarded, and the interpretation failure is not
-> demoted.
+> swallows either, and no lane rewrites either.**
+
+**`raise … from` is the wrong instrument here and the reason is mechanical.** `raise
+interpretation from ledger` **overwrites** the interpretation's own `__cause__`, destroying the
+transport failure underneath it; `raise ledger from interpretation` propagates the wrong exception
+and makes every caller's `except` clause see a store error for a provider outage. The corpus uses
+`raise … from` where one failure genuinely **caused** another — ADR-0029 §4's digest case — and
+these two did not cause each other: they are **two independent failures of one turn**, and the
+representation has to say so rather than invent a causal edge. A note says it and costs nothing;
+an `ExceptionGroup` would say it too and would change what every caller catches, which is a
+contract change this decision has no reason to make.
 
 > **Normative — a failed interpretation is never defaulted, and this is not a sixth stop trigger.**
 > **No lane substitutes `INCONCLUSIVE`, `DOES_NOT_QUALIFY` or any other member for a call that did
@@ -2150,8 +2170,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    failure — the arm asserts that **the interpretation's failure is the exception that reaches the
    caller**, that the ledger failure is **chained to it and not discarded**, and that the residual
    is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
-   skipped and nothing is re-dispatched. They are what stop an accounting cleanup masking a
-   provider outage as a store problem.
+   skipped and nothing is re-dispatched. **And each is run with *both* exceptions already carrying
+   a cause** — a transport error under the interpretation's, a database error under the ledger's —
+   asserting that the propagating exception's `__cause__` is **still the transport error** and
+   that the ledger failure and its own cause are present **beside** it and not in its chain. They
+   are what stop an accounting cleanup masking a provider outage as a store problem, and what
+   stop a `raise … from` overwriting the cause a reader needs.
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
@@ -2466,7 +2490,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     stop the stop rule swallowing ADR-0029 §4's refusal.
 17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
 18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
-    A9's and A10's guarantees are implemented and demonstrated.
+    A9's and A10's guarantees are implemented and demonstrated **and the evidence-to-claim window
+    §1 states is closed** (§13, §12, issue #2309) — **four** conditions and not three, the fourth
+    being assigned to none of those three lanes.
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
@@ -2492,6 +2518,50 @@ disposal is outstanding. **Every other clause of ADR-0254 binds entire and is re
 coverage conditions, §13's recheck-at-`decide` and its no-cached-verdict rule, §14's other clauses
 as the `Status` line enumerates them, §17's Q4 rule (§13 of this document), and §19's reservation
 of the re-entry mechanism to A7, which §10 discharges.
+
+**ADR-0254 §17 — partially superseded in the discharge half of one sentence, and the scope is on
+this document's `Status` line.** That section's normative block ends *"it is carried by A5, A6 and
+A7 and **discharged by A8, A9 and A10**"*. §13 adds a **fourth** condition to the wiring gate —
+the evidence-to-claim window §1 states, closed — and that window is assigned to **none** of those
+three lanes by §12. So a reader holding only §17 reads A8's reconciliation, A9's cancellation and
+A10's verification landing as releasing a deployment to wire a consequential capability, and §13
+refuses it: ADR-0070 §1's test met, and **partial** in ADR-0070 §3's sense, the scope being that
+sentence's discharge half and nothing else. **§17's rule itself binds verbatim and is relied on**
+— the verification, uncertain-outcome and cancellation guarantees, the milestone clause and
+*"wiring one is what this rule binds"* — as do its **carry** half naming A5, A6 and A7, which this
+decision is the third and last of, and §17's second normative clause that that decision's own lane
+dispatches nothing and wires nothing.
+
+**ADR-0253 §3 — relied on and not superseded, and the difference from ADR-0254 §17 is which text
+is normative.** A reader would expect the same record here, because §3 carries the same gate and
+the same owner's ruling. It does not get one, and the working is this: §3's **normative block is
+the rule alone** — *"No consequential capability is wired into a production deployment until the
+verification, uncertain-outcome and cancellation guarantees for its class are implemented and
+demonstrated"* — which §13 quotes unchanged and adds a condition beside rather than inside.
+§3's *"A5, A6 and A7 each carry it, and A8, A9 and A10 discharge it"* sits in the **prose** that
+follows, as a quotation of the owner's ruling about which lane does which job, and a reader does
+not release a deployment on it. **ADR-0254 §17 states the same assignment inside a normative
+block**, which is why that one is superseded and this one is not — ADR-0082 §1's test applied to
+each document's own text rather than to the substance both discuss. **Every other clause of
+ADR-0253 §3 binds entire**, its milestone clause and its ADR-0188/ADR-0236 precedent included.
+
+**ADR-0252 §6 — relied on entire and not superseded, and the evidence-to-claim window is not a
+weakening of it.** A reader would expect a record here too, because §1 states a window in which a
+step is claimed after a row that satisfied its `when` has become `SUPERSEDED`. **It does not get
+one, and the working is this.** §6 fixes **which rows satisfy a condition** — the four tests, over
+`STANDING` rows, evaluated *"at the moment of dispatch"* — and the driver obeys it exactly: §1
+takes all four tests, over the goal's rows, at that moment, and a `SUPERSEDED` row satisfies
+nothing then as it satisfies nothing ever. **What §6 does not state, in any clause, is that the
+evaluation is atomic with the store write that follows it**, and no clause of ADR-0252 says that
+the world may not move between a check and an act. The window is therefore a fact about **two
+turns running at once** — which ADR-0014's and ADR-0029's notes of 2026-08-25 establish and
+neither ADR-0252 nor this decision creates — and not a second reading of §6's tests. **No clause
+of §6 is replaced, narrowed or given an exception**: this decision states the window (§1), assigns
+it to no lane, names the two mechanisms that would close it (§12), and makes closing it a
+condition of wiring anything consequential (§13). **A decision that closes it will not have to
+undo a clause of this one**, which is the test ADR-0070 §3 puts on a scope; and were the window
+instead read as §6 being weakened, the honest record would be a supersession of §6 rather than the
+silence — which is why the working is shown here rather than left for a reader to reconstruct.
 
 **ADR-0037 §6 — relied on and not superseded, and the report's cut table is corrected.** Revision
 1's §L.1 row for A7 reads *"partially supersedes ADR-0037 §6's 'terminal for this turn'"*.
@@ -2655,7 +2725,8 @@ is ADR-0070 §1's test met, and a new
 ADR is the instrument.
 
 **It is a partial supersession of exactly three documents** (ADR-0070 §3) — **ADR-0254** in
-§14's two-case enumeration, **ADR-0251** in §4's trigger group and §1's occupancy clause, and
+§14's two-case enumeration **and in §17's discharge half**, **ADR-0251** in §4's trigger group and
+§1's occupancy clause, and
 **ADR-0228** in three scopes of §5 — its two per-turn clauses, in their subject; its
 superseded-plan-drives-nothing rule, in the moment it binds at; and its no-new-failure-mode
 clause — and each record it writes names its scope without an
