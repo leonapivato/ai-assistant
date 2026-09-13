@@ -2,6 +2,19 @@
 
 - Status: Partially superseded by ADR-0257 (two scopes, each narrow. **§2's first clause, in its first-line sentence alone** — *"Its first line begins `> **Normative.**`"* — which gains a second admitted opening: the token followed by a **label separator**, either a full stop and a space (U+002E U+0020) or a space, an em dash and a space (U+0020 U+2014 U+0020), and then a non-empty label on that line. §2's every other part binds **verbatim** and is read over the widened first line: the run's column-0 `> `-or-bare-`>` shape, the blank-line precedence, the run's end at the first line of neither shape, the no-fenced-block rule, the fenced-`**Normative.**`-line-is-display clause, the *"a line that fails any part of that grammar is not a mark, and no ADR is marked by it"* clause, and the one-obligation rule. §2's reasoning stands with the clause, its third reason included — that a token no existing line carries is what keeps the corpus predating this ADR outside the regime — which the superseding decision measures rather than sets aside: no ADR older than this one carries the token at all, and no ADR carries a labelled mark and no exact one, so no document's marked/unmarked regime under §4 changes. **And §5's second clause, in that decision's own reclassification alone** — *"No mark is added to a ratified ADR, by a dated note or otherwise"* does not reach the 321 labelled clauses it recognises in seven documents ratified after this ADR, no byte of which changes. That clause binds **entire** against every edit: no change adds a mark to a ratified ADR by writing one into it, by a dated note, or by re-marking a line, and no later decision reclassifies further ratified lines without superseding it again. **§5's first clause is untouched**, and is what the 321 were written under. §§1, 3, 4, 6, 7, 8 and 9 stand entire, and §7's question of whether anything reports a near-mark is left exactly where it was)
 - Date: 2026-08-01
+- Partially superseded: 2026-09-13 by ADR-0257 — two scopes, each stated in full on the
+  `Status` line above and argued in that ADR's §§1, 3 and 6. **§2's first clause, in its
+  first-line sentence alone**: a mark's first line may open `> **Normative.**` as before, or
+  carry a label after the token, introduced by a full stop and a space or by a space, an em
+  dash and a space, with at least one non-space character following. Every other part of §2
+  stands and is read over the widened first line, the fence rule, the blank-line precedence
+  and the fails-any-part-is-not-a-mark clause included. **§5's second clause, in that
+  decision's own reclassification alone**: its prohibition on adding a mark to a ratified ADR
+  does not reach the 321 labelled clauses ADR-0257 §3 recognises in seven documents ratified
+  after this one, no byte of which changes; against every *edit* it binds entire, and a later
+  decision reclassifying further ratified lines supersedes it again. §5's first clause is
+  untouched. This line is an appended note; the `Status` field above is this ADR's only
+  status. See ADR-0257.
 - **This ADR supersedes nothing.** It gives a ruling a delimited written form and
   says what that form obligates. Under ADR-0082 §1 every addition it makes is a
   **stacked addition** — no sentence of an earlier ADR becomes false or
