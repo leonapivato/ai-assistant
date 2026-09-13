@@ -4,9 +4,9 @@ ADR-0250 §19's **M3** threads that decision through ``orchestration``, and this
 module holds the parts of the threading that are **pure functions of typed
 values**: the focus derivation (§1), the candidacy projection and its labels (§3,
 §4), the resolution of a verdict's label back to the goal it names (§3), the
-deterministic reply an undecided turn composes (§5), the engagement facts a
-reply is announced from (§5), and the resolution of a raised question's subject
-(§7).
+deterministic reply an undecided turn composes (§5), the engagement facts and the
+one sentence a reply announces them in (§5), and the resolution of a raised
+question's subject (§7).
 
 **Why a module of its own rather than methods on** ``Engine`` **or**
 ``LearningLoop``. Every value below is
@@ -331,6 +331,46 @@ def disambiguation_of(asked_about: tuple[Goal, ...], *, elided: int) -> GoalDisa
     )
 
 
+def _quoted(text: str) -> str:
+    """One statement, in quotation marks, ready to sit inside a composed sentence.
+
+    **``ensure_ascii=False``**: this string is read by a person, not parsed by one.
+    The quoting is here to put the statement in quotation marks and to escape a quote
+    or a backslash inside it; escaping every non-ASCII character as well would render
+    a goal the user stated in their own language as escape sequences, which is
+    ADR-0250 §5's deterministic prose made unreadable by an encoding default.
+
+    Args:
+        text: The statement to render.
+
+    Returns:
+        It, quoted.
+    """
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _listed(texts: tuple[str, ...], *, joiner: str) -> str:
+    """Several statements, quoted and read out as a list.
+
+    One renderer for both of ADR-0250 §5's composed replies — the undecided turn's
+    ask and the engagement announcement — so the two cannot drift apart in how they
+    quote a statement the user gave. What differs between them is the last
+    conjunction, which is why it is an argument rather than a literal.
+
+    Args:
+        texts: The statements, in the order they are to be read. Never empty.
+        joiner: The word before the last one — ``"or"`` for a question between
+            candidates, ``"and"`` for a list of what moved.
+
+    Returns:
+        Them, quoted and joined.
+    """
+    quoted = [_quoted(text) for text in texts]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ", ".join(quoted[:-1]) + f" {joiner} {quoted[-1]}"
+
+
 def disambiguation_reply(disambiguation: GoalDisambiguation) -> str:
     """Compose the ``UNDECIDED`` turn's reply, deterministically (ADR-0250 §5).
 
@@ -361,19 +401,14 @@ def disambiguation_reply(disambiguation: GoalDisambiguation) -> str:
     Returns:
         The reply, which is non-blank because ``candidates`` is non-empty.
     """
-    # **`ensure_ascii=False`**: this string is read by a person, not parsed by one. The
-    # quoting is here to put the statement in quotation marks and to escape a quote or a
-    # backslash inside it; escaping every non-ASCII character as well would render a
-    # goal the user stated in their own language as `\uXXXX` sequences, which is §5's
-    # deterministic clarification made unreadable by an encoding default.
-    quoted = [json.dumps(text, ensure_ascii=False) for text in disambiguation.candidates]
-    if len(quoted) == 1:
+    if len(disambiguation.candidates) == 1:
         sentence = (
             f"I am not sure whether this continues something you already asked for: "
-            f"{quoted[0]}. Is it about that, or is it something new?"
+            f"{_quoted(disambiguation.candidates[0])}. Is it about that, or is it "
+            f"something new?"
         )
     else:
-        listed = ", ".join(quoted[:-1]) + f" or {quoted[-1]}"
+        listed = _listed(disambiguation.candidates, joiner="or")
         sentence = (
             f"I am not sure which of these this is about: {listed}. "
             f"Which one is it — or is it something new?"
@@ -539,6 +574,97 @@ def _elements(revision: GoalInterpretation, name: str) -> tuple[GoalElement, ...
     return elements
 
 
+#: The lead clause of ADR-0250 §5's announcement, per disposition that owes one on
+#: the **engagement** limb — *"the ``disposition`` is ``RESUMED`` or ``REOPENED``"*.
+#:
+#: A disposition absent here owes a sentence only where a revision moved a word, and
+#: takes :data:`_REVISED_LEAD` instead. The goal is named **once** in either case
+#: (§14): one clause, one quoted outcome statement, and no second mention of it.
+_ENGAGED_LEADS: Final[dict[EngagementDisposition, str]] = {
+    EngagementDisposition.RESUMED: "Picking up what you asked for earlier",
+    EngagementDisposition.REOPENED: "Going back to something you had finished with",
+}
+
+#: The lead clause where the sentence is owed on the **revision** limb alone — a
+#: turn whose disposition is ``OPENED`` or ``CONTINUED`` that moved a word.
+_REVISED_LEAD: Final[str] = "I have changed what I understand you are asking for"
+
+#: What is added to an engagement lead where a revision moved a word on the **same**
+#: turn, so that a resumption which also revised states both facts in one sentence.
+_ALSO_REVISED: Final[str] = ", and I have changed what I understand it to be"
+
+
+def announcement_of(engagement: GoalEngagement | None) -> str | None:
+    """ADR-0250 §5's announcement, composed from the typed value (§5, §16).
+
+    > *"A reply carries one sentence naming the goal it is about where, and only
+    > where, the ``disposition`` is ``RESUMED`` or ``REOPENED``, or ``revised`` is
+    > ``True`` **and** at least one of ``outcome_changed``, ``added`` and ``removed``
+    > says something moved."*
+
+    **The whole of §5's rule is this function**, so that the condition a reviewer
+    checks and the condition the reply is composed under are one statement rather
+    than two. A turn whose disposition is ``OPENED`` or ``CONTINUED`` and which moved
+    no word gets ``None`` — *"an ordinary topic change and an ordinary continuation
+    each need neither an announcement nor a confirmation"* — and so does a
+    **grounding-only** revision, where *"what moved is the record of who said it,
+    which the goal's own interpretation chain carries and which no reply states"*.
+
+    **What it states, where it is owed on the revision limb** (§5): the goal's
+    ``outcome`` *"as this turn recorded it, **every text in ``added``**, and **every
+    text in ``removed``** as something no longer held — never merely that something
+    changed, and never the outcome alone where either tuple is non-empty"*. Both
+    tuples are read out in full and neither is summarised, counted or truncated: the
+    sentence is *"the real safeguard against a wrong association"*, and a user who is
+    told only that something changed cannot tell whether it changed to what they
+    meant.
+
+    **And no model's decision reaches it** (§16). Every word but the statements
+    themselves is a literal of this module, and the statements are the goal's own
+    outcome and element texts as the store holds them — so the sentence cannot
+    disagree with the :class:`~ai_assistant.core.types.GoalEngagement` beside it in
+    the outcome, which is the property ADR-0242 §9's rendering-is-presentation ground
+    rests on.
+
+    **Nothing is confirmed and nothing is asked** (§5). The value returned is a
+    statement, placed in a reply the turn was composing anyway; no caller turns it
+    into a question, a park or a second turn, and no turn waits for it to be
+    acknowledged.
+
+    Args:
+        engagement: What this turn did with its goal, or ``None`` where it engaged
+            none — a routed operation, a restated settled binding and the
+            ``UNDECIDED`` turn, none of which has a goal to name.
+
+    Returns:
+        The sentence, or ``None`` where §5 owes none.
+    """
+    if engagement is None:
+        return None
+    # §5's two limbs, as one boolean each. `revised` alone is **not** the test: it
+    # "says a revision was recorded, and nothing more", so the conjunction with
+    # something having moved is what keeps a grounding-only revision silent.
+    moved = engagement.revised and bool(
+        engagement.outcome_changed or engagement.added or engagement.removed
+    )
+    lead = _ENGAGED_LEADS.get(engagement.disposition)
+    if lead is None:
+        if not moved:
+            return None
+        lead = _REVISED_LEAD
+    elif moved:
+        lead += _ALSO_REVISED
+    sentence = f"{lead}: {_quoted(engagement.outcome)}."
+    # The two tuples, each read out entire. They are stated **after** the outcome
+    # because each is a change to it, and `removed` last because "as something no
+    # longer held" reads as a qualification of what now stands.
+    if engagement.added:
+        sentence += f" I have added {_listed(engagement.added, joiner='and')}."
+    if engagement.removed:
+        sentence += f" I am no longer holding {_listed(engagement.removed, joiner='and')}."
+    return sentence
+
+
 @dataclass(frozen=True, slots=True)
 class RaisedSubject:
     """A :class:`~ai_assistant.core.types.ProposedQuestion` whose subject resolved.
@@ -698,6 +824,7 @@ __all__ = [
     "GoalFacts",
     "RaisedSubject",
     "Resolution",
+    "announcement_of",
     "candidacy_of",
     "disambiguation_of",
     "disambiguation_reply",
