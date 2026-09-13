@@ -348,13 +348,14 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > 2. Otherwise, read the stored `StepExecution.status` of the step the row names:
 >    - **`SUCCEEDED`** → **`COMPLETED`**, writing nothing.
 >    - **`RUNNING`** or **`INDETERMINATE`** → **`UNCERTAIN`**, writing nothing.
->    - **`FAILED`** or **`SKIPPED`** → **`CLAIMED`**, re-pointing the row at this step.
->    - **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing, where the row
->      names **this same `(execution_id, step_id)`**; **`HELD`**, writing nothing, where it names
->      a **different** step.
+>    - **`SKIPPED`** → **`CLAIMED`**, re-pointing the row at this step.
+>    - **`FAILED`**, **`PENDING`** or **`AWAITING_APPROVAL`** → **`CLAIMED`**, writing nothing,
+>      where the row names **this same `(execution_id, step_id)`**; **`HELD`**, writing nothing,
+>      where it names a **different** step.
 >
 > **The second limb is total over `StepStatus`'s seven members, exactly one answer is defined for
-> every input, and the same-step case is confined to the two statuses a failed claim leaves** —
+> every input, and the same-step case is exactly the three statuses under which the step the row
+> names may still dispatch** —
 > a row naming this step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED` or
 > `UNCERTAIN` like any other, because this step has then already acted. **No eighth answer
 > exists.**
@@ -417,11 +418,19 @@ under the same binding is the same effect* — and where a user genuinely wants 
 
 **The blocking set is `{SUCCEEDED, RUNNING, INDETERMINATE}` and is written out rather than referred to a private
 constant.** `core/types.py` carries `_CLAIMED_STATUSES` over those three **and `FAILED`**, for a different question —
-which statuses mean a tool call may have happened at all. `FAILED` is deliberately outside the blocking set here, and
-the ground is ADR-0034 §1: a `FAILED` step is one where *"nothing could have run under it" is a fact the executor
-**holds***, so re-performing that effect is not a repeat. ADR-0029 §5 agrees from the other side, admitting a retry
-where *"repeating is safe"*. A lane that bound the rule to `_CLAIMED_STATUSES` would refuse every legitimate second
-attempt after a proven failure, which is the opposite of what R43 asks.
+which statuses mean a tool call may have happened at all. `FAILED` is deliberately outside the blocking set, and the
+ground is ADR-0034 §1: a `FAILED` step is one where *"nothing could have run under it" is a fact the executor **holds***,
+so it answers neither `COMPLETED` nor `UNCERTAIN`. A lane that bound the rule to `_CLAIMED_STATUSES` would call a proven
+failure uncertain and refuse the holder's own second attempt — which ADR-0029 §5 admits where *"repeating is safe"* —
+and that is R43 read backwards.
+
+**`FAILED` is nonetheless an *occupied* status rather than a free one, and `StepExecutor.execute` is the reason.** That
+loop commits `RUNNING → FAILED` through `_run_once` and then, where ADR-0029 §5's two conjuncts both hold, calls
+`_claim` again — the tree's one `to_status=StepStatus.RUNNING` construction — so a `FAILED` step is one whose **next act
+may be a second dispatch of the same call, inside the same turn**. Re-pointing the row away from such a holder would let
+a later plan's step take the key while that retry was still coming, and both would invoke: two claims, on two
+`ExecutionState` records, which no compare-and-swap orders against each other. **So `FAILED` takes the shape `PENDING`
+takes** — its own holder re-claims it, nothing else does, and the key is freed by that holder being disposed of.
 
 **`RUNNING` is grouped with `INDETERMINATE` rather than with `SUCCEEDED`, and ADR-0014 §4 is why.**
 A step durably `RUNNING` is precisely the state that decision calls indistinguishable — *"a crash
@@ -431,13 +440,15 @@ startup scan moves to `INDETERMINATE`. Calling it `COMPLETED` would assert what 
 calling it `HELD` would invite a caller to wait for a step that may never move. `UNCERTAIN` is the
 honest member, and it is the one R45 asks to be preserved.
 
-**`HELD` exists because `PENDING` is a claim in progress, not an absence.** A row naming a
-`PENDING` step was written by a turn that is about to dispatch that step, and two turns of one
-conversation are not serialized. Treating `PENDING` as re-claimable would let the second turn take
-the key and dispatch beside the first. The cost is stated rather than hidden: a step whose row was
-written and whose own claim then failed is re-claimable by **itself** and by nothing else, until
-the plan holding it is superseded and §4's pass sweeps it to `SKIPPED`, at which point the key is
-free again. That is why the sweep and the key are one decision rather than two.
+**`HELD` exists because `PENDING` is a claim in progress rather than an absence, and a `FAILED` holder may still retry.**
+A row naming a `PENDING` step was written by a turn that is about to dispatch that step, and two turns of one conversation
+are not serialized. Treating `PENDING` as re-claimable would let the second turn take the key and dispatch beside the
+first. The cost is stated rather than hidden: a step whose row was written and whose own claim then failed is re-claimable
+by **itself** and by nothing else, until the plan holding it is superseded and §4's pass sweeps it to `SKIPPED`, at which
+point the key is free again — that is why the sweep and the key are one decision rather than two. **The `FAILED` holder's
+cost is larger and this decision does not close it**: §4's sweep reaches `PENDING` and `AWAITING_APPROVAL` steps only, so
+a key held by a step that failed for good stays held, and **a later plan of that goal cannot re-perform that effect** —
+which §10 books to the decision that owns what follows a failure.
 
 **The store decides it rather than the caller, for ADR-0255 §3's reason and no other.** That
 section refuses a caller-supplied revision because *"a check with an extra step"* is a check the
@@ -894,11 +905,11 @@ transition that would record a proven non-effect has **no producer**, and adding
 writes would be the vocabulary-with-no-producer problem ADR-0249 §5 names. §10 carries it: the
 decision that takes a second reconciliation route is the decision that adds the row.
 
-**`FAILED` stays terminal-unless-retried and this decision does not reach it.** ADR-0014 §4's
-*"`FAILED` is terminal unless retried"* and its `FAILED → RUNNING` row are untouched; **whether
-and when a `FAILED` step is retried across turns is the retry policy**, and that is the next ADR's
-(§10). What this decision settles about `FAILED` is one thing only: it does not block an effect
-key (§2).
+**`FAILED` stays terminal-unless-retried and this decision does not reach it.** ADR-0014 §4's *"`FAILED` is terminal
+unless retried"* and its `FAILED → RUNNING` row are untouched; **whether and when a `FAILED` step is retried across
+turns is the retry policy**, and that is the next ADR's (§10). What this decision settles about `FAILED` is one thing
+only: which step may take the key of a row a `FAILED` step holds (§2) — that step itself, so its own retry proceeds,
+and no other.
 
 ### 8. The evidence-to-claim window is booked, not closed, and the ground is stated
 
@@ -949,7 +960,7 @@ this decision now discharges the other half of.
 > **`key: EffectKey`**; **`execution_id: DurableIdentifier`** and **`step_id: DurableIdentifier`**,
 > carrying the annotations `PermissionDecision.execution_id` and `PermissionDecision.step_id` use
 > for the same two values; and **`claimed_at`**, a `UtcInstant` **read from the store's own injected clock at each write that
-> lands** — so a first claim stamps it, a re-point after a `FAILED` or `SKIPPED` holder
+> lands** — so a first claim stamps it, a re-point after a `SKIPPED` holder
 > **restamps** it at the new holder's instant, and every no-write outcome (`COMPLETED`,
 > `UNCERTAIN`, `HELD`, and the same-step `CLAIMED`) **leaves it exactly as it stands**. **No
 > record ever carries an instant earlier than its current holder's claim**, and the clock is
@@ -1026,8 +1037,13 @@ property are the whole of it.
   mints — `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable** test. **It does
   not inherit a way to read an effect row**: `claim_effect` returns an `EffectClaim` and nothing else, and §9 puts
   `EffectRecord` on the export document alone, so a modify-first strategy that needs to find the earlier reservation
-  adds the bounded lookup it needs and argues for it there rather than inheriting one nobody has reviewed. **Fired by this ADR
-  landing.**
+  adds the bounded lookup it needs and argues for it there rather than inheriting one nobody has reviewed. **It also inherits what §2
+  leaves open about a `FAILED` holder**: that row answers `HELD` to every step but the holder's own, and §4's sweep does
+  not reach a `FAILED` step, so **a later plan of the goal cannot re-perform an effect whose first attempt proved to
+  have failed** — the cost §2 states, taken because `StepExecutor.execute`'s retry makes the alternative a double
+  dispatch. That decision is the one that says how ownership passes, and it establishes it **atomically with**
+  `FAILED → RUNNING` rather than beside it. **No lane re-points a `FAILED` holder's row on this decision's authority.
+  Fired by this ADR landing.**
 - **Resolving an uncertain effect on the user's word.** **Not decided**, and §3 states the ground:
   a `SUCCEEDED` step carries an `output` its dependents read under ADR-0253 §2, and a user cannot
   supply one. **Fired by a decision that states what `output` such a resolution carries and where
@@ -1156,24 +1172,21 @@ property are the whole of it.
    account and endpoint with empty destinations); `ToolCall.effect_key` **`None` for a
    non-`side_effecting` tool and present for every side-effecting one whatever its
    `Idempotency`**; **unchanged under a post-construction mutation of `call.request`** and changed
-   by the same mutation of the decision; and **equality moving** with `tool_id`,
-   `parameters_digest`, `egress_account`, `egress_endpoint` and `egress_destinations` while
-   **staying equal** across `planned_with_external_content`, `coverage`, `closed_loop` and two
-   `spans` decompositions that canonicalise alike. **`claim_effect` is table-driven over §2's
-   second limb** — each of
-   `StepStatus`'s seven members, crossed with the row naming **this** step and a **different**
-   one — and asserts for each both the returned member **and** whether the row moved. It adds:
-   **durable re-pointing** after a `FAILED` or `SKIPPED` holder, with `claimed_at` restamped;
-   **`claimed_at` preserved** on every no-write outcome, under an injected clock; the **refusal**
-   paths — an unknown `execution_id`, and a `step_id` that is not a step of that execution —
-   raising `PlanningError` with **no row written**; and **atomicity under contention**, where two
-   writers claim one `(goal_id, effect_key)` concurrently, **exactly one** receives `CLAIMED`,
-   the other `HELD`, and exactly one durable row names a holder. The store under test is not
-   permitted to pass the last by serialising the two calls in the test's own control flow. It
-   adds one **upgrade** case: a store written before this decision opens with an **empty** effects
-   table, exports and deletes cleanly, and answers **`CLAIMED`** for the key of a legacy
-   `SUCCEEDED` side-effecting step — the delimited guarantee §9 states, asserted rather than
-   discovered.
+   by the same mutation of the decision; and **equality moving** with `tool_id`, `parameters_digest`,
+   `egress_account`, `egress_endpoint` and `egress_destinations` while **staying equal** across
+   `planned_with_external_content`, `coverage`, `closed_loop` and two `spans` decompositions that canonicalise alike.
+   **`claim_effect` is table-driven over §2's second limb** — each of `StepStatus`'s seven members, crossed with the
+   row naming **this** step and a **different** one — and asserts for each both the returned member **and** whether the
+   row moved. **The `FAILED` pair is what stops `StepExecutor.execute`'s retry racing a later plan**: this step answers
+   `CLAIMED`, a different one `HELD`, and the row moves in neither. It adds: **durable re-pointing** after a `SKIPPED`
+   holder, with `claimed_at` restamped; **`claimed_at` preserved** on every no-write outcome, under an injected clock; the
+   **refusal** paths — an unknown `execution_id`, and a `step_id` that is not a step of that execution — raising
+   `PlanningError` with **no row written**; and **atomicity under contention**, where two writers claim one
+   `(goal_id, effect_key)` concurrently, **exactly one** receives `CLAIMED`, the other `HELD`, and exactly one durable
+   row names a holder. The store under test is not permitted to pass the last by serialising the two calls in the
+   test's own control flow. It adds one **upgrade** case: a store written before this decision opens with an **empty**
+   effects table, exports and deletes cleanly, and answers **`CLAIMED`** for the key of a legacy `SUCCEEDED`
+   side-effecting step — the delimited guarantee §9 states, asserted rather than discovered.
 5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**:
    the `ALLOW` is **replayed**, no second permission record is authored, and the step reaches its
    dispatch exactly once. **And the replay is withheld wherever it must be**, in a table over
@@ -1541,14 +1554,13 @@ is wired and the Q4 gate is read for real.
   `StepExecution` cannot be queried across plans without an index, and a field on `Goal` would
   put a compare-and-swap on the goal into every dispatch, contending with `engage_goal` and every
   interpretation revision. The row is the store's, keyed by the pair that has to be looked up.
-- **Blocking on `_CLAIMED_STATUSES`.** Rejected. That constant includes `FAILED`, and ADR-0034
-  §1 makes a `FAILED` step one where *"nothing could have run under it" is a fact the executor
-  holds*. Blocking on it would refuse every legitimate retry after a proven failure, which is R43
-  read backwards.
-- **Treating `PENDING` as re-claimable.** Rejected. Two turns of one conversation are not
-  serialized, so a row naming a `PENDING` step names a dispatch in progress; re-claiming it would
-  let the second turn dispatch beside the first. The `HELD` member and §4's sweep are what make
-  the key free again without that.
+- **Blocking on `_CLAIMED_STATUSES`.** Rejected. That constant includes `FAILED`, and ADR-0034 §1 makes a `FAILED`
+  step one where *"nothing could have run under it" is a fact the executor holds*. Blocking on it would answer
+  `UNCERTAIN` about a proven failure and refuse the holder's own retry, which is R43 read backwards.
+- **Treating `PENDING` or `FAILED` as re-claimable by another step.** Rejected. Two turns of one conversation are not
+  serialized, so a row naming a `PENDING` step names a dispatch in progress and one naming a `FAILED` step names a
+  retry `StepExecutor.execute` may still take; re-claiming either would let the second turn dispatch beside the first.
+  The `HELD` member and §4's sweep are what make the key free again without that.
 - **A user's word resolving an `INDETERMINATE` step.** Rejected **here** and booked in §10. A
   `SUCCEEDED` step carries the `output` its dependents read under ADR-0253 §2, and a user cannot
   supply one; taking the assertion without the output would make `verifies` unevaluable on a step
