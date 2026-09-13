@@ -50,9 +50,15 @@ from ai_assistant.core.types import (
     EvidenceApplicability,
     EvidenceBasis,
     EvidenceStanding,
+    Goal,
+    GoalElement,
     GoalEvidence,
+    GoalInterpretation,
+    Ground,
     MemorySource,
     Placement,
+    ProposedElement,
+    ProposedUnderstanding,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -982,3 +988,204 @@ async def test_no_axis_is_inferred_from_the_query_the_ordering_or_the_response()
     assert query.requested is None, "a composed query is a model completion, not a record"
     assert query.supported == (), "and nothing was read out of the record's own text"
     assert query.records == ("belief-1",), "the record it returned is named, being store-resident"
+
+
+# --------------------------------------------------------------------------- #
+# §10: the `E` label space, over the sequence the planner was handed           #
+# --------------------------------------------------------------------------- #
+
+
+def _continuing() -> Goal:
+    """A goal an earlier turn opened, so this turn's history is a real one."""
+    return Goal(
+        id="goal-earlier",
+        conversation_id="c-1",
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome="book a campsite",
+                outcome_ground=Ground.USER_STATED,
+                outcome_span="book a campsite",
+                recorded_at=_NOW,
+                raised_by="turn-earlier",
+            ),
+        ),
+        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW),
+        created_at=_NOW,
+        last_engaged_at=_NOW,
+        version=4,
+    )
+
+
+async def _grounded_on(label: str, *, history: Sequence[GoalEvidence]) -> GoalElement | None:
+    """Run a turn whose planner grounds one condition on ``label``, and return it.
+
+    The turn is a production one: the real loop, the real resolver, and the history
+    handed in exactly as ``Engine`` hands it — which is the point, because §10's label
+    is an ordinal into *the sequence the call was handed* and an arm over the resolver
+    alone would not be reading that sequence.
+
+    Args:
+        label: What the planner named.
+        history: This goal's evidence rows, as the store holds them.
+
+    Returns:
+        The element the revision recorded, or ``None`` where the ground resolved to
+        nothing and it was dropped.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("m-seed", "the campsite takes bookings"))
+    planner = FakePlanner(
+        now=_clock,
+        understanding=ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(
+                ProposedElement(
+                    text="sunday is forecast dry", ground=Ground.FROM_EVIDENCE, evidence_label=label
+                ),
+            ),
+        ),
+    )
+
+    responded = await _loop(planner=planner, memory=memory).respond(
+        _ASK,
+        narrow=_bounded(),
+        operation=ConversationalOperation.CONVERSE,
+        continuing=_continuing(),
+        evidence=history,
+    )
+
+    record = responded.goal
+    assert record is not None
+    conditions = record.goal.interpretation[-1].conditions
+    return conditions[0] if conditions else None
+
+
+async def test_an_e_label_resolves_against_evidence_and_an_m_label_against_memories() -> None:
+    """§18 arm 18, first clause, and §10's prefix rule.
+
+    "The prefix is the whole of what decides which sequence ``orchestration`` resolves it
+    against", and the element carries **exactly one** of ``evidence_id`` and
+    ``evidence_row_id`` — so the two spaces are mutually exclusive at the value as well
+    as at the label. ``ProposedElement`` gains no field for it.
+    """
+    history = (_row("row-old", read_at=_NOW - timedelta(hours=1)), _row("row-new", read_at=_NOW))
+
+    by_row = await _grounded_on("E2", history=history)
+    by_record = await _grounded_on("M1", history=history)
+
+    assert by_row is not None
+    assert by_row.evidence_row_id == "row-new", "the row at 1-based index 2 of §12's order"
+    assert by_row.evidence_id is None
+    assert by_record is not None
+    assert by_record.evidence_id == "m-seed"
+    assert by_record.evidence_row_id is None
+
+
+@pytest.mark.parametrize("label", ["E3", "E0", "E01", "X1", "E", ""])
+async def test_a_label_that_names_nothing_drops_the_element_silently(label: str) -> None:
+    """§18 arm 18: out of range, below 1, padded, of neither form, and bare.
+
+    "A label of neither form, an *n* below 1 or beyond the sequence's length, and an
+    ``E`` label naming a row the store no longer holds each resolve to nothing", and the
+    element is dropped — "not an error, not a park, not a degradation of the turn". The
+    third case needs no arm of its own: a row §13's elision dropped is not in the history
+    the call was handed, so its ordinal is past the end like any other.
+    """
+    history = (_row("row-old", read_at=_NOW - timedelta(hours=1)), _row("row-new", read_at=_NOW))
+
+    assert await _grounded_on(label, history=history) is None
+
+
+async def test_the_outcome_grounds_on_a_row_on_the_same_rule_as_an_element() -> None:
+    """§10: "``GoalInterpretation`` gains ``outcome_evidence_row_id`` on the same rule".
+
+    ADR-0249 §1 validates the outcome's arguments "as a ``GoalElement``'s are", so the
+    outcome resolves through the same two label spaces and carries exactly one argument.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("m-seed", "the campsite takes bookings"))
+    planner = FakePlanner(
+        now=_clock,
+        understanding=ProposedUnderstanding(
+            outcome="book the campsite for sunday",
+            outcome_ground=Ground.FROM_EVIDENCE,
+            outcome_evidence_label="E1",
+        ),
+    )
+
+    responded = await _loop(planner=planner, memory=memory).respond(
+        _ASK,
+        narrow=_bounded(),
+        operation=ConversationalOperation.CONVERSE,
+        continuing=_continuing(),
+        evidence=(_row("row-only"),),
+    )
+
+    record = responded.goal
+    assert record is not None
+    revision = record.goal.interpretation[-1]
+    assert revision.outcome_ground is Ground.FROM_EVIDENCE
+    assert revision.outcome_evidence_row_id == "row-only"
+    assert revision.outcome_evidence_id is None
+
+
+async def test_a_retained_outcome_keeps_its_row_reference_byte_for_byte() -> None:
+    """§10 with ADR-0249 §7's retention: the fourth argument is copied forward too.
+
+    A retained outcome that quietly lost its row reference would break §7's "copied
+    forward **byte for byte**" on the one argument this decision adds.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("m-seed", "the campsite takes bookings"))
+    earlier = _continuing()
+    grounded = earlier.model_copy(
+        update={
+            "interpretation": (
+                earlier.interpretation[0].model_copy(
+                    update={
+                        "outcome_ground": Ground.FROM_EVIDENCE,
+                        "outcome_span": None,
+                        "outcome_evidence_row_id": "row-only",
+                    }
+                ),
+            )
+        }
+    )
+    planner = FakePlanner(
+        now=_clock, understanding=ProposedUnderstanding(retains_outcome=True, constraints=())
+    )
+
+    responded = await _loop(planner=planner, memory=memory).respond(
+        _ASK,
+        narrow=_bounded(),
+        operation=ConversationalOperation.CONVERSE,
+        continuing=grounded,
+        evidence=(_row("row-only"),),
+    )
+
+    record = responded.goal
+    assert record is not None
+    assert record.goal.interpretation[-1].outcome_evidence_row_id == "row-only"
+
+
+async def test_the_planner_is_handed_one_digest_per_row_in_the_label_order() -> None:
+    """§11 at the seam: the sequence the `E` labels are ordinals into.
+
+    Read off the argument the planner was **actually handed**, which is the only place
+    the correspondence between the label space and the projection is checkable.
+    """
+    history = (_row("row-new", read_at=_NOW), _row("row-old", read_at=_NOW - timedelta(hours=1)))
+    planner = FakePlanner(now=_clock)
+
+    await _loop(planner=planner, memory=FakeMemoryStore(now=_clock)).respond(
+        _ASK,
+        narrow=_bounded(),
+        operation=ConversationalOperation.CONVERSE,
+        continuing=_continuing(),
+        evidence=history,
+    )
+
+    [call] = planner.calls
+    assert call[7] == digests(history)
+    assert [one.read_at for one in call[7]] == [_NOW - timedelta(hours=1), _NOW]
