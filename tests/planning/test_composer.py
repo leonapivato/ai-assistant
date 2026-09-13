@@ -384,6 +384,11 @@ async def test_the_instruction_says_where_an_implicit_subject_comes_from() -> No
         "the order means something"
     )
     assert "those opening notes" in system.content, "and what it means: the subject is one of those"
+    assert "If any of them record" in system.content, (
+        "stated conditionally, because `recent` is empty on a first turn and on one "
+        "whose history read degraded, and the supply carries no boundary that would "
+        "let the model tell an opening note from retrieved background"
+    )
     assert "earliest" not in system.content, (
         "and never the earliest of them — history is oldest first, so that is the "
         "oldest turn rather than the one a follow-up is about"
