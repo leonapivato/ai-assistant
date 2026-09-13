@@ -1207,19 +1207,16 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   supersession — **neither is taken here, and no lane adds either on this decision's authority**.
   **Fired by a decision that takes one of the two**, which is also the decision that first makes
   this system's best uncertain-effect guarantee reachable.
-- **Reconciling an uncertain effect at the designated egress seam.** **Not decided**, and §3
-  states the ground: ADR-0148 §9 rules *"There is no egress outside a claimed step"* and *"A
-  designated seam adds no reconciliation path of its own"*, while §3's call takes no step claim.
-  **This is the consequential case**, so the shape a later decision would most plausibly take is
-  named **without being decided**: the reconciliation made as a **claimed read step of the goal's
-  next attempt** — planned and serviced as one of ADR-0251 §1's rounds, dispatched under its own
-  committed `→ RUNNING` claim so §9 is **satisfied rather than bent**, its answer recorded as an
-  ADR-0252 §1 `GoalEvidence` row and the `INDETERMINATE` step resolved from that row — and **never
-  a direct invoke taken by §4's pass**. **No lane builds it on this decision's authority**: it
-  needs a producer from an evidence row to a step transition that neither ADR-0252 nor this
-  decision has. **Fired by A8's second ADR** (the retry policy, which must say what to do about an
-  uncertain egress effect) **or by the wiring of the first consequential capability through the
-  seam ADR-0154 §1 designated, whichever is first.**
+- **Reconciling an uncertain effect at the designated egress seam.** **Not decided**, and §3 states the ground: ADR-0148 §9
+  rules *"There is no egress outside a claimed step"* and *"A designated seam adds no reconciliation path of its own"*, while
+  §3's call takes no step claim. **This is the consequential case**, so the shape a later decision would most plausibly take
+  is named **without being decided**: the reconciliation made as a **claimed read step of the goal's next attempt** — planned
+  and serviced as one of ADR-0251 §1's rounds, dispatched under its own committed `→ RUNNING` claim so §9 is **satisfied
+  rather than bent**, its answer recorded as an ADR-0252 §1 `GoalEvidence` row and the `INDETERMINATE` step resolved from that
+  row — and **never a direct invoke taken by §4's pass**. **No lane builds it on this decision's authority**: it needs a
+  producer from an evidence row to a step transition that neither ADR-0252 nor this decision has. **Fired by A8's second ADR**
+  (the retry policy, which must say what to do about an uncertain egress effect) **or by the wiring of the first consequential
+  capability through the seam ADR-0154 §1 designated, whichever is first.**
 - **Reconciling a side-effecting `Idempotency.NATURAL` step.** **Not decided**, and §3 states both blockers rather
   than one. `NATURAL` is ADR-0016 §4's guarantee about **the effect** — *"the operation is idempotent by nature (a
   read; set-to-a-value)"* — and **no declaration in this corpus says a repeat returns what the first call returned**,
@@ -1368,7 +1365,12 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    with **the holder's `output`**, `attempts` unchanged, **its dependents then driven**, and the turn's outcome carrying the
    told-once fact. **The committed row is asserted to carry the holder's own `execution_id` and `step_id` in
    `satisfied_by_execution` and `satisfied_by_step`**, read back from the store rather than from the stage's return. **The arm
-   asserts the continuation and not only the non-dispatch**, because a stalled walk was the defect this route closes.
+   asserts the continuation and not only the non-dispatch**, because a stalled walk was the defect this route closes. **And
+   the aggregation is the same arm's second half**: a superseded plan whose **two** steps are each satisfied from a different
+   completed effect of the goal in **one** walk asserts `satisfied_from_earlier` as the **exact tuple of both ids, in walk
+   order** — not a set, not the last id alone, and not reversed — while a **later** turn over the same goal reports
+   **neither** again. An implementation that overwrote the accumulator at each satisfaction, deduplicated it through a set or
+   returned it reversed passes every other arm and still returns the wrong tuple.
 2. The same over a plan **produced afresh** rather than by modification, **and the same again from `AWAITING_APPROVAL`**: a
    resumed step whose replayed `ALLOW` meets a `COMPLETED` answer is committed `AWAITING_APPROVAL → SUCCEEDED` the same way,
    with no second permission record and its recorded ruling unspent. **And the refusals are a table in the same arm, one row
