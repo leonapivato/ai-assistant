@@ -2795,17 +2795,21 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     §1's precedence binds and the ledger undercounts; the `CancelledError` **propagates to the
     caller as the same instance**, not converted to a value and not replaced by a failure of the
     accounting; and **no later step is dispatched and none is skipped**. **The entry-status
-    assertion is made at two of the five points and not at all of them**, because ADR-0060 §1
-    lets a cancelled write have committed or not: it is asserted where the cancellation is
-    delivered **before the seam's own write is dispatched** — into the **interpretation call**,
-    which claims nothing and writes no row, and into the **deadline gate** between two dispatches
-    (§9) — and the step then stands at its **entry** status (§3), `PENDING` from a walk and
-    `AWAITING_APPROVAL` from a resume. **At the other three — inside `commit_transition`, inside
-    `resume` past ADR-0037 §4's step 5, and inside §6's `commit_attempt` — the arm asserts the
-    permitted pair instead**: the write either landed or did not, and **both outcomes are
-    legal**, so what is asserted is that the durable state is one of the two and that no lane
-    reports the other. A stricter assertion would be one no implementation could satisfy, which is
-    the defect this replaces. **What each arm
+    assertion is made at two of those five seams and not at all five**, because ADR-0060 §1 lets
+    a cancelled write have committed or not. **The two are the seams whose cancellation is
+    delivered before any write of that seam is dispatched**: the **interpretation call**, which
+    claims nothing and writes no row, and a **`StepRunner.run` cancelled before its own claim** —
+    the pre-write half of that seam, which the fixture reaches by delivering into the runner
+    before `StepExecutor._claim`. At both the step stands at its **entry** status (§3), `PENDING`
+    from a walk and `AWAITING_APPROVAL` from a resume. **At the other three — inside
+    `commit_transition`, inside `resume` past ADR-0037 §4's step 5, and inside §6's
+    `commit_attempt` — the arm asserts the permitted pair instead**: the write either landed or
+    did not, and **both outcomes are legal**, so what is asserted is that the durable state is one
+    of the two and that no lane reports the other. **A `StepRunner.run` cancelled *after* its
+    claim is the `commit_transition` case and is asserted there**, not a sixth seam: the claim is
+    the write, and which side of it the cancellation fell on is what decides the assertion rather
+    than which call it entered. A stricter assertion would be one no implementation could satisfy,
+    which is the defect this replaces. **What each arm
     refutes is an implementation that catches `Exception`**: `CancelledError` is a
     `BaseException`, so such an implementation lets it past the accounting untouched, charges
     nothing, and passes every other arm of this list — none of which delivers one. **And the
