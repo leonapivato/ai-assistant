@@ -184,7 +184,7 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: 10 of 10 samples composes one about its own on 8 of 8, a supply carrying two
 #: requests of this conversation stays inside it on 8 of 8, the four passing shapes are
 #: unchanged, and three utterances that must compose nothing still decline 18 of 18.
-_SYSTEM_PROMPT: Final = """\
+_SYSTEM_PROMPT_BASE: Final = """\
 You turn one request from a user of an AI assistant into a single web-search \
 query. Reply with exactly one of the two JSON objects below — one JSON object and \
 nothing else, no prose, no code fence.
@@ -209,8 +209,22 @@ The request may be followed by notes this assistant already holds. They are ther
 to resolve what the request refers to — a "that", a "them", a name the request \
 leaves implicit, a preference the query should respect. Use them only for that. \
 Do not search for a note, do not repeat one back, and do not carry a detail from \
-one into the query unless the request is asking about it.
+one into the query unless the request is asking about it."""
 
+#: The paragraph deciding which note an implicit subject comes from (#2262).
+#:
+#: **Held apart from the prompt it is concatenated into, so a test can assert it
+#: reaches the model without asserting its wording** — which is ADR-0176 §4's
+#: instrument, taken as that section states it. §4 is normative that *"no test is
+#: required — and none is demanded of the implementing lane — that string-matches
+#: the wording of the prompt"*, and gives the reason this block is a constant
+#: rather than a substring: an assertion that the prompt contains a particular
+#: sentence *"fails on every rewording that improves the instruction and passes on
+#: every rewording that guts it, so it pins prose and reports nothing about
+#: behaviour"*. What a test owes is that the block is non-empty, that it reaches the
+#: model, and where it sits; what the block *says* is a reviewer's read, and the
+#: reasoning to read it against is above.
+_IMPLICIT_SUBJECT_GUIDANCE: Final = """\
 The notes are in the order this assistant selected them. If any of them record \
 earlier turns of this same conversation, those come first, and everything after \
 them is background this assistant retrieved. So where the request leaves its \
@@ -219,6 +233,9 @@ those opening notes, and never to a want, a purchase or a plan a note further \
 down records, however close to the request it reads. Search for the thing that \
 was asked for; carry a further detail in beside it only where the detail narrows \
 that thing rather than naming something else."""
+
+#: The whole instruction: the ratified prompt, then the paragraph above it.
+_SYSTEM_PROMPT: Final = f"{_SYSTEM_PROMPT_BASE}\n\n{_IMPLICIT_SUBJECT_GUIDANCE}"
 
 #: The heading the one span is presented under (ADR-0098 §2).
 #:
