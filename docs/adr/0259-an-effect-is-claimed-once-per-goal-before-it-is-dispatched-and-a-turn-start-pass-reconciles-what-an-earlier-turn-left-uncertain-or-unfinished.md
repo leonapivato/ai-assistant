@@ -664,30 +664,26 @@ implements the **first** route and explains why the second is not taken here.
 > reconciliation admission on `InvocationLedger` and no parameter to any existing member**. **No implementation of this
 > decision calls a `KEYED` tool to reconcile a step**, and §10 carries the route with what fires it.
 
-> **Normative — the reconciliation call is the authorised call rebuilt from durable state, and the rebuild is proved rather
-> than trusted.** The `ActionRequest` is rebuilt the way `StepRunner` builds one — the step read from the plan, its
+> **Normative — the reconciliation call is the authorised call rebuilt from durable state, and the rebuild is proved
+> rather than trusted.** The `ActionRequest` is rebuilt the way `StepRunner` builds one — the step read from the plan, its
 > `resolves` resolved from the stored `ExecutionState`, which ADR-0253 §6 makes *"a total function of two values both read
 > from the `PlanStore`"* and therefore reproducible after any restart — and the `PermissionDecision` is the one the step's
-> `approval_ref` names, read through `AuditTrail.get`. **The rebuilt request is then checked against that decision by
-> `PermissionDecision.authorises`, and the call is made only where it returns true**; **where it returns false the step
-> stays `INDETERMINATE`, nothing is written and no call is made.** So the derived `ToolCall.idempotency_key` is
-> **identical** to the first call's, and **no new `ActionPolicy.decide` is taken, no new decision is recorded and no new
-> authority is sought.**
+> `approval_ref` names, read through `AuditTrail.get`. **The rebuilt request is checked against that decision by
+> `PermissionDecision.authorises` and the call is made only where it returns true**; **where it returns false the step
+> stays `INDETERMINATE`, nothing is written and no call is made.** **No new `ActionPolicy.decide` is taken, no new
+> decision is recorded and no new authority is sought.**
 
-> **Normative — it is a reconciliation and not a retry, and the distinction is the tool's own declared guarantee.** ADR-0029
-> §5's exclusion binds verbatim and is **not relaxed**: an `INDETERMINATE` outcome is never **auto-retried**. What this
-> section performs is the route ADR-0014 §4 names beside that exclusion, and it is available **only** on the declarations
-> under which ADR-0192 §1 spends no authorisation at all. **A lane that reads this as licence to re-call a side-effecting
-> `Idempotency.NONE` or `KEYED` tool has read the opposite of the rule.**
+> **Normative — it is a reconciliation and not a retry.** ADR-0029 §5's exclusion binds verbatim and is **not relaxed**:
+> an `INDETERMINATE` outcome is never **auto-retried**. What this section performs is the route ADR-0014 §4 names beside
+> that exclusion, and only on a read. **A lane that reads this as licence to re-call a side-effecting tool of any
+> declaration has read the opposite of the rule.**
 
 > **Normative — this is automated reconciliation landing without the lookup ADR-0192 §3 names as its trigger, and the
 > difference is recorded rather than glossed.** That section rules that *"The ADR that lands automated reconciliation is
-> fired by a tool contract that offers a **lookup by idempotency key** — until a tool can be asked whether a key was already
-> acted on, reconciliation has nothing to read."* **This decision lands it without one, on the non-spendable, non-egress
-> authorisations alone** — the complete conjunction above — and §13 carries the partial supersession that fact owes. **The
-> side-effecting `KEYED` case that section was written about is untouched and still waits** — for that lookup, or for the
-> ledger admission §10 books, whichever arrives first. **No lane reads this clause as licence to reconcile a spendable
-> authorisation.**
+> fired by a tool contract that offers a **lookup by idempotency key**"*. **This decision lands it without one, on a
+> non-egress read alone** — the conjunction above — and §13 carries the partial supersession that fact owes. **The
+> side-effecting `KEYED` case that section was written about is untouched and still waits**, for that lookup or for the
+> ledger admission §10 books. **No lane reads this clause as licence to reconcile a spendable authorisation.**
 
 > **Normative — what its result writes, and what it does not.** Where the call returns a successful `ToolResult`, the step
 > is committed **`INDETERMINATE → SUCCEEDED`**, setting `output` from that result and re-stamping `finished_at` at the
@@ -701,22 +697,26 @@ implements the **first** route and explains why the second is not taken here.
 > **Normative — at most one reconciliation call per step per turn**, taken inside §4's pass, on the turn's own deadline
 > (ADR-0255 §9). **No lane loops, backs off, schedules a second, or re-calls a step the same turn already reconciled.**
 
-> **Normative — the seam's *declared* refusals end the pass and never the turn; anything else propagates, and the two are
-> not one case.** `ToolInvoker.invoke` names the exceptions it raises instead of returning a `ToolResult`, and **exactly
-> five of them are refusals of this call that a later turn could meet differently**: `ToolBindingError`,
-> `SpendCeilingError`, `SpendUndeterminedError`, `AuthorisationSpentError` and `UnrecordedAuthorisationError`. A restart
-> makes the first ordinary, since the tool a stored decision names need not be registered by the process that comes back.
-> **On those five the reconciliation writes nothing, the step stays `INDETERMINATE`, the pass ends at act 4, what earlier
-> acts landed stands, nothing is retried inside the turn, none of them escapes into the turn's own work, and the turn
-> does not fail** — §4's rule for a losing compare-and-swap, applied to the one act that reaches outside the store.
+> **Normative — the seam's *declared refusals of this call* end the pass and never the turn; everything else propagates,
+> and the two are not one case.** `ToolInvoker.invoke` names the exceptions it raises instead of returning a `ToolResult`,
+> and **exactly six of them are refusals of this call that a later turn could meet differently**: `ToolBindingError`,
+> `SpendCeilingError`, `SpendUndeterminedError`, `AuthorisationSpentError`, `UnrecordedAuthorisationError` and
+> **`AuditError`**. A restart makes the first ordinary, since the tool a stored decision names need not be registered by
+> the process that comes back; and the last is **the invocation-claim append failing**, which its own declaration calls a
+> *"**pre-callable**"* exit — a store failure at the seam, and therefore §4's store-failure case reached through a
+> different door rather than a second rule about it. **On those six the reconciliation writes nothing, the step stays
+> `INDETERMINATE`, the pass ends at act 4, what earlier acts landed stands, nothing is retried inside the turn, none of
+> them escapes into the turn's own work, and the turn does not fail.**
 
-> **Normative — an undeclared exception is a defect and is not swallowed.** `AuditError`, `ValueError` and **any
-> exception the seam's contract does not name** are propagated unchanged out of the pass. A seam that raises where its
-> contract says it returns is broken, and catching it would repeat one silent failure on **every** engagement of the goal
-> for ever while the record read as merely uncertain — which is the opposite of what a pass whose whole subject is
-> uncertainty should do. **`CancelledError` propagates too**, as at every other await in this system, and is not counted
-> among the five. **No lane widens the five by catching a base class**, retries the call, translates any exception into a
-> step transition, or reads a raised seam as establishing that the effect did not happen.
+> **Normative — an *undeclared* exception is a defect and is not swallowed.** **Any exception the seam's contract does
+> not name** is propagated unchanged out of the pass, and so is a **`ValueError`**, which that contract raises only for a
+> `timeout` that is not a strictly positive `timedelta` — a value this pass computes from the turn's own deadline, so
+> raising it is this system's bug and not the seam's refusal. A seam that raises where its contract says it returns is
+> broken, and catching it would repeat one silent failure on **every** engagement of the goal for ever while the record
+> read as merely uncertain — the opposite of what a pass whose whole subject is uncertainty should do. **`CancelledError`
+> propagates too**, as at every other await in this system, and is not counted among the six. **No lane widens the six by
+> catching a base class**, retries the call, translates any exception into a step transition, or reads a raised seam as
+> establishing that the effect did not happen.
 
 > **Normative — the reconciliation call takes no step claim, ADR-0014 §4's claim-before-invocation rule is untouched, and
 > the concurrency this leaves is bounded rather than denied.** That rule is stated over the **`→ RUNNING` transition** —
@@ -724,10 +724,10 @@ implements the **first** route and explains why the second is not taken here.
 > no such transition**: the step is `INDETERMINATE`, it stays `INDETERMINATE` until the call returns, and §7 admits only
 > `INDETERMINATE → SUCCEEDED` out of it. **No lane invents a claim for it, moves the step to `RUNNING` first, or reads this
 > as licence to invoke a `PENDING` step without one.** Two turns engaging one goal at once can therefore each make the call,
-> and **that is admitted rather than overlooked**: the authorisations §3 admits are ones ADR-0192 §1 rules non-spendable
-> *and* whose decision carries no `egress_binding`, where *"no claim under it is ever refused on the ground that it is
-> spent"* — the corpus already contemplating the same authorised read being made as often as the pipeline needs it — and
-> where ADR-0029 §4 rules a repeat changes nothing. **What is not concurrent is the record**: both turns' `→ SUCCEEDED`
+> and **that is admitted rather than overlooked**: the call §3 admits is a read whose authorisation ADR-0192 §1 rules
+> non-spendable, where *"no claim under it is ever refused on the ground that it is spent"* — the corpus already
+> contemplating the same authorised read being made as often as the pipeline needs it — and where ADR-0029 §4 rules a
+> repeat changes nothing. **What is not concurrent is the record**: both turns' `→ SUCCEEDED`
 > commits are compare-and-swaps on one `ExecutionState`, so **exactly one lands** and the loser writes nothing, which is
 > ADR-0014 §5's discipline doing here what it does everywhere else. **ADR-0148 §9's *"There is no egress outside a claimed
 > step"* is not reached at all**, because the test above admits no call carrying an egress binding, so nothing this section
@@ -760,15 +760,13 @@ it does for every other call, so the reconciliation's outcome and cost are in th
 non-spendable authorisation buys is that the **further** claim is *admitted*, and ADR-0192 §1's requirement that every call
 carry one **binds entire and is relied on here**.
 
-**An egress step is excluded because ADR-0148 §9 rules the seam it would go through, and its two
-sentences admit no wording around them.** That section states *"Every transmission through the seam happens under a
-committed `→ RUNNING` claim on a plan step … **There is no egress outside a claimed step**"*, and, of the recovery path by
+**An egress step is excluded because ADR-0148 §9 rules the seam it would go through, and its two sentences admit no
+wording around them.** That section states *"**There is no egress outside a claimed step**"*, and of the recovery path by
 name, *"**A designated seam adds no reconciliation path of its own**, relaxes none of ADR-0014 §4's treatment of
-`INDETERMINATE`, and never resolves a pending attempt by guessing."* §3's call takes **no** `→ RUNNING` claim, by the clause
-below and on purpose, so an egress reconciliation would be a transmission outside a claimed step **and** a reconciliation
-path a designated seam added — each forbidden on its own. **This decision excludes the case rather than superseding either
-sentence**, leaving ADR-0148 entire (§13); the cost is an uncertain **egress** effect uncheckable here whatever its
-`Idempotency`, which §10 books with the shape a later decision would take and with what fires it.
+`INDETERMINATE`, and never resolves a pending attempt by guessing."* §3's call takes **no** `→ RUNNING` claim, so an
+egress reconciliation would be a transmission outside a claimed step **and** a reconciliation path a designated seam
+added — each forbidden on its own. **This decision excludes the case rather than superseding either sentence**, leaving
+ADR-0148 entire (§13); §10 books the shape a later decision would take and what fires it.
 
 **A side-effecting `KEYED` tool has the harmlessness and not the permission.** Inside its window such a call carrying the
 first call's key returns the first call's outcome and performs the effect at most once — the better guarantee of the two,
@@ -939,17 +937,16 @@ is a narrowing; both are new rules**, and the mechanism that avoids both is alre
 names two closures: *"Find the recorded ruling for a parked step"* and *"Make the pair atomic"*. The first landed as
 `resolution_of` (ADR-0059 §2) and gets its consumer here. **The second is not taken** — it *"needs `PlanStore` to
 accept more than one transition in a commit, a contract change with a much wider blast radius"* — and §10 carries it with
-what fires it. All three of #257's instances close on the first: `resume`/`ALLOW` and `resume`/`DENY` by the replay above,
-and
-`run`/`DENY` — a step left `AWAITING_APPROVAL` under a recorded `DENY` — by §4's act 2, which
-reaches it because a `DENY` recorded at `run` and a `DENY` resolving a `CONFIRM` are both decisions the binding carries.
+what fires it. **The two instances of #257 that still exist close on the first**: `resume`/`ALLOW` and `resume`/`DENY`, by the replay
+above. The third #257 named — an initial `DENY` at `run` whose skip failed — **is already gone and is not closed here**,
+because ADR-0037 §5 says so in terms: *"The third window #257 named … is gone: §5's denial is now a single commit over
+ADR-0041's direct edge, so there is no gap on that path to strand in."* Act 2 could not reach it in any case:
+`resolution_of` answers *"the ALLOW or DENY whose `resolves` names a CONFIRM"*, and a `DENY` recorded at `run` resolves
+nothing.
 
-**And it is driven by §4's act 2 rather than by a new façade method, which is the budget ADR-0059
-§2 asks for.** That section rules that driving a stranded binding *"execute[s] and mutate[s] plan state, so [it] belong[s]
-to `resume` — which already carries a caller/deployment execution budget — or to a distinct, explicitly-budgeted recovery
-operation, **never** to
-`pending_confirmations`"*. §4's pass is the second of those: explicitly budgeted by the turn's own
-deadline. **`AssistantEngine` gains no member and no enumeration changes** (§9), so ADR-0052's presentation question is
+**And it is driven by §4's act 2 rather than by a new façade method, which is the budget ADR-0059 §2 asks for.** That
+section rules that driving a stranded binding *"belong[s] to `resume` … or to a distinct, explicitly-budgeted recovery
+operation, **never** to `pending_confirmations`"*. §4's pass is the second of those, budgeted by the turn's own deadline. **`AssistantEngine` gains no member and no enumeration changes** (§9), so ADR-0052's presentation question is
 untouched — this decision neither surfaces a stranded park nor changes what any enumerator returns.
 
 ### 6. The startup scan, and the engagement stamp
@@ -1434,7 +1431,8 @@ arguments**, and one store member and one derived property are the whole of it.
     same step on a plan a stored plan supersedes reconciles identically, because a read drives
     nothing. **The arm asserts nothing about a later walk**: the reconciled step belongs to
     the earlier execution, ADR-0255 §2 sends the later turn to plan again over a new one (§7), and
-    what that turn's plan meets is arms 1–3's subject.
+    a later plan matching that read is **dispatched and reads again** — it carries no effect key, so `claim_effect` is
+    never called for it and it does **not** enter arms 1–3, whose outcomes all require a row.
 11. **Every way a reconciliation does not resolve a step leaves it exactly as it stood**, in one table: a
     **side-effecting** `Idempotency.NONE` step, a side-effecting **`KEYED`** step, a side-effecting **`NATURAL`**
     step — the row that pins §3's exclusion, and the one an implementation reading `NATURAL` as reconcilable would
@@ -1445,12 +1443,12 @@ arguments**, and one store member and one derived property are the whole of it.
     step whose `approval_ref` is absent, whose decision the trail cannot return, or whose rebuilt request
     `PermissionDecision.authorises` rejects takes **no call**. And a reconcilable step whose call returns a failure, a
     timeout or an `INDETERMINATE` of its own takes **one**, as does one whose call **raises**. **The raising rows are
-    two tables and not one**: each of §3's **five declared refusals** — `ToolBindingError` (the registry no longer
-    holding the recorded definition after a restart), the two spend errors and the two authorisation errors — ends the
-    pass at act 4 with the earlier acts' writes **standing** and **the turn not failing**; while an **undeclared**
-    exception (`AuditError`, a `ValueError`, a bare `RuntimeError` from a broken invoker) and a `CancelledError` are
-    each asserted to **propagate out of the pass unchanged**. An implementation catching a base class fails the second
-    table. In **every**
+    two tables and not one**: each of §3's **six declared refusals** — `ToolBindingError` (the registry no longer
+    holding the recorded definition after a restart), the two spend errors, the two authorisation errors and
+    `AuditError` (the invocation-claim append failing) — ends the pass at act 4 with the earlier acts' writes
+    **standing** and **the turn not failing**; while a `ValueError`, a bare `RuntimeError` from a broken invoker and a
+    `CancelledError` are each asserted to **propagate out of the pass unchanged**. An implementation catching a base
+    class fails the second table. In **every**
     row the step stays **`INDETERMINATE`**, `attempts` is **unchanged**, no transition is committed, the attempt stays
     **`EFFECT_UNRESOLVED`**, and **no second call is made in that turn**. **The key is asserted per row rather than
     across them**, because §1 gives one only to a side-effecting tool: a **side-effecting** row's key answers
