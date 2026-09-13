@@ -1146,18 +1146,81 @@ async def test_an_elision_reconciles_every_candidate_before_it_destroys_one(
         store.close()
 
 
-async def test_a_deletion_takes_every_row_whose_record_names_the_deleted_goal(
+async def test_a_goals_table_whose_elision_default_is_not_zero_is_refused_at_open(
     tmp_path: Path,
 ) -> None:
-    """ADR-0014 §5 is a promise about the **record**, not about the projection.
+    """A default is load-bearing exactly where an insert omits the column (ADR-0252 §13).
 
-    "A goal the user deletes must not leave its plan history behind", and ADR-0252 §12
-    extends the cascade to evidence "of every standing". The promoted ``goal_id`` is a
-    projection of the record, so a cascade keyed on it alone answers the question with
-    the projection: a row whose record names the deleted goal while its column names
-    another **survives the deletion**, and ``evidence_removed`` reports that nothing was
-    left behind. That is the user's data still in the store after the store said it was
-    gone, which is the one outcome §5 forbids outright.
+    Every column of every record table is written explicitly by the insert that creates
+    the row — **except** ``evidence_elided``, which ``save_goal`` omits and the migration
+    adds as ``NOT NULL DEFAULT 0`` precisely so the value arrives without a row pass. So
+    a pre-existing ``goals`` this store adopts — ``CREATE TABLE IF NOT EXISTS`` is a
+    no-op against one (#373) — can declare ``DEFAULT 7``, pass the affinity and NOT NULL
+    checks that were all this store looked at, and then a goal with **no evidence at
+    all** reports ``elided == 7``.
+
+    That is a history saying *this is the evidence that was kept* where nothing was ever
+    dropped — ADR-0086 §4's "a *false* answer to the one question the provenance display
+    exists to answer", arriving through the counter built to prevent it. It is refused at
+    open, the way every other shape this store's guarantees rest on is.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute(
+            "CREATE TABLE goals(id TEXT PRIMARY KEY, conversation_id TEXT, "
+            "last_engaged_in TEXT, evidence_elided INTEGER NOT NULL DEFAULT 7, "
+            "data TEXT NOT NULL)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="declares DEFAULT 7, not the DEFAULT 0"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_a_goals_table_with_no_elision_default_is_refused_at_open(
+    tmp_path: Path,
+) -> None:
+    """The absent default is the same fault as the wrong one, and worse on a migration.
+
+    ``NOT NULL`` with no default makes ``save_goal``'s insert — which omits the column —
+    fail outright rather than silently mis-state a count, and the ``ALTER TABLE`` the
+    migration issues is only admissible *because* the default supplies the value every
+    existing row needs. A file declaring one without the other is not a file this store
+    shaped either way.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute(
+            "CREATE TABLE goals(id TEXT PRIMARY KEY, conversation_id TEXT, "
+            "last_engaged_in TEXT, evidence_elided INTEGER NOT NULL, data TEXT NOT NULL)"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="declares no default, not the DEFAULT 0"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_a_deletion_removes_the_rows_the_index_says_are_the_goals(
+    tmp_path: Path,
+) -> None:
+    """The cascade keys on the column, like every other site, and decodes nothing.
+
+    The evidence index rule has **no departure**: "the promoted columns are the index …
+    and a row is never selected under a goal its columns do not name". A goal's history
+    is what the index says it is, so ADR-0014 §5's "must not leave its plan history
+    behind" is satisfied by removing exactly those rows — and a row indexed under another
+    goal is that goal's, never this one's to delete.
+
+    It does not survive unnoticed, which is the half that makes keying on the index safe
+    rather than merely cheap: reading the goal its columns **do** name decodes it, finds
+    its record naming the deleted goal, and refuses. Both halves are asserted here,
+    because the first alone is also what a cascade that simply missed the row would do.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
@@ -1166,10 +1229,11 @@ async def test_a_deletion_takes_every_row_whose_record_names_the_deleted_goal(
         await store.save_goal(_goal("g2"))
         await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
         await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
     finally:
         store.close()
 
-    # The record still names `g1`; only the column is walked over to `g2`.
+    # `ev1`'s record still names `g1`; its index entry is moved to `g2`.
     with sqlite3.connect(path) as conn:
         conn.execute("UPDATE goal_evidence SET goal_id = 'g2' WHERE id = 'ev1'")
 
@@ -1178,50 +1242,54 @@ async def test_a_deletion_takes_every_row_whose_record_names_the_deleted_goal(
         removed = await store.delete_goal("g1")
 
         assert removed.deleted
-        assert removed.evidence_removed == 1, "the row went with the goal its record names"
+        assert removed.evidence_removed == 1, "the rows the index says are g1's, and only those"
         with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
+            assert conn.execute("SELECT id FROM goal_evidence").fetchall() == [("ev1",)]
+
+        # And the row left behind is not lost track of: it is g2's under the rule, and
+        # g2's own read is where its record is decoded and found to disagree.
+        with pytest.raises(PlanningError, match="record and columns disagree"):
+            await store.evidence_of("g2")
     finally:
         store.close()
 
 
-async def test_a_deletion_refuses_a_row_whose_column_claims_the_goal_its_record_does_not(
+async def test_a_deletion_decodes_nothing_so_an_unreadable_row_cannot_block_it(
     tmp_path: Path,
 ) -> None:
-    """The mirror-image fault is refused rather than committed (ADR-0049 §1).
+    """A cascade that decodes is a cascade an unrelated corrupt row can refuse.
 
-    A row whose **column** names the goal being deleted while its **record** names
-    another is the same disagreement every read refuses. Deleting it would destroy a row
-    whose record says it belongs to a goal the user did not delete — irrecoverably, and
-    reported as a successful cascade. The two directions resolve asymmetrically because
-    the two errors are not symmetrical: a record claiming the goal is taken, a column
-    claiming it alone is refused.
+    Keying on the index means the deletion reads no blob at all, so a row whose record
+    does not decode — or is valid JSON that is not an object, or is not JSON — cannot
+    stand between a user and their ADR-0004 data-rights call. An earlier draft scanned
+    and decoded every row to ask the record-side question, and a ``'[]'`` blob anywhere
+    in the table raised through it.
+
+    The unreadable row here is indexed under this very goal, which is the case that
+    matters: it goes with the goal rather than outliving it, and no decode is attempted
+    on the way out.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         await store.save_goal(_goal("g1"))
-        await store.save_goal(_goal("g2"))
         await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
         await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
     finally:
         store.close()
 
-    # The column still names `g1`; the record is walked over to `g2`.
     with sqlite3.connect(path) as conn:
-        (raw,) = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev1'").fetchone()
-        held = json.loads(raw)
-        held["goal_id"] = "g2"
-        conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (json.dumps(held),))
+        conn.execute("UPDATE goal_evidence SET data = '[]' WHERE id = 'ev1'")
 
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
-        with pytest.raises(PlanningError, match="while its record names goal"):
-            await store.delete_goal("g1")
+        removed = await store.delete_goal("g1")
 
+        assert removed.deleted, "an unreadable record does not block the deletion"
+        assert removed.evidence_removed == 2, "and it goes with the goal it is indexed under"
         with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (1,)
-            assert conn.execute("SELECT COUNT(*) FROM goals WHERE id = 'g1'").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
     finally:
         store.close()
 
@@ -1309,46 +1377,6 @@ async def test_a_row_indexed_under_another_goal_is_that_goals_and_refuses_there(
 
         with pytest.raises(PlanningError, match="record and columns disagree"):
             await store.evidence_of("g2")
-    finally:
-        store.close()
-
-
-async def test_a_deletion_is_not_blocked_by_a_row_whose_record_is_not_an_object(
-    tmp_path: Path,
-) -> None:
-    """A blob that parses but is not an object is an unreadable record, not a crash.
-
-    The deletion scan reaches **every** row in the table, which is the whole reason it
-    reads the record's goal out of the JSON rather than through the model: an unrelated
-    invalid row must not block a user's ADR-0004 data-rights call behind a fault they
-    cannot clear. ``json.loads`` succeeds on ``'[]'``, ``'7'`` and ``'"x"'``, so a
-    ``.get`` on the result is an ``AttributeError`` — the exact failure the policy exists
-    to prevent, arriving through the branch that states it.
-
-    The row here is indexed under another goal, so it is untouched by this deletion and
-    stays for that goal's own read to refuse.
-    """
-    path = tmp_path / "plans.db"
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        await store.save_goal(_goal("g1"))
-        await store.save_goal(_goal("g2"))
-        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
-        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
-    finally:
-        store.close()
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("UPDATE goal_evidence SET goal_id = 'g2', data = '[]' WHERE id = 'ev1'")
-
-    store = SqlitePlanStore(path=path, now=_fixed_now)
-    try:
-        removed = await store.delete_goal("g1")
-
-        assert removed.deleted, "an unrelated unreadable row does not block the deletion"
-        assert removed.evidence_removed == 0
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (1,)
     finally:
         store.close()
 

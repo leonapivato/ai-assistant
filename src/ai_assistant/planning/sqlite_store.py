@@ -322,47 +322,47 @@ _VERSION_BEFORE_INTERPRETATIONS: Final[int] = 1
 #: is only *required* where the schema declares it, never forbidden: ``id`` is a
 #: ``TEXT PRIMARY KEY``, which SQLite does not make implicitly ``NOT NULL``, so a
 #: file that hardens it is compatible and must not be refused.
-_RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
+_RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
     "goals": {
-        "id": ("TEXT", False),
-        "conversation_id": ("TEXT", False),
-        "last_engaged_in": ("TEXT", False),
-        "evidence_elided": ("INTEGER", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "conversation_id": ("TEXT", False, None),
+        "last_engaged_in": ("TEXT", False, None),
+        "evidence_elided": ("INTEGER", True, "0"),
+        "data": ("TEXT", True, None),
     },
     "plans": {
-        "id": ("TEXT", False),
-        "goal_id": ("TEXT", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "goal_id": ("TEXT", True, None),
+        "data": ("TEXT", True, None),
     },
     "executions": {
-        "id": ("TEXT", False),
-        "plan_id": ("TEXT", True),
-        "version": ("INTEGER", True),
-        "active": ("INTEGER", True),
-        "created_seq": ("INTEGER", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "plan_id": ("TEXT", True, None),
+        "version": ("INTEGER", True, None),
+        "active": ("INTEGER", True, None),
+        "created_seq": ("INTEGER", True, None),
+        "data": ("TEXT", True, None),
     },
     "attempts": {
-        "id": ("TEXT", False),
-        "goal_id": ("TEXT", True),
-        "opened_at": ("TEXT", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "goal_id": ("TEXT", True, None),
+        "opened_at": ("TEXT", True, None),
+        "data": ("TEXT", True, None),
     },
     "goal_questions": {
-        "id": ("TEXT", False),
-        "goal_id": ("TEXT", True),
-        "attempt_id": ("TEXT", True),
-        "asked_at": ("TEXT", True),
-        "disposition": ("TEXT", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "goal_id": ("TEXT", True, None),
+        "attempt_id": ("TEXT", True, None),
+        "asked_at": ("TEXT", True, None),
+        "disposition": ("TEXT", True, None),
+        "data": ("TEXT", True, None),
     },
     "goal_evidence": {
-        "id": ("TEXT", False),
-        "goal_id": ("TEXT", True),
-        "read_at": ("TEXT", True),
-        "standing": ("TEXT", True),
-        "data": ("TEXT", True),
+        "id": ("TEXT", False, None),
+        "goal_id": ("TEXT", True, None),
+        "read_at": ("TEXT", True, None),
+        "standing": ("TEXT", True, None),
+        "data": ("TEXT", True, None),
     },
 }
 
@@ -985,7 +985,11 @@ class SqlitePlanStore:
             # compatible schema must be accepted, not refused (the names in
             # `_RECORD_COLUMNS` are the lower-case form).
             actual = {
-                str(row[1]).lower(): (_affinity(str(row[2])), bool(row[3]))
+                str(row[1]).lower(): (
+                    _affinity(str(row[2])),
+                    bool(row[3]),
+                    None if row[4] is None else str(row[4]),
+                )
                 for row in conn.execute(f"PRAGMA table_info('{table}')")
             }
             self._verify_columns(table, expected, actual)
@@ -1036,11 +1040,29 @@ class SqlitePlanStore:
     def _verify_columns(
         self,
         table: str,
-        expected: dict[str, tuple[str, bool]],
-        actual: dict[str, tuple[str, bool]],
+        expected: dict[str, tuple[str, bool, str | None]],
+        actual: dict[str, tuple[str, bool, str | None]],
     ) -> None:
-        """Require each expected column at its affinity and, where declared, NOT NULL."""
-        for column, (affinity, not_null) in expected.items():
+        """Require each column at its affinity, its NOT NULL, and its declared default.
+
+        **The default is checked wherever this store's schema declares one, and that is
+        the case where a default is load-bearing rather than cosmetic.** Every column of
+        every record table is written explicitly by the insert that creates the row —
+        except ADR-0252 §13's ``evidence_elided``, which :meth:`save_goal` omits and the
+        migration adds with ``NOT NULL DEFAULT 0`` precisely so that the value arrives
+        without a row pass. A pre-existing ``goals`` this store adopts (``CREATE TABLE IF
+        NOT EXISTS`` is a no-op against one, #373) can therefore declare
+        ``DEFAULT 7`` and pass every other check, and then a goal with **no evidence at
+        all** reports ``elided == 7`` — a history saying *this is the evidence that was
+        kept* where nothing was ever dropped, which is the one false answer §13's counter
+        exists to prevent. Where the schema declares no default there is nothing to
+        check: no read consults one, because no insert omits the column.
+
+        The comparison is over ``PRAGMA table_info``'s ``dflt_value`` text with
+        surrounding whitespace stripped, which is the form SQLite stores a literal
+        default in; a file that spells it differently is a file this store did not shape.
+        """
+        for column, (affinity, not_null, default) in expected.items():
             found = actual.get(column)
             if found is None:
                 problem = "is absent"
@@ -1048,6 +1070,9 @@ class SqlitePlanStore:
                 problem = f"has {found[0]} affinity, not the {affinity} affinity"
             elif not_null and not found[1]:
                 problem = "is nullable, not the NOT NULL"
+            elif default is not None and (found[2] or "").strip() != default:
+                held = "no default" if found[2] is None else f"DEFAULT {found[2]}"
+                problem = f"declares {held}, not the DEFAULT {default}"
             else:
                 continue
             msg = (
@@ -2130,44 +2155,24 @@ class SqlitePlanStore:
         return None if row is None else _checked_evidence(str(self._path), row)
 
     def _delete_goal_evidence(self, conn: sqlite3.Connection, goal_id: str) -> int:
-        """Remove every evidence row that is this goal's, by **both** of the two answers.
+        """Remove this goal's evidence, which is the rows the index says are its.
 
-        ADR-0014 §5's guarantee is about the record — *"a goal the user deletes must not
-        leave its plan history behind"* — and the promoted ``goal_id`` column is only a
-        projection of it. A ``DELETE ... WHERE goal_id = ?`` therefore answers the
-        question with the projection alone, and on a file where the two disagree it gets
-        it wrong in the direction that matters: a row whose **record** names the deleted
-        goal, but whose column names another, survives the deletion and is reported as
-        nothing removed. That is the user's data, still in the store, after the store
-        said it was gone.
+        :data:`_EVIDENCE_INDEX_RULE`, with **no departure**: the cascade keys on the
+        promoted ``goal_id`` exactly as every read does, and decodes nothing. A row
+        indexed under another goal is that goal's under the rule — never this one's
+        history, so never this one's to delete — and it does not survive unnoticed,
+        because reading the goal its columns name decodes it and refuses.
 
-        **This is the one deliberate departure from** :data:`_EVIDENCE_INDEX_RULE`, and
-        it is a departure only from that rule's *selection* clause, which governs what a
-        goal's **history** contains. A cascade is not a history: it is the user's
-        ADR-0004 data-rights act, and the question it asks is not *which rows does this
-        goal's history hold* but *which rows claim this goal*. Under the rule alone a row
-        indexed elsewhere is not this goal's and would be left — correct for a read,
-        and for a deletion it leaves a record naming the deleted goal sitting in the file
-        after the store has said it is gone.
-
-        So both answers are consulted, and they resolve asymmetrically because the two
-        errors are not symmetrical:
-
-        - **A record naming this goal goes with it**, whatever its column says. Deletion
-          is the conservative direction for a row that claims the goal: keeping it is
-          the one outcome ADR-0014 §5 forbids outright.
-        - **A column naming this goal over a record that names another is refused**, as
-          the same disagreement every read refuses (:func:`_checked_evidence`). Deleting
-          it would destroy a row whose record says it belongs to a goal the user did not
-          delete, which is the mirror-image fault and is not recoverable.
-
-        **The record's goal is read out of the JSON rather than through the model**, and
-        that is deliberate: the question is about one field, and requiring the whole row
-        to validate would let an unrelated invalid row — one no read of *this* goal would
-        ever touch — block a user's ADR-0004 data-rights call behind a fault they cannot
-        clear. A row whose blob does not parse at all is removed where its column names
-        this goal: an unreadable record under the goal's own key goes with the goal
-        rather than outliving it.
+        **An earlier draft asked the record-side question instead**, scanning every row
+        and deleting the ones whose blob named this goal. That is not a cheaper or
+        costlier way to do the same thing; it is a different question, and asking it here
+        made this the one site not governed by the rule. It produced three defects in
+        three rounds — a raw ``AttributeError`` on a blob that was valid JSON but not an
+        object, a comparison against an unnormalised ``goal_id`` that ``Identifier``
+        would have stripped, and a full-table decode on the deletion path — each a
+        consequence of the scan rather than of any one line of it. Keying on the index,
+        as here, is what makes ADR-0014 §5's guarantee checkable: *this goal's* history
+        is what the index says it is, and all of it goes.
 
         Args:
             conn: The connection the delete transaction is running on.
@@ -2175,40 +2180,8 @@ class SqlitePlanStore:
 
         Returns:
             How many rows were removed.
-
-        Raises:
-            PlanningError: If a row's column claims this goal while its record names
-                another.
         """
-        doomed: list[str] = []
-        for row in conn.execute("SELECT id, goal_id, data FROM goal_evidence").fetchall():
-            # A blob that parses but is not an object — `[]`, `7`, `"x"` — is as
-            # unreadable a *record* as one that does not parse at all, and this scan
-            # reaches every row in the table, so letting either one raise would be the
-            # unrelated invalid row blocking a deletion that this method exists to
-            # prevent. `.get` on a list is an `AttributeError`, which is why the shape is
-            # checked rather than assumed.
-            try:
-                decoded = json.loads(str(row[2]))
-            except json.JSONDecodeError:
-                decoded = None
-            claimed = decoded.get("goal_id") if isinstance(decoded, dict) else None
-            if claimed == goal_id:
-                doomed.append(str(row[0]))
-                continue
-            if str(row[1]) != goal_id:
-                continue
-            if claimed is None:
-                doomed.append(str(row[0]))
-                continue
-            msg = (
-                f"the plan store at {str(self._path)!r} holds evidence row {row[0]} "
-                f"under goal {goal_id} while its record names goal {claimed}; the store "
-                f"is corrupt"
-            )
-            raise PlanningError(msg)
-        conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
-        return len(doomed)
+        return int(conn.execute("DELETE FROM goal_evidence WHERE goal_id = ?", (goal_id,)).rowcount)
 
     def _read_evidence(self, evidence_id: str) -> Sequence[Any] | None:
         """One evidence row and the four columns beside it, outside a transaction."""
