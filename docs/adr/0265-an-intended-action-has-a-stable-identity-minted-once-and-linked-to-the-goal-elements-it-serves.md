@@ -128,6 +128,16 @@ toward any of them.
 > `orchestration` mints from the request without a planner call, so `intended_actions` is empty on
 > every goal at the moment it is opened.
 
+> **Normative — the tuple is bounded by a refusal and never by an elision, and the bound is
+> `MAX_INTENDED_ACTIONS`, a `Final[int]` of `core/types.py` valued at 32.** A goal holding that
+> many intended actions **refuses** a further minting (§5) rather than dropping its oldest, so
+> `GoalBrief.actions` (§4) is bounded by construction and no lane truncates it at the seam. **No
+> lane elides an intended action, for any reason, at any age**: ADR-0249 §2 may elide a revision
+> and ADR-0252 §13 may elide an evidence row because each leaves a count on the record and loses
+> no identity, while **an identity that can vanish is not an identity** — the effect claim §6
+> obliges would silently become fresh for an act the goal had already performed. ADR-0086 §4's
+> no-silent-truncation rule is satisfied by the refusal and not by a disclosure.
+
 > **Normative — an `IntendedAction` is a record of an intent and never an instruction to act.**
 > **No lane walks `intended_actions` and dispatches, plans, schedules or reports from it.** An
 > action nothing has named in a plan sits in the record and causes nothing; an action a plan named
@@ -209,10 +219,20 @@ compares and nothing can re-derive.
 > user's words require an act the goal does not already hold an action for; **"book two identical
 > rooms" mints two because the user asked for two**, and a planner that splits one intended act
 > across two steps for its own reasons mints none. This is ADR-0249 §7's asymmetry observed rather
-> than extended — interpretation is the model's — and §6's obligation is what keeps a wrong
-> proposal from becoming an unauthorised effect: **a wrongly minted action costs a duplicate claim
-> that stalls, never a duplicate dispatch**, because the effect claim is still taken and still
-> compares the call's own key.
+> than extended: interpretation is the model's, and a **count of acts the user asked for** is
+> interpretation.
+
+> **Normative — what a wrongly minted action costs is a duplicate dispatch, this decision contains
+> it by no mechanism, and the trade is stated rather than implied away.** Where a goal already
+> holds a completed effect under `A1` for key `K` and a later call wrongly mints `A2`, §6's triple
+> `(goal, A2, K)` has **no row**, so the claim is fresh and the effect is performed again. **No
+> clause of this decision detects that**, and none may be read as doing so. It is the **exact
+> price of the requirement**: *"an earlier booking must not count as fulfilling 'book another
+> one'"* obliges two deliberate acts with one key to be two claims, and **at the key nothing
+> distinguishes two rooms asked for from one room asked for twice** — the only thing that ever
+> separates them is whether the user asked, which is a fact about the request and not about the
+> call. **A goal-scoped key would refuse both**, which is the failure the owner's correction
+> opened; this decision refuses neither and says so. §7 books the containment with what fires it.
 
 **Minting from the user's words rather than from the plan is what makes the two-rooms case a fact
 about the request instead of a property of a plan nobody reviewed.** A count derived from the plan
@@ -348,9 +368,13 @@ the whole of it.
 > which a decision is taken. **Two actions minted on one turn are appended in one call**, so the
 > two-rooms case takes one compare-and-swap and not two.
 
-> **Normative — the member refuses an id the goal already holds**, with the same error class, and
-> writes nothing. §1's append-only rule is closed at the store rather than trusted to close
-> itself, on §4's own footing.
+> **Normative — the member refuses an id the goal already holds, and refuses a minting that would
+> carry the goal past `MAX_INTENDED_ACTIONS` (§1), writing nothing in either case.** Both take the
+> error class ADR-0249 §12 gives `save_goal` for *"a goal whose `id` the store already holds"* —
+> *"the same error class an unknown goal already raises"* — and **neither takes the stale-write
+> class**: a duplicate id and a full tuple are **invariant breaches at the current version**, not
+> lost races, and a caller that re-read and retried would re-raise for ever. §1's append-only rule
+> and its bound are closed at the store rather than trusted to close themselves, on §4's footing.
 
 > **Normative — `PlanExport` gains no member and `schema_version` moves for the record's shape
 > alone.** `IntendedAction` rides **inside `Goal`**, which `PlanExport.goals` already carries, so
@@ -461,6 +485,15 @@ contradiction where the acts it governs cannot yet be performed.
 - **Whether a side-effecting step must name an intended action, and what refuses one that does
   not.** **Not decided here** (§4), and §6 puts it where `side_effecting` is known. **Fired by the
   decision that lands the effect claim.**
+- **Containing a wrongly minted intended action** — detecting that an act a call proposed is the
+  act the goal already performed, rather than a second one the user asked for. **Not decided**
+  (§2), and the reason is that the two are indistinguishable at the key: what separates them is
+  the user's own words, and a test over them would be a model clearing a prerequisite, which
+  ADR-0249 §7's asymmetry forbids. **The containment that exists today is the deployment gate**
+  ADR-0253 §3 and ADR-0255 §13 state, under which no consequential capability is wired at all.
+  **Fired by an act-instance authorization that rules on a proposed act against the user's
+  recorded request** — ADR-0254 §14's route, since a plan's resolved arguments are what such a
+  ruling would compare — **or by a measured case in which a planner mints a duplicate act.**
 - **Where a live correction would enter** — a message reaching a turn that is already running,
   mid-run interruption, and message queuing. **Not decided**, on the owner's sequencing ruling of
   2026-09-13: every correction this decision is stated under arrives as a subsequent turn, and
@@ -520,32 +553,44 @@ text states what a marked clause means and supplies no obligation (§3).
 
 ### 9. The lane cut, and the one lane that moves the wire
 
-> **Normative.** This decision is implemented in **two lanes**, in this order, each one subsystem
-> plus its tests, and **no lane of this decision wires a consequential capability** or enables
-> anything in a production deployment.
+> **Normative.** This decision is implemented in **three lanes**, in this order, **each one
+> subsystem plus its tests**, and **no lane of this decision wires a consequential capability** or
+> enables anything in a production deployment.
 
-- **L1 — the contract and the store.** `core/types.py`'s `IntendedAction`, `ProposedAction`,
-  `BriefAction` and `IntendedActionMinting`; `Goal.intended_actions`, `PlannerOutput.actions`,
-  `GoalBrief.actions` and `PlanStep.intended_action`; `core/protocols.py`'s
-  `record_intended_actions` and `save_plan`'s added conjunct; `planning`'s `PlanStore`
-  implementation with its schema migration and export, the shared conformance suite for the new
-  member and the added conjunct, and the canonical fake in `ai_assistant.testing`. **L1 moves
-  `PROTOCOL_VERSION`** (§5). Arms 1, 5, 6, 7.
-- **L2 — the loop.** `orchestration`'s recording of `PlannerOutput.actions` in §2's order, the
-  `serves` resolution and its drops (§3), the brief's `actions` projection and its live-link
-  rendering, `planning/planner.py`'s `A`-labelled block and its prompt, and the loop's resolution
-  and refusal of a step's action label (§4). Arms 2, 3, 4, 8.
+- **L1 — the contract and the store** (`core` plus `planning`'s implementation of it, which is
+  ADR-0259 §11's and ADR-0253 §12's own shape for a contract lane). `core/types.py`'s
+  `IntendedAction`, `ProposedAction`, `BriefAction`, `IntendedActionMinting` and
+  `MAX_INTENDED_ACTIONS`; `Goal.intended_actions`, `PlannerOutput.actions`, `GoalBrief.actions`
+  and `PlanStep.intended_action`; `core/protocols.py`'s `record_intended_actions` and
+  `save_plan`'s added conjunct; `planning`'s `PlanStore` implementation with its schema migration
+  and export, the shared conformance suite for the new member and the added conjunct, and the
+  canonical fake in `ai_assistant.testing`. **L1 moves `PROTOCOL_VERSION`** (§5). Arms 1, 5, 6, 7.
+- **L2 — the loop, in `orchestration` alone.** Recording `PlannerOutput.actions` in §2's order,
+  the `serves` resolution and its drops (§3), the `GoalBrief.actions` projection with its
+  live-link rendering — which is `orchestration`'s, on ADR-0252 §11's *"projected by
+  `orchestration` alone"* — and the resolution and refusal of a step's action label (§4). Arms 2,
+  3, 4.
+- **L3 — the seam, in `planning` alone.** `planning/planner.py`'s `A`-labelled block in
+  `_render_request`, the system turn stating the space, and the strict extraction of the step's
+  `action` key. Arm 8.
 
-> **Normative — L1 lands before L2**, and no arm of L2 is demonstrated against L1's absence.
-> **Neither lane implements an effect claim, a reuse check or a retry** (§7), and a lane that
-> finds itself needing one has left its fence.
+> **Normative — L1 lands before L2 and L2 before L3**, and no later lane's arm is demonstrated
+> against an earlier lane's absence. **L2 and L3 are two lanes and not one** because
+> `orchestration` and `planning` are two subsystems and this decision mints no Protocol whose
+> triad could ride across them (`CONTRIBUTING.md` → "One subsystem per change"); L2 tolerates an
+> envelope carrying no `action` key, which is what lets it land first.
+
+> **Normative — no lane implements an effect claim, a reuse check or a retry** (§7), and a lane
+> that finds itself needing one has left its fence.
 
 ### 10. The arms this decision owes
 
-The two lanes ship these eight, over controlled fakes, and the owner's two cases are arms 1 and 2.
+> **Normative.** **The three lanes ship the eight arms below, each over controlled fakes, and no
+> lane is complete without the arms §9 assigns it.** Every arm states its correction as a
+> **subsequent turn**, on the owner's sequencing ruling of 2026-09-13; **no arm drives a message
+> into a running turn**, and none is demonstrated against a live integration.
 
-Every arm states its correction as a **subsequent turn**, on the owner's sequencing ruling; none
-drives a message into a running turn.
+The owner's two cases are arms 1 and 2.
 
 1. **Two identical rooms are two intended actions on one goal**, and *"an earlier booking must not
    count as fulfilling 'book another one'"*. A goal whose request is *"book
@@ -569,10 +614,14 @@ drives a message into a running turn.
    plan naming `banana` are each **refused** with the `PlanningError` class `save_plan` raises,
    are not passed to `save_plan`, and dispatch nothing. A plan whose step names no action is saved
    and carries `None`.
-5. **The store closes the window and the append is atomic.** `save_plan` refuses a plan whose
-   `intended_action` is not a member of that goal's `intended_actions`; `record_intended_actions`
-   refuses a stale `expected_version`, refuses an `id` the goal already holds, and appends **two**
-   actions in one compare-and-swap. Each refusal writes nothing.
+5. **The store closes the windows, the append is atomic, and the bound refuses rather than
+   elides.** `save_plan` refuses a plan whose `intended_action` is not a member of that goal's
+   `intended_actions`; `record_intended_actions` appends **two** actions in one
+   compare-and-swap, and refuses a stale `expected_version`, an `id` the goal already holds, and a
+   minting that would carry the goal past `MAX_INTENDED_ACTIONS`. Assert that each refusal writes
+   nothing, that the **last two carry a class distinct from the stale-write class** (§5), and that
+   a goal at the bound holds every action it held before the refusal — **no member elided, no
+   count advanced**.
 6. **The record round-trips and the export closes.** A goal carrying two intended actions
    round-trips through `model_dump()` and construction; `PlanExport` carries them inside `goals`
    with no new member; `delete_goal` removes them with the goal; and a stored goal written before
@@ -604,9 +653,11 @@ absence — *"a goal records no completed effect that a driver could compare aga
 the comparison now has a subject, and the decision that records the effect supplies the predicate.
 
 **What becomes harder.** A planner must say what it intends before it may act on it, which is one
-more thing a model can get wrong; §2's mitigation is that a wrong proposal costs a stalled claim
-and never a duplicate dispatch. And the corpus gains an eighth label space, which is a seam a
-reader must now hold eight letters for.
+more thing a model can get wrong, and §2 states plainly that this decision contains a wrong one by
+**no mechanism** — a wrongly minted action dispatches a duplicate, which the goal-scoped key it
+replaces would have refused. That is the price of the owner's *"an earlier booking must not count
+as fulfilling 'book another one'"*, it is paid knowingly, and §7 books what would close it. And the
+corpus gains an eighth label space, which is a seam a reader must now hold eight letters for.
 
 **This identity is a candidate, and these are the cases that would falsify it.** The owner asked
 that goal-element scoping be treated as a candidate to test. What is on trial is *a goal-scoped,
