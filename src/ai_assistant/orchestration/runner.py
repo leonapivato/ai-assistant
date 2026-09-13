@@ -756,12 +756,13 @@ class StepRunner:
         # `PENDING` — which is `INVALID_PARAMETERS`' shape, and where no replan can
         # satisfy the check §14 leaves the attempt for A3's `BLOCKED` producer and
         # writes none itself.
-        gate = await self._phase_four(planned)
+        gate = await self._phase_four(planned, opened)
         if not gate.ready:
             _log.info(
-                "plan_step_arguments_unfillable",
+                "plan_refused_at_phase_four",
                 step_id=step.id,
                 unfillable=[one.step for one in gate.unfillable],
+                unmet=[one.step for one in gate.unmet],
                 deferred=len(gate.deferred),
             )
             return StepDisposition(Disposition.INVALID_PARAMETERS, state)
@@ -1571,7 +1572,7 @@ class StepRunner:
         await self._propose(request, recorded)
         return recorded
 
-    async def _phase_four(self, planned: _Planned) -> PhaseFour:
+    async def _phase_four(self, planned: _Planned, opened: ExecutionState) -> PhaseFour:
         """Run ADR-0254 §14's checks over the whole plan this step belongs to.
 
         The registry reads are here so that
@@ -1585,13 +1586,20 @@ class StepRunner:
         ADR-0211 §6's rule that no stage rejects a step *"on the ground that its
         capability is outside the stated vocabulary"*; it is disposed of at its own
         dispatch through ADR-0037 §1's ``NO_CAPABLE_TOOL``.
+
+        **The step statuses come from the *stored* execution** (:meth:`_opened`),
+        not from the caller's, for that method's own reason: everything this stage
+        decides about *what has already happened* reads the store. A caller could
+        otherwise hand over a state calling a failed producer ``PENDING`` and have
+        check 1 defer a dependency the store says has already failed.
         """
         advertised = await self._registry.capabilities()
         candidates: dict[str, Sequence[ToolDefinition]] = {}
         for step in planned.plan.steps:
             resolved = resolve_capability(step.capability, advertised)
             candidates[step.id] = await self._registry.find(resolved)
-        return evaluate(planned.plan, candidates=candidates)
+        disposed = {one.step_id: one.status for one in opened.steps}
+        return evaluate(planned.plan, candidates=candidates, disposed=disposed)
 
     async def _propose(self, request: ActionRequest, decision: PermissionDecision) -> None:
         """Write the `Authorization` this recorded `CONFIRM` proposes, if any.
