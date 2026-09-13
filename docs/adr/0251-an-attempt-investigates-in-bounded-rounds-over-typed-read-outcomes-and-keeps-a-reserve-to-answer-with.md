@@ -64,29 +64,32 @@
   BREAKING contract change under golden rule 5** and is ratified and merged as its own PR
   before anything implements against it (ADR-0015).
 - Date: 2026-09-12
-- **Note (2026-09-13): the model §3 mints is implemented as `ReadAskOutcome`; §3's text is
-  recorded against rather than rewritten.** §3 states *"`core/types.py` gains
-  **`ReadOutcome`**, a frozen model with `extra="forbid"` carrying exactly two fields"*.
-  `core/types.py` has held a `ReadOutcome` since
+- **Note (2026-09-13): the implementation diverges from §3's type name; §3 binds as ratified
+  and this note decides nothing.** §3 states *"`core/types.py` gains **`ReadOutcome`**, a
+  frozen model with `extra="forbid"` carrying exactly two fields"*. That name was already
+  taken. `core/types.py` has held a `ReadOutcome` since
   [ADR-0185](0185-every-attempt-to-read-a-source-is-recorded-refusals-included-and-the-trails-bound-has-no-unlimited-spelling.md)
   §1 — a `StrEnum` recording how one **gated source read** ended, carried on
-  `SourceReadRecord` and read by the audit path — so the two facts cannot share one name.
-  §11's L1 lane (PR #2287) landed §3's model as **`ReadAskOutcome`**, and `Planner.plan`'s
-  replaced parameter as `read_outcomes: Sequence[ReadAskOutcome] = ()`.
-  **Nothing else of §3 moves.** The two fields `ask` and `outcome`, their types, the
-  `extra="forbid"`, the carries-nothing-else clause, the parameter's name, its default and
-  its keyword position are §3's as ratified; §2's `ReadOutcomeKind` collides with nothing
-  and keeps its name; and the two names are string-equal on `refused` and `failed`, which
-  that PR pins as the hazard. So a reader acting on §3 builds the same model on the same
-  parameter and spells it `ReadAskOutcome`.
-  **Nothing is recorded on ADR-0185.** Under ADR-0082 §1 a record is owed on an earlier ADR
-  only where a later one amends a named clause of it, and no clause of ADR-0185 §1 becomes
-  false or over-wide: its enum keeps its name, its six members and its every reader. This
-  note is a self-amendment — this ADR reconciled with a fact about the corpus that its own
-  implementation surfaced, no other ADR being the cause — so under ADR-0082 §1's
-  self-amendment clause and ADR-0070 §1 the appended dated note is the whole record, no
-  `Status` line moves, every ratified section below is byte-identical, and no mark is added
-  (ADR-0089 §5). Refs #2281.
+  `SourceReadRecord` and read by the audit path — so §3's clause cannot be implemented as
+  written without shadowing it, and §11's L1 lane (PR #2287) landed the model as
+  **`ReadAskOutcome`** and `Planner.plan`'s replaced parameter as `read_outcomes:
+  Sequence[ReadAskOutcome] = ()`.
+  **Everything else of §3 is on the tree exactly as ratified**: the two fields `ask` and
+  `outcome`, their types, the `extra="forbid"`, the carries-nothing-else clause, and the
+  parameter's name, its default and its keyword position. §2's `ReadOutcomeKind` collides with
+  nothing and keeps its name, and the two names are string-equal on `refused` and `failed`,
+  which that PR pins as the hazard.
+  **What this note is, and what it is not.** §3's type name and its `Planner.plan` annotation
+  are a `core` contract surface, so under ADR-0070 §1 the name a reader is to implement is a
+  decision and only a superseding ADR may move it, which under golden rule 5 and ADR-0015 §5
+  is reviewed while `Proposed` and merged on its own before anything implements against it.
+  This note authors no such decision and does not direct a reader to either name: it records
+  that the tree and §3 disagree, and that the reconciliation is owed. **#2281 tracks it and
+  stays open.** Nothing is recorded on ADR-0185 either — under ADR-0082 §1 a record is owed on
+  an earlier ADR only where a later one amends a named clause of it, and no clause of ADR-0185
+  §1 becomes false or over-wide: its enum keeps its name, its six members and its every reader.
+  Appended dated note per ADR-0070 §1; no ratified text is rewritten, no `Status` line moves,
+  every ratified section below is byte-identical, and no mark is added (ADR-0089 §5).
 
 ## Context
 
