@@ -64,6 +64,29 @@
   BREAKING contract change under golden rule 5** and is ratified and merged as its own PR
   before anything implements against it (ADR-0015).
 - Date: 2026-09-12
+- **Note (2026-09-13): the model §3 mints is implemented as `ReadAskOutcome`; §3's text is
+  recorded against rather than rewritten.** §3 states *"`core/types.py` gains
+  **`ReadOutcome`**, a frozen model with `extra="forbid"` carrying exactly two fields"*.
+  `core/types.py` has held a `ReadOutcome` since
+  [ADR-0185](0185-every-attempt-to-read-a-source-is-recorded-refusals-included-and-the-trails-bound-has-no-unlimited-spelling.md)
+  §1 — a `StrEnum` recording how one **gated source read** ended, carried on
+  `SourceReadRecord` and read by the audit path — so the two facts cannot share one name.
+  §11's L1 lane (PR #2287) landed §3's model as **`ReadAskOutcome`**, and `Planner.plan`'s
+  replaced parameter as `read_outcomes: Sequence[ReadAskOutcome] = ()`.
+  **Nothing else of §3 moves.** The two fields `ask` and `outcome`, their types, the
+  `extra="forbid"`, the carries-nothing-else clause, the parameter's name, its default and
+  its keyword position are §3's as ratified; §2's `ReadOutcomeKind` collides with nothing
+  and keeps its name; and the two names are string-equal on `refused` and `failed`, which
+  that PR pins as the hazard. So a reader acting on §3 builds the same model on the same
+  parameter and spells it `ReadAskOutcome`.
+  **Nothing is recorded on ADR-0185.** Under ADR-0082 §1 a record is owed on an earlier ADR
+  only where a later one amends a named clause of it, and no clause of ADR-0185 §1 becomes
+  false or over-wide: its enum keeps its name, its six members and its every reader. This
+  note is a self-amendment — this ADR reconciled with a fact about the corpus that its own
+  implementation surfaced, no other ADR being the cause — so under ADR-0082 §1's
+  self-amendment clause and ADR-0070 §1 the appended dated note is the whole record, no
+  `Status` line moves, every ratified section below is byte-identical, and no mark is added
+  (ADR-0089 §5). Refs #2281.
 
 ## Context
 
