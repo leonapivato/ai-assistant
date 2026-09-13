@@ -53,9 +53,11 @@
 ### Where this comes from
 
 Issue #2255 is the owner's six-phase task lifecycle, and this decision is a limb of A8 cut off
-from it. [ADR-0259](0259-an-effect-is-claimed-once-per-goal-before-it-is-dispatched-and-a-turn-start-pass-reconciles-what-an-earlier-turn-left-uncertain-or-unfinished.md)
-takes A8's first half — an effect is claimed once per goal — and keys that claim on the authorised
-call's own arguments. The owner's correction of 2026-09-13 is that the key is not enough:
+from it. **A8's first half — an effect is claimed once per goal, keyed on the authorised call's
+own arguments — is drafted and is not on the tree at `41ccbe76`**, so this document cites no
+section of it and links to it nowhere: every obligation §6 states is stated as what *any* decision
+landing that claim owes, and none of them names a type, a member or a clause that decision has not
+yet ratified. The owner's correction of 2026-09-13 is that the key is not enough:
 
 > *"A goal element and an action are not necessarily the same unit. One element could require two
 > bookings; one booking could satisfy several elements. Linking actions to goal elements is
@@ -117,7 +119,8 @@ duplicate booking"* stated as a mechanism rather than as a wish.
 
 ### What this ADR is not allowed to settle
 
-At-most-once itself and the effect key are ADR-0259's. Retry, modify-before-replace and
+At-most-once itself and the effect key belong to the decision that lands them. Retry,
+modify-before-replace and
 reconciliation are A8's second ADR's. Verification against the goal's criteria is A10's.
 Cancellation is A9's. §7 names every deferral with what fires it, and no lane cites this decision
 toward any of them.
@@ -167,7 +170,8 @@ declines and §7 books with what fires it, and which is the same decision that t
 > **No lane walks `intended_actions` and dispatches, plans, schedules or reports from it.** An
 > action nothing has named in a plan sits in the record and causes nothing; an action a plan named
 > once and no later plan names again sits in the record and causes nothing. The tuple is read by
-> §4's label resolution, by §5's export, and by the effect claim §6 obliges, and by nothing else.
+> **§4's `GoalBrief.actions` projection and its label resolution**, by §5's export, and by the
+> effect claim §6 obliges, and by nothing else.
 
 > **Normative — the record carries no standing, and that is decided rather than deferred by
 > omission.** Nothing in this decision withdraws, cancels, completes or retires an intended
@@ -179,8 +183,13 @@ declines and §7 books with what fires it, and which is the same decision that t
 > **Normative — an `IntendedAction.id` is never an action label, and the type refuses one.** An
 > `IntendedAction` whose `id` matches §4's action-label grammar — the ASCII letter `A` followed by
 > one or more **ASCII** decimal digits `0`-`9` and nothing else — is **not constructible**. **The
-> two spellings are one grammar and no lane writes a second**: the validator's refusal and §4's
-> resolution are complementary halves of it, so a spelling one admits the other refuses, exactly. This is ADR-0253 §7's
+> reservation is deliberately wider than the canonical labels §4 renders**: `A0`, `A01` and `A007`
+> are each refused as ids though §4's resolution accepts none of them as a label. That is
+> ADR-0253 §7's construction reused **unaltered**, whose `D` reservation is the same shape for the
+> same reason, and the width is what makes §4's store-side membership check exact: **an
+> unsubstituted planner value can match no stored id, on any goal, ever** — which a reservation
+> narrowed to the canonical spellings would not give, since a faulty caller passing `A01` past the
+> loop would meet a goal that could legitimately hold `A01` as an id. This is ADR-0253 §7's
 > construction for `GoalElement.id` reused without alteration and for its reason: `Identifier`
 > admits any non-blank encodable string, so without the rule an unsubstituted label could equal
 > some action's id and pass §4's membership check **as a reference to a different action**,
@@ -642,7 +651,8 @@ text states what a marked clause means and supplies no obligation (§3).
 > enables anything in a production deployment.
 
 - **L1 — the contract and the store** (`core` plus `planning`'s implementation of it, which is
-  ADR-0259 §11's and ADR-0253 §12's own shape for a contract lane). `core/types.py`'s
+  ADR-0252 §17's own shape for a contract lane that widens `PlanStore` — *"the contract, the
+  store and the migration"*). `core/types.py`'s
   `IntendedAction`, `ProposedAction`, `BriefAction`, `IntendedActionMinting` and
   `MAX_INTENDED_ACTIONS`; `Goal.intended_actions`, `PlannerOutput.actions`, `GoalBrief.actions`
   and `PlanStep.intended_action`; `core/protocols.py`'s `record_intended_actions` and
@@ -721,12 +731,14 @@ The owner's two cases are arms 1 and 2.
    round-trips through `model_dump()` and construction; `PlanExport` carries them inside `goals`
    with no new member; `delete_goal` removes them with the goal; and a stored goal written before
    this decision decodes with `intended_actions` empty.
-7. **The disjointness refusals, over the same boundary as arm 4 and asserted to be its exact
-   complement.** An `IntendedAction` whose `id` is `A1` or `A12` is not constructible, while one
-   whose `id` is `A01`, `A+1`, `a1`, `A 1`, `A１` or `A` **is** — each being a value arm 4 shows
-   no label resolves to, so no id is both refused as a label and refused as an id, and none is
-   accepted as both. And an `IntendedActionMinting` carrying an empty `actions` is not
-   constructible, nor is a `ProposedAction` carrying no `intent`.
+7. **The disjointness reservation, and it is wider than the canonical labels.** An
+   `IntendedAction` whose `id` is `A1`, `A12`, `A0`, `A01` or `A007` is **not constructible** —
+   every `A` followed by ASCII digits, canonical spelling or not, because an unsubstituted planner
+   value must match no stored id on any goal. One whose `id` is `A+1`, `a1`, `A 1`, `A１` or the
+   bare `A` **is** constructible, those being outside the reserved grammar. Assert the same
+   boundary is refused by `PlanStore.save_plan`'s membership check (§4), so the two halves cannot
+   drift. And an `IntendedActionMinting` carrying an empty `actions` is not constructible, nor is
+   a `ProposedAction` carrying no `intent`.
 8. **The seam discloses no identifier and no history.** Over a goal with two intended actions, one
    already performed in an earlier turn's execution, assert that the rendered request contains
    **no** `IntendedAction.id`, no execution, no step and no outcome — and that the `A` block
