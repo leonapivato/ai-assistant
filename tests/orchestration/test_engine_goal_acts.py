@@ -12,7 +12,15 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, GOAL_QUESTION_TTL, PATIENT, Harness, NoStepPlanner
+from test_engine import (
+    AT,
+    GOAL_QUESTION_TTL,
+    PATIENT,
+    Harness,
+    NoStepPlanner,
+    OneStepPlanner,
+    tool,
+)
 from test_engine_goal_association import (
     _Advancing,
     _Asking,
@@ -24,6 +32,7 @@ from test_engine_goal_association import (
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import (
     ConfigurationError,
+    ContextError,
     ConversationStoreError,
     PlanningError,
     StaleExecutionError,
@@ -47,7 +56,12 @@ from ai_assistant.core.types import (
     TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeModelProvider, FakePlanStore, FakeStreamingCompleter
+from ai_assistant.testing import (
+    FakeContextProvider,
+    FakeModelProvider,
+    FakePlanStore,
+    FakeStreamingCompleter,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import GoalBrief
@@ -591,6 +605,55 @@ async def test_a_turn_that_fails_leaves_an_existing_goals_engagement_where_it_wa
     assert held.last_engaged_in == campsite.last_engaged_in
     assert held.version == campsite.version, "and the token the stamp would advance is unmoved"
     assert held.interpretation == campsite.interpretation, "nor was a revision recorded"
+
+
+@pytest.mark.parametrize("failure", ["capacity", "before-the-planner"])
+async def test_the_other_two_early_endings_leave_an_existing_goal_unstamped(failure: str) -> None:
+    """§20 arm 34's other two failures, over a **stored** goal.
+
+    The arm names three — *"A turn whose planner raises, one **rejected for capacity**
+    and one that **fails before the planner is reached**"* — and each must leave "no
+    question row and no engagement stamp". A planner failure alone would pass an
+    implementation that stamped the goal immediately before the capacity admission, and
+    a turn rejected for capacity is exactly the one a user retries a moment later: moving
+    focus for it would reorder the candidate set the retry is associated over.
+    """
+    harness = (
+        Harness(planner=OneStepPlanner(), tools=(tool(),))
+        if failure == "capacity"
+        else Harness(
+            planner=OneStepPlanner(),
+            tools=(tool(),),
+            context=FakeContextProvider(failure="the context source is unreadable"),
+        )
+    )
+    if failure == "capacity":
+        # The ceiling reached, without parking fifty confirmations to reach it. The
+        # constructor refuses a non-positive figure (that refusal is its own case), so
+        # the slot count is exhausted here rather than configured away.
+        harness.engine._max_outstanding = 0
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        harness.plans,
+        _goal("goal-campsite", "book a campsite", conversation=conversation),
+        engaged_in=conversation,
+    )
+
+    with pytest.raises((RuntimeError, ContextError)):
+        await harness.engine.converse(
+            "make it Sunday",
+            timeout=PATIENT,
+            conversation_id=conversation,
+            reference=TurnReference(goal_id=campsite.id),
+        )
+
+    held = await harness.plans.get_goal(campsite.id)
+    assert held is not None
+    assert held.last_engaged_at == campsite.last_engaged_at, "§20 arm 34: no engagement stamp"
+    assert held.last_engaged_in == campsite.last_engaged_in
+    assert held.version == campsite.version, "and the token the stamp would advance is unmoved"
+    assert held.interpretation == campsite.interpretation, "nor was a revision recorded"
+    assert await harness.plans.outstanding_questions() == (), "and no question row"
 
 
 class _Raising(NoStepPlanner):

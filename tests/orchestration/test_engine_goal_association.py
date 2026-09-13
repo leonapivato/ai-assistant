@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     GoalAssociation,
     GoalAttempt,
     GoalElement,
+    GoalEngagement,
     GoalInterpretation,
     GoalQuestion,
     GoalQuestionDisposition,
@@ -760,6 +761,110 @@ async def test_the_engagement_says_what_moved_and_a_continuation_says_nothing_mo
     assert revised.goal_engagement.outcome_changed is False
     assert campsite.id == (revised.turn.goal.goal_id if revised.turn else None)
 
+    # Arm 12's second load-bearing case: an element **replaced**, over a retained
+    # outcome — "the new text in `added` and the old in `removed`".
+    planner.understanding = ProposedUnderstanding(
+        retains_outcome=True,
+        constraints=(ProposedElement(text="under forty pounds", ground=Ground.INFERRED),),
+    )
+
+    replaced = await harness.engine.converse(
+        "make it forty", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert replaced.goal_engagement is not None
+    assert replaced.goal_engagement.revised is True
+    assert replaced.goal_engagement.added == ("under forty pounds",)
+    assert replaced.goal_engagement.removed == ("under fifty pounds",), (
+        "arm 12 fails if the case 'produces a sentence naming only the unchanged outcome'"
+    )
+    assert replaced.goal_engagement.outcome_changed is False
+
+    # And the third: an element **removed by omission** (ADR-0249 §7) — "`removed` with
+    # `added` empty", and the arm "fails if `revised` reads `False` or both tuples come
+    # back empty".
+    planner.understanding = ProposedUnderstanding(retains_outcome=True)
+
+    omitted = await harness.engine.converse(
+        "forget the budget", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert omitted.goal_engagement is not None
+    assert omitted.goal_engagement.revised is True, "arm 12: an omission is a revision"
+    assert omitted.goal_engagement.added == ()
+    assert omitted.goal_engagement.removed == ("under forty pounds",)
+
+
+async def test_the_announcement_rule_over_all_four_dispositions() -> None:
+    """§20 arm 12's first half: which dispositions owe a sentence at all.
+
+    "``RESUMED`` and ``REOPENED`` each produce the sentence; ``CONTINUED`` with
+    ``revised`` ``False`` produces none; ``OPENED`` with ``revised`` ``False`` produces
+    none" — §5 stating it as the rule a reviewer can check: "A reply carries one sentence
+    naming the goal it is about where, and only where, the ``disposition`` is ``RESUMED``
+    or ``REOPENED``, or ``revised`` is ``True`` **and** at least one of
+    ``outcome_changed``, ``added`` and ``removed`` says something moved."
+
+    The **typed value** is what this milestone owes and what is asserted: §5 rules that
+    "no interface adapter computes one: a surface renders what ``goal_engagement``
+    says", and the surface is §19's M4.
+    """
+    planner = _Asking(None)
+    harness = Harness(planner=planner, associator=_associating(AssociationVerdict.CONTINUES))
+    first = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        harness.plans,
+        _goal("goal-campsite", "book a campsite", conversation=first),
+        engaged_in=first,
+    )
+
+    opened = await harness.engine.converse("something else entirely", timeout=PATIENT)
+
+    assert opened.goal_engagement is not None
+    assert opened.goal_engagement.disposition is EngagementDisposition.OPENED
+    assert opened.goal_engagement.revised is False, "OPENED and nothing moved: no sentence owed"
+    assert _owes_a_sentence(opened.goal_engagement) is False
+
+    second = (await harness.conversations.begin(None)).id
+    resumed = await harness.engine.converse(
+        "carry on with that",
+        timeout=PATIENT,
+        conversation_id=second,
+        reference=TurnReference(goal_id=campsite.id),
+    )
+
+    assert resumed.goal_engagement is not None
+    assert resumed.goal_engagement.disposition is EngagementDisposition.RESUMED
+    assert resumed.goal_engagement.revised is False
+    assert _owes_a_sentence(resumed.goal_engagement) is True, "arm 12: RESUMED owes one anyway"
+
+    await harness.engine.abandon_goal(campsite.id)
+    reopened = await harness.engine.converse(
+        "back to that one",
+        timeout=PATIENT,
+        conversation_id=second,
+        reference=TurnReference(goal_id=campsite.id),
+    )
+
+    assert reopened.goal_engagement is not None
+    assert reopened.goal_engagement.disposition is EngagementDisposition.REOPENED
+    assert reopened.goal_engagement.revised is False
+    assert _owes_a_sentence(reopened.goal_engagement) is True, "and so does REOPENED"
+    held = await harness.plans.get_goal(campsite.id)
+    assert held is not None
+    assert held.status is GoalStatus.ACTIVE, "§13: a reopen writes ACTIVE first"
+
+
+def _owes_a_sentence(engagement: GoalEngagement) -> bool:
+    """§5's rule, restated here so the arm reads it off the typed value it binds."""
+    return engagement.disposition in {
+        EngagementDisposition.RESUMED,
+        EngagementDisposition.REOPENED,
+    } or (
+        engagement.revised
+        and bool(engagement.outcome_changed or engagement.added or engagement.removed)
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Arms 14, 15, 18, 20, 22, 24, 25, 29, 32: the rest M3 owes                    #
@@ -850,6 +955,7 @@ async def test_a_spoken_turn_builds_no_candidacy_and_makes_no_associate_call() -
         "rather than an empty render"
     )
 
+    candidacy_goals = (await harness.plans.candidates_for(conversation, limit=8)).goals
     await harness.engine.converse(
         "and a river pitch", timeout=PATIENT, conversation_id=conversation
     )
@@ -860,6 +966,31 @@ async def test_a_spoken_turn_builds_no_candidacy_and_makes_no_associate_call() -
     assert {"walk the pennine way", "book a campsite"} <= named, (
         "over **both** candidates — the two the spoken turn was told nothing about"
     )
+    # Arm 15's second half: "The goal such a turn opens **is** an ordinary goal: the next
+    # `converse` turn of that conversation has it in its candidate set, `goals` lists it,
+    # and it is engageable from a bounded surface."
+    assert spoken.outcome.turn is not None
+    spoken_goal = spoken.outcome.turn.goal.goal_id
+    held = await harness.plans.get_goal(spoken_goal)
+    assert held is not None
+    assert held.conversation_id == conversation, "saved under the conversation it was spoken in"
+    assert spoken_goal in {goal.id for goal in candidacy_goals}, (
+        "the goal the spoken turn opened is in the next bounded turn's candidate set"
+    )
+    assert spoken_goal in {summary.id for summary in await harness.engine.goals()}, (
+        "and `goals` lists it"
+    )
+
+    engaged = await harness.engine.converse(
+        "and about that one",
+        timeout=PATIENT,
+        conversation_id=conversation,
+        reference=TurnReference(goal_id=spoken_goal),
+    )
+
+    assert engaged.goal_engagement is not None
+    assert engaged.turn is not None
+    assert engaged.turn.goal.goal_id == spoken_goal, "and it is engageable from a bounded surface"
 
 
 def _inferred_goal(goal_id: str, outcome: str, *, conversation: str) -> Goal:
