@@ -40,7 +40,13 @@ from ai_assistant.core.types import (
     SpokenAudioFormat,
     TurnReference,
 )
-from ai_assistant.testing import FakeGoalAssociator, FakePlanStore
+from ai_assistant.orchestration.composing import ComposingStage
+from ai_assistant.testing import (
+    FakeGoalAssociator,
+    FakeModelProvider,
+    FakePlanStore,
+    FakeStreamingCompleter,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import PlanStore
@@ -727,7 +733,13 @@ async def test_a_refused_question_is_not_reported() -> None:
     ``None``, the attempt's state is **not** moved, and the turn still drives no
     side-effecting step."
     """
-    harness = Harness(planner=_Asking(), plans=_Refusing(now=lambda: AT))
+    model = FakeModelProvider()
+    harness = Harness(
+        planner=_Asking(),
+        plans=_Refusing(now=lambda: AT),
+        composing=ComposingStage(model=model, streaming=FakeStreamingCompleter()),
+    )
+
     outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
     assert outcome.clarification is None, "§10: nothing durable is outstanding"
@@ -735,6 +747,13 @@ async def test_a_refused_question_is_not_reported() -> None:
     (attempt,) = await harness.plans.attempts_of(outcome.turn.goal.goal_id)
     assert attempt.state is not AttemptState.AWAITING_CLARIFICATION
     assert outcome.step is None, "§10: the turn still declines to act"
+    assert any(
+        "Which campsite did you mean?" in message.content for message in model.calls[-1].messages
+    ), (
+        "§10: **the turn still declines to act in that case** and **its reply still "
+        "states the ambiguity** — what is missing is a durable question to answer, not "
+        "the question itself"
+    )
 
 
 async def test_the_candidacy_and_the_reference_carry_no_identifier() -> None:

@@ -374,15 +374,6 @@ _DEFAULT_GOAL_QUESTION_TTL: Final = timedelta(hours=72)
 #: conversation would have read anyway.
 _ENGAGEMENT_ATTEMPTS: Final = 3
 
-#: The widest span a :data:`~ai_assistant.core.types.UtcInstant` pair can express.
-#:
-#: :attr:`Engine._goal_question_ttl`'s refusal is stated against the **type's own range**
-#: rather than against a ceiling this file invented: a deadline further away than the
-#: whole calendar the record can carry is not a long deadline, it is a value no instant
-#: could hold. It is a `datetime` subtraction and reads no clock, so constructing an
-#: engine still reads the injected clock exactly where it always did.
-_REPRESENTABLE_SPAN: Final = datetime.max.replace(tzinfo=UTC) - datetime.min.replace(tzinfo=UTC)
-
 #: How many times a colliding ``route_id`` is retried from the injected factory inside
 #: the reserving critical section before the pass gives up (ADR-0197 §9). Small,
 #: because the budget exists for a *repeating* factory rather than for a collision
@@ -2876,23 +2867,6 @@ class Engine:
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
         self._max_spoken_audio_bytes = max_spoken_audio_bytes
         self._routed_ttl = routed_confirmation_ttl
-        # ADR-0250 §8 computes `expires_at` "**once**, at the instant the question is
-        # written", which is **after** the goal, the plans and the attempt are persisted
-        # (§11's order) — so an addition that overflows there would fail a turn whose
-        # records already stand, for a fault in the deployment's configuration rather
-        # than in the turn. `Settings.goal_question_ttl` is bounded below and not above,
-        # so the absurd figures are refused here, before any turn runs, against the
-        # record type's **own** range rather than against a ceiling this file invented.
-        # The residue — a figure inside that range whose addition still overflows from
-        # *this* instant — is caught at the raise site, where it costs a question rather
-        # than a turn (:meth:`_raise`).
-        if goal_question_ttl > _REPRESENTABLE_SPAN:
-            msg = (
-                f"goal_question_ttl must leave a representable deadline, and "
-                f"{goal_question_ttl} is longer than the whole calendar a stored instant "
-                f"can carry (ADR-0250 §8)"
-            )
-            raise ValueError(msg)
         self._goal_question_ttl = goal_question_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
@@ -8861,6 +8835,38 @@ class Engine:
         for plan in plans:
             await self._plans.save_plan(plan)
 
+    def _checked_deadline(self) -> None:
+        """Refuse a configured lifetime with no representable deadline (ADR-0250 §8).
+
+        §8 computes ``expires_at`` *"**once**, at the instant the question is written"*,
+        and §11's order puts that write **after** the goal, the plans and the attempt.
+        ``Settings.goal_question_ttl`` is bounded below and not above, so an addition
+        that overflowed at the write would fail a turn whose records already stand — for
+        a fault in the deployment's configuration rather than in the turn.
+
+        **So the addition is taken here, at the top of the turn, before anything is
+        persisted**, and the refusal names the configuration rather than the turn.
+
+        **It is the actual ``clock + ttl`` and never a proxy for it.** A bound on the
+        lifetime alone cannot answer the question, because whether a given lifetime is
+        representable depends on when it is added: a figure that works today and one
+        that never could are the same figure read from two instants.
+
+        Raises:
+            ConfigurationError: If this deployment's ``goal_question_ttl`` cannot
+                produce a representable deadline from this instant.
+        """
+        try:
+            self._clock() + self._goal_question_ttl
+        except OverflowError as exc:
+            msg = (
+                f"goal_question_ttl is {self._goal_question_ttl}, which added to this "
+                f"instant runs past the end of the calendar a stored instant can carry: "
+                f"a clarification raised on this turn could be given no deadline "
+                f"(ADR-0250 §8)"
+            )
+            raise ConfigurationError(msg) from exc
+
     # --- ADR-0250 §3: a turn resolves its goal before it plans ---------------
 
     async def _engage(self, goal_id: str | None, *, conversation_id: str | None) -> None:
@@ -8878,14 +8884,11 @@ class Engine:
         and *"No lane repairs, back-fills or refuses such a park"*. The same is true of
         a plan whose goal a later ``delete_goal`` removed.
 
-        **Contention is retried and then given up, and never raised** (ADR-0014 §5).
-        This runs after the act it stamps has already happened — the read dispatched, the
-        step resolved — so a stale-write refusal here would fail a resumption whose
-        irreversible work succeeded, in order to move a value §1 reads for focus alone.
-        The read is retaken :data:`_ENGAGEMENT_ATTEMPTS` times, which is ADR-0014 §5's own
-        instruction ("the caller should re-read and retry"), and a goal still contended
-        after that is one another turn is engaging in this same instant — so the order
-        this conversation reads is that turn's rather than absent.
+        **A lost compare-and-swap is raised here**, which is ADR-0014 §5's own posture:
+        it is "a detectable, retryable failure", and every caller of this method takes it
+        **before** the act it stamps has done anything irreversible. The one act §1 puts
+        after the irreversible work is the resumed park, and that caller is
+        :meth:`_engage_after_the_act`.
 
         Args:
             goal_id: The goal the resumption reached, or ``None`` where the record
@@ -8894,54 +8897,102 @@ class Engine:
                 ``None`` where it resolved to none — ADR-0074 §3's *"not captured at
                 all, and no conversation invented"*, which leaves nothing to stamp
                 ``last_engaged_in`` with.
+
+        Raises:
+            StaleExecutionError: As ``engage_goal`` raises it.
         """
         if goal_id is None or conversation_id is None:
             return
+        goal = await self._plans.get_goal(goal_id)
+        if goal is None:
+            return
+        await self._plans.engage_goal(
+            goal.id,
+            at=self._clock(),
+            conversation_id=conversation_id,
+            expected_version=goal.version,
+        )
+
+    async def _engage_after_the_act(
+        self, goal_id: str | None, *, conversation_id: str | None
+    ) -> None:
+        """ADR-0250 §1's third act, whose stamp its own clause places after the dispatch.
+
+        §1 admits a resumed park *"on the path that **dispatches**"* — so whether this
+        act engages at all is decided by the answer having dispatched, and the dispatch
+        is the irreversible work. **No ordering puts this stamp ahead of it**, which is
+        the difference from act 4 (:meth:`_engage_execution`), and is why this is the one
+        engagement that must not raise: a stale-write refusal here would throw away the
+        outcome of a read that already left the device, to move a value §1 reads for
+        focus alone.
+
+        **So contention is retried and then given up.** The read is retaken
+        :data:`_ENGAGEMENT_ATTEMPTS` times, which is ADR-0014 §5's own instruction — "the
+        caller should re-read and retry" — and exhaustion is logged rather than swallowed.
+        A goal still contended after that is one another turn is engaging in this same
+        instant, so what the order reflects is that turn rather than nothing. Retrying
+        without bound is the alternative, and it spins on a goal a second writer is
+        holding.
+
+        Args:
+            goal_id: The goal the resumed park names, or ``None``.
+            conversation_id: The conversation the resumption was recorded in, or
+                ``None``.
+        """
         for _ in range(_ENGAGEMENT_ATTEMPTS):
-            goal = await self._plans.get_goal(goal_id)
-            if goal is None:
-                return
             try:
-                await self._plans.engage_goal(
-                    goal.id,
-                    at=self._clock(),
-                    conversation_id=conversation_id,
-                    expected_version=goal.version,
-                )
+                await self._engage(goal_id, conversation_id=conversation_id)
             except StaleExecutionError:
-                # Another turn advanced the goal between the read and the write. The
-                # read is retaken rather than the token guessed, which is ADR-0014 §5's
-                # own instruction — "the caller should re-read and retry".
                 continue
             return
-        # **The stamp is given up rather than the act failed**, and that is the whole of
-        # what contention costs here. This runs *after* the read dispatched or the
-        # confirmed step resolved (§1's acts 3 and 4), so raising would throw away the
-        # outcome of work that already happened for the sake of a value §1 reads for
-        # focus alone — and the goal is engaged again by the very turn that is winning
-        # the race, so the order this conversation sees is the other turn's rather than
-        # absent. The alternative, retrying without bound, spins on a busy goal.
         _log.warning("goal_engagement_contended", goal_id=goal_id)
 
-    async def _engage_execution(self, execution_id: str, *, conversation_id: str) -> None:
+    async def _engage_execution(self, execution_id: str, step_id: str) -> None:
         """ADR-0250 §1's fourth act: the goal the resumed step's plan carries.
 
         The id is read **off the execution's own plan** rather than off the parked
         turn, because §1 names it there — *"a parked confirmation whose execution's plan
         carries that ``goal_id``"* — and because a park recovered after a restart has no
-        turn to read it from (ADR-0052 §3).
+        turn to read it from (ADR-0052 §3). The conversation is resolved from the
+        **durable binding** for the same reason: a resume is handed a token rather than
+        an id, and ADR-0074 §3 makes the binding what survives a restart.
+
+        **It runs before the runner is entered**, so a lost compare-and-swap refuses a
+        resumption that has done nothing yet rather than one whose irreversible work has
+        already succeeded. §1 states no ordering for this act, which is what makes the
+        safe one available here and unavailable for act 3
+        (:meth:`_engage_after_the_act`).
 
         Args:
             execution_id: The execution the resumed step belongs to.
-            conversation_id: The conversation the resolution was recorded in.
+            step_id: The step it parked on, which with the execution is the binding
+                ADR-0074 §3 resolves the conversation from.
+
+        Raises:
+            StaleExecutionError: As ``engage_goal`` raises it — **before** anything
+                irreversible has happened, which is the whole of what moving the stamp
+                here buys. ADR-0014 §5 makes that "a detectable, retryable failure", and
+                what the caller retries is the resumption, which has consumed nothing.
         """
         state = await self._plans.get_execution(execution_id)
-        if state is None:  # pragma: no cover — the resume already resolved it
+        if state is None:  # pragma: no cover — the caller already resolved it
             return
         plan = await self._plans.get_plan(state.plan_id)
         if plan is None:  # pragma: no cover — an execution's plan is its own row
             return
-        await self._engage(plan.goal_id, conversation_id=conversation_id)
+        try:
+            origin = await self._conversations.conversation_of_binding(
+                ParkedBinding(execution_id=execution_id, step_id=step_id)
+            )
+        except ConversationStoreError:
+            # ADR-0074 §3's "not captured at all, and no conversation invented": a
+            # binding that resolves to nothing leaves no conversation to stamp
+            # `last_engaged_in` with, and a resumption is not failed for it.
+            _log.warning("conversation_binding_unresolved", exc_info=True)
+            return
+        if origin is None:
+            return
+        await self._engage(plan.goal_id, conversation_id=origin.conversation_id)
 
     async def _outstanding(self) -> dict[str, GoalQuestion]:
         """Every goal's open question, expiring what is due (ADR-0250 §12, §15).
@@ -9824,6 +9875,11 @@ class Engine:
                 spoken=spoken,
             )
         history = await self._conversations.history(conversation.id)
+        # ADR-0250 §8's deadline, taken **before anything is persisted**: §11's order
+        # puts the question's write after the goal, the plans and the attempt, so a
+        # deployment whose configured lifetime has no representable deadline is refused
+        # here rather than at a site where refusing costs a turn its records.
+        self._checked_deadline()
         # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
         # association precedes the relevance read, the episodic supplement and the
         # planner call because all three are the goal's. The request is normalised
@@ -10031,7 +10087,16 @@ class Engine:
                 search_not_serviced,
                 _GoalPass(
                     facts=GoalFacts(
-                        clarification=(None if clarification is None else clarification.text),
+                        # ADR-0250 §10: "**The turn still declines to act in that
+                        # case.** … **Its reply still states the ambiguity**; what is
+                        # missing is a durable question to answer." So what reaches
+                        # composing is the text the **planner raised**, not the one the
+                        # store accepted: a turn whose `record_question` answered
+                        # `False` or raised has nothing durable outstanding and still
+                        # owes the user the question it could not settle. The outcome's
+                        # own `clarification` and the attempt's pause stay conditional
+                        # on the write, because those two *assert* a record.
+                        clarification=None if raised is None else raised.text,
                         elided=elided,
                     ),
                     engagement=engagement,
@@ -11532,7 +11597,7 @@ class Engine:
         # (ADR-0249 §11), **on the path that dispatches**". So it is stamped here,
         # below the early return every non-`DISPATCHED` answer takes, and never on an
         # answer that denied, expired or lost the race.
-        await self._engage(park.goal_id, conversation_id=conversation_id)
+        await self._engage_after_the_act(park.goal_id, conversation_id=conversation_id)
         goal, plan = park.goal, park.plan
         if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
             msg = (
@@ -11726,6 +11791,13 @@ class Engine:
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
                 raise PlanningError(msg)
+            # ADR-0250 §1's fourth engaging act — "a resumed step of that goal …
+            # whose execution's plan carries that `goal_id`" — taken **before** the
+            # runner is entered, so a lost compare-and-swap refuses a resumption that
+            # has not yet done anything rather than one whose irreversible work has
+            # already succeeded. §1 states no ordering for this act, so the safe one is
+            # available and is taken; act 3's is not (:meth:`_engage_after_the_act`).
+            await self._engage_execution(parked.execution_id, parked.step_id)
             allowed_by: str | None = None
             resumed = state
 
@@ -11957,13 +12029,6 @@ class Engine:
                 reply_degraded=composed is not None and composed.degraded,
                 recipient_grant=recipient_grant,
             )
-        # ADR-0250 §1's fourth engaging act: "a resumed step of that goal —
-        # `AssistantEngine.resume` answering a parked confirmation whose execution's
-        # plan carries that `goal_id`". It is taken here because this is the one place
-        # holding both halves the stamp needs: the execution the resolution belongs to,
-        # and the conversation `last_engaged_in` names, which a resume resolves from the
-        # durable binding rather than being handed.
-        await self._engage_execution(parked.execution_id, conversation_id=origin.conversation_id)
         return await self._capture(
             origin.conversation_id,
             turn=parked.turn,

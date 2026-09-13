@@ -8,7 +8,7 @@ production engine, because each is a fact about what the store holds afterwards.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -21,7 +21,12 @@ from test_engine_goal_association import (
     _seed,
 )
 
-from ai_assistant.core.errors import PlanningError, StaleExecutionError
+from ai_assistant.core.clock import ClockReadingError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     AssociationVerdict,
@@ -490,14 +495,12 @@ async def test_a_grounding_only_revision_is_recorded_and_announces_nothing() -> 
     )
 
 
-async def test_a_contended_engagement_gives_up_its_stamp_rather_than_failing_the_act() -> None:
-    """§1's acts 3 and 4 run **after** the work they stamp, so contention costs the stamp.
+async def test_a_contended_engagement_raises_where_the_stamp_precedes_the_act() -> None:
+    """§1's act 4 is stamped **before** the runner is entered, so a lost write refuses.
 
-    ADR-0014 §5 makes a stale write "a detectable, **retryable** failure" and says "the
-    caller should re-read and retry" — which is what the retry does. What it must never
-    do is raise: this stamp is taken once the read has dispatched or the confirmed step
-    has resolved, and failing there would throw away the outcome of work that already
-    happened, for a value §1 reads for focus alone.
+    ADR-0014 §5 makes a stale write "a detectable, **retryable** failure", and moving
+    the stamp ahead of the irreversible work is what makes raising the right answer: the
+    resumption has consumed nothing, so what the caller retries costs nothing.
     """
     plans = _AlwaysStale(now=lambda: AT)
     harness = Harness(planner=NoStepPlanner(), plans=plans)
@@ -506,12 +509,35 @@ async def test_a_contended_engagement_gives_up_its_stamp_rather_than_failing_the
         plans, _goal("goal-campsite", "book a campsite", conversation=conversation)
     )
 
-    await harness.engine._engage(campsite.id, conversation_id=conversation)
+    with pytest.raises(StaleExecutionError):
+        await harness.engine._engage(campsite.id, conversation_id=conversation)
+
+    assert plans.attempts == 1, "one read, one write, and the refusal is the caller's to retry"
+
+
+async def test_a_contended_resumed_park_retries_and_then_gives_up_its_stamp() -> None:
+    """§1's act 3 is stamped **after** the dispatch, because its own clause places it there.
+
+    §1 admits a resumed park "on the path that **dispatches**", so whether this act
+    engages at all is decided by the answer having dispatched — and the dispatch is the
+    irreversible work. No ordering puts the stamp ahead of it, so raising there would
+    throw away the outcome of a read that already left the device, for a value §1 reads
+    for focus alone. The read is retaken and exhaustion is logged, which is ADR-0014 §5's
+    "re-read and retry" with the one bound that stops a spin.
+    """
+    plans = _AlwaysStale(now=lambda: AT)
+    harness = Harness(planner=NoStepPlanner(), plans=plans)
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        plans, _goal("goal-campsite", "book a campsite", conversation=conversation)
+    )
+
+    await harness.engine._engage_after_the_act(campsite.id, conversation_id=conversation)
 
     assert plans.attempts == 3, "ADR-0014 §5: the read is retaken rather than the token guessed"
     held = await plans.get_goal(campsite.id)
     assert held is not None
-    assert held.last_engaged_at is None, "the stamp is given up, and nothing is raised"
+    assert held.last_engaged_at is None, "and the completed read's outcome is not thrown away"
 
 
 class _AlwaysStale(FakePlanStore):
@@ -526,18 +552,59 @@ class _AlwaysStale(FakePlanStore):
         raise StaleExecutionError(msg)
 
 
-def test_a_goal_question_ttl_with_no_representable_deadline_is_refused_at_construction() -> None:
-    """§8's deadline is computed after the turn's records are written, so the figure is
-    checked first.
+@pytest.mark.parametrize(
+    "ttl",
+    [
+        pytest.param(timedelta.max, id="longer-than-the-calendar"),
+        pytest.param(
+            datetime.max.replace(tzinfo=UTC) - datetime.min.replace(tzinfo=UTC),
+            id="exactly-the-calendars-width",
+        ),
+        pytest.param(
+            datetime.max.replace(tzinfo=UTC) - AT + timedelta(microseconds=1),
+            id="one-microsecond-past-what-this-instant-admits",
+        ),
+    ],
+)
+async def test_a_lifetime_with_no_representable_deadline_is_refused_before_any_write(
+    ttl: timedelta,
+) -> None:
+    """§8's deadline is checked at the top of the turn, and it is the real addition.
 
     ``Settings.goal_question_ttl`` is bounded below and not above, and §11's order puts
-    the question's write **after** the goal, the plans and the attempt. A figure whose
-    addition overflows would therefore fail a turn whose records already stand, for a
-    fault in the deployment rather than in the turn — so it is refused before any turn
-    runs, against the latest instant the record's own type can carry.
+    the question's write **after** the goal, the plans and the attempt — so an addition
+    that overflowed there would fail a turn whose records already stand, for a fault in
+    the deployment rather than in the turn.
+
+    **A bound on the lifetime alone cannot answer it**, which is why the check is the
+    actual ``clock + ttl``: the same figure is representable from one instant and not
+    from another, and the **default** lifetime overflows from a clock near the end of the
+    calendar.
     """
-    with pytest.raises(ValueError, match="representable deadline"):
-        Harness(planner=NoStepPlanner(), goal_question_ttl=timedelta.max)
+    harness = Harness(planner=NoStepPlanner(), goal_question_ttl=ttl)
+
+    with pytest.raises(ConfigurationError, match="goal_question_ttl"):
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert (await harness.plans.export()).goals == (), "and nothing was written first"
+
+
+def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> None:
+    """The other half of that boundary is ADR-0026's, and it is already closed.
+
+    A deployment whose clock reads near ``datetime.max`` would overflow **every**
+    lifetime, the default included — and it never reaches ADR-0250 §8's check, because
+    ``checked_clock`` refuses a reading "outside the localizable range" first. This case
+    pins that, so the deadline check is stated over the one axis that can actually vary:
+    the configured lifetime.
+    """
+    harness = Harness(
+        planner=NoStepPlanner(),
+        now=lambda: datetime.max.replace(tzinfo=UTC) - timedelta(hours=1),
+    )
+
+    with pytest.raises(ClockReadingError, match="localizable range"):
+        harness.engine._checked_deadline()
 
 
 async def test_a_reference_to_an_already_terminal_question_settles_nothing_at_all() -> None:
