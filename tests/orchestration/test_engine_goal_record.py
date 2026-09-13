@@ -191,7 +191,15 @@ async def test_a_plain_question_records_one_interpretation_and_one_attempt() -> 
     stored = await harness.plans.get_goal(outcome.turn.goal.goal_id)
     assert stored is not None
     assert len(stored.interpretation) == 1, "no understanding is proposed and none recorded"
-    assert stored.version == 0, "and the goal's compare-and-swap token has not moved"
+    assert stored.version == 1, (
+        "ADR-0250 §1: the opening turn is one of the four acts that engage a goal, and "
+        "`engage_goal` is a mutation of the goal like any other — so the one token move "
+        "on this turn is the engagement stamp and no other write"
+    )
+    assert stored.last_engaged_at is not None, "§1: the opening turn engaged it"
+    assert stored.last_engaged_in == outcome.conversation_id, (
+        "§1: and `last_engaged_in` names the conversation the engaging turn ran under"
+    )
     assert stored.status is GoalStatus.ACTIVE, "§4: producing a reply establishes nothing"
     (attempt,) = await harness.plans.attempts_of(outcome.turn.goal.goal_id)
     assert attempt.goal_id == stored.id

@@ -841,7 +841,7 @@ def test_a_goal_summary_carries_no_attempt_and_no_element() -> None:
 # --- §§9, 12, 13: what this lane deliberately writes nowhere --------------
 
 
-def test_neither_achieved_nor_blocked_is_named_in_code_anywhere_under_src() -> None:
+def test_neither_achieved_nor_blocked_is_written_anywhere_under_src() -> None:
     """§20 arm 23's permanent half, asserted over the shipped tree.
 
     The arm reads in full: "the only assignment of ``GoalStatus.ABANDONED`` under
@@ -851,54 +851,84 @@ def test_neither_achieved_nor_blocked_is_named_in_code_anywhere_under_src() -> N
     review convention, so that a later lane cannot supply one without the ADR that
     decides it."
 
-    This case is the half that holds **forever**: ``ACHIEVED`` is A10's, ``BLOCKED``
-    is A3's, and §12 rules that neither "gains a producer here". The first two limbs
-    are narrowed to their one caller each by ADR-0250 §19's M3 — in this lane they have
-    **no** caller, which the case below pins instead.
+    This case is the half that holds **forever**: ``ACHIEVED`` is A10's, ``BLOCKED`` is
+    A3's, and §12 rules that neither "gains a producer here".
 
-    Read from the **abstract syntax tree** rather than by grepping lines, which is what
-    keeps it honest: the two members are named in this decision's own prose in
-    ``core/protocols.py``, and a line-based scan would either flag that or would need a
-    docstring heuristic that a later paragraph could slip past. An attribute access is
-    a fact about the code.
+    **What it is stated over narrowed when ADR-0250 §19's M3 landed.** M1 could assert
+    the two members were not *named* anywhere, because nothing read them; §1's own
+    definition of an open goal — "a goal is **open** where its ``GoalStatus`` is
+    ``ACTIVE`` or ``BLOCKED``" — puts ``BLOCKED`` in a membership test that M3 must
+    build, and a mention is not a producer. So the test is over the **write** form, the
+    same one :func:`test_status_has_two_writers_and_they_are_the_two_acts_arm_23_names`
+    counts, and an ``ACHIEVED`` or ``BLOCKED`` status reaching a record is what it
+    refuses.
     """
-    named = sorted(
-        f"{path.relative_to(_SRC)}:{node.lineno} — GoalStatus.{node.attr}"
-        for path in _SRC.rglob("*.py")
-        for node in ast.walk(ast.parse(path.read_text()))
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "GoalStatus"
-        and node.attr in {"ACHIEVED", "BLOCKED"}
-    )
-    assert named == [], (
-        "ADR-0250 §12: GoalStatus.ACHIEVED gains no producer here (A10's, and the "
-        "owner's correction 2) and GoalStatus.BLOCKED gains none either (A3's, by "
-        f"ADR-0249 §4's own words). Found: {named}"
-    )
-
-
-def test_this_lane_writes_no_status_at_all() -> None:
-    """§19: "**No behaviour changes in M1**", read over the one write §9 adds.
-
-    ``set_goal_status`` is "the goal's **only** status-mutation route", and this lane
-    supplies the route without calling it: the two acts that do are the reopen (§13)
-    and ``abandon_goal`` (§12), both ADR-0250 §19's M3. So no ``status=GoalStatus.…``
-    argument and no ``"status": GoalStatus.…`` entry exists under ``src/`` — a *write*
-    form, deliberately distinct from the **declaration** ``Goal.status`` and
-    ``CandidateGoal.status`` each carry as a field default, which is not one.
-
-    **M3 replaces this case rather than deleting it**, narrowing it to the two callers
-    §20 arm 23 names, and until then it is what stops a status write arriving in a lane
-    whose ADR did not decide one.
-    """
-    writes = sorted(
+    written = sorted(
         f"{path.relative_to(_SRC)}:{number}"
         for path in _SRC.rglob("*.py")
         for number, line in enumerate(path.read_text().splitlines(), start=1)
+        if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.(?:ACHIEVED|BLOCKED)\b', line)
+    )
+    assert written == [], (
+        "ADR-0250 §12: GoalStatus.ACHIEVED gains no producer here (A10's, and the "
+        "owner's correction 2) and GoalStatus.BLOCKED gains none either (A3's, by "
+        f"ADR-0249 §4's own words). Found: {written}"
+    )
+
+
+def test_status_has_two_writers_and_they_are_the_two_acts_arm_23_names() -> None:
+    """§20 arm 23's first two limbs, over the shipped tree.
+
+    **This case replaces M1's, which pinned the same fact at zero.** That lane changed
+    no behaviour and so had no caller at all; ADR-0250 §19's M3 supplies exactly the two
+    §12 and §13 name — the reopen writes ``ACTIVE``, ``abandon_goal`` writes
+    ``ABANDONED`` — and the assertion narrows from "none" to "these two and no others"
+    rather than being dropped.
+
+    The **write** form is what is counted — a ``status=GoalStatus.…`` argument or a
+    ``"status": GoalStatus.…`` entry — deliberately distinct from the **declaration**
+    ``Goal.status`` and ``CandidateGoal.status`` each carry as a field default, and from
+    the membership test §1's "open" definition needs.
+    """
+    writes = sorted(
+        (str(path.relative_to(_SRC)), line.strip())
+        for path in _SRC.rglob("*.py")
+        for line in path.read_text().splitlines()
         if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.', line)
     )
-    assert writes == [], (
-        "ADR-0250 §19's M1 changes no behaviour, so it writes no GoalStatus: the reopen "
-        f"path and abandon_goal are M3's. Found: {writes}"
+    assert [where for where, _ in writes] == [
+        "ai_assistant/orchestration/engine.py",
+        "ai_assistant/orchestration/engine.py",
+    ], f"ADR-0250 §20 arm 23: two status writes, both `orchestration`'s. Found: {writes}"
+    assert sorted(what for _, what in writes) == [
+        "status=GoalStatus.ABANDONED,",
+        "status=GoalStatus.ACTIVE,",
+    ], f"and they are the abandonment (§12) and the reopen (§13). Found: {writes}"
+
+
+def test_every_status_write_goes_through_set_goal_status() -> None:
+    """§20 arm 23's third limb: "**both go through ``set_goal_status``**".
+
+    Read from the syntax tree rather than by proximity, so a later lane cannot satisfy
+    it by putting the argument near a call it is not an argument to: every
+    ``status=GoalStatus.…`` keyword under ``src/`` must sit on a call whose callee is
+    ``set_goal_status``, which §9 makes "the goal's **only** status-mutation route".
+    """
+    astray = sorted(
+        f"{path.relative_to(_SRC)}:{node.lineno}"
+        for path in _SRC.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and any(
+            keyword.arg == "status"
+            and isinstance(keyword.value, ast.Attribute)
+            and isinstance(keyword.value.value, ast.Name)
+            and keyword.value.value.id == "GoalStatus"
+            for keyword in node.keywords
+        )
+        and not (isinstance(node.func, ast.Attribute) and node.func.attr == "set_goal_status")
+    )
+    assert astray == [], (
+        "ADR-0250 §9: `set_goal_status` is the goal's only status-mutation route, so a "
+        f"status written through any other call is a second writer. Found: {astray}"
     )

@@ -332,7 +332,13 @@ async def test_respond_opens_a_user_asserted_goal_at_revision_one() -> None:
     assert goal.interpretation_elided == 0
     assert goal.provenance.source is MemorySource.USER_ASSERTED
     assert goal.created_at == _NOW
-    assert goal.last_engaged_at == _NOW
+    assert goal.last_engaged_at is None, (
+        "ADR-0250 §1 gives both engagement fields exactly one writer, "
+        "`PlanStore.engage_goal`, and the opening turn is one of its four engaging acts "
+        "— so the mint stamps neither and `Engine` engages the goal at the site that "
+        "first writes its row (#2297)"
+    )
+    assert goal.last_engaged_in is None, "and neither field is written here"
     [revision] = goal.interpretation
     assert revision.revision == 1
     # §3: revision 1 carries **no** element, and its outcome's span is the whole

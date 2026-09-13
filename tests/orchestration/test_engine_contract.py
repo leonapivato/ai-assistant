@@ -73,10 +73,12 @@ from ai_assistant.core.protocols import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
+    AssociationVerdict,
     CostBasis,
     DataTier,
     Disposition,
     EvidenceDigest,
+    GoalAssociation,
     GoalBrief,
     GrantScope,
     Idempotency,
@@ -133,6 +135,7 @@ from ai_assistant.testing import (
     FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
+    FakeGoalAssociator,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -536,6 +539,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         binder=binder,
     )
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         closers=closers,
         loop=loop,

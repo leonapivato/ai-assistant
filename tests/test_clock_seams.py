@@ -72,6 +72,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
+    AssociationVerdict,
     CanonicalDestination,
     CostBasis,
     CurrentContext,
@@ -82,6 +83,7 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalAssociation,
     GoalBrief,
     GoalInterpretation,
     Ground,
@@ -166,6 +168,7 @@ from ai_assistant.testing import (
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeFetcher,
+    FakeGoalAssociator,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -568,6 +571,7 @@ async def _engine(now: Clock) -> None:
     # ADR-0192 §1 makes unconditional, and nothing here reads it.
     invoker = FakeToolInvoker([], ledger=FakeAuditTrail(), gate=FakeAuditTrail())
     await Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         loop=LearningLoop(
             context=FakeContextProvider(),

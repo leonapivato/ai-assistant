@@ -179,6 +179,34 @@ def candidacy_of(request: str, candidates: GoalCandidates) -> GoalCandidacy | No
 
 
 @dataclass(frozen=True, slots=True)
+class GoalFacts:
+    """The two facts about this turn's goal that reach the composing stage (§10, §14).
+
+    **Facts told to composing, not prose stitched onto a composed reply**, which is
+    the shape ADR-0228 §10, ADR-0240 §8 and ADR-0242 §7 each already use at that seam.
+    Both are `orchestration`'s own — neither is a model's judgement, neither is
+    derived from the other, and on a turn given neither the assembled prompt is
+    byte-identical to what it is without ADR-0250.
+
+    Attributes:
+        clarification: The text of the question this turn raised (§10), where the
+            store accepted one, so that the turn's *"answer **is** the question"*.
+            ``None`` on every turn that raised none and on every turn whose
+            ``record_question`` refused — *"a lane that reported a question it did not
+            write would tell the user to answer a question nothing holds"*.
+        elided: Whether §2's cap dropped goals **and** this turn opened one (§14).
+            *"Where ``elided`` is non-zero the reply states that older goals were not
+            considered and that one may be named directly, on every turn whose
+            disposition is ``OPENED``"* — and **not** on a ``CONTINUED``, a ``RESUMED``
+            or a ``REOPENED``, where *"a goal was found, and reciting what was not
+            looked at would be noise on the turns the mechanism worked"*.
+    """
+
+    clarification: str | None = None
+    elided: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Resolution:
     """What ADR-0250 §3's four dispositions came to, resolved against the candidacy.
 
@@ -644,6 +672,7 @@ __all__ = [
     "ELISION_PROMPT",
     "MAX_ASSOCIATION_CANDIDATES",
     "OPEN_GOAL_STATUSES",
+    "GoalFacts",
     "RaisedSubject",
     "Resolution",
     "candidacy_of",

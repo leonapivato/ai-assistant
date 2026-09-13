@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
     AnswerOutcome,
+    AssociationVerdict,
     Attestation,
     Belief,
     BeliefBand,
@@ -67,6 +68,7 @@ from ai_assistant.core.types import (
     FeedbackEvent,
     FeedbackKind,
     Goal,
+    GoalAssociation,
     GoalBrief,
     GoalInterpretation,
     GrantScope,
@@ -144,6 +146,7 @@ from ai_assistant.testing import (
     FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeFeedbackProcessor,
+    FakeGoalAssociator,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -439,6 +442,7 @@ def _engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -4431,6 +4435,7 @@ def _conversation_engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),

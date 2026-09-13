@@ -35,8 +35,10 @@ from ai_assistant.core.errors import (
     NotificationOutboxError,
 )
 from ai_assistant.core.types import (
+    AssociationVerdict,
     ClassReach,
     DataTier,
+    GoalAssociation,
     NotificationCandidate,
     NotificationEnqueue,
     NotificationPreferences,
@@ -47,6 +49,7 @@ from ai_assistant.orchestration.payloads import DEFAULT_MAX_PAYLOAD_BYTES
 from ai_assistant.orchestration.speech import DEFAULT_MAX_SPOKEN_AUDIO_BYTES
 from ai_assistant.testing import (
     FakeAssistantEngine,
+    FakeGoalAssociator,
     FakeNotificationOutbox,
     FakeNotificationPolicy,
     FakeNotificationStore,
@@ -127,6 +130,7 @@ def _wired(  # noqa: PLR0913 — one parameter per knob a case here varies, whic
     a case that does not name one is wired exactly as it was before it was declared.
     """
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         notifications=notifications,
         notification_policy=notification_policy,
         transcriber=transcriber,

@@ -26,10 +26,12 @@ import structlog.testing
 
 from ai_assistant.core.types import (
     ActionPlan,
+    AssociationVerdict,
     CostBasis,
     DataTier,
     Disposition,
     EvidenceDigest,
+    GoalAssociation,
     GoalBrief,
     Idempotency,
     PlannerOutput,
@@ -71,6 +73,7 @@ from ai_assistant.testing import (
     FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
+    FakeGoalAssociator,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -360,6 +363,7 @@ def _make_engine(
         id_factory=lambda: uuid4().hex,
     )
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),

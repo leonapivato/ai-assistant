@@ -31,8 +31,10 @@ from test_engine import (
 from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
+    AssociationVerdict,
     ClassReach,
     DataTier,
+    GoalAssociation,
     NotificationCandidate,
     NotificationCondition,
     NotificationDisposition,
@@ -44,6 +46,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.testing import (
+    FakeGoalAssociator,
     FakeNotificationPolicy,
     FakeNotificationStore,
     FakeTranscriptArchive,
@@ -68,6 +71,7 @@ def _wired(
     objects and the same fakes — with the two collaborators ADR-0130 §9 adds.
     """
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),

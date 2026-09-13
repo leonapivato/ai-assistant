@@ -32,8 +32,10 @@ from ai_assistant.core.protocols import AuditTrail, InvocationLedger
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
+    AssociationVerdict,
     CostBasis,
     Goal,
+    GoalAssociation,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -57,6 +59,7 @@ from ai_assistant.permissions import SqliteAuditTrail
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.testing import (
     FakeAuditTrail,
+    FakeGoalAssociator,
     FakeIdentifiers,
     FakeIdentifierSpace,
     FakePlanStore,
@@ -895,6 +898,7 @@ def engine_with(scan: RecoveryScan | None) -> Engine:
     """A façade over a harness's durable state, holding ``scan``."""
     harness = Harness()
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=composing(),
         grant_operations=grant_operations(),
         recipient_grant_operations=recipient_grant_operations(),
