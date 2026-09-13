@@ -267,17 +267,23 @@ to every lane in flight. Filed as an issue, named in Consequences.
   rewritten. The property it protects also survives, on the measurement in §3: every ADR
   this decision reaches was ratified *after* ADR-0089 and authored under it, and no ADR
   older than ADR-0089 carries the token at all.
-- **The record on ADR-0089 is the `Status` line, and no dated note is owed.** ADR-0070 §1
-  splits the two mechanisms explicitly: an **amendment** *"is recorded as an appended, dated
-  note"*, while *"recording a supersession that has landed on the `Status` line"* is a
-  permitted header edit in its own right. ADR-0082 §§1-2 are about the first of those — §1's
-  rule fires *"exactly when the later ADR **amends** a named clause"* — and this decision
-  amends nothing; it supersedes, which ADR-0070 §1 says is the other branch of the same
-  test. The corpus is consistent with that reading and not with the other: ADR-0250 and
-  ADR-0252 each carry a `Partially superseded by` line with the scope in its parenthesis and
-  no dated note beside it, while ADR-0226's dated note records an **amendment** by ADR-0227.
-  A note here would restate the `Status` scope in a second place, with ADR-0070 §4's
-  single-line canonical status already carrying it.
+- **The record on ADR-0089 is both halves: the `Status` line and an appended dated note.**
+  ADR-0082 §1 is explicit that they come together — *"Where a record is owed, it goes on the
+  earlier ADR's `Status` line and in its appended dated note"*, and *"ADR-0070 §1 requires
+  the dated note in every case, so the note is the invariant half of the record"*. An earlier
+  draft of this section read §1's trigger — *"exactly when the later ADR amends a named
+  clause"* — as excluding a supersession, and wrote the `Status` line alone. That reading
+  does not survive §1's own test sentence, which asks whether a reader acts differently and
+  then says *"the later ADR amends it (or supersedes it — §1 decides which, and this ADR does
+  not touch that line)"*: the record follows from the test, and which branch it lands on
+  decides the wording, not whether a record is written. **ADR-0001 is the worked precedent**,
+  and it is ADR-0070's own: its header carries `Partially superseded by ADR-0070 (the
+  change-a-decision mechanism)` on `Status` **and** an appended
+  `Partially superseded: 2026-07-26 by ADR-0070 — …` note, in the shape written on ADR-0089
+  here. Two recent partial supersessions — ADR-0254's of ADR-0250 and ADR-0253's of ADR-0252
+  — carry the `Status` line with no note beside it. They are a defect of those records rather
+  than a licence, filed as #2314; a missing note is repairable in place, because ADR-0070
+  §1 lists *"adding a dated header note"* among the permitted header edits.
 - **ADR-0152, ADR-0249, ADR-0250, ADR-0251, ADR-0252, ADR-0253, ADR-0254 — nothing owed on
   any of them, and this is the one a reader should check.** ADR-0082 §1's test is applied to
   *the earlier ADR's text*: no sentence of any of the seven becomes false or over-wide,
@@ -364,6 +370,7 @@ beside it.
 the widening taught authors that the opening is negotiable, which it is not; that is the
 signal the check under ADR-0089 §7 should be decided rather than the grammar widened again.
 
-**Follow-on work, filed rather than written here** (§4, §7): the `docs/adr/template.md` and
-`CONTRIBUTING.md` corrections, and the ADR-0089 §7 question of whether a near-mark is
-reported by the gate.
+**Follow-on work, filed rather than written here** (§4, §6, §7): the `docs/adr/template.md`
+and `CONTRIBUTING.md` corrections; the ADR-0089 §7 question of whether a near-mark is reported
+by the gate; and #2314, the two partial-supersession records that carry a `Status` line with
+no appended dated note beside it.
