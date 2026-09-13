@@ -853,6 +853,61 @@ _STOPPED_LOOKING: Final[frozenset[StopReason]] = frozenset(
 )
 
 
+@dataclass(slots=True)
+class _Working:
+    """ADR-0251 §12's working accumulation: taken at each boundary, never reduced.
+
+    §12 rules that ``working`` "is accumulated by ``orchestration`` at **each round
+    boundary** from the injected clock (ADR-0026), excluding every interval spent
+    waiting for the user", and that ADR-0249 §5's monotonicity "binds entire: **no
+    replan, branch, recovery or phase transition resets either, and no implementation
+    subtracts from one**".
+
+    **Flooring one subtraction at zero is not enough, and that is why this type
+    exists.** The injected clock supplies wall-clock instants and guarantees no
+    monotonicity (ADR-0009), so a reading taken *after* a higher one can be lower
+    while still being positive: a gate that observed ten seconds consumed, followed by
+    a clock that stepped back to five, would hand the store a ledger **below a figure
+    the loop had already acted on** — a subtraction, by any reading of §5, and one no
+    `ge=0` bound on :class:`~ai_assistant.core.types.AttemptEffort` can catch.
+
+    So every reading passes through :meth:`at`, which keeps the **highest** value the
+    turn has observed, and the same accumulated value is what the gate compares and
+    what the attempt carries out. A backwards clock then costs the ledger nothing
+    rather than costing it the interval it already recorded — which is the conservative
+    direction, and the one §12 takes everywhere it cannot be atomic.
+
+    Attributes:
+        started: When this turn entered the loop.
+        carried: What the attempt's ledger held as this turn found it — the floor every
+            reading is measured up from, and the value a turn that reads the clock once
+            and goes backwards still reports.
+    """
+
+    started: datetime
+    carried: timedelta
+    _highest: timedelta = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Start at what the attempt carried in, which is the lowest honest value."""
+        self._highest = self.carried
+
+    def at(self, now: datetime) -> timedelta:
+        """The attempt's ``working`` at this instant, never below any earlier reading.
+
+        Args:
+            now: The reading, taken from the injected clock by the one caller that
+                reads it (:meth:`LearningLoop._spent`).
+
+        Returns:
+            The accumulated working time — this turn's interval added to what the
+            attempt carried in, or the highest figure already observed, whichever is
+            greater.
+        """
+        self._highest = max(self._highest, self.carried + max(now - self.started, timedelta(0)))
+        return self._highest
+
+
 @dataclass(frozen=True, slots=True)
 class _Spent:
     """What the two time gates compare, from **one** reading of the injected clock.
@@ -868,8 +923,12 @@ class _Spent:
     Attributes:
         working: ``AttemptEffort.working`` as it stands at that instant — what earlier
             turns of this attempt left plus what this turn has run, with every interval
-            spent waiting for the user excluded (§12).
-        elapsed: How long **this turn** has run, from its entry into the loop.
+            spent waiting for the user excluded (§12), and never below a figure an
+            earlier boundary already observed (:class:`_Working`).
+        elapsed: How long **this turn** has run, from its entry into the loop. ADR-0228
+            §4's own quantity, and **not** accumulated: it is a fresh measurement of one
+            user's wait rather than a ledger, so it carries no monotonicity obligation
+            and §12's clause is not stated over it.
     """
 
     working: timedelta
@@ -2153,6 +2212,11 @@ class LearningLoop:
         # `INVESTIGATE` from a later phase, and no clause of this decision creates
         # one". §4(j) is the gate that follows from it.
         attempt, phases = _advanced(attempt, phases, AttemptPhase.INVESTIGATE)
+        # ADR-0251 §12's accumulation, opened at what the attempt carried in. Every
+        # reading of the working clock passes through it — the gate's and the one the
+        # ledger carries out — so the two cannot disagree and neither can fall below a
+        # figure an earlier boundary already observed.
+        worked = _Working(started=started, carried=opened_working)
         # ADR-0251 §7's run, counted **within this turn** and started at zero on each
         # turn of the attempt. Nothing persists it: §14 defers the persisted variant,
         # fired by an ADR that first decides what an attempt's ephemeral supply is
@@ -2340,7 +2404,7 @@ class LearningLoop:
                 # monotonicity is why the interval is floored at zero: the injected
                 # clock supplies wall-clock instants and guarantees no monotonicity
                 # (ADR-0009).
-                spent=lambda: self._spent(started, opened_working),
+                spent=lambda: self._spent(worked),
             )
             if stop is not None:
                 audit.stop = stop
@@ -2417,14 +2481,16 @@ class LearningLoop:
                 "effort": AttemptEffort(
                     planner_calls=opened_calls + audit.planner_calls,
                     # §5: monotonically non-decreasing, and "no implementation
-                    # subtracts from one". The injected clock supplies wall-clock
-                    # instants and guarantees no monotonicity (ADR-0009), so a reading
-                    # that went backwards would otherwise make this a negative interval
-                    # — which `AttemptEffort` refuses at construction. It contributes
-                    # nothing instead of failing a turn that has already planned: what
-                    # the ledger loses is a duration, and what a raise here would lose
-                    # is the record of everything the turn did.
-                    working=opened_working + max(self._now_utc() - started, timedelta(0)),
+                    # subtracts from one". **The same accumulation the gates read**
+                    # (:class:`_Working`), taken once more here, so the figure the
+                    # attempt carries out is never below one a boundary already
+                    # observed — which a second subtraction from `started` would be
+                    # whenever the injected clock stepped back, and which no `ge=0`
+                    # bound on `AttemptEffort` could catch because such a figure is
+                    # still positive. A backwards reading therefore contributes nothing
+                    # instead of failing a turn that has already planned, or quietly
+                    # returning a slot the loop had already spent.
+                    working=worked.at(self._now_utc()),
                     kind=attempt.effort.kind,
                 ),
             }
@@ -2651,7 +2717,7 @@ class LearningLoop:
             memory_degraded=degraded or history_degraded,
         )
 
-    def _spent(self, started: datetime, carried: timedelta) -> _Spent:
+    def _spent(self, worked: _Working) -> _Spent:
         """Both time gates' subjects, from **one** reading of the injected clock.
 
         ADR-0228 §4 and ADR-0251 §4(h) are checked at the same moment and measure two
@@ -2660,21 +2726,23 @@ class LearningLoop:
 
         **§12's working excludes every interval spent waiting for the user**, and
         nothing in :meth:`_turn` waits for one — so what this turn contributes is
-        simply the interval since its entry into the loop. The interval is floored at
-        zero because ADR-0249 §5 forbids a ledger that decreases and the injected
-        clock guarantees no monotonicity (ADR-0009): a reading that went backwards
-        would otherwise make this negative, which ``AttemptEffort`` refuses at
-        construction.
+        simply the interval since its entry into the loop. **It is accumulated through
+        :class:`_Working` rather than subtracted here**, because §12 accumulates "at
+        each round boundary" and ADR-0249 §5 forbids a ledger that decreases: the
+        injected clock guarantees no monotonicity (ADR-0009), so a reading lower than
+        an earlier one would otherwise hand the store a figure below one this loop had
+        already gated on.
 
         Args:
-            started: When this turn entered the loop.
-            carried: What the attempt's ledger held as this turn found it.
+            worked: This turn's accumulation, which every reading passes through and
+                which the attempt carries out (:meth:`_turn`) — so the value a gate
+                compared and the value the ledger records are one value.
 
         Returns:
             The attempt's accumulated working time and this turn's elapsed time.
         """
         now = self._now_utc()
-        return _Spent(working=carried + max(now - started, timedelta(0)), elapsed=now - started)
+        return _Spent(working=worked.at(now), elapsed=now - worked.started)
 
     async def _planned(  # noqa: PLR0913 — the brief plus one keyword per thing the loop assembled for this call; ADR-0230 §3, ADR-0251 §3 and ADR-0249 §7 each add to it, and the audit record rides beside them
         self,
