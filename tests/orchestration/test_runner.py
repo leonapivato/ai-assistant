@@ -2393,3 +2393,62 @@ async def test_a_naive_clock_reading_fails_the_stage_that_read_it() -> None:
 
     assert await harness.trail.export() == []
     assert harness.invoker.invocations == []
+
+
+# --- the goal the request carries (ADR-0254 §15) --------------------------
+
+
+async def test_the_request_carries_the_goal_of_the_plan_the_execution_names() -> None:
+    """ADR-0254 §15: `orchestration` sets it, from the plan the execution names."""
+    harness = Harness(tools=(tool(),))
+    state = await an_execution(harness.plans, plan_step())
+
+    await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert [request.goal for request in harness.policy.requests] == ["g-1"]
+
+
+async def test_an_answered_confirmation_rules_on_a_request_carrying_the_same_goal() -> None:
+    """The resume path builds its request the same way, so the recheck is keyed alike.
+
+    ADR-0254 §13 takes the coverage comparison afresh at every dispatch. A resume
+    that dropped the goal would reach route (d) in no case, which is the fail-closed
+    direction but is not the ruled one — the answer would establish an authority the
+    very next dispatch could not use.
+    """
+    harness = Harness(tools=(confirmable(),))
+    state = await an_execution(harness.plans, plan_step())
+    parked = await harness.runner.run(
+        state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+
+    await harness.runner.resume(
+        parked.state, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
+
+    assert [request.goal for request in harness.policy.requests] == ["g-1"]
+    recorded = await harness.trail.export()
+    assert [decision.tool.id for decision in recorded] == ["smtp", "smtp"]
+
+
+async def test_the_goal_is_read_from_the_stored_plan_and_never_from_the_caller() -> None:
+    """`_planned` reads the stored execution's plan, so a caller cannot name a goal.
+
+    The two facts the request needs — the step and its plan's goal — are taken from
+    one read of one stored plan, so a caller holding a state that names another
+    plan cannot have the goal come from theirs (ADR-0037 §2's own reason for
+    `_planned`, read onto ADR-0254 §15's writer clause).
+    """
+    harness = Harness(tools=(tool(),))
+    state = await an_execution(harness.plans, plan_step())
+    # A state carrying this execution's id and somebody else's plan id.
+    misdirected = state.model_copy(update={"plan_id": "p-other"})
+
+    await harness.runner.run(
+        misdirected, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert [request.goal for request in harness.policy.requests] == ["g-1"]
