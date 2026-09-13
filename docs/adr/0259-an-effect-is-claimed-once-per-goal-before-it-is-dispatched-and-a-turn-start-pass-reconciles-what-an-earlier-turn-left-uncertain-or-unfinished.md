@@ -159,11 +159,21 @@ Its reason is the record that did not exist — *"a goal records no completed ef
 could compare against"*. This section mints that record.
 
 > **Normative.** `core/types.py` gains **`EffectKey`**, a frozen model with `extra="forbid"`
-> whose fields are exactly **`tool_id`**, **`parameters_digest`**, **`egress_account`**,
-> **`egress_endpoint`** and **`egress_destinations`** — the last three absent, and
-> `egress_destinations` empty, where the decision carries no binding. **It carries no sixth
-> field**: no step id, no execution id, no plan id, no decision id, no goal id, no instant and no
-> attempt.
+> whose fields are exactly these five, with these annotations and defaults:
+> **`tool_id: VisibleIdentifier`**, carrying `ToolDefinition.id`'s own annotation;
+> **`parameters_digest: Sha256Hex`**, carrying `PermissionDecision.parameters_digest`'s;
+> **`egress_account: BoundAccount | None = None`**; **`egress_endpoint`**, the annotation
+> `_EgressBindingBase.transport_endpoint` carries, `| None = None`; and
+> **`egress_destinations: tuple[CanonicalDestination, ...] = ()`**. **It carries no sixth field**:
+> no step id, no execution id, no plan id, no decision id, no goal id, no instant and no attempt.
+
+> **Normative — a model validator admits exactly two shapes and no mixture.** Either
+> **`egress_account` and `egress_endpoint` are both `None` and `egress_destinations` is empty** —
+> the no-binding shape — **or both are present and `egress_destinations` is non-empty**. A key
+> carrying an endpoint without an account, or destinations without either, is **unconstructable**,
+> so one effect cannot be split across two unequal rows by a partial projection. The non-empty
+> limb is not a new rule: `canonical_destination_set` is documented as *"therefore **never
+> empty**"*, and the validator refuses the shape that declaration already excludes.
 
 > **Normative — the key is what `PermissionDecision.authorises` compares, less the two ids a
 > replan mints afresh and less the binding's provenance, and that is the rule a later conjunct is
@@ -188,9 +198,22 @@ could compare against"*. This section mints that record.
 > canonicalisation: ADR-0150 §9 names that set as a thing `authorises` deliberately does *not*
 > compare, precisely because *two different decompositions can canonicalise to one destination
 > set*, and for effect identity that is the property wanted rather than the one refused.
-> **Where the projection is wrong it is wrong toward `HELD`, `COMPLETED` or `UNCERTAIN`** — two
-> distinct effects treated as one, which stalls a plan — and never toward a second dispatch,
-> which is the asymmetry ADR-0014 §4 chooses in every other place it is faced with one.
+> **Where the *projection* is wrong it is wrong toward `HELD`, `COMPLETED` or `UNCERTAIN`** —
+> two distinct effects treated as one, which stalls a plan — which is the asymmetry ADR-0014 §4
+> chooses in every other place it is faced with one. **The key's own reach is narrower than that
+> and is stated in the next clause rather than implied by this one.**
+
+> **Normative — what the key recognises is the *same authorised call*, and two calls that mean
+> the same thing without being the same call are not recognised.** `parameters_digest` is
+> ADR-0021 §1's digest over the canonical encoding of the **supplied** arguments, so two calls
+> whose arguments differ in spelling while naming one thing — a recipient written
+> `alice@Example.com` in one plan and `alice@example.com` in the next — carry **two** digests and
+> therefore **two keys**, and the second is `CLAIMED` and dispatched. **This decision does not
+> close that**, and §10 books it with what fires it. **No lane reads the guarantee more widely
+> than it is stated**: an effect is performed at most once per goal **per authorised call**,
+> which is the identity the permission stage already fixes and the only one this system can
+> compute without interpreting a tool's arguments — which ADR-0145 §5 and ADR-0016 §2 both put
+> outside `core`.
 
 > **Normative.** `ToolCall` gains **`effect_key`**, a **property** returning `EffectKey | None`,
 > derived from the call and **never minted, supplied, configured or carried as a field**. It is
@@ -308,6 +331,13 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > a row naming this step at `SUCCEEDED`, `RUNNING` or `INDETERMINATE` answers `COMPLETED` or
 > `UNCERTAIN` like any other, because this step has then already acted. **No eighth answer
 > exists.**
+
+> **Normative — the references are checked before anything is written, inside the same
+> indivisible step.** `claim_effect` **raises `PlanningError` and writes nothing** where no
+> execution with `execution_id` is stored, or where `step_id` is not the id of a step of **that**
+> execution. **A row is therefore never written that §9's export closure could not satisfy**, and
+> a later claim always finds a holder whose status it can read. The check is the store's because
+> the store is the only place it can be taken atomically with the write.
 
 > **Normative — the read, the comparison and the write are one indivisible step**, on ADR-0014
 > §5's existing compare-and-swap discipline and for ADR-0255 §3's reason: two turns of one
@@ -823,7 +853,12 @@ this decision now discharges the other half of.
 
 > **Normative.** `EffectRecord` is a frozen model with `extra="forbid"` whose fields are exactly
 > **`goal_id`**, **`key`** (an `EffectKey`), **`execution_id`**, **`step_id`** and
-> **`claimed_at`**, a `UtcInstant`. It is the row `claim_effect` keeps and the value
+> **`claimed_at`**, a `UtcInstant` **read from the store's own injected clock at each write that
+> lands** — so a first claim stamps it, a re-point after a `FAILED` or `SKIPPED` holder
+> **restamps** it at the new holder's instant, and every no-write outcome (`COMPLETED`,
+> `UNCERTAIN`, `HELD`, and the same-step `CLAIMED`) **leaves it exactly as it stands**. **No
+> record ever carries an instant earlier than its current holder's claim**, and the clock is
+> injected on ADR-0026's discipline rather than read from the wall. It is the row `claim_effect` keeps and the value
 > `PlanExport.effects` carries; **it is not returned by `claim_effect`**, which returns an
 > `EffectClaim` and nothing else, and **no member of any Protocol takes or returns one** outside
 > the export document.
@@ -901,6 +936,18 @@ property are the whole of it.
   §12's for the same class of question. §3 fixes that the record is preserved and *"told once"* is
   a property of the report; this decision fixes no reply, no phrasing and no channel. **Fired by
   this ADR landing.**
+- **A canonical effect-input identity** — one that would recognise two authorised calls whose
+  arguments mean the same thing while differing in spelling, so that `alice@Example.com` in one
+  plan and `alice@example.com` in the next carried one key rather than two. **Not decided**, and
+  §1 states the limit rather than implying it away. Closing it needs a canonicalisation of a
+  tool's **arguments**, which is a different thing from the canonicalisation of a **destination**
+  ADR-0148 §2 already lands: arguments are arbitrary JSON against a schema ADR-0145 §5 has this
+  system **read** and never interpret, so a general one would put a second canonicaliser in
+  `core` with no tool-independent rule to follow, and a per-tool one would be a declaration a
+  tool author could get wrong in the unsafe direction. **Fired by a measured case in which a
+  replan of one goal produces an equivalent-but-differently-spelled call**, or by a decision that
+  gives a tool a way to declare its own effect identity and states how a wrong declaration is
+  contained.
 - **How a user asks for the same effect twice on purpose.** **Not decided.** §2's key refuses a
   second identical concrete call within one goal, and the routes out — a new goal, or arguments
   that differ — are what a user has today. **Fired by a measured case in which a legitimate repeat
@@ -975,11 +1022,17 @@ property are the whole of it.
 3. The paired case over an **`INDETERMINATE`** first step, demonstrated over **both** plan shapes
    in the one arm: `claim_effect` answers `UNCERTAIN` and the later step is not dispatched, for
    the modifying plan and for the fresh one alike.
-4. **`claim_effect` is atomic under contention**, demonstrated in the shared conformance suite:
-   two writers claim one `(goal_id, effect_key)` concurrently, **exactly one** receives
-   `CLAIMED`, the other receives `HELD`, and exactly one durable row names a holder. The store
-   under test is not permitted to pass by serialising the two calls in the test's own control
-   flow.
+4. **`claim_effect`'s contract holds in full**, demonstrated in the shared conformance suite and
+   therefore against every implementation. It is **table-driven over §2's second limb** — each of
+   `StepStatus`'s seven members, crossed with the row naming **this** step and a **different**
+   one — and asserts for each both the returned member **and** whether the row moved. It adds:
+   **durable re-pointing** after a `FAILED` or `SKIPPED` holder, with `claimed_at` restamped;
+   **`claimed_at` preserved** on every no-write outcome, under an injected clock; the **refusal**
+   paths — an unknown `execution_id`, and a `step_id` that is not a step of that execution —
+   raising `PlanningError` with **no row written**; and **atomicity under contention**, where two
+   writers claim one `(goal_id, effect_key)` concurrently, **exactly one** receives `CLAIMED`,
+   the other `HELD`, and exactly one durable row names a holder. The store under test is not
+   permitted to pass the last by serialising the two calls in the test's own control flow.
 5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**:
    the `ALLOW` is **replayed**, no second permission record is authored, and the step reaches its
    dispatch exactly once.
@@ -1208,6 +1261,12 @@ is wired and the Q4 gate is read for real.
   word. §1 takes the **bound tool's id**, the **canonicalised arguments a policy ruled on** and
   the **account, endpoint and canonical destination set it ruled under** instead, which are
   values code fixed rather than a model proposed.
+- **Canonicalising the parameters before digesting them, so equivalent spellings share a key.**
+  Rejected **here** and booked in §10. It is the right answer to a real residual and it is a
+  mechanism of its own: `parameters_digest` is ADR-0021 §1's, computed at the request and
+  compared by `authorises`, and a second digest over a *different* canonicalisation would be a
+  second identity for one call, computed in a second place, free to disagree with the one the
+  permission stage rules on. §1 states what the key reaches instead of quietly widening it.
 - **A single hashed string as the key.** Rejected in §1. A composed digest needs an algorithm, a
   byte encoding, a domain separator and an output representation pinned, and every one of those is
   a thing two conforming implementations could differ on — after which a restart misses a row and
