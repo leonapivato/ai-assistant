@@ -5284,6 +5284,14 @@ function abandonAsk() {
   // Released before the abort, so the rejection it provokes finds this ask already
   // settled and `ask`'s own `finally` leaves the control alone.
   releaseAsk();
+  // **Which is why the reference is reconciled here and not only there** (round 3,
+  // `major`): `ask`'s `finally` is about to find `awaited !== waiting` and leave every
+  // shared thing alone, so an ending that stopped here would leave the hint reading
+  // `REFERENCE_SENT` for good — a page claiming a turn was still running on the very
+  // act that says this browser stopped listening — with the control hidden. This site
+  // knows it is the live ask, having just read `awaited`, so the guard `ask` needs is
+  // one this call does not.
+  reconcileReference(waiting);
   waiting.stopping.abort();
   // **A refusal the head already named is not an unknown outcome, and re-entry is what
   // it means.** Taken before everything below, because everything below is the wording
@@ -5356,27 +5364,35 @@ async function ask(event) {
     ran: false,
     composing: null,
     refusedWith: null,
+    // ADR-0250 §11's reference, held on the record of *this* ask so that whichever site
+    // ends it can reconcile it: `abandonAsk` ends a wait without `ask`'s `finally` ever
+    // reaching its guard, and a reconciliation that lived only in `ask` would leave that
+    // ending mid-sentence. Round 3, `major`.
+    reference: null,
   };
   awaited = waiting;
   askWaiting(true);
+  // ADR-0250 §11's keyword, recorded on this ask **before** the try so that every exit
+  // can reconcile it — an abort leaves through `abandonAsk` and a rejected fetch through
+  // the catch, and neither reaches a line written after the await (adversarial review,
+  // round 3, `major`). Nothing between here and the body's construction touches
+  // `reference`, so recording it here is recording it at submission.
+  waiting.reference = reference;
   try {
     const asked = { utterance: el("utterance").value };
     if (conversationId !== null) {
       asked.conversation_id = conversationId;
     }
-    // ADR-0250 §11's keyword, the browser's own argument, relayed whole. It is read
-    // here — before either entry is chosen — because `converse_streaming` "takes exactly
-    // `converse`'s arguments in exactly its" order, so the two entries carry it alike.
-    //
-    // Held in a local as well, because what this turn is allowed to give up when it ends
-    // is the reference it *sent* and not whatever is attached by then.
-    const sent = reference;
-    if (sent !== null) {
-      asked.reference = sent.value;
+    // The browser's own argument, relayed whole and carried by both entries alike,
+    // because `converse_streaming` "takes exactly `converse`'s arguments in exactly its"
+    // order (ADR-0173). It is the value read above rather than whatever is attached by
+    // the time this turn ends: what a turn may give up is the reference it *sent*.
+    if (waiting.reference !== null) {
+      asked.reference = waiting.reference.value;
     }
     // From here the body is serialised and the control can no longer take it back, so
     // the page stops offering it and says so (round 2, `major`).
-    referenceSent(sent);
+    referenceSent(waiting.reference);
     // **Which entry is the owner's choice, and the gateway never chooses between
     // them** (ADR-0175 §3). ADR-0173 §5 makes a provider that cannot stream a
     // `ModelError` before any delta, degrading to no answer at all — so on such a
@@ -5390,40 +5406,6 @@ async function ask(event) {
       await askStreaming(half, asked, chosenAt, waiting);
     } else {
       await askWhole(half, asked, chosenAt, waiting);
-    }
-    // The reference goes with the turn it was attached to and is not carried into the
-    // next one. It is dropped only where the turn came back — an abort or a dead
-    // gateway throws past this line and leaves it attached, so the owner's next attempt
-    // is the same attempt.
-    //
-    // **And only where it is still the one that went out** (adversarial review, round 1,
-    // `major`). The ask control is disabled while a turn is out, but the goals panel's
-    // are not — so an owner can pick a second goal while the first answer is still in
-    // flight, and a clear that ran whatever was attached by then would undo an act they
-    // had just taken, silently, one turn later. The identity comparison is enough
-    // because `setReference` installs a fresh object every time, and it is the same
-    // device as `awaited === waiting` two lines on: the identity of the thing decides,
-    // not a flag.
-    //
-    // **And only where the question reached the assistant** (round 2, `major`). A
-    // refusal the gateway takes before `_assistant` is reached — an expired session, a
-    // malformed body, the connection ceiling — ran no turn and settled nothing, so
-    // consuming the reference there would leave the owner's next press sending an
-    // ordinary turn in place of the answer they meant. `waiting.ran` is set exactly
-    // where an entry establishes that the assistant took the question, and nowhere
-    // else; where it is not set, the same words go back on the screen.
-    //
-    // **The conservative direction is to keep it**, which is what an entry that cannot
-    // tell does: a stream cut before its first chunk may have run a turn, and a second
-    // send of the same reference is answered `ALREADY_SETTLED` and rendered as its own
-    // fixed statement (§11) — an honest sentence, where the other way round is an
-    // answer that silently went nowhere.
-    if (reference === sent) {
-      if (waiting.ran) {
-        clearReference();
-      } else {
-        restoreReference(sent);
-      }
     }
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
@@ -5448,7 +5430,47 @@ async function ask(event) {
     // identity of the ask that decides it.
     if (awaited === waiting) {
       releaseAsk();
+      reconcileReference(waiting);
     }
+  }
+}
+
+// What becomes of the reference this ask sent, on **every** ending it can have.
+//
+// **In the `finally` and not after the await** (adversarial review, round 3, `major`).
+// An abort and a rejected `fetch` leave through the `catch`, so a reconciliation written
+// after the await ran on exactly one of three endings: pressing `Stop waiting` left the
+// hint reading `REFERENCE_SENT` for good — a page claiming a turn was still running
+// after it had said the opposite two lines up — with the control hidden, so the owner
+// could neither take the reference back nor see what it was for, and the next question
+// silently carried it.
+//
+// **Only while this ask is still the one being waited on**, which is `releaseAsk`'s own
+// guard and for its reason one state over: a superseded ask that settles late must not
+// move what the live one is holding. The `reference === sent` test is the second half of
+// it — a goal chosen while this turn was out is a value this turn never sent.
+//
+// **Dropped where the question reached the assistant, kept where it did not** (round 2).
+// `waiting.ran` is set exactly where an entry establishes that the assistant took the
+// question; a refusal the gateway took before `_assistant`, and a wait the owner ended
+// before anything arrived, establish nothing — so the same words go back on the screen
+// and the control comes back with them.
+//
+// **The conservative direction is to keep it**, which is what an ending that cannot tell
+// does: a stream cut before its first chunk, and an abandoned wait, may each have run a
+// turn — ADR-0173 §9 is explicit that abandoning the stream does not abandon it — and a
+// second send of the same reference is answered `ALREADY_SETTLED` and rendered as its
+// own fixed statement (§11). That is an honest sentence, where the other way round is an
+// answer that silently went nowhere.
+function reconcileReference(waiting) {
+  const sent = waiting.reference;
+  if (sent === null || reference !== sent) {
+    return;
+  }
+  if (waiting.ran) {
+    clearReference();
+  } else {
+    restoreReference(sent);
   }
 }
 
