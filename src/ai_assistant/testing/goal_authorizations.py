@@ -799,11 +799,12 @@ class _AuthorizationLog:
         for one in rows:
             if one.disposition is AuthorizationDisposition.PROPOSED and one.expires_at <= reading:
                 self._write_settlement(one, to=AuthorizationDisposition.EXPIRED, settled_at=reading)
-        return live[0] if live else None
+        return _detached(live[0]) if live else None
 
     def resolve(self, authorization_id: str) -> Authorization | None:
-        """The row with that id, whatever its disposition, or ``None``."""
-        return next((one for one in self._records if one.id == authorization_id), None)
+        """The row with that id, whatever its disposition, or ``None``, detached."""
+        found = next((one for one in self._records if one.id == authorization_id), None)
+        return None if found is None else _detached(found)
 
     def standing(self, goal: str) -> tuple[Authorization, ...]:
         """Every ``ESTABLISHED`` row of ``goal``, live and lapsed, newest first."""
@@ -816,7 +817,7 @@ class _AuthorizationLog:
     def ordered(self, limit: int | None = None) -> tuple[Authorization, ...]:
         """Every row, newest first by ``proposed_at``, ties broken by ``id`` ascending."""
         ranked = sorted(self._records, key=lambda one: (-_epoch_us(one.proposed_at), one.id))
-        return tuple(ranked if limit is None else ranked[:limit])
+        return tuple(_detached(one) for one in (ranked if limit is None else ranked[:limit]))
 
     def clear(self) -> int:
         """Delete every row, returning the number removed."""
@@ -838,6 +839,18 @@ def _epoch_us(instant: datetime) -> int:
     """
     elapsed = instant - _EPOCH
     return (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+
+
+def _detached(row: Authorization) -> Authorization:
+    """A snapshot no caller shares with the log (ADR-0097 §3).
+
+    ``frozen=True`` refuses ``row.expires_at = …`` and does **not** refuse
+    ``row.__dict__["expires_at"] = …``, so a caller rewriting the answer would
+    otherwise widen what the user authorised — **through the gate's own answer**.
+    ``deep=True`` because the members beneath the root carry the bounds the
+    comparison reads, and a shallow copy still shares every one of them.
+    """
+    return row.model_copy(deep=True)
 
 
 def _is_live(row: Authorization, reading: datetime) -> bool:

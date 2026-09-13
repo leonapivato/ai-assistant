@@ -1,0 +1,1415 @@
+"""Shared conformance suites for the three goal-authorization Protocols (ADR-0254 §16).
+
+Every ``GoalAuthorizations`` implementation must pass
+:class:`GoalAuthorizationsContract`, every ``AuthorizationResolution`` must pass
+:class:`AuthorizationResolutionContract`, and every ``GoalAuthorizationStore`` must
+pass :class:`GoalAuthorizationStoreContract` — which inherits both, because a store
+**is** the two narrow seams plus the ability to write and settle. A concrete test
+subclasses one of them and supplies its subject fixture.
+
+**Here rather than under ``tests/core/``.** The corpus puts a suite beside the
+subsystem that implements it, and ADR-0254 §20 puts the implementation in
+``permissions/``. The Protocols themselves stay in ``core``, which is what lets a
+policy and a trail hold their own narrow faces by injection without either
+importing ``permissions``.
+
+**Three suites, and the cost is named rather than discovered.** One Protocol would
+have cost one suite; the split costs three, and it buys the property that a policy
+**cannot name** ``record`` or ``resolve`` and a trail can name neither ``record``
+nor ``live_for`` — ADR-0254 §16's central clause held by ``mypy --strict`` instead
+of by review. Part of the cost comes back as evidence: the two narrow suites are
+bound against the **store** fake and against the durable store as well as against
+their own fakes, so *"three faces, one object"* is a test rather than an assertion.
+
+**And this suite is what holds the two statements of the invariants in step.**
+``testing/`` may not import ``permissions/`` (golden rule 1), so
+``_AuthorizationLog`` re-implements what ``SqliteGoalAuthorizationStore`` states;
+every refusal below is asserted of both.
+
+**What is deliberately not in here**, restated so its absence does not read as
+absence from the contract. The test is whether a clause is decidable from the
+store's own surface:
+
+* **ADR-0254 §6's route (d), its bar, its ordering and its seam-read counts.**
+  Obligations on ``ActionPolicy``, not on a store — no store exhibits how often a
+  policy calls it. They are ``tests/permissions/test_goal_authorization_policy.py``'s.
+* **§7's ten checks.** Obligations on ``AuditTrail.record``; a store exhibits none
+  of them. They are ``tests/permissions/test_goal_authorization_trail.py``'s.
+* **§§9 and 10's basis-against-a-recorded-turn rules, §1's three write paths as
+  ``orchestration`` walks them, and §12's ladder.** All ``orchestration``'s, which
+  ADR-0254 §20 assigns to **Lane 2**. What a store can see is the *shape* a path
+  leaves, and that is what is asserted here.
+* **ADR-0060's cancellation matrix.** Not among ADR-0254's clauses, and the
+  implementations inherit the SQLite family's own ``_run_to_completion``; filed
+  rather than half-built here.
+
+Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
+``Test``-prefixed subclass, never the abstract bases directly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, cast
+
+import pytest
+from authorization_builders import (
+    AT,
+    EXPIRES,
+    GOAL,
+    NOW,
+    OTHER_GOAL,
+    OTHER_SITE,
+    SHARED_CLOCK,
+    TOOL,
+    MovableClock,
+    member,
+)
+
+from ai_assistant.core.errors import AuthorizationError, InvalidAuthorizationError
+from ai_assistant.core.types import (
+    AuthorizationDisposition,
+    AuthorizationOrigin,
+    AuthorizationSettlement,
+)
+from ai_assistant.testing.goal_authorizations import (
+    authorization,
+    coverage_member,
+    money_bound,
+    period_bound,
+    terms_bound,
+)
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import (
+        AuthorizationResolution,
+        GoalAuthorizations,
+        GoalAuthorizationStore,
+    )
+    from ai_assistant.core.types import Authorization
+
+
+class _Deceptive(int):
+    """An ``int`` subclass that answers ``<=`` with a lie, and carries its value.
+
+    Not a contrivance for its own sake: it is the value class a denylist naming
+    ``bool`` lets through, and the reason the guard it exercises is written as an
+    allowlist of the exact ``int``.
+    """
+
+    def __le__(self, other: object) -> bool:
+        """Answer ``False`` to every ``<=``, which is what carries it past a sign check."""
+        return False
+
+
+#: Every disposition that is **retired**: no edge leaves it (ADR-0254 §1).
+RETIRED = (
+    AuthorizationDisposition.DECLINED,
+    AuthorizationDisposition.EXPIRED,
+    AuthorizationDisposition.REVOKED,
+    AuthorizationDisposition.SUPERSEDED,
+)
+
+#: ADR-0254 §1's five edges, as ``(source, target)`` pairs. Stated once so the
+#: edge cases and the non-edge cases are derived from one enumeration.
+EDGES = (
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.ESTABLISHED),
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.DECLINED),
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.EXPIRED),
+    (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.REVOKED),
+    (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.SUPERSEDED),
+)
+
+#: Moves ADR-0254 §1's graph does **not** admit, each named so a failure says which.
+NON_EDGES = (
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.REVOKED),
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.SUPERSEDED),
+    (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.DECLINED),
+    (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.EXPIRED),
+)
+
+
+def established(**overrides: object) -> Authorization:
+    """A row written already ``ESTABLISHED`` — path (iii)'s shape, or path (ii)'s.
+
+    ``settled_at`` equal to ``proposed_at`` is what ``record`` requires of a row
+    carrying no ``confirmation``, so it is supplied here rather than at every call
+    site (ADR-0254 §1, §16).
+    """
+    scripted: dict[str, object] = {
+        "confirmation": None,
+        "origin": AuthorizationOrigin.OPENING_ACT,
+        "disposition": AuthorizationDisposition.ESTABLISHED,
+    }
+    scripted.update(overrides)
+    return authorization(**scripted)  # type: ignore[arg-type]  # the builder's own keys
+
+
+async def _refuses(
+    store: GoalAuthorizationStore,
+    rejected: Authorization,
+    error: type[AuthorizationError] = InvalidAuthorizationError,
+) -> None:
+    """Assert ``record`` refuses ``rejected`` **and writes nothing**.
+
+    ADR-0254 §16 makes ``record`` atomic — the duplicate-id check, the path rules,
+    the uniqueness refusal, the two-row checks and the append are one operation — so
+    a refusal is not a partial write with an exception on top. Asserting only that
+    it raised would accept a store that appended a bad row and *then* rejected it,
+    leaving a history the contract says is unrecordable.
+
+    The whole store is compared rather than just the rejected id, because a write
+    that landed under a different id, or that settled the row it named on its way
+    through, is the same failure wearing a disguise.
+    """
+    before = await store.export()
+    with pytest.raises(error):
+        await store.record(rejected)
+    assert await store.export() == before, "a refused write must leave no trace"
+
+
+class GoalAuthorizationsContract:
+    """``GoalAuthorizations.live_for``'s clauses (ADR-0254 §1, §3, §16)."""
+
+    @pytest.fixture
+    def clock(self) -> MovableClock:
+        """The shared clock, reset for this case."""
+        return SHARED_CLOCK.reset()
+
+    @pytest.fixture
+    def authorizations(self) -> GoalAuthorizations:
+        """The subject: a seam over an empty history, on the shared clock."""
+        raise NotImplementedError
+
+    async def hold(self, authorizations: GoalAuthorizations, *rows: Authorization) -> None:
+        """Put ``rows`` into the subject's history, under ``record``'s invariants."""
+        raise NotImplementedError
+
+    async def settle(
+        self,
+        authorizations: GoalAuthorizations,
+        authorization_id: str,
+        *,
+        to: AuthorizationDisposition,
+        settled_at: datetime = NOW,
+    ) -> AuthorizationSettlement:
+        """Move a row along an edge in the subject's history."""
+        raise NotImplementedError
+
+    async def test_an_empty_store_answers_none(self, authorizations: GoalAuthorizations) -> None:
+        """``None`` means *"the store holds no live record"* and nothing else."""
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_it_answers_the_live_established_row_of_that_pair(
+        self, authorizations: GoalAuthorizations
+    ) -> None:
+        """§3's conditions 1 and 2 and the **id half** of condition 3."""
+        await self.hold(authorizations, established(id="a1"))
+        found = await authorizations.live_for(GOAL, TOOL.id)
+        assert found is not None
+        assert found.id == "a1"
+
+    async def test_a_proposed_row_is_never_live(self, authorizations: GoalAuthorizations) -> None:
+        """§1: *"a row the user has not answered authorises nothing"* (arm 37)."""
+        await self.hold(authorizations, authorization(id="a1"))
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    @pytest.mark.parametrize("disposition", RETIRED)
+    async def test_a_retired_row_is_never_live(
+        self, authorizations: GoalAuthorizations, disposition: AuthorizationDisposition
+    ) -> None:
+        """§1: every retired disposition is never live."""
+        await self.hold(authorizations, authorization(id="a1"))
+        edge = (
+            AuthorizationDisposition.ESTABLISHED
+            if disposition
+            in (AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED)
+            else disposition
+        )
+        await self.settle(authorizations, "a1", to=edge)
+        if edge is AuthorizationDisposition.ESTABLISHED:
+            await self.settle(authorizations, "a1", to=disposition)
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_row_of_another_goal_is_not_returned(
+        self, authorizations: GoalAuthorizations
+    ) -> None:
+        """§1: *"The goal is a field and the scope is never the conversation"*."""
+        await self.hold(authorizations, established(id="a1", goal=OTHER_GOAL))
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_row_about_another_declaration_id_is_not_returned(
+        self, authorizations: GoalAuthorizations
+    ) -> None:
+        """§16: the seam is **keyed** on the goal and the declaration's id."""
+        await self.hold(authorizations, established(id="a1"))
+        assert await authorizations.live_for(GOAL, "some_other_tool") is None
+
+    async def test_a_row_about_an_edited_declaration_of_that_id_is_still_found(
+        self, authorizations: GoalAuthorizations
+    ) -> None:
+        """§6: *"What the id buys is that the bar neither appears nor disappears when
+        a declaration is edited"* (arm 48).
+
+        The **policy** then takes §3's condition 3 by value and covers nothing — but
+        the seam's job is to find the row, and a value key would lose it.
+        """
+        edited = TOOL.model_copy(update={"description": "Book a pitch — reworded."})
+        await self.hold(authorizations, established(id="a1", tool=edited))
+        found = await authorizations.live_for(GOAL, TOOL.id)
+        assert found is not None
+        assert found.tool != TOOL
+
+    async def test_liveness_is_closed_below_and_open_above(
+        self, authorizations: GoalAuthorizations, clock: MovableClock
+    ) -> None:
+        """§1, arm 71: equality at the lower end is live; the upper end is strict."""
+        await self.hold(authorizations, established(id="a1"))
+        clock.set(AT)
+        assert await authorizations.live_for(GOAL, TOOL.id) is not None
+        clock.set(EXPIRES - timedelta(microseconds=1))
+        assert await authorizations.live_for(GOAL, TOOL.id) is not None
+        clock.set(EXPIRES)
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_clock_that_moved_backwards_answers_none_rather_than_disagreeing(
+        self, authorizations: GoalAuthorizations, clock: MovableClock
+    ) -> None:
+        """§1, arm 71: *"the clock can move backwards — an operator correction, an
+        NTP step"*.
+
+        A row this seam called live whose ``settled_at`` is after the ruling's
+        ``decided_at`` is one §7's trail then refuses as **backdated**, so the policy
+        would report an authority the dispatch could not use and the step would die
+        at the write rather than at the ruling. The lower end is what stops that.
+        """
+        await self.hold(authorizations, established(id="a1"))
+        clock.set(AT - timedelta(hours=1))
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_lapsed_established_row_is_not_live_and_is_not_settled_expired(
+        self, authorizations: GoalAuthorizations, clock: MovableClock
+    ) -> None:
+        """§1, arm 37: ``EXPIRED`` is *"the answer a question never got"*.
+
+        Re-using it for a lapsed authority would make the two indistinguishable in a
+        listing — so a lapsed ``ESTABLISHED`` row stays ``ESTABLISHED``, which is
+        also why it is still revocable.
+        """
+        await self.hold(authorizations, established(id="a1"))
+        clock.set(EXPIRES + timedelta(hours=1))
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+        assert (
+            await self.settle(authorizations, "a1", to=AuthorizationDisposition.REVOKED)
+            is AuthorizationSettlement.SETTLED
+        )
+
+    async def test_it_reads_the_clock_exactly_once_per_call(
+        self, authorizations: GoalAuthorizations, clock: MovableClock
+    ) -> None:
+        """§16, on ADR-0193 §9: *"a query reading an advancing clock per row could
+        answer over a set true at no real instant"*."""
+        await self.hold(
+            authorizations,
+            established(id="a1"),
+            established(id="a2", goal=OTHER_GOAL),
+            authorization(id="a3"),
+        )
+        clock.reset()
+        clock.advance_by()
+        await authorizations.live_for(GOAL, TOOL.id)
+        assert clock.readings == 1
+
+    async def test_it_settles_an_expired_proposal_it_reads(
+        self, authorizations: GoalAuthorizations, clock: MovableClock
+    ) -> None:
+        """§1, arm 37: ADR-0244 §10's mechanism — *"an expiry is settled and is never
+        inferred"*, by the **first operation that reads it**.
+
+        Asserted through the seam a policy holds, because that is where the rule
+        lives; the store suite asserts the row's own disposition afterwards.
+        """
+        await self.hold(authorizations, authorization(id="a1"))
+        clock.set(EXPIRES + timedelta(hours=1))
+        assert await authorizations.live_for(GOAL, TOOL.id) is None
+
+    async def test_the_answer_is_a_detached_snapshot(
+        self, authorizations: GoalAuthorizations
+    ) -> None:
+        """ADR-0097 §3: ``frozen=True`` does not close the ``__dict__`` bypass.
+
+        A caller rewriting the answer would otherwise widen what the user
+        authorised, **through the gate's own answer**.
+        """
+        await self.hold(authorizations, established(id="a1"))
+        first = await authorizations.live_for(GOAL, TOOL.id)
+        assert first is not None
+        first.__dict__["expires_at"] = EXPIRES + timedelta(days=365)
+        second = await authorizations.live_for(GOAL, TOOL.id)
+        assert second is not None
+        assert second.expires_at == EXPIRES
+
+
+class AuthorizationResolutionContract:
+    """``AuthorizationResolution.resolve``'s clauses (ADR-0254 §7, §16)."""
+
+    @pytest.fixture
+    def resolution(self) -> AuthorizationResolution:
+        """The subject: a seam over an empty history."""
+        raise NotImplementedError
+
+    async def hold_for_resolution(
+        self, resolution: AuthorizationResolution, *rows: Authorization
+    ) -> None:
+        """Put ``rows`` into the subject's history, under ``record``'s invariants."""
+        raise NotImplementedError
+
+    async def settle_for_resolution(
+        self,
+        resolution: AuthorizationResolution,
+        authorization_id: str,
+        *,
+        to: AuthorizationDisposition,
+    ) -> AuthorizationSettlement:
+        """Move a row along an edge in the subject's history."""
+        raise NotImplementedError
+
+    async def test_an_unknown_id_answers_none(self, resolution: AuthorizationResolution) -> None:
+        """``None`` means the store holds no row with that id, and nothing else."""
+        assert await resolution.resolve("nobody") is None
+
+    @pytest.mark.parametrize(
+        "to",
+        [
+            AuthorizationDisposition.ESTABLISHED,
+            AuthorizationDisposition.DECLINED,
+            AuthorizationDisposition.EXPIRED,
+        ],
+    )
+    async def test_it_answers_the_row_whatever_its_disposition(
+        self, resolution: AuthorizationResolution, to: AuthorizationDisposition
+    ) -> None:
+        """§7: the trail's own first check **reads** that field.
+
+        A member that withheld a retired row would move the check inside the seam
+        and leave the trail unable to say which of the five it refused on.
+        """
+        await self.hold_for_resolution(resolution, authorization(id="a1"))
+        await self.settle_for_resolution(resolution, "a1", to=to)
+        found = await resolution.resolve("a1")
+        assert found is not None
+        assert found.disposition is to
+
+    async def test_it_answers_a_proposal_the_user_has_not_answered(
+        self, resolution: AuthorizationResolution
+    ) -> None:
+        """§7: the row in every disposition, ``PROPOSED`` included."""
+        await self.hold_for_resolution(resolution, authorization(id="a1"))
+        found = await resolution.resolve("a1")
+        assert found is not None
+        assert found.disposition is AuthorizationDisposition.PROPOSED
+
+    async def test_it_reads_no_clock_so_a_lapsed_row_still_resolves(
+        self, resolution: AuthorizationResolution
+    ) -> None:
+        """§16: both ends of liveness are decided by ``AuditTrail.record`` against
+        the **decision's own** ``decided_at``, which is what makes that check a
+        comparison of two recorded values rather than a reading of the present."""
+        await self.hold_for_resolution(
+            resolution, established(id="a1", expires_at=AT + timedelta(seconds=1))
+        )
+        assert await resolution.resolve("a1") is not None
+
+    async def test_a_resolved_row_is_a_detached_snapshot(
+        self, resolution: AuthorizationResolution
+    ) -> None:
+        """ADR-0097 §3, as on the query face.
+
+        Named apart from :meth:`GoalAuthorizationsContract.
+        test_the_answer_is_a_detached_snapshot` because a store subclasses both
+        suites and one name would be one test.
+        """
+        await self.hold_for_resolution(resolution, established(id="a1"))
+        first = await resolution.resolve("a1")
+        assert first is not None
+        first.__dict__["goal"] = "somewhere-else"
+        second = await resolution.resolve("a1")
+        assert second is not None
+        assert second.goal == GOAL
+
+
+class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationResolutionContract):
+    """The durable face's clauses: ``record``, ``settle``, and the four reads.
+
+    Inherits both narrow suites, because a store **is** the two narrow seams plus
+    the ability to write — so an implementation bound here answers every clause of
+    all three faces, which is ADR-0254 §16's *"three faces, one object"*.
+    """
+
+    @pytest.fixture
+    def store(self) -> GoalAuthorizationStore:
+        """The subject: a store over an empty history, on the shared clock."""
+        raise NotImplementedError
+
+    # --- the two narrow suites, answered by this same object ---------------
+
+    @pytest.fixture
+    def authorizations(self, store: GoalAuthorizationStore) -> GoalAuthorizations:
+        """The store, as its query face."""
+        return store
+
+    @pytest.fixture
+    def resolution(self, store: GoalAuthorizationStore) -> AuthorizationResolution:
+        """The store, as its resolution face."""
+        return store
+
+    async def hold(self, authorizations: GoalAuthorizations, *rows: Authorization) -> None:
+        """Record ``rows`` through the store's own write path."""
+        subject = cast("GoalAuthorizationStore", authorizations)
+        for row in rows:
+            await subject.record(row)
+
+    async def settle(
+        self,
+        authorizations: GoalAuthorizations,
+        authorization_id: str,
+        *,
+        to: AuthorizationDisposition,
+        settled_at: datetime = NOW,
+    ) -> AuthorizationSettlement:
+        """Settle through the store's own write path."""
+        subject = cast("GoalAuthorizationStore", authorizations)
+        return await subject.settle(authorization_id, to=to, settled_at=settled_at)
+
+    async def hold_for_resolution(
+        self, resolution: AuthorizationResolution, *rows: Authorization
+    ) -> None:
+        """Record ``rows`` through the store's own write path."""
+        subject = cast("GoalAuthorizationStore", resolution)
+        for row in rows:
+            await subject.record(row)
+
+    async def settle_for_resolution(
+        self,
+        resolution: AuthorizationResolution,
+        authorization_id: str,
+        *,
+        to: AuthorizationDisposition,
+    ) -> AuthorizationSettlement:
+        """Settle through the store's own write path."""
+        subject = cast("GoalAuthorizationStore", resolution)
+        return await subject.settle(authorization_id, to=to, settled_at=NOW)
+
+    # --- record: the write paths (ADR-0254 §1, §16) ------------------------
+
+    async def test_record_returns_the_id_it_wrote(self, store: GoalAuthorizationStore) -> None:
+        """§16: ``record(authorization) -> str`` — *"the id it wrote"*."""
+        assert await store.record(authorization(id="a1")) == "a1"
+
+    async def test_it_is_write_once(self, store: GoalAuthorizationStore) -> None:
+        """§16: *"a store that upserts is one where history can be rewritten by
+        replaying a write"*."""
+        await store.record(authorization(id="a1"))
+        await _refuses(store, authorization(id="a1", goal=OTHER_GOAL))
+
+    async def test_a_confirmation_carrying_row_is_written_proposed_and_no_other(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 38: *"the write-path rule the validator deliberately does not
+        state"*.
+
+        It is not a model validator because the same row is later persisted
+        ``ESTABLISHED`` with that same ``confirmation`` — a validator stating it
+        would refuse to decode the row it had just written.
+        """
+        await store.record(authorization(id="a1"))
+        for disposition in AuthorizationDisposition:
+            if disposition is AuthorizationDisposition.PROPOSED:
+                continue
+            await _refuses(
+                store,
+                authorization(id=f"bad-{disposition.value}", disposition=disposition),
+            )
+
+    async def test_a_row_carrying_no_confirmation_is_written_established(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: paths (ii) and (iii) write ``ESTABLISHED`` directly."""
+        await _refuses(
+            store,
+            authorization(
+                id="a1", confirmation=None, disposition=AuthorizationDisposition.DECLINED
+            ),
+        )
+
+    async def test_a_row_carrying_no_confirmation_settles_at_the_instant_it_was_written(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: ``settled_at`` equal to ``proposed_at`` — the recorded turn's instant."""
+        await _refuses(
+            store,
+            authorization(
+                id="a1",
+                confirmation=None,
+                origin=AuthorizationOrigin.OPENING_ACT,
+                disposition=AuthorizationDisposition.ESTABLISHED,
+                settled_at=AT + timedelta(minutes=1),
+            ),
+        )
+
+    async def test_at_most_one_established_row_stands_per_goal_and_declaration_id(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1, arm 36: the refusal is over the **disposition**, so no clock is read."""
+        await store.record(established(id="a1"))
+        await _refuses(store, established(id="a2"))
+
+    async def test_the_uniqueness_key_is_the_id_and_not_the_declaration_by_value(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1, arm 36: *"stricter than a value key"*.
+
+        It additionally refuses a second row about an **edited** declaration of the
+        same id, which a value key would admit.
+        """
+        edited = TOOL.model_copy(update={"description": "Book a pitch — reworded."})
+        await store.record(established(id="a1"))
+        await _refuses(store, established(id="a2", tool=edited))
+
+    async def test_another_goal_and_another_declaration_are_each_a_different_pair(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: uniqueness is per **pair**, so neither axis alone refuses."""
+        other_tool = TOOL.model_copy(update={"id": "other_tool"})
+        await store.record(established(id="a1"))
+        await store.record(established(id="a2", goal=OTHER_GOAL))
+        await store.record(established(id="a3", tool=other_tool))
+        assert len(await store.export()) == 3
+
+    async def test_two_proposals_of_one_pair_are_both_recorded(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 56: *"neither write leaves two rows ``ESTABLISHED``, so neither is
+        ``record``'s to refuse"* — it is the **second settlement** that answers."""
+        await store.record(authorization(id="a1"))
+        await store.record(authorization(id="a2", confirmation="confirm-0002"))
+        assert len(await store.export()) == 2
+
+    async def test_a_supersedes_naming_no_established_row_of_that_pair_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16: absent, standing elsewhere, or belonging to another pair."""
+        await _refuses(store, established(id="a1", supersedes="nobody"))
+        await store.record(authorization(id="p1"))
+        await _refuses(store, established(id="a2", supersedes="p1"))
+        await store.record(established(id="e1", goal=OTHER_GOAL))
+        await _refuses(store, established(id="a3", supersedes="e1"))
+
+    # --- record: what a path-(ii) correction may change (§1, §5, §9) --------
+
+    async def test_a_correction_settles_the_row_it_supersedes_in_the_same_write(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16: *"in the same indivisible write"* — so uniqueness is never
+        momentarily false."""
+        await store.record(established(id="a1"))
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+        first = await store.resolve("a1")
+        assert first is not None
+        assert first.disposition is AuthorizationDisposition.SUPERSEDED
+
+    @pytest.mark.parametrize("field", ["goal", "tool", "account", "destinations", "origin"])
+    async def test_a_correction_transcribes_the_five_fields_it_may_not_change(
+        self, store: GoalAuthorizationStore, field: str
+    ) -> None:
+        """§1, arm 17 — and ADR-0256 §9 adds ``origin`` to the four arm 17 names.
+
+        **Transcribing ``origin`` is what keeps §6's recipient recheck alive through
+        a correction**: a chain of corrections over an opening act is still an
+        authority resting on someone else's grant, and the row says so.
+        """
+        await store.record(established(id="a1"))
+        other_tool = TOOL.model_copy(update={"id": "other_tool"})
+        moved: dict[str, object] = {
+            "goal": OTHER_GOAL,
+            "tool": other_tool,
+            "account": authorization().account.model_copy(update={"reference": "conn-0002"}),
+            "destinations": (member(OTHER_SITE),),
+            "origin": AuthorizationOrigin.CONFIRMED,
+        }
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                **{field: moved[field]},
+            ),
+        )
+
+    async def test_a_correction_may_replace_a_fixed_value_the_row_already_fixed(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5: the owner's *"make it Sunday"*, and the user is not asked to repeat it."""
+        await store.record(
+            established(id="a1", coverage=(coverage_member("stay_from", fixed="2026-09-19"),))
+        )
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("stay_from", fixed="2026-09-20"),),
+            )
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+
+    async def test_a_correction_may_narrow_a_bound_the_row_already_bounded(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: *"narrow a bound for an argument it already bounded"*."""
+        await store.record(established(id="a1"))
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+
+    @pytest.mark.parametrize(
+        "widened",
+        [
+            pytest.param(lambda: money_bound("80"), id="raised-maximum"),
+            pytest.param(lambda: money_bound("60", minimum="5"), id="lowered-minimum"),
+            pytest.param(lambda: money_bound("60", currency="EUR"), id="changed-currency"),
+            pytest.param(
+                lambda: money_bound("60", currency_argument="ccy"), id="moved-currency-argument"
+            ),
+            pytest.param(period_bound, id="changed-kind"),
+        ],
+    )
+    async def test_a_correction_that_would_widen_a_money_bound_is_refused(
+        self, store: GoalAuthorizationStore, widened: object
+    ) -> None:
+        """§5, arm 15: *"A widening of any kind takes path (i) and is confirmed"*.
+
+        A changed currency or currency argument is neither a narrowing nor a
+        widening — it **re-denominates** what the bound is about — and takes path
+        (i) with the rest.
+        """
+        assert callable(widened)
+        await store.record(
+            established(
+                id="a1",
+                coverage=(coverage_member("amount", bound=money_bound("60", minimum="10")),),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=widened()),),
+            ),
+        )
+
+    async def test_a_correction_may_drop_a_minimum_neither_way(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: a lower bound the correction **drops** widens — every amount below the
+        earlier minimum becomes permitted — and one it **adds** narrows."""
+        await store.record(
+            established(
+                id="a1",
+                coverage=(coverage_member("amount", bound=money_bound("60", minimum="10")),),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("60")),),
+            ),
+        )
+
+    async def test_a_correction_that_would_widen_a_terms_bound_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 15: *"add Bob"* — an added term is a widening."""
+        await store.record(
+            established(
+                id="a1", coverage=(coverage_member("terms", bound=terms_bound("flexible")),)
+            )
+        )
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("terms", bound=terms_bound("flexible")),),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a3",
+                supersedes="a2",
+                proposed_at=AT + timedelta(minutes=10),
+                coverage=(coverage_member("terms", bound=terms_bound("flexible", "refundable")),),
+            ),
+        )
+
+    async def test_a_correction_that_would_lengthen_a_period_bound_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 15: *"make it next month as well"* — a longer period is a widening."""
+        await store.record(
+            established(
+                id="a1",
+                coverage=(
+                    coverage_member("stay_from", bound=period_bound(starts_at=AT, ends_at=EXPIRES)),
+                ),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(
+                    coverage_member(
+                        "stay_from",
+                        bound=period_bound(starts_at=AT, ends_at=EXPIRES + timedelta(days=30)),
+                    ),
+                ),
+            ),
+        )
+
+    async def test_a_correction_naming_an_argument_no_member_covers_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 15, arm 47: *"add insurance"* — path (ii) refuses it at
+        construction, and §6's bar is what then refuses the dispatch."""
+        await store.record(established(id="a1"))
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(
+                    coverage_member("amount", bound=money_bound()),
+                    coverage_member("insurance", fixed=True),
+                ),
+            ),
+        )
+
+    async def test_a_correction_dropping_a_member_it_does_not_replace_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5: *"every other member is carried forward byte for byte with the basis it
+        already had"*."""
+        await store.record(
+            established(
+                id="a1",
+                coverage=(
+                    coverage_member("amount", bound=money_bound()),
+                    coverage_member("site", fixed="A"),
+                ),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            ),
+        )
+
+    async def test_a_correction_turning_a_fixed_value_into_a_bound_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1: it replaces a fixed value the row **fixed**, or narrows a bound the row
+        **bounded**; turning one shape into the other is neither motion."""
+        await store.record(established(id="a1", coverage=(coverage_member("amount", fixed="60"),)))
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("60")),),
+            ),
+        )
+
+    # --- record: ADR-0256 §5's one narrowing of expires_at -----------------
+
+    async def test_a_correction_stating_an_earlier_admissible_instant_narrows(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0256 §5, §9's **Lane 1 arm**: *"the store accepts exactly that row"*.
+
+        Strictly after the new row's ``proposed_at`` and strictly before the
+        superseded row's ``expires_at`` — where ADR-0254 §20's arm 17 refused every
+        altered ``expires_at``.
+        """
+        await store.record(established(id="a1"))
+        narrowed = AT + timedelta(hours=6)
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                expires_at=narrowed,
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        held = await store.resolve("a2")
+        assert held is not None
+        assert held.expires_at == narrowed
+
+    async def test_a_correction_stating_a_later_instant_does_not_lengthen(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0256 §5, §9's second **Lane 1 arm**: every other movement is refused.
+
+        *"Nothing lengthens a horizon on any path but (i)"*, so ADR-0254 §12's *"No
+        sequence of corrections outlives the confirmation that began it"* holds a
+        fortiori.
+        """
+        await store.record(established(id="a1"))
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                expires_at=EXPIRES + timedelta(hours=1),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            ),
+        )
+
+    async def test_a_chain_narrows_against_the_row_it_supersedes_not_against_the_first(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0256 §9: *"an implementation comparing against the first row's
+        ``expires_at`` passes every single-correction arm above and lengthens on the
+        second"*."""
+        await store.record(established(id="a1"))
+        narrowed = AT + timedelta(hours=6)
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                expires_at=narrowed,
+                coverage=(coverage_member("amount", bound=money_bound("50")),),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a3",
+                supersedes="a2",
+                proposed_at=AT + timedelta(minutes=10),
+                expires_at=narrowed + timedelta(hours=1),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            ),
+        )
+
+    async def test_a_path_one_proposal_carrying_supersedes_may_carry_a_later_instant(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0256 §9: *"a path-(i) proposal carrying ``supersedes`` is not this
+        arm's subject and is refused by none of it"* — arm 42's renewal.
+
+        *"An implementation that applied the path-(ii) rule to it would break
+        renewal."*
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                expires_at=EXPIRES + timedelta(days=1),
+            )
+        )
+        assert (
+            await store.settle(
+                "a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=AT + timedelta(hours=1)
+            )
+            is AuthorizationSettlement.SETTLED
+        )
+        standing = await store.standing(GOAL)
+        assert [row.id for row in standing] == ["a2"]
+        assert standing[0].expires_at == EXPIRES + timedelta(days=1)
+
+    # --- settle: the graph, and the four outcomes (§1, §16) ----------------
+
+    @pytest.mark.parametrize(("source", "target"), EDGES)
+    async def test_each_of_the_five_edges_succeeds_from_its_own_source(
+        self,
+        store: GoalAuthorizationStore,
+        source: AuthorizationDisposition,
+        target: AuthorizationDisposition,
+    ) -> None:
+        """§1, arm 37 and arm 55: each edge, from its own source."""
+        await store.record(authorization(id="a1"))
+        if source is AuthorizationDisposition.ESTABLISHED:
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+        assert (
+            await store.settle("a1", to=target, settled_at=NOW) is AuthorizationSettlement.SETTLED
+        )
+        held = await store.resolve("a1")
+        assert held is not None
+        assert (held.disposition, held.settled_at) == (target, NOW)
+
+    @pytest.mark.parametrize(("source", "target"), NON_EDGES)
+    async def test_every_move_that_is_not_an_edge_answers_not_at_source(
+        self,
+        store: GoalAuthorizationStore,
+        source: AuthorizationDisposition,
+        target: AuthorizationDisposition,
+    ) -> None:
+        """§1, arm 37 and arm 55: *"no other edge exists"*."""
+        await store.record(authorization(id="a1"))
+        if source is AuthorizationDisposition.ESTABLISHED:
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+        assert (
+            await store.settle("a1", to=target, settled_at=NOW)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+
+    @pytest.mark.parametrize("retired", RETIRED)
+    async def test_no_edge_leaves_a_retired_disposition(
+        self, store: GoalAuthorizationStore, retired: AuthorizationDisposition
+    ) -> None:
+        """§1, arm 55: *"a retired row asked for anything"* answers ``NOT_AT_SOURCE``.
+
+        **And a revoked or superseded row cannot be settled again** (arm 3's third
+        limb): none of §1's five edges leaves ``REVOKED`` or ``SUPERSEDED``.
+        """
+        await store.record(authorization(id="a1"))
+        if retired in (AuthorizationDisposition.REVOKED, AuthorizationDisposition.SUPERSEDED):
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+        await store.settle("a1", to=retired, settled_at=NOW)
+        for target in AuthorizationDisposition:
+            assert (
+                await store.settle("a1", to=target, settled_at=NOW)
+                is AuthorizationSettlement.NOT_AT_SOURCE
+            )
+
+    async def test_the_same_settlement_repeated_answers_not_at_source(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 55: the compare-and-swap's token is the row's own disposition."""
+        await store.record(authorization(id="a1"))
+        await store.settle("a1", to=AuthorizationDisposition.DECLINED, settled_at=NOW)
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.DECLINED, settled_at=NOW)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+
+    async def test_an_id_the_store_does_not_hold_answers_no_such_authorization(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 55: *"a ``bool`` cannot tell an unknown id from a row that was not
+        at the source"*."""
+        assert (
+            await store.settle("nobody", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+            is AuthorizationSettlement.NO_SUCH_AUTHORIZATION
+        )
+
+    async def test_two_racing_settlements_of_one_row_never_both_win(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1, §16, arm 55: *"the loser of two racing settlements"* is ``NOT_AT_SOURCE``."""
+        await store.record(authorization(id="a1"))
+        outcomes = await asyncio.gather(
+            store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW),
+            store.settle("a1", to=AuthorizationDisposition.DECLINED, settled_at=NOW),
+        )
+        assert sorted(outcome.value for outcome in outcomes) == ["not_at_source", "settled"]
+
+    async def test_settling_the_second_proposal_of_one_pair_answers_would_duplicate(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 56: *"a settlement is where two rows can meet"*.
+
+        *"A lane that answered ``SETTLED`` here has written the state §1 forbids"*,
+        and one that raised has made a refusal an exception.
+        """
+        await store.record(authorization(id="a1"))
+        await store.record(authorization(id="a2", confirmation="confirm-0002"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+        assert (
+            await store.settle("a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.WOULD_DUPLICATE
+        )
+        held = await store.resolve("a2")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.PROPOSED
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    async def test_two_racing_establishments_of_one_pair_never_both_win(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 56: *"never two winners and never an interleaving that leaves two
+        rows ``ESTABLISHED``"*."""
+        await store.record(authorization(id="a1"))
+        await store.record(authorization(id="a2", confirmation="confirm-0002"))
+        outcomes = await asyncio.gather(
+            store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW),
+            store.settle("a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW),
+        )
+        assert sorted(outcome.value for outcome in outcomes) == ["settled", "would_duplicate"]
+        assert len(await store.standing(GOAL)) == 1
+
+    async def test_a_path_one_proposal_retires_nothing_until_it_is_answered(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 57: *"a lane whose ``record`` settled the predecessor at the
+        proposal fails this arm"*.
+
+        The bar would have had no row to test and the declined widening would have
+        dispatched.
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(id="a2", supersedes="a1", proposed_at=AT + timedelta(minutes=5))
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+        found = await store.live_for(GOAL, TOOL.id)
+        assert found is not None
+        assert found.id == "a1"
+
+    async def test_declining_a_widening_leaves_the_row_it_named_exactly_as_it_was(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 39: *"a refused widening is not a revocation of what the user
+        already authorised"*."""
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(id="a2", supersedes="a1", proposed_at=AT + timedelta(minutes=5))
+        )
+        before = await store.resolve("a1")
+        assert (
+            await store.settle("a2", to=AuthorizationDisposition.DECLINED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+        assert await store.resolve("a1") == before
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    async def test_approving_a_widening_settles_both_rows_in_one_write(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 39: *"with no instant at which both are established"*."""
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(id="a2", supersedes="a1", proposed_at=AT + timedelta(minutes=5))
+        )
+        assert (
+            await store.settle("a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+        first = await store.resolve("a1")
+        assert first is not None
+        assert first.disposition is AuthorizationDisposition.SUPERSEDED
+
+    async def test_a_predecessor_revoked_while_the_question_stood_is_left_as_it_stands(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1's conditional-supersession clause, arm 63.
+
+        *"A lane that refused the establishment here fails this arm"*, as does one
+        that answered ``SETTLED`` while moving A out of a retired disposition.
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(id="a2", supersedes="a1", proposed_at=AT + timedelta(minutes=5))
+        )
+        await store.settle("a1", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+        assert (
+            await store.settle("a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+        first = await store.resolve("a1")
+        assert first is not None
+        assert first.disposition is AuthorizationDisposition.REVOKED
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+
+    async def test_a_third_established_row_of_that_pair_answers_would_duplicate(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1, arm 63: *"a row this write's ``supersedes`` does not name"*.
+
+        *"That is §16's member doing exactly what it exists for, and it is why the
+        arm above is stated over *the named row* and never over *the pair*."*
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            authorization(id="a2", supersedes="a1", proposed_at=AT + timedelta(minutes=5))
+        )
+        await store.record(
+            established(
+                id="a3",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=6),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        assert (
+            await store.settle("a2", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.WOULD_DUPLICATE
+        )
+        held = await store.resolve("a2")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.PROPOSED
+        assert [row.id for row in await store.standing(GOAL)] == ["a3"]
+
+    async def test_supersession_is_permanent(self, store: GoalAuthorizationStore) -> None:
+        """§1, arm 19: *"nothing un-supersedes one"*.
+
+        Both rows stay in the store, both appear in ``export``, and revoking the
+        superseding row leaves **neither** live — the fail-closed direction.
+        """
+        await store.record(established(id="a1"))
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member("amount", bound=money_bound("40")),),
+            )
+        )
+        await store.settle("a2", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+        first = await store.resolve("a1")
+        assert first is not None
+        assert first.disposition is AuthorizationDisposition.SUPERSEDED
+        assert await store.live_for(GOAL, TOOL.id) is None
+        assert {row.id for row in await store.export()} == {"a1", "a2"}
+
+    async def test_a_lapsed_established_row_is_still_revocable(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """§1, arm 43: *"a lapsed row never becomes an obstacle"*.
+
+        It is reachable for the withdrawal because ``standing(goal)`` returns it,
+        which is why that member needs no history query.
+        """
+        await store.record(established(id="a1"))
+        clock.set(EXPIRES + timedelta(hours=1))
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+            is AuthorizationSettlement.SETTLED
+        )
+
+    async def test_a_proposed_row_is_refused_a_revocation(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§1, arm 43: ``PROPOSED → REVOKED`` is not an edge."""
+        await store.record(authorization(id="a1"))
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+
+    async def test_live_for_settles_the_lapsed_proposal_it_reads(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """§1, arm 37: settled ``EXPIRED`` by a ``live_for`` read, **and by no other
+        operation** — ``standing``, ``resolve``, ``recent`` and ``export`` settle
+        nothing."""
+        await store.record(authorization(id="a1"))
+        clock.set(EXPIRES + timedelta(hours=1))
+        await store.resolve("a1")
+        await store.recent()
+        await store.export()
+        await store.standing(GOAL)
+        held = await store.resolve("a1")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.PROPOSED
+        await store.live_for(GOAL, TOOL.id)
+        settled = await store.resolve("a1")
+        assert settled is not None
+        assert settled.disposition is AuthorizationDisposition.EXPIRED
+
+    # --- the reads (§16) ---------------------------------------------------
+
+    async def test_standing_returns_the_established_rows_of_that_goal_live_and_lapsed(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """§16, arm 33: *"never a ``PROPOSED`` one and never another goal's"*, and
+        *"the same rows immediately before and immediately after an
+        ``expires_at``"* — the difference being the caller's comparison."""
+        await store.record(established(id="a1"))
+        await store.record(authorization(id="a2", confirmation="confirm-0002"))
+        await store.record(established(id="a3", goal=OTHER_GOAL))
+        clock.set(EXPIRES - timedelta(microseconds=1))
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+        clock.set(EXPIRES + timedelta(hours=1))
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            AuthorizationDisposition.DECLINED,
+            AuthorizationDisposition.EXPIRED,
+            AuthorizationDisposition.REVOKED,
+        ],
+    )
+    async def test_standing_never_returns_a_retired_row(
+        self, store: GoalAuthorizationStore, disposition: AuthorizationDisposition
+    ) -> None:
+        """§16, arm 33: ``recent`` and ``export`` are where those are read."""
+        await store.record(authorization(id="a1"))
+        if disposition is AuthorizationDisposition.REVOKED:
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+        await store.settle("a1", to=disposition, settled_at=NOW)
+        assert await store.standing(GOAL) == ()
+
+    async def test_standing_reads_no_clock(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """§16: *"it reports no liveness, reports none and reads none"* — the caller
+        compares, against one reading of the injected clock."""
+        await store.record(established(id="a1"))
+        clock.reset()
+        clock.advance_by()
+        await store.standing(GOAL)
+        assert clock.readings == 0
+
+    async def test_recent_is_newest_first_by_proposed_at_with_an_id_tie_break(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16: ``RecipientGrantStore.recent``'s order one store over.
+
+        *"Newest first"* is ambiguous between insertion order and decision time,
+        which disagree whenever rows are appended out of order, and an ``id``
+        tie-break makes the order total rather than merely mostly determined.
+        """
+        await store.record(authorization(id="b", proposed_at=AT + timedelta(minutes=5)))
+        await store.record(authorization(id="c", proposed_at=AT, confirmation="c-2"))
+        await store.record(authorization(id="a", proposed_at=AT, confirmation="c-3"))
+        assert [row.id for row in await store.recent()] == ["b", "a", "c"]
+
+    async def test_recent_is_bounded(self, store: GoalAuthorizationStore) -> None:
+        """§16: every read of a Tier 1 store in this corpus is bounded (ADR-0021 §4)."""
+        for index in range(4):
+            await store.record(
+                authorization(
+                    id=f"a{index}",
+                    proposed_at=AT + timedelta(minutes=index),
+                    confirmation=f"c-{index}",
+                )
+            )
+        assert len(await store.recent(limit=2)) == 2
+
+    @pytest.mark.parametrize(
+        "limit",
+        [None, True, 1.0, "1", _Deceptive(5)],
+        ids=["none", "bool", "float", "str", "int-subclass"],
+    )
+    async def test_recent_refuses_a_limit_that_is_not_a_strictly_positive_int(
+        self, store: GoalAuthorizationStore, limit: object
+    ) -> None:
+        """§16, arm 58: refused **locally and before any I/O**.
+
+        The type is allowlisted rather than a ``bool`` denylisted, for the reasons
+        ``SqliteRecipientGrantStore.recent`` states at length: ``True`` is an
+        ``int``, passes ``<= 0``, and is silently taken as a bound of one.
+        """
+        with pytest.raises(ValueError, match="strictly positive int"):
+            await store.recent(limit=limit)  # type: ignore[arg-type]  # the refusal is the point
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_recent_refuses_a_non_positive_limit(
+        self, store: GoalAuthorizationStore, limit: int
+    ) -> None:
+        """§16: SQLite reads ``LIMIT -1`` as *no limit at all*, so the one call
+        offering a bounded read would become the unbounded read it exists to avoid."""
+        with pytest.raises(ValueError, match="strictly positive int"):
+            await store.recent(limit=limit)
+
+    async def test_export_carries_every_row_in_every_disposition_with_its_basis_whole(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 33: *"act, span and resolution"* — the data right (ADR-0004 §6)."""
+        await store.record(authorization(id="a1"))
+        await store.settle("a1", to=AuthorizationDisposition.DECLINED, settled_at=NOW)
+        await store.record(established(id="a2"))
+        exported = await store.export()
+        assert {row.id for row in exported} == {"a1", "a2"}
+        basis = exported[0].coverage[0].basis
+        assert (basis.act, basis.span, basis.resolution.rule.value) == (
+            "turn-0001",
+            "up to fifty pounds",
+            "as_stated",
+        )
+
+    async def test_clear_returns_the_count_and_leaves_the_store_empty(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 33: the wholesale erase, and the **only** operation that removes a
+        row — *"a store from which a row can be removed is one whose history can be
+        rewritten"*."""
+        await store.record(authorization(id="a1"))
+        await store.record(established(id="a2", goal=OTHER_GOAL))
+        assert await store.clear() == 2
+        assert await store.export() == ()
+        assert await store.recent() == ()
+
+    async def test_an_id_held_before_a_clear_may_be_recorded_again_afterwards(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16: nothing is retained — no id, no tombstone, no derived value."""
+        await store.record(authorization(id="a1"))
+        await store.clear()
+        assert await store.record(authorization(id="a1")) == "a1"
+
+    async def test_the_store_holds_a_detached_validated_snapshot(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0097 §3: a caller rewriting the row it handed in **after** ``record``
+        accepted it must not widen the history the store has already recorded."""
+        row = established(id="a1")
+        await store.record(row)
+        row.coverage[0].__dict__["fixed"] = "tampered"
+        held = await store.resolve("a1")
+        assert held is not None
+        assert held.coverage[0].fixed is None
+
+    async def test_an_invalid_record_is_refused_as_the_callers_error(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§16, arm 58: *"a refusal is the caller's error and a fault is the
+        store's"*, and the subclass relation means a caller catching the base class
+        still catches both."""
+        assert issubclass(InvalidAuthorizationError, AuthorizationError)
+        await store.record(established(id="a1"))
+        with pytest.raises(AuthorizationError):
+            await store.record(established(id="a2"))
