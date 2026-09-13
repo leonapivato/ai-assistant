@@ -224,10 +224,9 @@ this section is that statement read for a different consumer.** `_result_of`'s d
 puts `SPEND_REFUSED` before the send in terms — it *"reaches no claim at all and so reaches
 this function never"* — and puts `NO_RESULT` and `UNATTESTED` after a response in terms:
 *"answers a provider gave: the call was made, it completed, and what came back is not
-something this system will carry"*. For `DEADLINE_EXPIRED` it says exactly why the third
-group exists: recording a failure there would say *the call did not act* about *"a search
-whose query may have left the machine and may have been served and billed, which is the one
-direction ADR-0014 §4 refuses to guess in"*.
+something this system will carry"*. For `DEADLINE_EXPIRED` it gives the third group its
+reason: a search *"whose query may have left the machine and may have been served and
+billed"* is *"the one direction ADR-0014 §4 refuses to guess in"*.
 
 **Two readings of that docstring have to be kept apart.** It also groups
 `PROVIDER_REFUSED` and `RESPONSE_TOO_LARGE` with `TRANSPORT_FAILED` as *"calls that did
@@ -276,11 +275,10 @@ indeterminate rather than a sentence this system cannot support.
 > the prompt.
 
 **This half is included because the rule is about the world and not about search.** #2268
-is a search defect, and search is where the failure is acute — an egress send is driven as
-a *step*, and ADR-0170 §5 already obliges the composing stage to be told the plan and what
-became of each step, so the reply has an account of it. Ruling only on search would have
-made this decision a second search clause rather than the general one the issue asks for,
-and would have left the next outbound seam to mint its own vocabulary.
+is a search defect and search is where the failure is acute — an egress send is driven as a
+*step*, and ADR-0170 §5 already has the composing stage told what became of each one.
+Ruling only on search would have made this a second search clause rather than the general
+one the issue asks for, and would have left the next outbound seam to mint its own member.
 
 ### 4. `OutboundContact`: what it carries, and the one count it carries
 
@@ -573,8 +571,7 @@ is there so that when they do not, the user can see it.
 
 **Booked rather than refused, and #2291's audit-recording ADR is where it belongs.** That
 work is already owed and is the right place for a question about what the system records
-about its own conduct; deciding it here would be this ADR reaching into a decision it has
-not read. §12 names the trigger.
+about its own conduct; deciding it here would reach into a decision this ADR has not read.
 
 ### 11. The lane cut
 
@@ -675,8 +672,9 @@ not read. §12 names the trigger.
 >    carries **both** members — `outbound_contact` with `records` `0`, and
 >    `search_not_serviced` `UNAVAILABLE` — and renders both statements (§8).
 > 4. **A parked read the user approved, dispatched on the resume** (ADR-0244 §7), in two
->    shapes: one whose call returns records, which carries a contact with those records
->    counted; and one that reaches the provider and returns nothing, which carries a
+>    shapes: one whose call returns records, **two of them under one id**, so `records` is
+>    what `admitted_fourth_group` admitted at the resume's own site and not what the call
+>    returned (§4); and one that reaches the provider and returns nothing, which carries a
 >    contact with `records` `0`. Neither is a servicing and neither drives a step, and an
 >    implementation that computes the fact only in `reads` fails this arm (§2).
 > 5. **Three egress steps over one tool, and only the first carries a contact**: one
@@ -687,12 +685,15 @@ not read. §12 names the trigger.
 >    none either.
 > 6. **A turn that both searched and sent, in that encounter order and in the reverse**,
 >    where `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both — the declared order
->    and not the encounter order (§4) — and §6's one fragment is given once, stating the
->    contact rather than a lookup; **and the construction invariants over `OutboundContact`
->    itself, asserted on the model and not on its producer**, because it is a
->    boundary-crossing value a wire decode also builds: an empty `destinations`, one
->    carrying a class twice, and one carrying `(EGRESS_TOOL, SEARCH_PROVIDER)` are each
->    refused rather than accepted and carried in the order they arrived.
+>    and not the encounter order (§4) — and **`records` is the search's admitted count in
+>    both**, the egress contact neither zeroing nor replacing it, and a second search
+>    servicing that also admits records adding to it, because §4 counts one population
+>    over the turn. §6's one fragment is given once, stating the contact rather than a
+>    lookup. **And the construction invariants over `OutboundContact` itself, asserted on
+>    the model and not on its producer**, because it is a boundary-crossing value a wire
+>    decode also builds: an empty `destinations`, one carrying a class twice, one carrying
+>    `(EGRESS_TOOL, SEARCH_PROVIDER)`, one carrying a negative `records` and one carrying
+>    an unknown field are each refused rather than accepted and carried as they arrived.
 
 > 7. **A servicing that failed after its search had already been answered**, in three
 >    shapes, which are what separate the ruling from the record it cannot be read off.
