@@ -6504,6 +6504,57 @@ class GoalInterpretation(BaseModel):
         )
         return self
 
+    @model_validator(mode="after")
+    def _element_ids_are_unique_within_a_revision(self) -> GoalInterpretation:
+        """No two elements of one revision share an ``id`` (ADR-0253 §7).
+
+        **The container refuses the duplicate, because an element cannot see the tuple
+        it sits in** — which is this corpus's standing shape for an identity inside a
+        container, stated three times in ADR-0253 §8 alone: "``ActionPlan`` refuses two
+        interpretations sharing an ``id`` and two sharing a ``settles``, exactly as it
+        already refuses two steps sharing an id".
+
+        **What a duplicate would cost.** §7 makes the id "an ``Identifier | None``
+        naming **this** element durably across the revisions that retain it", and §8
+        makes it the ``declaration`` a ``GoalEvidence`` row carries and §5 makes it a
+        ``StepCondition.about``. Two elements under one id leave every one of those
+        naming a proposition nobody can identify: ``save_plan``'s §9 check would admit
+        the condition, ADR-0252 §6 test 1 would read *some* applicability, and ADR-0252
+        §8 limb 3's ``L.declaration == E.declaration`` would equate two readings of two
+        propositions — the exact confusion §7 of that decision exists to prevent.
+
+        **One id space across the three tuples**, and not one per tuple, because the id
+        is the durable name rather than a position: a ``declaration`` carries no tuple,
+        so an id that meant one thing under ``conditions`` and another under
+        ``criteria`` would be the ambiguity above arriving by a different route. §9's
+        ``C``/``S``/``D`` **labels** are per tuple and stay so; they are a different
+        space, minted per call and never persisted.
+
+        **An element carrying no ``id`` is exempt**, and there may be many: ``None`` is
+        the one value a row written before ADR-0253 carries (§7), such an element is
+        named by nothing, and refusing a revision for holding two would refuse rows
+        already on disk.
+
+        Raises:
+            ValueError: If two elements of this revision share an ``id``.
+        """
+        named = [
+            element.id
+            for tuples in (self.constraints, self.criteria, self.conditions)
+            for element in tuples
+            if element.id is not None
+        ]
+        if len(set(named)) != len(named):
+            repeated = sorted({one for one in named if named.count(one) > 1})
+            msg = (
+                f"two elements of revision {self.revision} share an id: "
+                f"{', '.join(repeated)}. An element id is the durable name a condition "
+                f"and an evidence row's declaration point at, so a revision states each "
+                f"once (ADR-0253 §7, §8)"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class Goal(BaseModel):
     """A durable objective the assistant is working toward (ADR-0014 §1, ADR-0249 §1).
@@ -11117,6 +11168,16 @@ class GoalEvidence(BaseModel):
         the interpretation call's whole input is one record, it reads no source and
         admits nothing.
 
+        **An output-backed row also declares no source instant** (ADR-0253 §8): its
+        ``as_of`` is absent, because that field is "the instant the source itself
+        declares" (ADR-0252 §4) and a ``StepExecution`` declares none. Refused here
+        rather than left to the composer, because the failure it prevents is the one §8
+        states: a row whose effective instant was the interpretation call's rather than
+        the producing step's "would pass a fifteen-minute recency requirement it should
+        fail" and "could **supersede** a genuinely newer reading". **That the ``read_at``
+        equals the producing step's ``finished_at`` is not checkable here** — the type
+        holds no execution — and is the composing lane's (§8, §12).
+
         **That basis admits two shapes and no third** (ADR-0253 §8, partially
         superseding ADR-0252 §1's enumeration in this limb alone). The row carries
         **exactly one** of one member of ``records`` and an ``interpreted_output``, and
@@ -11161,6 +11222,14 @@ class GoalEvidence(BaseModel):
                     "an output-backed INTERPRETATION evidence row carries empty "
                     "records: its whole input is the step output interpreted_output "
                     "names, and a row carries exactly one of the two (ADR-0253 §8)"
+                )
+                raise ValueError(msg)
+            if self.as_of is not None:
+                msg = (
+                    "an output-backed INTERPRETATION evidence row carries no as_of: "
+                    "that instant is 'the instant the source itself declares' "
+                    "(ADR-0252 §4) and a StepExecution declares none, so there is none "
+                    "to carry (ADR-0253 §8)"
                 )
                 raise ValueError(msg)
             return
