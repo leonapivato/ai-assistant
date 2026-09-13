@@ -149,23 +149,26 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: assembles `preceding = recent + retrieved` and `memories = preceding + supplement`,
 #: with `recent` the conversation's own history; the one construction site filters
 #: that sequence by membership and preserves its order. So the supply **opens** with
-#: this conversation's own turns whenever it holds any. This module neither re-ranks
+#: this conversation's own turns whenever that history read returned any — which is
+#: the condition the sentence names, and not the presence of such a note in the
+#: supply, for the reason two paragraphs down. This module neither re-ranks
 #: nor truncates that order — it now also *relies* on it, which is a dependency on a
 #: value handed across the contract rather than on a name imported across a boundary,
 #: and it is stated here because nothing in `planning` can assert it.
 #:
-#: **The leading run is the whole of what the order says, and the sentence claims no
-#: more.** It does *not* say that everything after the opening notes is somebody
-#: else's: `_supplement` searches the episodic band with no conversation filter,
-#: deduplicating only against `preceding` by id, so an older turn of *this*
-#: conversation — one outside the tail window — can come back after a retrieved belief.
-#: That is the same boundary ADR-0158 §4 already names from the other side, where
-#: `planning.planner` splits the tail from the retrieved group by "taking the **leading
-#: run** of `EPISODIC` records, so any belief between the two keeps them apart". An
-#: earlier wording here asserted the complement — that later notes are retrieved
-#: background — and that was false of exactly this supply. What is left is true and is
-#: what the measurements were taken over: the turns at the top are this conversation's
-#: recent ones, and an implicit subject comes from there.
+#: **What it says about the notes below the leading run carries its own hedge, and the
+#: hedge is the load-bearing half.** The sentence does *not* say that everything after
+#: the opening notes is somebody else's: `_supplement` searches the episodic band with
+#: no conversation filter, deduplicating only against `preceding` by id, so an older
+#: turn of *this* conversation — one outside the tail window — can come back after a
+#: retrieved belief. That is the same boundary ADR-0158 §4 already names from the other
+#: side, where `planning.planner` splits the tail from the retrieved group by "taking
+#: the **leading run** of `EPISODIC` records, so any belief between the two keeps them
+#: apart". So what is said of those notes is the one thing true of all of them — they
+#: are what this assistant *retrieved* rather than read from the conversation, which
+#: covers the supplement's own read as much as retrieval's — followed by the hedge
+#: naming the case above. An earlier wording asserted the complement flatly, and a
+#: review round found it false of exactly this supply.
 #:
 #: **It says the opening notes are this conversation's, and deliberately does not say
 #: which of them wins.** `history` is the conversation's turns *oldest first*
@@ -180,25 +183,33 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: sentence claims only what the order really says, which is also the whole of the
 #: defect: the subject is this conversation's, not a note retrieved from another.
 #:
-#: **It is conditional, because the leading run can be empty.** On a first turn, and
-#: on a turn whose history read degraded, `recent` is empty while retrieval may still
-#: supply records — so the notes open with retrieved background, and a retrieved
-#: episode also begins "The user asked: …". Nothing in the supply distinguishes the
-#: two: `SearchSupply` carries no boundary and no origin, which is why the sentence
-#: says *if* any note records an earlier turn of this conversation rather than
-#: asserting one does. What it cannot do is make the case decidable; measured on a
-#: supply stripped of its own episode, this instruction and the one before it compose
-#: the same query on 8 of 8 samples, so the un-decidable case is left exactly where it
-#: already was and the honest statement is the whole of what is available here. The
-#: conditional was lost once in this lane's own rework and a round found it again,
-#: which is what the regression arm below is for.
+#: **The claim carries its condition, and the condition is the read rather than the
+#: notes.** `recent` is empty on a first turn and on a turn whose history read
+#: degraded, while retrieval may still supply records — so the notes can open with
+#: retrieved background, and a retrieved episode also begins "The user asked: …".
+#: Nothing in the supply distinguishes the two: `SearchSupply` carries no boundary and
+#: no origin. An earlier wording made the antecedent the **notes** — *if any of them
+#: record turns this conversation has already had* — and a review round showed that
+#: false of the supply two paragraphs up, where such a note is present and is last
+#: rather than first. The antecedent here is instead the assistant's own read, which is
+#: what actually decides whether a leading run exists: where that read failed there is
+#: no leading run and the sentence claims nothing of the shape that round named. What
+#: no wording can do is make that case **decidable** — measured on a supply stripped of
+#: its own episode, this instruction and the unmodified one compose the same query on 8
+#: of 8 samples, so the un-decidable case is left exactly where it already was. The
+#: decidable fix is a rendered boundary on `SearchSupply`, filed as #2359.
 #:
-#: Measured rather than assumed, against the two drives #2262 recorded failing and the
-#: four it recorded passing, replayed over the supplies a scratch hub actually built
-#: for them: the shape that composed a query about another conversation's subject on
-#: 10 of 10 samples composes one about its own on 8 of 8, a supply carrying two
-#: requests of this conversation stays inside it on 8 of 8, the four passing shapes are
-#: unchanged, and three utterances that must compose nothing still decline 18 of 18.
+#: Measured rather than assumed, on the supplies a scratch hub actually built for
+#: #2262's six drives and replayed through this composer, seven wordings compared
+#: inside one process so that each met the same model on the same records (the table is
+#: in the pull request). The shape that composed a query about another conversation's
+#: subject on 10 of 10 samples composes one about its own on 16 of 16; a supply
+#: carrying two requests of this conversation stays inside it on 16 of 16; the four
+#: drives #2262 recorded passing and the supplement-episode supply are unchanged at 8
+#: of 8; three utterances that must compose nothing still decline 18 of 18. **Deleting
+#: the second half of the first sentence was measured too**, and is what the exception
+#: exists to avoid: every wording that dropped it held the single-request shapes and
+#: halved the two-request one, to 7 of 16 at best and 1 of 8 at worst.
 _SYSTEM_PROMPT_BASE: Final = """\
 You turn one request from a user of an AI assistant into a single web-search \
 query. Reply with exactly one of the two JSON objects below — one JSON object and \
@@ -240,16 +251,16 @@ one into the query unless the request is asking about it."""
 #: model, and where it sits; what the block *says* is a reviewer's read, and the
 #: reasoning to read it against is above.
 _IMPLICIT_SUBJECT_GUIDANCE: Final = """\
-The notes are in the order this assistant selected them. If any of them record \
-turns this conversation has already had, the notes open with those; the rest are \
-things this assistant retrieved, which may themselves include an older turn of \
-this conversation. So where the request leaves its subject implicit — "that", \
-"them", "more about it" — it refers to what was asked for in one of this \
-conversation's own turns, and the notes at the top are where the recent ones \
-are: take the subject from there, and never from a want, a purchase or a plan a \
-note merely records about the user. Search for the thing that was asked for; \
-carry a further detail in beside it only where the detail narrows that thing \
-rather than naming something else."""
+The notes are in the order this assistant selected them: unless its read of \
+this conversation failed, they open with the turns this conversation has \
+already had, and the rest are things it retrieved, which may themselves include \
+an older turn of this conversation. So where the request leaves its subject \
+implicit — "that", "them", "more about it" — it refers to what was asked for in \
+one of this conversation's own turns, and the notes at the top are where the \
+recent ones are: take the subject from there, and never from a want, a purchase \
+or a plan a note merely records about the user. Search for the thing that was \
+asked for; carry a further detail in beside it only where the detail narrows \
+that thing rather than naming something else."""
 
 #: The whole instruction: the ratified prompt, then the paragraph above it.
 _SYSTEM_PROMPT: Final = f"{_SYSTEM_PROMPT_BASE}\n\n{_IMPLICIT_SUBJECT_GUIDANCE}"
