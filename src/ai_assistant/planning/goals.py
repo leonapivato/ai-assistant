@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     TERMINAL_ATTEMPT_STATES,
+    ActionPlan,
     AttemptPhase,
     EvidenceStanding,
     Goal,
@@ -41,7 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from ai_assistant.core.types import (
-        ActionPlan,
         AttemptTransition,
         GoalInterpretation,
         GoalStatus,
@@ -623,6 +623,41 @@ def _appended_id(held: tuple[str, ...], addition: str | None) -> tuple[str, ...]
     if addition is None or addition in held:
         return held
     return (*held, addition)
+
+
+def revalidated_plan(plan: ActionPlan) -> ActionPlan:
+    """Rebuild ``plan`` as a validated, detached :class:`ActionPlan`, or refuse it.
+
+    ADR-0023 §2's rule read over the record: ``model_copy(update=...)`` **skips
+    validators** — "a pydantic property no type can close" — so "a write that reaches
+    past it must re-validate". ``SqlitePlanStore`` has revalidated at its own write
+    since ADR-0049 §1, and stating it here makes the **two** conforming stores in this
+    package agree rather than leaving a caller's plan admitted by one and refused by
+    the other.
+
+    **ADR-0253 is what makes it load-bearing rather than tidy.** Before that decision a
+    plan's only construction-time rule was step-id uniqueness; it now states a graph —
+    a dependency pointing strictly backwards, a reference that is a dependency filling a
+    free argument, a bounded and ordered set of interpretations — every clause of which
+    ADR-0253 §§1, 6 and 8 make **unconstructible** rather than detected. A store that
+    persisted a plan reaching past those validators would put a cycle, or a conditioned
+    step ahead of the step its verdict comes from, into the record a driver walks.
+
+    Args:
+        plan: The plan as the caller handed it in.
+
+    Returns:
+        The plan, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return ActionPlan.model_validate(plan.model_dump())
+    except ValidationError as exc:
+        subject = getattr(plan, "id", "<no id>")
+        msg = f"plan {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def refuse_an_unsubstituted_condition(plan: ActionPlan, goal: Goal) -> None:

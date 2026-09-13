@@ -39,6 +39,7 @@ from ai_assistant.planning.goals import (
     invalidated,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
+    revalidated_plan,
     revalidated_revision,
     revalidated_row_ids,
     settled,
@@ -737,48 +738,60 @@ class InMemoryPlanStore:
         read. ADR-0253 §7's disjointness makes it exact — an element id can never
         match the condition-label grammar. **A plan declaring neither is not checked.**
 
-        Stored as a copy for the same reason goals and executions are:
+
+        **The plan is revalidated before it is kept, not merely copied** (ADR-0023 §2,
+        ADR-0253 §§1, 6, 8). ``model_copy(update=...)`` skips validators, so a caller
+        can hand in a plan whose graph ADR-0253 makes **unconstructible** — a dependency
+        pointing forward, a reference outside ``depends_on``, a conditioned step ahead
+        of the step its verdict comes from. "A write that reaches past it must
+        re-validate", and ``SqlitePlanStore`` has done so at its own write since
+        ADR-0049 §1; doing it here is what makes the two conforming stores agree.
+
+        Stored detached for the same reason goals and executions are:
         ``frozen=True`` stops ``plan.goal_id = ...`` but not
         ``plan.__dict__["goal_id"] = ...``, so sharing the instance would let a
         caller rewrite the store's own audit record — including a nested step's
-        ``capability``.
+        ``capability``. The revalidated snapshot **is** that detachment — it is built
+        from the caller's dump, so no node of the caller's graph survives in it — which
+        is why it replaces the deep copy rather than sitting beside one.
         """
-        held = self._goals.get(plan.goal_id)
+        snapshot = revalidated_plan(plan)
+        held = self._goals.get(snapshot.goal_id)
         if held is None:
-            msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+            msg = f"plan {snapshot.id} refers to unknown goal {snapshot.goal_id}"
             raise PlanningError(msg)
-        refuse_an_unsubstituted_condition(plan, held)
-        if plan.targets_revision is None:
+        refuse_an_unsubstituted_condition(snapshot, held)
+        if snapshot.targets_revision is None:
             msg = (
-                f"plan {plan.id} carries no targets_revision: the unstamped state "
+                f"plan {snapshot.id} carries no targets_revision: the unstamped state "
                 "exists only between the planner's return and the loop's stamp, and "
                 "the window is closed at the store (ADR-0249 §8)"
             )
             raise PlanningError(msg)
-        if plan.supersedes is not None:
-            if plan.supersedes == plan.id:
-                msg = f"plan {plan.id} supersedes itself; a plan cannot replace the plan it is"
+        if snapshot.supersedes is not None:
+            if snapshot.supersedes == snapshot.id:
+                msg = f"plan {snapshot.id} supersedes itself; a plan cannot replace the plan it is"
                 raise PlanningError(msg)
-            predecessor = self._plans.get(plan.supersedes)
+            predecessor = self._plans.get(snapshot.supersedes)
             if predecessor is None:
-                msg = f"plan {plan.id} supersedes unknown plan {plan.supersedes}"
+                msg = f"plan {snapshot.id} supersedes unknown plan {snapshot.supersedes}"
                 raise PlanningError(msg)
-            if predecessor.goal_id != plan.goal_id:
+            if predecessor.goal_id != snapshot.goal_id:
                 msg = (
-                    f"plan {plan.id} supersedes plan {plan.supersedes}, which is under goal "
-                    f"{predecessor.goal_id} rather than {plan.goal_id}; a revision replaces "
-                    "a plan for the same goal"
+                    f"plan {snapshot.id} supersedes plan {snapshot.supersedes}, which is under "
+                    f"goal {predecessor.goal_id} rather than {snapshot.goal_id}; a revision "
+                    "replaces a plan for the same goal"
                 )
                 raise PlanningError(msg)
-        existing = self._plans.get(plan.id)
-        if existing is not None and existing != plan:
+        existing = self._plans.get(snapshot.id)
+        if existing is not None and existing != snapshot:
             msg = (
-                f"plan {plan.id} already exists and differs; re-planning must use a new "
+                f"plan {snapshot.id} already exists and differs; re-planning must use a new "
                 "id so the previous plan stays an intact audit record"
             )
             raise PlanningError(msg)
-        self._plans[plan.id] = plan.model_copy(deep=True)
-        return plan.id
+        self._plans[snapshot.id] = snapshot
+        return snapshot.id
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None``."""
