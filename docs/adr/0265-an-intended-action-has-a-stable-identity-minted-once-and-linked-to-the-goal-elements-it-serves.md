@@ -129,14 +129,27 @@ toward any of them.
 > every goal at the moment it is opened.
 
 > **Normative — the tuple is bounded by a refusal and never by an elision, and the bound is
-> `MAX_INTENDED_ACTIONS`, a `Final[int]` of `core/types.py` valued at 32.** A goal holding that
-> many intended actions **refuses** a further minting (§5) rather than dropping its oldest, so
-> `GoalBrief.actions` (§4) is bounded by construction and no lane truncates it at the seam. **No
-> lane elides an intended action, for any reason, at any age**: ADR-0249 §2 may elide a revision
-> and ADR-0252 §13 may elide an evidence row because each leaves a count on the record and loses
-> no identity, while **an identity that can vanish is not an identity** — the effect claim §6
-> obliges would silently become fresh for an act the goal had already performed. ADR-0086 §4's
-> no-silent-truncation rule is satisfied by the refusal and not by a disclosure.
+> `MAX_INTENDED_ACTIONS`, a `Final[int]` of `core/types.py` valued at 64** — `MAX_GOAL_EVIDENCE`'s
+> figure, for a record of the same goal with the same durability. A minting that would carry a
+> goal past it is **refused whole** (§5), and **no lane elides an intended action, for any reason,
+> at any age**: ADR-0249 §2 may elide a revision and ADR-0252 §13 may elide an evidence row
+> because each leaves a count on the record and loses no identity, while **an identity that can
+> vanish is not an identity** — the effect claim §6 obliges would silently become fresh for an act
+> the goal had already performed, which is a duplicate booking nobody could detect afterwards.
+> `GoalBrief.actions` (§4) is therefore bounded by construction, no lane truncates it at the seam,
+> and ADR-0086 §4's no-silent-truncation rule is satisfied by the refusal rather than by a
+> disclosure.
+
+**The refusal exhausts a long-lived goal, and that is the direction chosen rather than an
+oversight.** A goal that intends 64 acts and is asked for a 65th is refused, and nothing here
+retires a completed one to make room — so a recurring goal reaches the bound and stops, which §7
+books and the Consequences name as a falsifier. ADR-0148 §1's third clause is the reason the
+refusal is the right half of the trade: *"Refusing costs a recoverable error the user sees;
+proceeding costs a disclosure nobody can detect afterwards."* A rollover that dropped the oldest
+identity would make a completed booking's claim fresh again, silently, at the moment capacity ran
+out — the failure this whole decision exists to prevent, arriving through the mechanism meant to
+keep it usable. What actually closes it is **retirement**, which needs the standing field §1
+declines and §7 books with what fires it, and which is the same decision that takes withdrawal.
 
 > **Normative — an `IntendedAction` is a record of an intent and never an instruction to act.**
 > **No lane walks `intended_actions` and dispatches, plans, schedules or reports from it.** An
@@ -217,10 +230,21 @@ compares and nothing can re-derive.
 > **Normative — a model may propose a new intended action only from the interpretation's own
 > elements, and never from a plan's convenience.** A `ProposedAction` is warranted where the
 > user's words require an act the goal does not already hold an action for; **"book two identical
-> rooms" mints two because the user asked for two**, and a planner that splits one intended act
-> across two steps for its own reasons mints none. This is ADR-0249 §7's asymmetry observed rather
-> than extended: interpretation is the model's, and a **count of acts the user asked for** is
-> interpretation.
+> rooms" warrants two because the user asked for two**, and a planner that splits one intended act
+> across two steps for its own reasons warrants none. This is ADR-0249 §7's asymmetry observed
+> rather than extended: interpretation is the model's, and a **count of acts the user asked for**
+> is interpretation. **What is warranted is minted where §1's bound admits it and is refused whole
+> where it does not** (§5): the two clauses do not conflict, because this one says which
+> proposals are legitimate and that one says what capacity the goal has for them.
+
+> **Normative — a minting is all-or-nothing, and a proposal crossing the bound records none of
+> itself.** Where a `PlannerOutput` proposes *k* actions and the goal holds more than
+> `MAX_INTENDED_ACTIONS` − *k*, `record_intended_actions` refuses and **no action of that
+> proposal is recorded** — not the first, not a prefix, not the ones that would have fit. A
+> partial record would leave *"book two identical rooms"* holding **one** intended action, which
+> is the two-rooms defect reached through the capacity path and is worse than a refusal the turn
+> can report. **What the turn then does** — report, replan, compose without acting — is recovery
+> policy and is A7's and A9's, which is ADR-0253 §9's own division for a refused plan.
 
 > **Normative — what a wrongly minted action costs is a duplicate dispatch, this decision contains
 > it by no mechanism, and the trade is stated rather than implied away.** Where a goal already
@@ -358,7 +382,10 @@ the whole of it.
 > appends one or more `IntendedAction`s to the named goal's `intended_actions`, advances
 > `version`, and returns the stored goal. `core/types.py` gains **`IntendedActionMinting`**, a
 > frozen command carrying exactly `goal_id`, `actions` (a **non-empty** `tuple[IntendedAction,
-> ...]`) and the `expected_version` it was computed against.
+> ...]`) and the `expected_version` it was computed against. **A model validator refuses a command
+> two of whose `actions` carry one `id`**, so §1's one-id-per-member invariant cannot be breached
+> *inside* a single append — a case the store's refusal of an id the goal **already holds** does
+> not reach, because neither id is stored when the command is built.
 
 > **Normative — the write is compare-and-swap and the store takes a command, not a snapshot.**
 > ADR-0014 §5's discipline binds unchanged and ADR-0249 §12's statement of it is adopted whole:
@@ -437,6 +464,18 @@ the whole of it.
 > the criteria and is **A10's by name**. So the three conditions bound reuse and do not establish
 > it, and **no lane reads them as establishing it**.
 
+> **Normative — this decision adds a prerequisite to the production-deployment gate, and states
+> it here so that a reader does not take the gate's existing three for the whole.** **No
+> consequential capability is wired until a containment for §2's wrongly-minted action is
+> implemented and demonstrated** — a deterministic or user-authorised ruling that a proposed act
+> is a second act the user asked for and not the act this goal already performed. **The gate's own
+> three guarantees do not reach it**: verification, uncertain-outcome and cancellation could each
+> land and leave this path exactly where it stands, because the duplicate here is a *correctly
+> claimed, correctly authorised, correctly verified* dispatch of an effect the goal already has —
+> nothing downstream of the mint can see that it was one act and not two. This is ADR-0255 §13's
+> own move, taken for the same reason and stated in its own words: the honest half of stating a
+> residual rather than closing it.
+
 > **Normative — this decision takes no effect claim, computes no key, and refuses no dispatch.**
 > It mints an identity and states what a claim owes it. **No lane cites this section as authority
 > for dispatching a step, for refusing one, for writing a `GoalStatus`, or for reading an effect
@@ -475,6 +514,12 @@ contradiction where the acts it governs cannot yet be performed.
   on the record. **Not decided** (§1). **Fired by A9's cancellation semantics, or by a measured
   case in which a live-but-unnamed action causes a wrong act** — which §1's
   never-an-instruction-to-act clause is what makes hard to reach.
+- **Retiring an intended action, and therefore what a goal at `MAX_INTENDED_ACTIONS` does.**
+  **Not decided** (§1). A goal that has intended 64 acts refuses a 65th and nothing here frees
+  capacity, so a recurring goal reaches the bound and stops. **No lane closes this by eliding the
+  oldest member**, which §1 forbids in terms and for the reason it gives. **Fired by the same
+  decision that takes withdrawal** — retirement and withdrawal are one standing field — **or by a
+  measured goal that reaches the bound.**
 - **Two goals sharing one intended action.** **Not decided.** The record lives inside a `Goal` and
   no clause admits a cross-goal reference; a second goal that means the same act mints its own.
   **Fired by a decision that states what a shared act's deletion, export and permission trail
@@ -564,12 +609,13 @@ text states what a marked clause means and supplies no obligation (§3).
   and `PlanStep.intended_action`; `core/protocols.py`'s `record_intended_actions` and
   `save_plan`'s added conjunct; `planning`'s `PlanStore` implementation with its schema migration
   and export, the shared conformance suite for the new member and the added conjunct, and the
-  canonical fake in `ai_assistant.testing`. **L1 moves `PROTOCOL_VERSION`** (§5). Arms 1, 5, 6, 7.
+  canonical fake in `ai_assistant.testing`. **L1 moves `PROTOCOL_VERSION`** (§5). Arms **1(a)**,
+  5, 6, 7.
 - **L2 — the loop, in `orchestration` alone.** Recording `PlannerOutput.actions` in §2's order,
   the `serves` resolution and its drops (§3), the `GoalBrief.actions` projection with its
   live-link rendering — which is `orchestration`'s, on ADR-0252 §11's *"projected by
-  `orchestration` alone"* — and the resolution and refusal of a step's action label (§4). Arms 2,
-  3, 4.
+  `orchestration` alone"* — and the resolution and refusal of a step's action label (§4). Arms
+  **1(b)**, 2, 3, 4.
 - **L3 — the seam, in `planning` alone.** `planning/planner.py`'s `A`-labelled block in
   `_render_request`, the system turn stating the space, and the strict extraction of the step's
   `action` key. Arm 8.
@@ -593,12 +639,15 @@ text states what a marked clause means and supplies no obligation (§3).
 The owner's two cases are arms 1 and 2.
 
 1. **Two identical rooms are two intended actions on one goal**, and *"an earlier booking must not
-   count as fulfilling 'book another one'"*. A goal whose request is *"book
-   two identical rooms"*; the planner returns two `ProposedAction`s and a plan whose two steps
-   carry the **same** capability and byte-identical `parameters` and name `A1` and `A2`. Assert:
-   two `IntendedAction`s are recorded with **distinct** ids; both steps resolve; and the triple
-   §6's first clause requires is **distinct for the two steps** while the argument key is equal —
-   which is the fact an at-most-once claim scoped to the goal alone cannot see.
+   count as fulfilling 'book another one'"*. Stated in two halves, because the two lanes that own
+   them are two lanes. **1(a), L1:** a goal minted two `IntendedAction`s in one
+   `IntendedActionMinting` holds two members with **distinct** ids, and a plan whose two steps
+   carry the **same** capability and byte-identical `parameters` but **different**
+   `intended_action` values is saved — so the triple §6's first clause requires is **distinct for
+   the two steps** while the argument key is equal, which is the fact an at-most-once claim scoped
+   to the goal alone cannot see. **1(b), L2:** given a `PlannerOutput` carrying two
+   `ProposedAction`s and a plan whose two steps name `A1` and `A2`, the loop records two actions
+   and resolves **both** labels, in §2's order, before the plan is saved.
 2. **"Change our booking to Sunday" mints no second action.** From arm 1's goal at a revision
    whose element reads Saturday, record a revision restating it Sunday. Assert: the element's `id`
    is **new** (ADR-0253 §7); `Goal.intended_actions` is **byte-identical** before and after; the
@@ -618,10 +667,12 @@ The owner's two cases are arms 1 and 2.
    elides.** `save_plan` refuses a plan whose `intended_action` is not a member of that goal's
    `intended_actions`; `record_intended_actions` appends **two** actions in one
    compare-and-swap, and refuses a stale `expected_version`, an `id` the goal already holds, and a
-   minting that would carry the goal past `MAX_INTENDED_ACTIONS`. Assert that each refusal writes
-   nothing, that the **last two carry a class distinct from the stale-write class** (§5), and that
-   a goal at the bound holds every action it held before the refusal — **no member elided, no
-   count advanced**.
+   minting that would carry the goal past `MAX_INTENDED_ACTIONS` — the last over a goal at 63
+   handed **two** actions, so the all-or-nothing limb is exercised and **neither** is recorded.
+   Assert that each refusal writes nothing, that the **last two carry a class distinct from the
+   stale-write class** (§5), and that a goal at the bound holds every action it held before the
+   refusal — **no member elided, no count advanced**. And an `IntendedActionMinting` two of whose
+   `actions` carry one `id` is **not constructible** (§5).
 6. **The record round-trips and the export closes.** A goal carrying two intended actions
    round-trips through `model_dump()` and construction; `PlanExport` carries them inside `goals`
    with no new member; `delete_goal` removes them with the goal; and a stored goal written before
@@ -682,6 +733,12 @@ booked in §7.
   a required deposit, a confirmation call — has no element to be minted from. If such acts are
   common, minting from the user's words is too narrow a rule. **What fires it: a measured case in
   which a needed act has no warrant in the user's words.**
+- **A goal that runs out of acts.** A recurring or long-lived goal reaches
+  `MAX_INTENDED_ACTIONS` and can intend no more, because nothing retires a completed act and §1
+  forbids eliding one. The refusal is the chosen half of ADR-0148 §1's trade, and it is a
+  falsifier rather than a residual: if goals commonly reach 64, an act's identity needs a
+  lifecycle and this record is too flat. **What fires it: a measured goal that reaches the
+  bound**, or the decision that takes withdrawal, whichever is first.
 - **A step that is half an act.** Two steps that together perform one effect — book, then confirm
   — both name one intended action, and a claim scoped to the triple would let the second reuse the
   first's completed effect. §6's fourth clause says the three reuse conditions do not establish
