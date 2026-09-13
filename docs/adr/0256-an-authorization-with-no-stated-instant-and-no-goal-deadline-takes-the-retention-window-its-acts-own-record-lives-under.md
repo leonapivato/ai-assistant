@@ -6,11 +6,12 @@
   — **six limbs, all about one field, `Authorization.expires_at`.** **§12's ladder rung 3
   entire**, its *"no row at all"* and its *"Nothing is invented, nothing is defaulted and
   nothing falls back to a configuration"* included: where the recorded act states no instant and
-  the goal carries no `deadline`, `expires_at` is now `proposed_at` advanced by the deployment's
-  turn-retention window and a row **is** written, where that window is finite; with it **§1's
-  fourth proposal condition**, *"§12's ladder yields an `expires_at` … There is no deployment
-  figure to fall back on and none is invented"*, which governs path (iii) too, and **§20's arm
-  69 in its two rung-3 cases alone**, every other case of that arm standing verbatim (§1, §7).
+  the goal carries no `deadline` **or carries one at or before `proposed_at`**, `expires_at` is
+  now `proposed_at` advanced by the deployment's turn-retention window and a row **is** written,
+  where that window is finite; with it **§1's fourth proposal condition**, *"§12's ladder yields
+  an `expires_at` … There is no deployment figure to fall back on and none is invented"*, which
+  governs path (iii) too, and **§20's arm 69 in its two rung-3 cases alone**, every other case of
+  that arm standing verbatim (§1, §7).
   **§12's stated cost of that rung** — *"a goal carrying no `deadline` whose user stated no
   horizon has no route (d) at all, and every call of it asks"* — which is true only where that
   window is set to keep turns forever, and there the ratified rung stands verbatim as the
@@ -482,18 +483,21 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    invented but read (§2). And with both, **§20's arm 69** in its two rung-3 cases alone — *"An
    act naming none on a goal carrying **no** `deadline`, and one carrying a `deadline` at or before
    `proposed_at` → **no path-(i) proposal and no path-(iii) row is written** … one test each"* —
-   which a lane must now ship as §9's arms instead. A reader holding only ADR-0254 writes no row
-   for every deadline-free goal and ships a test asserting that; after this decision they write
-   one wherever the turn-retention window is finite, which is the default. **Superseded wherever
-   `episode_retention` is finite — which is its shipped default — and not otherwise**: the
-   ratified rung and its no-row outcome survive **verbatim** in the one case where
-   `episode_retention` is `None`, and there alone (§1, §3). **Every other case of arm 69 stands
-   verbatim**: rung 1's,
-   rung 2's, its path-(ii) case — *"a live row with an explicit future `expires_at` on a goal
-   carrying **no** `deadline`, corrected by 'make it Sunday' naming no horizon → the correction
-   **is written**, transcribing that `expires_at` unchanged"*, which §5 leaves untouched because
-   that correction's span states no instant — its `deadline`-edited-after-the-write case, its
-   `Settings` roster test and its recipient-grant and configured-provider limbs.
+   which a lane must now ship as §9's arms instead — **two of them, one per case**, matching arm
+   69's own *"one test each"*: §9's ordinary-case arm for a goal carrying no `deadline`, and its
+   stale-or-equal-`deadline` arm for one carrying a `deadline` at or before `proposed_at`. A
+   reader holding only ADR-0254 writes no row for a deadline-free goal **and none for a goal whose
+   `deadline` is at or before `proposed_at`**, and ships a test asserting each; after this
+   decision they write one in **both** cases wherever the turn-retention window is finite, which
+   is the default. **Superseded wherever `episode_retention` is finite — which is its shipped
+   default — and not otherwise**: the ratified rung and its no-row outcome survive **verbatim** in
+   the one case where `episode_retention` is `None`, and there alone (§1, §3). **Every other case
+   of arm 69 stands verbatim**: rung 1's, rung 2's, its path-(ii) case — *"a live row with an
+   explicit future `expires_at` on a goal carrying **no** `deadline`, corrected by 'make it
+   Sunday' naming no horizon → the correction **is written**, transcribing that `expires_at`
+   unchanged"*, which §5 leaves untouched because that correction's span states no instant — its
+   `deadline`-edited-after-the-write case, its `Settings` roster test and its recipient-grant and
+   configured-provider limbs.
 2. **§12's stated cost.** *"a goal carrying no `deadline` whose user stated no horizon has no
    route (d) at all, and every call of it asks"*. Over-wide as it stands: true only under a
    deployment that keeps turns forever. **Superseded in scope, and verbatim where §3 fires.**
@@ -664,6 +668,13 @@ one.
 
 > **Normative.** **Rung 2 is not displaced.** A goal carrying a `deadline` takes rung 2 and the
 > goal's own instant, though a finite window exists and would give a different one.
+
+> **Normative.** **A stale or equal `deadline` reaches rung 3, not rung 2.** A finite
+> `episode_retention`; a goal carrying a `deadline` **at or before `proposed_at`**; an act naming
+> no instant → rung 2 does **not** take that `deadline`, rung 3 fires, and a row **is** written on
+> path (i) and on path (iii) with `expires_at` equal to `proposed_at` advanced by the window —
+> which is the second of the two cases §7 limb 1 records against ADR-0254 §20's arm 69, and the
+> one an implementation keeping the old no-row behaviour would otherwise still pass.
 
 > **Normative.** **Rung 1 is not displaced and is not clamped.** An act naming an instant takes
 > rung 1 **even where that instant is later than the window would give**, and the row carries it
