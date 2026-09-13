@@ -349,6 +349,47 @@ function changeConversation(id) {
   setConversation(id);
 }
 
+// --- the reference this next turn carries (ADR-0250 §11, §13) ----------------
+//
+// **Answering a clarification and taking a goal up are one thing here**, because they
+// are one thing in the decision: §11 makes answering "a turn and not an operation of
+// its own, and that is the whole reason `converse` gains a keyword rather than the
+// surface gaining a fifth verb", and §13 performs the cross-conversation resumption by
+// the same keyword carrying a goal instead of a question. So this page has no answer
+// form and no resume form — it has a reference attached to the ordinary composer.
+//
+// **It holds the object the gateway takes and not two fields**, so that the shape sent
+// is the shape the type admits: "a `question_id` and no `goal_id`, or a `goal_id` and
+// no `question_id`".
+let reference = null;
+
+// Attach one, say what the next turn will be about, and put the cursor where the answer
+// goes.
+function setReference(next, note) {
+  reference = next;
+  const hint = el("referencing");
+  hint.textContent = note;
+  hint.hidden = false;
+  el("clear-reference").hidden = false;
+  el("utterance").focus();
+}
+
+// Give it up.
+//
+// **Nothing is lost by giving one up**, which is why this page drops it after a turn
+// rather than keeping it for a retry: "the handle is the question's own durable `id`
+// and needs no re-minting" (§11), so it is read again from the listing at no cost —
+// where a consent token is process-scoped and is the thing `answerConfirmation` spends
+// so carefully. Keeping one attached across turns would be the worse failure: a second
+// question answered against a record the owner had stopped meaning.
+function clearReference() {
+  reference = null;
+  const hint = el("referencing");
+  hint.textContent = "";
+  hint.hidden = true;
+  el("clear-reference").hidden = true;
+}
+
 function setConversation(id) {
   conversationId = id;
   try {
@@ -1051,12 +1092,22 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // member over. `read_answer` is guarded for the identical reason: a `declined` answer
   // carries `turn` and `reply` both `null` (ADR-0170 §4's second shape), so every term
   // above it is empty on the one outcome that most plainly *did* something.
+  //
+  // **And not a turn that could not act yet either** (ADR-0250 §10, §5). A turn whose
+  // planner raised a clarification "drives no step of its plan and produces no effect",
+  // and an undecided turn "engaged neither goal, drove nothing" and carries no turn at
+  // all — so both reach here with no steps, no step account and no route, and "No
+  // action was needed." above a question the owner is being asked to answer is the same
+  // contradiction on one screen, two members further on. It is the *opposite* of what
+  // each of those turns says: action was needed and is waiting on an answer.
   if (
     outcome.steps.length === 0 &&
     outcome.step === null &&
     outcome.routed === null &&
     outcome.read_confirmation === null &&
-    outcome.read_answer === null
+    outcome.read_answer === null &&
+    outcome.clarification === null &&
+    outcome.disambiguation === null
   ) {
     line(body, "No action was needed.", "notice");
   }
@@ -1083,6 +1134,17 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // members this surface is admitted for.
   renderReadConfirmation(body, outcome.read_confirmation);
   renderReadAnswer(body, outcome.read_answer);
+  // ADR-0250's four members, in the order a reader needs them: what became of the
+  // handle they gave, what this turn did with a goal, the question it could not tell
+  // two goals apart with, and the question it raised. **No member is derived from
+  // another and each is rendered on its own** (§5) — a `reference` is carried on a turn
+  // with no engagement, and a `disambiguation` only on a turn that engaged nothing at
+  // all — so none of these four is guarded on any of the others. They go below the
+  // reply and never in place of it, which is `renderRouted`'s own placement.
+  renderReferenceOutcome(body, outcome.reference);
+  renderGoalEngagement(body, outcome.goal_engagement);
+  renderDisambiguation(body, outcome.disambiguation);
+  renderClarification(body, outcome.clarification);
   // `null` only where nothing could be resolved (a recovered park, a deleted
   // conversation), and the last known id is then kept rather than cleared: the
   // hub decides which conversation a turn ran under, and forgetting one on an
@@ -1488,6 +1550,231 @@ function renderReadAnswer(body, member) {
     throw new TypeError("read_answer is not one of ADR-0244 §9's members");
   }
   line(body, readAnswerWords(member), "notice");
+}
+
+// --- the goal vocabularies (ADR-0250 §5, §11, §12, §15) ----------------------
+//
+// **One fixed statement per member, written out as a literal**, which is
+// `READ_ANSWER_WORDS`' ratified shape three vocabularies over and ADR-0250 §15's clause
+// in terms: "a surface that renders no statement for a `ReferenceOutcome`, an
+// `EngagementDisposition` or a `ClarificationWithdrawal` member it was given has not
+// implemented this section — it is **not permissibly degraded**". Nothing below is
+// assembled from a member's value, its name, or a format string over the vocabulary.
+//
+// **None of them carries an identifier**, a goal, a deadline, a count, a monetary
+// figure, a threshold or a settings name — §15's bar, which is ADR-0242 §9's binding on
+// these vocabularies for the same reason. The one identifier this decision's surfaces
+// render is the question id, "because the act takes it", and it appears in the listing
+// and in a raised clarification rather than in any statement below.
+
+// What this turn did with the goal it engaged (ADR-0250 §5).
+//
+// **These name the act and never restate the announcement.** §5 owns the announcement
+// and puts it in the reply — one sentence where the disposition is `resumed` or
+// `reopened`, or where a revision moved a word, "composed by `orchestration` from the
+// typed value and by no model's decision", stating the outcome and every text in
+// `added` and `removed`. It is already on the screen. So nothing here renders
+// `outcome`, `revised`, `outcome_changed`, `added` or `removed`: a second account of
+// them would be the announcement twice, and on a `continued` or an `opened` that moved
+// no word it would be an announcement §5 rules silent — "announcing it would be noise
+// on every turn … told every time, the sentence stops being read".
+//
+// What is added instead is the half a composed reply cannot carry: where the owner goes
+// next. That is ADR-0242 §9's split at a render site — the reply says what happened and
+// the surface says what can be done about it — and it is why each of the four names the
+// listing rather than describing the goal again.
+const ENGAGEMENT_WORDS = {
+  opened:
+    "I am treating this as a new piece of work of its own. What I am working on lists " +
+    "everything outstanding.",
+  continued:
+    "This carried on the work this conversation was already on. What I am working on " +
+    "lists everything outstanding.",
+  resumed:
+    "This took up something you already had open rather than starting anything new. " +
+    "What I am working on lists everything outstanding.",
+  reopened:
+    "This took up work that had been closed. Everything it had recorded before is kept " +
+    "as it stands — nothing it did was replayed or undone. What I am working on lists " +
+    "everything outstanding.",
+};
+
+// What became of the reference this turn carried (ADR-0250 §11).
+//
+// **`expired` says the work carries on**, which is decision 2 in terms (§14): where a
+// reference names an expired question "the reply says that the question expired and
+// that the goal is still being worked on", and §12 forbids reading an expiry as "a
+// refusal, an abandonment, a denial or a decision of any kind".
+//
+// **`already_settled` is never worded as an expiry**, which is the pair most easily
+// collapsed: "a question answered an hour after it was asked and referenced a week
+// later is `ALREADY_SETTLED`, not `EXPIRED`: it was answered, and a reply saying
+// otherwise would tell the user their answer never arrived."
+const REFERENCE_WORDS = {
+  unknown:
+    "The reference you gave names nothing I hold. Nothing was answered and nothing was " +
+    "taken up by it, and this turn was run as an ordinary one.",
+  answered:
+    "That question is answered and settled, and what you said went into what I " +
+    "understand this work to be.",
+  expired:
+    "That question had run out of time, so it was not answered. The work it was about " +
+    "is still open and is still being worked on — what you said was taken as an " +
+    "ordinary turn about it.",
+  already_settled:
+    "That question was already settled before this turn, so nothing about it changed " +
+    "here. What you said was taken as an ordinary turn about the work it was on.",
+};
+
+// What a withdrawal did (ADR-0250 §12).
+//
+// **It says it recorded no answer, because that is the whole difference from one**, on
+// ADR-0244 §11's distinction between a denial and a cancellation — a withdrawal
+// "records no answer, revises no interpretation and engages no goal". **And it says the
+// pause is still there**: "withdrawing removes the question and not the pause … what
+// the act buys is the freedom to ask again".
+const CLARIFICATION_WITHDRAWAL_WORDS = {
+  withdrawn:
+    "That question is withdrawn. No answer was recorded — taking a question back is " +
+    "not the same as answering it — and the words it held are gone. The work it was " +
+    "about is still open and still waiting.",
+  nothing_to_withdraw:
+    "There was nothing here for this to take. That question is already settled, or I " +
+    "hold none of that id, so this took nothing back and changed nothing.",
+};
+
+// What an abandonment did (ADR-0250 §12).
+//
+// **It says what it did not touch, and that is the load-bearing half**: abandoning
+// "does not move the attempt's state, does not write an `AttemptOutcome`, does not end
+// an execution and does not cancel anything in flight — what becomes of an attempt on
+// an abandoned goal is A9's". A sentence promising everything stopped would be false on
+// a reachable state, and one promising work already done was undone would be false
+// always.
+//
+// **`already_closed` names no reason**, because the member carries none: §12 reaches it
+// from `achieved` and from `abandoned` alike, and guessing which would be a diagnosis a
+// member is not.
+const GOAL_ABANDONMENT_WORDS = {
+  abandoned:
+    "That goal is given up. I will not take it up again on my own and nothing more is " +
+    "planned for it, and any question it had open is withdrawn. Nothing already done " +
+    "for it was undone, reversed or replayed, and nothing under way was cancelled.",
+  already_closed:
+    "That goal was already closed, so this moved nothing and recorded nothing. However " +
+    "it was closed before is how it still reads.",
+  no_such_goal: "I hold no goal of that id, so nothing was given up.",
+};
+
+// What each `GoalStatus` member reads as in the listing.
+//
+// **Not one of the vocabularies ADR-0250 adds** — ADR-0014 §1 declares it and ADR-0249
+// §4 gives it its meanings — and two of its members have no producer anywhere in the
+// tree today (ADR-0250 §20's arm 23 asserts exactly that). They are given words anyway,
+// because what this map is for is that a member arriving from a gateway is rendered
+// rather than shown raw, and "no producer today" is not a property of the value this
+// page receives.
+const GOAL_STATUS_WORDS = {
+  active: "open",
+  achieved: "done",
+  abandoned: "given up",
+  blocked: "blocked",
+};
+
+// What the page says for a value it has no words for, said once for all five maps.
+//
+// `READ_ANSWER_UNREADABLE`'s position, one decision over: silence is refused by §15's
+// clause, and an enum value put on the screen as itself is this surface reporting an
+// internal vocabulary to a person. So the honest thing is to say this browser cannot
+// report it, rather than a sentence for one of the members it might not be.
+const GOAL_MEMBER_UNREADABLE =
+  "That arrived as something this browser has no words for, so it is not reported here " +
+  "rather than reported as something it may not be. Press What I am working on to read " +
+  "what is outstanding.";
+
+// Whether a value is a member of one of these vocabularies.
+//
+// `isReadAnswer`'s test, generalised over the map: `Object.hasOwn` rather than a
+// truthiness test, because a value naming an inherited property — `toString`,
+// `constructor` — would otherwise pass as a member and put a function's source text on
+// the screen; and `typeof` in front of it, because a property key is a coerced one and
+// `String(["opened"])` spells a member.
+function isGoalMember(words, member) {
+  return typeof member === "string" && Object.hasOwn(words, member);
+}
+
+// The sentence for one member, or the refusal above. Total over whatever it is handed,
+// which is `readAnswerWords`' own arrangement, so that a second caller cannot put
+// `undefined` on the screen.
+function goalMemberWords(words, member) {
+  return isGoalMember(words, member) ? words[member] : GOAL_MEMBER_UNREADABLE;
+}
+
+// What this turn did with its goal, beside the reply and never in place of it.
+function renderGoalEngagement(body, engagement) {
+  if (engagement === null || engagement === undefined) {
+    return;
+  }
+  line(body, goalMemberWords(ENGAGEMENT_WORDS, engagement.disposition), "hint");
+}
+
+// What became of this turn's reference (ADR-0250 §11).
+//
+// **Rendered whether or not a goal was engaged.** "An `UNKNOWN` reference is reported
+// whatever the association then does": the turn falls through to the ordinary rule and
+// may come back undecided, carrying no engagement at all, "and `reference` is a member
+// of its own precisely so that the user is still told the handle they gave resolved to
+// nothing". So this reads that member alone and infers it from nothing beside it.
+function renderReferenceOutcome(body, member) {
+  if (member === null || member === undefined) {
+    return;
+  }
+  const unknown = member === "unknown";
+  line(body, goalMemberWords(REFERENCE_WORDS, member), unknown ? "notice" : "hint");
+}
+
+// The question this turn raised, in the exchange that raised it (ADR-0250 §10).
+//
+// **The turn did not park and is not shown as having parked.** "It composes, its answer
+// *is* the question, and it returns" — so there is no token here, no approval pair, and
+// nothing to answer on this request. What paused is the goal's attempt, not the turn.
+//
+// **The id is on screen because the answer act takes it** (§15): "a surface that showed
+// a question but no way to name it would have put a question the user cannot answer".
+function renderClarification(body, clarification) {
+  if (clarification === null || clarification === undefined) {
+    return;
+  }
+  line(
+    body,
+    "There is one thing I need cleared up before I act on this. Nothing was done for " +
+      "it in the meantime, and it keeps until you answer:",
+    "notice"
+  );
+  renderGoalQuestion(body, clarification);
+}
+
+// What an undecided turn leaves the owner to do (ADR-0250 §5, §14).
+//
+// **The question itself is in the reply and is not restated.** §5 composes the ask from
+// the typed value, deterministically, so that it "cannot disagree with the member beside
+// it", and §14 places the mention of a paused goal in the reply of exactly this turn. A
+// second listing of the same outcome statements under it would be that mention twice on
+// one screen, and would be this page composing a reply (golden rule 3).
+//
+// So what is added is the half a reply cannot carry — and answering in words is named
+// first, because §5 makes it the ordinary route: "the user answers in words on the next
+// turn or by a reference".
+function renderDisambiguation(body, disambiguation) {
+  if (disambiguation === null || disambiguation === undefined) {
+    return;
+  }
+  line(
+    body,
+    "Say which one you mean in your next turn, or point at it directly: What I am " +
+      "working on lists them, and each row can be taken up here.",
+    "hint"
+  );
 }
 
 // --- the CONFIRM prompt (ADR-0177 §8, ADR-0178 §7) ---------------------------
@@ -5032,6 +5319,12 @@ async function ask(event) {
     if (conversationId !== null) {
       asked.conversation_id = conversationId;
     }
+    // ADR-0250 §11's keyword, the browser's own argument, relayed whole. It is read
+    // here — before either entry is chosen — because `converse_streaming` "takes exactly
+    // `converse`'s arguments in exactly its" order, so the two entries carry it alike.
+    if (reference !== null) {
+      asked.reference = reference;
+    }
     // **Which entry is the owner's choice, and the gateway never chooses between
     // them** (ADR-0175 §3). ADR-0173 §5 makes a provider that cannot stream a
     // `ModelError` before any delta, degrading to no answer at all — so on such a
@@ -5046,6 +5339,11 @@ async function ask(event) {
     } else {
       await askWhole(half, asked, chosenAt, waiting);
     }
+    // The reference goes with the turn it was attached to and is not carried into the
+    // next one. It is dropped only where the turn came back — an abort or a dead
+    // gateway throws past this line and leaves it attached, so the owner's next attempt
+    // is the same attempt.
+    clearReference();
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one — `readDeliveries`' own
@@ -8060,7 +8358,7 @@ const PAGE = 25;
 
 // How far each listing has read. Not a count of what exists: a total is not available
 // and would be a claim this page cannot make.
-const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0 };
+const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0, goals: 0 };
 
 // Which run of each listing is current. An offset is only meaningful against the
 // question that produced it, so starting a listing again — a band unchecked, the
@@ -8071,7 +8369,7 @@ const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0 }
 // did not ask for and moves the offset the *next* page is read at, which skips
 // beliefs — and a belief with no rendered row has no `Forget` control, so the failure
 // costs the owner a control rather than a little tidiness.
-const runs = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0 };
+const runs = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0, goals: 0 };
 
 // A full page says so and offers the next one.
 //
@@ -9171,6 +9469,263 @@ function offerNotificationActs(item, record, offset) {
       null
     )
   );
+}
+
+// --- the goal surface (ADR-0250 §15) -----------------------------------------
+//
+// **Relay and render, and nothing derived** (golden rule 3, ADR-0042 §6). §15 is
+// explicit at this seam: "no adapter reads a store, joins a row, computes a member or
+// composes a reply", and `paused` in particular is the engine's, computed there "so
+// that two surfaces cannot render it differently". Nothing below compares a status
+// against anything, re-orders the page, or counts what is outstanding.
+//
+// **The two ids are on screen because the acts take them** (§15, §13): the answer takes
+// the question's id, and the cross-conversation resumption is "a `TurnReference`
+// carrying a `goal_id`, performed from a surface listing the user was shown". Neither
+// is minted here; both are durable record ids and a reload changes nothing about them.
+
+// What the last act on this panel did, in that vocabulary's own words.
+//
+// **Not the fault slot**, because neither act failing is what these sentences are
+// about: every member of both vocabularies is something the hub *established*, the two
+// that moved nothing included, and writing "there was nothing here for this to take"
+// into a fault slot would report a working act as a broken one. `answer-said` and
+// `cancellation-said` hold the same position one panel over.
+function sayGoalAct(said) {
+  const node = el("goal-said");
+  node.textContent = said === null ? "" : said;
+  node.hidden = said === null;
+}
+
+// Start the listing again.
+//
+// The account of the last act is left alone here, because `withdrawClarification` and
+// `abandonGoal` each re-read the listing immediately after writing one — clearing it
+// would erase the sentence at the moment it was written. Every other route into the
+// panel clears it first.
+async function listGoals() {
+  runs.goals += 1;
+  readSoFar.goals = 0;
+  await readGoals(false, runs.goals);
+}
+
+// One page of goals, most recently taken up first (ADR-0250 §15).
+//
+// Paged for `readBeliefs`' reason one surface over: a goal past the first page would be
+// one the owner can neither answer nor give up, and a rendered row is the only route to
+// either. **There is no total**, and none is available to show — §15 makes the operation
+// answer none, on ADR-0074 §2's ground — so "is there more" is answered by asking.
+async function readGoals(more, run) {
+  fault(null, "goals");
+  if (run !== runs.goals) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const offset = readSoFar.goals;
+  try {
+    const body = await relay(half, "/goals", { limit: PAGE, offset }, "goals");
+    if (body === null || run !== runs.goals) {
+      return;
+    }
+    const list = el("goal-list");
+    if (!more) {
+      clearNode(list);
+    }
+    if (body.goals.length === 0 && !more) {
+      line(
+        list,
+        "Nothing outstanding. Whatever you ask for next shows up here while I am " +
+          "working on it.",
+        "hint"
+      );
+    }
+    body.goals.forEach((one) => renderGoal(list, one));
+    readSoFar.goals += body.goals.length;
+    offerMore(list, body.goals.length, () => readGoals(true, run));
+    show("goals", true);
+  } catch (_) {
+    fault(GATEWAY_GONE, "goals");
+  }
+}
+
+// One goal, with everything `GoalSummary` carries and nothing it does not.
+//
+// **Paused and open are two facts and are shown as two.** The status says whether the
+// work is still live; `paused` says whether it is waiting on the owner. A goal can be
+// open and running, open and waiting, or closed — and collapsing the pair would lose
+// exactly the state this listing exists to make visible (#2286).
+//
+// **The elements, the grounds, the attempts and the plans are not here and cannot be**:
+// the type "carries no attempt id, no revision number, no element, no ground, no
+// evidence reference and no plan", so this renders every field it has and invents none.
+function renderGoal(list, goal) {
+  const item = document.createElement("div");
+  item.className = "notification-row";
+  line(item, goal.outcome, "reply");
+  const waiting = goal.paused ? " — waiting on you" : "";
+  line(item, `State: ${goalMemberWords(GOAL_STATUS_WORDS, goal.status)}${waiting}`, "hint");
+  line(
+    item,
+    goal.last_engaged_at === null
+      ? "No turn has taken it up yet."
+      : `Last taken up: ${goal.last_engaged_at}`,
+    "hint"
+  );
+  line(item, `id: ${goal.id}`, "hint");
+  renderGoalQuestion(item, goal.clarification);
+  offerGoalActs(item, goal);
+  list.appendChild(item);
+}
+
+// The open question a goal is waiting on, shared by the listing and by a raised
+// clarification — so a question read in an answer and the same question read back from
+// the listing say the same three things: the words, the deadline, and the act.
+//
+// **The deadline is stated and is never read as a refusal** (§12): "a goal whose
+// question expired is still paused and still resumable … no lane reads an expiry as a
+// refusal, an abandonment, a denial or a decision of any kind", and §11 adds that a late
+// answer "reopens the work rather than vanishing". So this says when the question stops
+// being answerable and says nothing about the work stopping with it.
+function renderGoalQuestion(item, clarification) {
+  if (clarification === null || clarification === undefined) {
+    return;
+  }
+  line(item, `Waiting on: ${clarification.text}`, "notification-summary");
+  line(
+    item,
+    `Answerable until ${clarification.expires_at}. A late answer is not lost: the work ` +
+      "stays open and what you say goes to it.",
+    "hint"
+  );
+  line(item, `question id: ${clarification.question_id}`, "hint");
+}
+
+// The acts one row offers (ADR-0250 §11, §12, §13).
+//
+// **Answering and taking up are the same control in two wordings**, because they are
+// the same mechanism: a reference attached to the ordinary composer. A row with an open
+// question offers the answer; every row offers taking the goal up here, which is the one
+// route by which a goal moves between conversations.
+//
+// **The withdrawal is offered beside the answer** and never instead of it, on ADR-0244
+// §13's clause one record kind over: an owner told only how to answer has not been told
+// everything they can do, and §12 pairs the two deliberately — withdrawing "removes the
+// question and not the pause".
+//
+// **Giving the goal up is offered on a goal that is still open and on no other**, which
+// is what the members say: §12 answers `ALREADY_CLOSED` on a goal that is `achieved` or
+// `abandoned`, so a control there would be one that reports having done nothing. That is
+// a rendering decision taken on the status the engine sent and not a rule derived here —
+// pressing it on a row that closed since is still answered honestly.
+function offerGoalActs(item, goal) {
+  const row = document.createElement("p");
+  row.className = "choice";
+  if (goal.clarification !== null) {
+    const answer = document.createElement("button");
+    answer.type = "button";
+    answer.textContent = "Answer this";
+    answer.addEventListener("click", () => {
+      setReference(
+        { question_id: goal.clarification.question_id },
+        "Your next question answers the clarification on this goal, in your own words."
+      );
+    });
+    row.appendChild(answer);
+    const withdraw = document.createElement("button");
+    withdraw.type = "button";
+    withdraw.textContent = "Take the question back";
+    withdraw.addEventListener("click", () =>
+      withdrawClarification(goal.clarification.question_id)
+    );
+    row.appendChild(withdraw);
+  }
+  const take = document.createElement("button");
+  take.type = "button";
+  take.textContent = "Take this up here";
+  take.addEventListener("click", () => {
+    setReference(
+      { goal_id: goal.id },
+      "Your next question is about this goal, in the conversation you are in now."
+    );
+  });
+  row.appendChild(take);
+  if (goal.status === "active") {
+    const give = document.createElement("button");
+    give.type = "button";
+    give.textContent = "Give this up";
+    give.addEventListener("click", () => abandonGoal(goal));
+    row.appendChild(give);
+  }
+  item.appendChild(row);
+}
+
+// Take one clarification back without answering it (ADR-0250 §12).
+//
+// **This is not a denial and this page does not present it as one**: a withdrawal
+// "records no answer, revises no interpretation and engages no goal". The page renders
+// one fixed statement for the member that comes back and rules on nothing.
+async function withdrawClarification(questionId) {
+  fault(null, "goals");
+  sayGoalAct(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const done = await relay(half, "/clarification/withdraw", { question_id: questionId }, "goals");
+    if (done === null) {
+      return;
+    }
+    // Said as a fault rather than in the row, because the row is about to be replaced
+    // by a fresh read and a sentence written into it would be gone before it was read.
+    sayGoalAct(goalMemberWords(CLARIFICATION_WITHDRAWAL_WORDS, done.withdrawal));
+    await listGoals();
+  } catch (_) {
+    fault(GATEWAY_GONE, "goals");
+  }
+}
+
+// Give one goal up (ADR-0250 §12).
+//
+// **The confirmation is show-then-confirm at the unit the owner thinks in** (ADR-0073
+// §5), from the row they are looking at: what it shows is the outcome statement, which
+// is what a goal *is* to a reader, and it says in terms what the act does not do.
+// ADR-0250 §12 is the source of every clause in it — the goal leaves what is
+// considered, its open question is withdrawn, and nothing already done is undone.
+async function abandonGoal(goal) {
+  const asked = window.confirm(
+    `About to give this up.\n\n${goal.outcome}\n\nI will not take it up again on my ` +
+      "own and nothing more will be planned for it, and any question it has open is " +
+      "withdrawn.\n\nNothing already done for it is undone, reversed or replayed, and " +
+      "nothing under way is cancelled. The record stays and this listing still shows " +
+      "it, so you can point at it again later.\n\nYou are giving up whatever goal that " +
+      "id names when you answer, which may have changed since it was shown."
+  );
+  if (!asked) {
+    return;
+  }
+  fault(null, "goals");
+  sayGoalAct(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const done = await relay(half, "/goal/abandon", { goal_id: goal.id }, "goals");
+    if (done === null) {
+      return;
+    }
+    sayGoalAct(goalMemberWords(GOAL_ABANDONMENT_WORDS, done.abandonment));
+    await listGoals();
+  } catch (_) {
+    fault(GATEWAY_GONE, "goals");
+  }
 }
 
 // Deal with one notification and keep the record (ADR-0130 §9).
@@ -10392,6 +10947,13 @@ el("beliefs-button").addEventListener("click", listBeliefs);
   el(box).addEventListener("change", listBeliefs);
 });
 el("questions-button").addEventListener("click", listQuestions);
+el("goals-button").addEventListener("click", () => {
+  // The control is a fresh question, so the account of whatever act was last taken
+  // stops standing at the moment the owner asks it again.
+  sayGoalAct(null);
+  return listGoals();
+});
+el("clear-reference").addEventListener("click", clearReference);
 el("observe-button").addEventListener("click", observe);
 el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);

@@ -26,14 +26,19 @@ from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
     BeliefSummary,
+    ClarificationWithdrawal,
     ConversationDigest,
     DiscloserProvenance,
+    EngagementDisposition,
+    GoalAbandonment,
+    GoalStatus,
     GrantScope,
     MemoryKind,
     NotificationCondition,
     NotificationReach,
     ReadAnswerOutcome,
     ReadCancellation,
+    ReferenceOutcome,
     RoutableOperation,
     SearchNotServiced,
     SpanCoverage,
@@ -3856,6 +3861,7 @@ _FAULT_PANELS: Final = frozenset(
         "history",
         "beliefs",
         "questions",
+        "goals",
         "review",
         "tuning",
         "connections",
@@ -7971,3 +7977,167 @@ def test_a_withdrawal_does_not_leave_the_page_saying_the_action_may_have_run() -
     assert "nothing was cancelled" not in out
     assert "withdrawn" not in out
     assert out.rstrip().endswith("PARK_WHERE_NOW")
+
+
+# --- ADR-0250 §15: what the goal surface says, and the identifiers it does not
+
+
+def test_one_fixed_statement_per_member_of_every_vocabulary_adr_0250_adds() -> None:
+    """ADR-0250 §15's non-degradation clause, read off ``core``'s own vocabularies.
+
+    "A surface that renders no statement for a ``ReferenceOutcome``, an
+    ``EngagementDisposition`` or a ``ClarificationWithdrawal`` member it was given has
+    not implemented this section — **it is not permissibly degraded**." ``GoalAbandonment``
+    is the fourth vocabulary this decision adds and is held to the same bar, because
+    ``abandon_goal``'s answer is nothing else: §12 closes it "at exactly three members"
+    and the act has no other result to render.
+
+    So each map is **total over its enumeration and closed at its count**, which is
+    ``READ_ANSWER_WORDS``' own arrangement: a fifth member fails here rather than
+    reaching a person as a bare identifier.
+
+    **And the lookup is by ownership rather than by truthiness**, with a ``typeof`` in
+    front of it — the arm ``READ_ANSWER_WORDS`` leaves open one vocabulary over: a member
+    naming an inherited property comes back as a function, and a property key is a
+    coerced one, so ``["opened"]`` asks for the key ``String(["opened"])`` and spells a
+    member.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert _keys(_map(script, "ENGAGEMENT_WORDS")) == {
+        member.value for member in EngagementDisposition
+    }
+    assert _keys(_map(script, "REFERENCE_WORDS")) == {member.value for member in ReferenceOutcome}
+    assert _keys(_map(script, "CLARIFICATION_WITHDRAWAL_WORDS")) == {
+        member.value for member in ClarificationWithdrawal
+    }
+    assert _keys(_map(script, "GOAL_ABANDONMENT_WORDS")) == {
+        member.value for member in GoalAbandonment
+    }
+    # The listing's status words are total over ``GoalStatus`` too. It is **not** one of
+    # the vocabularies this decision adds — ADR-0014 §1 declares it — and two of its
+    # members have no producer in the tree today (ADR-0250 §20's arm 23), but what the
+    # map is for is that a member arriving from a gateway is rendered rather than shown
+    # raw, and "no producer today" is not a property of the value this page receives.
+    assert _keys(_map(script, "GOAL_STATUS_WORDS")) == {member.value for member in GoalStatus}
+
+    assert (
+        'return typeof member === "string" && Object.hasOwn(words, member);'
+        in functions["isGoalMember"]
+    )
+    assert "isGoalMember(words, member)" in functions["goalMemberWords"]
+    assert "GOAL_MEMBER_UNREADABLE" in functions["goalMemberWords"]
+
+
+def test_no_goal_statement_carries_a_record_identifier_or_a_configuration() -> None:
+    """ADR-0250 §15's bar, which is ADR-0242 §9's binding on these vocabularies.
+
+    "No statement rendered for any member of this decision's vocabularies carries a
+    record identifier other than the question id the answer act requires, a destination,
+    an account identity, a provider name, a query or any fragment of one, a monetary
+    figure, a budget, a threshold or a ``Settings`` field name."
+
+    **Asserted structurally, over the maps' own source.** Every statement is a literal,
+    so the way an identifier could reach one is an interpolation — and there is none:
+    a map holding a template placeholder would be a statement assembled from a value,
+    which §9 forbids for its own reason one vocabulary over. That is the strongest form
+    the assertion takes here, because a literal containing no interpolation cannot carry
+    an id whatever the hub sends.
+
+    **The one identifier the surfaces do render is the question id**, and §15 admits it
+    in terms — "the question id is rendered because the act takes it" — which is why it
+    is rendered by ``renderGoalQuestion`` and by no statement.
+    """
+    script = _code("app.js")
+    maps = [
+        _map(script, name)
+        for name in (
+            "ENGAGEMENT_WORDS",
+            "REFERENCE_WORDS",
+            "CLARIFICATION_WITHDRAWAL_WORDS",
+            "GOAL_ABANDONMENT_WORDS",
+        )
+    ]
+
+    for block in maps:
+        # No interpolation of any kind: a statement is a literal or it is not fixed.
+        assert "${" not in block
+        assert "goal_id" not in block
+        assert "question_id" not in block
+        for barred in ("budget", "threshold", "Settings", "provider", "account", "query"):
+            assert barred not in block, barred
+
+    # And the id that *is* rendered is rendered beside the question it names, where §15
+    # puts it, rather than in a statement about a member.
+    assert "clarification.question_id" in _functions(script)["renderGoalQuestion"]
+
+
+def test_the_page_composes_no_announcement_of_its_own() -> None:
+    """ADR-0250 §5's announcement belongs to the reply, and this page writes no second.
+
+    §5 gives the sentence to the reply — one "naming the goal it is about", stating the
+    goal's outcome and "every text in ``added``" and "every text in ``removed``" — and
+    rules it "composed by ``orchestration`` from the typed value and by no model's
+    decision". A page restating those would put the announcement in a second place, and
+    on a ``continued`` or an ``opened`` that moved no word it would put one where §5
+    rules the turn silent: "announcing it would be noise on every turn … told every time,
+    the sentence stops being read."
+
+    So the renderer reads the **disposition** and nothing else off the member.
+    """
+    render = _functions(_code("app.js"))["renderGoalEngagement"]
+
+    assert "engagement.disposition" in render
+    for barred in ("engagement.outcome", "engagement.added", "engagement.removed", "revised"):
+        assert barred not in render, barred
+
+
+def test_an_undecided_turn_and_a_raised_question_are_not_reported_as_needing_no_action() -> None:
+    """The contradiction ``read_confirmation`` already closed, two members further on.
+
+    A turn whose planner raised a clarification "drives no step of its plan and produces
+    no effect" (ADR-0250 §10), and an undecided turn "engaged neither goal, drove
+    nothing" and carries no turn at all (§20's arm 11) — so both reach the renderer with
+    no steps, no step account and no route. "No action was needed." above a question the
+    owner is being asked to answer is the opposite of what each of those turns says.
+    """
+    render = _functions(_code("app.js"))["renderOutcome"]
+
+    guard = render[render.index("outcome.steps.length === 0") : render.index('"No action')]
+    assert "outcome.clarification === null" in guard
+    assert "outcome.disambiguation === null" in guard
+
+
+def test_the_goal_surface_is_not_the_deferred_question_surface() -> None:
+    """ADR-0250 §20's arm 30 at this surface, over the page's own panels and paths.
+
+    "``assistant questions`` and ``assistant answer`` list and answer **memory**
+    questions only, and neither lists nor accepts a ``GoalQuestion``; the clarification
+    acts neither list nor accept an ADR-0078 ``Question``." §15 states it as a bar on the
+    surface: no surface "presents a goal clarification in the same list, the same command
+    or the same vocabulary as a memory question".
+
+    Two panels, two controls, two sets of paths — and the goal panel reaches neither of
+    the memory question paths, nor the reverse.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert '<section id="goals"' in document
+    assert '<section id="questions"' in document
+    assert 'id="goals-button"' in document
+    assert 'id="questions-button"' in document
+
+    goals = "".join(
+        _functions(script)[name]
+        for name in ("readGoals", "renderGoal", "offerGoalActs", "withdrawClarification")
+    )
+    assert "/questions" not in goals
+    assert "/question/answer" not in goals
+    assert "/question/forget" not in goals
+
+    questions = "".join(_functions(script)[name] for name in ("readQuestions", "renderQuestion"))
+    assert "/goals" not in questions
+    assert "/clarification/withdraw" not in questions
+    assert "/goal/abandon" not in questions
