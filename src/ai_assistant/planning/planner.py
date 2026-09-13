@@ -1129,10 +1129,11 @@ about something else cannot later be read as settling it. Send any of `window` �
 `{"start": "<ISO-8601 instant>", "end": "<ISO-8601 instant>"}`, and either end \
 may be left out — `participants`, `topics` and `about_person`, each a non-empty \
 list of strings. Send none of them where the element is about no particular \
-interval, person or subject, which is the ordinary case. Do NOT send an empty \
-list, a `window` carrying neither end, or an `end` that is not after its `start`: \
-each of those is refused outright rather than read as "about nothing at all". A \
-retaining element carries `retains` alone and none of these.
+interval, person or subject, which is the ordinary case — leaving the key out \
+altogether is the only way to say so. Do NOT send null, an empty list, a `window` \
+carrying neither end, or an `end` that is not after its `start`: each of those is \
+refused outright rather than read as "about nothing at all". A retaining element \
+carries `retains` alone and none of these.
 
 The objective itself is either kept or restated, and one of the two is always \
 required. Where this turn does not change what the goal is for, send \
@@ -1618,9 +1619,21 @@ class ModelBackedPlanner:
         its own instance mid-flight would otherwise get an ``ActionPlan`` whose
         frozen, auditable ``goal_id`` names a goal the model was never shown. The
         prompt, the plan's ``goal_id`` and the failure message all derive from
-        that one snapshot. ``context``, ``memories``, ``capabilities`` and ``files``
-        need no snapshot: each is read once, into the prompt, before the same first
-        ``await`` and never again — the other discharge the clause allows.
+        that one snapshot. ``context`` and ``capabilities`` need no snapshot: each is
+        read once, into the prompt, before the same first ``await`` and never again —
+        the other discharge the clause allows.
+
+        **``memories`` is snapshotted too, and ADR-0253 §9 is why.** That section has
+        an ``M`` label resolved "against the very sequence it was passed on that
+        call", and the resolution happens *after* the model call — so this is the one
+        input that is now read on both sides of the widest suspension window in the
+        system, which is exactly the shape ADR-0065's second discharge stops covering.
+        One tuple is taken before the first ``await`` and **both** the rendering and
+        the resolution read it, so the record the prompt printed as ``M2`` and the
+        record ``M2`` resolves to are the same record by construction rather than
+        because nothing happened to mutate the caller's list in between. ``files`` and
+        ``read_outcomes`` are snapshotted on the line above for the shape's sake; only
+        this one has a reader past the ``await``.
 
         ``memories`` carries what the pipeline assembled for this turn, which
         ADR-0074 §5 widened from "relevant, best first" to the conversation's
@@ -1683,8 +1696,11 @@ class ModelBackedPlanner:
         # `model_copy(update=...)` here would be shallow and would not detach it.
         snapshot = goal.model_copy(deep=True)
         # ADR-0253 §9: this module rendered the ``M`` labels, so this module resolves
-        # them, "against the very sequence it was passed on that call" — read once,
-        # before the first ``await``, exactly as the prompt's copy of it is.
+        # them, "against the very sequence it was passed on that call". Taken **once**,
+        # before the first ``await``, and read by the axis gate, by the renderer and by
+        # the resolver — one value on both sides of the suspension window, so the
+        # sequence a label was printed from is the sequence it is read back against
+        # whatever the caller does to its own list meanwhile (ADR-0065).
         supply = tuple(memories)
         shown = tuple(files)
         asked = tuple(read_outcomes)
@@ -1692,7 +1708,7 @@ class ModelBackedPlanner:
         # by both messages: the system turn offers an axis and the user turn renders
         # the values that opened it, which is what §9's "no axis is described whose
         # values the same call leaves unrendered" asks of a pair of prompts.
-        label_axes = _label_axes(memories)
+        label_axes = _label_axes(supply)
         conversation: list[Message] = [
             Message(
                 role=Role.SYSTEM,
@@ -1705,7 +1721,7 @@ class ModelBackedPlanner:
                 content=_render_request(
                     snapshot,
                     context,
-                    memories,
+                    supply,
                     shown,
                     asked,
                     utterance=utterance,
@@ -2616,12 +2632,57 @@ def _proposed_elements(understanding: dict[str, object], member: str) -> list[di
                 "span": entry.get("span"),
                 "retains": entry.get("retains"),
                 "window": _proposed_window(entry, member=member, index=index),
-                "participants": entry.get("participants"),
-                "topics": entry.get("topics"),
-                "about_person": entry.get("about_person"),
+                **{
+                    axis: _proposed_axis(entry, axis, member=member, index=index)
+                    for axis in ("participants", "topics", "about_person")
+                },
             }
         )
     return payloads
+
+
+def _proposed_axis(entry: dict[str, object], axis: str, *, member: str, index: int) -> object:
+    """One sequence axis of a proposed element, with ``null`` refused (ADR-0253 §7).
+
+    **An absent key is the one spelling of "this axis is not applied", and a key
+    written as ``null`` is not it.** That is :func:`_structured_axis`'s rule on the
+    same three axes one member over — "a ``null`` is not absence here either … so the
+    only spelling of *not applied* is a key the object does not carry" — and
+    :func:`_proposed_elements`' rule for the tuples above. §7 is why it matters more
+    here than there: "declaring nothing and declaring something malformed are two
+    different states, and only the first records an absent applicability", because an
+    element recorded with no applicability **widens** every condition later written
+    against it. A ``null`` an implementation read as absence would be exactly that
+    widening, arriving through the one spelling §7 did not enumerate.
+
+    A value that is present and is not a list of non-blank strings is refused by
+    ``ProposedElement``'s own annotation, and an empty one by L1's validator, so this
+    function decides the **absent-versus-declared** question and settles nothing
+    about what a declared axis may hold.
+
+    Args:
+        entry: The element object the envelope carried.
+        axis: Which axis to read.
+        member: Which of the three tuples the element sits in, for the repair turn.
+        index: Its 0-based position in that tuple, for the repair turn.
+
+    Returns:
+        The value as written, or ``None`` where the element carries no such key.
+
+    Raises:
+        _ExtractionError: If the key is present and written as ``null``.
+    """
+    if axis not in entry:
+        return None
+    value = entry[axis]
+    if value is None:
+        msg = (
+            f"'understanding.{member}[{index}]' has a {axis!r} written as null: the "
+            f"one spelling of 'this element is not about a particular {axis}' is to "
+            f"send no {axis!r} at all"
+        )
+        raise _ExtractionError(msg, understanding=True)
+    return value
 
 
 def _proposed_window(entry: dict[str, object], *, member: str, index: int) -> TimeWindow | None:
@@ -2660,10 +2721,16 @@ def _proposed_window(entry: dict[str, object], *, member: str, index: int) -> Ti
     Raises:
         _ExtractionError: If ``window`` is present and does not compose one.
     """
-    if entry.get("window") is None:
+    where = f"'understanding.{member}[{index}]'"
+    if "window" not in entry:
         return None
     raw = entry["window"]
-    where = f"'understanding.{member}[{index}]'"
+    if raw is None:
+        msg = (
+            f"{where} has a 'window' written as null: the one spelling of 'this "
+            f"element is about no particular interval' is to send no 'window' at all"
+        )
+        raise _ExtractionError(msg, understanding=True)
     if not isinstance(raw, dict):
         msg = f"{where} has a 'window' that is not a JSON object"
         raise _ExtractionError(msg, understanding=True)

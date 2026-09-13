@@ -5959,6 +5959,10 @@ async def test_an_element_proposing_no_axis_is_recorded_with_none() -> None:
     "axes",
     [
         {"window": {}},
+        {"window": None},
+        {"topics": None},
+        {"participants": None},
+        {"about_person": None},
         {"window": {"start": None, "end": None}},
         {"window": {"start": "2026-03-08T00:00:00+00:00", "end": "2026-03-01T00:00:00+00:00"}},
         {"window": {"start": 20260301}},
@@ -5979,6 +5983,12 @@ async def test_an_axis_that_does_not_compose_an_applicability_is_an_extraction_f
     unset, or a window whose ``end`` is not strictly after its ``start`` — is an
     **extraction failure** for that envelope … it is **never** recorded as an element
     with an absent applicability."
+
+    **A key written as ``null`` is in the list because it is not the spelling of
+    absence**, which is :func:`_structured_axis`'s rule on the same three axes one
+    member over — "a ``null`` is not absence here either … so the only spelling of
+    *not applied* is a key the object does not carry" — and is the one shape §7's
+    three named cases do not enumerate while its argument covers it exactly.
 
     Recording one would *widen* every condition later written against the element:
     "an element whose proposed window ran Sunday to Saturday states a Sunday
@@ -6041,3 +6051,49 @@ async def test_an_element_proposing_axes_carries_the_requirement_it_proposed() -
     assert proposed.topics == ("weather",)
     assert proposed.participants is None
     assert proposed.about_person is None
+
+
+async def test_the_supply_is_snapshotted_before_the_call_it_is_resolved_after() -> None:
+    """ADR-0065 at the one input ADR-0253 §9 gives a reader past the suspension window.
+
+    Before this decision ``memories`` was "read once, into the prompt, before the same
+    first ``await`` and never again", which is the second discharge that clause allows.
+    §9 ends that: an ``M`` label is resolved "against the very sequence it was passed
+    on that call", and the resolution happens **after** the model call. So the sequence
+    is snapshotted with the goal, and a caller mutating its own list while the model is
+    in flight cannot change what a label resolves to.
+
+    Driven at the only interleaving point there is — the fake clears the caller's list
+    from inside ``complete``, which is the ``await`` ADR-0065 calls "the widest
+    suspension window in the system". A planner resolving against the live sequence
+    would find it empty and refuse the plan; this one resolves ``M2`` to the record the
+    prompt printed under that label, and the assertion reads the prompt's own bytes
+    rather than what the test believes was printed.
+    """
+    supply = _supply()
+    reply = _shaped_reply([_step()], interpretations=[{"settles": "D1", "record": "M2"}])
+
+    class _MutatingModel(FakeModelProvider):
+        """Clears the caller's own list from inside the suspension window."""
+
+        async def complete(
+            self, messages: Sequence[Message], *, model: str | None = None
+        ) -> Message:
+            supply.clear()
+            return await super().complete(messages, model=model)
+
+    model = _MutatingModel(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    output = await planner.plan(
+        _goal(),
+        utterance=_REQUEST,
+        context=_context(),
+        memories=supply,
+        capabilities=_VOCABULARY,
+    )
+
+    user = next(one.content for one in model.calls[0].messages if one.role is Role.USER)
+    printed = [line for line in user.splitlines() if line.startswith("  - M2 ")]
+    assert len(printed) == 1, "the prompt printed two records and M2 is the second"
+    assert output.plan.interpretations[0].record == _supply()[1].id
