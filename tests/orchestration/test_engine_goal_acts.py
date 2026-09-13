@@ -24,11 +24,13 @@ from test_engine_goal_association import (
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import (
     ConfigurationError,
+    ConversationStoreError,
     PlanningError,
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
+    ActionPlan,
     AssociationVerdict,
     AttemptState,
     ClarificationWithdrawal,
@@ -37,6 +39,7 @@ from ai_assistant.core.types import (
     GoalQuestionDisposition,
     GoalStatus,
     Ground,
+    PlanStep,
     ProposedElement,
     ProposedUnderstanding,
     ReferenceOutcome,
@@ -651,3 +654,91 @@ class _CountingSettlement(FakePlanStore):
         """Settle as the fake does, counting the attempt."""
         self.settled += 1
         return await super().settle_question(question_id, **fields)
+
+
+async def test_a_binding_lookup_that_failed_is_not_a_binding_that_resolved_to_nothing() -> None:
+    """§1's fourth act: an unreadable index refuses the resume rather than skipping the stamp.
+
+    ``None`` from ``conversation_of_binding`` is ADR-0074 §3's "not captured at all, and
+    no conversation invented" — a park predating capture, or one whose conversation the
+    user deleted — and leaves nothing to stamp ``last_engaged_in`` with. A
+    ``ConversationStoreError`` is the index being unreadable for a moment, and treating
+    the two alike would let a confirmed step run **unengaged** on a turn where the very
+    next lookup succeeds. Propagating it costs nothing, because this runs before the
+    runner is entered.
+    """
+    harness = Harness(planner=NoStepPlanner())
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        harness.plans, _goal("goal-campsite", "book a campsite", conversation=conversation)
+    )
+    await harness.plans.save_plan(
+        ActionPlan(
+            id="plan-1",
+            goal_id=campsite.id,
+            steps=(PlanStep(id="step-1", intent="send it", capability="send_email"),),
+            created_at=AT,
+            targets_revision=1,
+        )
+    )
+    state = await harness.plans.start_execution("plan-1")
+    harness.engine._conversations = _UnreadableBindings(  # type: ignore[assignment]  # a case arming one read
+        harness.conversations
+    )
+
+    with pytest.raises(ConversationStoreError):
+        await harness.engine._engage_execution(state.id, "step-1")
+
+    held = await harness.plans.get_goal(campsite.id)
+    assert held is not None
+    assert held.last_engaged_at is None, "and the resumption is refused before it runs"
+
+
+class _UnreadableBindings:
+    """A lifecycle whose binding lookup is the one read that fails."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        """Everything but the binding lookup is the real lifecycle's."""
+        return getattr(self._inner, name)
+
+    async def conversation_of_binding(self, binding: Any) -> Any:
+        """Fail as an unreadable index does."""
+        msg = "the index could not be read"
+        raise ConversationStoreError(msg)
+
+
+async def test_a_deadline_a_clock_advance_invalidates_raises_rather_than_writing_nothing() -> None:
+    """§8's time-of-check/time-of-use pair, and the use half is not silent.
+
+    §8 computes ``expires_at`` "**once**, at the instant the question is written", so the
+    write's addition is taken from a **later** reading than the one
+    ``_checked_deadline`` validated. What that leaves open is a lifetime within one
+    turn's duration of the end of the calendar — and it raises, because a material
+    ambiguity that quietly produced no question is the failure this section exists to
+    prevent.
+    """
+    ticking = _Ticking(AT)
+    harness = Harness(
+        planner=_Asking(),
+        goal_question_ttl=datetime.max.replace(tzinfo=UTC) - AT,
+        now=ticking,
+    )
+
+    with pytest.raises(ConfigurationError, match="goal_question_ttl"):
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+
+class _Ticking:
+    """A clock that advances one microsecond per reading (ADR-0009's injected seam)."""
+
+    def __init__(self, start: datetime) -> None:
+        self._now = start
+
+    def __call__(self) -> datetime:
+        """Read, then advance."""
+        reading = self._now
+        self._now += timedelta(microseconds=1)
+        return reading

@@ -8732,10 +8732,11 @@ class Engine:
         **``expires_at`` is computed once, at the instant the question is written, and
         is never extended, refreshed or recomputed** (§8), from
         ``Settings.goal_question_ttl`` — required, positive, with no disable spelling.
-        That field is bounded below and not above, so a lifetime whose addition runs off
-        the end of the calendar leaves **no question** here rather than failing a turn
-        whose goal, plans and attempt are already written; the figures that could never
-        work at all are refused at construction instead.
+        That field is bounded below and not above, so the same addition is **also taken
+        at the top of the turn** (:meth:`_checked_deadline`): this site runs after the
+        goal, the plans and the attempt are written (§11's order), and a deployment's
+        configuration fault must not ordinarily be the thing that fails a turn whose
+        records already stand.
 
         **A question exists only where the store accepted it** (§10). Where
         ``record_question`` answered ``False`` — that goal already holds an open one — or
@@ -8757,17 +8758,6 @@ class Engine:
         if raised is None or record is None or opened is None:
             return None
         now = self._clock()
-        try:
-            expires_at = now + self._goal_question_ttl
-        except OverflowError:
-            # A configured lifetime inside the type's range whose addition still runs
-            # off the end of the calendar from *this* instant. It is a deployment fault
-            # and it is reported as one — but it costs a **question** and not a turn:
-            # this site runs after the goal, the plans and the attempt are written
-            # (§11's order), so raising here would fail a turn whose records already
-            # stand. §10 already gives the shape for a question that was not written.
-            _log.error("goal_question_deadline_unrepresentable", ttl=self._goal_question_ttl)
-            return None
         question = GoalQuestion(
             id=self._id_factory(),
             goal_id=record.goal.id,
@@ -8775,7 +8765,7 @@ class Engine:
             text=raised.text,
             about=raised.about,
             asked_at=now,
-            expires_at=expires_at,
+            expires_at=self._deadline(now),
         )
         try:
             written = await self._plans.record_question(question)
@@ -8835,6 +8825,42 @@ class Engine:
         for plan in plans:
             await self._plans.save_plan(plan)
 
+    def _deadline(self, at: datetime) -> datetime:
+        """When a question written at ``at`` stops being answerable (ADR-0250 §8).
+
+        §8 computes ``expires_at`` *"**once**, at the instant the question is written"*,
+        so the addition is taken from **that** instant and not from the one
+        :meth:`_checked_deadline` validated: carrying a turn-start deadline forward would
+        be a second reading of a value §8 fixes to the write.
+
+        **The two readings are a time-of-check/time-of-use pair, and this is the use
+        half.** The check at the top of the turn keeps this refusal out of reach for
+        every configured lifetime a clock advance cannot invalidate; what is left is a
+        lifetime within one turn's duration of the end of the calendar, and it **raises**
+        rather than quietly writing no question — a material ambiguity that silently
+        produced nothing is the failure this section exists to prevent.
+
+        Args:
+            at: The instant the question is being written.
+
+        Returns:
+            The deadline.
+
+        Raises:
+            ConfigurationError: If the configured lifetime added to this instant runs
+                past the end of the calendar a stored instant can carry.
+        """
+        try:
+            return at + self._goal_question_ttl
+        except OverflowError as exc:
+            msg = (
+                f"goal_question_ttl is {self._goal_question_ttl}, which added to this "
+                f"instant runs past the end of the calendar a stored instant can carry: "
+                f"a clarification raised on this turn could be given no deadline "
+                f"(ADR-0250 §8)"
+            )
+            raise ConfigurationError(msg) from exc
+
     def _checked_deadline(self) -> None:
         """Refuse a configured lifetime with no representable deadline (ADR-0250 §8).
 
@@ -8852,20 +8878,16 @@ class Engine:
         representable depends on when it is added: a figure that works today and one
         that never could are the same figure read from two instants.
 
+        **It is the same computation the write performs** (:meth:`_deadline`), taken from
+        an earlier reading of the same clock — so this is the *check* half of a
+        time-of-check/time-of-use pair rather than a second rule that could drift from
+        the first, and the use half refuses what a clock advance leaves open.
+
         Raises:
             ConfigurationError: If this deployment's ``goal_question_ttl`` cannot
                 produce a representable deadline from this instant.
         """
-        try:
-            self._clock() + self._goal_question_ttl
-        except OverflowError as exc:
-            msg = (
-                f"goal_question_ttl is {self._goal_question_ttl}, which added to this "
-                f"instant runs past the end of the calendar a stored instant can carry: "
-                f"a clarification raised on this turn could be given no deadline "
-                f"(ADR-0250 §8)"
-            )
-            raise ConfigurationError(msg) from exc
+        self._deadline(self._clock())
 
     # --- ADR-0250 §3: a turn resolves its goal before it plans ---------------
 
@@ -8980,16 +9002,18 @@ class Engine:
         plan = await self._plans.get_plan(state.plan_id)
         if plan is None:  # pragma: no cover — an execution's plan is its own row
             return
-        try:
-            origin = await self._conversations.conversation_of_binding(
-                ParkedBinding(execution_id=execution_id, step_id=step_id)
-            )
-        except ConversationStoreError:
-            # ADR-0074 §3's "not captured at all, and no conversation invented": a
-            # binding that resolves to nothing leaves no conversation to stamp
-            # `last_engaged_in` with, and a resumption is not failed for it.
-            _log.warning("conversation_binding_unresolved", exc_info=True)
-            return
+        # **A lookup that *failed* is not a binding that resolved to nothing**, and the
+        # two are kept apart because only one of them is a fact about this resumption.
+        # `None` is ADR-0074 §3's "not captured at all, and no conversation invented" —
+        # a park predating capture, or one whose conversation the user deleted — and
+        # leaves nothing to stamp `last_engaged_in` with. A `ConversationStoreError` is
+        # the index being unreadable for a moment, and swallowing it here would let a
+        # confirmed step run **unengaged** on a turn where the very next lookup succeeds.
+        # It is allowed to propagate, which this site can afford precisely because it
+        # runs **before** the runner is entered.
+        origin = await self._conversations.conversation_of_binding(
+            ParkedBinding(execution_id=execution_id, step_id=step_id)
+        )
         if origin is None:
             return
         await self._engage(plan.goal_id, conversation_id=origin.conversation_id)
