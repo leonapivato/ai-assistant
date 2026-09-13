@@ -9061,7 +9061,10 @@ class Engine:
 
         **A caller that loses the compare-and-swap records nothing and reports the
         settled state** (§9), which is why a ``False`` from ``settle_question`` re-reads
-        rather than assuming.
+        rather than assuming — on the **expiry** settlement as well as on the answer.
+        Both read the question as ``OPEN`` and then write, so both have the same window,
+        and a lane that reported ``EXPIRED`` whatever the store answered would tell a
+        user their question expired on a turn where somebody had already answered it.
 
         Args:
             question: The question the reference named, as it was read.
@@ -9072,15 +9075,24 @@ class Engine:
         if question.disposition is not GoalQuestionDisposition.OPEN:
             return _reference_outcome(question.disposition)
         now = self._clock()
-        if question.expires_at <= now:
-            await self._plans.settle_question(
-                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
+        taken = (
+            GoalQuestionDisposition.EXPIRED
+            if question.expires_at <= now
+            else GoalQuestionDisposition.ANSWERED
+        )
+        if await self._plans.settle_question(question.id, disposition=taken, at=now):
+            return (
+                ReferenceOutcome.EXPIRED
+                if taken is GoalQuestionDisposition.EXPIRED
+                else ReferenceOutcome.ANSWERED
             )
-            return ReferenceOutcome.EXPIRED
-        if await self._plans.settle_question(
-            question.id, disposition=GoalQuestionDisposition.ANSWERED, at=now
-        ):
-            return ReferenceOutcome.ANSWERED
+        # **The losing caller records nothing and reports the settled state** (§9), and
+        # that is true of *both* settlements rather than of the answer alone: a second
+        # party that answered, withdrew or expired this question between the read above
+        # and this write left a disposition that is now the truth, and reporting what
+        # this call *attempted* would tell the user their answer arrived when it did
+        # not — or that the question expired when somebody had already answered it. §11
+        # states the outcome over the disposition for exactly this reason.
         again = await self._plans.get_question(question.id)
         if again is None:  # pragma: no cover — a settled question keeps its row (§8)
             return ReferenceOutcome.UNKNOWN

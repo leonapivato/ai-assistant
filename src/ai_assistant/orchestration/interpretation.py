@@ -58,6 +58,7 @@ from values the loop holds.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
@@ -69,7 +70,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.reads import resolve_label
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.types import (
@@ -78,7 +79,14 @@ if TYPE_CHECKING:
         ProposedUnderstanding,
     )
 
-__all__ = ["CONDITIONS_LETTER", "CONSTRAINTS_LETTER", "CRITERIA_LETTER", "recorded_revision"]
+__all__ = [
+    "CONDITIONS_LETTER",
+    "CONSTRAINTS_LETTER",
+    "CRITERIA_LETTER",
+    "RecordedUnderstanding",
+    "recorded_revision",
+    "resolved_ordinal",
+]
 
 #: ADR-0249 §9's three label letters, one per tuple of the brief. They are the whole of
 #: what keeps the three label spaces apart: a ``retains`` naming an element of another
@@ -103,23 +111,31 @@ CONDITIONS_LETTER: Final = "D"
 _ORDINAL: Final = re.compile(r"[1-9][0-9]{0,8}")
 
 
-def _resolved_ordinal(label: str, letter: str, length: int) -> int | None:
+def resolved_ordinal(label: str, letter: str, length: int) -> int | None:
     """Resolve one brief label to a 0-based index of its own tuple, or to nothing (§9).
 
     **Every way of being outside the shown set lands here alike**: a label of another
-    tuple's letter, a string that does not match the form, an ordinal below 1, an ordinal
-    beyond the tuple's length, and an ordinal of more digits than any shown set could
-    have. Each resolves to nothing, and the retaining element is then dropped —
+    tuple's letter, a string that does not match the form — a **zero-padded** ordinal
+    included, which :data:`_ORDINAL`'s leading ``[1-9]`` refuses because ADR-0249 §9
+    spells the scheme as the letter "followed by *n* in decimal with **no padding**" —
+    an ordinal below 1, an ordinal beyond the tuple's length, and an ordinal of more
+    digits than any shown set could have. Each resolves to nothing, and the retaining
+    element is then dropped —
     silently, exactly as ADR-0226 §3 drops an ``M`` label outside the shown set. **None
     of them fails the turn**, which is why the last is tested before the conversion
     rather than after it: a model-supplied string is not bounded by anything, and
     ``int()`` refuses one past CPython's digit limit.
 
+    **It is public because ADR-0250 §3 and §7 spell the same scheme over two more
+    sequences** — a candidacy's ``G`` labels and a proposal's own ``C``/``S``/``D``
+    labels — and a second parser for one rule is a second place to get the padding, the
+    digit class and the bound wrong. One function, one refusal, three call sites.
+
     Args:
-        label: What the planner named. Model-supplied text, treated as a label and
-            never as an identifier (ADR-0228 §8).
-        letter: The letter of the tuple the retaining element sits in.
-        length: How many elements that tuple of the **current** interpretation holds.
+        label: What the planner or the associator named. Model-supplied text, treated as
+            a label and never as an identifier (ADR-0228 §8).
+        letter: The letter of the sequence the label is read over.
+        length: How many elements that sequence holds.
 
     Returns:
         The 0-based index, or ``None``.
@@ -213,7 +229,7 @@ def _resolved_element(  # noqa: PLR0913, PLR0911 — one parameter per thing a g
         The element to record, or ``None`` where it is dropped.
     """
     if proposed.retains is not None:
-        index = _resolved_ordinal(proposed.retains, letter, len(current))
+        index = resolved_ordinal(proposed.retains, letter, len(current))
         return None if index is None else current[index]
     # A new element: `ProposedElement`'s validator refused every shape but the three a
     # ground admits, so both values below are present on anything that constructed.
@@ -242,7 +258,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
     utterance: str,
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
-) -> tuple[GoalElement, ...]:
+) -> tuple[GoalElement | None, ...]:
     """Resolve one tuple of proposed elements, dropping what does not resolve (§7).
 
     **A revision states its elements in full, and omission is removal** (§7): an element
@@ -258,10 +274,19 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
         supply: The sequence the loop passed the planner on this call.
         minted: The ids of the records this turn's searches minted.
 
+    **One entry per *proposed* position, and a dropped element is a ``None``** rather
+    than an absence. ADR-0250 §7 resolves a raised question's subject to "the position it
+    names in the ``ProposedUnderstanding``'s own tuple", and then reads the text of "the
+    ``GoalElement`` **that position produced**" — so a caller that only saw the surviving
+    elements could not tell which proposed position each came from, and would drop a
+    valid question because a **sibling**'s ground failed. The caller that wants the
+    recorded tuple filters; the caller that wants the correspondence reads it.
+
     Returns:
-        The elements to record, in the order the planner stated them.
+        One entry per proposed element, in the order the planner stated them: the
+        element to record, or ``None`` where its ground did not resolve.
     """
-    resolved = (
+    return tuple(
         _resolved_element(
             element,
             letter=letter,
@@ -272,7 +297,30 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
         )
         for element in proposed
     )
-    return tuple(element for element in resolved if element is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedUnderstanding:
+    """One recorded revision, and which proposed position produced each element (§7).
+
+    ADR-0250 §7 resolves a raised question's subject to **the position it names in the
+    ``ProposedUnderstanding``'s own tuple**, and then records the text of *"the
+    ``GoalElement`` **that position produced** in the revision this turn recorded"*. So
+    the correspondence between a proposal's positions and the revision's is a value the
+    caller needs and cannot recompute: ADR-0249 §7's ground resolution drops an element
+    whose ground does not resolve, and a caller comparing lengths would drop a question
+    about a **surviving** element because a *sibling* failed.
+
+    Attributes:
+        revision: The revision to append.
+        positions: Per tuple name — ``constraints``, ``criteria``, ``conditions`` — one
+            entry per **proposed** position, holding that position's index in the
+            recorded tuple, or ``None`` where its ground did not resolve and the element
+            is not in the revision at all.
+    """
+
+    revision: GoalInterpretation
+    positions: Mapping[str, tuple[int | None, ...]]
 
 
 def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed, and one parameter per thing a ground is resolved against plus the two values §6 reserves to `orchestration`; every one is a distinct fact and a bundle would mint a type for an argument list
@@ -284,7 +332,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
     minted: Collection[str] = (),
     recorded_at: datetime,
     raised_by: str,
-) -> GoalInterpretation:
+) -> RecordedUnderstanding:
     """Resolve ``understanding`` into the revision that follows ``goal``'s current one.
 
     **The provenance is this package's and never the model's** (§6's writer clause).
@@ -323,7 +371,9 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             ``orchestration`` authors, and a default would let a call site forget it.
 
     Returns:
-        The revision to append. It is not appended here: what a caller does with it —
+        The revision to append, beside the correspondence ADR-0250 §7 resolves a
+        raised question's subject through. It is not appended here: what a caller does
+        with it —
         an in-memory append on a goal this turn opened, a ``record_interpretation``
         under §12's compare-and-swap on one the store already holds — is the caller's,
         and this function holds only the resolution.
@@ -351,12 +401,22 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             # §7: recorded `INFERRED` with neither argument rather than dropped.
             ground, evidence_id, span = Ground.INFERRED, None, None
     groups = (
-        (CONSTRAINTS_LETTER, understanding.constraints, current.constraints),
-        (CRITERIA_LETTER, understanding.criteria, current.criteria),
-        (CONDITIONS_LETTER, understanding.conditions, current.conditions),
+        (
+            "constraints",
+            CONSTRAINTS_LETTER,
+            understanding.constraints,
+            current.constraints,
+        ),
+        ("criteria", CRITERIA_LETTER, understanding.criteria, current.criteria),
+        (
+            "conditions",
+            CONDITIONS_LETTER,
+            understanding.conditions,
+            current.conditions,
+        ),
     )
-    resolved = tuple(
-        _resolved_group(
+    resolved = {
+        name: _resolved_group(
             proposed,
             letter=letter,
             current=held,
@@ -364,17 +424,43 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             supply=supply,
             minted=minted,
         )
-        for letter, proposed, held in groups
+        for name, letter, proposed, held in groups
+    }
+    kept = {
+        name: tuple(one for one in group if one is not None) for name, group in resolved.items()
+    }
+    return RecordedUnderstanding(
+        revision=GoalInterpretation(
+            revision=current.revision + 1,
+            outcome=outcome,
+            outcome_ground=ground,
+            outcome_evidence_id=evidence_id,
+            outcome_span=span,
+            constraints=kept["constraints"],
+            criteria=kept["criteria"],
+            conditions=kept["conditions"],
+            recorded_at=recorded_at,
+            raised_by=raised_by,
+        ),
+        positions={name: _positions(group) for name, group in resolved.items()},
     )
-    return GoalInterpretation(
-        revision=current.revision + 1,
-        outcome=outcome,
-        outcome_ground=ground,
-        outcome_evidence_id=evidence_id,
-        outcome_span=span,
-        constraints=resolved[0],
-        criteria=resolved[1],
-        conditions=resolved[2],
-        recorded_at=recorded_at,
-        raised_by=raised_by,
-    )
+
+
+def _positions(group: Sequence[GoalElement | None]) -> tuple[int | None, ...]:
+    """Map each proposed position to its index in the recorded tuple, or to nothing.
+
+    Args:
+        group: One tuple's per-proposed-position resolution.
+
+    Returns:
+        One entry per proposed element: its index among the survivors, or ``None``.
+    """
+    mapped: list[int | None] = []
+    kept = 0
+    for element in group:
+        if element is None:
+            mapped.append(None)
+            continue
+        mapped.append(kept)
+        kept += 1
+    return tuple(mapped)

@@ -2326,7 +2326,7 @@ class LearningLoop:
         # is stamped. `None` means the planner proposed no change, which is the
         # semantically correct answer for a planner that knows nothing of this
         # envelope, and no path here reads it as an error or a reason to re-plan.
-        goal, recorded, brief = self._recorded(
+        goal, recorded, brief, positions = self._recorded(
             goal,
             produced.understanding,
             recorded=recorded,
@@ -2345,7 +2345,7 @@ class LearningLoop:
         # leaves the turn raising none — §6's conditions are the planner's report "on
         # this call", and a turn that carried an earlier call's question forward would
         # re-ask what its own re-plan had just resolved (§11's late answer).
-        raised = await self._raised(produced, goal=goal)
+        raised = await self._raised(produced, goal=goal, positions=positions)
         # ADR-0249 §8: the stamp is the goal's revision **after this call's
         # understanding, if any, has been recorded**. Stamping the *input* revision
         # would leave every turn on which the planner revised its understanding holding
@@ -2590,7 +2590,7 @@ class LearningLoop:
             # the first's, and against the supply **this** call was handed — ADR-0228 §8
             # binds ADR-0226 §3's label space per call, so the same `M` label may name
             # different records on a turn's two calls.
-            goal, recorded, brief = self._recorded(
+            goal, recorded, brief, positions = self._recorded(
                 goal,
                 revised.understanding,
                 recorded=recorded,
@@ -2605,7 +2605,7 @@ class LearningLoop:
             )
             # §6, §7 again, on the same terms as the first call's: this call's own
             # report, over this call's own plan, replacing whatever the last one said.
-            raised = await self._raised(revised, goal=goal)
+            raised = await self._raised(revised, goal=goal, positions=positions)
             plan = _stamped(
                 revised.plan,
                 targets_revision=goal.revision,
@@ -3260,7 +3260,13 @@ class LearningLoop:
         """
         return request_of(utterance)
 
-    async def _raised(self, produced: PlannerOutput, *, goal: Goal) -> RaisedSubject | None:
+    async def _raised(
+        self,
+        produced: PlannerOutput,
+        *,
+        goal: Goal,
+        positions: Mapping[str, tuple[int | None, ...]],
+    ) -> RaisedSubject | None:
         """Take at most one question from one planner call (ADR-0250 §6, §7).
 
         **§6's three conditions, and the two this method can check.** Condition 1 —
@@ -3290,6 +3296,10 @@ class LearningLoop:
             goal: The goal as it stands **after** this call's understanding was
                 recorded, so ``interpretation[-1]`` is the revision §7 resolves the
                 subject's text out of.
+            positions: Which position of that revision each proposed position produced
+                (:func:`~ai_assistant.orchestration.goals.subject_of`), so a question
+                about a surviving element is not dropped because a sibling's ground
+                failed to resolve.
 
         Returns:
             The question to raise, or ``None``.
@@ -3300,6 +3310,7 @@ class LearningLoop:
         return taken_question(
             understanding,
             recorded=goal.interpretation[-1],
+            positions=positions,
             side_effecting=await self._side_effecting(produced.plan),
         )
 
@@ -3346,7 +3357,9 @@ class LearningLoop:
         raised_by: str,
         brief: GoalBrief,
         open_question: str | None,
-    ) -> tuple[Goal, tuple[GoalInterpretation, ...], GoalBrief]:
+    ) -> tuple[
+        Goal, tuple[GoalInterpretation, ...], GoalBrief, Mapping[str, tuple[int | None, ...]]
+    ]:
         """Record one planner call's understanding onto the goal, if it proposed one.
 
         **The revision is appended in memory here and persisted at §11's site.** This
@@ -3398,13 +3411,13 @@ class LearningLoop:
                 per call.
 
         Returns:
-            The goal, the revisions this turn has recorded, and the brief a next call
+            The goal, the revisions this turn has recorded, the brief a next call
             would receive — the brief of the **new** revision where one was recorded
             (§7), and the one passed in where none was.
         """
         if understanding is None:
-            return goal, recorded, brief
-        revision = recorded_revision(
+            return goal, recorded, brief, {}
+        understood = recorded_revision(
             goal,
             understanding,
             utterance=utterance,
@@ -3413,6 +3426,7 @@ class LearningLoop:
             recorded_at=at,
             raised_by=raised_by,
         )
+        revision = understood.revision
         # §1: append-only. Nothing edits an element in place, reorders the tuple or
         # removes one — §2's elision is the store's, taken on the write.
         moved = goal.model_copy(update={"interpretation": (*goal.interpretation, revision)})
@@ -3422,6 +3436,7 @@ class LearningLoop:
             moved,
             recorded if opened else (*recorded, revision),
             _brief_of(moved, open_question),
+            understood.positions,
         )
 
     def _goal_from(self, request: str, *, conversation_id: str | None) -> Goal:

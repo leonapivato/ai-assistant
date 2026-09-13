@@ -35,7 +35,7 @@ from ai_assistant.core.types import (
     ProposedUnderstanding,
     Provenance,
 )
-from ai_assistant.orchestration.interpretation import recorded_revision
+from ai_assistant.orchestration.interpretation import RecordedUnderstanding, recorded_revision
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,6 +90,20 @@ def _revised(
     minted: Sequence[str] = (),
 ) -> GoalInterpretation:
     """Resolve ``understanding`` against ``goal``, with this lane's own stamps."""
+    return _understood(
+        goal=goal, understanding=understanding, utterance=utterance, supply=supply, minted=minted
+    ).revision
+
+
+def _understood(
+    understanding: ProposedUnderstanding,
+    *,
+    goal: Goal | None = None,
+    utterance: str = _ASKED,
+    supply: Sequence[MemoryRecord] = (),
+    minted: Sequence[str] = (),
+) -> RecordedUnderstanding:
+    """The whole of what one resolution produced, positions included (ADR-0250 §7)."""
     return recorded_revision(
         goal if goal is not None else _goal(_opened()),
         understanding,
@@ -468,3 +482,67 @@ def test_the_provenance_of_a_revision_is_this_packages_and_not_the_models() -> N
         "raised_by",
         "recorded_at",
     }.isdisjoint(ProposedUnderstanding.model_fields), "no field one could arrive on"
+
+
+def test_a_positions_map_names_the_recorded_index_of_every_proposed_element() -> None:
+    """ADR-0250 §7: the correspondence a question's subject is resolved through.
+
+    §7 resolves ``about`` to "the **position** it names in the
+    ``ProposedUnderstanding``'s own tuple", and then records the text of "the
+    ``GoalElement`` **that position produced** in the revision this turn recorded".
+
+    **A sibling whose ground did not resolve drops that sibling and nothing else.**
+    ADR-0249 §7 drops an element whose ground does not resolve, so the recorded tuple is
+    shorter than the proposed one — and a caller comparing the two lengths would drop a
+    question about a **surviving** element because a neighbour failed. The map says which
+    proposed position produced which recorded element, and says ``None`` for the one that
+    produced nothing.
+    """
+    understood = _understood(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            criteria=(
+                ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),
+                ProposedElement(
+                    text="from evidence", ground=Ground.FROM_EVIDENCE, evidence_label="M9"
+                ),
+                ProposedElement(text="quiet after ten", ground=Ground.INFERRED),
+            ),
+        )
+    )
+
+    assert [element.text for element in understood.revision.criteria] == [
+        "a pitch by the river",
+        "quiet after ten",
+    ], "ADR-0249 §7: the element whose FROM_EVIDENCE label resolved to nothing is dropped"
+    assert understood.positions["criteria"] == (0, None, 1), (
+        "and the surviving neighbours keep their own recorded positions, which is what "
+        "stops a question about one of them being dropped for the other's failure"
+    )
+    assert understood.positions["constraints"] == ()
+    assert understood.positions["conditions"] == ()
+
+
+def test_a_dropped_element_is_a_none_and_its_siblings_keep_their_positions() -> None:
+    """ADR-0250 §7, over the one shape ADR-0249 §7 actually drops.
+
+    A **retaining** element whose ``retains`` label resolves to nothing is dropped
+    entire — "the retaining element is then dropped, silently" — so its proposed position
+    produced no element, and the positions after it shift down by one.
+    """
+    understood = _understood(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            criteria=(
+                ProposedElement(text="a pitch by the river", ground=Ground.INFERRED),
+                ProposedElement(retains="S9"),
+                ProposedElement(text="quiet after ten", ground=Ground.INFERRED),
+            ),
+        )
+    )
+
+    assert [element.text for element in understood.revision.criteria] == [
+        "a pitch by the river",
+        "quiet after ten",
+    ]
+    assert understood.positions["criteria"] == (0, None, 1)

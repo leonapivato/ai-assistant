@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
@@ -49,6 +49,10 @@ from ai_assistant.core.types import (
     ProposedQuestion,
     ProposedUnderstanding,
 )
+from ai_assistant.orchestration.interpretation import resolved_ordinal
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 #: The two :class:`~ai_assistant.core.types.GoalStatus` members ADR-0250 §1 calls
 #: **open**, stated once so no reader spells the test a second way.
@@ -291,16 +295,11 @@ def _indices(labels: tuple[str, ...], length: int) -> tuple[int, ...]:
     """
     seen: list[int] = []
     for label in labels:
-        if not label.startswith(CANDIDATE_LABEL_PREFIX):
-            continue
-        digits = label[len(CANDIDATE_LABEL_PREFIX) :]
-        # `isdigit` admits every Unicode decimal, and `int` would then accept a label
-        # this scheme does not spell — the form is ASCII decimal with no padding, so
-        # the test is over ASCII digits and over nothing else.
-        if not digits.isascii() or not digits.isdigit():
-            continue
-        index = int(digits) - 1
-        if 0 <= index < length and index not in seen:
+        # **The same parser ADR-0249 §9's own labels are read by** — one refusal for one
+        # scheme, so a zero-padded ordinal, a Unicode decimal, an ordinal below 1 and one
+        # beyond the sequence's length are all refused here exactly as they are there.
+        index = resolved_ordinal(label, CANDIDATE_LABEL_PREFIX, length)
+        if index is not None and index not in seen:
             seen.append(index)
     return tuple(seen)
 
@@ -550,6 +549,7 @@ def subject_of(
     *,
     proposal: ProposedUnderstanding,
     recorded: GoalInterpretation,
+    positions: Mapping[str, tuple[int | None, ...]],
 ) -> RaisedSubject | None:
     """Resolve what a raised question is about, or drop it (ADR-0250 §7).
 
@@ -578,6 +578,13 @@ def subject_of(
         question: What the planner raised.
         proposal: The understanding it raised it about, as received.
         recorded: The revision this turn recorded from that proposal.
+        positions: Which position of the **recorded** tuple each proposed position
+            produced, or ``None`` where its ground did not resolve
+            (:class:`~ai_assistant.orchestration.interpretation.RecordedUnderstanding`).
+            **A sibling's failure drops that sibling and nothing else**: §7 drops a
+            question exactly where *"the element it is about is not in the recorded
+            revision"*, and reading a length difference instead would drop a question
+            about a surviving element because a neighbour's ground did not resolve.
 
     Returns:
         The subject, or ``None`` where the label resolves to nothing.
@@ -588,21 +595,22 @@ def subject_of(
     name = _SUBJECT_TUPLES.get(label[:1])
     if name is None:
         return None
-    digits = label[1:]
-    if not digits.isascii() or not digits.isdigit():
-        return None
-    index = int(digits) - 1
     proposed: tuple[ProposedElement, ...] = getattr(proposal, name)
-    if not 0 <= index < len(proposed):
+    # **ADR-0249 §9's own parser, read over the proposal's tuple rather than the
+    # brief's** — one refusal for one scheme, so a zero-padded ordinal is refused here
+    # exactly as it is where the brief's labels are read.
+    index = resolved_ordinal(label, label[:1], len(proposed))
+    if index is None:
         return None
-    produced = _elements(recorded, name)
-    # ADR-0249 §7's ground resolution drops an element whose ground does not resolve,
-    # so a recorded tuple shorter than the proposed one is a tuple something fell out
-    # of and the position names a different element or none at all. The conservative
-    # reading is the one §7 states: the question is dropped rather than re-pointed.
-    if len(produced) != len(proposed):
+    produced = positions.get(name, ())
+    if index >= len(produced):  # pragma: no cover — one entry per proposed position
         return None
-    return RaisedSubject(text=question.text, about=produced[index].text, tuple_name=name)
+    kept = produced[index]
+    if kept is None:
+        return None
+    return RaisedSubject(
+        text=question.text, about=_elements(recorded, name)[kept].text, tuple_name=name
+    )
 
 
 def is_material(subject: RaisedSubject, *, side_effecting: bool) -> bool:
@@ -641,6 +649,7 @@ def taken_question(
     proposal: ProposedUnderstanding,
     *,
     recorded: GoalInterpretation,
+    positions: Mapping[str, tuple[int | None, ...]],
     side_effecting: bool,
 ) -> RaisedSubject | None:
     """Take at most one question from a planner call (ADR-0250 §7, §6).
@@ -653,6 +662,7 @@ def taken_question(
     Args:
         proposal: The understanding the planner proposed, as received.
         recorded: The revision this turn recorded from it.
+        positions: The proposal-to-revision correspondence (:func:`subject_of`).
         side_effecting: §6's second materiality limb, read by the caller that holds
             the registry.
 
@@ -660,7 +670,7 @@ def taken_question(
         The question to raise, or ``None`` where none resolved and was material.
     """
     for question in proposal.questions:
-        subject = subject_of(question, proposal=proposal, recorded=recorded)
+        subject = subject_of(question, proposal=proposal, recorded=recorded, positions=positions)
         if subject is not None and is_material(subject, side_effecting=side_effecting):
             return subject
     return None
