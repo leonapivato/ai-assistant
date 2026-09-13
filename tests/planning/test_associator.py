@@ -22,6 +22,7 @@ import asyncio
 import json
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 
 import pytest
@@ -276,36 +277,39 @@ async def test_the_elision_is_rendered_and_never_silent() -> None:
     assert "3 further objective" in _block(model)
 
 
-async def test_a_count_with_no_decimal_form_still_discloses_the_elision() -> None:
-    """§2: "the elision is disclosed and never silent", whatever the count renders as.
+async def test_a_count_past_the_digit_limit_is_rendered_in_full() -> None:
+    """§2: the count is rendered exactly, and neither raises nor collapses to a flag.
 
-    CPython declines to convert an integer with more digits than
-    ``sys.get_int_max_str_digits()``, and
-    :class:`~ai_assistant.core.types.GoalCandidacy` bounds ``elided`` only at zero. No
-    reachable value comes near the limit — it is a count of rows a store held — but the
-    type admits one, and :meth:`associate` documents exactly one exception, which is the
-    provider being unreachable (§4). A ``ValueError`` out of the renderer would be a
-    second, undocumented one, and the turn would lose its association to a number it was
-    only ever going to print.
+    Two obligations meet on a value that cannot occur. CPython declines to convert an
+    integer with more digits than ``sys.get_int_max_str_digits()``, and
+    :class:`~ai_assistant.core.types.GoalCandidacy` bounds ``elided`` only at zero — it
+    is a count of rows a store held, so nothing reachable comes near the limit, but the
+    type admits one. An ``f"{elided}"`` over it raises, which would be a second,
+    undocumented exception out of :meth:`associate` (§4 admits one, the provider being
+    unreachable); and a count-free fallback sentence would render two different
+    over-limit counts identically, which is the flag §2 refuses for the stated reason
+    that one "would discard a magnitude the writer holds".
 
-    So the figure is dropped and the disclosure is kept: the model is still told the
-    list is not the whole set, which is what §2 asks of this seam. The limit is
-    **pinned** rather than read off the ambient interpreter for the reason
+    So the renderer uses :class:`decimal.Decimal`, whose conversion from an ``int`` is
+    exact, carries exponent zero and is not subject to the limit — and this arm asserts
+    the **whole** count reaches the prompt rather than merely that the call survived.
+
+    The limit is **pinned** rather than read off the ambient interpreter for the reason
     ``tests/core/_int_str_digits.py`` gives — ``PYTHONINTMAXSTRDIGITS=0`` disables it
-    outright, and this branch would then go unexercised while the case passed for the
-    wrong reason (#1358).
+    outright, and the property this arm exists for would then hold trivially while the
+    case passed for the wrong reason (#1358).
     """
     model = FakeModelProvider(_VALID_REPLY)
 
     with pinned_int_str_digits():
         absurd = 10 ** (sys.get_int_max_str_digits() + 1)
         got = await _over(model).associate(candidacy_of("book a campsite", elided=absurd))
+        expected = f"{Decimal(absurd)} further objectives"
 
     assert got.verdict is AssociationVerdict.ASSOCIATES, "the call was made and answered"
     block = _block(model)
-    assert "Further objectives of this conversation are not listed" in block, (
-        "the fallback sentence, so the branch this arm exists for is the one that ran"
-    )
+    assert expected in block, "every digit of the count, not a sentence standing in for it"
+    assert "not listed" in block
 
 
 async def test_no_elision_is_claimed_where_none_happened() -> None:

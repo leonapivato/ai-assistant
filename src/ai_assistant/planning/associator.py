@@ -46,6 +46,7 @@ resolves to nothing becomes the ask (§3) rather than a repaired pick.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
@@ -516,34 +517,39 @@ def _render_candidates(candidacy: GoalCandidacy) -> str:
 def _elision(elided: int) -> str:
     """The sentence disclosing what the cap dropped (ADR-0250 §2).
 
-    **The count is rendered where it has a decimal form, and the elision is disclosed
-    either way.** CPython declines to convert an integer with more digits than
-    ``sys.get_int_max_str_digits()``, and :class:`~ai_assistant.core.types.GoalCandidacy`
-    bounds ``elided`` only at zero — it is a count of rows a store held, so no reachable
-    value comes near the limit, but the type admits one and this module must not raise a
-    ``ValueError`` for a rendering reason: :meth:`ModelBackedGoalAssociator.associate`
-    documents exactly one exception and it is the provider being unreachable (§4).
+    **The exact count is rendered, and it is rendered through
+    :class:`decimal.Decimal` rather than through ``str``.** CPython declines to convert
+    an integer with more digits than ``sys.get_int_max_str_digits()``, and
+    :class:`~ai_assistant.core.types.GoalCandidacy` bounds ``elided`` only at zero — it
+    is a count of rows a store held, so no reachable value comes near the limit, but
+    the type admits one and an ``f"{elided}"`` over it would raise. That would be a
+    second, undocumented exception out of
+    :meth:`ModelBackedGoalAssociator.associate`, which documents exactly one and it is
+    the provider being unreachable (§4).
 
-    So the figure is dropped and the disclosure is kept, which is the direction §2
-    fixes: "the elision is disclosed and never silent", and "no lane raises the cap to
-    avoid disclosing an elision". A sentence without the number still tells the model
-    the list is not the whole set, which is the one thing the disclosure is for at this
-    seam; a call that failed would disclose nothing at all.
+    **A count-free sentence is not the answer either**, which is why this is a
+    formatter and not a fallback: §2 fixes the field as "a count and never an
+    identifier" and rejects a flag for the stated reason that one "would discard a
+    magnitude the writer holds", so rendering two different over-limit counts as the
+    same sentence would put that discarding back at the rendering seam instead of at
+    the type.
+
+    ``Decimal`` is the stdlib's digit-limit-free decimal conversion: construction from
+    an ``int`` is exact and carries exponent zero, so ``str`` on it emits every digit
+    with no scientific form and no context rounding. For every count a store could
+    actually produce this is byte-identical to ``str(elided)``.
 
     Args:
         elided: How many goals the cap dropped. Non-zero — the caller renders no line
             at all for a set that lost nothing, so this never states an elision of zero.
 
     Returns:
-        The sentence, with the count where the interpreter can render one.
+        The sentence, carrying the count exactly as it was given.
     """
-    try:
-        count = f"{elided} further objectives"
-    except ValueError:
-        count = "Further objectives"
     return (
-        f"{count} of this conversation are not listed above. If the request is about "
-        f"one of those, you cannot tell which objective it is about."
+        f"{Decimal(elided)} further objectives of this conversation are not listed "
+        f"above. If the request is about one of those, you cannot tell which "
+        f"objective it is about."
     )
 
 
