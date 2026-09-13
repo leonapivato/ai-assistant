@@ -41,9 +41,10 @@
   round re-entering no phase at all; and §4's never-gated-first-call clause, its (e)-is-dissolved
   clause and (j)'s own `NOT_ITERATED` record are untouched.
 - **Partially supersedes [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md),
-  in one narrowly stated scope**, and §16 shows the working.
-  **§5's two per-turn clauses** — *"**Every plan of the turn is persisted before anything is
-  driven.** The whole sequence of `save_plan` calls precedes `start_execution`"* and *"**Exactly
+  in three narrowly stated scopes, every one of them §5's**, and §16 shows the working for each.
+  **The first is §5's two per-turn clauses, in their subject** — *"**Every plan of the turn is
+  persisted before anything is driven.** The whole sequence of `save_plan` calls precedes
+  `start_execution`"* and *"**Exactly
   one plan of a turn is driven and it is the last**"* — become statements over a **walk**: the
   plans produced for a walk are all persisted before that walk's `start_execution`, and exactly
   one plan is driven per walk and it is the last produced for it. A turn makes at most **two**
@@ -53,12 +54,14 @@
   weakened**: the ordering protects a turn that *"has driven nothing: no execution is open, no
   capacity slot is spent on a step and no side effect has been reached"*, which is true before a
   turn's first walk and false before its second, so the per-turn reading would forbid the
-  investigation while buying nothing. **Two further clauses fall inside the same scope**: *"A
-  superseded plan **drives nothing** … reaches no `StepRunner`"* binds of a plan superseded
-  **before its walk began** and does not retrospectively forbid a walk that had already run when
-  the supersession was recorded; and the **no-new-failure-mode** clause held because every
-  `save_plan` preceded every drive, which a licensed round's save no longer does, so §10 states
-  what a second walk's persistence failure leaves behind. **§5's remaining clauses bind
+  investigation while buying nothing. **The second and third scopes are two further clauses of
+  §5**, and they are named rather than left inside the first. **The second is the
+  superseded-plan-drives-nothing rule, in the moment it binds at**: *"A superseded plan **drives
+  nothing** … reaches no `StepRunner`"* binds of a plan superseded **before its walk began** and
+  does not retrospectively forbid a walk that had already run when the supersession was recorded.
+  **The third is the no-new-failure-mode clause**, which held because every `save_plan` preceded
+  every drive, which a licensed round's save no longer does, so §10 states what a second walk's
+  persistence failure leaves behind. **§5's remaining clauses bind
   verbatim**: the every-plan-is-persisted rule, the oldest-first order, the one-persistence-site
   rule and the turn-that-ends-early-persists-nothing rule.
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
@@ -490,13 +493,19 @@ was settled about the step rather than by where in the plan it sat.
 > **Normative.** **`PlanStore.commit_transition` gains one claim condition**: a `→ RUNNING`
 > transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, carries
 > the transition's own **`execution_id` among its `execution_ids`**, is in a **non-terminal
-> `AttemptState`**, and is the **only** attempt of that goal naming that execution. A claim naming
-> no attempt, an unknown attempt, an attempt that **did not open this execution**, an attempt
-> whose `state` is `CANCELLED` or `ENDED`, or an execution **more than one attempt names**, is
-> **refused with the
+> `AttemptState`**, and is the **only** attempt of that goal naming that execution. **The refusal
+> takes one of two classes, and which it takes is decided by whether a corrected claim or a later
+> turn could ever satisfy the limb.** A claim naming **no attempt**, an **unknown** attempt, an
+> attempt that **did not open this execution**, or an attempt whose `state` is **`CANCELLED` or
+> `ENDED`**, is **refused with the
 > error class a stale `expected_version` already raises** (`StaleExecutionError`), which is
-> ADR-0249 L1's precedent for the revision conjunct. This is a **strengthening of an existing
-> member** rather than a new one, exactly as ADR-0249 §12 classifies the first added condition.
+> ADR-0249 L1's precedent for the revision conjunct: each of those four names a row the caller
+> could have named correctly, or a state a later turn under a live attempt reaches. A claim
+> against an execution **more than one attempt names** is refused with the **non-stale
+> `PlanningError`** the two ownership refusals below take, because that limb is **permanent** and
+> no re-read, corrected claim or later turn makes it claimable. This is a **strengthening of an
+> existing member** rather than a new one, exactly as ADR-0249 §12 classifies the first added
+> condition.
 
 > **Normative — the binding is the execution's membership and never the goal's, and this is the
 > conjunct's whole strength.** A goal may carry many attempts (ADR-0249 §5, ADR-0250 §12), so a
@@ -523,10 +532,16 @@ was settled about the step rather than by where in the plan it sat.
 > lost the optimistic-concurrency race"* (ADR-0014 §5), and its whole contract is that re-reading
 > and retrying can succeed. **An ownership conflict is permanent**: no re-read makes an execution
 > owned by attempt A valid for attempt B, so a caller conforming to that class's contract would
-> retry a write that can never land. The two refusals therefore raise a `PlanningError` that is
-> **not** the stale class, and §3's `→ RUNNING` conjunct keeps `StaleExecutionError` because a
-> claim refused there **is** retryable in the sense that class names — a later turn under the
-> right attempt succeeds. This
+> retry a write that can never land. **Three refusals therefore raise a `PlanningError` that is
+> **not** the stale class** — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
+> **duplicate-ownership limb** — and §3's `→ RUNNING` conjunct keeps `StaleExecutionError` for its
+> **other four** limbs alone, each of which **is** retryable in the sense that class names: a
+> claim naming no attempt or the wrong one succeeds when corrected, and a claim under an ended
+> attempt succeeds on a later turn under a live one. **The duplicate is the one limb no
+> correction reaches**: with execution E named by attempts A and B, every claim for E is refused
+> whichever attempt it supplies (below), so handing the caller a class whose contract is *re-read
+> and retry* would be telling it to loop forever against a state this decision deliberately
+> refuses to repair. This
 > is a second **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
 > what makes §3's conjunct a binding rather than a coincidence: ADR-0249 §12's append-only rule —
 > *"an identifier the tuple already holds is ignored rather than duplicated or refused"* — governs
@@ -542,8 +557,9 @@ was settled about the step rather than by where in the plan it sat.
 > the store's `schema_version` does not move (§11). **What a reader does with a legacy duplicate
 > is fixed here, and it is to refuse**: `commit_transition`'s conjunct requires **exactly one**
 > attempt of that goal to name the execution, so a claim against an execution **two** attempts
-> name is refused whichever is supplied, and **§5's recovered resume refuses** on the same state
-> for the same reason. **No lane repairs, rewrites or deletes a legacy duplicate**, and none reads
+> name is refused whichever is supplied — on the **non-stale `PlanningError`** above, because no
+> correction reaches it — and **§5's recovered resume refuses** on the same state for the same
+> reason. **No lane repairs, rewrites or deletes a legacy duplicate**, and none reads
 > `PlanExport`'s closure rule as excluding one.
 
 **Refusing rather than migrating, and refusing at the claim and not only at the resume.** A
@@ -867,15 +883,26 @@ wider blast radius, filed there and **not taken here** (§12).
 > stays `PENDING` until the `INDETERMINATE` step is resolved explicitly."* **Every other step the
 > walk did not reach stays `PENDING` too**, under §2's stop rule and for §2's reasons.
 
-> **Normative.** **No step of a plan carrying an `INDETERMINATE` step is ever moved to `SKIPPED`
-> by this decision — not with `UNMET_DEPENDENCY`, not with `SUPERSEDED`, and not on a later
-> turn.** ADR-0014 §4's reason is the whole of it and is quoted rather than restated:
+> **Normative.** **No step the uncertainty reaches is ever moved to `SKIPPED` by this decision —
+> not with `UNMET_DEPENDENCY`, not with `SUPERSEDED`, and not on a later turn.** The prohibition
+> is stated over exactly three sets of steps and over no others: the **`INDETERMINATE` step
+> itself**, **its dependents, transitively**, and **every step the walk did not reach**, which
+> behind an `INDETERMINATE` step is every step after it in `steps` order (§2). ADR-0014 §4's
+> reason is the whole of it and is quoted rather than restated:
 > *"Automatically retrying it would risk acting twice; automatically failing it would risk
 > reporting a completed action as failed. So recovery does neither."* A skip records that the
 > producer did not act, which is exactly the half of the ambiguity that state refuses to pick.
 > **This rule overrides §7's supersession clause** where the two would meet: a plan superseded
-> after driving whose walk stopped on an `INDETERMINATE` step leaves that step's branch `PENDING`
-> and moves no step of it to `SKIPPED`/`SUPERSEDED`.
+> after driving whose walk stopped on an `INDETERMINATE` step leaves that step, its dependent
+> branch and every step behind it `PENDING`, and moves none of them to `SKIPPED`/`SUPERSEDED`.
+
+> **Normative — a step already `SKIPPED` before the uncertainty arose stays `SKIPPED`, and this
+> section does not reach backwards.** A walk that moved an independent step `PENDING → SKIPPED`
+> under §2's skip rule and **then** met an `INDETERMINATE` step later in `steps` order has
+> **committed** that skip, at the moment it reached that step, on inputs §2 establishes were
+> fixed then and are fixed still. **It stays exactly as it stands, with the `UNMET_DEPENDENCY`
+> reason it was written with**, and no lane of this decision reverts it, rewrites its reason, or
+> reads the later uncertainty as bearing on it.
 
 > **Normative — the driver is `AttemptState.EFFECT_UNRESOLVED`'s one producer, for a step it
 > drove.** The attempt's `state` is committed `EFFECT_UNRESOLVED` through `PlanStore.commit_attempt`
@@ -904,6 +931,18 @@ wider blast radius, filed there and **not taken here** (§12).
 > everything else about resolving an `INDETERMINATE` step. **No lane infers the state from a
 > step's status at read time** — ADR-0249 §6's writer clause binds, and a derived state would be
 > the second authority ADR-0249 §5 refuses for *paused*.
+
+**Scoping the prohibition rather than stating it over the whole plan is what keeps it a rule an
+implementation can obey.** A skip already committed records what that step's own dependency,
+`when` or `resolves` settled about the world, and §2 establishes that every input to that refusal
+was fixed when the walk reached it; an uncertainty about a **different** step's effect neither
+revises those inputs nor contradicts what they settled. §10 reads the same durable state from the
+other side, ruling that a walk carries no licence *"whatever it skipped before stopping"* — which
+presupposes exactly the state a blanket prohibition would forbid. **And a prohibition over every
+step of such a plan would demand a committed transition have never happened**, which no lane can
+deliver: `PlanStore`'s write API is a compare-and-swap over a transition graph in which
+`SKIPPED` is terminal (ADR-0014 §4), so the only way to honour it would be to undo a durable
+record, which is the fabrication §7 refuses for the same reason.
 
 **Naming a producer here rather than leaving the member unwritten is what stops the state being a
 vocabulary nobody reaches.** ADR-0249 §5 minted `EFFECT_UNRESOLVED` and wrote no producer; today
@@ -937,6 +976,33 @@ composed is a state the answer could not mention.
 > further step of it, and its still-`PENDING` steps are moved **`PENDING → SKIPPED` with
 > `skip_reason=SUPERSEDED`** — ADR-0014 §4's own row, taken for the case it was written for.
 > **§6's rule overrides this one** where a branch is stopped behind an `INDETERMINATE` step.
+
+> **Normative — the sweep is several writes, and what a sweep that stops part-way leaves is
+> stated rather than inherited.** Each `PENDING → SKIPPED`/`SUPERSEDED` is **its own
+> compare-and-swap** and `PlanStore` offers no multi-write commit (#257's own observation, §12),
+> so a sweep over two or more `PENDING` steps can land some and not the rest — a stale
+> `expected_version`, a store failure. **The residual is exactly what landed**: the steps swept
+> are durably `SKIPPED`/`SUPERSEDED`, the steps not swept stay durably `PENDING`, **nothing is
+> undone, nothing is re-dispatched, no step is moved to any other status and no `SkipReason` is
+> rewritten**, and the turn fails as a turn whose store write raised already fails. **No lane
+> retries the sweep, resumes it from a later turn, or reads the mixed state as a plan still
+> driving**, and **§6's override binds inside the sweep as it binds outside it** — a sweep that
+> meets a step of an `INDETERMINATE` branch skips none of that branch and is not thereby partial.
+
+> **Normative — repairing that residual is A8's, on exactly §6's footing.** A8's reconciliation
+> is the lane that reads a plan's leftover statuses and is the only one that may complete a
+> sweep; **no lane of this decision derives around the residual, infers `SUPERSEDED` at read
+> time, or reads an unswept `PENDING` step as licence to dispatch it.** §12 carries it.
+
+**Leaving the residual rather than retrying it is §6's precedent taken for the same reason, and
+the unswept step is not a step anything will run.** What a sweep records is a fact about a plan
+**nobody will drive again** — §7's other clauses and §2's stop rule have already put that beyond
+the driver — so a half-finished sweep is a record that is *less* complete rather than one that is
+wrong, which is exactly the shape §6's partial write leaves. A retry from a later turn would be a
+sweep nobody asked for over a plan nobody is driving, and it would have to decide afresh whether
+§6's override had come to apply in the interval; that is reconciliation, and A8 owns it. An
+atomic sweep would need a `PlanStore` that accepts several transitions in one commit, which is
+#257's remaining half and is **not taken here** (§12).
 
 > **Normative — one plan is driven per walk, and it is the plan the turn holds.** The driver is
 > handed one `ActionPlan` and one `ExecutionState` and walks that plan's steps. **It never
@@ -1236,7 +1302,8 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > whatever it skipped, so a turn cannot alternate walking and investigating without bound.
 > **No implementation re-derives a licence from a walk that already ran under one.**
 
-> **Normative — ADR-0251 §1's occupancy clause is partially superseded in the same scope.** That
+> **Normative — ADR-0251 §1's occupancy clause is partially superseded, and it is the second of
+> this decision's two scopes on that ADR rather than part of the first.** That
 > section rules *"**Every round of one attempt's investigation sits inside one occupancy of
 > `AttemptPhase.INVESTIGATE`**"* and *"There is no re-entry into `INVESTIGATE` from a later phase,
 > and no clause of this decision creates one."* **A round sits inside one occupancy of
@@ -1262,7 +1329,8 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > keeping them apart is the whole of this section.
 
 > **Normative — a turn that investigates again drives again, and ADR-0228 §5's two per-turn
-> clauses become per-walk. This partially supersedes ADR-0228 §5** in the one scope §16 states.
+> clauses become per-walk. This partially supersedes ADR-0228 §5** in the **first** of the three
+> scopes §16 states.
 > That section rules *"**Every plan of the turn is persisted before anything is driven.** The whole
 > sequence of `save_plan` calls precedes `start_execution`"* and *"**Exactly one plan of a turn is
 > driven and it is the last**"*. Both are stated over a **turn** and both become statements over a
@@ -1272,17 +1340,17 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > investigation — so it drives at most two plans and persists each set before the drive it
 > precedes.
 
-> **Normative — two further clauses of §5 take the same scope, and they are named rather than
-> assumed to survive.** *"A superseded plan **drives nothing**. It starts no execution, reaches no
-> `StepRunner`…"* is stated of a plan that **is** superseded, and a first plan becomes superseded
-> by the licensed round's successor **after** it has driven. It binds **of a plan superseded
-> before its walk began**, which is every plan ADR-0228 §5 was written about; **it does not
-> retrospectively forbid a walk that had already run when the supersession was recorded**, and no
-> lane reads it as requiring a driven plan's execution to be undone. And §5's **no-new-failure-
-> mode** clause — *"A `save_plan` that raises on a superseded plan fails the turn exactly as one
-> raising on any other plan does today"* — held because every `save_plan` preceded every drive; a
-> licensed round's save can now fail **after** a side effect, which is a failure mode §5 did not
-> admit.
+> **Normative — two further clauses of §5 are this decision's second and third scopes on it, and
+> they are named rather than assumed to survive.** *"A superseded plan **drives nothing**. It
+> starts no execution, reaches no `StepRunner`…"* is stated of a plan that **is** superseded, and
+> a first plan becomes superseded by the licensed round's successor **after** it has driven. It
+> binds **of a plan superseded before its walk began**, which is every plan ADR-0228 §5 was
+> written about; **it does not retrospectively forbid a walk that had already run when the
+> supersession was recorded**, and no lane reads it as requiring a driven plan's execution to be
+> undone. And §5's **no-new-failure-mode** clause — *"A `save_plan` that raises on a superseded
+> plan fails the turn exactly as one raising on any other plan does today"* — held because every
+> `save_plan` preceded every drive; a licensed round's save can now fail **after** a side effect,
+> which is a failure mode §5 did not admit.
 
 > **Normative — what a second walk's persistence failure leaves behind, stated rather than
 > inherited.** Where the licensed round's `save_plan` raises, **the first walk's execution and its
@@ -1443,6 +1511,12 @@ ledger and stops on the same three guards.
   attempt's state from one. §6 states what the residual is and that nothing re-dispatches or
   derives around it; nothing here retries that write from a later turn. Fired by A8's
   reconciliation landing.
+- **Completing a supersession sweep that stopped part-way**, where §7's second or a later
+  `PENDING → SKIPPED`/`SUPERSEDED` commit did not land. **A8**, which reads a plan's leftover
+  statuses and is the only lane that may finish one. §7 states what the residual is and that
+  nothing is undone, re-dispatched or retried; nothing here sweeps again from a later turn, and
+  the atomic alternative is #257's remaining half, also not taken. Fired by A8's reconciliation
+  landing.
 - **Whether the startup recovery scan writes `EFFECT_UNRESOLVED` on the attempt of a step it
   found `RUNNING`.** **A8.** §6 gives the state one producer — the driver, for a step it drove —
   and the scan runs outside a turn with no attempt in hand. Fired by the lane that gives the scan
@@ -1722,7 +1796,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     **the step stays `INDETERMINATE`**, **the attempt stays `RUNNING`**, the turn **fails**, **no
     later step is dispatched and none is skipped**, and the committed step transition is **not
     lost or retried**. They are what stop an implementation composing over the failure, sweeping
-    the remainder, or re-driving the step.
+    the remainder, or re-driving the step. **And the arm that pins the scope of the no-skip
+    rule** (§6): a three-step plan whose **first** step is independent of the others and is
+    `SKIPPED`/`UNMET_DEPENDENCY` on an unsatisfied `when`, whose **second** returns
+    `INDETERMINATE`, and whose **third** the walk never reaches. The arm asserts that after the
+    uncertainty is recorded the first step is **still** `SKIPPED` with its original
+    `UNMET_DEPENDENCY` reason, that nothing reverted or rewrote it, that the second and third are
+    `PENDING` and neither is skipped, and — on a paired case that supersedes that plan — that the
+    sweep moves the first step not at all and the second and third not at all (§6's override of
+    §7). It is what stops an implementation reading §6 as a rule over the whole plan and trying
+    to undo a committed transition.
 15. **Replan after partial execution preserves what happened** — a plan driven to its second
     step, superseded on a later turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's
     `output` are unchanged, the attempt's `execution_ids` names both executions, and the
@@ -1730,7 +1813,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     preservation and asserts nothing about a second dispatch**: whether the later plan's act
     happens at most once is §7's obligation, whose mechanism and whose demonstration are **A8's**
     (§12). **No arm of this decision requires a duplicate dispatch to be shown**, because no lane
-    of this decision can prevent one.
+    of this decision can prevent one. **And two arms over the partial sweep** (§7): a superseded
+    plan with **two** still-`PENDING` steps where the first `PENDING → SKIPPED`/`SUPERSEDED`
+    commit lands and the second raises — once on a stale `expected_version`, once on a store
+    failure — asserting the exact residual, that the **first step stays `SKIPPED`/`SUPERSEDED`**,
+    the **second stays `PENDING`**, no step takes any other status and no `SkipReason` is
+    rewritten, the turn **fails**, nothing is re-dispatched, and the committed skip is **not lost
+    or retried**. They are what stop an implementation rolling the sweep back, sweeping again
+    from a later turn, or reading the mixed state as a plan still driving.
 16. **The deadline, decremented across steps and not replenished by a resume** — a three-step
     plan under a budget that two steps exhaust: each `StepRunner.run` receives a **strictly
     smaller and strictly positive** remainder, the third step is never started, it is `PENDING`
@@ -1749,9 +1839,10 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
 **Exactly three documents are partially superseded — ADR-0254 in one scope, ADR-0251 in two and
-ADR-0228 in one** — and the entries below
+ADR-0228 in three** — and the entries below
 show the working for it and for each other document a reader would expect to be superseded and is
-not: ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them. ADR-0082 §1's test
+not: ADR-0037, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them — the same list the `Status`
+line's no-other-ADR clause names. ADR-0082 §1's test
 is applied to each earlier ADR's **text**.
 
 **ADR-0254 §14 — partially superseded in the field of one enumeration, and the scope is on this
@@ -1866,26 +1957,28 @@ monotone-supply rule and its brief-as-it-stands rule; §5's figures; §6's reser
 ungated-composing clause (§9, §10); and §13's *"A replan never resets an allowance"*, which is what
 makes a licensed round **charge** rather than refresh.
 
-**ADR-0228 §5 — partially superseded in its two per-turn clauses, and the scope is on this
-document's `Status` line.** A reader holding only §5 requires *"The whole sequence of `save_plan`
-calls precedes `start_execution`"* and *"Exactly one plan of a turn is driven and it is the last"*
-of a **turn** — so a turn whose licensed investigation produces a plan after its first walk may
-neither persist that plan nor drive it, and the investigation §10 licenses can change nothing.
-That is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is those two
-clauses' subject, which becomes the **walk**, and nothing else. **§5's reason is what decides the
+**ADR-0228 §5 — partially superseded in three scopes, every one of them §5's, and each is on this
+document's `Status` line**: its **two per-turn clauses**, in their subject; its
+**superseded-plan-drives-nothing rule**, in the moment it binds at; and its **no-new-failure-mode
+clause**. A reader holding only §5 requires *"The whole sequence of `save_plan` calls precedes
+`start_execution`"* and *"Exactly one plan of a turn is driven and it is the last"* of a **turn**
+— so a turn whose licensed investigation produces a plan after its first walk may neither persist
+that plan nor drive it, and the investigation §10 licenses can change nothing. That is ADR-0070
+§1's test met and **partial** in ADR-0070 §3's sense: the **first** scope is those two clauses'
+subject, which becomes the **walk**, and nothing else of them. **§5's reason is what decides the
 scope rather than being set aside by it**: the ordering exists so that a turn whose second
 `save_plan` raises *"has driven nothing: no execution is open, no capacity slot is spent on a step
 and no side effect has been reached"* — a state that obtains before a turn's first walk and cannot
 obtain before its second, so the per-turn reading forbids the investigation and protects nothing.
-**Two further clauses of §5 fall inside the same scope rather than outside it**, and §10 names
-both: *"A superseded plan **drives nothing** … reaches no `StepRunner`"* binds of a plan superseded
-**before its walk began** and does not retrospectively forbid a walk that had already run, and the
-**no-new-failure-mode** clause held because every `save_plan` preceded every drive — which a
-licensed round's save no longer does, so §10 states what a second walk's persistence failure
-leaves behind. **Every remaining clause of ADR-0228 binds entire and is relied on**: §5's
-every-plan-is-persisted rule, its oldest-first order, its one-persistence-site rule and its
-turn-that-ends-early-persists-nothing rule all stand, and §14's plan-driving deferral is **fired**
-rather than superseded (above).
+**The second and third scopes are two further clauses of §5**, named rather than left inside the
+first, and §10 states both: *"A superseded plan **drives nothing** … reaches no `StepRunner`"*
+binds of a plan superseded **before its walk began** and does not retrospectively forbid a walk
+that had already run, and the **no-new-failure-mode** clause held because every `save_plan`
+preceded every drive — which a licensed round's save no longer does, so §10 states what a second
+walk's persistence failure leaves behind. **Every remaining clause of ADR-0228 binds entire and is
+relied on**: §5's every-plan-is-persisted rule, its oldest-first order, its one-persistence-site
+rule and its turn-that-ends-early-persists-nothing rule all stand, and §14's plan-driving deferral
+is **fired** rather than superseded (above).
 
 **ADR-0252, ADR-0253 and ADR-0254's remainder — relied on and not superseded.**
 ADR-0252 §6's four tests are evaluated by §1 and §5 and not restated; ADR-0253's §§1, 2, 4, 5, 6,
@@ -1908,7 +2001,9 @@ ADR is the instrument.
 
 **It is a partial supersession of exactly three documents** (ADR-0070 §3) — **ADR-0254** in
 §14's two-case enumeration, **ADR-0251** in §4's trigger group and §1's occupancy clause, and
-**ADR-0228** in §5's two per-turn clauses — and each record it writes names its scope without an
+**ADR-0228** in three scopes of §5 — its two per-turn clauses, in their subject; its
+superseded-plan-drives-nothing rule, in the moment it binds at; and its no-new-failure-mode
+clause — and each record it writes names its scope without an
 `ADR-NNNN` token inside the parentheses, so ADR-0070 §4's extraction invariant holds. Every other
 ADR it touches is
 **relied on**, and what it takes it takes by **firing deferrals** rather than by replacing
