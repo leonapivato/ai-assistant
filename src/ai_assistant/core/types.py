@@ -6241,6 +6241,22 @@ def ground_of(source: MemorySource) -> Ground:
             assert_never(source)
 
 
+#: ADR-0253 §9's condition-label grammar: "the ASCII letter ``D`` followed by one or
+#: more decimal digits and nothing else". :meth:`GoalElement._an_id_is_never_a_condition_label`
+#: is its one consumer, and the rule it enforces is a **disjointness** guarantee rather
+#: than a resolution rule — which is why it is wider than the form the loop resolves
+#: (``orchestration``'s own ordinal pattern is 1-based, unpadded and bounded in width,
+#: because it converts a model-supplied string with :func:`int`). Every string a plan
+#: could still be carrying as an unsubstituted label must fail to be an element id, not
+#: only the ones that would have resolved.
+#:
+#: ``[0-9]`` and not a shorthand digit class, which is
+#: :data:`~ai_assistant.orchestration.reads._LABEL_PATTERN`'s own reason: the shorthand
+#: admits every Unicode decimal digit, and a label the renderer could not have produced
+#: is not a label this side has to keep an id away from.
+_CONDITION_LABEL: Final = re.compile(r"D[0-9]+")
+
+
 class GoalElement(BaseModel):
     """One constraint, success criterion or condition of an interpretation (§1).
 
@@ -6268,12 +6284,60 @@ class GoalElement(BaseModel):
     ``evidence_row_id`` that resolves in no row — whose one route is ADR-0252 §13's
     elision — is **answerable and never repaired**: the element still states what it
     says and ``EvidenceHistory.elided`` discloses the missing warrant.
+
+    **It has an identity and states what it is about** (ADR-0253 §7). ``orchestration``
+    mints :attr:`id` **once**, at the instant the element is first recorded, and it is
+    **not** re-minted on a later revision that **retains** the element: ADR-0249 §7's
+    retention copies an element "whole and unchanged", and the id and the applicability
+    travel in that copy. A **restated** element is a new element and is minted a new
+    id, because a revision that restates a proposition has stated a different one.
+
+    Without the first, ADR-0252 §8's refresh test can never hold across two plans,
+    because "a re-reading necessarily interprets a **new** record" and nothing else on
+    an element survives a re-plan. Without the second, ADR-0252 §9's invalidation
+    predicate has no operands and that section's "``GoalRevision.invalidates`` is empty
+    on every revision" would be permanent — :attr:`applicability` **is** those two
+    operands, read for each condition element of the two revisions a mark compares.
+
+    **``None`` is reachable by exactly one route and no lane writes it** (§7). An
+    element carrying no :attr:`id` is one recorded **before** ADR-0253, and it decodes.
+    Such an element is **named by no ``StepCondition`` and settled by no
+    interpretation**, so no condition over it is ever satisfied, which is the
+    fail-closed direction and is ADR-0249 §8's own construction for
+    ``targets_revision`` word for word. **No migration and no stored-record version
+    moves for it** (§7): the clause above makes such a row a conforming value rather
+    than a row to repair, and minting an id for one would buy nothing, because an
+    element nothing can name is an element no condition was ever written against.
+
+    **An element carrying no :attr:`applicability` imposes no coverage requirement**
+    (§5, ADR-0252 §6 test 1) and **is settled by no interpretation** (§8): ADR-0252 §3
+    composes such a row's ``supported`` from "the one region the interpretation step
+    declared", and an element declaring none declares no region.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    id: Identifier | None = Field(
+        default=None,
+        description=(
+            "This element's durable name across the revisions that retain it "
+            "(ADR-0253 §7), minted once by orchestration when it is first recorded. "
+            "None is reachable only by a row written before that decision, and no "
+            "lane writes None into it: such an element is named by no condition."
+        ),
+    )
     text: NonBlankEncodableText = Field(description="What this element says.")
     ground: Ground = Field(description="How this element came to be known.")
+    applicability: EvidenceApplicability | None = Field(
+        default=None,
+        description=(
+            "What this element is about, in the one form ADR-0252 §2 can compare "
+            "(ADR-0253 §7). It is ADR-0252 §9's two operands and the region an "
+            "interpretation settling this element declares. Absent imposes no "
+            "coverage requirement and leaves the element settled by no "
+            "interpretation."
+        ),
+    )
     evidence_id: Identifier | None = Field(
         default=None, description="The record establishing it, on a FROM_EVIDENCE element."
     )
@@ -6303,6 +6367,42 @@ class GoalElement(BaseModel):
             bare_user_stated=False,
         )
         return self
+
+    @field_validator("id")
+    @classmethod
+    def _an_id_is_never_a_condition_label(cls, value: str | None) -> str | None:
+        """An element's ``id`` never matches §9's condition-label grammar (§7).
+
+        :data:`Identifier` admits any non-blank encodable string, so without this rule
+        an **unsubstituted** label could equal some element's id and pass §9's store
+        membership check **as a reference to a different element** — silently changing
+        what a step requires instead of refusing. **The disjointness is what makes
+        §9's refusal exact**: a plan still carrying a label cannot match any element,
+        on any goal, ever.
+
+        The grammar refused here is §7's own and is deliberately **wider** than the
+        form the loop resolves: every ``D`` followed by decimal digits, ``D0`` and
+        ``D007`` included. The renderer produces only unpadded 1-based ordinals, but
+        the guarantee this rule buys is disjointness from every string a plan could
+        still be carrying, not from the resolvable ones alone.
+
+        Args:
+            value: The proposed id, or ``None``.
+
+        Returns:
+            The id unchanged.
+
+        Raises:
+            ValueError: If the id matches the condition-label grammar.
+        """
+        if value is not None and _CONDITION_LABEL.fullmatch(value) is not None:
+            msg = (
+                f"a goal element's id is never a condition label, and {value!r} is "
+                f"one: the two spaces are disjoint so that a plan still carrying an "
+                f"unsubstituted label can match no element on any goal (ADR-0253 §7)"
+            )
+            raise ValueError(msg)
+        return value
 
 
 #: The most interpretation revisions one goal's history holds (ADR-0249 §2).
@@ -7316,12 +7416,46 @@ class ProposedElement(BaseModel):
     it as ``USER_STATED`` — which §7 then drops — or as ``INFERRED``, quietly
     downgrading an explicit user instruction.
 
+    **A new element may say what it is about, in the four axes an
+    :class:`EvidenceApplicability` is composed from** (ADR-0253 §7) — a window and
+    the three label axes — **on the new-element shape alone**. A **retaining** element
+    still carries ``retains`` and nothing else, because §7's retention copies the
+    earlier element's applicability forward in the same copy that carries its ground.
+    ``orchestration`` composes an :class:`EvidenceApplicability` from these under
+    ADR-0252 §2's own validator; **this type composes nothing**.
+
+    The axes are the ones the planner already composes an ask from, so the seam gains
+    no new vocabulary: ``planning/planner.py`` extracts a window and the three label
+    axes out of an envelope for ADR-0240's ``StructuredAsk``, and ADR-0252 §11 renders
+    those same axes back to the planner on every evidence digest.
+
+    **Declaring nothing and declaring something malformed are two different states,
+    and only the first records an absent applicability** (§7). An element proposing
+    **no axis at all** is recorded with ``applicability`` absent, and such an element
+    imposes no coverage requirement (ADR-0252 §6 test 1). An element proposing **one
+    or more axes that do not compose** an ``EvidenceApplicability`` — an empty
+    sequence axis, a window with both ends unset, or a window whose ``end`` is not
+    strictly after its ``start`` — is an **extraction failure for that envelope** and
+    is **never** recorded as an element with an absent applicability. The first two of
+    those three are this type's refusals; the third is :class:`TimeWindow`'s own.
+
+    Recording a malformed requirement as no requirement would silently **widen** every
+    condition written against it, which is the fail-open direction: an element whose
+    proposed window ran Sunday to Saturday states a Sunday requirement, and recorded
+    with the applicability absent a standing, answering **Saturday** row would satisfy
+    the condition. The element's ``text`` surviving does not preserve its mechanical
+    restriction, because no test reads the text.
+
     Attributes:
         text: What a **new** element says.
         ground: How a new element came to be known.
         evidence_label: The ``M`` label of the record establishing it, on a
             ``FROM_EVIDENCE`` element. A **label and never an identifier**.
         span: The span of this turn's request stating it, on a ``USER_STATED`` one.
+        window: The interval a new element is about, where it proposes one.
+        participants: Whom a new element is about.
+        topics: What a new element is filed under.
+        about_person: Whose beliefs a new element is about.
         retains: The brief label of an element to keep whole, and the only field a
             retaining element carries.
     """
@@ -7336,6 +7470,18 @@ class ProposedElement(BaseModel):
     span: EncodableText | None = Field(
         default=None, description="The span of this turn's request stating it."
     )
+    window: TimeWindow | None = Field(
+        default=None, description="The interval a new element is about (ADR-0253 §7)."
+    )
+    participants: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whom a new element is about (ADR-0253 §7)."
+    )
+    topics: tuple[TopicLabel, ...] | None = Field(
+        default=None, description="What a new element is filed under (ADR-0253 §7)."
+    )
+    about_person: tuple[NonBlankEncodableText, ...] | None = Field(
+        default=None, description="Whose beliefs a new element is about (ADR-0253 §7)."
+    )
     retains: EncodableText | None = Field(
         default=None, description="The brief label of an element to keep whole."
     )
@@ -7347,6 +7493,12 @@ class ProposedElement(BaseModel):
         Raises:
             ValueError: If the element neither states a new value nor keeps one.
         """
+        axes = (
+            ("window", self.window),
+            ("participants", self.participants),
+            ("topics", self.topics),
+            ("about_person", self.about_person),
+        )
         if self.retains is not None:
             beside = sorted(
                 name
@@ -7355,6 +7507,7 @@ class ProposedElement(BaseModel):
                     ("ground", self.ground),
                     ("evidence_label", self.evidence_label),
                     ("span", self.span),
+                    *axes,
                 )
                 if value is not None
             )
@@ -7362,7 +7515,8 @@ class ProposedElement(BaseModel):
                 msg = (
                     f"a retaining element carries retains and nothing else: "
                     f"{', '.join(beside)} "
-                    f"{'is' if len(beside) == 1 else 'are'} set beside it (ADR-0249 §7)"
+                    f"{'is' if len(beside) == 1 else 'are'} set beside it "
+                    f"(ADR-0249 §7, ADR-0253 §7)"
                 )
                 raise ValueError(msg)
             return self
@@ -7372,6 +7526,15 @@ class ProposedElement(BaseModel):
                 "retains alone (ADR-0249 §7)"
             )
             raise ValueError(msg)
+        for name, value in axes[1:]:
+            if value is not None and not value:
+                msg = (
+                    f"{name} is proposed and empty: None is the one spelling of 'not "
+                    f"applied', and an axis that does not compose an "
+                    f"EvidenceApplicability is an extraction failure rather than an "
+                    f"element with no applicability (ADR-0253 §7, ADR-0252 §2)"
+                )
+                raise ValueError(msg)
         _refuse_mismatched_ground(
             ground=self.ground,
             reference=self.evidence_label,
@@ -8562,13 +8725,538 @@ class ReadRequest(BaseModel):
 # place and `ActionPlan`'s construction-time refusals read directly below it.
 
 
+class VerificationKind(StrEnum):
+    """What a step's ``verifies`` predicate asserts of its own output (ADR-0253 §4).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased member name. The vocabulary is **added to and never renamed**, on
+    :class:`Ground`'s own rule (ADR-0249 §1, itself ADR-0226 §4's): no later ADR
+    removes a member, renames one, gives one a second spelling, or replaces this
+    enum with a differently-named one for the same question.
+
+    **It is evaluated in code and never by a model** (§4). ADR-0249 §7's asymmetry
+    binds it by name — "a model may never clear a permission, a coverage test, a
+    prerequisite or a **dependency**" — and this predicate is the second conjunct of
+    §2's dependency rule. What a model supplies is the **declaration**: a member of
+    this enumeration, a key name and a literal. The comparison is arithmetic.
+    """
+
+    OUTPUT_PRESENT = "output_present"
+    """The producing step's ``output`` is not ``None``."""
+
+    FIELD_PRESENT = "field_present"
+    """The ``output`` is a JSON **object** carrying the key ``field``, whose value is
+    not JSON ``null``. An ``output`` that is not an object, an absent key, and a key
+    whose value is ``null`` each fail it."""
+
+    FIELD_EQUALS = "field_equals"
+    """``FIELD_PRESENT`` holds **and** that key's value equals ``equals``
+    **byte-exactly**, compared as ADR-0148 §2 compares a canonical destination. No
+    lane folds case, coerces a number to a string, compares a float by tolerance, or
+    treats ``1`` as ``true``."""
+
+
+class StepVerification(BaseModel):
+    """A mechanical predicate over one step's own output (ADR-0253 §4).
+
+    **This is not the verification A10 lands, and the two are never conflated**
+    (§4). This predicate is about **one step's own output** and answers *did this
+    step produce what the plan said it would*. Verification against the goal's
+    ``criteria`` — whether the requested outcome was reached, and the producer of
+    ``GoalStatus.ACHIEVED`` — is A10's, is stated over the goal rather than over a
+    step's output, and is **not this field**. That is the owner's correction 2 made
+    structural: "producing a reply never by itself establishes that the goal was
+    achieved".
+
+    **There is no path language and the depth is one** (§4). :attr:`field` names a
+    **key of the output object** and never a path, a dotted expression, an index, a
+    wildcard or a selector; a nested value is not addressable, and no lane adds an
+    addressing syntax. ADR-0014 §7 withheld output references because "it is a
+    substitution language with real injection-safety questions" — a path expression
+    *is* that language, interpreted by the engine against a structure a tool
+    returned. A single key is not an interpreter: it is a lookup in a mapping, whose
+    whole failure mode is *absent*, which this enumeration already names.
+
+    Attributes:
+        kind: Which predicate this is.
+        field: The key of the output object it reads, on the two kinds that read one.
+        equals: The literal ``FIELD_EQUALS`` compares that key's value against.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: VerificationKind = Field(description="Which predicate this is.")
+    field: EncodableText | None = Field(
+        default=None, description="The key of the output object this predicate reads."
+    )
+    equals: FrozenJsonValue = Field(
+        default=None, description="The literal FIELD_EQUALS compares that key's value against."
+    )
+
+    @model_validator(mode="after")
+    def _the_kind_and_its_arguments_travel_together(self) -> StepVerification:
+        """Admit exactly ADR-0253 §4's three shapes and refuse every other.
+
+        ``OUTPUT_PRESENT`` carries neither argument; ``FIELD_PRESENT`` carries
+        ``field`` and no ``equals``; ``FIELD_EQUALS`` carries both. **A JSON ``null``
+        is not a legal ``equals`` at all** — a predicate asserting that a *present*
+        field equals ``null`` contradicts ``FIELD_PRESENT``'s own requirement — and
+        it is spelled by the field's absence, so the two states are one.
+
+        This is ADR-0249 §1's move applied to one more type: the kind and the
+        arguments it takes travel together or the value does not construct.
+
+        Raises:
+            ValueError: If the kind and the arguments beside it disagree.
+        """
+        wanted = {
+            VerificationKind.OUTPUT_PRESENT: (False, False),
+            VerificationKind.FIELD_PRESENT: (True, False),
+            VerificationKind.FIELD_EQUALS: (True, True),
+        }[self.kind]
+        held = (self.field is not None, self.equals is not None)
+        if held != wanted:
+            expected = {
+                VerificationKind.OUTPUT_PRESENT: "neither field nor equals",
+                VerificationKind.FIELD_PRESENT: "field and no equals",
+                VerificationKind.FIELD_EQUALS: "both field and equals",
+            }[self.kind]
+            msg = (
+                f"a {self.kind.value} verification carries {expected} (ADR-0253 §4); a "
+                f"predicate asserting that a present field equals null contradicts "
+                f"FIELD_PRESENT's own requirement and is refused"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class StepOutputRef(BaseModel):
+    """A place in a producing step's output (ADR-0253 §6).
+
+    **It is the one spelling of that**, carried by a :class:`ResultReference`'s
+    ``source`` and by a :class:`PlanInterpretation`'s ``reads`` alike — one type
+    rather than two near-identical ones, which is ADR-0251 §3's "two carriers for
+    one fact" avoided rather than repaired.
+
+    **The depth is one and this rule is stated once here**, exactly as
+    :class:`StepVerification`'s is (§6): :attr:`field` is a key name and never a
+    dotted expression, an index, a wildcard or a selector, and no lane adds an
+    addressing syntax to it wherever a ``StepOutputRef`` is carried.
+
+    **Six cases make one unresolvable** (§6), and the same six bind every
+    ``StepOutputRef``: the producing step is not ``SUCCEEDED``; its ``verifies`` does
+    not hold; its ``output`` is ``None``; a ``field`` is named and the ``output`` is
+    not a JSON object; a ``field`` is named and the object does not carry that key;
+    the value at that key is JSON ``null``. **No lane substitutes an empty string, a
+    zero, an empty object, the parameter's absence, or a value from anywhere else** —
+    resolving one and disposing of a step that cannot be resolved is A7's (§11).
+
+    Attributes:
+        step: The producing step, by its ``PlanStep.id``.
+        field: A key of that step's ``output``, absent meaning the whole ``output``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step: Identifier = Field(description="The producing step, by its id.")
+    field: EncodableText | None = Field(
+        default=None, description="A key of that step's output; absent means the whole output."
+    )
+
+
+class InterpretedOutput(BaseModel):
+    """The step output one interpretation row's verdict was formed over (§8).
+
+    **The reference names the *execution* and not the plan, because one plan has
+    many.** ADR-0014 §5's ``start_execution`` mints a new :class:`ExecutionState` per
+    run, and two executions of one plan can carry two different
+    ``StepExecution.output`` values for one step — so ``(plan_id, step_id)`` names a
+    *decision* and not a *value*, and a row built on it could not say which output it
+    read. :attr:`execution_id` names the value, and **the plan is derived and never
+    copied**: ``ExecutionState.plan_id`` already names it, and a second carrier for
+    the same fact is what ADR-0251 §3 calls the defect whose first disagreement is
+    right in one of them.
+
+    **A durable row must be able to name its own input, and a step output has a name
+    where a minted record does not.** ADR-0252 §1 keeps a search-minted or
+    fetch-minted record out of ``records`` because such a record "resolves in no
+    store". A step's output does not have that defect: it is in
+    ``StepExecution.output`` of a named step of a named execution, which the plan
+    store holds and ``delete_goal`` cascades over, so this reference resolves for
+    exactly as long as the row does.
+
+    **``orchestration`` composes it from the plan's** :class:`StepOutputRef` (§8):
+    ``execution_id`` from the execution it read the output from, ``step_id`` and
+    ``field`` from the reference. **No model supplies any of the three.**
+
+    Attributes:
+        execution_id: The execution whose stored step output the verdict read.
+        step_id: The step of that execution.
+        field: The key of that step's output, absent meaning the whole output.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    execution_id: Identifier = Field(description="The execution the output was read from.")
+    step_id: Identifier = Field(description="The step of that execution.")
+    field: EncodableText | None = Field(
+        default=None, description="The key of that step's output; absent means the whole output."
+    )
+
+
+class ResultReference(BaseModel):
+    """One argument a producing step's output fills (ADR-0253 §6).
+
+    **There is no substitution language** (§6). A reference is a typed triple of
+    three named values, never a string the engine interpolates into another string: a
+    resolved value replaces **a whole parameter value** and never part of one, no
+    template is parsed, no delimiter is scanned for, and no value a tool returned is
+    ever concatenated into, embedded in, or used to select among, anything. The
+    injection surface ADR-0014 §7 withheld this field for is **absent by
+    construction** rather than mitigated.
+
+    **The resolution is a total function of two values both read from the**
+    :class:`~ai_assistant.core.protocols.PlanStore` (§6), and it runs **before** the
+    ``ActionRequest`` is built — so ADR-0148 §1's completeness rule is satisfied
+    rather than worked around, ADR-0145 §1's schema check runs over the value that
+    will actually be sent, and ADR-0021 §1's digest pins it. **No caller supplies a
+    resolved value, a parameter mapping or a substituted step**, which is ADR-0037
+    §2's property kept rather than re-argued. Performing that resolution is **A7's**
+    and no lane of ADR-0253 does it (§12).
+
+    Attributes:
+        parameter: The key of the declaring step's ``parameters`` this fills.
+        source: Where the value comes from.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    parameter: EncodableText = Field(
+        description="The key of the declaring step's parameters this reference fills."
+    )
+    source: StepOutputRef = Field(description="The producing step's output this reads.")
+
+
+class InterpretationVerdict(StrEnum):
+    """What one interpretation settled about one proposition (ADR-0253 §8).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased member name, **added to and never renamed** on :class:`Ground`'s own
+    rule. It is the whole of what a model supplies at an interpretation call: one
+    member, over one recorded record, with the proposition as the question.
+
+    **``INCONCLUSIVE`` is the does-not-settle member** ADR-0252 §5 requires such an
+    enumeration always to carry, and a row carrying it **satisfies nothing, refreshes
+    nothing and conflicts with nothing** — those are ADR-0252 §5's and §7's clauses,
+    which bind here and are not restated as rules of this decision.
+
+    **The three values are disjoint from** :class:`ReadOutcomeKind`'s **seven**,
+    which is the constraint ADR-0252 §5 puts on "the later vocabulary, which is the
+    one not yet minted": a digest carries ``verdict`` and not ``basis``, so the value
+    must identify which vocabulary it is drawn from on its own.
+
+    **There is no per-declaration vocabulary** (§8). Every interpretation row's
+    ``verdict`` is a member of this enumeration, and what separates two readings of
+    two propositions is ADR-0252 §7's comparison of ``declaration``s. Members
+    invented per plan would be unprovenanced strings in a durable row, and two plans
+    about one proposition would almost never agree on a spelling.
+    """
+
+    QUALIFIES = "qualifies"
+    """The record settles the proposition affirmatively."""
+
+    DOES_NOT_QUALIFY = "does_not_qualify"
+    """The record settles the proposition negatively."""
+
+    INCONCLUSIVE = "inconclusive"
+    """The record settles it neither way. A condition may never require this member
+    (ADR-0252 §6 test 2), and a row carrying it enables no branch and disables
+    none."""
+
+
+class StepCondition(BaseModel):
+    """What a step requires of its goal's evidence before it is dispatched (§5).
+
+    A step is **eligible for dispatch** only where **every** member of its ``when``
+    is satisfied for that goal by ADR-0252 §6's four tests, evaluated at the moment
+    of dispatch. **Evaluating them is A7's** and no lane of ADR-0253 does it (§12).
+
+    **``when`` is a conjunction of positive requirements and nothing else** (§5).
+    There is no negation, no disjunction and no nesting: no condition requires that a
+    row **not** exist, that a verdict be **other than** a member, that a proposition
+    be **unsupported**, or that two conditions be satisfied alternatively. Negation
+    is refused because a requirement of absence is an assertion of absence, which
+    ADR-0237 §7 already forbids one level down — a condition reading *no row says the
+    trip is unsafe* would dispatch an act on the strength of a read nobody performed.
+
+    **A condition narrows and never clears** (§5). It is a requirement the plan
+    *adds* to a dispatch, and a plan declaring fewer conditions authorises nothing:
+    ADR-0004 §7's gate rules on every side-effecting call whatever a step's ``when``
+    says, and authorization coverage is a second test a dispatch must pass. That is
+    what keeps a model-declared condition on the safe side of ADR-0249 §7's
+    asymmetry — a model is a safe denier and an unsafe allower (#2096 item 8), and
+    this is the denying direction.
+
+    **One field carries the declaration and the coverage operand** (§5).
+    :attr:`about` names a proposition of the goal, and the element that states it is
+    the one place this system records both what that proposition **says** (its
+    ``text``) and what it is **about** (its ``applicability``, §7). A condition
+    carrying an applicability of its own would be ADR-0251 §3's "two carriers for one
+    fact", and would leave ADR-0252 §9's invalidation predicate without operands,
+    because §9 compares what two **revisions** require and a value on a step is not
+    on a revision.
+
+    Attributes:
+        about: On the value the store holds, the ``GoalElement.id`` (§7) of a
+            **condition element** of the interpretation the plan's
+            ``targets_revision`` names; on the value a planner returns, the
+            **condition label** §9 fixes. **The loop substitutes one for the other,
+            once**, and ``PlanStore.save_plan`` refuses a plan on which it has not.
+            It is **required on both bases** even though only one of them compares a
+            ``declaration``: on ``INTERPRETATION`` the element is the declaration
+            ADR-0252 §6 test 2 compares, and on ``READ_OUTCOME`` a row carries no
+            ``declaration`` at all — but test 1 still needs an applicability, and
+            ADR-0252 §9 still needs to know what the step is about.
+        basis: Which of ADR-0252 §3's two sources a satisfying row must have been
+            composed from. **Required**, on ADR-0228 §2(a)'s fail-closed rule.
+        requires: Which member of :class:`InterpretationVerdict` a satisfying row's
+            ``verdict`` must be. Required exactly on the ``INTERPRETATION`` basis,
+            forbidden on ``READ_OUTCOME``, and **never** the does-not-settle member.
+        read_kind: What a satisfying row must have read, admitted only on the
+            ``READ_OUTCOME`` basis. **A condition may never require a ``source``**
+            (§5): ADR-0252 §1 rules that field "absent on every row this decision's
+            producers write", so a condition requiring one could be satisfied by no
+            row that exists. The field returns to the table only with a producer.
+
+    **Recency lives on the step and not on the condition** (§5, ADR-0252 §6): the
+    step's ``evidence_recency`` applies to **every** condition of that step, evidence
+    never expires by itself, no sweep marks a row for age, and no ``Settings`` figure,
+    deployment flag or per-request parameter supplies a default.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    about: Identifier = Field(
+        description="The condition element this is about — an element id, or a label before the "
+        "loop substitutes one (ADR-0253 §5, §9)."
+    )
+    basis: EvidenceBasis = Field(description="Which source a satisfying row must be composed from.")
+    requires: InterpretationVerdict | None = Field(
+        default=None, description="The verdict a satisfying row must carry, on an INTERPRETATION."
+    )
+    read_kind: ReadKind | None = Field(
+        default=None, description="What a satisfying row must have read, on a READ_OUTCOME."
+    )
+
+    @model_validator(mode="after")
+    def _the_basis_carries_its_own_arguments(self) -> StepCondition:
+        """Admit exactly ADR-0253 §5's two shapes and refuse every other.
+
+        Raises:
+            ValueError: If the basis and the arguments beside it disagree, or if the
+                condition requires the does-not-settle member.
+        """
+        if self.basis is EvidenceBasis.INTERPRETATION:
+            if self.requires is None or self.read_kind is not None:
+                msg = (
+                    "an INTERPRETATION condition carries a required verdict and no "
+                    "read_kind: a row of that basis carries no read_kind to compare "
+                    "(ADR-0253 §5)"
+                )
+                raise ValueError(msg)
+            if self.requires is InterpretationVerdict.INCONCLUSIVE:
+                msg = (
+                    "a condition may never require the does-not-settle member: a row "
+                    "carrying INCONCLUSIVE satisfies nothing, so a condition requiring "
+                    "it could be satisfied by no row that exists (ADR-0253 §5, "
+                    "ADR-0252 §5, §6 test 2)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.requires is not None:
+            msg = (
+                "a READ_OUTCOME condition carries no requires: a row of that basis "
+                "carries a ReadOutcomeKind verdict and never an InterpretationVerdict "
+                "(ADR-0253 §5)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class PlanInterpretation(BaseModel):
+    """One proposition a plan settles over one record (ADR-0253 §8).
+
+    **An interpretation is not a** :class:`PlanStep`, and ADR-0226 §4's reasoning is
+    adopted whole rather than re-derived: a model reading one record the user already
+    holds and returning a member of a closed enumeration is not an act in the world,
+    so it is **not selected against the capability vocabulary, not resolved to a
+    tool, not ruled on by** ``ActionPolicy``, **not bound by** ``EgressBinder``, and
+    **never reaches** ``StepExecutor``, ``ExecutionState`` or ``StepExecution``.
+    ``PlanStep.capability`` stays required, ``StepStatus`` gains no member and
+    ``SkipReason`` gains no member.
+
+    Putting it on ``steps`` would have collided with ADR-0014 §4 in a way no
+    validator could repair: every transition into ``RUNNING`` carries an
+    ``approval_ref``, so an interpretation routed through ``ExecutionState`` would
+    need a permission decision for a call the permission layer has no business ruling
+    on.
+
+    **The call, its input and its declared output schema** (§8). One model call whose
+    whole input is its one input value — the record ``record`` names, or the resolved
+    ``reads`` output — together with the **proposition** the element ``settles``
+    names, and whose declared output schema is exactly one member of
+    :class:`InterpretationVerdict` and nothing else. The proposition is the element's
+    ``text`` *and* its ``applicability``, the latter rendered by ADR-0252 §11's
+    deterministic rendering: two conditions may carry the same text and different
+    windows, so an interpreter handed only the text would return a verdict about one
+    region and the loop would stamp it as supporting another. It is handed no
+    utterance, no conversation, no other memory, no context facet, no plan, no
+    capability vocabulary, no goal brief beyond that one element, and no evidence
+    digest. **Performing it is A7's** and no lane of ADR-0253 makes the call (§12).
+
+    **It carries no ``when`` and no ``verifies``** (§8), and its eligibility is its
+    input's availability and nothing else: a ``record`` input is available from the
+    moment the plan exists; a ``reads`` input is available when §2's dependency rule
+    is satisfied on its producing step. **``reads.step`` is the interpretation's
+    whole dependency and it carries no ``depends_on`` field**, because it has exactly
+    one input and a second carrier for the same fact is ADR-0251 §3's defect.
+
+    Attributes:
+        id: This interpretation's own identifier, minted by the implementation that
+            mints step ids. No identifier is rendered to a model or accepted from one
+            (ADR-0228 §8).
+        settles: On the value the store holds, the ``GoalElement.id`` of a
+            **condition element** of the interpretation the plan's
+            ``targets_revision`` names; on the value a planner returns, the condition
+            label §9 fixes. It is the ``declaration`` the row carries, and ADR-0252
+            §1 left that form to this decision: a ``GoalElement.id`` is durable,
+            stable across turns, resolves within the plan store, is never a
+            ``MemoryStore`` identifier and never a minted one, and survives every
+            revision that retains the element. **A step id would fail the second**,
+            because a re-plan mints new step ids and ADR-0252 §8 limb 3's
+            ``L.declaration == E.declaration`` could then never hold.
+        record: One record of the labelled supply of the call that produced this
+            plan. An interpretation over one waits on nothing and is performed before
+            the plan's first step is dispatched.
+        reads: The output of a producing step of this same plan. An interpretation
+            over one waits on that step and on nothing else, and is performed after
+            that step is ``SUCCEEDED`` and its ``verifies`` holds, and before any step
+            whose ``when`` reads the verdict.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="This interpretation's own identifier.")
+    settles: Identifier = Field(
+        description="The condition element this settles — an element id, or a label before the "
+        "loop substitutes one (ADR-0253 §8, §9)."
+    )
+    record: Identifier | None = Field(
+        default=None, description="One record of this call's own labelled supply."
+    )
+    reads: StepOutputRef | None = Field(
+        default=None, description="The output of a producing step of this same plan."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_input(self) -> PlanInterpretation:
+        """Require exactly one of ``record`` and ``reads`` (ADR-0253 §8).
+
+        An interpretation with **no** input and one with **two** are each not
+        constructible. Whether one may ever take more than one input is **refused and
+        not deferred** (§11): ADR-0252 §1 admits "exactly one member of ``records``",
+        §8 gives the second shape exactly one ``interpreted_output``, and widening
+        either is a decision of its own.
+
+        Raises:
+            ValueError: If neither input is named, or both are.
+        """
+        if (self.record is None) == (self.reads is None):
+            held = "both a record and a reads" if self.record is not None else "no input at all"
+            msg = (
+                f"an interpretation carries exactly one of record and reads, and this "
+                f"one carries {held}: its whole input is one value (ADR-0253 §8)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+#: How many interpretations one :class:`ActionPlan` may declare (ADR-0253 §8). **A
+#: fixed constant valued 4**, and deliberately not a ``Settings`` field, a constructor
+#: knob or a per-deployment value — on ADR-0086 §1's rule as ADR-0213 §4 states it, "a
+#: knob that raises the ceiling is a knob that re-opens it".
+#:
+#: A plan declaring more is **refused at construction rather than truncated**, because
+#: dropping an interpretation would silently delete a branch of a plan the rest of
+#: which is stated over it — ADR-0253 §1's argument for refusing a malformed dependency
+#: rather than dropping it.
+#:
+#: **Four, and where the figure comes from.** An interpretation is an ungated model
+#: call that no permission stage rules on, so a plan declaring them without bound would
+#: be a per-turn cost nobody reviewed — ADR-0228 §3's ground for refusing a configurable
+#: planner-call bound reached one level over. Four is ADR-0251 §5's planner-call
+#: allowance, taken because it is the one figure this corpus has judged for model calls
+#: within one attempt, and it is **a first declaration and is labelled as one**: the
+#: bound exists to stop a plan multiplying ungated calls, not to express a judgement
+#: about how many propositions a plan should settle.
+#:
+#: :attr:`ActionPlan.steps` is **not** bounded by this decision and stays unbounded: a
+#: step is bound to a capability, selected, ruled on by the permission gate and claimed
+#: one at a time, so a long plan is expensive in a way the corpus already gates.
+MAX_INTERPRETATION_STEPS: Final[int] = 4
+
+
 class PlanStep(BaseModel):
-    """One step of an :class:`ActionPlan` (see ADR-0014 §2).
+    """One step of an :class:`ActionPlan` (ADR-0014 §2, ADR-0253 §§1, 4, 5, 6).
 
     A step names a **capability** — what must be done — rather than a tool. That
     keeps the pipeline's ``planning → tool selection`` boundary intact: the
     selection stage still gets to weigh a tool's risk and reversibility, instead
     of ratifying a choice the planner already made.
+
+    **And it declares what it waits on, what fills its arguments and what must be
+    evidenced before it is dispatched** (ADR-0253). Every one of the five fields
+    below is **defaulted**, so a step declaring none of them is exactly the step
+    this system has always written: no dependency, no reference, no condition, no
+    verification and no recency requirement.
+
+    **``depends_on`` points strictly backwards, so a cycle is unconstructible**
+    (§1). Every member names a step of the same plan at a **strictly earlier**
+    position, which admits no cycle at all: any cycle needs at least one edge
+    pointing forward or at itself, and both are refused one member at a time by a
+    comparison of two positions. The refusal is :class:`ActionPlan`'s and not this
+    type's, because a step cannot see the tuple it sits in. The alternative —
+    admitting forward references and detecting cycles by traversal — buys nothing a
+    plan needs and costs a graph algorithm whose failure mode is a plan that
+    validates and never terminates.
+
+    **An empty ``depends_on`` means the step waits on no other step**, and it is the
+    value on every step of every plan written before ADR-0253. **It does not mean
+    *after the previous step***: ADR-0014 §7 sketched that default and §1 declines
+    it, because a default that manufactured an edge would make independence
+    inexpressible and would silently attach a dependency to every plan already on
+    disk — a claim about those plans that nobody made when they were written.
+
+    **``depends_on`` narrows what may be dispatched and never widens it** (§1), and
+    no lane reads it as a licence to execute two steps concurrently: ADR-0014 §7's
+    "step dependencies / parallel execution" bullet is fired in its **first** half
+    alone, the tuple order is preserved, and the steps remain an ordered sequence.
+
+    **A step declaring no ``verifies`` imposes none**, and ``SUCCEEDED`` alone then
+    satisfies a dependency on it (§4) — ADR-0252 §6's own posture toward the recency
+    figure, and not the fail-closed case ADR-0228 §2(a) governs, because there is no
+    absent member of a closed vocabulary here to read as a default. A mandatory
+    predicate would oblige a planner to invent one about a tool's return shape on
+    every step, and an invented predicate fails steps that succeeded and passes
+    steps that did not, on a guess nobody recorded.
+
+    **Which of this is evaluated, and by whom.** §2's dependency rule — satisfied
+    only on a ``SUCCEEDED`` producer whose ``verifies`` holds, failed by a ``FAILED``
+    or ``SKIPPED`` one, and **stopping the branch** on an ``INDETERMINATE`` one
+    rather than skipping it, because a skip would assert the half of the ambiguity
+    that state exists to refuse — and the disposal of a step nothing can run,
+    ``PENDING → SKIPPED`` with ``UNMET_DEPENDENCY``, are **A7's** and are performed
+    by no lane of ADR-0253 (§§2, 12).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -8579,6 +9267,49 @@ class PlanStep(BaseModel):
     parameters: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="Capability arguments; frozen, and validated against the tool at selection.",
+    )
+    depends_on: tuple[Identifier, ...] = Field(
+        default=(),
+        description=(
+            "Steps of this same plan, strictly earlier in its steps tuple, that this "
+            "one waits on (ADR-0253 §1). Empty means it waits on no other step, and "
+            "never 'after the previous step'. ActionPlan refuses every other shape."
+        ),
+    )
+    resolves: tuple[ResultReference, ...] = Field(
+        default=(),
+        description=(
+            "Arguments filled from a producing step's output rather than by a literal "
+            "(ADR-0253 §6). ActionPlan refuses a reference outside depends_on, one "
+            "naming a parameter this step already carries, and two naming one "
+            "parameter."
+        ),
+    )
+    when: tuple[StepCondition, ...] = Field(
+        default=(),
+        description=(
+            "What must be evidenced of the goal before this step is dispatched, as a "
+            "conjunction of positive requirements (ADR-0253 §5). Empty imposes no "
+            "evidential requirement, and is the value on every plan written before "
+            "that decision."
+        ),
+    )
+    verifies: StepVerification | None = Field(
+        default=None,
+        description=(
+            "A mechanical predicate over this step's own output (ADR-0253 §4). None "
+            "imposes none, and SUCCEEDED alone then satisfies a dependency on it. It "
+            "is never verification against the goal's criteria, which is A10's."
+        ),
+    )
+    evidence_recency: Annotated[timedelta, Field(gt=timedelta(0))] | None = Field(
+        default=None,
+        description=(
+            "How recent a row satisfying every condition of this step must be, "
+            "applied to all of them and evaluated at the moment of dispatch "
+            "(ADR-0253 §5, ADR-0252 §6). None imposes none. Evidence never expires by "
+            "itself, and no Settings figure or deployment flag supplies a default."
+        ),
     )
 
 
@@ -8716,6 +9447,15 @@ class ActionPlan(BaseModel):
             "route being a row written before ADR-0249 — decodes and is not driven."
         ),
     )
+    interpretations: tuple[PlanInterpretation, ...] = Field(
+        default=(),
+        description=(
+            "The propositions this plan settles over one record each (ADR-0253 §8), "
+            "at most MAX_INTERPRETATION_STEPS of them. Empty is the value on every "
+            "plan written before that decision. An interpretation is not a PlanStep: "
+            "nothing selects, rules on, binds or executes one."
+        ),
+    )
 
     @field_validator("steps")
     @classmethod
@@ -8730,6 +9470,211 @@ class ActionPlan(BaseModel):
             msg = "plan step ids must be unique within a plan"
             raise ValueError(msg)
         return value
+
+    @model_validator(mode="after")
+    def _the_graph_this_plan_states_is_constructible(self) -> ActionPlan:
+        """Refuse every shape ADR-0253 §§1, 6 and 8 do not admit.
+
+        **Here and not on** :class:`PlanStep` **or** :class:`PlanInterpretation`,
+        because everything these rules compare is a relation between a value and the
+        tuple it sits in — "a step cannot see the tuple it sits in" (§1) — and each
+        refusal names a state that would otherwise have to be resolved at dispatch by
+        a rule somebody remembered.
+
+        Raises:
+            ValueError: If a dependency, a reference or an interpretation is not one
+                this plan can state.
+        """
+        position = {step.id: index for index, step in enumerate(self.steps)}
+        self._dependencies_point_strictly_backwards(position)
+        self._references_are_dependencies_that_fill_a_free_argument()
+        self._interpretations_are_bounded_distinct_and_ordered(position)
+        return self
+
+    def _dependencies_point_strictly_backwards(self, position: Mapping[str, int]) -> None:
+        """ADR-0253 §1's four refusals, one per member of one ``depends_on``.
+
+        A member naming a step the plan does not carry, naming the declaring step
+        itself, naming a step at or after the declaring step's position, or repeating
+        another member of the same tuple makes the plan **not constructible**. The
+        self-reference case is the at-or-after case at zero distance and is reported
+        as its own state, because a reader who wrote it meant something else.
+
+        **Acyclicity is a property of the type rather than a check somebody
+        remembered to write**: a tuple in which every reference points strictly
+        earlier admits no cycle at all.
+
+        Args:
+            position: Each step's index in ``steps``, by id.
+
+        Raises:
+            ValueError: If a dependency is not one this plan can state.
+        """
+        for index, step in enumerate(self.steps):
+            seen: set[str] = set()
+            for wanted in step.depends_on:
+                if wanted in seen:
+                    msg = (
+                        f"step {step.id} names {wanted} twice in depends_on: a "
+                        f"dependency is an edge and a plan states each once "
+                        f"(ADR-0253 §1)"
+                    )
+                    raise ValueError(msg)
+                seen.add(wanted)
+                if wanted == step.id:
+                    msg = f"step {step.id} depends on itself, which is a cycle of one (ADR-0253 §1)"
+                    raise ValueError(msg)
+                at = position.get(wanted)
+                if at is None:
+                    msg = (
+                        f"step {step.id} depends on {wanted}, which is not a step of "
+                        f"this plan (ADR-0253 §1)"
+                    )
+                    raise ValueError(msg)
+                if at >= index:
+                    msg = (
+                        f"step {step.id} at position {index + 1} depends on {wanted} "
+                        f"at position {at + 1}: a dependency names a step strictly "
+                        f"earlier in the plan, so a cycle has no spelling "
+                        f"(ADR-0253 §1)"
+                    )
+                    raise ValueError(msg)
+
+    def _references_are_dependencies_that_fill_a_free_argument(self) -> None:
+        """ADR-0253 §6's three refusals, over one step's ``resolves``.
+
+        ``source.step`` must be a member of the declaring step's ``depends_on`` — a
+        reference **is** a dependency and is not a second way of saying so.
+        ``parameter`` must not already be a key of that step's ``parameters``, so
+        there is never a literal and a reference competing for one argument and no
+        precedence rule exists to get wrong. And no two references of one step name
+        one ``parameter``.
+
+        Raises:
+            ValueError: If a reference is not one this plan can state.
+        """
+        for step in self.steps:
+            filled: set[str] = set()
+            for reference in step.resolves:
+                if reference.source.step not in step.depends_on:
+                    msg = (
+                        f"step {step.id} resolves {reference.parameter} from "
+                        f"{reference.source.step}, which is not in its depends_on: a "
+                        f"reference is a dependency and not a second way of saying so "
+                        f"(ADR-0253 §6)"
+                    )
+                    raise ValueError(msg)
+                if reference.parameter in step.parameters:
+                    msg = (
+                        f"step {step.id} resolves {reference.parameter}, which it "
+                        f"already carries as a literal parameter: there is never a "
+                        f"literal and a reference competing for one argument "
+                        f"(ADR-0253 §6)"
+                    )
+                    raise ValueError(msg)
+                if reference.parameter in filled:
+                    msg = (
+                        f"step {step.id} resolves {reference.parameter} twice: two "
+                        f"references of one step never name one parameter "
+                        f"(ADR-0253 §6)"
+                    )
+                    raise ValueError(msg)
+                filled.add(reference.parameter)
+
+    def _interpretations_are_bounded_distinct_and_ordered(
+        self, position: Mapping[str, int]
+    ) -> None:
+        """ADR-0253 §8's refusals over ``interpretations``.
+
+        The bound is :data:`MAX_INTERPRETATION_STEPS` and a plan declaring more is
+        **refused rather than truncated**, because dropping one would silently delete
+        a branch of a plan the rest of which is stated over it. Two sharing an ``id``
+        and two sharing a ``settles`` are refused exactly as two steps sharing an id
+        are: the first would make a reference ambiguous, and the second would have one
+        plan settle one proposition twice.
+
+        **The order is fixed at construction and is not left to a driver to
+        discover**: a step carrying an ``INTERPRETATION``-basis condition about an
+        element that an interpretation of this plan settles **from a step's output**
+        may not sit at or before that producing step's position. Together with §1's
+        backwards-only rule this keeps the whole graph acyclic by position, so the
+        driver A7 lands walks it in one pass.
+
+        **The comparison of an ``about`` with a ``settles`` is by equality and both
+        are always in the same state** (§8): §9's substitution replaces every one of
+        them in one act, so the rule is checkable both on the value the planner
+        returned and on the value the store holds, and **no lane compares a label with
+        an id**.
+
+        Args:
+            position: Each step's index in ``steps``, by id.
+
+        Raises:
+            ValueError: If an interpretation is not one this plan can state.
+        """
+        if len(self.interpretations) > MAX_INTERPRETATION_STEPS:
+            msg = (
+                f"this plan declares {len(self.interpretations)} interpretations and "
+                f"ADR-0253 §8 bounds a plan at {MAX_INTERPRETATION_STEPS}: an "
+                f"interpretation is an ungated model call, and a plan over the bound "
+                f"is refused rather than truncated"
+            )
+            raise ValueError(msg)
+        for field in ("id", "settles"):
+            named = [getattr(one, field) for one in self.interpretations]
+            if len(set(named)) != len(named):
+                msg = (
+                    f"two interpretations of this plan share a {field}: a plan states "
+                    f"each interpretation once and settles each proposition once "
+                    f"(ADR-0253 §8)"
+                )
+                raise ValueError(msg)
+        for interpretation in self.interpretations:
+            if interpretation.reads is None:
+                continue
+            producer = position.get(interpretation.reads.step)
+            if producer is None:
+                msg = (
+                    f"interpretation {interpretation.id} reads step "
+                    f"{interpretation.reads.step}, which is not a step of this plan "
+                    f"(ADR-0253 §8)"
+                )
+                raise ValueError(msg)
+            self._no_step_reads_that_verdict_before(interpretation, producer=producer)
+
+    def _no_step_reads_that_verdict_before(
+        self, interpretation: PlanInterpretation, /, *, producer: int
+    ) -> None:
+        """ADR-0253 §8's ordering rule, for one output-backed interpretation.
+
+        Split out from the bound and the distinctness so that one method is not two
+        rulesets behind one name — the shape ``PlanExport``'s closure validator
+        already takes for the same reason.
+
+        Args:
+            interpretation: The interpretation whose verdict is being placed.
+            producer: The index in ``steps`` of the step it reads.
+
+        Raises:
+            ValueError: If a step requiring that verdict sits at or before the
+                producing step.
+        """
+        for index, step in enumerate(self.steps[: producer + 1]):
+            for condition in step.when:
+                if (
+                    condition.basis is EvidenceBasis.INTERPRETATION
+                    and condition.about == interpretation.settles
+                ):
+                    reads = interpretation.reads
+                    named = "no step" if reads is None else reads.step
+                    msg = (
+                        f"step {step.id} at position {index + 1} requires a verdict "
+                        f"interpretation {interpretation.id} forms from the output of "
+                        f"step {named} at position {producer + 1}: a conditioned step "
+                        f"sits strictly after the step its verdict is read from "
+                        f"(ADR-0253 §8)"
+                    )
+                    raise ValueError(msg)
 
 
 class PlannerOutput(BaseModel):
@@ -10027,6 +10972,12 @@ class GoalEvidence(BaseModel):
             the owner's** :class:`~ai_assistant.core.protocols.MemoryStore` **and hold
             nothing else** — never a record ADR-0231 §1's search minted, and never one
             ADR-0230 §5's fetch minted, each of which "resolves in no store".
+        interpreted_output: The **step output** an ``INTERPRETATION`` row's verdict was
+            formed over, on the second of that basis's two shapes (ADR-0253 §8).
+            Absent on every ``READ_OUTCOME`` row and on the ``records``-backed
+            ``INTERPRETATION`` shape. A step's output is not a ``MemoryRecord`` at all,
+            so naming it in ``records`` would put an identifier there that no store
+            resolves — the exact defect that field's rule exists to prevent.
         returned: How many records the ask handed back **before** ADR-0226 §7's
             deduplication. Persisted rather than recomputed, because the supply it was
             counted over is ephemeral (ADR-0052 §3).
@@ -10068,6 +11019,14 @@ class GoalEvidence(BaseModel):
     )
     records: tuple[Identifier, ...] = Field(
         default=(), description="The store-resident records the ask returned."
+    )
+    interpreted_output: InterpretedOutput | None = Field(
+        default=None,
+        description=(
+            "The step output this INTERPRETATION row's verdict was formed over "
+            "(ADR-0253 §8), on the second of that basis's two shapes. Absent on every "
+            "READ_OUTCOME row and on the records-backed INTERPRETATION shape."
+        ),
     )
     returned: int = Field(ge=0, description="How many records came back, before deduplication.")
     admitted: int = Field(ge=0, description="How many of those the supply did not already hold.")
@@ -10142,21 +11101,34 @@ class GoalEvidence(BaseModel):
     def _refuse_a_basis_mismatch(self) -> None:
         """ADR-0252 §1's first axis: what each basis carries.
 
-        A ``READ_OUTCOME`` row carries a ``read_kind`` and no ``declaration``. An
-        ``INTERPRETATION`` row carries **no** ``read_kind``, a **required**
-        ``declaration``, **exactly one** member of ``records``, and ``returned`` and
-        ``admitted`` both ``0`` — the interpretation call's whole input is one recorded
-        record, it reads no source and admits nothing, and a verdict over two records
-        is not one ADR-0252 admits.
+        A ``READ_OUTCOME`` row carries a ``read_kind``, no ``declaration`` and no
+        ``interpreted_output``. An ``INTERPRETATION`` row carries **no** ``read_kind``,
+        a **required** ``declaration``, and ``returned`` and ``admitted`` both ``0`` —
+        the interpretation call's whole input is one record, it reads no source and
+        admits nothing.
+
+        **That basis admits two shapes and no third** (ADR-0253 §8, partially
+        superseding ADR-0252 §1's enumeration in this limb alone). The row carries
+        **exactly one** of one member of ``records`` and an ``interpreted_output``, and
+        ``records`` is **empty** in the second. Without the second, an interpretation
+        over the output of a step of the same plan has no durable way to name its own
+        input, and #2255's dynamic plan — refresh, interpret what came back, then book
+        — is not expressible in one plan at all. It is not a loosening of §1's refusal
+        of a minted record: a step output *has* a durable name, which is the clause
+        that makes the refusal costless rather than contradicted.
 
         Raises:
             ValueError: If the row's fields are not what its basis admits.
         """
         if self.basis is EvidenceBasis.READ_OUTCOME:
-            if self.read_kind is None or self.declaration is not None:
+            if (
+                self.read_kind is None
+                or self.declaration is not None
+                or self.interpreted_output is not None
+            ):
                 msg = (
-                    "a READ_OUTCOME evidence row carries a read_kind and no declaration "
-                    "(ADR-0252 §1)"
+                    "a READ_OUTCOME evidence row carries a read_kind, no declaration "
+                    "and no interpreted_output (ADR-0252 §1, ADR-0253 §8)"
                 )
                 raise ValueError(msg)
             return
@@ -10166,11 +11138,28 @@ class GoalEvidence(BaseModel):
                 "declaration (ADR-0252 §1)"
             )
             raise ValueError(msg)
-        if len(self.records) != 1 or self.returned or self.admitted:
+        if self.returned or self.admitted:
             msg = (
-                "an INTERPRETATION evidence row carries exactly one record and "
-                "returned and admitted both 0: the call's whole input is one recorded "
-                "record, it reads no source and admits nothing (ADR-0252 §1)"
+                "an INTERPRETATION evidence row carries returned and admitted both 0: "
+                "the call's whole input is one record, it reads no source and admits "
+                "nothing (ADR-0252 §1)"
+            )
+            raise ValueError(msg)
+        if self.interpreted_output is not None:
+            if self.records:
+                msg = (
+                    "an output-backed INTERPRETATION evidence row carries empty "
+                    "records: its whole input is the step output interpreted_output "
+                    "names, and a row carries exactly one of the two (ADR-0253 §8)"
+                )
+                raise ValueError(msg)
+            return
+        if len(self.records) != 1:
+            msg = (
+                "a records-backed INTERPRETATION evidence row carries exactly one "
+                "record: a row carries exactly one of one member of records and an "
+                "interpreted_output, and a verdict over two records is neither shape "
+                "(ADR-0252 §1, ADR-0253 §8)"
             )
             raise ValueError(msg)
 
@@ -10579,7 +11568,25 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 11 because this document gained ``evidence``**
+    **``schema_version`` is 12 because ``ActionPlan`` and ``PlanStep`` change shape,
+    ``GoalElement`` changes shape inside a ``Goal``, and ``GoalEvidence`` gains
+    ``interpreted_output``** (ADR-0253 §10) — four independent grounds, each
+    sufficient on its own, reaching ``tuple[ActionPlan, ...]``, ``tuple[Goal, ...]``
+    and ``tuple[EvidenceHistory, ...]`` respectively. It is ADR-0039 §10's own
+    mechanism as ADR-0249 §12 applies it: "``StepExecution`` is inside the export, so
+    its shape changing is exactly what the version exists to announce". A defaulted
+    field on a frozen model is still a shape change to every document that carries it,
+    and ``model_dump()`` emits all six on every plan and both on every element.
+
+    **ADR-0014 §5's closure rule extends to ``execution_id`` rather than changing**
+    (§8), exactly as ADR-0249 §12 extended it to ``attempt_id`` and ADR-0250 to
+    ``question_id``: an export carrying a row whose ``interpreted_output`` names an
+    execution it does not carry does not validate. ``PlanExport`` already carries
+    ``tuple[ExecutionState, ...]``, and it gains **no member** — so §5's shape is
+    untouched and no supersession of it is owed. **It is a stored-record version and
+    not a wire ground**: ``PlanExport`` crosses no frame and is emitted by no peer.
+
+    **It was 11 because this document gained ``evidence``**
     (ADR-0252 §13). ``tuple[EvidenceHistory, ...]`` is a member an earlier reading of
     this document has no field for, and ``model_dump()`` emits it on **every**
     document — refused by an older reader's ``extra="forbid"`` exactly as
@@ -10700,12 +11707,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[11] = Field(
-        default=11,
+    schema_version: Literal[12] = Field(
+        default=12,
         description=(
-            "Shape of this export, pinned to exactly 11 (ADR-0039 §10, ADR-0252 §13): an "
+            "Shape of this export, pinned to exactly 12 (ADR-0039 §10, ADR-0253 §10): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[11]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[12]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -10794,7 +11801,7 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         self._questions_close_over_their_records(goal_ids, attempt_ids)
-        self._evidence_closes_over_its_records(goal_ids)
+        self._evidence_closes_over_its_records(goal_ids, execution_ids)
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -10809,7 +11816,9 @@ class PlanExport(BaseModel):
 
         return self
 
-    def _evidence_closes_over_its_records(self, goal_ids: set[str]) -> None:
+    def _evidence_closes_over_its_records(
+        self, goal_ids: set[str], execution_ids: set[str]
+    ) -> None:
         """Enforce ADR-0252 §13's extension of ADR-0014 §5's closure rule.
 
         **Exactly one entry per goal the export carries**, so a reader holding the
@@ -10840,13 +11849,24 @@ class PlanExport(BaseModel):
         identifiers and **elidable** row references, and §10 and §12 both rule such a
         reference "an identifier and not a resolution guarantee".
 
+        **An ``interpreted_output``'s ``execution_id`` *is* closed over** (ADR-0253
+        §8), and it is not the case the paragraph above excuses: ADR-0014 §5's rule is
+        stated over "every ``goal_id``/``plan_id`` referenced by an included record",
+        this document already carries ``tuple[ExecutionState, ...]``, and the plan
+        store's ``delete_goal`` cascades over executions — so the reference "resolves
+        for exactly as long as the row does", which is the property §8 mints the type
+        for. It is the same extension ADR-0249 §12 made for ``attempt_id`` and
+        ADR-0250 for ``question_id``, over one more reference.
+
         Args:
             goal_ids: The ids of the goals this export carries.
+            execution_ids: The ids of the executions it carries.
 
         Raises:
             ValueError: If a history names a goal the export does not carry, if two
-                histories name one goal, if a goal has no history, or if two rows share
-                an id.
+                histories name one goal, if a goal has no history, if two rows share
+                an id, or if a row's ``interpreted_output`` names an execution the
+                export does not carry.
         """
         named = [history.goal_id for history in self.evidence]
         if len(set(named)) != len(named):
@@ -10863,6 +11883,19 @@ class PlanExport(BaseModel):
         rows = [row.id for history in self.evidence for row in history.rows]
         if len(set(rows)) != len(rows):
             msg = "export contains duplicate evidence row ids"
+            raise ValueError(msg)
+        unresolved = sorted(
+            row.id
+            for history in self.evidence
+            for row in history.rows
+            if row.interpreted_output is not None
+            and row.interpreted_output.execution_id not in execution_ids
+        )
+        if unresolved:
+            msg = (
+                "export has evidence rows whose interpreted execution is missing: "
+                f"{', '.join(unresolved)}"
+            )
             raise ValueError(msg)
 
     def _questions_close_over_their_records(

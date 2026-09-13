@@ -37,6 +37,7 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    refuse_an_unsubstituted_condition,
     revalidated_evidence,
     revalidated_revision,
     revalidated_row_ids,
@@ -726,15 +727,27 @@ class InMemoryPlanStore:
         supersession whose subject has been lost, discovered only by whoever reads
         the export back.
 
+
+        **And every ``StepCondition.about`` and ``PlanInterpretation.settles`` must
+        already be an element id** (ADR-0253 §9), naming a **condition element** of
+        the interpretation this plan's ``targets_revision`` names. It is the same
+        window closed at the same place as ``targets_revision``'s, one substitution
+        later: the loop replaces each label with the id it resolves to, and a plan on
+        which it has not is refused rather than saved with a reference nobody could
+        read. ADR-0253 §7's disjointness makes it exact — an element id can never
+        match the condition-label grammar. **A plan declaring neither is not checked.**
+
         Stored as a copy for the same reason goals and executions are:
         ``frozen=True`` stops ``plan.goal_id = ...`` but not
         ``plan.__dict__["goal_id"] = ...``, so sharing the instance would let a
         caller rewrite the store's own audit record — including a nested step's
         ``capability``.
         """
-        if plan.goal_id not in self._goals:
+        held = self._goals.get(plan.goal_id)
+        if held is None:
             msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
             raise PlanningError(msg)
+        refuse_an_unsubstituted_condition(plan, held)
         if plan.targets_revision is None:
             msg = (
                 f"plan {plan.id} carries no targets_revision: the unstamped state "

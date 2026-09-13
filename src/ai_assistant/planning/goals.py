@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from ai_assistant.core.types import (
+        ActionPlan,
         AttemptTransition,
         GoalInterpretation,
         GoalStatus,
@@ -622,3 +623,76 @@ def _appended_id(held: tuple[str, ...], addition: str | None) -> tuple[str, ...]
     if addition is None or addition in held:
         return held
     return (*held, addition)
+
+
+def refuse_an_unsubstituted_condition(plan: ActionPlan, goal: Goal) -> None:
+    """Refuse a plan naming an element the revision it targets does not carry (§9).
+
+    ADR-0253 §9 adds one conjunct to ``PlanStore.save_plan``: a plan is refused where
+    any ``StepCondition.about`` or ``PlanInterpretation.settles`` is **not** the ``id``
+    of a **condition element** of the interpretation the plan's ``targets_revision``
+    names. It is a **strengthening of an existing member** rather than a new one,
+    exactly as ADR-0249 §12 classifies ``commit_transition``'s added claim condition.
+
+    **The window is closed at the store rather than trusted to close itself**, which
+    is ADR-0249 §8's own construction for an unstamped ``targets_revision`` and is
+    stated here once so the two conforming stores in this package cannot drift on it.
+    The unresolved state exists only between the planner's return and the loop's
+    substitution; a plan carrying a label nothing resolves is a decision **nobody can
+    read at all**, and persisting one would put a value in the audit trail no later
+    reader could interpret.
+
+    **ADR-0253 §7's disjointness is what makes the refusal exact**: a
+    ``GoalElement.id`` can never match the condition-label grammar, so a plan still
+    carrying an unsubstituted ``"D1"`` matches no element on any goal, ever — rather
+    than silently matching one and changing what the step requires.
+
+    **A plan declaring neither a condition nor an interpretation names nothing and is
+    not checked**, which is what makes this cost such a plan nothing at all.
+
+    Args:
+        plan: The plan being saved.
+        goal: The goal it is under, already read by the caller under the same lock or
+            transaction as the write, so the check and the write see one fact.
+
+    Raises:
+        PlanningError: If the plan names an element the targeted revision does not
+            carry as a condition.
+    """
+    named = frozenset(
+        [condition.about for step in plan.steps for condition in step.when]
+        + [interpretation.settles for interpretation in plan.interpretations]
+    )
+    if not named:
+        return
+    unresolved = sorted(named - _condition_element_ids(goal, plan.targets_revision))
+    if unresolved:
+        msg = (
+            f"plan {plan.id} names {', '.join(unresolved)}, which "
+            f"{'is' if len(unresolved) == 1 else 'are'} not the id of a condition "
+            f"element of revision {plan.targets_revision} of goal {plan.goal_id}: the "
+            f"loop substitutes each condition label for an element id once, and the "
+            f"window is closed at the store (ADR-0253 §9)"
+        )
+        raise PlanningError(msg)
+
+
+def _condition_element_ids(goal: Goal, revision: int | None) -> frozenset[str]:
+    """The ids of the condition elements of one revision of ``goal`` (ADR-0253 §9).
+
+    Args:
+        goal: The goal the plan is under.
+        revision: The revision the plan targets.
+
+    Returns:
+        The ``id`` of every condition element of that revision. **Empty where the goal
+        holds no such revision** — one ADR-0249 §2 elided, say — so a plan targeting it
+        and naming anything is refused. An element carrying **no** ``id`` contributes
+        nothing, which is ADR-0253 §7's fail-closed direction stated as arithmetic:
+        such an element "is named by no ``StepCondition`` and settled by no
+        interpretation".
+    """
+    for held in goal.interpretation:
+        if held.revision == revision:
+            return frozenset(element.id for element in held.conditions if element.id is not None)
+    return frozenset()

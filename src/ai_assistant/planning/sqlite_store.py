@@ -66,6 +66,7 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    refuse_an_unsubstituted_condition,
     revalidated_evidence,
     revalidated_revision,
     revalidated_row_ids,
@@ -2456,6 +2457,16 @@ class SqlitePlanStore:
         individually, or a chain that spanned goals, fires that constraint; ADR-0228
         §1 forbids the second and nothing contracts the first.
 
+
+        **And every ``StepCondition.about`` and ``PlanInterpretation.settles`` must
+        already be an element id** (ADR-0253 §9), naming a **condition element** of
+        the interpretation this plan's ``targets_revision`` names — checked inside the
+        same write transaction as the orphan check, against the goal row that
+        transaction reads, so a concurrent writer cannot land a revision between the
+        check and the insert. It is the same window closed at the same place as
+        ``targets_revision``'s, one substitution later, and ADR-0253 §7's disjointness
+        makes it exact. **A plan declaring neither is not checked.**
+
         Revalidated before it is persisted, for the same reason as ``save_goal``:
         a mutable ``ActionPlan`` mutated past its validators must fail at the write
         rather than poison every later decode.
@@ -2467,9 +2478,11 @@ class SqlitePlanStore:
 
     def _save_plan_sync(self, plan: ActionPlan) -> None:
         with self._transaction(f"save plan {plan.id!r}") as conn:
-            if conn.execute("SELECT 1 FROM goals WHERE id = ?", (plan.goal_id,)).fetchone() is None:
+            held = conn.execute("SELECT data FROM goals WHERE id = ?", (plan.goal_id,)).fetchone()
+            if held is None:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
                 raise PlanningError(msg)
+            refuse_an_unsubstituted_condition(plan, _decode_goal(held[0]))
             # ADR-0249 §8: the unstamped state exists only between the planner's
             # return and the loop's stamp, and the window is closed at the store.
             if plan.targets_revision is None:

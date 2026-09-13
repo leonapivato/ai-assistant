@@ -1135,6 +1135,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     on neither promoted surface. §16 fixes the numeral, which is why this entry names
     one.
 
+    **41 is ADR-0253 §10, and it is under the second limb alone** — the wire-carried
+    type widened, which is this pin's ordinary shape. ``PlanStep`` gains five defaulted
+    members and ``ActionPlan`` gains ``interpretations``; an ``ActionPlan`` rides
+    ``TurnResult.plan``, ``TurnResult`` rides ``TurnOutcome.turn``, all three models are
+    ``extra="forbid"``, and ``project`` renders a model by ``model_dump()`` — so a hub
+    at 41 emits six members on every plan and a client at 40 fails each with
+    ``extra_forbidden``. ``GoalElement`` gaining ``id`` and ``applicability`` is **not**
+    a second ground (§10): ``TurnResult.goal`` is a ``GoalBrief``, whose
+    ``BriefElement`` carries "exactly ``text`` and ``ground``", and a
+    ``GoalInterpretation`` crosses no frame. Neither is ``GoalEvidence`` gaining
+    ``interpreted_output``, which ADR-0252 §12 already ruled moves no wire version. The
+    method set does **not** move and stands at sixty-one: ``Planner`` and ``PlanStore``
+    change — BREAKING under golden rule 5 — and neither is on a promoted surface, and
+    ``PlanStore`` gains no member at all. §10 fixes no numeral and says why: "the figure
+    is the tree's and not this decision's".
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1143,7 +1159,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 40), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 41), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

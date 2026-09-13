@@ -1569,6 +1569,71 @@ from ai_assistant.wire.errors import (
 #: is registered, and the error mapping is untouched — ADR-0251's L1 mints no error class
 #: and removes none.
 #:
+#: **41 since ADR-0253 §10**, and the ground is the plan itself — "``PROTOCOL_VERSION``
+#: moves by exactly one, in the same change that makes a wire-carried value one peer
+#: emits invalid for the other". That is ADR-0124 §9's second limb quoted rather than
+#: restated: "a change to a wire-carried `core` type that makes a value one peer emits
+#: invalid for the other, whether the change widens or narrows the type".
+#:
+#: :class:`~ai_assistant.core.types.PlanStep` gains **five** defaulted members —
+#: ``depends_on``, ``resolves``, ``when``, ``verifies`` and ``evidence_recency`` — and
+#: :class:`~ai_assistant.core.types.ActionPlan` gains ``interpretations``. An
+#: ``ActionPlan`` rides :attr:`~ai_assistant.core.types.TurnResult.plan`, a
+#: ``TurnResult`` rides :attr:`~ai_assistant.core.types.TurnOutcome.turn`, a
+#: ``TurnOutcome`` is what the promoted surface returns, all three models set
+#: ``extra="forbid"``, and ``wire/codec.py`` renders a model by ``model_dump()`` — so a
+#: hub at 41 emits six members on **every** plan it sends and a client at 40 fails each
+#: with ``extra_forbidden``. **A defaulted member is still a shape change**, exactly as
+#: the entries at 39 and 40 state of ``AttemptEffort.kind`` and ``TurnOutcome``'s four.
+#:
+#: **One lane moves it and moves it once**, which is what makes the bump singular rather
+#: than a property of the cut: ADR-0253 §12 puts every wire-visible value of that
+#: decision in L1, and its L2 — the planning seam — changes no wire-carried shape.
+#:
+#: **``GoalElement`` gaining two fields is not a second ground** (§10).
+#: :attr:`~ai_assistant.core.types.TurnResult.goal` is a
+#: :class:`~ai_assistant.core.types.GoalBrief` after ADR-0249 §11,
+#: :class:`~ai_assistant.core.types.BriefElement` carries "exactly ``text`` and
+#: ``ground``", and ADR-0253 adds nothing to either. A ``GoalInterpretation`` crosses no
+#: frame; it is carried in the plan store and in ``PlanExport``, and neither is a wire
+#: surface. ``GoalEvidence`` gaining ``interpreted_output`` is not one either — ADR-0252
+#: §12 rules that ``PROTOCOL_VERSION`` does not move for that type and nothing here
+#: changes it.
+#:
+#: **No new class of content crosses.** A ``StepCondition`` carries a member of a closed
+#: vocabulary and two identifiers; a ``ResultReference`` carries two names and an
+#: identifier; a ``PlanInterpretation`` carries three identifiers; an element's
+#: applicability carries instants and the label vocabularies ADR-0237 and ADR-0213
+#: already fix, which ADR-0252 §11 already has crossing to the planner on a digest. No
+#: row is minted in ADR-0087 §2c's scalar table: ``evidence_recency`` is a
+#: :class:`~datetime.timedelta`, which §2e already gives a form.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 40 and a peer at 41 refuse each other and say so.
+#:
+#: **The promoted method set does not move** and stands at sixty-one; ADR-0177 §1's
+#: browser enumeration does not move and stands at thirty-three.
+#:
+#: **One stored-record version moves and it is not one of this wire's.**
+#: ``PlanExport.schema_version`` goes 11 → 12, because ``ActionPlan`` and ``PlanStep``
+#: change shape inside ``tuple[ActionPlan, ...]``, ``GoalElement`` changes shape inside
+#: ``tuple[Goal, ...]``, and ``GoalEvidence`` gains ``interpreted_output`` inside
+#: ``tuple[EvidenceHistory, ...]``. It is a **stored-record** version rather than a
+#: second wire ground — ``PlanExport`` crosses no frame and is emitted by no peer. **The
+#: plan store's own ``schema_version`` stays at 4 and no migration is owed** (ADR-0253
+#: §10): every new field is defaulted, so a stored plan written before this decision
+#: decodes as exactly the plan it was — no dependency, no reference, no condition, no
+#: verification and no interpretation — and a stored ``GoalElement`` decodes with ``id``
+#: and ``applicability`` absent, which §7 makes a conforming value rather than a row to
+#: repair. The parked-read store's stays at **3** and
+#: ``ConversationExport.schema_version`` at **2**.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0253's L1 mints no error class
+#: and removes none.
+#:
 #: **40 since ADR-0250 §19**, and the grounds are four at once — "every wire-visible
 #: change rides M1", because "splitting them across lanes would leave two peers passing
 #: the exact-match handshake and then failing to decode a turn — the failure ADR-0124 §9
@@ -1626,7 +1691,7 @@ from ai_assistant.wire.errors import (
 #: is registered, and the error mapping is untouched — ADR-0250's M1 mints no error class
 #: and removes none. ``wire/surface.py`` reads the three new methods and the new keyword
 #: off the Protocol itself, which is what that module exists for.
-PROTOCOL_VERSION: Final[int] = 40
+PROTOCOL_VERSION: Final[int] = 41
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

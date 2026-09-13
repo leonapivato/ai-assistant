@@ -4696,11 +4696,31 @@ class PlanStore(Protocol):
         route being a row written before ADR-0249 (§12) — decodes, and §8's
         not-driven rule reads it as targeting no revision.
 
+        **And every ``StepCondition.about`` and ``PlanInterpretation.settles`` must
+        already be an element id** (ADR-0253 §9). A plan is refused where any of them
+        is not the ``GoalElement.id`` of a **condition element** of the interpretation
+        the plan's ``targets_revision`` names — with the same error class an unstamped
+        ``targets_revision`` raises, and for the same reason: the unresolved state
+        exists only between the planner's return and the loop's substitution, and a
+        window is closed at the store rather than trusted to close itself. This is a
+        **strengthening of an existing member** rather than a new one, exactly as
+        ADR-0249 §12 classifies ``commit_transition``'s added claim condition, and
+        ``PlanStore`` gains **no member** for it.
+
+        **The disjointness is what makes the refusal exact**: ADR-0253 §7 makes a
+        ``GoalElement.id`` matching the condition-label grammar unconstructible, so a
+        plan still carrying an unsubstituted ``"D1"`` can match no element on any
+        goal, ever — rather than silently matching one and changing what the step
+        requires. **A plan declaring no condition and no interpretation is not
+        checked at all**, and is saved exactly as it always was.
+
         Raises:
             PlanningError: If the plan's ``goal_id`` names no stored goal, if its
                 ``supersedes`` names no stored plan, names this plan's own ``id``, or
-                names a plan under a different ``goal_id``, or if its
-                ``targets_revision`` is still absent.
+                names a plan under a different ``goal_id``, if its
+                ``targets_revision`` is still absent, or if a ``StepCondition.about``
+                or a ``PlanInterpretation.settles`` is not the id of a condition
+                element of the revision the plan targets.
         """
         ...
 
