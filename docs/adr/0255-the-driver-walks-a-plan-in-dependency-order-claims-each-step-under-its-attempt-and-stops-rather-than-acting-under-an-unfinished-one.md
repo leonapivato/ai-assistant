@@ -2811,8 +2811,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     records `EFFECT_UNRESOLVED` the residual is §6's own and is not an entry status**: §6 commits
     the step's `→ INDETERMINATE` transition and the attempt's write under **two**
     compare-and-swaps, so there the step stands durably **`INDETERMINATE`** whether or not the
-    attempt write landed, which is what §6 already fixes. **What is committed once
-    a write has begun, inside `StepExecutor.execute`, this arm cites by clause and does not
+    attempt write landed, which is what §6 already fixes. **And at the interpretation call, no
+    `GoalEvidence` row is written for it and every row the goal already held is unchanged** (§1) —
+    the **cancelled** route of the same clause the three paired arms above drive for a call that
+    raises and for one returning a non-member, against an implementation that charges and
+    re-raises correctly and defaults an `INCONCLUSIVE` row on the way out. **What is committed
+    once a write has begun, inside `StepExecutor.execute`, this arm cites by clause and does not
     restate**: **ADR-0034 §1** for the window between the committed claim and entering `invoke`,
     **ADR-0029 §4** for the interrupted-call classification once `invoke` has been entered, and
     **ADR-0014 §4** for what recovery reads from a durable `RUNNING`. Those three are ratified,
