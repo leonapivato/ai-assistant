@@ -489,9 +489,11 @@ was settled about the step rather than by where in the plan it sat.
 
 > **Normative.** **`PlanStore.commit_transition` gains one claim condition**: a `→ RUNNING`
 > transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, carries
-> the transition's own **`execution_id` among its `execution_ids`**, and is in a **non-terminal
-> `AttemptState`**. A claim naming no attempt, an unknown attempt, an attempt that **did not open
-> this execution**, or an attempt whose `state` is `CANCELLED` or `ENDED` is **refused with the
+> the transition's own **`execution_id` among its `execution_ids`**, is in a **non-terminal
+> `AttemptState`**, and is the **only** attempt of that goal naming that execution. A claim naming
+> no attempt, an unknown attempt, an attempt that **did not open this execution**, an attempt
+> whose `state` is `CANCELLED` or `ENDED`, or an execution **more than one attempt names**, is
+> **refused with the
 > error class a stale `expected_version` already raises** (`StaleExecutionError`), which is
 > ADR-0249 L1's precedent for the revision conjunct. This is a **strengthening of an existing
 > member** rather than a new one, exactly as ADR-0249 §12 classifies the first added condition.
@@ -538,21 +540,22 @@ was settled about the step rather than by where in the plan it sat.
 > naming one execution before this decision, so a `schema_version` 2 database may carry one.
 > **The refusals above bind on every write and change no stored row**, so no migration is owed and
 > the store's `schema_version` does not move (§11). **What a reader does with a legacy duplicate
-> is fixed here**: `commit_transition`'s conjunct is satisfied by **any** attempt whose
-> `execution_ids` names the execution, so a claim under either owner is accepted — the guarantee
-> is prospective and no clause here claims it is retrospective — and **§5's recovered resume
-> refuses** rather than choosing, because its resolution requires exactly one owner and finding
-> two is the ambiguity it must not resolve by picking. **No lane repairs, rewrites or deletes a
-> legacy duplicate**, and none reads `PlanExport`'s closure rule as excluding one.
+> is fixed here, and it is to refuse**: `commit_transition`'s conjunct requires **exactly one**
+> attempt of that goal to name the execution, so a claim against an execution **two** attempts
+> name is refused whichever is supplied, and **§5's recovered resume refuses** on the same state
+> for the same reason. **No lane repairs, rewrites or deletes a legacy duplicate**, and none reads
+> `PlanExport`'s closure rule as excluding one.
 
-**Prospective and refusing rather than migrated, and each half is the cheaper honest answer.** A
+**Refusing rather than migrating, and refusing at the claim and not only at the resume.** A
 migration would have to choose which attempt owns an execution two attempts name, and nothing in
-the record says — the append order is not retained, and ADR-0249 §12's tuples carry no instant. So
-the migration would invent an ownership nobody recorded, which is the fabrication ADR-0249 §12's
-own migration clause refuses for a ground it cannot show. Refusing at the one place ambiguity
-actually bites — the resume, which needs a single `attempt_id` to supply — costs a recoverable
-error on a state no code this system ships can newly create, and leaves the durable record
-untouched.
+the record says — the append order is not retained and ADR-0249 §12's tuples carry no instant — so
+it would invent an ownership nobody recorded, which is the fabrication ADR-0249 §12's own
+migration clause refuses for a ground it cannot show. **And accepting either owner would hand back
+the exact bypass this conjunct exists to close**: an execution under a `CANCELLED` attempt A and a
+live attempt B is the cancellation-defeating state named above, and a claim naming B would start a
+step after A ended. So ambiguity fails closed **everywhere it is read**, not only where a single
+value had to be chosen. The cost is a refusal on a state no code this system ships can newly
+create; the alternative is a silent hole in the one guarantee §3 is for.
 
 > **Normative — the exclusivity is what makes §5's recovered resume total.** That section resolves
 > a parked step's attempt as *"the attempt whose `execution_ids` names that execution"*; with
@@ -879,6 +882,21 @@ wider blast radius, filed there and **not taken here** (§12).
 > at the instant a step of the plan it is driving is recorded `INDETERMINATE`, in the same turn
 > and before the turn composes. `EFFECT_UNRESOLVED` is a **non-terminal** member (ADR-0249 §5), so
 > a later claim of that attempt is **not** refused by §3's conjunct on that ground alone.
+
+> **Normative — the two writes are not one, and what a failure between them leaves is stated.**
+> The step's `→ INDETERMINATE` transition and the attempt's `commit_attempt` are **two writes
+> under two compare-and-swaps**, and `PlanStore` offers no multi-write commit (#257's own
+> observation, one store over). Where the attempt write does not land — a stale
+> `expected_version`, a store failure — **the step stays durably `INDETERMINATE` and the attempt
+> stays `RUNNING`**, the turn fails as a turn whose store write raised already fails, **nothing is
+> re-dispatched and no step is skipped**. **The step's status is the authoritative record of the
+> uncertainty** and the attempt's state is the derived convenience, so the residual is a record
+> that is *less* informative rather than one that is wrong.
+
+> **Normative — repairing that residual is A8's, and no lane derives around it.** A8's
+> reconciliation reads `INDETERMINATE` steps and is the lane that can write the attempt's state
+> from one; **no lane infers `EFFECT_UNRESOLVED` at read time** (below), and **no lane retries the
+> attempt write from a later turn on its own authority**. §12 carries it.
 
 > **Normative.** **Nothing else writes `EFFECT_UNRESOLVED` under this decision.** In particular
 > the startup recovery scan does not: it moves a stranded step `RUNNING → INDETERMINATE`
@@ -1335,8 +1353,14 @@ ledger and stops on the same three guards.
 > No new model, no new enumeration, no new constant, and no widening of `StepExecution`,
 > `ExecutionState`, `ActionPlan`, `PlanStep`, `GoalAttempt` or `Goal`.
 
-> **Normative — this is a BREAKING contract change under golden rule 5**, and it is breaking for
-> the Protocol rather than for the constructor. `StepRunner` and `StepExecutor` are concrete
+> **Normative — this is a BREAKING contract change under golden rule 5, and it is breaking in two
+> ways rather than one.** **For the constructor**: `StepTransition`'s validator requires
+> `attempt_id` on every `→ RUNNING` transition, so **every existing construction of one without it
+> stops validating** — `StepExecutor._claim` and every test, fixture and canonical fake that builds
+> a claim — and **L1 migrates each of them in the same change**. **And for the Protocol**: what a
+> conforming `PlanStore` must refuse moves on three members (below). Transitions to every other
+> status are untouched, `recovery.py`'s `→ INDETERMINATE` among them, because the field is
+> forbidden there and absent there today. `StepRunner` and `StepExecutor` are concrete
 > `orchestration` classes and **not** Protocols, so §3's threaded keyword changes no contract
 > surface at all. `PlanStore`'s signatures do **not** move and `PlanStore` gains **no member**;
 > what changes is what a conforming implementation must **refuse**, on **three** members. §3 adds
@@ -1407,6 +1431,11 @@ ledger and stops on the same three guards.
 - **Retry across turns, reconciliation, idempotency keys, modify-before-replace, and how an
   `INDETERMINATE` step is resolved.** **A8**, which takes ADR-0014 §7's deferral. §6 stops the
   branch and writes the attempt's state; it resolves nothing.
+- **Repairing an attempt left `RUNNING` beside an `INDETERMINATE` step**, where §6's second write
+  did not land. **A8**, which reads `INDETERMINATE` steps and is the only lane that can write the
+  attempt's state from one. §6 states what the residual is and that nothing re-dispatches or
+  derives around it; nothing here retries that write from a later turn. Fired by A8's
+  reconciliation landing.
 - **Whether the startup recovery scan writes `EFFECT_UNRESOLVED` on the attempt of a step it
   found `RUNNING`.** **A8.** §6 gives the state one producer — the driver, for a step it drove —
   and the scan runs outside a turn with no attempt in hand. Fired by the lane that gives the scan
@@ -1563,7 +1592,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    that member takes a whole attempt and the tuple may arrive non-empty — a caller could otherwise
    reach the forbidden state without calling `commit_attempt` at all. A paired arm asserts the
    append is still idempotent on the attempt that owns it, which is ADR-0249 §12's own clause and
-   is untouched.
+   is untouched. **And the legacy arm**: a store seeded — beneath the refusals, as only a
+   pre-decision store could be — with execution E named by both a `CANCELLED` attempt A and a live
+   attempt B, where a `→ RUNNING` claim for E is **refused whichever attempt it names**, and §5's
+   recovered resume refuses on the same state. The arm is what stops the cancellation bypass
+   surviving in a database written before this decision.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
    goal revision is not the stored one, and none whose attempt is absent, does not carry this
@@ -1673,8 +1706,11 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     and not `SKIPPED`, and a step already begun ran to completion past the deadline. **The arm
     that pins the resume**: a `resume(timeout=PT30S)` whose parked step takes PT29S leaves the
     following walk's first step approximately **PT1S** and not PT30S, so one adapter call spends
-    one budget (§9). A paired arm asserts `AttemptEffort.working` advanced by the walk and
-    `planner_calls` did not.
+    one budget (§9). **And the arm that pins it across a licensed investigation**: a first walk
+    and the licensed round together exhaust the `converse` deadline, and the **second walk starts
+    no step** — asserted on the injected clock, against an implementation that would otherwise fix
+    a fresh deadline when the second walk begins. A paired arm asserts `AttemptEffort.working`
+    advanced by both walks and by the licensed round, and `planner_calls` by the round alone.
 17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
 18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
@@ -1719,17 +1755,6 @@ states that a decision was **not** taken (ADR-0070 §1), so firing one replaces 
 `Accepted` is not dropped. Both halves of the entry's own list are taken: *"a rule for parking
 mid-plan (#257 …)"* is §5, and *"an `INDETERMINATE` step in the middle of a plan (ADR-0014 §4)"* is
 §6. ADR-0042 §3's follow-on, which that entry names, is §9.
-
-**ADR-0228 §5 — relied on and extended, and the extension is new ground rather than a
-replacement.** §5 rules *"A superseded plan **drives nothing**"* and *"Exactly one plan of a turn
-is driven and it is the last"*, both stated of a turn that revises **before** driving; both stay
-true of a walk, which drives one plan per turn and drives the last one produced. What §5 never
-states is what becomes of an **already-driven** plan's remaining `PENDING` steps when a later turn
-supersedes it, and §7 states it. A reader holding only §5 builds a system in which those steps sit
-`PENDING` forever, indistinguishable from a walk that stopped — a smaller gap than a contradiction,
-and ADR-0070 §1's test comes out on the record side. Its persistence clauses are relied on entire:
-*"Every plan of the turn is persisted before anything is driven"* is what makes the plan the walk
-reads a stored one.
 
 **ADR-0249 §8 — relied on entire, and its refusal of a `StepTransition` member is kept, not
 narrowed.** That clause reads *"**`StepTransition` gains no member for this.**"* Its scope is
