@@ -681,7 +681,7 @@ def test_an_interpretation_row_refreshes_nothing_on_this_tree() -> None:
     §14 rules that "no lane of this decision produces an ``INTERPRETATION`` row" and §17
     repeats it for both lanes, so no such row exists on any tree this predicate runs on.
     Declining is §8 limb 5's own fail-closed direction: it retires nothing. The lane that
-    lands ``InterpretationVerdict`` lands this limb with it (#2332).
+    lands ``InterpretationVerdict`` lands this limb with it (#2333).
     """
     week = (_region(window=_WEEK),)
     interpretation = {
