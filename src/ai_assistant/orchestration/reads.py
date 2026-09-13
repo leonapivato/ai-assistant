@@ -99,6 +99,7 @@ from ai_assistant.core.types import (
     EgressBinding,
     FetchRefusal,
     MemoryKind,
+    OutboundReach,
     ParkedRead,
     ParkedReadDisposition,
     PermissionDecision,
@@ -539,6 +540,145 @@ SEARCH_DISPOSITIONS: Final[Mapping[SearchRefusal, SearchDisposition]] = MappingP
         SearchRefusal.UNATTESTED: SearchDisposition.UNATTESTED,
     }
 )
+
+
+#: ADR-0264 §2's partition of :class:`SearchDisposition`, **total over the seventeen
+#: members the vocabulary is closed at** and written once here, beside the two mappings
+#: whose discipline §2 names: "a member added without an arm fails rather than falling
+#: to a default". §18's item 9a asserts it over the enum itself, so a lane that adds an
+#: eighteenth member without placing it fails rather than being silently grouped.
+#:
+#: **Three groups and not two, because each member was read from the code that produces
+#: it** (§2). This vocabulary names *the stage that produced the outcome*, and a stage is
+#: not a wire fact: four members are reached from more than one producing path and the
+#: paths disagree about whether anything left the machine.
+#:
+#: * :attr:`~ai_assistant.core.types.OutboundReach.REACHED` — a **contact**, because
+#:   this system reaches the member only from octets the provider's channel had already
+#:   returned. :attr:`SearchDisposition.RESPONSE_TOO_LARGE` is reached only from a reader
+#:   counting octets off the channel and :attr:`SearchDisposition.UNATTESTED` only from a
+#:   response that declared no instant, so both arrived.
+#: * :attr:`~ai_assistant.core.types.OutboundReach.INDETERMINATE` — **nothing either
+#:   way**, and the non-asserting direction is taken deliberately (§2, §12). A refused
+#:   connection, an expiry of ``search_call_deadline`` and a fault raised out of
+#:   ``WebSearcher.search`` are each consistent with a request that left and with one
+#:   that did not; and :attr:`SearchDisposition.PROVIDER_REFUSED` is recorded **both**
+#:   for a response the provider gave and this system refused **and** for an account that
+#:   changed across the credential read, whose limbs "discarded the credential and wrote
+#:   nothing to any channel — none was opened" (ADR-0148 §6). None of the four carries a
+#:   value separating its causes.
+#: * :attr:`~ai_assistant.core.types.OutboundReach.NOT_REACHED` — **no contact**, every
+#:   one of them a stage before the send: no query was composed, no ruling was obtained,
+#:   or the send was refused on a ceiling. :attr:`SearchDisposition.NO_BUDGET`'s own
+#:   definition is that "no request is composed, no ruling is sought and no channel is
+#:   opened".
+#:
+#: **One reading of ``_result_of``'s docstring is deliberately kept out** (§2): it also
+#: groups ``RESPONSE_TOO_LARGE`` with ``TRANSPORT_FAILED`` and ``PROVIDER_REFUSED`` as
+#: "calls that did not complete as calls", which is about the **invocation's** outcome
+#: and not about whether bytes crossed the wire. A response too large to carry arrived;
+#: a refused connection did not; a provider refusal is recorded for both.
+SEARCH_CONTACTS: Final[Mapping[SearchDisposition, OutboundReach]] = MappingProxyType(
+    {
+        SearchDisposition.NOT_CONFIGURED: OutboundReach.NOT_REACHED,
+        SearchDisposition.NO_BUDGET: OutboundReach.NOT_REACHED,
+        SearchDisposition.COMPOSER_DECLINED: OutboundReach.NOT_REACHED,
+        SearchDisposition.COMPOSER_UNAVAILABLE: OutboundReach.NOT_REACHED,
+        SearchDisposition.COMPOSER_MALFORMED: OutboundReach.NOT_REACHED,
+        SearchDisposition.COMPOSER_TOO_LONG: OutboundReach.NOT_REACHED,
+        SearchDisposition.BINDING_FAILED: OutboundReach.NOT_REACHED,
+        SearchDisposition.RULING_CONFIRM: OutboundReach.NOT_REACHED,
+        SearchDisposition.RULING_DENY: OutboundReach.NOT_REACHED,
+        SearchDisposition.RULING_UNAVAILABLE: OutboundReach.NOT_REACHED,
+        SearchDisposition.SPEND_REFUSED: OutboundReach.NOT_REACHED,
+        SearchDisposition.RESPONSE_TOO_LARGE: OutboundReach.REACHED,
+        SearchDisposition.UNATTESTED: OutboundReach.REACHED,
+        SearchDisposition.TRANSPORT_FAILED: OutboundReach.INDETERMINATE,
+        SearchDisposition.DEADLINE_EXPIRED: OutboundReach.INDETERMINATE,
+        SearchDisposition.SEARCH_FAILED: OutboundReach.INDETERMINATE,
+        SearchDisposition.PROVIDER_REFUSED: OutboundReach.INDETERMINATE,
+    }
+)
+
+
+def contact_of(disposition: SearchDisposition | None) -> OutboundReach:
+    """What one **performed** ``WEB_SEARCH`` call established (ADR-0264 §2).
+
+    **The caller must have performed a call.** The absent disposition is §2's
+    eighteenth case — "a call that **completed and recorded no**
+    ``SearchDisposition``", which is a search that reached the provider and was
+    answered, records or none, because ``SearchRefusal.NO_RESULT`` maps to no
+    disposition (ADR-0231 §13). A site that performed **no** call establishes
+    nothing either way and does not call this: it contributes nothing to the fold,
+    and a turn every one of whose sites contributed nothing is ``NOT_REACHED`` (§1).
+
+    **It is never derived from** :class:`~ai_assistant.core.types.SearchNotServiced`
+    (§2). That vocabulary is non-injective by design (ADR-0242 §8) and
+    ``UNAVAILABLE`` covers both a response that arrived and was refused and a
+    transport that failed, which this partition's second and third groups separate.
+
+    **The discriminator is over the call and never over the servicing's completion**
+    (§2). A response that arrived is a contact whatever the enclosing servicing's
+    disposition, so this is called at the performing site and no component
+    re-derives it from ``ServicedRead.disposition`` after the servicing has ended —
+    an absent disposition on a *failed* servicing covers both a search that was
+    answered and a servicing that raised before its search was serviced, and the
+    record holds nothing that separates them.
+
+    Args:
+        disposition: What the call resolved to, or ``None`` where it completed and
+            recorded none.
+
+    Returns:
+        The member of :class:`~ai_assistant.core.types.OutboundReach` §2 places this
+        call in.
+    """
+    if disposition is None:
+        return OutboundReach.REACHED
+    return SEARCH_CONTACTS[disposition]
+
+
+#: ADR-0264 §2's fold order, least-claiming first, read by :func:`folded_reach`.
+_REACH_RANK: Final[Mapping[OutboundReach, int]] = MappingProxyType(
+    {
+        OutboundReach.NOT_REACHED: 0,
+        OutboundReach.INDETERMINATE: 1,
+        OutboundReach.REACHED: 2,
+    }
+)
+
+
+def folded_reach(carried: OutboundReach | None, one: OutboundReach | None) -> OutboundReach | None:
+    """Fold one call's contribution into the turn's (ADR-0264 §2).
+
+    "**The turn's value is folded from its calls,** ``REACHED`` **outranking**
+    ``INDETERMINATE`` **and** ``INDETERMINATE`` **outranking** ``NOT_REACHED``."
+    One call that established a contact makes the turn ``REACHED`` however many
+    others did not; failing that, one that established nothing either way makes it
+    ``INDETERMINATE``. **The order is the least-claiming one available**: a turn is
+    never reported as having reached nothing while one of its own calls may have
+    reached something.
+
+    **Assembly accumulates and never replaces** (§6). A servicing that establishes
+    no contact clears nothing an earlier one established, and a
+    last-writer-wins assembly is the defect that clause names — which is why this is
+    a fold rather than an assignment, on the shape :func:`earliest` already has for
+    ADR-0242 §7's member.
+
+    Args:
+        carried: What the turn holds so far, or ``None`` where no site has
+            contributed.
+        one: What this site contributed, or ``None`` where it performed no call and
+            so established nothing either way.
+
+    Returns:
+        The stronger of the two, or ``None`` where neither contributed.
+    """
+    if one is None:
+        return carried
+    if carried is None:
+        return one
+    return one if _REACH_RANK[one] > _REACH_RANK[carried] else carried
 
 
 class StructuredAxis(StrEnum):
@@ -1827,6 +1967,35 @@ class _Searched:
             The **enumeration** path reads the trail for a park it did not write, and
             that is a different seam: ``pending_confirmations`` is not inside a turn and
             already declares ``AuditError`` (ADR-0052 §1).
+        contact: ADR-0264 §2's carrier for this servicing — what this site's
+            ``WEB_SEARCH`` **call** established, computed **here at the performing
+            site** by :func:`contact_of` from the outcome this site holds, and ``None``
+            where no call was performed at all.
+
+            **It is not derivable from** :attr:`disposition` (§2). An absent disposition
+            is a call that completed and recorded none *and* a servicing that never
+            reached its search, and this field is what tells those apart: the branch
+            that answers an absent ask carries ``None`` here, and the branch whose
+            provider answered ``NO_RESULT`` carries
+            :attr:`~ai_assistant.core.types.OutboundReach.REACHED`.
+
+            **A contact is established the moment a response arrived, and nothing that
+            happens to the enclosing servicing afterwards unmakes it** (§2), which is
+            why this rides out on the failing record's carriers exactly as
+            :attr:`not_serviced` does.
+        admitted: ADR-0264 §4's count for this servicing — how many records this
+            call's contact put into the **turn's supply**, taken as the delta of
+            ``_Union.admitted`` across the admission and so **after** ADR-0226 §7's
+            deduplication and §6's budget.
+
+            **Recorded by the site that performs the admission and never
+            reconstructed** (§4), and in particular it is **not** ``len(minted)``:
+            where one response carries two records under one id the supply takes one
+            and this is ``1``, and where the budget cut the rest this counts what fit.
+            It is also **not** :attr:`ServicedRead.supplied`, which counts what was sent
+            *to* the query composer before anything left.
+
+            Zero on every non-yield, which §4 rules never suppresses the statement.
     """
 
     records: tuple[MemoryRecord, ...]
@@ -1834,6 +2003,8 @@ class _Searched:
     not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
     parked_decision: PermissionDecision | None = None
+    contact: OutboundReach | None = None
+    admitted: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2005,6 +2176,32 @@ class ServicedCarriers:
             with **no store read of its own** — ADR-0244 §1's "the turn does not park,
             is not suspended and does not fail", which a trail read taken after the park
             was written could break between the park and the reply.
+        contact: ADR-0264 §2's carrier: what this servicing's ``WEB_SEARCH`` **call**
+            established, or ``None`` where the servicing performed no call at all — a
+            request carrying no such ask, and one that raised before its search was
+            serviced.
+
+            **Computed at the performing site and never re-derived here** (§2). It
+            travels beside :attr:`not_serviced` for that member's own reason and on the
+            same terms — "computed at the servicing site, by the component that recorded
+            the ``SearchDisposition``" — and **rides on the failing record's carriers
+            too**: a servicing whose search was answered and whose later read then
+            raised carries the contact its call established, because what ADR-0226 §5
+            discards is the records and not the call.
+
+            **It is not read off** :attr:`not_serviced` (§2). That vocabulary is
+            non-injective and ``UNAVAILABLE`` covers both a response that arrived and
+            was refused and a transport that failed, which §2's second and third groups
+            separate.
+        contact_records: ADR-0264 §4's count: how many records this servicing's contact
+            put into the **turn's supply**.
+
+            **Zero on a servicing that failed**, whatever its search admitted before
+            the fault, because ADR-0226 §5 leaves the supply as planning saw it — so
+            nothing that servicing fetched is in the turn's supply, and §4 rules that a
+            ``0`` never suppresses the statement. That is the one case in which this
+            and :attr:`minted` disagree by design: `minted` is folded on every path out
+            because ADR-0249 §7 asks it to be, and this is the count of what **entered**.
     """
 
     hop_reached: tuple[str, ...] = ()
@@ -2017,6 +2214,8 @@ class ServicedCarriers:
     not_serviced: SearchNotServiced | None = None
     parked_read: ParkedRead | None = None
     parked_decision: PermissionDecision | None = None
+    contact: OutboundReach | None = None
+    contact_records: int = 0
 
 
 @dataclass(slots=True)
@@ -2508,7 +2707,11 @@ class SearchServicer:
         # this set dies with the turn and a captured episode is never in it.
         if footing.registered:
             footing.minted_user_chosen.update(record.id for record in result.records)
-        return _Searched(result.records, None, None)
+        # ADR-0264 §2's first group, at the site that performed the call: the call
+        # completed and recorded no disposition, which is a search that reached the
+        # provider and was answered. `admitted` is filled by the admission site, which
+        # is `_serviced_search` — this frame has not offered the records to the union.
+        return _Searched(result.records, None, None, contact=OutboundReach.REACHED)
 
     # --- what ADR-0244 §6 and §7 reach this object for ----------------------
     #
@@ -2732,7 +2935,8 @@ class SearchServicer:
                 the question cannot raise inside a turn ADR-0244 §1 says must not fail.
 
         Returns:
-            The empty records, the disposition, the member, the park and its decision.
+            The empty records, the disposition, the member, the park, its decision and
+            what the call established.
         """
         return _Searched(
             (),
@@ -2745,6 +2949,14 @@ class SearchServicer:
             ),
             park,
             decision if park is not None else None,
+            # ADR-0264 §2's third carrier, computed here with the other two and never
+            # apart from them. **An absent disposition on this method is
+            # ``SearchRefusal.NO_RESULT`` and nothing else** — the one branch that
+            # passes `SEARCH_DISPOSITIONS.get(...)` a refusal the mapping does not
+            # carry — so it is a call that completed and recorded none, which is §2's
+            # eighteenth case and a contact. Every other branch reaching here named a
+            # member, and :func:`contact_of` places it.
+            contact=contact_of(disposition),
         )
 
     async def _park(  # noqa: PLR0913 — the ruled request, the recorded decision, the footing, and the three members ADR-0244 §2 and ADR-0248 §3 persist because the continuation composes over them; each is a distinct fact and none is derivable from another
@@ -3372,6 +3584,12 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # record too and a fault raised *by* the search leaves the call that would have
     # assigned it unreturned — where the honest value is the empty one §5's
     # degradation carries (issue #2112).
+    #
+    # **Its `contact` is `None` and that is ADR-0264 §13 item 7's third shape** (§2): a
+    # servicing that raised *before* its search was serviced performed no call, so it
+    # establishes nothing either way — and this is the value it carries out, which is
+    # what tells it from the first shape, whose search was answered and which carries a
+    # contact with `records` `0`.
     searched = _Searched((), None, None)
     # **ADR-0238 §11's three counts are *written* rather than returned**, for the reason
     # `_Reads` is: a fault the searcher raised after the ruling unwinds past the call
@@ -3618,7 +3836,15 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # `searched` still holds the initial value no stage has written to. The
         # counts are untouched — they are written through as each stage completes, so
         # what actually happened before the fault survives (ADR-0238 §11).
-        searched = _Searched((), SearchDisposition.SEARCH_FAILED, SearchNotServiced.UNAVAILABLE)
+        # ADR-0264 §2 places `SEARCH_FAILED` in the second group: a fault raised out of
+        # `WebSearcher.search` is consistent with a request that left and with one that
+        # did not, so the turn says this system cannot tell rather than claiming either.
+        searched = _Searched(
+            (),
+            SearchDisposition.SEARCH_FAILED,
+            SearchNotServiced.UNAVAILABLE,
+            contact=contact_of(SearchDisposition.SEARCH_FAILED),
+        )
     finally:
         # One record, on every path out of this function — the completed servicing,
         # the degraded one, and the one a cancellation carried away — and the
@@ -3677,6 +3903,21 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         not_serviced=searched.not_serviced,
         parked_read=searched.parked_read,
         parked_decision=searched.parked_decision,
+        # ADR-0264 §2's carrier, folded on **every** path out for the identical reason,
+        # and that is the whole of what makes the failed servicing's contact survive:
+        # "a contact is established the moment a response arrived, and nothing that
+        # happens to the enclosing servicing afterwards unmakes it". A servicing whose
+        # search was answered and whose later `SIGHTED_QUERY` raised carries it here,
+        # and one that raised *before* its search was serviced carries `None` — which is
+        # the pair §2 says no site can tell apart from the ended servicing's record.
+        contact=searched.contact,
+        # ADR-0264 §4 over ADR-0226 §5: `records` counts what entered the supply, and a
+        # failed servicing entered nothing — §5 "leaves the supply as planning saw it"
+        # and the caller appends `ServicedRead.records`, which the failing record leaves
+        # empty. `completed` is `None` on exactly the degraded paths, so this is the
+        # servicing's own all-or-nothing posture reaching the count rather than a second
+        # rule about it. §4 rules that the resulting `0` never suppresses the statement.
+        contact_records=searched.admitted if completed is not None else 0,
     )
 
 
@@ -3896,12 +4137,27 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
         # Answered before the deployment is consulted, so a turn nobody asked a
         # search of reads the same on a wired deployment and an unwired one. ADR-0242
         # §6's eligibility is the disposition's presence, so this turn carries no
-        # member either and its assembled prompt is byte-identical to today's.
+        # member either.
+        #
+        # **ADR-0264 §2: no call was performed, so this establishes nothing either
+        # way and contributes nothing to the fold.** `contact` is `None` and not
+        # `NOT_REACHED`: the two fold identically (§2's order), and the distinction
+        # is kept because `None` is the honest statement of a site that did nothing
+        # — a turn every one of whose sites contributed nothing is `NOT_REACHED` by
+        # §1 and not by an arm here.
         return _Searched((), None, None)
     if search is None:
         # ADR-0242 §8's residue: a deployment that connected no search account gives the
         # user no act, so `UNAVAILABLE` — the member that names no cause and no act.
-        return _Searched((), SearchDisposition.NOT_CONFIGURED, SearchNotServiced.UNAVAILABLE)
+        #
+        # ADR-0264 §2 places `NOT_CONFIGURED` in the third group: no channel was
+        # opened, so no contact.
+        return _Searched(
+            (),
+            SearchDisposition.NOT_CONFIGURED,
+            SearchNotServiced.UNAVAILABLE,
+            contact=contact_of(SearchDisposition.NOT_CONFIGURED),
+        )
     if footing is None:
         # **No conversation, so no park could be written and nothing is serviced.**
         # This branch used to name ADR-0238 §8's refused admission; ADR-0247 §5 removes
@@ -3913,7 +4169,12 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
         # Unreachable in production, where `app/composition.py` wires the footing
         # unconditionally and every caller passes a conversation it has already begun,
         # and fail-closed rather than a fallback.
-        return _Searched((), SearchDisposition.NOT_CONFIGURED, SearchNotServiced.UNAVAILABLE)
+        return _Searched(
+            (),
+            SearchDisposition.NOT_CONFIGURED,
+            SearchNotServiced.UNAVAILABLE,
+            contact=contact_of(SearchDisposition.NOT_CONFIGURED),
+        )
     # ADR-0238 §5's own words for what this holds: "the turn's pre-servicing supply and
     # every record this servicing has already contributed", read once here so that
     # ADR-0181 §4's fact and ADR-0238 §2's supply are computed from **one** value at
@@ -3955,9 +4216,16 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
         # rendered traceback, and every one of those is Tier 1.
         raise _ServicingFailedError(type(exc).__name__) from None
     reads.note(len(found.records))
+    # ADR-0264 §4's count, taken **here, at the site that performs the admission**, and
+    # never reconstructed: the delta is what the union took after ADR-0226 §7's
+    # deduplication over the whole union and §6's budget, so a response carrying two
+    # records under one id contributes one and a response the budget cut contributes
+    # what fit. A lane reading `len(found.records)` or `ServicedRead.supplied` counts a
+    # different population, and §4 refuses both by name.
+    before = len(union.admitted)
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
-    return found
+    return replace(found, admitted=len(union.admitted) - before)
 
 
 async def _serviced_file(

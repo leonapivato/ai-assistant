@@ -34,6 +34,7 @@ from ai_assistant.core.errors import PlanningError, UngrantableActError
 from ai_assistant.core.types import (
     ActionRequest,
     EgressBinding,
+    OutboundReach,
     ParkedRead,
     ParkedReadDisposition,
     PermissionOutcome,
@@ -41,7 +42,7 @@ from ai_assistant.core.types import (
     ReadCancellation,
     ToolCall,
 )
-from ai_assistant.orchestration.reads import SEARCH_DISPOSITIONS, not_serviced
+from ai_assistant.orchestration.reads import SEARCH_DISPOSITIONS, contact_of, not_serviced
 from ai_assistant.orchestration.runner import EstablishingAnswer
 
 if TYPE_CHECKING:
@@ -147,6 +148,22 @@ class AnsweredRead:
             :attr:`ReadAnswerOutcome.DISPATCHED` says what became of the *answer* and
             does not say what became of the read; a reply composed with no member would
             leave a user told a lookup ran and shown nothing it produced.
+        contact: ADR-0264 §2's carrier for this answer: what the dispatched read's one
+            call established, or ``None`` where **no call was dispatched** — which is
+            every member but :attr:`ReadAnswerOutcome.DISPATCHED`.
+
+            **§2 binds at every site that performs a** ``WEB_SEARCH`` **call, and there
+            are two today**: the servicing in
+            :mod:`ai_assistant.orchestration.reads`, and this dispatch. "Each computes
+            the fact **at its own site**, from the outcome it holds"; no site recomputes
+            another's, and an implementation that computed it only in ``reads`` would
+            leave every approved park's contact unstated (§13 item 4).
+
+            It travels beside :attr:`not_serviced` for that member's own reason: the
+            refusal is mapped here, at the site that holds it, and carried back as data.
+            The two are **not** read off one another — ``UNAVAILABLE`` covers both a
+            response that arrived and was refused and a transport that failed, which
+            §2's second and third groups separate.
         establishing: The two records a standing recipient grant is transcribed from,
             where this answer collected an establishing act and recorded a resolution,
             or ``None`` otherwise (ADR-0235 §2, §6; ADR-0244 §5). **The act still rides
@@ -169,6 +186,7 @@ class AnsweredRead:
     records: tuple[MemoryRecord, ...] = ()
     not_serviced: SearchNotServiced | None = None
     establishing: EstablishingAnswer | None = None
+    contact: OutboundReach | None = None
 
 
 @dataclass(slots=True)
@@ -595,7 +613,7 @@ class ParkedReadOperations:
             return AnsweredRead(
                 ReadAnswerOutcome.AUTHORITY_CHANGED, park, establishing=establishing
             )
-        records, not_serviced = await self._dispatched(
+        records, not_serviced, contact = await self._dispatched(
             park, ToolCall(request=request, decision=answer)
         )
         return AnsweredRead(
@@ -604,11 +622,16 @@ class ParkedReadOperations:
             records,
             not_serviced=not_serviced,
             establishing=establishing,
+            # ADR-0264 §2: the fact the dispatch computed, carried out as data. Every
+            # member above returns before this line, and each of them dispatched
+            # nothing — so the contact is `None` on all six, which is a site that
+            # performed no call rather than one that reached nothing.
+            contact=contact,
         )
 
     async def _dispatched(
         self, park: ParkedRead, call: ToolCall
-    ) -> tuple[tuple[MemoryRecord, ...], SearchNotServiced | None]:
+    ) -> tuple[tuple[MemoryRecord, ...], SearchNotServiced | None, OutboundReach]:
         """Run the one call, registered so that a cancellation can reach it.
 
         **The dispatch is one call** (ADR-0244 §7). ``settle`` is the gate and it was
@@ -645,9 +668,20 @@ class ParkedReadOperations:
             park: The park this dispatch answers, spent and ``APPROVED``.
             call: The call over the resolving ``ALLOW``.
 
+        **And it establishes ADR-0264 §2's contact at this site, because this is a site
+        that performs the call.** The fact is computed here from the outcome this frame
+        holds, by the same function the servicing site uses, and carried back as data —
+        never recomputed by the engine and never derived from
+        :class:`~ai_assistant.core.types.SearchNotServiced`, which cannot separate a
+        response that arrived and was refused from a transport that failed (§2).
+
+        Args:
+            park: The park this dispatch answers, spent and ``APPROVED``.
+            call: The call over the resolving ``ALLOW``.
+
         Returns:
-            What the read minted, empty on a refusal; and which class of act would have
-            let it happen, or ``None`` where it yielded.
+            What the read minted, empty on a refusal; which class of act would have let
+            it happen, or ``None`` where it yielded; and what the call established.
         """
         self._dispatches.running[park.id] = asyncio.current_task()
         try:
@@ -656,13 +690,24 @@ class ParkedReadOperations:
             self._dispatches.running.pop(park.id, None)
         refusal = outcome.refusal
         if refusal is None:
-            return outcome.records, None
-        return (), not_serviced(
-            SEARCH_DISPOSITIONS.get(refusal),
-            # The binding and the destination's trust are the **servicing** site's two
-            # discriminators for a `RULING_CONFIRM` row, and this branch is not one: a
-            # refusal after a recorded `ALLOW` maps by its own disposition alone, so
-            # passing anything here would be inventing an input this site does not hold.
+            # ADR-0264 §2's eighteenth case: the call completed and recorded no
+            # disposition, so it reached the provider and was answered.
+            return outcome.records, None, OutboundReach.REACHED
+        # `SEARCH_DISPOSITIONS.get` answers `None` for `NO_RESULT` alone, which is a
+        # completed call this site made — so :func:`contact_of` reads it as the contact
+        # it is rather than as an absent one (ADR-0231 §13, ADR-0264 §2).
+        disposition = SEARCH_DISPOSITIONS.get(refusal)
+        return (
+            (),
+            not_serviced(
+                disposition,
+                # The binding and the destination's trust are the **servicing** site's
+                # two discriminators for a `RULING_CONFIRM` row, and this branch is not
+                # one: a refusal after a recorded `ALLOW` maps by its own disposition
+                # alone, so passing anything here would be inventing an input this site
+                # does not hold.
+            ),
+            contact_of(disposition),
         )
 
     # --- the cancellation (ADR-0244 §11) ------------------------------------
