@@ -10629,8 +10629,9 @@ class PlanExport(BaseModel):
     **ADR-0014 §5's closure rule extends to the attempt rather than changing** (§11):
     an export naming an attempt's goal it does not carry does not validate as a
     ``PlanExport`` at all, and the plan and execution ids an attempt references
-    resolve within the same document for the reason ``supersedes`` does. It does
-    **not** gain evidence rows, because A4 mints them (§10).
+    resolve within the same document for the reason ``supersedes`` does. **At 8 it did
+    not carry evidence**, because ADR-0249 §10 left the rows to A4 — which is ADR-0252,
+    whose §13 adds them at 11 above.
 
     **It was 7 because ``ActionPlan``'s ``read_request`` changed
     shape again** (ADR-0240 §11): ``ReadKind`` gained ``STRUCTURED_READ``, ``ReadAsk``
