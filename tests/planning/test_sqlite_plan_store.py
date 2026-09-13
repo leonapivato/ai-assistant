@@ -33,16 +33,22 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import PlanningError, StaleExecutionError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
+    MAX_GOAL_EVIDENCE,
     AttemptTransition,
+    EvidenceApplicability,
+    EvidenceBasis,
     EvidenceHistory,
+    EvidenceStanding,
     Goal,
     GoalAttempt,
+    GoalEvidence,
     GoalQuestion,
     GoalQuestionDisposition,
     GoalRevision,
     GoalStatus,
     Ground,
     MemorySource,
+    ReadKind,
     StepStatus,
     StepTransition,
 )
@@ -1024,6 +1030,50 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
     try:
         with pytest.raises(PlanningError, match="elision count"):
             await reading
+    finally:
+        store.close()
+
+
+async def test_an_elision_count_that_would_overflow_refuses_the_write(tmp_path: Path) -> None:
+    """SQLite's ``+`` promotes to ``REAL`` on overflow, so the count is advanced in Python.
+
+    SQLite's integers are 64-bit and its arithmetic **does not raise** when one
+    overflows: ``9223372036854775807 + 1`` is stored as ``9.223372036854776e+18`` of type
+    ``real``. A store that advanced ADR-0252 §13's counter in SQL would therefore commit
+    a write whose counter every later ``evidence_of`` and ``export`` refuses — a row
+    accepted and then unreadable, which is worse than either a clean refusal or a clean
+    success.
+
+    So the read, the addition and the write are done with Python's unbounded integers and
+    the write is **refused** where the result will not fit, at the write that would have
+    caused it. The counter and the history are both left exactly as they were, because
+    the refusal happens inside the one ``BEGIN IMMEDIATE`` the whole call runs in.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        for index in range(MAX_GOAL_EVIDENCE):
+            await store.record_evidence(
+                _evidence_row(f"ev{index:03d}", read_at=_AT + timedelta(minutes=index))
+            )
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE goals SET evidence_elided = ? WHERE id = 'g1'", (2**63 - 1,))
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError, match="would exceed what this store can hold"):
+            await store.record_evidence(_evidence_row("ev-new", read_at=_AT + timedelta(days=1)))
+
+        history = await store.evidence_of("g1")
+        assert history.elided == 2**63 - 1, "the counter is untouched"
+        assert len(history.rows) == MAX_GOAL_EVIDENCE
+        assert await store.get_evidence("ev-new") is None, "the whole write rolled back"
+        assert await store.get_evidence("ev000") is not None, "and nothing was elided"
     finally:
         store.close()
 
@@ -2562,6 +2612,25 @@ def _version_2_database(path: Path, *, engaged_at: datetime | None = None) -> No
         )
         conn.execute("CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq)")
         conn.execute("INSERT INTO goals(id, data) VALUES ('g1', ?)", (json.dumps(goal),))
+
+
+def _evidence_row(evidence_id: str, *, read_at: datetime) -> GoalEvidence:
+    """A ``STANDING`` ``READ_OUTCOME`` row of goal ``g1`` (ADR-0252 §1)."""
+    return GoalEvidence(
+        id=evidence_id,
+        goal_id="g1",
+        attempt_id="a1",
+        basis=EvidenceBasis.READ_OUTCOME,
+        read_kind=ReadKind.SIGHTED_QUERY,
+        supported=(EvidenceApplicability(topics=("weather",)),),
+        supported_elided=0,
+        read_at=read_at,
+        records=("m1",),
+        returned=1,
+        admitted=1,
+        verdict="returned_records",
+        standing=EvidenceStanding.STANDING,
+    )
 
 
 def _version_3_database(path: Path) -> None:

@@ -2428,6 +2428,39 @@ class PlanStoreContract:
         assert untouched is not None
         assert untouched.standing is EvidenceStanding.STANDING, "every other row is untouched"
 
+    async def test_a_revision_reads_its_invalidation_set_once(self, store: PlanStore) -> None:
+        """The set is observed at one instant, however the caller spelled it (§12).
+
+        ``invalidates`` is annotated a tuple, but ``model_copy(update=...)`` **skips
+        validators** — ADR-0023 §2's premise, "a pydantic property no type can close" —
+        so a caller can hand this member a one-shot iterator. A store that traversed it
+        twice would drain it on the refusal pass and find it **empty** on the marking
+        pass: the revision would be appended, the version would advance, and the rows
+        the revision invalidated would still be ``STANDING``. That is precisely the
+        window §12's indivisibility exists to close — *"there is no second call and no
+        window in which a recorded revision stands beside evidence its own change
+        invalidated"* — reopened not by a second call but by reading one argument twice
+        (``core.protocols``' second standing obligation, ADR-0065 §1).
+
+        The mark is what is asserted rather than the traversal, because the traversal is
+        the implementation's: what a caller is owed is that the marks landed.
+        """
+        await _goal_with_evidence(store, rows=2)
+        one_shot = iter(("ev1", "ev2"))
+        revision = GoalRevision(
+            goal_id="g1", interpretation=_revision(2), expected_version=0
+        ).model_copy(update={"invalidates": one_shot})
+
+        await store.record_interpretation(revision)
+
+        for row_id in ("ev1", "ev2"):
+            marked = await store.get_evidence(row_id)
+            assert marked is not None
+            assert marked.standing is EvidenceStanding.INAPPLICABLE, (
+                f"{row_id} was named and must be marked, whatever the set's spelling"
+            )
+            assert marked.inapplicable_at_revision == 2
+
     async def test_a_revision_naming_an_unmarkable_row_appends_nothing(
         self, store: PlanStore
     ) -> None:

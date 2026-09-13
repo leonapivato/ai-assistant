@@ -798,6 +798,11 @@ class FakePlanStore:
                 follow the goal's current one, or a row named by ``invalidates`` is not
                 this goal's or is not ``STANDING``.
         """
+        # Materialised **once**, before the first await, for the reason
+        # `InMemoryPlanStore.record_interpretation` gives: `model_copy(update=...)` skips
+        # validators, so a caller can plant a one-shot iterator that the refusal loop
+        # drains and the marking loop finds empty (ADR-0023 §2, ADR-0065 §1).
+        named = tuple(revision.invalidates)
         async with self._resource.held():
             stored = self._goals.get(revision.goal_id)
             if stored is None:
@@ -818,7 +823,7 @@ class FakePlanStore:
                 )
                 raise PlanningError(msg)
             self._refuse_unmarkable_locked(
-                revision.goal_id, revision.invalidates, being_written=None, what="invalidate"
+                revision.goal_id, named, being_written=None, what="invalidate"
             )
             history = (*stored.interpretation, revision.interpretation)
             # ADR-0249 §2: the write that would exceed the bound drops the **oldest**
@@ -833,7 +838,7 @@ class FakePlanStore:
                 }
             )
             self._goals[updated.id] = updated
-            for row_id in revision.invalidates:
+            for row_id in named:
                 self._evidence[row_id] = _marked_evidence(
                     self._evidence[row_id],
                     {
