@@ -5712,6 +5712,7 @@ async def test_a_read_kind_outside_its_enumeration_is_an_extraction_failure(bad:
         "P",
         "PT",
         "P1DT",
+        "PT1.5H30M",
     ],
 )
 async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_clamped(
@@ -5723,9 +5724,12 @@ async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_cla
     numeric string as **seconds**, the two clock forms as durations, and ``-PT5M`` as
     a negative one. ``PT0S`` is the form the field's own ``gt`` refuses, and it is in
     the same list because §9 makes "not strictly positive" the same disposal as "not
-    an ISO-8601 duration" rather than a different one.
+    an ISO-8601 duration" rather than a different one. ``PT1.5H30M`` puts a fraction
+    somewhere other than the lowest-order component, which the parser refuses on its
+    own — the pattern does not restate that rule, and this arm is what says the
+    disposal there is still a refusal rather than a reading.
 
-    **The last five are the relaxed-parser cases**, and they are the ones a leading-
+    **The relaxed-parser cases**, and they are the ones a leading-
     ``P`` test alone would let through: pydantic sums repeated designators and accepts
     misordered ones, so ``P1D2D`` reads as three days, ``PT1H2H`` as three hours and
     ``PT1M1H`` as an hour and a minute — none of them an ISO-8601 duration, and each a
@@ -6124,7 +6128,21 @@ async def test_the_supply_is_snapshotted_before_the_call_it_is_resolved_after() 
     assert output.plan.interpretations[0].record == _supply()[1].id
 
 
-@pytest.mark.parametrize("duration", ["PT15M", "P1D", "PT1H30M", "P1W", "PT1,5S", "P1DT2H"])
+@pytest.mark.parametrize(
+    "duration",
+    [
+        "PT15M",
+        "P1D",
+        "PT1H30M",
+        "P1W",
+        "PT1,5S",
+        "P1DT2H",
+        "PT1.5H",
+        "P0.5D",
+        "P1DT1.5H",
+        "P1W2D",
+    ],
+)
 async def test_an_iso_8601_duration_is_read_as_the_form_it_is(duration: str) -> None:
     """ADR-0253 §9: what the grammar admits is read, and the figure is never repaired.
 
@@ -6133,6 +6151,13 @@ async def test_an_iso_8601_duration_is_read_as_the_form_it_is(duration: str) -> 
     field's own ``gt`` is what judges the bound. A pattern narrow enough to refuse
     ``P1D2D`` and also narrow enough to refuse ``P1DT2H`` would be a second opinion
     about what an ISO-8601 duration is, which is the failure in the other direction.
+
+    ``PT1.5H``, ``P0.5D`` and ``P1DT1.5H`` are that failure exactly: a fraction
+    belongs on a duration's lowest-order component, so each is a duration and the
+    parser reads each correctly. ``P1W2D`` is here as a **recorded reading** rather
+    than an oversight — nine days is the sum of the two designators written, so §9's
+    harm does not arise, and whether the week form may combine with others is a point
+    readings of ISO-8601 differ on and which §9 does not adjudicate.
     """
     plan = await _shaped_plan(_shaped_reply([_step(evidence_recency=duration)]))
 
