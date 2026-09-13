@@ -292,13 +292,17 @@ instead.
 > `StepStatus.SUCCEEDED` or from any combination of them, so no turn is `REACHED` on a
 > send's account and no class is named on one.
 
-> **Normative.** **But such a turn is not `NOT_REACHED` either, and §2's fold is where that
-> is decided** (§2's egress clause). `EXECUTED` is consistent with a byte on the wire and
-> with none, so a turn whose only outbound act was a driven send is `INDETERMINATE` with
-> `destinations` empty — the statement saying this system cannot tell, rather than that
-> nothing was reached. **That is this section working and not an exception to it**: what
-> §2 takes from the step is the *absence* of a ground for either answer, which is the one
-> thing `EXECUTED` does establish.
+> **Normative.** **But such a turn need not be `NOT_REACHED` either, and §2's fold is where
+> that is decided — over the executor's carried pre-callable fact and never over
+> `Disposition.EXECUTED`**, which `StepRunner` returns for the three windows ADR-0192 §1
+> places before the callable as well as for a call that reached it. A turn whose only
+> outbound act was a send the executor **reached the callable for, or cannot say it did
+> not**, is `INDETERMINATE` with `destinations` empty — the statement saying this system
+> cannot tell. A turn whose only outbound act was a send the executor **proved never reached
+> the callable** is `NOT_REACHED`, because there nothing is uncertain. **That is this
+> section working and not an exception to it**: what §2 takes from the step is the absence
+> of a ground for either answer, and it takes it only where the executor's own fact leaves
+> that absence.
 
 > **Normative.** **The reason is that no value this system holds establishes it**, and
 > ADR-0192 §4 says so in terms: `SUCCEEDED` is *"bounded by ADR-0031 §4 to exactly three
@@ -866,10 +870,14 @@ this here would reach into a decision this ADR has not read.
 >    it fails it too.
 > 11. **A routed pass that is not a park**, whole-reply, streaming **and spoken**, which are
 >    separate composers from the conversational one and the path an implementation updating
->    only the latter would leave behind. It carries `NOT_REACHED`, renders §7's statement, and its
->    composer is given **neither** §6's fragment **nor** `_PLAN_IS_ABOUT_ACTING` — ADR-0197
->    §6's two inputs unchanged, which is the assertion that keeps that closure true. A
->    **routed park** carries `None` and renders nothing. An implementation that gives the
+>    only the latter would leave behind. Each carries `NOT_REACHED`, and each composer is
+>    given **neither** §6's fragment **nor** `_PLAN_IS_ABOUT_ACTING` — ADR-0197 §6's two
+>    inputs unchanged, which is the assertion that keeps that closure true. The whole-reply
+>    and streaming passes **render §7's statement**; the **spoken** one renders none, because
+>    ADR-0200 §4 makes `spoken` the rendering of `outcome.reply` and of nothing else and §7
+>    adds nothing to `SpokenTurn` — so the arm asserts a carried member with no rendering
+>    there, which is this decision's stated spoken cost and not a lane's omission. A
+>    **routed park** carries `None` and renders nothing. An implementation that gives any
 >    routed composer a third input fails this arm, and so does one that leaves the routed
 >    pass's member `None`.
 
