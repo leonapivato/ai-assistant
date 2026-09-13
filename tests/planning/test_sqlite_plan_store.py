@@ -129,11 +129,12 @@ _SYNC_METHODS = {
     "get_execution": "_read_one",
     "active_executions": "_active_executions_sync",
     "export": "_export_sync",
-    # ADR-0252 §12's three members. `get_evidence` shares `_read_one` with the three
-    # row reads above, exactly as they share it with each other: what distinguishes a
-    # case is the lock site the call enters, and each of these enters its own.
+    # ADR-0252 §12's three members, each entering its own lock site. `get_evidence`
+    # reads through `_read_evidence` rather than the `_read_one` the three row reads
+    # above share, because an evidence row is reconciled against the columns promoted
+    # beside it (#2328) and a blob-only read cannot be.
     "record_evidence": "_record_evidence_sync",
-    "get_evidence": "_read_one",
+    "get_evidence": "_read_evidence",
     "evidence_of": "_evidence_of_sync",
 }
 
@@ -1037,6 +1038,68 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
     try:
         with pytest.raises(PlanningError, match="elision count"):
             await reading
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "read",
+    ["get_evidence", "evidence_of", "export"],
+    ids=["get_evidence", "evidence_of", "export"],
+)
+@pytest.mark.parametrize(
+    "column",
+    ["data", "read_at"],
+    ids=["the-record-names-another-row", "the-order-column-contradicts-the-record"],
+)
+async def test_an_evidence_read_whose_record_and_columns_disagree_is_refused(
+    tmp_path: Path, read: str, column: str
+) -> None:
+    """A read is held to the same agreement the marking write is (#2328).
+
+    The columns promoted beside the blob (ADR-0252 §13) are not decoration: **all three
+    reads use them**, and each use breaks differently when they lie. `get_evidence`
+    answers under the id the caller asked for, so a row keyed `ev1` whose record calls
+    itself `ev2` would be returned as a row naming a different one. `evidence_of` and
+    the export order by ``(read_at, id)`` over the *columns* and return the *blobs*, so
+    a disagreeing `read_at` hands a caller §12's total order over values the rows
+    themselves contradict — and §10's ``E`` label is an ordinal into exactly that
+    sequence, so the labels would name rows other than the ones a reader counts to.
+
+    Both are refused as the corrupt file they are, on the boundary `_decode_evidence`
+    already draws for the blob's own shape. **The other five members' reads are not held
+    to this yet** — the same promoted-column shape predates this lane there — which is
+    what #2328 is left open for.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal("g1"))
+        await store.open_attempt(GoalAttempt(id="a1", goal_id="g1", opened_at=_AT))
+        await store.record_evidence(_evidence_row("ev1", read_at=_AT))
+        await store.record_evidence(_evidence_row("ev2", read_at=_AT + timedelta(minutes=1)))
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        if column == "data":
+            impostor = conn.execute("SELECT data FROM goal_evidence WHERE id = 'ev2'").fetchone()[0]
+            conn.execute("UPDATE goal_evidence SET data = ? WHERE id = 'ev1'", (impostor,))
+        else:
+            conn.execute(
+                "UPDATE goal_evidence SET read_at = ? WHERE id = 'ev1'",
+                ((_AT + timedelta(days=1)).isoformat(),),
+            )
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        reads: dict[str, Callable[[], Awaitable[object]]] = {
+            "get_evidence": lambda: store.get_evidence("ev1"),
+            "evidence_of": lambda: store.evidence_of("g1"),
+            "export": store.export,
+        }
+        with pytest.raises(PlanningError, match="record and columns disagree"):
+            await reads[read]()
     finally:
         store.close()
 
