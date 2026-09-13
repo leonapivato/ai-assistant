@@ -6535,22 +6535,30 @@ class GoalInterpretation(BaseModel):
         named by nothing, and refusing a revision for holding two would refuse rows
         already on disk.
 
+        **One pass, and the refusal path is not where a cost is hidden.** Nothing bounds
+        how many elements a revision's three tuples hold — ``MAX_GOAL_INTERPRETATIONS``
+        bounds revisions per goal and ``MAX_INTERPRETATION_STEPS`` interpretations per
+        plan, but these tuples take the shape ADR-0253 §11 files for ``ActionPlan.steps``
+        — so the duplicates are accumulated while the ids are walked rather than counted
+        per element afterwards. Whether these tuples should take a bound of their own is
+        not decided here and is filed as one question with §11's.
+
         Raises:
             ValueError: If two elements of this revision share an ``id``.
         """
-        named = [
-            element.id
-            for tuples in (self.constraints, self.criteria, self.conditions)
-            for element in tuples
-            if element.id is not None
-        ]
-        if len(set(named)) != len(named):
-            repeated = sorted({one for one in named if named.count(one) > 1})
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for tuples in (self.constraints, self.criteria, self.conditions):
+            for element in tuples:
+                if element.id is None:
+                    continue
+                (repeated if element.id in seen else seen).add(element.id)
+        if repeated:
             msg = (
                 f"two elements of revision {self.revision} share an id: "
-                f"{', '.join(repeated)}. An element id is the durable name a condition "
-                f"and an evidence row's declaration point at, so a revision states each "
-                f"once (ADR-0253 §7, §8)"
+                f"{', '.join(sorted(repeated))}. An element id is the durable name a "
+                f"condition and an evidence row's declaration point at, so a revision "
+                f"states each once (ADR-0253 §7, §8)"
             )
             raise ValueError(msg)
         return self
