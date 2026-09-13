@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-09-12
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
-  — **seven limbs, all about one field, `Authorization.expires_at`.** **§12's ladder rung 3
+  — **six limbs, all about one field, `Authorization.expires_at`.** **§12's ladder rung 3
   entire**, its *"no row at all"* and its *"Nothing is invented, nothing is defaulted and
   nothing falls back to a configuration"* included: where the recorded act states no instant and
   the goal carries no `deadline`, `expires_at` is now the **earliest instant among the recorded
@@ -20,11 +20,9 @@
   §7). **§12's path-(ii) transcription clause together with §1's path-(ii) *"transcribed
   unchanged"* list and §1's path-(i) *"the only path that may … set `expires_at`"***, each in
   the `expires_at` limb alone and in the **narrowing direction alone** (§5). **§9 clause (ii)'s
-  bar limb *"move `expires_at`"***, in that same narrowing direction alone. **§9 clause (iii)'s
-  *"not taken"* half, only as §12 reads it onto an `expires_at` and only on a path-(ii)
-  correction**: an instant the correction's span does not settle is now resolved to the
-  **earliest admissible** reading rather than discarded, and clause (iii)'s asking limb is not
-  superseded — it follows the discarding, and in that scope there is none (§5). And **§19's
+  bar limb *"move `expires_at`"***, in that same narrowing direction alone. **§9 clause (iii)
+  stands entire and no limb of it is superseded** — an instant a correction's span does not
+  settle to one value is not taken and the user is asked, exactly as ratified (§5). And **§19's
   entry *"What the user is shown where §12's ladder yields no instant"***,
   **narrowed in application and not replaced** (§7). Every other clause of ADR-0254 §12 binds
   entire and several are what this decision rests on: no `Settings` **field**, the expiry per
@@ -197,15 +195,19 @@ and the episode is a `MemoryStore` record nothing on this path reads. So the row
 **same window** as the act's record, measured from the act's own recorded instant rather than
 from that record's stamp.
 
-> **Normative.** **A row outlives the episode of an act it rests on in exactly one case, and
-> that case is named rather than hidden.** An episode is stamped at capture from the same
-> setting (ADR-0074 §7) and capture is at or after its turn's own instant, so a row taking the
-> window from the **earliest** turn its coverage rests on expires at or before that act's
-> episode — **except** where `episode_retention` was **widened between that act's capture and
-> the row's write**, the episode carrying the window in force when it was captured and the row
-> the window in force when it was written. **That one case is not repaired here and is not
-> hidden**: the row is bounded by the window in force at its own write and by nothing longer,
-> §4's rendering shows the instant it actually carries, and §9's arms pin it.
+> **Normative.** **A row outlives the episode of an act it rests on in exactly two cases, and
+> both are named rather than hidden.** An episode is stamped at capture from the same setting
+> (ADR-0074 §7), so a row taking the window from the **earliest** turn its coverage rests on
+> expires at or before that act's episode wherever the window is unchanged **and** that episode's
+> capture is at or after its turn's own instant. The two cases are exactly the two ways that
+> fails: **`episode_retention` widened between an act's capture and the row's write**, the
+> episode carrying the window in force when it was captured and the row the window in force when
+> it was written; and **the clock moving backwards between an act's turn and that act's episode
+> capture**, which this corpus admits in terms — ADR-0254 §1 states its own lower bound *"because
+> the clock can move backwards — an operator correction, an NTP step"* — and which stamps the
+> episode from a reading earlier than the instant the row measures from. **Neither is repaired
+> here and neither is hidden**: the row is bounded by the window in force at its own write and by
+> nothing longer, §4's rendering shows the instant it actually carries, and §9's arms pin both.
 
 > **Normative.** **An authority is never granted on an act the deployment's own horizon has
 > already passed.** Where the basis instant advanced by the window is at or before
@@ -355,8 +357,8 @@ rungs above.
 > and strictly before the superseded row's `expires_at`**, the new row carries that instant.
 > **Where the correction's span states no instant at all, or states one outside those two
 > bounds, `expires_at` is transcribed unchanged**, which is ADR-0254 §12's path-(ii) clause
-> standing. A span that states an instant it does not settle to **one** value is neither of
-> those cases and is governed by the third clause below.
+> standing. **A span that states an instant it does not settle to one value is not the first
+> case**: ADR-0254 §9 clause (iii) reaches it first, and the clause below says so.
 
 > **Normative.** **Nothing lengthens a horizon on any path but (i).** An instant at or after the
 > superseded row's `expires_at` is **not taken**; an instant at or before the new row's
@@ -369,44 +371,38 @@ rungs above.
 > one"* — because extending an authority is the direction that needs the user to have been shown
 > what they are extending.
 
-> **Normative.** **An instant a correction's span does not settle to one value takes the
-> earliest admissible reading.** Where the span admits more than one instant, the new row
-> carries **the earliest of the admissible ones** — admissible being exactly the two bounds the
-> first clause of this section states, strictly after the new row's `proposed_at` and strictly
-> before the superseded row's `expires_at`. Where those bounds admit **none** of the readings,
-> nothing is taken and `expires_at` is transcribed unchanged.
+> **Normative.** **An instant a correction's span does not settle to one value is ADR-0254 §9
+> clause (iii)'s, entire, and this decision changes nothing about it.** Where the span admits
+> more than one admissible instant, *"the resolution is **not taken** and no member is minted
+> from it: the user is asked, by **ADR-0250 §6's three conditions and no fewer**"* — both halves,
+> unqualified. `expires_at` is then transcribed unchanged, which is ADR-0254 §12's path-(ii)
+> clause standing, and **whether a question is raised is §6's test and not this decision's**.
+> **No limb of clause (iii) is superseded, narrowed or suppressed anywhere in this decision**,
+> and §7 records nothing against it.
 
-> **Normative.** **That supersedes ADR-0254 §9 clause (iii)'s *"not taken"* half on this field
-> and this path alone, and its asking limb is not superseded.** The resolution is taken rather
-> than discarded, so clause (iii)'s *"the user is asked"* limb — which is the consequence of the
-> discarding — is not engaged, and **no question is put about the instant**. The scope is
-> exactly: an `expires_at`, on a path-(ii) correction, under this decision's narrowing. Clause
-> (iii) binds entire everywhere else — for every coverage member, for a consequence outside
-> scope, and for an instant taken under §12's rung 1 on paths (i) and (iii). §7 records it.
+> **Normative.** **Nothing here enumerates a reading, orders a set of them, or takes a value from
+> a model.** The narrowing in the first clause fires only where §10's resolutions settle the span
+> to **one** instant, which is the same total function rung 1 takes; this decision adds no
+> candidate set, no carrier for one and no rule for generating one, so ADR-0250 §7's
+> `ProposedQuestion` is untouched and ADR-0254 §9's *"a value a model wrote into a durable audit
+> chain is unprovenanced"* is never reached for. §8 books the decision that would take an
+> unsettled instant without a question, with what fires it.
 
-> **Normative.** **The earliest reading is the narrowest one, and that is why it is the one
-> taken.** ADR-0254 §9 clause (ii) states its own principle — *"The interpretation narrows what
-> the act covers and can never widen it"* — and of the readings a span admits, the earliest
-> yields the **least** authority. So an unsettled instant leaves strictly less authority than
-> transcription would and never more; and the readings it is taken over are exactly the ones §9
-> clause (iii) already quantifies over in *"the span admits more than one admissible value"*.
-> **This decision enumerates no reading that clause does not and mints no determination of its
-> own**, so nothing here needs a discriminator on a raised question and ADR-0250 §7's
-> `ProposedQuestion` is untouched.
-
-**Why an unsettled instant is resolved rather than asked about, and what that buys over
-discarding it.** The correction lands regardless — ADR-0254 §12's *"a correction is never refused
-for want of an instant it was never going to set"* binds entire — so a question here could not
-change what the correction does to the coverage, and it would be a second question at the moment
-this decision exists to remove one, which is the ruling this ADR rests on. What taking the
-earliest reading buys over the ratified discarding is that **the user's restriction is never
-dropped**: *"actually, make it Sunday, and only until Friday"* lands both halves whether or not
-the system can tell which Friday, and the half it lands is the shorter one. Nor is anything
-dropped **silently**: the instant the row carries is rendered in the per-goal listing on every
-read afterwards and carried by `export` (ADR-0254 §11), the correcting act is on the row as the
-basis of the member it replaced — so `export` names the turn the instant was read from — and the
-revocation handle is in front of the user beside it. The user's own act for ending an authority
-outright is still `revoke_authorization` (ADR-0254 §11), which this decision does not re-spell.
+**Why the unsettled case is left exactly where ADR-0254 put it.** An earlier draft of this
+decision took the **earliest admissible** reading of an unsettled instant and put no question,
+on the argument that the earliest is the narrowest and so the fail-closed choice. The argument
+about direction is sound and the rule is not implementable: the corpus gives `orchestration` a
+**predicate** — §9 clause (iii)'s *"the span admits more than one admissible value"*, reported
+by the planner under ADR-0250 §6 — and never a **set**, so there is nothing to take a minimum
+over. Building one would mean deriving candidate instants from model-written prose and writing
+the least of them into a durable authority, which is precisely what ADR-0254 §9's no-model-output
+clause forbids in terms, and some spans admit readings with no earliest member at all. So the
+unsettled case stays §9 clause (iii)'s, and what this decision narrows is only the case §10's
+resolutions **do** settle — which is the case the owner's *"make it Sunday, and only until
+Friday"* actually presents. What the correction does to the coverage is unaffected either way:
+ADR-0254 §12's *"a correction is never refused for want of an instant it was never going to
+set"* binds entire, and the user's own act for ending an authority outright is still
+`revoke_authorization` (ADR-0254 §11), which this decision does not re-spell.
 
 > **Normative.** **This mints no write path.** The narrowing rides a path-(ii) correction ADR-0254
 > §1 would write anyway — *"A later recorded turn of the same goal whose span names an argument
@@ -506,21 +502,19 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
 5. **§9 clause (ii)'s bar limb *"move `expires_at`"*.** **Superseded in the narrowing direction
    alone** (§5), on that clause's own stated principle. Clause (i) and the no-model-output rule
    stand entire.
-6. **§9 clause (iii)'s *"not taken"* half, *"the resolution is **not taken** and no member is
-   minted from it"*.** §12 reads §9's clauses onto the instant a rung takes, so as ADR-0254
-   stands an instant a correction's span does not settle is discarded and the user asked. §5
-   **takes** it, as the earliest admissible reading, **for an `expires_at`, on a path-(ii)
-   correction, and nowhere else**. **Superseded in that scope alone.** **Clause (iii)'s asking
-   limb is not superseded and loses no sentence**: it is the consequence of the discarding, and
-   in that one scope there is nothing discarded for it to follow. Its asking for every coverage
-   member, its consequence-outside-scope limb, its bar clause and the *"not taken"* half
-   everywhere but here all stand entire.
-7. **§19's entry *"What the user is shown where §12's ladder yields no instant"*.** **Narrowed in
+6. **§19's entry *"What the user is shown where §12's ladder yields no instant"*.** **Narrowed in
    application and not replaced.** The entry books a decision — *"a decision that would ask
    'until when?' at the act"* — and **this is not that decision and does not take it**. What
    changes is the entry's premise: the case now arises only where §3 fires, not for every
    deadline-free goal. A reader holding only §19 would read the booking more widely than it now
    holds, so the record is owed; the booking itself stands open.
+
+**ADR-0254 §9 clause (iii) is relied on and not amended**, and it is worth saying so here
+because an earlier draft of this decision did record a limb against it. It binds entire: for
+every coverage member, for a consequence outside scope, and — under §5 — for an instant a
+correction's span does not settle, both its *"not taken"* half and its *"the user is asked"*
+limb. §5 narrows only the case §10's resolutions settle to one value, which clause (iii) does
+not reach.
 
 **Every other ADR this decision touches is relied on, not amended.** ADR-0074 §7 supplies a
 setting and a window and loses no sentence (§6). ADR-0193 §9's *"The user chooses the instant in
@@ -557,6 +551,14 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
   §1's closed field list and needs that argument made.
 - **Retention for the authorization store itself.** ADR-0254 §19's entry — issue #108's shape one
   store over — untouched. What happens to a **lapsed** row's storage is that decision's.
+- **Taking an instant a correction's span does not settle, without putting a question.** §5
+  leaves that case entirely to ADR-0254 §9 clause (iii) — not taken, and the user asked under
+  ADR-0250 §6's three conditions — because the corpus carries a predicate for ambiguity and
+  never a set of candidate readings, and building one out of model-written prose is what §9's
+  no-model-output clause forbids. Fired by a decision that authorises a typed carrier for
+  candidate instants, which must say what makes the set finite, what orders it, and how a value
+  taken from it is provenanced. That is a change to ADR-0254 §9 and ADR-0250 §7 rather than to
+  this one.
 - **Whether an act naming only an instant may open or move a row.** §5 rules that it does not, on
   ADR-0254 §15's *"there is no fourth path"*. Fired by a decision that adds a write path, which
   is a change to ADR-0254 §1 and §15 rather than to this one.
@@ -597,10 +599,16 @@ what forbids joining them into one.
 > **Normative.** **Prospectivity after the write.** Widen `episode_retention` between the write
 > and a later read → the row's `expires_at` is **unchanged**, and a lapsed row is not revived.
 
-> **Normative.** **The capture-to-write interval, which is the one divergence §1 admits.** Widen
+> **Normative.** **The capture-to-write interval, the first divergence §1 admits.** Widen
 > `episode_retention` between an act's capture and a path-(i) row's write → the row carries the
 > window in force **at the write**, so it outlives that act's episode, and that is the ruled
 > behaviour rather than a defect the lane repairs.
+
+> **Normative.** **A clock rollback before capture, the second divergence §1 admits.** Move the
+> injected clock backwards between a basis act's turn and that act's episode capture, with
+> `episode_retention` unchanged → the episode is stamped from the earlier reading and the row
+> outlives it, and that too is the ruled behaviour rather than a defect the lane repairs. Nothing
+> in the row is clamped, re-stamped or recomputed for it.
 
 > **Normative.** **An older basis act shortens the row.** A path-(i) proposal whose coverage
 > carries a member resting on a recorded turn materially older than the `CONFIRM` it rides →
@@ -632,13 +640,11 @@ what forbids joining them into one.
 > instant at or before the new row's `proposed_at` → `expires_at` **transcribed unchanged**, and
 > no row is written born expired.
 
-> **Normative.** **An unsettled instant takes the earliest admissible reading.** A correction
-> whose span admits more than one instant, two or more of them admissible → the new row carries
-> **the earliest admissible** one, and **no question is raised**.
-
-> **Normative.** **An unsettled instant none of whose readings is admissible changes nothing.** A
-> correction whose span admits more than one instant, none of them inside the two bounds →
-> `expires_at` **transcribed unchanged**, and **no question is raised**.
+> **Normative.** **An unsettled instant is ADR-0254 §9 clause (iii)'s and is not narrowed.** A
+> correction whose span admits more than one admissible instant → the resolution is **not
+> taken**, `expires_at` **transcribed unchanged**, and whether a question is raised is ADR-0250
+> §6's three conditions and **not** a rule of this decision. The arm exists to pin that this
+> decision's narrowing does **not** fire on an unsettled span.
 
 > **Normative.** **No fourth path.** A turn naming only an instant and correcting no argument →
 > **no row written, none superseded, nothing moved.**
@@ -655,7 +661,7 @@ whose objective carried no date — which is the ordinary request — and refuse
 ADR-0254's Decision text may not be rewritten (ADR-0070 §1's append-only rule), and the change
 reverses what one of its rungs instructs.
 
-**It is a partial supersession of exactly one document** (ADR-0070 §3) — ADR-0254, in the seven
+**It is a partial supersession of exactly one document** (ADR-0070 §3) — ADR-0254, in the six
 limbs §7 enumerates — and that document's `Status` line names the scope **without an `ADR-NNNN`
 token inside the parentheses**, so ADR-0070 §4's extraction invariant holds and the line stays
 one physical line.
@@ -707,12 +713,13 @@ invariant ADR-0254 stated over corrections — none outlives the confirmation th
 survives strengthened rather than weakened, and the implementing lane owes arms in both
 directions (§9) because a rule that only ever narrows is the one a refactor most easily inverts.
 
-**An ambiguous instant on a correction now resolves where it used to be discarded**, to the
-earliest reading the span admits inside the two bounds. That is a real change to what ADR-0254
-§9 clause (iii) instructs and §7 limb 6 records it as one. It raises no question, because there
-is nothing left ambiguous to ask about, and it can only ever leave less authority standing than
-the transcription it replaces — but it does mean a user whose words admitted two Fridays gets the
-first, and reads which one on the row.
+**A user whose words the system cannot settle is still asked, and that is deliberate rather than
+left over.** The narrowing fires only where ADR-0254 §10's resolutions settle the span to one
+instant; where they do not, §9 clause (iii) binds entire and nothing here touches it. So *"only
+until Friday"* shortens the horizon when there is one Friday to take and reaches §9 clause (iii)
+when there are two, which is the same treatment the corpus already gives every other value a
+user states. §8 books the decision that would take an unsettled instant without a question and
+says what it would have to supply first.
 
 **What would trigger revisiting this.** A deployment where `episode_retention` is routinely
 `None` — at which point §3's withholding is the common case rather than the deliberate one, and
@@ -765,21 +772,26 @@ which is exactly what §1 claims it does not do. Measuring from the **earliest**
 no new machinery, collapses the divergence to the single widened-window case, and turns the same
 arithmetic into §1's refusal for an act already past the horizon.
 
-**Asking the user which instant an ambiguous correction meant.** Rejected on the same ruling the
-whole decision rests on — it is a second question at the moment this design exists to remove one,
-and *"repeatedly confirming actions"* is what the owner ruled against. It is also the more
-expensive answer to a question that has a safe one: the earliest admissible reading is the
-narrowest available (§5), it can only leave less authority than transcription, and it is rendered
-in the establishing row, in every listing afterwards and in `export` beside the act it was read
-from — so the user can see which reading was taken and revoke it with the handle ADR-0254 §11
-puts in front of them, rather than being asked before it is known whether they care.
+**Taking the earliest admissible reading of an instant the span does not settle, and putting no
+question.** A draft of this decision did exactly that, on the argument that the earliest reading
+is the narrowest and therefore the fail-closed one. **Rejected because it is not implementable
+from anything the corpus carries.** ADR-0254 §10's three resolutions are total functions yielding
+one value or no resolution; §9 clause (iii) recognises that a span *may* admit more than one and
+never enumerates them; and ADR-0250 §7's `ProposedQuestion` carries only `text` and a
+whole-element `about`. So there is no set to take a minimum over, the only place candidate
+instants could come from is model-written prose, and ADR-0254 §9's no-model-output clause forbids
+a value a model wrote reaching a durable authority — *"a value a model wrote into a durable audit
+chain is unprovenanced"*. Some spans admit readings with no earliest member in any case. §8 books
+the decision, with what it would have to supply.
 
-**Discarding an ambiguous instant and transcribing the horizon unchanged**, which is ADR-0254 §9
-clause (iii)'s *"not taken"* applied as it stands. Rejected because it drops the safety half of
-the user's own sentence while landing the argument half: *"make it Sunday, and only until
-Friday"* would move the date and leave the longer horizon standing. That is the failure this
-corpus refuses everywhere it can see it, and refusing it here needed no new question and no new
-type.
+**Suppressing the question for an ambiguous instant while transcribing the horizon unchanged.**
+An earlier draft of this decision did that instead, so that no second question was put on a
+correction. **Rejected on both halves.** It is not decidable from the contract — `about` names a
+whole goal element, so `orchestration` cannot tell an expiry-only ambiguity from a coverage one
+without reading the model's question text, which is the reading ADR-0254 §9 forbids. And it runs
+the wrong way on safety: it would drop the restricting half of *"make it Sunday, and only until
+Friday"* while landing the argument half, leaving the **longer** horizon standing, which is the
+outcome this decision exists to avoid rather than to cause.
 
 **Capping rungs 1 and 2 at the same window.** Rejected in §6: shortening an instant the user
 named would make ADR-0254 §11 show them something other than what they said, which defeats the
