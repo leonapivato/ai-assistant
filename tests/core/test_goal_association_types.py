@@ -564,6 +564,9 @@ def test_a_turn_that_raised_a_question_drove_no_step() -> None:
     describing a turn that declined to act and acted.
     """
     clarification = Clarification(question_id="q1", text="which campsite?", expires_at=_LATER)
+    engagement = GoalEngagement(
+        disposition=EngagementDisposition.CONTINUED, outcome="book a campsite"
+    )
 
     with pytest.raises(ValidationError, match="never both"):
         TurnOutcome(
@@ -571,6 +574,7 @@ def test_a_turn_that_raised_a_question_drove_no_step() -> None:
             step=_DROVE,
             reply="Booked it.",
             clarification=clarification,
+            goal_engagement=engagement,
         )
 
     assert (
@@ -579,9 +583,52 @@ def test_a_turn_that_raised_a_question_drove_no_step() -> None:
             step=None,
             reply="Which campsite did you mean?",
             clarification=clarification,
+            goal_engagement=engagement,
         ).clarification
         is clarification
     ), "and a turn that planned and drove nothing carries one"
+
+
+def test_a_clarification_is_about_the_goal_the_outcome_names() -> None:
+    """§10: a :class:`Clarification` "carries no goal id, no attempt id, no subject and
+    no disposition … and the goal is what ``goal_engagement`` names".
+
+    So the one member that was to name the question's goal saying nothing leaves the
+    question unattributable — a durable pause on a goal no reader of the outcome can
+    identify — and the type refuses it rather than documenting it, which is
+    :meth:`StepOutcome._confirmation_matches_disposition`'s own posture.
+
+    **``revised`` is deliberately not tested**, and the anti-vacuity half below is what
+    pins that. §5 rules that "no member is derived from another and a client renders
+    each on its own", and that "``revised`` says a revision was recorded, and nothing
+    more"; a validator computing this member's admissibility from that flag would be
+    exactly the derivation the clause forbids. That a raising turn will in practice
+    also have recorded a revision is a property of the loop §19's M3 writes, not a
+    shape this type closes.
+    """
+    clarification = Clarification(question_id="q1", text="which campsite?", expires_at=_LATER)
+
+    with pytest.raises(ValidationError, match="unattributable"):
+        TurnOutcome(
+            turn=_PLANNED,
+            step=None,
+            reply="Which campsite did you mean?",
+            clarification=clarification,
+        )
+
+    unrevised = TurnOutcome(
+        turn=_PLANNED,
+        step=None,
+        reply="Which campsite did you mean?",
+        clarification=clarification,
+        goal_engagement=GoalEngagement(
+            disposition=EngagementDisposition.CONTINUED, outcome="book a campsite", revised=False
+        ),
+    )
+    assert unrevised.clarification is clarification, (
+        "and an engagement that recorded no revision is admitted beside one: §5 forbids "
+        "deriving this member from that flag"
+    )
 
 
 def test_a_routed_pass_carries_no_engagement_either() -> None:
