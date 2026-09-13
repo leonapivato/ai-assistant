@@ -1556,11 +1556,25 @@ class FakePlanStore:
         above keeps it for ``goal_id`` — a plan whose predecessor is missing is a
         supersession whose subject has been lost, discovered only by whoever reads
         the export back.
+
+        **And every ``StepCondition.about`` and ``PlanInterpretation.settles`` must
+        already be an element id** (ADR-0253 §9), naming a **condition element** of the
+        interpretation this plan's ``targets_revision`` names. It is the same window
+        closed at the same place as ``targets_revision``'s, one substitution later.
+        **A plan declaring neither is not checked.**
+
+        The test is spelled out here rather than imported from
+        :mod:`ai_assistant.planning.goals`, for the reason this module's own docstring
+        gives: a fake that decided conformance by calling the code it stands in for
+        would report every implementation conformant. The shared conformance suite is
+        what holds the two statements honest.
         """
         async with self._resource.held():
-            if plan.goal_id not in self._goals:
+            held = self._goals.get(plan.goal_id)
+            if held is None:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
                 raise PlanningError(msg)
+            self._refuse_an_unsubstituted_condition(plan, held)
             # ADR-0249 §8: the window between the planner's return and the loop's
             # stamp is closed at the store rather than trusted to close itself.
             if plan.targets_revision is None:
@@ -1594,6 +1608,47 @@ class FakePlanStore:
                 raise PlanningError(msg)
             self._plans[plan.id] = plan.model_copy(deep=True)
         return plan.id
+
+    @staticmethod
+    def _refuse_an_unsubstituted_condition(plan: ActionPlan, goal: Goal) -> None:
+        """Refuse a plan naming an element its targeted revision does not carry (§9).
+
+        ADR-0253 §9's conjunct on ``save_plan``, and the fake's **own** statement of
+        it. An element carrying no ``id`` (ADR-0253 §7) contributes nothing to the
+        resolvable set, which is that clause's fail-closed direction; a revision the
+        goal does not hold — one ADR-0249 §2 elided — resolves nothing at all.
+
+        Args:
+            plan: The plan being saved.
+            goal: The goal it is under, read under the same resource as the write.
+
+        Raises:
+            PlanningError: If the plan names an element the targeted revision does not
+                carry as a condition.
+        """
+        named = frozenset(
+            [condition.about for step in plan.steps for condition in step.when]
+            + [interpretation.settles for interpretation in plan.interpretations]
+        )
+        if not named:
+            return
+        known = frozenset(
+            element.id
+            for revision in goal.interpretation
+            if revision.revision == plan.targets_revision
+            for element in revision.conditions
+            if element.id is not None
+        )
+        unresolved = sorted(named - known)
+        if unresolved:
+            msg = (
+                f"plan {plan.id} names {', '.join(unresolved)}, which "
+                f"{'is' if len(unresolved) == 1 else 'are'} not the id of a condition "
+                f"element of revision {plan.targets_revision} of goal {plan.goal_id}: "
+                f"the loop substitutes each condition label for an element id once, "
+                f"and the window is closed at the store (ADR-0253 §9)"
+            )
+            raise PlanningError(msg)
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None`` — under the resource (#397)."""

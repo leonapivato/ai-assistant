@@ -1228,32 +1228,34 @@ def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 11
+    assert export.schema_version == 12
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_eleven() -> None:
+def test_export_pins_the_schema_version_to_exactly_twelve() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[11]`` refuses an explicit ``10`` — a document of the shape this export
-    had before it gained ``evidence`` does not validate against this contract at all
-    (ADR-0252 §13), exactly as a ``9`` stopped validating when this document gained
-    ``questions``, an ``8`` when ``AttemptEffort`` gained ``kind``, a ``7`` when this
-    document gained ``attempts`` and ``ActionPlan`` gained ``targets_revision``, a
-    ``6`` when ``ReadKind`` gained ``STRUCTURED_READ``, a ``5`` when it gained
-    ``WEB_SEARCH``, a ``4`` when it gained ``LOCAL_FILE`` and ``ReadAsk`` gained
-    ``entry``, a ``3`` when ``ActionPlan`` gained ``supersedes`` and a ``2`` when it
-    gained ``read_request`` — and any other value, so the advertised version cannot be
-    mislabelled. The positive default is what a producer gets for free; only the
-    rejections pin it.
+    ``Literal[12]`` refuses an explicit ``11`` — a document of the shape this export
+    had before ``ActionPlan`` and ``PlanStep`` gained the plan's graph, ``GoalElement``
+    gained an identity and an applicability, and ``GoalEvidence`` gained
+    ``interpreted_output`` does not validate against this contract at all (ADR-0253
+    §10), exactly as a ``10`` stopped validating when this document gained
+    ``evidence``, a ``9`` when it gained ``questions``, an ``8`` when
+    ``AttemptEffort`` gained ``kind``, a ``7`` when this document gained ``attempts``
+    and ``ActionPlan`` gained ``targets_revision``, a ``6`` when ``ReadKind`` gained
+    ``STRUCTURED_READ``, a ``5`` when it gained ``WEB_SEARCH``, a ``4`` when it gained
+    ``LOCAL_FILE`` and ``ReadAsk`` gained ``entry``, a ``3`` when ``ActionPlan``
+    gained ``supersedes`` and a ``2`` when it gained ``read_request`` — and any other
+    value, so the advertised version cannot be mislabelled. The positive default is
+    what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``10`` is
-    the shape this contract had one decision ago and ``12`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``11`` is
+    the shape this contract had one decision ago and ``13`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=11).schema_version == 11
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12):
+    assert PlanExport(exported_at=_WHEN, schema_version=12).schema_version == 12
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1300,7 +1302,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
         exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
     )
 
-    assert export.schema_version == 11
+    assert export.schema_version == 12
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1393,7 +1395,7 @@ def test_export_round_trips_through_json() -> None:
     )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 11
+    assert restored.schema_version == 12
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}

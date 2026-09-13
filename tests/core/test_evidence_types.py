@@ -76,9 +76,9 @@ def test_a_read_outcome_row_carries_a_kind_and_no_declaration() -> None:
     """§1's first axis, in both directions."""
     assert _row().read_kind is ReadKind.SIGHTED_QUERY
 
-    with pytest.raises(ValidationError, match="read_kind and no declaration"):
+    with pytest.raises(ValidationError, match="a read_kind, no declaration"):
         _row(read_kind=None, records=(), returned=0, admitted=0)
-    with pytest.raises(ValidationError, match="read_kind and no declaration"):
+    with pytest.raises(ValidationError, match="a read_kind, no declaration"):
         _row(declaration="d1")
 
 

@@ -3216,7 +3216,7 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
         assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
 
         export = await store.export()
-        assert export.schema_version == 11
+        assert export.schema_version == 12
         assert export.evidence == (EvidenceHistory(goal_id="g1"),)
     finally:
         store.close()
@@ -3267,7 +3267,7 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         assert page.elided == 0
 
         export = await store.export()
-        assert export.schema_version == 11
+        assert export.schema_version == 12
         assert export.questions == ()
     finally:
         store.close()
@@ -3385,7 +3385,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 11
+        assert export.schema_version == 12
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 
