@@ -20,8 +20,10 @@ inputs and observable outcomes exactly as the rest of this layer is.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
+from urllib.parse import urlparse
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Dialog, ViewportSize
+    from playwright.async_api import Browser, Dialog, Route, ViewportSize
 
 pytestmark = [
     pytest.mark.integration,
@@ -384,13 +386,111 @@ async def test_a_reference_chosen_while_a_turn_is_out_survives_that_turn(
         await expect(drive.page.locator("#referencing")).to_be_visible()
         await drive.page.fill("#utterance", "and make it Monday")
         await drive.page.click("#ask-button")
-        await drive.page.wait_for_function(
-            "() => document.querySelectorAll('#answer-body p').length > 0"
-        )
+        # **The second turn's own completion, and not a predicate the first already
+        # satisfied** (adversarial review, round 2, `major`). `#answer-body` holds a
+        # paragraph from the first turn, so a wait for "a paragraph exists" is true
+        # before the second request has even gone out. The hint is the condition this
+        # page reaches only on the second turn's completion: it was asserted visible two
+        # lines above, and `ask` hides it by clearing the reference it sent.
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
 
         turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
         assert turns[-2][1]["reference"] == TurnReference(question_id=QUESTION_ID)
         assert turns[-1][1]["reference"] == TurnReference(goal_id=OTHER_ID)
+
+
+async def test_a_refusal_the_gateway_took_leaves_the_reference_attached(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A turn that never reached the assistant consumes nothing.
+
+    ADR-0168 §6 classifies a request "from its method and path alone" and the door takes
+    an expired session, a malformed body and the connection ceiling **before**
+    ``_assistant`` is reached — so such a turn settled no question and engaged no goal.
+    Consuming the reference there would leave the owner's next press sending an ordinary
+    turn in place of the answer they meant, and the hint would already be gone.
+    Adversarial review, round 2, ``major``.
+
+    The refusal is fulfilled at the transport rather than provoked, because every
+    condition that produces one genuinely — an expired session most of all — also ends
+    the session and takes the page off this panel, which is a different case. What is
+    under test is what the page does with a refusal head, and that is what this hands it.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+
+        # The **first** request is refused and every later one goes through, so the
+        # retry below is a real turn rather than a second fabricated answer. Counted in
+        # the handler for ``_holding``'s reason: unrouting by pattern would have to match
+        # the matcher as well as the handler, and one counter cannot get that wrong.
+        seen = {"n": 0}
+
+        async def refuse(route: Route) -> None:
+            seen["n"] += 1
+            if seen["n"] > 1:
+                await route.continue_()
+                return
+            await route.fulfill(
+                status=400,
+                content_type="application/json",
+                body=json.dumps({"fault": "malformed-request"}),
+            )
+
+        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", refuse)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await expect(drive.page.locator("#console .fault")).to_be_visible()
+
+        # Still attached, still offered, and still saying what it is for: the owner
+        # presses again and the same answer goes to the same question.
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await expect(drive.page.locator("#referencing")).to_contain_text(
+            "answers the clarification"
+        )
+        await expect(drive.page.locator("#clear-reference")).to_be_visible()
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert [call[1]["reference"] for call in turns] == [TurnReference(question_id=QUESTION_ID)]
+
+
+async def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The control stops being offered once the body carrying it has gone out.
+
+    The reference is serialised at submission, so a "never mind" pressed while that
+    request is in flight would hide the hint while the value still reached the assistant
+    — a page claiming to have withdrawn something it had already sent, which is the
+    silent refusal this surface spends the most words preventing (#1536, ADR-0139 §4).
+    Adversarial review, round 2, ``major``.
+
+    **And the sentence does not say the turn can be stopped**, because that is a
+    different control with a different meaning: ``Stop waiting`` ends this browser's
+    wait, and ADR-0173 §9 is explicit that abandoning the stream does not abandon the
+    turn.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+        held = await _holding(drive, "/ask/stream", at=1)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await held.reached.wait()
+
+        await expect(drive.page.locator("#clear-reference")).to_be_hidden()
+        said = await drive.page.inner_text("#referencing")
+        assert "no longer be taken back" in said
+        assert "stop" not in said.lower()
+
+        await held.release()
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
 
 
 async def test_a_reference_can_be_given_up_before_it_is_sent(

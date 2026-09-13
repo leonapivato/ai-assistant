@@ -360,18 +360,58 @@ function changeConversation(id) {
 //
 // **It holds the object the gateway takes and not two fields**, so that the shape sent
 // is the shape the type admits: "a `question_id` and no `goal_id`, or a `goal_id` and
-// no `question_id`".
+// no `question_id`" — and it holds the sentence that was put on screen beside it, so a
+// turn that never reached the assistant can put the same words back rather than inventing
+// new ones for the same fact.
 let reference = null;
+
+// What the hint says once the reference has gone out with a turn (adversarial review,
+// round 2, `major`).
+//
+// **The control cannot take it back by then, so it stops being offered and this says
+// why.** The body was serialised at submission, so a "never mind" pressed while that
+// request is in flight would hide the hint while the reference still reached the
+// assistant — a page claiming to have withdrawn something it had already sent, which is
+// the silent refusal this surface spends the most words preventing.
+//
+// **And it does not say the turn can be stopped**, because that is a different control
+// with a different meaning: `Stop waiting` ends this browser's wait and ADR-0173 §9 is
+// explicit that abandoning the stream does not abandon the turn.
+const REFERENCE_SENT =
+  "That went out with the question now running, so it can no longer be taken back. " +
+  "What became of it is in the answer.";
 
 // Attach one, say what the next turn will be about, and put the cursor where the answer
 // goes.
-function setReference(next, note) {
-  reference = next;
+function setReference(value, note) {
+  reference = { value, note };
+  showReference(note, true);
+  el("utterance").focus();
+}
+
+// Put the hint and the control into one state, which is the only place either moves.
+function showReference(note, offered) {
   const hint = el("referencing");
   hint.textContent = note;
-  hint.hidden = false;
-  el("clear-reference").hidden = false;
-  el("utterance").focus();
+  hint.hidden = note === "";
+  el("clear-reference").hidden = !offered;
+}
+
+// Say that the attached reference has gone out, where it is still the attached one.
+function referenceSent(sent) {
+  if (sent !== null && reference === sent) {
+    showReference(REFERENCE_SENT, false);
+  }
+}
+
+// Put an unsent reference back on offer, after a turn that never reached the assistant.
+//
+// **The words are the ones it carried**, held on the value for that reason: a second
+// sentence for the same fact is a second place for one of them to go stale.
+function restoreReference(sent) {
+  if (sent !== null && reference === sent) {
+    showReference(sent.note, true);
+  }
 }
 
 // Give it up.
@@ -391,10 +431,7 @@ function setReference(next, note) {
 // scope.
 function clearReference() {
   reference = null;
-  const hint = el("referencing");
-  hint.textContent = "";
-  hint.hidden = true;
-  el("clear-reference").hidden = true;
+  showReference("", false);
 }
 
 function setConversation(id) {
@@ -5316,6 +5353,7 @@ async function ask(event) {
   const waiting = {
     stopping: new AbortController(),
     heard: false,
+    ran: false,
     composing: null,
     refusedWith: null,
   };
@@ -5334,8 +5372,11 @@ async function ask(event) {
     // is the reference it *sent* and not whatever is attached by then.
     const sent = reference;
     if (sent !== null) {
-      asked.reference = sent;
+      asked.reference = sent.value;
     }
+    // From here the body is serialised and the control can no longer take it back, so
+    // the page stops offering it and says so (round 2, `major`).
+    referenceSent(sent);
     // **Which entry is the owner's choice, and the gateway never chooses between
     // them** (ADR-0175 §3). ADR-0173 §5 makes a provider that cannot stream a
     // `ModelError` before any delta, degrading to no answer at all — so on such a
@@ -5363,8 +5404,26 @@ async function ask(event) {
     // because `setReference` installs a fresh object every time, and it is the same
     // device as `awaited === waiting` two lines on: the identity of the thing decides,
     // not a flag.
+    //
+    // **And only where the question reached the assistant** (round 2, `major`). A
+    // refusal the gateway takes before `_assistant` is reached — an expired session, a
+    // malformed body, the connection ceiling — ran no turn and settled nothing, so
+    // consuming the reference there would leave the owner's next press sending an
+    // ordinary turn in place of the answer they meant. `waiting.ran` is set exactly
+    // where an entry establishes that the assistant took the question, and nowhere
+    // else; where it is not set, the same words go back on the screen.
+    //
+    // **The conservative direction is to keep it**, which is what an entry that cannot
+    // tell does: a stream cut before its first chunk may have run a turn, and a second
+    // send of the same reference is answered `ALREADY_SETTLED` and rendered as its own
+    // fixed statement (§11) — an honest sentence, where the other way round is an
+    // answer that silently went nowhere.
     if (reference === sent) {
-      clearReference();
+      if (waiting.ran) {
+        clearReference();
+      } else {
+        restoreReference(sent);
+      }
     }
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
@@ -5419,6 +5478,11 @@ async function askWhole(half, asked, chosenAt, waiting) {
   // body that never arrived (`SESSION_LOST_STATUS`, `abandonAsk`).
   if (response.ok) {
     waiting.heard = true;
+    // And on this entry that is also proof the turn **ran**: `_ask` awaits `converse`
+    // and answers with the outcome, so a `200` cannot come back until the assistant has
+    // finished with the question. A refusal is proof of nothing, which is why the two
+    // are set together here and apart on the streamed entry.
+    waiting.ran = true;
   } else {
     waiting.refusedWith = response.status;
   }
@@ -5498,8 +5562,10 @@ async function askStreaming(half, asked, chosenAt, waiting) {
     for await (const value of streamValues(response)) {
       if (value.kind === "chunk") {
         // The first chunk is what proves the question reached the assistant on this
-        // entry, and it is the fact a wait abandoned from here is announced with.
+        // entry, and it is the fact a wait abandoned from here is announced with — and
+        // the fact that lets the reference this turn carried be given up (round 2).
         waiting.heard = true;
+        waiting.ran = true;
         composing.textContent += value.text;
       } else if (TERMINAL_KINDS.has(value.kind)) {
         terminal = value;
@@ -5572,6 +5638,12 @@ async function askStreaming(half, asked, chosenAt, waiting) {
     refused("console", terminal, response.status);
     return;
   }
+  // A terminal **outcome** is the assistant having taken the question, whether or not a
+  // chunk preceded it: ADR-0173 §4 yields "zero or more chunks, then exactly one
+  // `TurnOutcome`", so a turn composed in one piece carries no chunk and would otherwise
+  // leave `ran` false over a turn that plainly ran (round 2). A terminal *fault* is not
+  // one, which is why the branch above returns before this line.
+  waiting.ran = true;
   // The same reading on the streamed entry (#1622), and the partial text goes the way
   // `ANSWER_STREAM_CUT` sends it rather than staying under a fault: ADR-0173 §3 makes the
   // terminal outcome's `reply` the answer, so an accumulated chunk sequence left on
