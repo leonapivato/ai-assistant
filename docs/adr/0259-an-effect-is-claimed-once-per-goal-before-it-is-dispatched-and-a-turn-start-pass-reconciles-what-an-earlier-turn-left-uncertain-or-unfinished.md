@@ -42,7 +42,10 @@
   sweep and that sweep's stated residual, its one-plan-per-walk rule and its
   no-licence-to-repeat prohibition; §12's every other entry, both acceptance requirements' other
   halves, and its firing conditions — and §10 books the canonical effect-input identity that
-  would close the difference.
+  would close the difference. **And in §11's `core/types.py` clause, in its *"Nothing else"*
+  closure over `StepTransition` alone**: §9 adds `satisfied_by_execution` and `satisfied_by_step`
+  to it, the only stated route by which §2's satisfaction reaches the committed `StepExecution`.
+  **Every other clause of §11 binds entire** (§13).
 - **Partially supersedes [ADR-0192](0192-an-authorisation-is-spent-by-the-act-it-authorises-and-the-trail-gains-an-invocation-row.md),
   in §3's firing clause alone, and in nothing else.** That section rules that the ADR landing
   automated reconciliation *"is fired by a tool contract that offers a **lookup by idempotency
@@ -682,7 +685,7 @@ implements the **first** route and explains why the second is not taken here.
 
 > **Normative — the reconciliation call is gated on the turn's remaining budget, under §4's rule for the whole pass.** The
 > remainder is read immediately before the call and passed as its `timeout`; a non-positive one makes no call and leaves the
-> step `INDETERMINATE`. §4 states the gate once, over every act that starts a unit of work.
+> step `INDETERMINATE`. §4 states that gate once, over every act of the pass.
 
 > **Normative — the seam's *declared refusals of this call* end the pass and never the turn; everything else propagates, and
 > the two are not one case.** `ToolInvoker.invoke` names the exceptions it raises instead of returning a `ToolResult`, and
@@ -826,23 +829,21 @@ is a state that resolves where the integration supports it, and that is **durabl
 > sweep"*. **This decision is that authority**, and it is the only one: **no other lane, and no implementation of any other
 > decision, completes a sweep, repairs an attempt's state, or reconciles a step.**
 
-> **Normative — every act that starts a unit of work is gated on the turn's remaining budget, stated once here rather than per
-> act.** ADR-0255 §9 rules that *"immediately before it begins **any** of them"* — *"every unit of work the walk starts"* —
-> the remainder is read from that turn's **monotonic** source and nothing is started where it is **not strictly positive**.
-> **Two of this pass's acts start such units**: **act 2's replay**, a step's disposal through `StepRunner.resume`, and **act
-> 4's reconciliation call**. Before each, the pass **reads the remainder and passes it as the `timeout`**; where it is not
-> strictly positive it **starts nothing**, the step keeps the status it stood at, **the pass ends there** with what earlier
-> acts landed standing, and **the turn does not fail**. **A disposal or a call already begun runs to its own completion**,
-> §9's own posture. **No lane passes the turn's whole figure to more than one of them, and none fixes a second deadline inside
-> the pass.**
-
-> **Normative — the other acts start no unit of work, and the enumeration is closed.** Acts 1, 3 and 5, and act 2's `DENY`,
-> are **compare-and-swap store writes**, and `AuditTrail.resolution_of` is a **query-only read**: none disposes a step or
-> makes a model or tool call, so none is a *"unit of work"* in ADR-0255 §9's sense and **none is gated** — an ungated store
-> write is what lets a pass out of budget finish the repair it had begun. **No lane adds a sixth act or starts a unit of work
-> from these that is not one of the two named above.** The gate is also what keeps §3's propagating `ValueError` a statement
-> about **defects**: `invoke` and `StepRunner` each refuse a non-positive `timeout`, so without it an exhausted turn would
-> raise one and fail on the most ordinary event this pass can meet.
+> **Normative — the pass charges the turn's budget, and every one of its acts is gated on the remainder exactly as any other
+> act of the turn is.** ADR-0255 §9 rules that *"immediately before it begins **any** of them"* — *"every unit of work the
+> walk starts"* — the remainder is read from that turn's **monotonic** source and nothing is started where it is **not
+> strictly positive**. **This pass reads that remainder immediately before each of its five acts and starts none of them
+> where it is not strictly positive**: the step or attempt keeps the state it stood at, **the pass ends there** with what
+> earlier acts landed standing, and **the turn does not fail**. **No enumeration of which acts are units of work is made or
+> needed** — §9 is applied to the pass as a whole, so nothing turns on classifying one act. **An act already begun runs to
+> its own completion**, §9's own posture, so a compare-and-swap the pass has reached lands rather than being abandoned.
+> **Where the act takes a `timeout`** — act 2's `ALLOW` replay through `StepRunner.resume`, and act 4's reconciliation
+> call — **the remainder just read is what is passed**, and **no lane passes the turn's whole figure to more than one act
+> or fixes a second deadline inside the pass**. The gate is also what keeps §3's propagating `ValueError` a statement about
+> **defects**: `invoke` and `StepRunner` each
+> refuse a non-positive `timeout`, so without it an exhausted turn would raise one and fail on the most ordinary event this
+> pass can meet. **Its cost is one turn's delay** on a repair the next turn redoes, which is what every other early end in
+> this section already produces.
 
 > **Normative — the pass makes every write as a compare-and-swap and stops at the first that loses.** A stale
 > `expected_version` or a store failure ends the pass for that turn; **what landed stands, nothing is undone, nothing is
@@ -1063,8 +1064,8 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > `computed_field`** — for `idempotency_key`'s own recorded reason, that a computed field enters `model_dump()` and ADR-0018
 > §4's registration rebuild runs against `extra="forbid"`. **`Disposition` gains exactly two members**,
 > `EFFECT_ALREADY_CLAIMED` and `EFFECT_UNSCOPED` (§2); **`PlanExport` gains exactly one field**, `effects`; **`StepExecution`
-> gains exactly two**, `satisfied_by_execution` and `satisfied_by_step` (§2); and **`TurnOutcome` gains exactly one**,
-> `satisfied_from_earlier`, in ADR-0242 §9's shape.
+> gains exactly two**, `satisfied_by_execution` and `satisfied_by_step` (§2), **and `StepTransition` gains that same pair**
+> (below); and **`TurnOutcome` gains exactly one**, `satisfied_from_earlier`, in ADR-0242 §9's shape.
 
 > **Normative.** `EffectRecord` is a frozen model with `extra="forbid"` whose fields are exactly **seven**: **`goal_id:
 > Identifier`**, carrying the annotation `ActionPlan.goal_id` uses; **`intended_action_id: Identifier`**, carrying the
@@ -1095,15 +1096,28 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > **Normative.** **`ToolDefinition` gains no field**, **`ActionRequest` gains no field**, **`ToolCall` gains no field** (it
 > keeps the two ADR-0029 §2 gives it and the absences that section calls *"the design"*), **`ExecutionState` gains no field**,
 > **`PlanStep` gains no field** — it carries `intended_action` already, from ADR-0265 §4, and this decision **reads** it and
-> adds nothing beside it — **`Goal` gains no field**, **`GoalAttempt` gains no field**, and **`StepTransition` and
-> `AttemptTransition` gain no field.** The effect row is the store's own record, reached only through `claim_effect`.
+> adds nothing beside it — **`Goal` gains no field**, **`GoalAttempt` gains no field**, and **`AttemptTransition` gains no
+> field.** The effect row is the store's own record, reached only through `claim_effect`.
+
+> **Normative — `StepTransition` gains exactly two fields, and they are how §2's satisfaction reaches the committed row.**
+> `satisfied_by_execution` and `satisfied_by_step`, both `DurableIdentifier | None` defaulting to `None`.
+> **`StepTransition`'s validator requires them non-`None` together and only on a `→ SUCCEEDED` transition**, refusing either
+> on a transition to any other status and one carrying exactly one of them — ADR-0255 §11's constructor limb for
+> `attempt_id`, applied to this pair; and **`commit_transition` persists both exactly as given onto the committed
+> `StepExecution`**, the strengthening of an existing member §11 itself distinguishes from a new one. The stage is the
+> pair's only holder, from the `EffectOutcome` §2 returns, and `commit_transition` takes a `StepTransition` and nothing
+> else: without them the pair reaches the row by no stated route. **The store derives neither, and that is refused rather
+> than merely not taken** — deriving would need it to know which `→ SUCCEEDED` commits are satisfactions and which are
+> ordinary, which is what the transition carries and the store does not hold. **This reopens ADR-0255 §11's *"Nothing
+> else"* closure in that one scope** (§13).
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is flagged here rather than inferred from a
 > version number.** `PlanStore` gains exactly one member, **`claim_effect`** (§2), so **every implementation and every fake
 > gains it before this decision's L2 lands**; the change extends ADR-0014 §5's member enumeration exactly as ADR-0249 §12's
 > and ADR-0250's additions did, and it is BREAKING for the same reason each of those was. **`AuditTrail` gains none** — §5
 > consumes `resolution_of`, which ADR-0059 §2 already landed. **`ToolInvoker`, `ActionPolicy`, `ToolRegistry`, `Planner` and
-> `AssistantEngine` each gain none**, and **no Protocol member changes signature.**
+> `AssistantEngine` each gain none**, and **no Protocol member changes signature** — `commit_transition` gains **one
+> strengthening**, the persistence above, in ADR-0255 §11's own sense of that word.
 
 > **Normative — the effect rows are the goal's durable data and carry its obligations.** `PlanExport` gains **`effects`**, a
 > possibly-empty `tuple[EffectRecord, ...]`; ADR-0014 §5's **closure rule extends to it, and it is stated over one holder
@@ -1294,7 +1308,9 @@ goal has already claimed, and with which arguments**, and one store member and o
 
 - **L1 — the contract and the store.** `core/types.py`'s `EffectKey`, `EffectClaim` with its five members,
   `EffectOutcome`, `EffectRecord` with its seven fields and `ToolCall.effect_key`, `Disposition`'s **two** members and
-  `PlanExport`'s `effects` field with its `schema_version` move, and `TurnOutcome.satisfied_from_earlier`; `core/protocols.py`'s
+  `PlanExport`'s `effects` field with its `schema_version` move, `TurnOutcome.satisfied_from_earlier` and
+  `StepTransition`'s two satisfaction fields with their validator and `commit_transition`'s persistence of them (§9);
+  `core/protocols.py`'s
   `claim_effect`; `planning`'s
   `PlanExecution` transition-table row (§7) and the `PlanStore` implementation with its schema
   migration, export entry and `delete_goal` cascade; the **shared conformance suite** for
@@ -1330,7 +1346,9 @@ goal has already claimed, and with which arguments**, and one store member and o
    same effect: the later step is **not dispatched** — `ToolInvoker.invoke` is not reached and no invocation is
    claimed — `claim_effect` answers **`COMPLETED`** naming the holder, and the step is **satisfied**: committed
    `PENDING → SUCCEEDED` with **the holder's `output`**, `attempts` unchanged, **its dependents then driven**, and the
-   turn's outcome carrying the told-once fact. **The arm asserts the continuation and not only the non-dispatch**,
+   turn's outcome carrying the told-once fact. **The committed row is asserted to carry the holder's own `execution_id`
+   and `step_id` in `satisfied_by_execution` and `satisfied_by_step`**, read back from the store rather than from the
+   stage's return. **The arm asserts the continuation and not only the non-dispatch**,
    because a stalled walk was the defect this route closes.
 2. The same over a plan **produced afresh** rather than by modification, **and the same again from
    `AWAITING_APPROVAL`**: a resumed step whose replayed `ALLOW` meets a `COMPLETED` answer is committed
@@ -1365,7 +1383,11 @@ goal has already claimed, and with which arguments**, and one store member and o
    `CLAIMED`, a different one `HELD`, and the row moves in neither. It adds: **durable re-pointing** after a `SKIPPED`
    holder, with `claimed_at` restamped; **`claimed_at` preserved** on every no-write outcome, under an injected clock; the
    **refusal** paths — an unknown `execution_id`, a `step_id` that is not a step of that execution, and a `step_id`
-   whose stored step carries **no `intended_action`** — each raising `PlanningError` with **no row written**; and
+   whose stored step carries **no `intended_action`** — each raising `PlanningError` with **no row written**; the
+   **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying `satisfied_by_execution` and
+   `satisfied_by_step` persists **both exactly as given** onto the committed `StepExecution`, leaving `attempts`,
+   `started_at`, `approval_ref` and `bound_tool` untouched — the validator's own refusals sitting in `core`'s
+   construction table (§9); and
    **atomicity under contention**, where two writers claim one
    `(goal_id, intended_action_id)` concurrently, **over both write paths** — **no row**, and an existing **`SKIPPED`** holder
    two callers would each re-point, because a uniqueness constraint on insertion passes the first and leaves the second
@@ -1434,14 +1456,14 @@ goal has already claimed, and with which arguments**, and one store member and o
     **`UNCERTAIN`** to a later plan's claim, and the reconcilable row's `ToolCall.effect_key` is **`None`**
     and `claim_effect` is **never called for it**.
 12. The pass's **boundaries**, in one arm, over a **controlled monotonic source**. **The deadline gate is asserted over
-    both gated acts, in four rows**: a remainder already non-positive **before the first** reconciliation call and
-    **between two** reconcilable steps' calls, and the same pair over **act 2's replay** — before the first, and between
-    two replayable `ALLOW`s. In each, **nothing is started** for the ungated step — `ToolInvoker.invoke` is **not
-    reached** and `StepRunner.resume` is **not called** — the step keeps the status it stood at, the pass **ends**,
-    earlier acts' writes **stand**, and the **turn does not fail**; an implementation that passed the turn's whole figure
-    to both, or passed a non-positive remainder through, fails these rows with the `ValueError` §3 propagates, and one
-    that gated only the reconciliation call fails the second pair. **And a store write already reached is not gated**: a
-    row asserts that acts 1, 3 and 5 complete on an exhausted remainder. It touches **only the goal the turn engaged**:
+    every act, in six rows**: a remainder already non-positive **before the first** act and **between two** acts of one
+    kind, taken over act 1's `→ SKIPPED`/`SUPERSEDED` sweep commit, over act 2 on **both** its `DENY → SKIPPED` branch and
+    its `ALLOW` replay, and over act 4's reconciliation call. In each, **nothing is started** for the ungated step — **no
+    transition is committed**, `ToolInvoker.invoke` is **not reached** and `StepRunner.resume` is **not called** — the
+    step keeps the status it stood at, the pass **ends**, earlier acts' writes **stand**, and the **turn does not fail**;
+    an implementation that passed the turn's whole figure to more than one act, or passed a non-positive remainder
+    through, fails these rows with the `ValueError` §3 propagates, and one that gated only the acts that make a call
+    fails the sweep and `DENY` rows. It touches **only the goal the turn engaged**:
     a
     second goal carrying the same three residuals is **unchanged**, and nothing runs for it until
     a turn engages it. And a **store failure injected at each act boundary** stops it there: what
@@ -1490,7 +1512,7 @@ goal has already claimed, and with which arguments**, and one store member and o
 
 ### 13. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly four documents are partially superseded, in six scopes — ADR-0014 in three, ADR-0255 in one, ADR-0192 in one and
+**Exactly four documents are partially superseded, in seven scopes — ADR-0014 in three, ADR-0255 in two, ADR-0192 in one and
 ADR-0037 in one** — and the entries below show the working for those and for each other document a reader would expect to be
 superseded and is not. ADR-0082 §1's test is applied to each earlier ADR's **text**: would a reader holding only it now act
 differently, or read one of its clauses more widely than it holds?
@@ -1565,6 +1587,16 @@ residual, its one-plan-per-walk rule and its no-licence-to-repeat prohibition; �
 requirements' *other* halves — the modifying-and-fresh demonstration, the paired `INDETERMINATE` case, and the
 resolved-but-unapplied answer entire — and its firing conditions. §10 books the canonical effect-input identity that would
 close the difference, with what fires it.
+
+**ADR-0255 §11 — partially superseded in its `core/types.py` clause's closure alone, and the scope is on this document's
+`Status` line.** That clause adds *"**One field**: `StepTransition.attempt_id`"* and closes the type — *"**Nothing
+else**"*. §9 adds **two more**, `satisfied_by_execution` and `satisfied_by_step`, the only stated route by which the
+holder's identifiers reach the committed `StepExecution`, which `commit_transition` writes from a `StepTransition` and
+nothing else, so a reader holding only §11 builds a transition that cannot carry §2's satisfaction at all — ADR-0070 §1's
+test met, and **partial** in ADR-0070 §3's sense: the scope is that closure, and nothing else. **Every other clause of §11
+binds entire** — `attempt_id` and its validator, the no-new-model/enumeration/constant rule, the no-widening list, the
+three-member and four-strengthening classification of what a conforming `PlanStore` must refuse, the triad obligation, and
+its `PROTOCOL_VERSION` and `PlanExport.schema_version` clauses, which §9 moves by their own read-off-the-tree instruction.
 
 **Every other clause of ADR-0255 is relied on and not superseded, and the working is that its own clauses name this lane.**
 A reader would expect records on §6 and on §12's residual entries, because this decision writes `EFFECT_UNRESOLVED` from a
@@ -1673,9 +1705,10 @@ and that spends a user's one *yes* on a dispatch that never happened while the r
 That is ADR-0070 §1's test met, and a new ADR is the instrument — as it must be in any case, since `core/types.py` and
 `core/protocols.py` both change (golden rule 5, ADR-0015).
 
-**It is a partial supersession of exactly four documents in six scopes** (ADR-0070 §3) — ADR-0014 in §4's transition table,
-in §5's member enumeration, `PlanExport` shape and `delete_goal` cascade, **and** in §3's `StepExecution` record;
-**ADR-0255** in the identity §7's and §12's at-most-once obligation is stated over; **ADR-0192** in §3's firing clause; and
+**It is a partial supersession of exactly four documents in seven scopes** (ADR-0070 §3) — ADR-0014 in §4's transition
+table, in §5's member enumeration, `PlanExport` shape and `delete_goal` cascade, **and** in §3's `StepExecution` record;
+**ADR-0255** in the identity §7's and §12's at-most-once obligation is stated over **and** in §11's *"Nothing else"*
+closure over `StepTransition`; **ADR-0192** in §3's firing clause; and
 ADR-0037 in §4's resolution step — and §13 shows the working for each and for the six documents a reader would expect and
 that get no record — ADR-0148, ADR-0029, ADR-0250, ADR-0059, ADR-0253 and **ADR-0265**, whose §6 states the obligations this
 decision discharges and whose §4 hands it one question, neither of which a reader acts differently on once this lands.
