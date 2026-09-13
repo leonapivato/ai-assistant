@@ -40,10 +40,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import TypeAdapter
+
 from ai_assistant.core.types import (
     BoundAccount,
     BoundKind,
     CanonicalDestination,
+    FrozenJsonMapping,
     ToolDefinition,
     canonical_json_bytes,
 )
@@ -60,6 +63,27 @@ if TYPE_CHECKING:
         SpanCoverage,
         ValueBound,
     )
+
+
+#: ``ActionRequest.parameters``' own annotated type, so the capture below is
+#: **rebuilt through the same validation the field is** rather than copied.
+#:
+#: A ``dict(request.parameters)`` would detach the top level and leave every nested
+#: value shared: :class:`~ai_assistant.core.types.FrozenDict` holds its pairs in one
+#: ``__slots__`` attribute and refuses assignment, which
+#: ``object.__setattr__(nested, "_items", …)`` goes straight past — so a caller
+#: could rewrite ``parameters["prefs"]["x"]`` while the authorization seam was out
+#: and the comparison would read the rewritten value. ``_freeze_json`` rebuilds
+#: every container beneath the root, which is ``recipient_grants.py``'s *"detached
+#: **recursively**, which is what ``field_state`` buys over a copy of ``__dict__``"*
+#: reaching the one field on this request that is not a model.
+#:
+#: **It is not ADR-0145 §1's schema evaluation**, which is what makes this cheaper
+#: than rebuilding the whole :class:`~ai_assistant.core.types.ActionRequest`: the
+#: walk here is the freeze the field already runs at construction, and no schema is
+#: consulted — §4's *"no reading consults a schema to decide what an argument
+#: means"* holds of the capture as it does of the comparison.
+_PARAMETERS: Final[TypeAdapter[Mapping[str, FrozenJson]]] = TypeAdapter(FrozenJsonMapping)
 
 
 class CoverageSubject(NamedTuple):
@@ -97,7 +121,11 @@ class CoverageSubject(NamedTuple):
     and :func:`account_of` read."""
 
     parameters: Mapping[str, FrozenJson]
-    """The arguments condition 6 and every §4 reading are taken over."""
+    """The arguments condition 6 and every §4 reading are taken over.
+
+    **Rebuilt through ``FrozenJsonMapping``'s own validation and therefore detached
+    all the way down** (:data:`_PARAMETERS`), because a top-level copy would leave
+    every nested value shared with the caller."""
 
     account: BoundAccount | None
     """The binding's connected account — §3's condition 4 — and ``None`` exactly
@@ -138,7 +166,7 @@ def coverage_subject(request: ActionRequest) -> CoverageSubject:
     return CoverageSubject(
         goal=request.goal,
         tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
-        parameters=dict(request.parameters),
+        parameters=_PARAMETERS.validate_python(request.parameters),
         account=(
             None
             if binding is None

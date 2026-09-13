@@ -48,6 +48,7 @@ from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     AuthorizationDisposition,
     CostBasis,
+    FrozenDict,
     PermissionOutcome,
     Reversibility,
     RiskLevel,
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
         Authorization,
         CanonicalDestination,
         CoverageMember,
+        FrozenJson,
         ToolDefinition,
     )
 
@@ -1655,6 +1657,31 @@ class TestARulingIsDecidedOverOneObservationOfItsRequest:
             request(binding(SITE), goal=OTHER_GOAL, amount="50", currency="GBP")
         )
         assert rewritten.outcome is PermissionOutcome.CONFIRM
+
+    async def test_a_nested_argument_rewritten_mid_ruling_earns_no_route_d(self) -> None:
+        """The capture is detached **all the way down**, not only at the top.
+
+        `FrozenDict` holds its pairs in one ``__slots__`` attribute and refuses
+        assignment, which ``object.__setattr__(nested, "_items", …)`` goes straight
+        past. A ``dict(request.parameters)`` would leave that nested mapping shared
+        with the caller, so the fixed-value comparison — canonical JSON bytes on
+        both sides — would be taken over the value as **rewritten**, and a row
+        fixing ``prefs`` to one payload would cover a call that presented another.
+        """
+        fixed: FrozenJson = FrozenDict({"x": "ok"})
+        gate, authorizations, _ = policy(
+            live(id="a1", coverage=(coverage_member("prefs", fixed=fixed),))
+        )
+        assert authorizations is not None
+        action = request(binding(SITE), prefs=FrozenDict({"x": "bad"}))
+        held = authorizations.suspend_next_operation()
+        ruling = asyncio.ensure_future(gate.decide(action))
+        await held.reached()
+        object.__setattr__(action.parameters["prefs"], "_items", (("x", "ok"),))
+        held.release()
+        decided = await ruling
+        assert decided.outcome is PermissionOutcome.CONFIRM
+        assert (decided.authorised_by, decided.authorised_goal) == (None, None)
 
     async def test_a_binding_rewritten_mid_ruling_earns_no_route_b(self) -> None:
         """The grant seam takes its own subject at its own first executed line, which
