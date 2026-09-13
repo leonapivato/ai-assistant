@@ -26,8 +26,10 @@
   **§4's trigger group** — the read conditions **(b)**, **(c)** and **(d)** together with **(j)**,
   *"The attempt's `phase` is `AttemptPhase.INVESTIGATE`"* — is satisfied, in place of a serviced
   read, by a **re-investigation licence**: a typed outcome of a plan-driving walk that ran to the
-  end of the plan and skipped at least one step because the world did not meet what the plan
-  declared. **And §1's occupancy clause**, in one term: *"Every round of one attempt's
+  end of the plan, skipped at least one step because the world did not meet what the plan
+  declared, and **dispatched no sibling branch the plan had declared for the other reading of that
+  same basis** — so a conditional plan that declared both readings and took one carries no licence
+  at all (ADR-0253 §9). **And §1's occupancy clause**, in one term: *"Every round of one attempt's
   investigation sits inside one occupancy of `AttemptPhase.INVESTIGATE`"* becomes *"inside one
   occupancy of `AttemptPhase.INVESTIGATE` **or** under a re-investigation licence"*. Without the
   pair, an attempt that executed and learned something may make its turn's one ungated planner
@@ -481,7 +483,7 @@ alone.** A `SKIPPED`/`UNMET_DEPENDENCY` step says *this plan's own conditions re
 `PENDING` step says *the walk did not get there*; and which it is, is decided by whether anything
 was settled about the step rather than by where in the plan it sat.
 
-### 3. The claim's second conjunct: the attempt, and not a caller-supplied revision
+### 3. The claim's two further conjuncts: the attempt, the successor, not a supplied revision
 
 > **Normative.** `core/types.py`'s **`StepTransition` gains exactly one field**:
 > **`attempt_id`, an `Identifier | None`, defaulting to `None`**, naming the `GoalAttempt` the
@@ -490,16 +492,62 @@ was settled about the step rather than by where in the plan it sat.
 > shape — *"required when the status is `FAILED` or `INDETERMINATE`, and forbidden on every other
 > status"* — applied to one more field.
 
-> **Normative.** **`PlanStore.commit_transition` gains one claim condition**: a `→ RUNNING`
+> **Normative.** **`PlanStore.commit_transition` gains two claim conditions, and this is the
+> first**: a `→ RUNNING`
 > transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, carries
-> the transition's own **`execution_id` among its `execution_ids`**, is in a **non-terminal
-> `AttemptState`**, and is the **only** attempt of that goal naming that execution. **It refuses
+> the transition's own **`execution_id` among its `execution_ids`**, is in an `AttemptState`
+> that is **neither terminal nor paused**, and is the **only** attempt of that goal naming that
+> execution. **This conjunct refuses
 > on exactly four limbs, and the case a reader would expect as a fifth is removed at construction
 > rather than refused here**: a `→ RUNNING` transition carrying **no** `attempt_id` is **not
 > constructible** under the validator above, so `commit_transition` never receives one and this
 > decision requires no store to refuse it. Naming the absent case as a store limb as well would
 > be a rule no conforming implementation could be shown to obey, and would put the boundary in
 > two places — which is the `to_status` shape the store already declines to re-check.
+
+> **Normative — the state limb disqualifies five of `AttemptState`'s seven members, because
+> *paused* is as disqualifying as *ended*.** It refuses a claim under an attempt whose `state` is
+> `CANCELLED` or `ENDED` — ADR-0249 §5's two terminal members — **and** under one whose `state` is
+> `AWAITING_CLARIFICATION`, `AWAITING_AUTHORIZATION` or `BLOCKED`, which are the three members
+> ADR-0249 §5 derives *paused* from: *"A goal is **paused** when its status is `ACTIVE` and its
+> current attempt's state is `AWAITING_CLARIFICATION`, `AWAITING_AUTHORIZATION` or `BLOCKED`"*.
+> **The seventh member, `EFFECT_UNRESOLVED`, is accepted** (§6). **The limb is not a `RUNNING`
+> whitelist and no lane implements it as one**, because §6 lands a producer for the seventh member
+> and a claim under it is exactly what that clause admits.
+
+**Naming the three rather than requiring `RUNNING` is what keeps §6's own member reachable, and
+refusing them is what keeps *paused* true of a paused system.** §2's park argument states the
+hazard in terms — *"A paused attempt that went on dispatching would make *paused* false of a
+system that is acting, in the one surface a user reads to find out whether anything is
+happening"* — and a store that accepted every non-terminal state would let a step reach the tool
+under an attempt the system is reporting as paused. **The driver's own stop rule does not close
+it, because the walk is not the only writer of the attempt's state.** Two turns of one
+conversation are **not** serialized: ADR-0014's note of 2026-08-25 and ADR-0029's amendment of the
+same date both state it — *"`Engine.converse` takes no lock … `Engine._admit_and_reserve` is
+written for the **Nth concurrent turn** … so two turns can each be driving a step"* — so a
+clarification or an authorization park recorded by one turn can land while another turn's walk
+sits between two steps, and only a check inside the claim sees it.
+
+> **Normative — the paused limb strands no answered park, and the ordering that makes that true
+> is already ruled rather than added here.** ADR-0254 §14 rules that an answer establishing an
+> `Authorization` *"resumes the attempt it paused by the path that already exists: ADR-0249's lane
+> commits the attempt out of `AWAITING_AUTHORIZATION` to `RUNNING` at `EXECUTE` the moment the
+> resolving ruling reaches the trail, in one `commit_attempt` with the decision that answer was
+> recorded under"*, and ADR-0037 §4's `resume` sequence records that ruling at its **step 5** and
+> claims at its **step 6**. So the attempt a resumed claim names stands at `RUNNING` by the time
+> that claim is made, and **this decision adds no writer, no second commit and no ordering of its
+> own** (§5, ADR-0254 §14's own clause). **A resume that nevertheless finds the attempt paused is
+> refused rather than excused**, which is the fail-closed direction and the same answer §5 already
+> gives a resume whose predicates no longer hold.
+
+> **Normative — the paused limb raises the same non-stale `PlanningError`, and it is the one limb
+> whose ground is not permanent.** A paused attempt can become `RUNNING` again, so the argument
+> below does not reach it through permanence — it reaches it through what a caller can do.
+> **Nothing the caller can do makes this claim land**: what lifts the pause is a **user act**
+> answering the question the attempt is paused on, and §3's own rule governs it in terms —
+> *"Naming a different attempt or acting on a later turn is a different claim, not a retry of this
+> one"*. A caller obeying `StaleExecutionError`'s re-read-and-retry contract would spin against a
+> store waiting on a human, which is the failure the class rule exists to prevent.
 
 > **Normative — every limb of this conjunct raises a `PlanningError` that is *not*
 > `StaleExecutionError`, and the class is decided by what the class means rather than by which
@@ -508,7 +556,8 @@ was settled about the step rather than by where in the plan it sat.
 > §5). **No limb of this conjunct is that**: an unknown attempt stays unknown however many times
 > the caller re-reads; an attempt that did not open this execution can **never** acquire it, since
 > `execution_ids` is append-only and §3 makes ownership exclusive; a `CANCELLED` or `ENDED`
-> attempt never becomes live again; and a duplicated ownership is refused whichever attempt is
+> attempt never becomes live again; a **paused** attempt becomes live only by a user act and never
+> by a re-read (above); and a duplicated ownership is refused whichever attempt is
 > supplied. **Naming a different attempt or acting on a later turn is a different claim, not a
 > retry of this one** — so a caller obeying the stale class's contract would loop against a write
 > that cannot land, on every limb and not only on the duplicate. This is a **strengthening of an
@@ -674,6 +723,51 @@ attempt claim and act. **The attempt conjunct is what makes revision 1 §H.2's c
 true** — *"after an acknowledged cancellation **no later step starts**"* — for the cancellations
 that end an attempt rather than revise a goal.
 
+> **Normative — `commit_transition` gains a *second* claim condition, and it is §7's supersession
+> made atomic with the claim.** A `→ RUNNING` transition is accepted only where **no plan the
+> store holds names this transition's plan in its `supersedes`** — this transition's plan being
+> the one its `execution_id` names, by the execution → plan chain the store already follows for
+> the revision. **The store derives it and no caller supplies it**, exactly as ADR-0249 §8 derives
+> the revision and for that clause's own reason, and it is decided **in the same indivisible step
+> as the write**. It refuses on the same **non-stale `PlanningError`** every limb of the attempt
+> conjunct raises, and its ground is permanent in the plainest way: **a persisted successor is
+> never un-persisted**, so no re-read makes the claim land. **It is one condition and not a fifth
+> limb of the conjunct above**, because it compares a different row — the plan's, not the
+> attempt's — and the two are refused independently.
+
+> **Normative — what it closes, and it is a race no serial rule closes.** §7 rules that **a plan
+> superseded after driving drives nothing further** and ADR-0228 §5 that a plan superseded before
+> driving *"**drives nothing** … reaches no `StepRunner`"*. **Neither is enforced by anything the
+> tree holds.** Two turns of one conversation are **not** serialized — ADR-0014's note of
+> 2026-08-25 and ADR-0029's amendment of the same date both state it, *"`Engine.converse` takes no
+> lock … `Engine._admit_and_reserve` is written for the **Nth concurrent turn** … so two turns can
+> each be driving a step"* — and **saving a successor moves neither the goal's `revision` nor the
+> attempt's `state`**, so turn B's `save_plan` of P2 carrying `supersedes=P` leaves turn A's next
+> claim on P satisfying the revision conjunct and the attempt conjunct alike. §7's sweep is
+> several compare-and-swaps over the old plan's steps and **cannot be atomic with a claim another
+> turn is making**; a driver-side check would be a read-then-claim, which is the
+> time-of-check-to-time-of-use gap §3 refuses for the revision. **So the rule is put where the
+> claim is decided**, which is ADR-0249 §8's answer for the revision and §3's for the attempt,
+> reached a third time for the third value and for the same reason.
+
+> **Normative — this adds no `core` field, no `PlanStore` member and no second authority.**
+> `ActionPlan.supersedes` is the value the check reads and ADR-0228 §5 already put it there;
+> **`PlanStore` gains no member**, no query is promoted to the wire, and the derivation is the
+> store's own over rows it already holds — `save_plan` refuses a `supersedes` naming a plan under
+> a different `goal_id`, so the only plans that can name this one are the plans of its own goal.
+> **No lane exposes an is-superseded fact on `ActionPlan`, on `ExecutionState`, on the wire or in
+> the export**, and none reads this conjunct as licence to sweep, to repair, or to infer
+> `SUPERSEDED` at read time (§7).
+
+> **Normative — it refuses the claim and changes nothing else about a superseded plan.** §7 binds
+> entire: the superseded plan's executions, its `SUCCEEDED` steps' outputs and the attempt's
+> `execution_ids` stay exactly as they stand, its still-`PENDING` steps are disposed of by §7's
+> sweep and by nothing here, **§6's override still forbids that sweep behind an `INDETERMINATE`
+> step**, and **a walk that had already run when the supersession was recorded is not undone** —
+> what this conjunct refuses is the **next** claim, which is what *"drives nothing further"*
+> says. A claim it refuses leaves its step **`PENDING` at its stored version** with nothing
+> invoked and the walk stopped, exactly as every other refused claim does.
+
 > **Normative — what the refused claim then causes is not decided here in full, and what is
 > decided is stated.** A refused claim leaves the step **`PENDING` at its stored version** with
 > **nothing invoked**, and the walk **stops** under §2's rule. **Which report the turn composes,
@@ -682,18 +776,19 @@ that end an attempt rather than revise a goal.
 
 > **Normative — the four tests of revision 1 §H.4, and which of them is owed here.** **Test 3 —
 > the store-level invariant in the shared `PlanStore` conformance suite — is this decision's**,
-> and it is owed for **both** conjuncts: no `→ RUNNING` transition is ever accepted whose goal
-> revision is not the stored one, and none whose attempt is **unknown**, **does not name this
-> execution**, or is **terminal**, and none naming an execution **more than one attempt names** —
-> §3's four limbs, each asserting the **non-stale `PlanningError`** §3 fixes. **The absent case is
-> not among them**: §3's validator makes a `→ RUNNING` transition carrying no `attempt_id`
-> unconstructible, so it is asserted unconstructible rather than refused (§3, arm 7). **Tests 1,
-> 2 and 4 —
+> and it is owed for **all three** conjuncts: no `→ RUNNING` transition is ever accepted whose
+> goal revision is not the stored one; none whose attempt is **unknown**, **does not name this
+> execution**, or is in a state that is **terminal or paused**; none naming an execution **more
+> than one attempt names**; and **none whose plan a stored plan supersedes** — §3's four attempt
+> limbs and its successor condition, each asserting the **non-stale `PlanningError`** §3 fixes.
+> **The absent case is not among them**: §3's validator makes a `→ RUNNING` transition carrying
+> no `attempt_id` unconstructible, so it is asserted unconstructible rather than refused (§3,
+> arm 7). **Tests 1, 2 and 4 —
 > interleaved cancel before the claim, interleaved cancel after it, and the exhaustive two-writer
 > interleaving — are A9's**, because each is stated over a cancellation whose semantics that lane
 > decides. **No lane reads this decision as having established them.**
 
-### 4. The boundary: what is already ruled, and that this decision adds only the conjunct
+### 4. The boundary: what is already ruled, and that this decision adds only the two conjuncts
 
 > **Normative.** **The committed `→ RUNNING` claim is the boundary**, and this decision states it
 > rather than moves it. ADR-0148 §9 binds entire: *"Every transmission through the seam happens
@@ -710,8 +805,9 @@ that end an attempt rather than revise a goal.
 > — and ADR-0034 §1's limit binds: *"`ToolInvoker` exposes no 'the callable was reached' fact and
 > this ADR introduces none"*, and **this one introduces none either**.
 
-> **Normative.** **What this decision adds to the boundary is the attempt conjunct of §3 and
-> nothing else.** No clause here changes what a claim is, when it is committed, what it carries
+> **Normative.** **What this decision adds to the boundary is §3's two claim conditions — the
+> attempt conjunct and the successor conjunct — and nothing else.** No clause here changes what
+> a claim is, when it is committed, what it carries
 > besides `attempt_id`, what the executor does after it, or what any of the three intervals above
 > mean. **`StepExecutor` keeps its four-collaborator construction contract** (ADR-0058), and
 > ADR-0254 §13's clause that *"**No collaborator is added to `StepExecutor`**"* binds entire: a
@@ -786,9 +882,10 @@ a fifteen-minute recency requirement that parks on fresh evidence and is approve
 would otherwise dispatch on a forecast ADR-0252 §6 test 4 refuses, with the user's *yes* as the
 only thing anyone checked.
 
-> **Normative — the resumed claim carries the same conjunct** — it is a `→ RUNNING` transition
-> and §3 binds it — so a park answered after the goal moved on, or under an attempt that has
-> ended, is refused and nothing is invoked.
+> **Normative — the resumed claim carries the same conjuncts** — it is a `→ RUNNING` transition
+> and **both** of §3's claim conditions bind it — so a park answered after the goal moved on,
+> under an attempt that has **ended or is paused**, or **on a plan a later plan supersedes**, is
+> refused and nothing is invoked.
 
 > **Normative — a whole fresh walk follows the resumed step.** Where `resume` returns `EXECUTED`,
 > the driver **walks that plan again**; where it returns `DENIED`, the step is
@@ -921,8 +1018,10 @@ wider blast radius, filed there and **not taken here** (§12).
 > **Normative — the driver is `AttemptState.EFFECT_UNRESOLVED`'s one producer, for a step it
 > drove.** The attempt's `state` is committed `EFFECT_UNRESOLVED` through `PlanStore.commit_attempt`
 > at the instant a step of the plan it is driving is recorded `INDETERMINATE`, in the same turn
-> and before the turn composes. `EFFECT_UNRESOLVED` is a **non-terminal** member (ADR-0249 §5), so
-> a later claim of that attempt is **not** refused by §3's conjunct on that ground alone.
+> and before the turn composes. `EFFECT_UNRESOLVED` is **neither a terminal member nor one of the
+> three ADR-0249 §5 derives *paused* from**, so a later claim of that attempt is **not** refused
+> by §3's state limb on that ground alone — which is the member's whole point: an attempt holding
+> an effect it cannot account for is neither finished nor waiting on anybody.
 
 > **Normative — the two writes are not one, and what a failure between them leaves is stated.**
 > The step's `→ INDETERMINATE` transition and the attempt's `commit_attempt` are **two writes
@@ -990,6 +1089,14 @@ composed is a state the answer could not mention.
 > further step of it, and its still-`PENDING` steps are moved **`PENDING → SKIPPED` with
 > `skip_reason=SUPERSEDED`** — ADR-0014 §4's own row, taken for the case it was written for.
 > **§6's rule overrides this one** where a branch is stopped behind an `INDETERMINATE` step.
+
+> **Normative — §3's successor conjunct is what makes *drives nothing further* mechanical rather
+> than a rule the driver is trusted to obey.** `commit_transition` refuses a `→ RUNNING` claim
+> whose plan a stored plan supersedes, in the same indivisible step as the write, so a claim
+> racing a successor's persistence **from another turn** is refused rather than won — which the
+> sweep below cannot do, being several compare-and-swaps in a turn that does not hold the claim.
+> **This decision adds no other enforcement**: the sweep still records what it records, and A8
+> still owns the residual.
 
 > **Normative — the sweep is several writes, and what a sweep that stops part-way leaves is
 > stated rather than inherited.** Each `PENDING → SKIPPED`/`SUPERSEDED` is **its own
@@ -1347,10 +1454,49 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > `orchestration` gains a **frozen stage type carrying the walk's outcome**, on ADR-0037 §4's own
 > precedent for `StepDisposition` — *"a frozen dataclass in `orchestration` … it crosses no
 > subsystem boundary"* — so **no `core` type is added, `GoalAttempt` gains no field, and nothing
-> durable is minted**. A walk ended with an **unexpected finding** when it **ran to the end of
-> the plan** and moved **at least one step `PENDING → SKIPPED` under §2's skip rule**: the plan
-> declared a requirement about the world — a dependency, a `verifies`, a `when`, a resolvable
-> reference — and the world did not meet it.
+> durable is minted**. A walk ended with an **unexpected finding** when **all three** of the
+> following hold: it **ran to the end of the plan**; it moved **at least one step
+> `PENDING → SKIPPED` under §2's skip rule**; and **at least one step it so skipped is one the
+> plan declared no alternative for that the walk took** (below). The plan declared a requirement
+> about the world — a dependency, a `verifies`, a `when`, a resolvable reference — the world did
+> not meet it, **and the plan said nothing about what to do then**.
+
+> **Normative — what it is for the plan to have declared the alternative, in ADR-0253 §9's own
+> terms, and the test is that a sibling branch was *dispatched* rather than merely declared.** The
+> alternative to a skipped step was **taken** where that step was skipped because a member of its
+> `when` was not satisfied **and** the walk **dispatched** another step of the same plan declaring
+> a condition that names the **same** element on the **same** basis and requires a **different**
+> member of `InterpretationVerdict`, whose own `when` that same verdict satisfied. That is
+> ADR-0253 §9's own definition of the relation, taken rather than invented: *"Two steps declaring
+> conditions that name the **same** element on the `INTERPRETATION` basis and require
+> **different** members of `InterpretationVerdict` are two branches."* **A step skipped on any of
+> §2's other three cases has no declared alternative by construction** — a `FAILED` or `SKIPPED`
+> producer, a `verifies` that does not hold over a `SUCCEEDED` producer's output, and an
+> unresolvable `resolves` are none of them a branch ADR-0253 §9 lets a plan condition a sibling
+> on — so a skip on one of those **always** carries the finding.
+
+> **Normative — declaring a branch is not taking it, and a plan whose branches were all refused
+> carries the licence.** Where the plan declared both readings and **neither** sibling was
+> dispatched, the licence **fires**: the `INCONCLUSIVE` case, which ADR-0253 §9 rules *"enables no
+> branch by itself"*, and the case where the sibling's own `when` failed one of ADR-0252 §6's
+> other three tests. **No lane reads a declared-but-untaken branch as an expected outcome**, and
+> no lane reads the predicate off the plan's text: it is read off **what the walk did**.
+
+**A skip the plan anticipated is an expected outcome; a skip it did not is a finding.** ADR-0253
+§9 draws exactly that line and this clause reads it at the walk's end: *"A plan **may express**
+the alternative, so that the answer to an unexpected verdict is a branch the plan already declared
+rather than a model asked at dispatch what to do next."* Where the plan expressed it and the walk
+took it, **the answer to the verdict is the step that ran** — the goal's outcome was reached by a
+route the plan declared for it, and there is nothing a further round could learn that the plan did
+not already hold. Where the plan anticipated the **check** but not the **consequence of its
+answer**, the walk ends with the goal's outcome unreached and nothing declared in its place, which
+is the state §10 licenses one round over. **Without the third conjunct the ordinary conditional
+plan would carry a licence**: ADR-0253 §14's dynamic plan skips its untaken branch on every run,
+so *every* completed conditional walk would license a planner call, and the *"intact and
+unreplanned"* property ADR-0253 §9's branch contract exists to buy would be reachable only by a
+plan that declared no branches at all. **The narrowing changes the trigger and not the scope**:
+what §10 supersedes in ADR-0251 is §4's four trigger conditions and §1's one occupancy term,
+exactly as §16 and the `Status` line state them, over a licence that fires in fewer cases.
 
 > **Normative — a walk that stopped carries no licence, whatever it skipped before stopping.**
 > Each of §2's five stop triggers leaves a question outstanding or an effect unaccounted for — a
@@ -1538,8 +1684,9 @@ ledger and stops on the same three guards.
 > forbidden there and absent there today. `StepRunner` and `StepExecutor` are concrete
 > `orchestration` classes and **not** Protocols, so §3's threaded keyword changes no contract
 > surface at all. `PlanStore`'s signatures do **not** move and `PlanStore` gains **no member**;
-> what changes is what a conforming implementation must **refuse**, on **three** members. §3 adds
-> one conjunct to **`commit_transition`**, and the execution-ownership refusal to
+> what changes is what a conforming implementation must **refuse**, on **three** members, in
+> **four** strengthenings. §3 adds **two** claim conditions to **`commit_transition`** — the
+> attempt conjunct and the successor conjunct — and the execution-ownership refusal to
 > **`commit_attempt`** and to **`open_attempt`**. Each is a **strengthening of an existing
 > member** rather than a new one, exactly as ADR-0249 §12 classifies the first one. **The existing `PlanStore`
 > conformance suite and the canonical fake in `ai_assistant.testing` gain the new obligation in
@@ -1706,11 +1853,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 > **Normative.** This decision is implemented in **two lanes**, in this order.
 
-- **L1 — the conjunct and the ownership invariant.** `core/types.py`'s one field and its
-  validator; **all three** of §3's strengthenings in `InMemoryPlanStore` and `SqlitePlanStore` —
-  `commit_transition`'s added claim condition, and the execution-ownership refusal on
+- **L1 — the conjuncts and the ownership invariant.** `core/types.py`'s one field and its
+  validator; **all four** of §3's strengthenings in `InMemoryPlanStore` and `SqlitePlanStore` —
+  `commit_transition`'s **two** added claim conditions, the attempt conjunct with its widened
+  state limb and the **successor conjunct**, and the execution-ownership refusal on
   `commit_attempt` **and** on `open_attempt`; the shared `PlanStore` conformance suite arms for
-  each (§3's test 3, arm 6's two serial ownership cases, its two **dispatched-together** arms and
+  each (§3's test 3, arm 6's two serial ownership cases, its paused and `EFFECT_UNRESOLVED` cases,
+  its **three** dispatched-together arms — the successor race among them — and
   its class assertions) and the canonical fake in
   `ai_assistant.testing`; and the
   `wire/envelope.py` log entry and version bump **only if** the tree contradicts §11's dated
@@ -1718,7 +1867,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   `StepRunner.resume` and `StepExecutor.execute`, supplied by `engine.py`'s existing single-step
   drive from the `GoalAttempt` it already holds. It **drives nothing** and changes no behaviour of
   a turn: the one `→ RUNNING` claim in the tree is `StepExecutor._claim`, and after L1 it carries
-  the attempt the engine opened.
+  the attempt the engine opened. **The successor conjunct changes no behaviour of a turn either**,
+  because ADR-0228 §5 drives *"exactly one plan of a turn … and it is the last"*, which nothing
+  has superseded at the moment it is driven.
 - **L2 — the driver, and the runner's request construction.** The plan-driving stage in
   `orchestration/`, the walk, §1's three driver evaluations and **`StepRunner`'s resolution of a
   step's `resolves` from the stored plan and execution while it builds the request** (§1), §2's
@@ -1768,11 +1919,20 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    constructed values because no lane of that decision drives. Here it is **driven**: one goal
    carrying the condition element, one plan with step 1 (`refresh_forecast`), interpretation 1
    (`reads` step 1's output at `"summary"`, `settles` that element) and step 2 (`book_campsite`,
-   `when` on the `INTERPRETATION` basis requiring `QUALIFIES`). The arm asserts that the driver
+   `when` on the `INTERPRETATION` basis requiring `QUALIFIES`). **And the plan declares the
+   alternative**, which is what makes it ADR-0253 §9's branching plan rather than a one-sided one:
+   a **step 3** (`search_nearby_sites`) whose `when` names the **same** element on the **same**
+   basis and requires `DOES_NOT_QUALIFY`. The arm asserts that the driver
    dispatches step 1, performs interpretation 1 **after** step 1 is `SUCCEEDED` and its `verifies`
-   holds and **before** step 2 is evaluated, writes the row, and dispatches step 2; and that on
-   `DOES_NOT_QUALIFY` and on `INCONCLUSIVE` step 2 is `SKIPPED`/`UNMET_DEPENDENCY` and **the plan
-   is intact and unreplanned**.
+   holds and **before** step 2 is evaluated, and writes the row; and then, per verdict: on
+   **`QUALIFIES`** step 2 is dispatched and step 3 is `SKIPPED`/`UNMET_DEPENDENCY`; on
+   **`DOES_NOT_QUALIFY`** step 2 is `SKIPPED`/`UNMET_DEPENDENCY` and **step 3 is dispatched**; and
+   in both cases **the plan is intact and unreplanned** and **the walk carries no licence**
+   (§10), a sibling branch the same verdict satisfied having been dispatched. On
+   **`INCONCLUSIVE`** **both** conditioned steps are `SKIPPED`/`UNMET_DEPENDENCY` — ADR-0253 §9's
+   *"enables no branch by itself"* — the plan is **intact**, no step's record is revised,
+   rewritten or re-dispatched, and the walk **does** carry a licence, which is arm 13's case
+   reached through a plan that declared an alternative no verdict took.
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
@@ -1792,22 +1952,24 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    step 1's success and step 2's claim; `commit_transition` refuses, **`ToolInvoker` is never
    entered** (a fake that records entry), step 2 is `PENDING` at its stored version, and the walk
    stops.
-6. **A terminal-attempt claim is refused** — the attempt is committed `ENDED` between step 1's
-   success and step 2's claim; same four assertions. A paired arm asserts the **goal's revision
-   did not move**, which is what makes this conjunct not redundant with the previous arm's. **And
-   the arm that pins the binding**: with execution E opened under attempt A, A committed `ENDED`,
-   and a second attempt **B non-terminal on the same goal**, a claim for E naming **B** is
-   **refused** — every goal-level fact about B is satisfactory and B's `execution_ids` does not
-   carry E, which is the only thing that decides it (§3). **And the arm that closes the bypass**,
+6. **A claim under an attempt that is not driving is refused** — the attempt is committed
+   `ENDED` between step 1's success and step 2's claim; same four assertions. A paired arm asserts
+   the **goal's revision did not move**, which is what makes this conjunct not redundant with the
+   previous arm's. **And the arm that pins the binding**: with execution E opened under attempt
+   A, A committed `ENDED`, and a second attempt **B on the same goal, neither terminal nor
+   paused**, a claim for E naming **B** is **refused** — every goal-level fact about B is
+   satisfactory and B's `execution_ids` does not carry E, which is the only thing that decides it
+   (§3). **And the arm that closes the bypass**,
    in the shared `PlanStore` conformance suite: `commit_attempt(add_execution_id=E)` on **B**
    after A already holds E is **refused**, so the state in which E belongs to two attempts —
    under which a claim naming B would pass every conjunct — **cannot be reached through the
    store** (§3). **And every refusal this decision adds asserts its class, not merely that it
    refused**: `StaleExecutionError` **subclasses** `PlanningError` (`core/errors.py`), so an arm
    asserting only `PlanningError` is satisfied by the retryable class §3 forbids — a caller
-   obeying that class's contract would then retry a permanently invalid write forever. **All six**
-   — `commit_attempt`'s and `open_attempt`'s ownership refusals, and each of the conjunct's four
-   limbs, the seeded legacy claim included — assert a `PlanningError` that is **not** a
+   obeying that class's contract would then retry a permanently invalid write forever. **All
+   seven** — `commit_attempt`'s and `open_attempt`'s ownership refusals, each of the attempt
+   conjunct's four limbs, the seeded legacy claim included, and the **successor** condition —
+   assert a `PlanningError` that is **not** a
    `StaleExecutionError`. **And the arm that keeps the two questions apart**: ADR-0249 §8's
    stale-revision refusal, reached through the same member, still raises `StaleExecutionError`,
    so an implementation cannot satisfy the set by making `commit_transition` raise one class for
@@ -1832,16 +1994,48 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    read, compared and then wrote across a suspension passes every one of them while letting both
    appends land — reaching, through the door this decision closes, exactly the legacy duplicate the
    arm above is reduced to refusing.
+   **And the arms that pin the state limb's five members**: with the attempt committed
+   `AWAITING_AUTHORIZATION` between step 1's success and step 2's claim, the claim is **refused**,
+   `ToolInvoker` is **never entered**, step 2 is `PENDING` at its stored version and the walk
+   stops; parameterized over `AWAITING_CLARIFICATION` and `BLOCKED`, which §3 treats alike. **And
+   the paired arm that stops the limb being read as a `RUNNING` whitelist**: on the same
+   construction with the attempt committed **`EFFECT_UNRESOLVED`**, the claim is **accepted** and
+   the step runs — §6's own member, which a `RUNNING`-only rule would make unreachable. **And the
+   arm that pins the resume ordering** (§3, §5): a park answered while the attempt still stands
+   `AWAITING_AUTHORIZATION` is **refused** with no ruling resolved and nothing invoked, and the
+   paired case in which ADR-0254 §14's `commit_attempt` has moved the attempt to `RUNNING` first
+   resumes and dispatches — which is what makes the limb a gate on the pause rather than on the
+   park.
+   **And the arms that pin the successor conjunct** (§3): with execution E open on plan P and a
+   plan P2 carrying `supersedes=P` saved between step 1's success and step 2's claim, the claim is
+   **refused** on the non-stale `PlanningError`, `ToolInvoker` is **never entered**, step 2 is
+   `PENDING` at its stored version, **the goal's revision did not move and the attempt is not
+   terminal** — which is what makes this condition not redundant with either of the others — and
+   P's `SUCCEEDED` step 1 and its output are unchanged. A paired arm asserts a claim on **P2** is
+   accepted, so the rule is *this plan has a successor* and not *this goal has two plans*. **And
+   the two-writer arm**, in the same suite and on arm 6's dispatched-together construction:
+   `save_plan(P2 with supersedes=P)` dispatched together with a `→ RUNNING` claim on a step of P,
+   asserting that either the claim lands and the save lands after it, or the save lands and the
+   claim is **refused** — and **never** that both a successor stands and a step of P went
+   `RUNNING`. The serial arms above cannot see that interleaving, and an implementation that read
+   the plan's successors, compared and then wrote across a suspension passes every one of them
+   while letting a superseded plan dispatch, which is the race §7's sweep cannot close from
+   another turn.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
-   goal revision is not the stored one, and none whose attempt is unknown, does not carry this
-   execution in its `execution_ids`, or is terminal. **And two constructions are asserted
+   goal revision is not the stored one; none whose attempt is unknown, does not carry this
+   execution in its `execution_ids`, or is in a state that is **terminal or paused** — the five
+   members §3 names, with `EFFECT_UNRESOLVED` asserted **accepted** in the same parameterization;
+   none naming an execution more than one attempt names; and **none whose plan a stored plan
+   supersedes**. **And two constructions are asserted
    unconstructible rather than refused**: `attempt_id` on any other `to_status`, and a
    `→ RUNNING` transition carrying **none** — which is why neither is a store limb (§3).
 8. **A parked middle step, answered and resumed** — a three-step plan whose **second** step rules
    `CONFIRM`: the walk stops, step 3 is `PENDING` and **not** `SKIPPED`, no third step is
    dispatched, the attempt is `AWAITING_AUTHORIZATION`, and the turn carries the confirmation.
-   `resume` then disposes of step 2 and the driver **walks the plan again**, passing over the now
+   `resume` then disposes of step 2 — the attempt having been committed back to `RUNNING` by
+   ADR-0254 §14's own path when the resolving ruling reached the trail, without which §3's paused
+   limb refuses the claim — and the driver **walks the plan again**, passing over the now
    terminal steps 1 and 2 and reaching step 3 — from the stored execution and not from a carried
    index. A paired arm answers `DENY`: step 2 is
    `SKIPPED`/`APPROVAL_DENIED`, and step 3 — declaring `depends_on` step 2 — is
@@ -1889,7 +2083,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 13. **An unexpected finding is investigated inside the same attempt, and the ledger is charged**
     — the concrete case, end to end on fakes. A goal to book a campsite; a plan whose step 1
     checks availability, whose interpretation settles *the site is available* and whose step 2
-    books it. Step 1 succeeds, the interpretation returns `DOES_NOT_QUALIFY`, and step 2 is
+    books it — **and which declares no alternative**, so no sibling branch the verdict satisfied
+    is dispatched and §10's third conjunct holds. Step 1 succeeds, the interpretation returns
+    `DOES_NOT_QUALIFY`, and step 2 is
     `SKIPPED`/`UNMET_DEPENDENCY` — so the walk's outcome carries an **unexpected finding** (§10).
     The arm asserts, in this order: the investigation loop **runs again inside the same attempt**,
     admitted by ADR-0251 §4 with (j) satisfied by the licence; **`AttemptEffort.planner_calls` and
@@ -1901,7 +2097,15 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     is admitted and the turn composes instead; with the walk **stopped** rather than skipped — a
     park, an `INDETERMINATE`, a deadline — **no licence is carried and no round is admitted**; and
     with the attempt's phase at `INVESTIGATE`, the round is admitted by (j)'s original limb with no
-    licence needed. **And the arm that pins the trigger group**: the driven plan carries
+    licence needed. **And the arm that pins the third conjunct of §10's predicate**: the same
+    campsite plan carrying a **step 3** whose `when` names the same element on the same basis and
+    requires `DOES_NOT_QUALIFY`, so the walk skips step 2 and **dispatches step 3** — **no licence
+    is carried, no round is admitted, `Planner.plan` is never entered again** (a fake planner that
+    records entry) and the turn composes over the one walk. A paired case returns
+    **`INCONCLUSIVE`** over that same three-step plan, dispatching **neither** conditioned step,
+    and asserts the licence **is** carried — which is what stops an implementation reading the
+    conjunct off the plan's declarations rather than off what the walk dispatched.
+    **And the arm that pins the trigger group**: the driven plan carries
     **`read_request=None`**, so ADR-0251 §4's (b), (c) and (d) are each unsatisfied on their own
     terms and the round is admitted by the licence alone — which is what a supersession of (j)
     by itself would not have bought. A further paired arm asserts the licence admits **one** round:
@@ -2063,7 +2267,8 @@ discharged, which is the entry spent rather than replaced.
 §4's transition graph, its `→ RUNNING`-before-invoke ordering, its `approval_ref` rule, its
 `PENDING → SKIPPED` row with `SUPERSEDED`, and its `INDETERMINATE` treatment are each taken as
 written; §5's
-compare-and-swap and its commands-not-snapshots argument are what §3 strengthens by one conjunct.
+compare-and-swap and its commands-not-snapshots argument are what §3 strengthens by two
+conjuncts.
 **`SkipReason` gains no member** and **`StepStatus` gains no member**, so §3's and §4's
 vocabularies are untouched. §7's **execution leases** and the **parallel-execution** half of its
 step-dependencies bullet stay deferred and are named in §12; §7's **idempotency and
@@ -2111,7 +2316,13 @@ which acts open an attempt forbid opening a fresh one to escape either bar, so *
 alternatives* is unreachable inside that attempt without the user asking again. **Both are
 ADR-0070 §1's test met and both are partial in ADR-0070 §3's sense**: the scopes are §4's four
 trigger conditions and §1's one occupancy term, and nothing else. §10 states the licence, the
-typed walk outcome that carries it and the guards that still bind. **(j)'s own two hazards are
+typed walk outcome that carries it and the guards that still bind — **and the trigger is narrower
+than *a walk that skipped something***: a walk whose every skipped step had an alternative the
+plan declared and the walk dispatched carries **no** licence, on ADR-0253 §9's own branch
+relation, so the reader holding only §4 is unaffected by this decision on every conditional plan
+that declares both readings and takes one. **The narrowing changes the trigger and not the
+scope** — what is superseded is still those four conditions and that one term and nothing else, a
+trigger that fires in fewer cases replacing no further clause. **(j)'s own two hazards are
 each avoided rather than accepted** — the phase does not move, and the loop is placed by the
 licence rather than by a phase it does not occupy — and §1's no-re-entry clause is obeyed rather
 than lifted, a licensed round re-entering no phase at all. **(j)'s own reservation is the
@@ -2140,7 +2351,10 @@ obtain before its second, so the per-turn reading forbids the investigation and 
 **The second and third scopes are two further clauses of §5**, named rather than left inside the
 first, and §10 states both: *"A superseded plan **drives nothing** … reaches no `StepRunner`"*
 binds of a plan superseded **before its walk began** and does not retrospectively forbid a walk
-that had already run, and the **no-new-failure-mode** clause held because every `save_plan`
+that had already run — and **that rule is now enforced rather than only stated**, §3's successor
+conjunct refusing a `→ RUNNING` claim on a plan a stored plan supersedes, in the same indivisible
+step as the write, which widens neither §5's rule nor §7's and reaches no walk that had already
+run — and the **no-new-failure-mode** clause held because every `save_plan`
 preceded every drive — which a licensed round's save no longer does, so §10 states what a second
 walk's persistence failure leaves behind. **Every remaining clause of ADR-0228 binds entire and is
 relied on**: §5's every-plan-is-persisted rule, its oldest-first order, its one-persistence-site
@@ -2149,7 +2363,12 @@ is **fired** rather than superseded (above).
 
 **ADR-0252, ADR-0253 and ADR-0254's remainder — relied on and not superseded.**
 ADR-0252 §6's four tests are evaluated by §1 and §5 and not restated; ADR-0253's §§1, 2, 4, 5, 6,
-8 and 9 are each taken as the contract this lane was handed, and **the three questions ADR-0253
+8 and 9 are each taken as the contract this lane was handed — **and §14's acceptance row is met
+rather than contradicted by §10's licence**: *"the plan is intact and unreplanned in every case"*
+is a statement about **that plan**, which nothing here revises, discards or re-dispatches a step
+of (§7), and §10's third conjunct is what keeps the ordinary branching case **unlicensed** as well
+as unrevised, a plan that declared the alternative and took it carrying no licence at all — and
+**the three questions ADR-0253
 hands here by name are answered** — the moment a never-eligible step is skipped (§2), the
 mechanism by which the work returns to an earlier phase (§10), and the driver's performance of the
 plan's interpretations (§1). ADR-0254 §13's recheck and §17's Q4 rule are relied on entire, §14 is
@@ -2162,8 +2381,10 @@ happens to a call already claimed when a revocation lands"* to A9 is untouched.
 corpus without it builds a system that drives one step of every plan — which ADR-0228 §14 says in
 terms is *"the system as ratified"* — leaves `depends_on`, `when`, `resolves`, `verifies` and
 `interpretations` inert, has no producer for `UNMET_DEPENDENCY` or `EFFECT_UNRESOLVED`, accepts a
-`→ RUNNING` claim under an attempt that has ended, and has no rule for what becomes of the steps
-after a park, an uncertain effect or an expired budget. That is ADR-0070 §1's test met, and a new
+`→ RUNNING` claim under an attempt that has ended, one under an attempt the same system is
+reporting as **paused**, and one on a plan another turn has already **superseded**, and has no
+rule for what becomes of the steps after a park, an uncertain effect or an expired budget. That
+is ADR-0070 §1's test met, and a new
 ADR is the instrument.
 
 **It is a partial supersession of exactly three documents** (ADR-0070 §3) — **ADR-0254** in
