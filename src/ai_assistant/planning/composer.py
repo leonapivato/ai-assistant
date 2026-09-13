@@ -129,6 +129,38 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: query text is the instrument ADR-0098 §6 forbids buying a bound from, and ADR-0098
 #: §5's honesty clause forbids reading its absence as an assurance either way — the
 #: same corridor §12 states plainly for a credential the user pasted into a turn.
+#:
+#: **The last paragraph is about which note resolves an implicit subject, and it is
+#: the one part of this prompt that reads the order the supply arrived in.**
+#:
+#: ADR-0238 §2 gives the records their job in one sentence — a stamped episode "is
+#: what resolves *find more about that* across turns" — and names the population that
+#: does it: "episodes of this conversation that `orchestration` selected into the
+#: turn's supply". The paragraph above says only that the notes resolve *a* "that",
+#: and on an exit-sentence turn at production store size that is not enough to pick
+#: **which** note. The supply carries several notes of the same shape, each beginning
+#: "The user asked: …", most of them belonging to other conversations, and one of them
+#: may record the very same words this turn carries. Every field that would
+#: distinguish them — the id, the kind, the instant — is deliberately not rendered
+#: (:meth:`ModelBackedQueryComposer.compose`), and `SearchSupply` carries no
+#: conversation of its own, so **content alone cannot answer it**. Order can, and does.
+#:
+#: **What makes the order mean that is `orchestration`, not this module.** The loop
+#: assembles `preceding = recent + retrieved` and `memories = preceding + supplement`,
+#: with `recent` the conversation's own history; the one construction site filters
+#: that sequence by membership and preserves its order. So this conversation's own
+#: episodes lead the supply whenever it holds any. This module neither re-ranks nor
+#: truncates that order — it now also *relies* on it, which is a dependency on a value
+#: handed across the contract rather than on a name imported across a boundary, and it
+#: is stated here because nothing in `planning` can assert it. The sentence is written
+#: to stay true where the history is empty: it points at "the earliest note recording
+#: something the user asked for", which on a first turn is the best note there is.
+#:
+#: Measured rather than assumed, against the two drives #2262 recorded failing and the
+#: four it recorded passing, replayed over the supplies a scratch hub actually built
+#: for them: the shape that composed a query about another conversation's subject on
+#: 10 of 10 samples composes one about its own on 8 of 8, the four passing shapes are
+#: unchanged, and three utterances that must compose nothing still decline 18 of 18.
 _SYSTEM_PROMPT: Final = """\
 You turn one request from a user of an AI assistant into a single web-search \
 query. Reply with exactly one of the two JSON objects below — one JSON object and \
@@ -154,7 +186,15 @@ The request may be followed by notes this assistant already holds. They are ther
 to resolve what the request refers to — a "that", a "them", a name the request \
 leaves implicit, a preference the query should respect. Use them only for that. \
 Do not search for a note, do not repeat one back, and do not carry a detail from \
-one into the query unless the request is asking about it."""
+one into the query unless the request is asking about it.
+
+The notes are in the order this assistant selected them, and a note recording an \
+earlier turn of this same conversation comes before every other. So where the \
+request leaves its subject implicit — "that", "them", "more about it" — take that \
+subject from the earliest note recording something the user asked for, and never \
+from a want, a purchase or a plan a later note records. Search for the thing that \
+was asked for; carry a further detail in beside it only where the detail narrows \
+that thing rather than naming something else."""
 
 #: The heading the one span is presented under (ADR-0098 §2).
 #:

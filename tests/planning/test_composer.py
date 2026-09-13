@@ -263,6 +263,119 @@ async def test_a_record_whose_content_forges_a_heading_is_quoted_into_one_line()
     assert records_message.count("\n") == 1, "so the span opens no second line"
 
 
+#: The two exit-sentence shapes #2262 recorded, as the composer is actually handed
+#: them: the words of the turn carry no subject at all, and the first record is the
+#: episode of the conversation this turn continues.
+_EXIT_SENTENCE: Final = "find more about that, taking my preferences into account"
+
+#: #2262's B1 — the drive whose results came back about the floor rather than the rug.
+#: Record 0 is this conversation's own turn; records 1 and 2 belong to another
+#: conversation and are the ones a composer reading content alone was observed to
+#: resolve "that" against, one of them recording *these very words*.
+_B1_RECORDS: Final = (
+    "The user asked: Alex and I want a big rug for the living room to go over those oak boards.",
+    "The user intends to acquire a proper frame bag and bikepacking luggage for his "
+    "gravel bike before his upcoming trip.",
+    "The user asked: find more about that, taking my preferences into account",
+)
+
+#: #2262's C1, whose own turn is the only one of its shape in the supply.
+_C1_RECORDS: Final = (
+    "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
+    "gravel bike before that trip.",
+    "The user and Alex settled on wide oak boards with a brushed finish for the living-room floor.",
+)
+
+
+def _echoing_the_first_record() -> FakeModelProvider:
+    """A provider whose query is whatever the records block lists **first**.
+
+    The composed query is then a function of the ordering alone, which is what makes
+    the ordering assertable through ``compose``'s own return value rather than only
+    over the message text: a composer that re-ranked, reversed or sorted the supply
+    would answer with a different record and this case would fail. A scripted reply
+    could not tell those apart, because it answers the same whatever it is shown.
+    """
+
+    def first_listed(messages: Sequence[Message]) -> str:
+        listed = messages[-1].content.splitlines()[1:]
+        return json.dumps({"query": json.loads(listed[0].strip())})
+
+    return FakeModelProvider(reply=first_listed)
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        pytest.param(_B1_RECORDS, _B1_RECORDS[0], id="b1"),
+        pytest.param(_C1_RECORDS, _C1_RECORDS[0], id="c1"),
+    ],
+)
+async def test_the_records_reach_the_prompt_in_the_supplys_own_order(
+    records: tuple[str, ...], expected: str
+) -> None:
+    """The supply's order survives to the prompt, on both of #2262's failing shapes.
+
+    ADR-0238 §2 makes a stamped episode of **this** conversation the thing that
+    "resolves *find more about that* across turns", and the one construction site
+    hands those episodes first — `orchestration` assembles `recent + retrieved` and
+    filters that sequence by membership without reordering it. Every field that would
+    let a reader tell one conversation's episode from another's is deliberately not
+    rendered, so on an exit-sentence turn the position **is** the only carrier of that
+    fact, and the instruction's last paragraph reads it.
+
+    So this pins the property that paragraph rests on, at the seam where it could
+    break: the records are listed in the supply's own order and the conversation's own
+    episode is the first line under the heading. The model here answers with whatever
+    is listed first, so the outcome moves if the ordering does.
+    """
+    model = _echoing_the_first_record()
+    supply = SearchSupply(
+        utterance=encodable_text(_EXIT_SENTENCE),
+        records=tuple(_belief(f"r-{i}", content) for i, content in enumerate(records)),
+    )
+
+    outcome = await ModelBackedQueryComposer(model, max_chars=200).compose(supply)
+
+    assert outcome.query == expected, "the first record listed is the supply's first"
+    listed = [json.loads(line.strip()) for line in model.last_messages[-1].content.splitlines()[1:]]
+    assert listed == list(records), "and the rest follow in the supply's own order"
+
+
+async def test_the_instruction_says_where_an_implicit_subject_comes_from() -> None:
+    """#2262's defect, pinned at the one place a prompt can be pinned.
+
+    Two of six drives searched the setting rather than the thing asked for — one
+    returning flooring for a rug, one returning bike tours for a frame bag — and
+    replaying their own supplies showed why: nothing in the instruction said which of
+    several same-shaped notes resolves an implicit "that", so the model resolved it
+    against whichever read as most substantial, including one belonging to another
+    conversation. The fix is a sentence, and a sentence is not deterministically
+    testable against a real model; what **is** testable is that the model is shown it.
+
+    Asserted over the system message the provider received, and over fragments rather
+    than the whole paragraph, so rewording the guidance does not fail the case while
+    dropping either half of it does.
+    """
+    model = FakeModelProvider(json.dumps({"query": "porto"}))
+
+    await _over(model, max_chars=200).compose(
+        SearchSupply(
+            utterance=encodable_text(_EXIT_SENTENCE),
+            records=(_belief("r-0", _B1_RECORDS[0]),),
+        )
+    )
+
+    system = model.last_messages[0]
+    assert system.role is Role.SYSTEM
+    assert "in the order this assistant selected them" in system.content, (
+        "the order means something"
+    )
+    assert "earliest note recording something the user asked for" in system.content, (
+        "and what it means"
+    )
+
+
 def _belief(record_id: str, content: str) -> SemanticMemory:
     """One belief a turn's retrieval could have selected, placed for ``ANYONE``.
 
