@@ -36,7 +36,8 @@
   automated reconciliation *"is fired by a tool contract that offers a **lookup by idempotency
   key** — until a tool can be asked whether a key was already acted on, reconciliation has nothing
   to read."* §3 lands it with no such lookup, on the authorisations ADR-0192 §1 itself rules **not
-  spendable** — a read and a `NATURAL` tool — where the call **is** the read. **§1's spendability
+  spendable** *and* whose recorded decision carries **no `egress_binding`** — a read and a `NATURAL`
+  tool, neither of them an egress call — where the call **is** the read. **§1's spendability
   rule and its further-claim enumeration bind verbatim** and are what §3 cites and §10 books
   behind; **no clause here widens either, adds an admission, or changes any signature on
   `InvocationLedger`**; and §3's own no-reconciliation-here statement, its recovery-scan clause
@@ -421,14 +422,6 @@ the ground is ADR-0034 §1: a `FAILED` step is one where *"nothing could have ru
 **holds***, so re-performing that effect is not a repeat. ADR-0029 §5 agrees from the other side, admitting a retry
 where *"repeating is safe"*. A lane that bound the rule to `_CLAIMED_STATUSES` would refuse every legitimate second
 attempt after a proven failure, which is the opposite of what R43 asks.
-
-**The re-point away from a `FAILED` holder is safe on the corpus as it stands, and the ground is read rather than
-assumed.** Nothing re-enters a `FAILED` step: the check `StepRunner.run` takes before it rules says so in terms —
-*"`PENDING` is the only entry, and `FAILED` is deliberately not a second one"* — `resume` enters only at
-`AWAITING_APPROVAL`, the walk passes over `FAILED` without re-dispatching as the clause above records, and
-`planning/execution.py`'s legal `FAILED → RUNNING` edge has **no caller**, the tree's one
-`to_status=StepStatus.RUNNING` construction being `StepExecutor._claim`'s. **That is a property of today's corpus and
-not a rule this decision lands**, so the obligation it leaves is booked on the decision that changes it (§10).
 
 **`RUNNING` is grouped with `INDETERMINATE` rather than with `SUCCEEDED`, and ADR-0014 §4 is why.**
 A step durably `RUNNING` is precisely the state that decision calls indistinguishable — *"a crash
@@ -1033,12 +1026,8 @@ property are the whole of it.
   mints — `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable** test. **It does
   not inherit a way to read an effect row**: `claim_effect` returns an `EffectClaim` and nothing else, and §9 puts
   `EffectRecord` on the export document alone, so a modify-first strategy that needs to find the earlier reservation
-  adds the bounded lookup it needs and argues for it there rather than inheriting one nobody has reviewed. **It does
-  inherit one obligation about the effect row**: §2 re-points a row away from a `FAILED` holder, which is safe only
-  while nothing re-enters a `FAILED` step, so the decision landing a cross-turn `FAILED → RUNNING` retry
-  **re-establishes ownership of that row under `claim_effect` before it commits the transition** — stated as what that
-  ADR owes, not as a mechanism this one adds, and no lane reads it as a change to `commit_transition`. **Fired by this
-  ADR landing.**
+  adds the bounded lookup it needs and argues for it there rather than inheriting one nobody has reviewed. **Fired by this ADR
+  landing.**
 - **Resolving an uncertain effect on the user's word.** **Not decided**, and §3 states the ground:
   a `SUCCEEDED` step carries an `output` its dependents read under ADR-0253 §2, and a user cannot
   supply one. **Fired by a decision that states what `output` such a resolution carries and where
