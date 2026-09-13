@@ -1132,11 +1132,12 @@ which is exactly the conflation ADR-0253 §4 mints the field's scope to prevent.
 plan declared on a terminal step is inert rather than unsafe**: the step has already succeeded,
 nothing depends on it, and no act follows — so nothing fails open.
 
-### 9. The deadline: one clock the driver reads, and what a walk charges
+### 9. The deadline: one budget the driver reads, on a monotonic source, and what a walk charges
 
 > **Normative.** **ADR-0042 §3's per-request deadline is attached here, and it is the driver's.**
 > The `timeout` an adapter supplies to `converse` or `resume` is the **whole request's** budget.
-> **The deadline is fixed once per adapter call**, from the injected clock at the instant
+> **The deadline is fixed once per adapter call**, from the **monotonic** source §9 names below
+> at the instant
 > `orchestration` enters that call's driving — **before** the resumed step's disposal on a
 > `resume`, and before the first step's on a `converse` — and every disposal that call makes,
 > **the resumed one and every step of every walk that follows it**, is passed the **remaining**
@@ -1144,7 +1145,8 @@ nothing depends on it, and no act follows — so nothing fails open.
 > than one disposal, and no lane fixes a second deadline inside one call.**
 
 > **Normative — it gates starting and never cancels what is running.** Immediately before it
-> begins a step's disposal, the driver reads the injected clock and computes the remainder. Where
+> begins a step's disposal, the driver reads that same monotonic source and computes the
+> remainder. Where
 > the remainder is **not strictly positive** it **starts no further step** and the walk stops
 > (§2). **A step already begun runs to its own completion**, which is ADR-0228 §4's posture in its
 > own words — *"a planner call already begun runs to its own completion, and a turn's total
@@ -1153,10 +1155,32 @@ nothing depends on it, and no act follows — so nothing fails open.
 > `StepRunner` is therefore always strictly positive**, which ADR-0029 §4 requires: *"a zero or
 > negative duration is refused rather than treated as an instantly-expired deadline"*.
 
+> **Normative — the deadline is an elapsed duration, so it is measured on a monotonic source and
+> never on the injected `Clock`.** The driver takes both the deadline and every remainder from
+> **the event loop's monotonic clock** (`asyncio.get_running_loop().time()`), which is
+> `orchestration/consolidation.py`'s own construction for its run budget and is taken rather than
+> re-argued. `core.clock.Clock` is scoped to **wall-clock instants** and ADR-0026's Consequences
+> rule the other contract out in terms — *"measuring an elapsed duration across a DST transition
+> or an NTP step is a different contract this one does not provide and should not be stretched
+> to"*. **A wall-clock reading moved backwards by NTP or an operator would make the computed
+> remainder larger**, topping the request's budget up for as long as the correction lasted and
+> making a later step's remainder **not** strictly smaller — the two things the clauses above
+> forbid, reached through the instrument meant to enforce them.
+
+> **Normative — and no seam, type or collaborator is added for it.** The source is read from the
+> running loop at the point of use: **no `core` type is added, no `Clock` is injected for it, no
+> constructor parameter is added to `StepRunner`, `StepExecutor` or the driver (ADR-0058), and no
+> `Settings` field is minted** (§11, and the no-configurable-figure clause below). **What the
+> injected `Clock` is still read for is unchanged and is not this section's**: an instant a rule
+> compares against a stored one — ADR-0253 §5's `evidence_recency` among them (§1, §5) — where a
+> wall-clock instant is exactly the right contract.
+
 > **Normative.** **A step the deadline stopped is `PENDING` and is never `SKIPPED`** (§2), and the
 > remainder is never rounded up, clamped to a minimum, borrowed from a later turn or topped up.
 
-> **Normative — three clocks, and the driver reads exactly one.** ADR-0042 §3's per-request
+> **Normative — three budgets, and the driver reads exactly one. These are budgets and not time
+> sources**: which source measures this one is the clause above, and the count here is of the
+> budgets a walk could be gated on. ADR-0042 §3's per-request
 > deadline bounds **one user's wait** and is this section's. **ADR-0251 §5's working allowance
 > bounds one attempt's consumption across turns and does not gate execution**: its gate is
 > §4(h)'s investigation gate, which admits **rounds of investigation** in phase 2, and ADR-0251
@@ -1610,7 +1634,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   validator; **all three** of §3's strengthenings in `InMemoryPlanStore` and `SqlitePlanStore` —
   `commit_transition`'s added claim condition, and the execution-ownership refusal on
   `commit_attempt` **and** on `open_attempt`; the shared `PlanStore` conformance suite arms for
-  each (§3's test 3 and arm 6's two ownership cases) and the canonical fake in
+  each (§3's test 3, arm 6's two serial ownership cases, its two **dispatched-together** arms and
+  its class assertions) and the canonical fake in
   `ai_assistant.testing`; and the
   `wire/envelope.py` log entry and version bump **only if** the tree contradicts §11's dated
   observation; and §3's threading — the `attempt_id` keyword on `StepRunner.run`,
@@ -1686,7 +1711,15 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    in the shared `PlanStore` conformance suite: `commit_attempt(add_execution_id=E)` on **B**
    after A already holds E is **refused**, so the state in which E belongs to two attempts —
    under which a claim naming B would pass every conjunct — **cannot be reached through the
-   store** (§3). **And the same case through the other door**: `open_attempt` with a
+   store** (§3). **And every ownership refusal asserts its class, not merely that it refused**:
+   `StaleExecutionError` **subclasses** `PlanningError` (`core/errors.py`), so an arm asserting
+   only `PlanningError` is satisfied by the retryable class §3 forbids here — a caller obeying
+   that class's contract would then retry a permanently invalid write forever. Each of the three
+   ownership paths — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
+   duplicate-ownership limb, the seeded legacy claim included — asserts a `PlanningError` that is
+   **not** a `StaleExecutionError`, and the four retryable limbs of §3's conjunct assert
+   `StaleExecutionError` positively, so an implementation cannot satisfy the set by collapsing the
+   two. **And the same case through the other door**: `open_attempt` with a
    `GoalAttempt` whose `execution_ids` already names E is **refused** on the same terms, because
    that member takes a whole attempt and the tuple may arrive non-empty — a caller could otherwise
    reach the forbidden state without calling `commit_attempt` at all. A paired arm asserts the
@@ -1695,7 +1728,18 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    pre-decision store could be — with execution E named by both a `CANCELLED` attempt A and a live
    attempt B, where a `→ RUNNING` claim for E is **refused whichever attempt it names**, and §5's
    recovered resume refuses on the same state. The arm is what stops the cancellation bypass
-   surviving in a database written before this decision.
+   surviving in a database written before this decision. **And the arms that pin the
+   indivisibility**, in the same suite and on its own existing construction — ADR-0249 §12's
+   `test_two_interpretations_dispatched_together_leave_one_loser` and its `commit_attempt` twin,
+   which dispatch both commands before either completes: `commit_attempt(add_execution_id=E)` on
+   **A** and on **B** dispatched together over an execution **no attempt yet owns**, and
+   `open_attempt` carrying E raced against `commit_attempt(add_execution_id=E)`, each asserting
+   **exactly one write lands** and the loser raises the **non-stale `PlanningError`**. §3 states
+   that each member decides exclusivity *"in the same indivisible step as its own write"*, and the
+   serial arms above cannot see the interleaving that rule is stated about: an implementation that
+   read, compared and then wrote across a suspension passes every one of them while letting both
+   appends land — reaching, through the door this decision closes, exactly the legacy duplicate the
+   arm above is reduced to refusing.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
    goal revision is not the stored one, and none whose attempt is absent, does not carry this
@@ -1829,9 +1873,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     following walk's first step approximately **PT1S** and not PT30S, so one adapter call spends
     one budget (§9). **And the arm that pins it across a licensed investigation**: a first walk
     and the licensed round together exhaust the `converse` deadline, and the **second walk starts
-    no step** — asserted on the injected clock, against an implementation that would otherwise fix
-    a fresh deadline when the second walk begins. A paired arm asserts `AttemptEffort.working`
-    advanced by both walks and by the licensed round, and `planner_calls` by the round alone.
+    no step** — asserted on the injected monotonic source, against an implementation that would
+    otherwise fix a fresh deadline when the second walk begins. A paired arm asserts
+    `AttemptEffort.working` advanced by both walks and by the licensed round, and `planner_calls`
+    by the round alone. **And the arm that pins which clock is read** (§9): with the injected
+    `Clock` moved **backwards** between two steps — and, on a paired case, returning the **same**
+    instant twice — the second step's remainder is still **strictly smaller** than the first's and
+    the budget is **not** topped up, so a driver that computed the remainder from the wall clock
+    fails it. It is what stops ADR-0026's reserved contract being reached for here by accident.
 17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
 18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
