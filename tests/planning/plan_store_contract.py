@@ -2163,6 +2163,32 @@ class PlanStoreContract:
         assert stored is not None
         assert stored.supported == (_REGION,), "the held row is untouched"
 
+    async def test_record_evidence_refuses_a_row_that_does_not_revalidate(
+        self, store: PlanStore
+    ) -> None:
+        """A caller can reach past a frozen model's validators, and the store may not.
+
+        ADR-0023 §2: "``model_copy(update=...)`` skips validators (a pydantic property no
+        type can close), so the invariant holds *at the validation boundary*, and **a
+        write that reaches past it must re-validate**". The row built here is the shape
+        ADR-0252 §1's fourth axis says is **not constructible** — ``SUPERSEDED`` with no
+        ``superseded_by`` — and the axis exists so that "a row that says it was displaced
+        without saying by what" cannot be stored, which is the whole of what makes
+        correction 1 auditable.
+
+        In the shared suite because the alternative is two conforming stores that admit
+        different rows: §12's own "a conformance suite exercising one implementation
+        would be a suite that lets the other disagree".
+        """
+        await _goal_with_attempt(store)
+        reaching_past = _evidence().model_copy(update={"standing": EvidenceStanding.SUPERSEDED})
+
+        with pytest.raises(PlanningError):
+            await store.record_evidence(reaching_past)
+
+        assert await store.get_evidence("ev1") is None
+        assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
+
     async def test_record_evidence_refuses_a_goal_the_store_does_not_hold(
         self, store: PlanStore
     ) -> None:

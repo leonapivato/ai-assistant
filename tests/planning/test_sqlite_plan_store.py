@@ -978,7 +978,11 @@ async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
-@pytest.mark.parametrize("corrupt", ["bad", -1], ids=["non-numeric", "negative"])
+@pytest.mark.parametrize(
+    "corrupt",
+    ["bad", "1_0", -1],
+    ids=["unparseable-text", "python-parseable-text", "negative"],
+)
 @pytest.mark.parametrize("read", ["evidence_of", "export"], ids=["evidence_of", "export"])
 async def test_a_corrupt_elision_count_is_a_planning_error(
     tmp_path: Path, corrupt: object, read: str
@@ -996,6 +1000,14 @@ async def test_a_corrupt_elision_count_is_a_planning_error(
     makes §13's elision non-silent, so reading a corrupt one as zero would answer
     *nothing was ever dropped* — ADR-0086 §4's "a *false* answer to the one question the
     provenance display exists to answer".
+
+    **``'1_0'`` is the case that says why only an actual ``int`` is admitted**, and it is
+    the one a text-parsing read passes. Python's ``int()`` reads it as ``10``; SQLite's
+    own ``evidence_elided + 1`` reads the same bytes as ``2``. A store that accepted it
+    would report ``10`` and then ``2`` after the next elision — a count that
+    **decreased**, which ADR-0252 §13 says it never does. The column has ``INTEGER``
+    affinity, so SQLite has already converted every value it reads as a number, and text
+    that survives is text SQLite itself would not read as one.
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)

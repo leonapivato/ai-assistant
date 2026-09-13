@@ -315,6 +315,48 @@ def settled(
         raise PlanningError(msg) from exc
 
 
+def revalidated_evidence(row: GoalEvidence) -> GoalEvidence:
+    """Rebuild ``row`` as a validated, detached :class:`GoalEvidence`, or refuse it.
+
+    **The one place a caller-supplied evidence row is checked before a store keeps it**,
+    so the conforming implementations cannot disagree about which rows
+    :meth:`~ai_assistant.core.protocols.PlanStore.record_evidence` admits. ADR-0023 §2
+    is the ground and its words are the reason: "``model_copy(update=...)`` skips
+    validators (a pydantic property no type can close), so the invariant holds *at the
+    validation boundary*, and **a write that reaches past it must re-validate**" — and a
+    caller holding a stored row can reach past them, so a row copied to ``SUPERSEDED``
+    with no ``superseded_by`` arrives here as a value ADR-0252 §1's fourth axis says is
+    not constructible.
+
+    That matters more for this record than for the four the stores already take as
+    given, because §1's fourth axis is the whole of what makes ADR-0252's correction 1
+    auditable: "retained historical disagreements do not permanently block progress" is
+    only checkable if **every retirement names what did it**. A half-marked row admitted
+    here would be one the history could never explain.
+
+    Rebuilt as ``GoalEvidence`` specifically, so a subclass's extra fields are refused by
+    ``extra="forbid"`` rather than silently dropped — :func:`_revalidated`'s own move.
+
+    Args:
+        row: The row as the caller handed it in.
+
+    Returns:
+        The row, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return GoalEvidence.model_validate(row.model_dump())
+    except ValidationError as exc:
+        # getattr, not row.id: a `model_construct`'d instance may carry no id at all,
+        # and reading one while composing the message would leak an `AttributeError`
+        # past this helper's `PlanningError` boundary (`_revalidated_goal`'s lesson).
+        subject = getattr(row, "id", "<no id>")
+        msg = f"evidence row {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
 def superseded(row: GoalEvidence, *, by: str) -> GoalEvidence:
     """``row`` marked ``SUPERSEDED``, naming the row that displaced it (ADR-0252 §8).
 

@@ -66,6 +66,7 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    revalidated_evidence,
     settled,
     superseded,
 )
@@ -1792,7 +1793,7 @@ class SqlitePlanStore:
                 not this goal's, is not ``STANDING``, or is the row being written, or
                 if the row does not revalidate.
         """
-        snapshot = _revalidated_evidence(evidence)
+        snapshot = revalidated_evidence(evidence)
         named = tuple(supersedes)
         async with self._lock:
             await _run_to_completion(self._record_evidence_sync, snapshot, named)
@@ -2839,31 +2840,6 @@ def _migrated_goal(row_id: str, data: str) -> str:
     return json.dumps(held)
 
 
-def _revalidated_evidence(evidence: GoalEvidence) -> GoalEvidence:
-    """Re-run ``GoalEvidence``'s validators before the row is persisted.
-
-    :func:`_revalidated_goal`'s reason, over the record ADR-0252 §1 adds: the model is
-    mutable and does not validate on assignment, so a caller can build a valid row,
-    reach past its validators and hand it here — and storing that unchecked would write
-    a record every later ``get_evidence``/``export`` fails to decode, so the store would
-    poison its own reads.
-
-    Args:
-        evidence: The row as handed in.
-
-    Returns:
-        The row, revalidated.
-
-    Raises:
-        PlanningError: If it no longer satisfies its own contract.
-    """
-    try:
-        return GoalEvidence.model_validate(evidence.model_dump())
-    except ValidationError as exc:
-        msg = f"evidence row {evidence.id!r} is not a valid record: {exc}"
-        raise PlanningError(msg) from exc
-
-
 def _elided_count(path: str, goal_id: str, raw: Any) -> int:
     """Read a stored elision count, translating corruption to ``PlanningError``.
 
@@ -2875,6 +2851,15 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
     :class:`~ai_assistant.core.types.EvidenceHistory` as a raw ``ValidationError`` —
     each a hole in the boundary every other stored value is read through
     (:func:`_decode_goal` and its siblings).
+
+    **Only an actual ``int`` is admitted, and no text is parsed.** The column has
+    ``INTEGER`` affinity, so SQLite has already converted every value it reads as a
+    number; a value that still comes back as text is one **SQLite** would not read as
+    one, and parsing it with Python's wider grammar would let the two disagree about the
+    same bytes. ``'1_0'`` is the case that forces it: ``int()`` reads it as ``10`` while
+    SQLite's own ``evidence_elided + 1`` reads it as ``2``, so a store that accepted it
+    would report a count that **decreased** on the next elision — the one thing ADR-0252
+    §13 says it never does.
 
     **A negative count is refused rather than clamped**, which is ADR-0086 §4's
     direction: the count is the whole of what makes §13's elision non-silent, so a
@@ -2894,15 +2879,23 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
         PlanningError: If the stored value is not a non-negative integer.
     """
     msg = (
-        f"the plan store at {path!r} holds a non-numeric evidence elision count for "
+        f"the plan store at {path!r} holds a non-integer evidence elision count for "
         f"goal {goal_id} ({raw!r}); the store is corrupt"
     )
-    if isinstance(raw, bool) or not isinstance(raw, str | int):
+    # **An `int` and never a string, which is where this parts company with
+    # `_meta_int`.** That helper reads the `meta` table, whose `value` column this code
+    # writes as TEXT, so a string there is the normal case. This column has INTEGER
+    # affinity and every write this store makes is an integer, so SQLite has already
+    # converted any well-formed integer literal — which means a value that comes back
+    # as text is one SQLite itself would not read as a number, and parsing it with
+    # Python's grammar would let the two disagree. `'1_0'` is the case: `int()` reads it
+    # as 10 and SQLite's own `evidence_elided + 1` reads it as 2, so the count this
+    # store reported would **decrease** on the next elision — which is exactly what
+    # ADR-0252 §13 says it never does. `bool` is an `int` in Python, so it is named
+    # rather than left to read as a count of 0 or 1.
+    if isinstance(raw, bool) or not isinstance(raw, int):
         raise PlanningError(msg)
-    try:
-        count = int(raw)
-    except ValueError as exc:
-        raise PlanningError(msg) from exc
+    count = raw
     if count < 0:
         negative = (
             f"the plan store at {path!r} holds a negative evidence elision count for "
