@@ -284,9 +284,13 @@
   (#2302's own worked example here — that a consumer reads this ADR as superseded by
   **ADR-0250**, which it says is not a target — has been overtaken: ADR-0250 landed a
   `(<scope>)` pair of its own on this line on 2026-09-12 and is a target today.)
-  **The targets are unchanged — ADR-0041, ADR-0211, ADR-0228, ADR-0249 and ADR-0250 — each
-  still paired with the same scope, whose extent does not move; what is re-rendered is the
-  prose naming the clauses.** **The cross-references that prose carried, on which §4
+  **The targets are unchanged — ADR-0041, ADR-0211, ADR-0228, ADR-0249 and ADR-0250 — and
+  every scope stays with the target it was written for, its extent unmoved; what is
+  re-rendered is the prose naming the clauses. ADR-0041 carries no `(<scope>)` of its own
+  and still carries none**, which is deliberate: the 2026-08-29 note below keeps its pair
+  unrestructured because *"giving it the `(<scope>)` it lacks would mean asserting what
+  ADR-0041 replaced, which is ADR-0041's to state"*. Nothing here disturbs that, and it is
+  the one target on this line in that position. **The cross-references that prose carried, on which §4
   places no constraint in a note:** the grounds **ADR-0249** reasons from; **ADR-0249's**
   record, which **ADR-0250's** scope layers on; and the grounds **ADR-0250** reasons from.
   Each names a target of this line by a pair of its own.
