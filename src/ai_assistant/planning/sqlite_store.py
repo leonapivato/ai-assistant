@@ -28,7 +28,6 @@ import asyncio
 import contextlib
 import json
 import os
-import re
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -69,6 +68,7 @@ from ai_assistant.planning.goals import (
     invalidated,
     revalidated_evidence,
     revalidated_revision,
+    revalidated_row_ids,
     settled,
     superseded,
 )
@@ -181,28 +181,39 @@ _UPDATE_HIGH_WATER = "UPDATE meta SET value = ? WHERE key = 'exec_high_water'"
 #: reader has to interpret. ``delete_goal`` removes the count with the goal because the
 #: count *is* a column of the goal.
 #:
-#: **It is TEXT rather than INTEGER, and that is the count's own requirement rather than
-#: a storage preference.** ADR-0252 §13 makes the count monotonic and unbounded — "it
-#: **never decreases**, and a write that drops *k* rows advances it by *k*" — and
-#: ``EvidenceHistory.elided`` is a Python ``int``, which has no ceiling. SQLite's
-#: integers stop at 64 bits and its ``+`` **promotes to REAL rather than raising** when
-#: one overflows, so an ``INTEGER`` column would either commit a count no later read
-#: accepts or force the store to refuse a write — and §12 rules that ``record_evidence``
-#: "refuses only for the three reasons §12 lists", so a fourth is not available to it.
-#: Canonical decimal text has neither problem, and §13 leaves the shape open in terms:
-#: "what shape the store keeps it in is not contracted — the contract is the value, its
-#: monotonicity and the fact that it advances in the **same indivisible step** as the
-#: write that drops the rows".
+#: **It is an ordinary ``INTEGER``, and the 64-bit ceiling is not reachable from here.**
+#: ADR-0252 §13 leaves the shape open in terms — "what shape the store keeps it in is
+#: not contracted — the contract is the value, its monotonicity and the fact that it
+#: advances in the **same indivisible step** as the write that drops the rows" — so the
+#: only question is whether an ``INTEGER`` holds every count this store can produce. It
+#: does, by a wide margin: one ``record_evidence`` call appends exactly one row and
+#: :data:`~ai_assistant.core.types.MAX_GOAL_EVIDENCE` bounds the history it leaves
+#: behind, so the call drops **at most one** row and advances this goal's count by at
+#: most one. Saturating a signed 64-bit column therefore takes 2**63 ≈ 9.2e18
+#: successful writes **to a single goal** — §13's counter is per goal, so the figure is
+#: not shared out across a store — which is millions of years at any rate a system
+#: driven one turn at a time reaches. A ceiling nothing can walk to does not buy a
+#: representation, and the two things a wider one would cost are both real: hand-rolled
+#: decimal arithmetic in the store, and text this store must parse back with a grammar
+#: of its own (SQLite reads ``'1_0'`` as ``2`` where Python's ``int()`` reads ``10``).
+#:
+#: What the ceiling does rule out is SQLite's own ``+``, which **promotes to REAL rather
+#: than raising** on overflow. :meth:`SqlitePlanStore._elide_evidence` reads the count,
+#: adds in Python and writes it back, so the only value that can reach the ceiling is
+#: one an outside writer put there — corruption, refused as corruption by
+#: :func:`_elided_count` and :meth:`SqlitePlanStore._elide_evidence`, never a float
+#: committed in silence. No refusal is added to ``record_evidence`` for it: §12 rules
+#: that the method "refuses only for the three reasons §12 lists".
 _GOAL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
     ("conversation_id", "TEXT"),
     ("last_engaged_in", "TEXT"),
-    ("evidence_elided", "TEXT NOT NULL DEFAULT '0'"),
+    ("evidence_elided", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
     "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
-    "evidence_elided TEXT NOT NULL DEFAULT '0', data TEXT NOT NULL)",
+    "evidence_elided INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS executions("
@@ -271,14 +282,6 @@ _ORDINAL_INDEX = "executions_created_seq"
 #: the two columns beside it (ADR-0250 §9).
 _VERSION_BEFORE_INTERPRETATIONS: Final[int] = 1
 
-#: The one spelling ADR-0252 §13's elision count is stored in: canonical decimal, no
-#: sign, no leading zero, no separator. The column is TEXT because the count is unbounded
-#: and SQLite's integers are not, and a text column read with Python's ``int()`` grammar
-#: would accept spellings this store never writes and that SQLite itself reads
-#: differently (``'1_0'`` is ``10`` to one and ``2`` to the other). Matching the exact
-#: output form instead means there is nothing for the two to disagree about.
-_CANONICAL_COUNT: Final[re.Pattern[str]] = re.compile(r"0|[1-9][0-9]*")
-
 #: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
 #: EXISTS`` is a no-op against a pre-existing table of a different shape (#373),
 #: exactly as it is for the ``meta`` table (#349) and the ordinal index (#364), so
@@ -298,7 +301,7 @@ _RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
         "id": ("TEXT", False),
         "conversation_id": ("TEXT", False),
         "last_engaged_in": ("TEXT", False),
-        "evidence_elided": ("TEXT", True),
+        "evidence_elided": ("INTEGER", True),
         "data": ("TEXT", True),
     },
     "plans": {
@@ -1819,16 +1822,22 @@ class SqlitePlanStore:
         the id returned is read from **it**. ``supersedes`` is snapshotted on the same
         line for that clause's own stated reason: "a ``Sequence`` argument is a
         container the caller may still be holding", so a caller that appends to it while
-        the write is in flight cannot add a row to the set this call marks.
+        the write is in flight cannot add a row to the set this call marks. It is
+        **revalidated** rather than merely snapshotted
+        (:func:`~ai_assistant.planning.goals.revalidated_row_ids`), because the
+        parameter's ``Sequence[str]`` is satisfied by a bare ``str`` and ``tuple("ev1")``
+        is ``("e", "v", "1")`` — three rows the caller never named, which this store
+        would supersede irreversibly while leaving ``ev1`` standing.
 
         Raises:
-            PlanningError: If the store already holds a row under this ``id``, if
-                ``goal_id`` names no stored goal, if a row named by ``supersedes`` is
-                not this goal's, is not ``STANDING``, or is the row being written, or
-                if the row does not revalidate.
+            PlanningError: If ``supersedes`` is not a container of identifiers, if the
+                store already holds a row under this ``id``, if ``goal_id`` names no
+                stored goal, if a row named by ``supersedes`` is not this goal's, is not
+                ``STANDING``, or is the row being written, or if the row does not
+                revalidate.
         """
+        named = revalidated_row_ids(supersedes, what="supersede")
         snapshot = revalidated_evidence(evidence)
-        named = tuple(supersedes)
         async with self._lock:
             await _run_to_completion(self._record_evidence_sync, snapshot, named)
         return snapshot.id
@@ -1987,11 +1996,10 @@ class SqlitePlanStore:
             return
         doomed = [row_id for row_id in ordered if row_id != keep][:excess]
         conn.executemany("DELETE FROM goal_evidence WHERE id = ?", [(one,) for one in doomed])
-        # **Read, add and write, rather than `evidence_elided + ?` in SQL.** The count is
-        # an unbounded Python integer (§13) held as canonical decimal text, so the
-        # addition is Python's and has no ceiling — where SQLite's `+` is 64-bit and
-        # **promotes to REAL rather than raising** on overflow, which would commit a
-        # count no later read accepts. Reading the current value through
+        # **Read, add and write, rather than `evidence_elided + ?` in SQL.** SQLite's `+`
+        # is 64-bit and **promotes to REAL rather than raising** on overflow, so the one
+        # thing it would do with a count at the ceiling is commit a float no later read
+        # accepts. Python's addition cannot do that. Reading the current value through
         # :func:`_elided_count` also means a counter an outside writer has corrupted is
         # caught **here**, at the write, rather than only on the next read. None of this
         # adds a refusal: §12 rules that `record_evidence` "refuses only for the three
@@ -1999,10 +2007,26 @@ class SqlitePlanStore:
         # rather than a fourth reason to refuse a caller's row.
         held = conn.execute("SELECT evidence_elided FROM goals WHERE id = ?", (goal_id,)).fetchone()
         advanced = _elided_count(str(self._path), goal_id, held[0]) + len(doomed)
-        conn.execute(
-            "UPDATE goals SET evidence_elided = ? WHERE id = ?",
-            (str(advanced), goal_id),
-        )
+        # A count this store wrote cannot reach the ceiling — `_GOAL_COLUMNS` does that
+        # arithmetic — so `advanced` exceeds it only where an outside writer left a count
+        # at or above 2**63 - 1, which is the same corruption :func:`_elided_count`
+        # refuses one line above and is reported in the same words. Without this the
+        # driver's `OverflowError` would cross the boundary raw, which is the hole every
+        # other stored value is read through a translation to avoid; with it, still no
+        # fourth refusal reason, because a corrupt store is not the caller's row being
+        # refused.
+        try:
+            conn.execute(
+                "UPDATE goals SET evidence_elided = ? WHERE id = ?",
+                (advanced, goal_id),
+            )
+        except OverflowError as exc:
+            msg = (
+                f"the plan store at {str(self._path)!r} holds an evidence elision count "
+                f"for goal {goal_id} that cannot be advanced ({advanced} exceeds "
+                f"SQLite's integer range); the store is corrupt"
+            )
+            raise PlanningError(msg) from exc
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
         """Return the evidence row under that id, or ``None`` (ADR-0252 §12)."""
@@ -2895,18 +2919,20 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
     ``INTEGER`` is an **affinity** and not a constraint, so SQLite stores whatever a
     writer outside this code put there, and ``CREATE TABLE IF NOT EXISTS`` accepts a
     pre-existing ``goals`` this store did not shape. A text value would leave ``int()``
-    as a raw ``ValueError`` and a negative one would leave
+    as a raw ``ValueError``, a float would arrive as a count that is not a whole number
+    of rows, and a negative one would leave
     :class:`~ai_assistant.core.types.EvidenceHistory` as a raw ``ValidationError`` —
     each a hole in the boundary every other stored value is read through
     (:func:`_decode_goal` and its siblings).
 
-    **Exactly one spelling is admitted, and it is the one this store writes.** The
-    column holds canonical decimal text, so the check is a full match against
-    ``0|[1-9][0-9]*`` rather than a call to ``int()``: Python's parsing grammar is wider
-    than SQLite's and wider than this store's own output, and a column is read by more
-    than one reader. ``'1_0'`` is the case that forces it — ``int()`` reads it as ``10``
-    and SQLite's arithmetic reads the same bytes as ``2`` — and ``' 7'``, ``'+7'``,
-    ``'007'`` and ``'-0'`` are refused on the same rule rather than each on its own.
+    **The value has to be an integer already, not something an integer can be parsed
+    out of.** The column is ``INTEGER`` and this store only ever writes an ``int`` into
+    it, so a ``float`` (SQLite's REAL, which is what its own ``+`` yields on overflow),
+    a ``str`` (any spelling at all, including one Python's ``int()`` would happily
+    accept and SQLite's arithmetic would read differently) and ``None`` are each a value
+    this store did not write, and are refused as such rather than coerced into one.
+    Refusing the *type* rather than parsing it is also what keeps a grammar out of this
+    function: there is nothing here for SQLite and Python to disagree about.
 
     **A negative count is refused rather than clamped**, which is ADR-0086 §4's
     direction: the count is the whole of what makes §13's elision non-silent, so a
@@ -2925,23 +2951,16 @@ def _elided_count(path: str, goal_id: str, raw: Any) -> int:
     Raises:
         PlanningError: If the stored value is not a non-negative integer.
     """
-    msg = (
-        f"the plan store at {path!r} holds a malformed evidence elision count for "
-        f"goal {goal_id} ({raw!r}); the store is corrupt"
-    )
-    # **One spelling, matched exactly, and no parsing grammar of its own.** The value is
-    # required to be the canonical decimal text this store writes — `str(int)` — rather
-    # than anything Python's `int()` happens to accept, because those two grammars are
-    # not the same and a column is read by more than one reader. `'1_0'` is the case that
-    # forces it: `int()` reads it as 10 while SQLite's own arithmetic reads the same
-    # bytes as 2, so a store that parsed it would disagree with its own file. `' 7'`,
-    # `'+7'`, `'007'` and `'-0'` are refused on the same rule rather than each on its
-    # own: there is exactly one spelling of each count, so any other is a value this
-    # store did not write. A negative cannot be spelled at all, which is where §13's
-    # "never decreases" becomes a property of the column rather than a check.
-    if not isinstance(raw, str) or _CANONICAL_COUNT.fullmatch(raw) is None:
+    # `bool` is excluded explicitly because it is a subclass of `int` in Python; SQLite
+    # does not hand one back, but the check states what is admitted rather than what
+    # this driver happens to return.
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+        msg = (
+            f"the plan store at {path!r} holds a malformed evidence elision count for "
+            f"goal {goal_id} ({raw!r}); the store is corrupt"
+        )
         raise PlanningError(msg)
-    return int(raw)
+    return raw
 
 
 def _decode_evidence(data: str) -> GoalEvidence:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import IllegalTransitionError, PlanningError
 from ai_assistant.core.types import (
@@ -34,10 +34,11 @@ from ai_assistant.core.types import (
     GoalQuestion,
     GoalQuestionDisposition,
     GoalRevision,
+    Identifier,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from ai_assistant.core.types import (
         AttemptTransition,
@@ -389,6 +390,59 @@ def revalidated_evidence(row: GoalEvidence) -> GoalEvidence:
         # past this helper's `PlanningError` boundary (`_revalidated_goal`'s lesson).
         subject = getattr(row, "id", "<no id>")
         msg = f"evidence row {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
+#: The shape a caller's set of row ids has to have before a store acts on it. Declared
+#: once, beside :func:`revalidated_row_ids`, so the element rule is ``Identifier``'s own
+#: rather than a second spelling of it.
+_ROW_IDS: Final[TypeAdapter[tuple[Identifier, ...]]] = TypeAdapter(tuple[Identifier, ...])
+
+
+def revalidated_row_ids(named: Sequence[str], *, what: str) -> tuple[Identifier, ...]:
+    """Snapshot a caller's set of evidence row ids as a validated tuple, or refuse it.
+
+    The ``supersedes`` counterpart of :func:`revalidated_revision`'s work on
+    ``GoalRevision.invalidates``, and it exists for the identical reason, one level out:
+    a **parameter** annotated ``Sequence[str]`` has no validator at all, so nothing
+    between the caller and the store checks what arrived.
+
+    **A bare string is the case that forces this.** ``str`` satisfies
+    ``Sequence[str]``, and ``tuple("ev1")`` is ``("e", "v", "1")`` — three ids the
+    caller never named. Where rows ``e``, ``v`` and ``1`` happen to be standing under
+    the same goal, a store would irreversibly supersede all three and leave ``ev1``
+    itself **standing**, reporting nothing: ADR-0252 §12 obliges a store to mark the
+    rows the caller named, and marking three others while answering success is the
+    failure mode §1's fourth axis exists to make impossible. ``bytes`` is refused beside
+    it, for the same reason in another spelling.
+
+    Snapshotting is the other half, and it is ``core.protocols``' second standing
+    obligation (ADR-0065 §1): "a ``Sequence`` argument is a container the caller may
+    still be holding". Taking the tuple **once**, on the coroutine's first executed
+    line, is what stops a one-shot iterator being drained by the refusal pass and found
+    empty by the marking pass, and what stops a caller appending to a list while the
+    write is in flight.
+
+    Args:
+        named: The ids as the caller handed them in.
+        what: What the ids are for, as the tail of "the ids to {what}" in the message.
+
+    Returns:
+        The ids, validated and detached, in the order given.
+
+    Raises:
+        PlanningError: If the argument is not a container of identifiers.
+    """
+    if isinstance(named, str | bytes):
+        msg = (
+            f"the ids to {what} were given as {named!r}, a single string rather than a "
+            f"container of ids: its characters are not the ids you named (ADR-0252 §12)"
+        )
+        raise PlanningError(msg)
+    try:
+        return _ROW_IDS.validate_python(named)
+    except ValidationError as exc:
+        msg = f"the ids to {what} are not a container of identifiers: {exc}"
         raise PlanningError(msg) from exc
 
 

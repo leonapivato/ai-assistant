@@ -39,6 +39,7 @@ from ai_assistant.planning.goals import (
     invalidated,
     revalidated_evidence,
     revalidated_revision,
+    revalidated_row_ids,
     settled,
     superseded,
 )
@@ -429,7 +430,11 @@ class InMemoryPlanStore:
         displaced its own operand. That is also this method's discharge of
         ``core.protocols``' second standing obligation (ADR-0065 §1), by the first of
         the three routes it names: this store does not suspend, so it cannot read
-        ``supersedes`` twice across a suspension and see two different sets.
+        ``supersedes`` twice across a suspension and see two different sets. It is
+        nonetheless **revalidated into a tuple on the first executed line**
+        (:func:`~ai_assistant.planning.goals.revalidated_row_ids`): the parameter is
+        annotated ``Sequence[str]``, which a bare ``str`` satisfies, and ``tuple("ev1")``
+        is ``("e", "v", "1")`` — three rows the caller never named.
 
         **The row is revalidated before it is kept**, not merely copied, so the three
         conforming implementations admit the same rows: ADR-0023 §2's "a write that
@@ -438,11 +443,13 @@ class InMemoryPlanStore:
         ``superseded_by`` is refused here exactly as ``SqlitePlanStore`` refuses it.
 
         Raises:
-            PlanningError: If the row does not revalidate, if the store already holds a
-                row under this ``id``, if ``goal_id`` names no stored goal, or if a row
-                named by ``supersedes`` is not this goal's, is not ``STANDING``, or is
-                the row being written.
+            PlanningError: If ``supersedes`` is not a container of identifiers, if the
+                row does not revalidate, if the store already holds a row under this
+                ``id``, if ``goal_id`` names no stored goal, or if a row named by
+                ``supersedes`` is not this goal's, is not ``STANDING``, or is the row
+                being written.
         """
+        named = revalidated_row_ids(supersedes, what="supersede")
         stored = revalidated_evidence(evidence)
         if stored.id in self._evidence:
             msg = (
@@ -453,11 +460,9 @@ class InMemoryPlanStore:
         if stored.goal_id not in self._goals:
             msg = f"cannot record evidence for unknown goal {stored.goal_id}"
             raise PlanningError(msg)
-        self._refuse_unmarkable(
-            stored.goal_id, supersedes, being_written=stored.id, what="supersede"
-        )
+        self._refuse_unmarkable(stored.goal_id, named, being_written=stored.id, what="supersede")
         self._evidence[stored.id] = stored
-        for row_id in supersedes:
+        for row_id in named:
             self._evidence[row_id] = superseded(self._evidence[row_id], by=stored.id)
         self._elide_evidence(stored.goal_id, keep=stored.id)
         return stored.id
