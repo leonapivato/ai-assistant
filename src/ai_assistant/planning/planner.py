@@ -1510,9 +1510,11 @@ class ModelBackedPlanner:
                 legal and is the ordinary case — every first call — and renders
                 nothing.
             evidence: What this call may act on about the reads already taken
-                (ADR-0249 §10), rendered under a heading of its own and carrying no
-                label, no identifier and no address. Empty is legal and is the
-                ordinary case, and renders nothing.
+                (ADR-0249 §10), rendered under a heading of its own with each row
+                labelled ``E1``, ``E2``, … by its position in **this** sequence
+                (ADR-0252 §10) — an ordinal the renderer derives and never an
+                identifier or an address, which the digest carries none of. Empty is
+                legal and is the ordinary case, and renders nothing.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.PlannerOutput` carrying the
@@ -2561,8 +2563,10 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
         lines += listing
 
     # ADR-0249 §10, below the material and above ADR-0251 §3's carrier: it is what the
-    # reads already taken for this goal established, which is neither a group of
-    # `memories` nor a second address space — it carries no label at all.
+    # reads already taken for this goal established, which is not a group of `memories`
+    # and not the same address space — ADR-0252 §10 makes its `E` labels a fourth one,
+    # and the prefix is the whole of what tells the loop which sequence to resolve
+    # against.
     lines += _render_evidence(evidence)
 
     # ADR-0251 §3, printed **last**: it is a fact about this turn's own earlier asks
