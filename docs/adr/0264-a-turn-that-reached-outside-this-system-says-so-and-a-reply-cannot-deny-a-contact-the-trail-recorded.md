@@ -135,15 +135,31 @@ a user reading one has not been told the other.
 
 ### 2. A search contact, established from the disposition the servicing recorded
 
-> **Normative.** A servicing that emitted a `WEB_SEARCH` ask establishes an outbound
-> contact where it **completed and recorded no `SearchDisposition`** — which is a search
+> **Normative.** **This section binds at every site that performs a `WEB_SEARCH` call,
+> and there are two today**: the servicing in `ai_assistant.orchestration.reads`, and
+> ADR-0244 §7's **dispatch on the resume**, which runs the parked read's one call after
+> the user answers. Each computes the fact **at its own site**, from the outcome it holds
+> and by the partition below, and carries it out beside the `SearchNotServiced` member it
+> already carries — the placement ADR-0242 §7 fixes for its own member, *"computed at the
+> servicing site, by the component that recorded the `SearchDisposition`"*. **No site
+> recomputes another's**, and a later site that performs the call performs this
+> computation too.
+
+> **Normative.** **The fact is never derived from `SearchNotServiced`.** That vocabulary
+> is non-injective by design (ADR-0242 §8) and `UNAVAILABLE` covers both a response that
+> arrived and was refused and a transport that failed, which this section's second and
+> third groups separate. A site holding only the member cannot compute this fact and does
+> not try.
+
+> **Normative.** A site establishes an outbound contact where its call
+> **completed and recorded no `SearchDisposition`** — which is a search
 > that reached the provider and was answered, records or none, because
 > `SearchRefusal.NO_RESULT` maps to no disposition (ADR-0231 §13) — **or** where the
 > disposition it recorded is one of
 > `PROVIDER_REFUSED`, `RESPONSE_TOO_LARGE` and `UNATTESTED`, each of which is a response
 > this system received and then refused.
 
-> **Normative.** A servicing whose disposition is `NOT_CONFIGURED`, `NO_BUDGET`,
+> **Normative.** A call whose disposition is `NOT_CONFIGURED`, `NO_BUDGET`,
 > `COMPOSER_DECLINED`, `COMPOSER_UNAVAILABLE`, `COMPOSER_MALFORMED`, `COMPOSER_TOO_LONG`,
 > `BINDING_FAILED`, `RULING_CONFIRM`, `RULING_DENY`, `RULING_UNAVAILABLE` or
 > `SPEND_REFUSED` establishes **no** contact. Every one of those is a stage before the
@@ -151,7 +167,7 @@ a user reading one has not been told the other.
 > ceiling, and `NO_BUDGET`'s own definition is that *"no request is composed, no ruling
 > is sought and no channel is opened"*.
 
-> **Normative.** A servicing whose disposition is `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`
+> **Normative.** A call whose disposition is `TRANSPORT_FAILED`, `DEADLINE_EXPIRED`
 > or `SEARCH_FAILED` establishes **nothing either way**, and the turn carries no
 > statement on its account. A refused connection, an expiry of `search_call_deadline` and
 > a fault raised out of `WebSearcher.search` are each consistent with a request that left
@@ -268,20 +284,30 @@ and would have left the next outbound seam to mint its own vocabulary.
 > `SearchDisposition` value, no record id, no decision id and no instant.**
 
 > **Normative.** **`destinations` holds each class contacted once, in
-> `OutboundDestination`'s declared order and never in encounter order.** A turn that
-> contacted one class through three servicings carries that class once. **It is not an
+> `OutboundDestination`'s declared order and never in encounter order**, and the model
+> **refuses** a value that is empty or that carries a class twice rather than accepting
+> one a surface would then render as a contact naming nothing. A turn that contacted one
+> class through three servicings carries that class once. **It is not an
 > enumeration of a turn's servicings**, which is the direction ADR-0226 §9's
 > counts-and-no-copy reasoning and ADR-0228 §10's *"no count, no duration, no guard
 > name"* both refuse: what a reader is told is which kinds of thing this turn reached,
 > and the system's internal shape stays inside it.
 
 > **Normative.** **`records` is how many of the records the composing stage was given
-> were minted by this turn's established contacts** — the count of ids in the
-> contacting servicings' `minted` carriers that the supply handed to composition still
-> holds, taken as one population over the turn so a record minted twice counts once.
-> That is `hop_reached`'s own shape, which ADR-0227 §3 states as the ids a servicing
-> reached *"that the supply holds after it"*, and it is computed in `orchestration` from
-> two values that package already has.
+> came from this turn's established contacts.** The contacting site records **the ids it
+> admitted into the supply from its own call** — a fact it holds, because admission is
+> its own act — and `records` is how many of those the supply handed to composition still
+> holds, taken as one population over the turn. The second half is the withholding test
+> and is `hop_reached`'s ratified shape, which ADR-0227 §3 states as the ids a servicing
+> reached *"that the supply holds after it"*.
+
+> **Normative.** **The admitted set is recorded and never reconstructed**, and in
+> particular it is not `ServicedCarriers.minted` filtered after the fact. `minted` is
+> every id the call produced; the supply's budget can stop one of them entering
+> (`_Union.admit`'s truncation), and the difference is a fact the union has and a later
+> reader does not. The rule is ADR-0249 §7's own for `minted` — *"supplied by the
+> servicing that knows it and never inferred at the resolution site"* — applied to the
+> narrower set this decision needs.
 
 > **Normative.** **It is not `ServicedRead.supplied` and no lane derives it from that
 > field.** ADR-0238 §11's count is *"how many records this servicing supplied to the
@@ -293,14 +319,25 @@ and would have left the next outbound seam to mint its own vocabulary.
 > step produced.
 
 > **Normative.** `records` is `0` on a turn whose only contact was an egress one, on a
-> search answered with nothing, on one whose every minted record deduplication removed,
-> and on one whose minted records a channel's withholding kept out of the supply
-> (ADR-0199 §3). **A `0` means no record from outside is in front of the composing
-> stage**, and it means nothing else.
+> search answered with nothing, on one whose every returned record the budget stopped,
+> and on one whose admitted records a channel's withholding kept out of what composition
+> was given (ADR-0199 §3). **A `0` means no record from outside is in front of the
+> composing stage**, and it means nothing else.
+
+**Deduplication is deliberately absent from that list, and the reason is worth stating
+because its absence looks like an omission.** A search's records are minted with a fresh
+identifier and ADR-0231 §16 keeps them out of every store, so *"no id in here is ever seen
+again"*: a minted id is never already in `_Union.held`, and `_Union.admit`'s deduplication
+therefore cannot remove one. What can remove one is the **budget**, which is why the
+clause above names truncation and not deduplication. The admitted set is nonetheless what
+the site records rather than the returned set, because a count defined over a fact its own
+site holds does not have to be argued from an identifier scheme at all — and an earlier
+draft of this section, which defined the count by filtering `minted` against the final
+supply, is what made that argument load-bearing.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
-> contact, and a turn that reached outside itself and brought nothing into the answer is
-> the case this decision most needs to state — it is the one a user cannot tell from a
+> contact, and a turn that reached outside itself and put nothing in front of composition
+> is the case this decision most needs to state — it is the one a user cannot tell from a
 > turn that did not look, and telling them apart is what #2268 asks for.
 
 > **Normative.** **Neither the value nor any rendering of it says what the reply did
@@ -351,7 +388,16 @@ today, which is why #2268 was reported as a contradiction rather than as a thin 
 > own carrier and ADR-0228 §10 for its own — adds no member to any Protocol, and is
 > **never recomputed downstream**.
 
-> **Normative.** The composing stage is given **one fixed fragment**, written in
+> **Normative.** **The fragment obligation binds on a contact-carrying pass that
+> composes a reply, and on no other.** ADR-0170 §4 requires no composition on a pass whose
+> step parked for confirmation or whose `turn` is `None`, and a recovered resume can
+> finish an egress-bound step and satisfy §3 with no composing stage in the pass at all.
+> On such a pass the member is carried and the surface statement is rendered exactly as
+> §7 fixes, and there is no fragment because there is nothing to give one to — which is
+> not a degradation, because the reply the fragment guards does not exist.
+
+> **Normative.** Where the pass composes, the composing stage is given **one fixed
+> fragment**, written in
 > `ai_assistant.orchestration`, interpolating **`records` and nothing else**. The
 > fragment states the two facts every contact has and no others: that **this turn reached
 > outside this system**, and **how many of the records in front of the model came from
@@ -554,33 +600,41 @@ not read. §12 names the trigger.
 > **Normative.** The implementing lane owes these six arms, each over representative
 > input, and a lane that lands fewer has not implemented this decision.
 >
-> 1. **A search that minted records into the supply, over a turn whose pre-existing
->    supply is non-empty.** `destinations` is `(SEARCH_PROVIDER,)`, `records` is the
->    number of **minted** records composition was given and **not** the pre-existing
->    ones, `search_not_serviced` is `None`, and the prompt carries §6's fragment and
->    `_PLAN_IS_ABOUT_ACTING`. The non-empty pre-existing supply is what makes the arm
->    discriminate: a lane reading `ServicedRead.supplied` passes every other arm and
->    fails this one.
+> 1. **A search that put records in front of composition, over a turn whose pre-existing
+>    supply is non-empty, and with the read budget stopping one returned record.**
+>    `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the **admitted** records and
+>    neither the pre-existing ones nor the truncated one; `search_not_serviced` is `None`;
+>    the prompt carries §6's fragment and `_PLAN_IS_ABOUT_ACTING`. The non-empty supply is
+>    what makes the arm discriminate — a lane reading `ServicedRead.supplied` passes every
+>    other arm and fails this one — and the truncation is what makes admitted differ from
+>    returned.
 > 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`),
 >    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
 >    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
 >    rendered statement states the `0` rather than eliding it.
-> 3. **A search refused before the send** (`RULING_DENY`). `outbound_contact` is `None`,
->    `search_not_serviced` is `DECLINED`, and the composing prompt is byte-identical to
->    what it is without this decision.
-> 4. **A response received and then refused** (`UNATTESTED`). **Both** members are
->    carried — `outbound_contact` with `records` `0`, and `search_not_serviced`
->    `UNAVAILABLE` — and both statements render (§8).
+> 3. **The two sides of the disposition partition.** A search refused before the send
+>    (`RULING_DENY`) carries **no** contact, carries `search_not_serviced` `DECLINED`, and
+>    leaves the composing prompt byte-identical to what it is without this decision; a
+>    response received and then refused (`UNATTESTED`) carries **both** members —
+>    `outbound_contact` with `records` `0`, and `search_not_serviced` `UNAVAILABLE` — and
+>    renders both statements (§8).
+> 4. **A parked read the user approved, dispatched on the resume** (ADR-0244 §7), in two
+>    shapes: one whose call returns records, which carries a contact with those records
+>    counted; and one that reaches the provider and returns nothing, which carries a
+>    contact with `records` `0`. Neither is a servicing and neither drives a step, and an
+>    implementation that computes the fact only in `reads` fails this arm (§2).
 > 5. **Three egress steps over one tool, and only the first carries a contact**: one
 >    whose addressed `StepExecution` is `SUCCEEDED`, where `destinations` is
 >    `(EGRESS_TOOL,)` and `records` is `0`; one whose disposition is `EXECUTED` and whose
 >    addressed step is **`FAILED`** because the invocation claim was refused before the
 >    callable, which carries **no** contact; and one refused at the gate, which carries
 >    none either.
-> 6. **A turn that both searched and sent, in that encounter order and in the reverse.**
->    `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both, which is the declared
->    order and not the encounter order (§4); and the one fragment §6 fixes is rendered
->    once, stating the contact rather than a lookup.
+> 6. **A turn that both searched and sent, in that encounter order and in the reverse**,
+>    where `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both — the declared order
+>    and not the encounter order (§4) — and §6's one fragment is given once, stating the
+>    contact rather than a lookup; **and the construction invariants over `OutboundContact`
+>    itself**: an empty `destinations`, and one carrying a class twice, are each refused by
+>    the model rather than accepted and rendered.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
