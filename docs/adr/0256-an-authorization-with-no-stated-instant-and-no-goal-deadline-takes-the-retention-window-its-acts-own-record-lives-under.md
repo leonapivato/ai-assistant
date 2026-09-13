@@ -7,7 +7,9 @@
   entire**, its *"no row at all"* and its *"Nothing is invented, nothing is defaulted and
   nothing falls back to a configuration"* included: where the recorded act states no instant and
   the goal carries no `deadline`, `expires_at` is now `proposed_at` advanced by the deployment's
-  turn-retention window and a row **is** written, where that window is finite (§1).
+  turn-retention window and a row **is** written, where that window is finite; with it **§20's
+  arm 69 in its two rung-3 cases alone**, every other case of that arm standing verbatim (§1,
+  §7).
   **§12's stated cost of that rung** — *"a goal carrying no `deadline` whose user stated no
   horizon has no route (d) at all, and every call of it asks"* — which is true only where that
   window is set to keep turns forever, and there the ratified rung stands verbatim as the
@@ -15,9 +17,11 @@
   third rung reads one deployment value, `core.config.Settings.episode_retention`**, together
   with **§12's justification clause in its limb *"and in neither case by a deployment"***; every
   other limb of both stands, `Settings` gains nothing and no figure bounds rung 1 or rung 2 (§2,
-  §7). **§12's path-(ii) transcription clause together with §1's path-(ii) *"transcribed
-  unchanged"* list and §1's path-(i) *"the only path that may … set `expires_at`"***, each in
-  the `expires_at` limb alone and in the **narrowing direction alone** (§5). **§9 clause (ii)'s
+  §7). **The path-(ii) transcription rule in all four places ADR-0254 states it** — §12's
+  path-(ii) transcription clause, §1's path-(ii) *"transcribed unchanged"* list, §1's path-(i)
+  *"the only path that may … set `expires_at`"* and §5's *"`expires_at` is transcribed from the
+  row it supersedes"* — **together with §20's arm 17 in its `expires_at` field alone**, each in
+  the `expires_at` limb and in the **narrowing direction alone** (§5). **§9 clause (ii)'s
   bar limb *"move `expires_at`"***, in that same narrowing direction alone. **§9 clause (iii)
   stands entire and no limb of it is superseded** — an instant a correction's span does not
   settle to one value is not taken and the user is asked, exactly as ratified (§5). And **§19's
@@ -460,9 +464,18 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
 1. **§12's ladder, rung 3, entire.** *"**no row at all.** Where the act states no instant **and**
    the goal carries no `deadline` … **no path-(i) proposal and no path-(iii) row is written**"*,
    and with it that rung's *"Nothing is invented, nothing is defaulted and nothing falls back to
-   a configuration"*. A reader holding only ADR-0254 writes no row for every deadline-free goal;
-   after this decision they write one wherever the turn-retention window is finite, which is the
-   default. **Superseded, narrowed to where a window exists** (§1, §3).
+   a configuration"*. With it, **§20's arm 69** in its two rung-3 cases alone — *"An act naming
+   none on a goal carrying **no** `deadline`, and one carrying a `deadline` at or before
+   `proposed_at` → **no path-(i) proposal and no path-(iii) row is written** … one test each"* —
+   which a lane must now ship as §9's arms instead. A reader holding only ADR-0254 writes no row
+   for every deadline-free goal and ships a test asserting that; after this decision they write
+   one wherever the turn-retention window is finite, which is the default. **Superseded, narrowed
+   to where a window exists** (§1, §3). **Every other case of arm 69 stands verbatim**: rung 1's,
+   rung 2's, its path-(ii) case — *"a live row with an explicit future `expires_at` on a goal
+   carrying **no** `deadline`, corrected by 'make it Sunday' naming no horizon → the correction
+   **is written**, transcribing that `expires_at` unchanged"*, which §5 leaves untouched because
+   that correction's span states no instant — its `deadline`-edited-after-the-write case, its
+   `Settings` roster test and its recipient-grant and configured-provider limbs.
 2. **§12's stated cost.** *"a goal carrying no `deadline` whose user stated no horizon has no
    route (d) at all, and every call of it asks"*. Over-wide as it stands: true only under a
    deployment that keeps turns forever. **Superseded in scope, and verbatim where §3 fires.**
@@ -471,12 +484,21 @@ each limb the answer is yes, and the sentence that becomes false or over-wide is
    for an expiry at all. **Superseded in the single respect that §1's rung reads
    `episode_retention`**, and in no other: `Settings` gains nothing, the expiry stays per
    `Authorization` and shown when granted, and no figure bounds rung 1 or rung 2 (§2, §6).
-4. **§12's path-(ii) transcription clause, §1's path-(ii) *"`expires_at` … transcribed
-   unchanged"* and §1's path-(i) *"the only path that may … set `expires_at`"*.** A reader
-   holding only ADR-0254 refuses every movement of that field on a correction. **Superseded in
-   the `expires_at` limb of each and in the narrowing direction alone** (§5); the widening
-   direction, the rest of each list — `goal`, `tool`, `account`, `destinations`, `origin` — and
-   the whole of path (ii)'s carry-forward rule stand entire.
+4. **The path-(ii) transcription rule, in all four places ADR-0254 states it, and the arm that
+   tests it.** §12's path-(ii) transcription clause; §1's path-(ii) *"`expires_at` … transcribed
+   unchanged"*; §1's path-(i) *"the only path that may … set `expires_at`"*; and **§5's
+   *"`expires_at` is transcribed from the row it supersedes"***, which states the same rule a
+   fourth time and would on its own refuse the narrowing. With them, **§20's arm 17** — *"`goal`,
+   `tool`, `account`, `destinations` and `expires_at` altered on an otherwise valid superseding
+   record → the store refuses the transcription, one test per field"* — **in its `expires_at`
+   field alone**, which a lane must now test as an acceptance for a narrowing and a refusal for
+   everything else (§9). A reader holding only ADR-0254 refuses every movement of that field on
+   a correction and ships a test asserting the refusal. **Superseded in the `expires_at` limb of
+   each and in the narrowing direction alone** (§5); the widening direction, the rest of each
+   list — `goal`, `tool`, `account`, `destinations`, `origin` — arm 17's other four fields, §5's
+   *"A path-(ii) correction never extends authority in time"* headline and its *"No sequence of
+   corrections outlives the confirmation that began it"*, and the whole of path (ii)'s
+   carry-forward rule all stand entire.
 5. **§9 clause (ii)'s bar limb *"move `expires_at`"*.** **Superseded in the narrowing direction
    alone** (§5), on that clause's own stated principle. Clause (i) and the no-model-output rule
    stand entire.
@@ -558,8 +580,10 @@ Decision text is rewritten, which ADR-0070 §1 forbids.
 > member reaches the promoted surface and no wire-carried value changes shape, so ADR-0124 §9 is
 > not engaged.
 
-**Lane 2 owes the arms below for this decision**, each a representative-input test shipped with
-it, and **each is a clause of its own** because each is separately satisfiable: a lane could ship
+**Lane 2 owes the arms below for this decision**, and they **replace ADR-0254 §20's arm 69 in
+its two rung-3 cases and its arm 17 in the `expires_at` field alone** (§7 limbs 1 and 4); every
+other case of both stands and is still owed. Each is a representative-input test shipped with it,
+and **each is a clause of its own** because each is separately satisfiable: a lane could ship
 the ordinary case and omit the refusals, and ADR-0089 §2's *"A clause states one obligation"* is
 what forbids joining them into one.
 
@@ -605,7 +629,14 @@ what forbids joining them into one.
 
 > **Normative.** **A correction stating an earlier admissible instant narrows.** A path-(ii)
 > correction whose span states an instant strictly after the new row's `proposed_at` and strictly
-> before the superseded row's `expires_at` → **the new row carries that instant**.
+> before the superseded row's `expires_at` → **the new row carries that instant**, and the store
+> **accepts** it where ADR-0254 §20's arm 17 would have refused the altered field.
+
+> **Normative.** **The store refuses every other movement of a transcribed field, exactly as
+> before.** A superseding record altering `goal`, `tool`, `account`, `destinations` or `origin`
+> → **refused**, one test per field, which is ADR-0254 §20's arm 17 standing in those fields; and
+> one altering `expires_at` in any direction but the single narrowing §5 permits → **refused**
+> too.
 
 > **Normative.** **A correction stating a later instant does not lengthen.** An instant at or
 > after the superseded row's `expires_at` → `expires_at` **transcribed unchanged**.
@@ -730,11 +761,13 @@ reclaim never reaches the goal in any case (ADR-0250 §13).
 when the row is written on path (i): capture writes one episode per turn **outcome** (ADR-0074
 §3), and a rung that fires on one of its two paths is not a rung of a total ladder. It would also
 put a `MemoryStore` read on the write path of a permissions record, which ADR-0254 §16's roster
-does not contemplate. **The line this decision draws is between two records, not between a record
-and a computation**: the act's *recorded turn* is what §9 clause (i) already makes
-`orchestration` resolve for every member, so its instant costs nothing; the act's *episode* is a
-second record nothing on this path reads. The cost of not reading the episode is stated in §1 and
-pinned by §9's capture-to-write arm rather than left for a reader to find.
+does not contemplate. **And resolving a basis is not the same as reading a record's instants**:
+ADR-0254 §9 clause (i) makes `orchestration` resolve a member's act and the span inside that
+turn's stored utterance, and **neither that resolution nor anything else on this path yields an
+instant** — not the episode's stamp, and not the turn's own `occurred_at`, which the alternative
+below rejects separately and for its own reasons. The cost of not reading the episode is stated
+in §1's bound clause and pinned by §9's capture-to-write arm rather than left for a reader to
+find.
 
 **Measuring the window from the earliest recorded turn the row's coverage rests on, rather than
 from `proposed_at`.** A draft of this decision did that, to bound the row by the horizon of the
