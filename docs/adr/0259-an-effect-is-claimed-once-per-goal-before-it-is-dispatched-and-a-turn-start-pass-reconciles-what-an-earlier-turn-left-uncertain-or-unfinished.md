@@ -414,14 +414,21 @@ under the same binding is the same effect* — and where a user genuinely wants 
 > over"* `SUCCEEDED`, `FAILED` and `SKIPPED` without re-dispatching. **Across plans of one goal
 > the effect claim is what stops it**, and neither is read as doing the other's work.
 
-**The blocking set is `{SUCCEEDED, RUNNING, INDETERMINATE}` and is written out rather than
-referred to a private constant.** `core/types.py` carries `_CLAIMED_STATUSES` over those three
-**and `FAILED`**, for a different question — which statuses mean a tool call may have happened at
-all. `FAILED` is deliberately outside the blocking set here, and the ground is ADR-0034 §1: a
-`FAILED` step is one where *"nothing could have run under it" is a fact the executor **holds***,
-so re-performing that effect is not a repeat. ADR-0029 §5 agrees from the other side, admitting a
-retry where *"repeating is safe"*. A lane that bound the rule to `_CLAIMED_STATUSES` would refuse
-every legitimate second attempt after a proven failure, which is the opposite of what R43 asks.
+**The blocking set is `{SUCCEEDED, RUNNING, INDETERMINATE}` and is written out rather than referred to a private
+constant.** `core/types.py` carries `_CLAIMED_STATUSES` over those three **and `FAILED`**, for a different question —
+which statuses mean a tool call may have happened at all. `FAILED` is deliberately outside the blocking set here, and
+the ground is ADR-0034 §1: a `FAILED` step is one where *"nothing could have run under it" is a fact the executor
+**holds***, so re-performing that effect is not a repeat. ADR-0029 §5 agrees from the other side, admitting a retry
+where *"repeating is safe"*. A lane that bound the rule to `_CLAIMED_STATUSES` would refuse every legitimate second
+attempt after a proven failure, which is the opposite of what R43 asks.
+
+**The re-point away from a `FAILED` holder is safe on the corpus as it stands, and the ground is read rather than
+assumed.** Nothing re-enters a `FAILED` step: the check `StepRunner.run` takes before it rules says so in terms —
+*"`PENDING` is the only entry, and `FAILED` is deliberately not a second one"* — `resume` enters only at
+`AWAITING_APPROVAL`, the walk passes over `FAILED` without re-dispatching as the clause above records, and
+`planning/execution.py`'s legal `FAILED → RUNNING` edge has **no caller**, the tree's one
+`to_status=StepStatus.RUNNING` construction being `StepExecutor._claim`'s. **That is a property of today's corpus and
+not a rule this decision lands**, so the obligation it leaves is booked on the decision that changes it (§10).
 
 **`RUNNING` is grouped with `INDETERMINATE` rather than with `SUCCEEDED`, and ADR-0014 §4 is why.**
 A step durably `RUNNING` is precisely the state that decision calls indistinguishable — *"a crash
@@ -463,16 +470,16 @@ user"*. ADR-0029 §5 repeats the pair — *"Both remain resolvable by asking the
 reconciling with the tool, which is the explicit resolution ADR-0014 §4 requires"*. This section
 implements the **first** route and explains why the second is not taken here.
 
-> **Normative — a step is reconcilable exactly where its authorisation is one ADR-0192 §1 rules
-> **not spendable**, and that test is cited rather than restated.** That section rules an
-> authorisation spendable *"when the decision's `ToolDefinition` is `side_effecting` and its
-> `idempotency` is not `NATURAL`"*, and on any other *"no claim under it is ever refused on the
-> ground that it is spent"*. **So an `INDETERMINATE` step is reconcilable if and only if two
-> things hold: the `ToolDefinition` recorded for its committed `bound_tool` is not
-> `side_effecting` or has `idempotency` `NATURAL`, and the `PermissionDecision` its
-> `approval_ref` names carries no `egress_binding`.** That second conjunct is the corpus's own mark for an egress call —
-> the field is *"`None` for every decision about a non-egress call"*, which is the same test
-> `ToolInvocationRow.egress_call` is declared over. **Every other `INDETERMINATE` step is
+> **Normative — a step is reconcilable exactly where its authorisation is one ADR-0192 §1 rules **not spendable**
+> *and* its recorded decision carries **no `egress_binding`** — the complete conjunction, never one half of it,
+> wherever this rule is summarised.** That section rules an authorisation spendable *"when the decision's
+> `ToolDefinition` is `side_effecting` and its `idempotency` is not `NATURAL`"*, and on any other *"no claim under it
+> is ever refused on the ground that it is spent"*. **So an `INDETERMINATE` step is reconcilable if and only if two
+> things hold: the `ToolDefinition` recorded for its committed `bound_tool` is not `side_effecting` or has
+> `idempotency` `NATURAL`, and the `PermissionDecision` its `approval_ref` names carries no `egress_binding`.** That
+> second conjunct is the corpus's own mark for an egress call — the field is *"`None` for every decision about a
+> non-egress call"*, which is the same test `ToolInvocationRow.egress_call` is declared over. **Every other
+> `INDETERMINATE` step is
 > uncheckable** — every side-effecting `KEYED` or `NONE` step, and **every egress step whatever
 > its declaration** — for the reasons stated below and booked in §10, and **no `ToolDefinition`
 > field is added to say so**: the existing declarations are that test already.
@@ -507,14 +514,13 @@ implements the **first** route and explains why the second is not taken here.
 > re-call a side-effecting `Idempotency.NONE` or `KEYED` tool has read the opposite of the
 > rule.**
 
-> **Normative — this is automated reconciliation landing without the lookup ADR-0192 §3 names as
-> its trigger, and the difference is recorded rather than glossed.** That section rules that *"The
-> ADR that lands automated reconciliation is fired by a tool contract that offers a **lookup by
-> idempotency key** — until a tool can be asked whether a key was already acted on, reconciliation
-> has nothing to read."* **This decision lands it without one, on the non-spendable
-> authorisations alone**, and §13 carries the partial supersession that fact owes. **The
-> side-effecting `KEYED` case that section was written about is untouched and still waits** — for
-> that lookup, or for the ledger admission §10 books, whichever arrives first. **No lane reads
+> **Normative — this is automated reconciliation landing without the lookup ADR-0192 §3 names as its trigger, and the
+> difference is recorded rather than glossed.** That section rules that *"The ADR that lands automated reconciliation
+> is fired by a tool contract that offers a **lookup by idempotency key** — until a tool can be asked whether a key
+> was already acted on, reconciliation has nothing to read."* **This decision lands it without one, on the
+> non-spendable, non-egress authorisations alone** — the complete conjunction above — and §13 carries the partial
+> supersession that fact owes. **The side-effecting `KEYED` case that section was written about is untouched and
+> still waits** — for that lookup, or for the ledger admission §10 books, whichever arrives first. **No lane reads
 > this clause as licence to reconcile a spendable authorisation.**
 
 > **Normative — what its result writes, and what it does not.** Where the call returns a
@@ -532,24 +538,21 @@ implements the **first** route and explains why the second is not taken here.
 > the turn's own deadline (ADR-0255 §9). **No lane loops, backs off, schedules a second, or
 > re-calls a step the same turn already reconciled.**
 
-> **Normative — the reconciliation call takes no step claim, ADR-0014 §4's
-> claim-before-invocation rule is untouched, and the concurrency this leaves is bounded rather
-> than denied.** That rule is stated over the **`→ RUNNING` transition** — *"The `→ RUNNING`
-> transition is a claim, and must be committed before the tool is invoked"* — and a
-> reconciliation **makes no such transition**: the step is `INDETERMINATE`, it stays
-> `INDETERMINATE` until the call returns, and §7 admits only `INDETERMINATE → SUCCEEDED` out of
-> it. **No lane invents a claim for it, moves the step to `RUNNING` first, or reads this as
-> licence to invoke a `PENDING` step without one.** Two turns engaging one goal at once can
-> therefore each make the call, and **that is admitted rather than overlooked**: the
-> authorisations §3 admits are exactly the ones ADR-0192 §1 rules non-spendable, where *"no claim
-> under it is ever refused on the ground that it is spent"* — the corpus already contemplating
-> the same authorised read being made as often as the pipeline needs it — and where ADR-0029 §4
-> rules a repeat changes nothing. **What is not concurrent is the record**: both turns'
-> `→ SUCCEEDED` commits are compare-and-swaps on one `ExecutionState`, so **exactly one lands**
-> and the loser writes nothing, which is ADR-0014 §5's discipline doing here what it does
-> everywhere else. **ADR-0148 §9's *"There is no egress outside a claimed step"* is not reached at
-> all**, because the test above admits no call carrying an egress binding, so nothing this section
-> performs is a transmission through the designated seam.
+> **Normative — the reconciliation call takes no step claim, ADR-0014 §4's claim-before-invocation rule is untouched,
+> and the concurrency this leaves is bounded rather than denied.** That rule is stated over the **`→ RUNNING`
+> transition** — *"The `→ RUNNING` transition is a claim, and must be committed before the tool is invoked"* — and a
+> reconciliation **makes no such transition**: the step is `INDETERMINATE`, it stays `INDETERMINATE` until the call
+> returns, and §7 admits only `INDETERMINATE → SUCCEEDED` out of it. **No lane invents a claim for it, moves the step
+> to `RUNNING` first, or reads this as licence to invoke a `PENDING` step without one.** Two turns engaging one goal
+> at once can therefore each make the call, and **that is admitted rather than overlooked**: the authorisations §3
+> admits are ones ADR-0192 §1 rules non-spendable *and* whose decision carries no `egress_binding`, where *"no claim
+> under it is ever refused on the ground that it is spent"* — the corpus already contemplating the same authorised
+> read being made as often as the pipeline needs it — and where ADR-0029 §4 rules a repeat changes nothing. **What is
+> not concurrent is the record**: both turns' `→ SUCCEEDED` commits are compare-and-swaps on one `ExecutionState`, so
+> **exactly one lands** and the loser writes nothing, which is ADR-0014 §5's discipline doing here what it does
+> everywhere else. **ADR-0148 §9's *"There is no egress outside a claimed step"* is not reached at all**, because the
+> test above admits no call carrying an egress binding, so nothing this section performs is a transmission through
+> the designated seam.
 
 > **Normative — an uncheckable effect stays uncertain, is told once, and is never repeated.** Its
 > step stays **`INDETERMINATE`**, its attempt stays **`EFFECT_UNRESOLVED`** (§4), its effect key
@@ -566,22 +569,20 @@ implements the **first** route and explains why the second is not taken here.
 > ADR-0014 §4 names second is **booked, not refused** (§10), to the decision that gives it a
 > surface and states what `output` such a resolution carries.
 
-**The non-spendable authorisations are exactly the ones under which the corpus both makes a
-repeat harmless and lets the call happen, which is why the test is theirs rather than a new one.**
-ADR-0029 §4 states the harmlessness in the same breath as the classification this section's
-subject comes from — *"A read that timed out changed nothing and there is nothing to be ambiguous
-about"*, and *"A `NATURAL` tool is idempotent by nature (ADR-0016 §4), so whether it acted does
-not change what a repeat does"* — so the call establishes the effect's status whether or not the
-first one landed, which is exactly what R44 asks for and why only one new transition is needed
-rather than two. `claim_invocation` states the permission: *"An **authorisation is spendable**
-when the decision's `ToolDefinition` is `side_effecting` and its `idempotency` is not
-`NATURAL`"*, and on any other *"no claim under it is ever refused on the ground that it is
-spent"*. Such a reconciliation therefore reaches the callable with **no ledger *contract* change
-and no signature change** — and **not** with no ledger *write*: `ToolInvoker.invoke` appends its
-invocation claim before the callable and its completion after, exactly as it does for every other
-call, so the reconciliation's outcome and cost are in the trail like any other act's. What the
-non-spendable authorisation buys is that the **further** claim is *admitted*, and ADR-0192 §1's
-requirement that every call carry one **binds entire and is relied on here**.
+**The non-spendable authorisations are the ones under which the corpus both makes a repeat harmless and lets the call
+happen, which is why the first conjunct is theirs rather than a new one; the egress conjunct then narrows them
+further.** ADR-0029 §4 states the harmlessness in the same breath as the classification this section's subject comes
+from — *"A read that timed out changed nothing and there is nothing to be ambiguous about"*, and *"A `NATURAL` tool
+is idempotent by nature (ADR-0016 §4), so whether it acted does not change what a repeat does"* — so the call
+establishes the effect's status whether or not the first one landed, which is exactly what R44 asks for and why only
+one new transition is needed rather than two. `claim_invocation` states the permission: *"An **authorisation is
+spendable** when the decision's `ToolDefinition` is `side_effecting` and its `idempotency` is not `NATURAL`"*, and on
+any other *"no claim under it is ever refused on the ground that it is spent"*. Such a reconciliation therefore
+reaches the callable with **no ledger *contract* change and no signature change** — and **not** with no ledger
+*write*: `ToolInvoker.invoke` appends its invocation claim before the callable and its completion after, exactly as
+it does for every other call, so the reconciliation's outcome and cost are in the trail like any other act's. What
+the non-spendable authorisation buys is that the **further** claim is *admitted*, and ADR-0192 §1's requirement that
+every call carry one **binds entire and is relied on here**.
 
 **An egress step is excluded because ADR-0148 §9 rules the seam it would go through, and its two
 sentences admit no wording around them.** That section states *"Every transmission through the seam
@@ -1024,17 +1025,19 @@ property are the whole of it.
 > any of them. Each is named so that a reader cannot mistake this ADR's silence for a ruling, and
 > each carries the condition that fires it.
 
-- **The retry policy** — the three cases, **modify-before-replace**, and the rule that a known
-  failure and integration-supported safe retry are treated differently from an uncertain effect.
-  **A8's second ADR.** This decision establishes *what happened*; that one decides *what to do
-  next*, and the owner's addendum requirement 5 is its brief: *"Keep 'do not blindly retry an
-  uncertain effect'; drop 'nothing auto-retries, ever'"*, and *"For 'make it Sunday', investigate
-  **modifying** the existing reservation first"*. It inherits the vocabulary this decision mints —
-  `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable**
-  test. **It does not inherit a way to read an effect row**: `claim_effect` returns an
-  `EffectClaim` and nothing else, and §9 puts `EffectRecord` on the export document alone, so a
-  modify-first strategy that needs to find the earlier reservation adds the bounded lookup it
-  needs and argues for it there rather than inheriting one nobody has reviewed. **Fired by this
+- **The retry policy** — the three cases, **modify-before-replace**, and the rule that a known failure and
+  integration-supported safe retry are treated differently from an uncertain effect. **A8's second ADR.** This
+  decision establishes *what happened*; that one decides *what to do next*, and the owner's addendum requirement 5 is
+  its brief: *"Keep 'do not blindly retry an uncertain effect'; drop 'nothing auto-retries, ever'"*, and *"For 'make
+  it Sunday', investigate **modifying** the existing reservation first"*. It inherits the vocabulary this decision
+  mints — `EffectClaim`'s four members, `Disposition.EFFECT_ALREADY_CLAIMED` and §3's **reconcilable** test. **It does
+  not inherit a way to read an effect row**: `claim_effect` returns an `EffectClaim` and nothing else, and §9 puts
+  `EffectRecord` on the export document alone, so a modify-first strategy that needs to find the earlier reservation
+  adds the bounded lookup it needs and argues for it there rather than inheriting one nobody has reviewed. **It does
+  inherit one obligation about the effect row**: §2 re-points a row away from a `FAILED` holder, which is safe only
+  while nothing re-enters a `FAILED` step, so the decision landing a cross-turn `FAILED → RUNNING` retry
+  **re-establishes ownership of that row under `claim_effect` before it commits the transition** — stated as what that
+  ADR owes, not as a mechanism this one adds, and no lane reads it as a change to `commit_transition`. **Fired by this
   ADR landing.**
 - **Resolving an uncertain effect on the user's word.** **Not decided**, and §3 states the ground:
   a `SUCCEEDED` step carries an `output` its dependents read under ADR-0253 §2, and a user cannot
@@ -1212,21 +1215,19 @@ property are the whole of it.
     `PermissionDecision.authorises`. **The arm asserts nothing about a later walk**: the reconciled step belongs to
     the earlier execution, ADR-0255 §2 sends the later turn to plan again over a new one (§7), and
     what that turn's plan meets is arms 1–3's subject.
-11. **Every way a reconciliation does not resolve a step leaves it exactly as it stood**, in one
-    table: a **side-effecting** `Idempotency.NONE` step, a side-effecting **`KEYED`** step, and a
-    step whose recorded decision carries an **`egress_binding`** — that last row taken twice, over
-    a `NATURAL` tool and over a non-`side_effecting` one, so the exclusion is pinned on both
-    declarations §3 otherwise admits — each take **no call**; a step whose `approval_ref` is
-    absent, whose decision the
-    trail cannot return, or whose rebuilt request `PermissionDecision.authorises` rejects takes
-    **no call**; and a reconcilable step whose call returns a failure, a timeout or an
-    `INDETERMINATE` of its own takes **one**. In **every** row the step stays
-    **`INDETERMINATE`**, `attempts` is **unchanged**, no transition is committed, the attempt
-    stays **`EFFECT_UNRESOLVED`**, and **no second call is made in that turn**. **The key is
-    asserted per row rather than across them**, because §1 gives one only to a side-effecting
-    tool: a **side-effecting** row's key answers **`UNCERTAIN`** to a later plan's claim, and a
-    **non-`side_effecting`** row's `ToolCall.effect_key` is **`None`** and `claim_effect` is
-    **never called for it**.
+11. **Every way a reconciliation does not resolve a step leaves it exactly as it stood**, in one table: a
+    **side-effecting** `Idempotency.NONE` step, a side-effecting **`KEYED`** step, and a step whose recorded decision
+    carries an **`egress_binding`** — that last row over a **`NATURAL`** tool, which is the only declaration it can
+    carry, because ADR-0148 §8 rules that a tool registered at the seam declares a *"**non-empty `discloses`**"* and
+    `core/types.py` refuses *"a tool that discloses data off-device is side-effecting"* — each take **no call**; a
+    step whose `approval_ref` is absent, whose decision the trail cannot return, or whose rebuilt request
+    `PermissionDecision.authorises` rejects takes **no call**; and a reconcilable step whose call returns a failure, a
+    timeout or an `INDETERMINATE` of its own takes **one**, over each of the two declarations §3 admits. In **every**
+    row the step stays **`INDETERMINATE`**, `attempts` is **unchanged**, no transition is committed, the attempt stays
+    **`EFFECT_UNRESOLVED`**, and **no second call is made in that turn**. **The key is asserted per row rather than
+    across them**, because §1 gives one only to a side-effecting tool: a **side-effecting** row's key answers
+    **`UNCERTAIN`** to a later plan's claim, and a **non-`side_effecting`** row's `ToolCall.effect_key` is **`None`**
+    and `claim_effect` is **never called for it**.
 12. The pass's **boundaries**, in one arm. It touches **only the goal the turn engaged**: a
     second goal carrying the same three residuals is **unchanged**, and nothing runs for it until
     a turn engages it. And a **store failure injected at each act boundary** stops it there: what
@@ -1339,17 +1340,15 @@ evaluations and its no-parameter-mapping rule, §2's stop rule and its closed re
 claim conjuncts, §5's re-walk-from-the-first-position rule and its three re-evaluated predicates,
 §9's budget and §13's Q4 rule included.
 
-**ADR-0192 §3 — partially superseded in its firing clause alone, and the scope is on this
-document's `Status` line.** That section rules *"The ADR that lands automated reconciliation is
-fired by a tool contract that offers a **lookup by idempotency key** — until a tool can be asked
-whether a key was already acted on, reconciliation has nothing to read."* §3 of this document
-lands automated reconciliation **with no such lookup**, on the authorisations ADR-0192 §1 itself
-rules **not spendable**: a read, whose interrupted call *"changed nothing"*, and a `NATURAL` tool,
-whose repeat *"does not change what a repeat does"*. There the call **is** the read — it
-establishes the effect's status by making it true — so the premise *"reconciliation has nothing to
-read"* does not hold, and a reader holding only §3 would wait for a contract this decision does not
-need. That is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is that
-firing clause, and nothing else.
+**ADR-0192 §3 — partially superseded in its firing clause alone, and the scope is on this document's `Status` line.**
+That section rules *"The ADR that lands automated reconciliation is fired by a tool contract that offers a **lookup
+by idempotency key** — until a tool can be asked whether a key was already acted on, reconciliation has nothing to
+read."* §3 of this document lands automated reconciliation **with no such lookup**, on the authorisations ADR-0192 §1
+itself rules **not spendable** and whose decision carries **no `egress_binding`**: a read, whose interrupted call
+*"changed nothing"*, and a `NATURAL` tool, whose repeat *"does not change what a repeat does"*. There the call **is**
+the read — it establishes the effect's status by making it true — so the premise *"reconciliation has nothing to
+read"* does not hold, and a reader holding only §3 would wait for a contract this decision does not need. That is
+ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is that firing clause, and nothing else.
 
 **ADR-0192's other clauses bind entire and several are the grounds this decision reasons from.**
 §1's spendability rule is what §3 of this document **cites as its eligibility test** rather than
