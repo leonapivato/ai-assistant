@@ -227,15 +227,36 @@ driver could compare against"*. This section mints that record.
 > `spans` is excluded because `canonical_destination_set` is its canonicalisation: ADR-0150 §9 names that set as a thing
 > `authorises` deliberately does *not* compare, precisely because *two different decompositions can canonicalise to one
 > destination set*, and for effect identity that is the property wanted rather than the one refused. **Where the
-> *projection* is wrong it is wrong toward `HELD`, `COMPLETED` or `UNCERTAIN`** — two distinct effects treated as one, which
-> stalls a plan — which is the asymmetry ADR-0014 §4 chooses in every other place it is faced with one. **The key's own
-> reach is narrower than that and is stated in the next clause rather than implied by this one.**
+> *projection* is wrong it is wrong toward `HELD`, `COMPLETED`, `COMPLETED_OTHERWISE` or `UNCERTAIN`** — two distinct
+> effects treated as one, which stalls a plan — which is the asymmetry ADR-0014 §4 chooses in every other place it is
+> faced with one. **The key's own reach is narrower than that and is stated in the next clause rather than implied by
+> this one.**
+
+> **Normative — the tool is projected to its `id`, and that is a third narrowing stated here rather than left to be
+> discovered.** `authorises`'s first conjunct is `request.tool == self.tool`, a **whole `ToolDefinition`** compared by
+> value, and `EffectKey` carries **`tool_id` alone**. The reason is the one the provenance exclusion already gives: a
+> definition carries a description, a JSON schema, a risk level and declarations that a deployment can revise **without
+> changing what the call does**, and a key over the whole definition would mint a fresh key on every such revision and
+> **dispatch the effect a second time** — the failure this section exists to stop. **The cost is stated rather than
+> hidden.** ADR-0016 spends an id *"for the life of the process"*, and its registry is *"rebuilt from scratch each run"*,
+> so a deployment that changes a definition's code and restarts may bind a **materially different** tool to a spent id
+> while this decision's rows are durable across that restart. There the projection is wrong in the direction the clause
+> above names: the new call meets the old row and is **suppressed** — `COMPLETED`, `COMPLETED_OTHERWISE` or `HELD` — never
+> dispatched twice. **No lane reads the projection as a claim that a tool id means one thing for ever**, arm 4 asserts the
+> collapse deliberately rather than leaving it untested, and §10 books the identity that would close it with what fires
+> it.
 
 > **Normative — what the key recognises is the *same authorised call*, and two calls that mean the same thing without being
 > the same call are not recognised.** `parameters_digest` is ADR-0021 §1's digest over the canonical encoding of the
 > **supplied** arguments, so two calls whose arguments differ in spelling while naming one thing — a recipient written
-> `alice@Example.com` in one plan and `alice@example.com` in the next — carry **two** digests and therefore **two keys**,
-> and the second is `CLAIMED` and dispatched. **This decision does not close that**, and §10 books it with what fires it.
+> `alice@Example.com` in one plan and `alice@example.com` in the next — carry **two** digests and therefore **two keys**.
+> **What that now costs is stated over the scoping and not over the goal.** Under **one** intended action the second call
+> is `COMPLETED_OTHERWISE` (§2) rather than `COMPLETED`, so it is **not dispatched**: what the unrecognised equivalence
+> costs is a **spurious modify-before-replace investigation** of an act that in fact needs no modifying. Under **two**
+> intended actions it is `CLAIMED` and dispatched, which is correct and is not a cost at all — two acts the user asked
+> for. **Neither case is a double dispatch of one act**, which is what the paragraph above said before the scoping landed
+> and what no longer follows from it. **This decision does not close the equivalence itself**, and §10 books it with what
+> fires it.
 > **No lane reads the guarantee more widely than it is stated**: an effect is performed at most once **per intended
 > action per authorised call** within one goal, which is the identity the permission stage already fixes and the only one this system can compute
 > without interpreting a tool's arguments — which ADR-0145 §5 and ADR-0016 §2 both put outside `core`.
@@ -516,13 +537,25 @@ effect twice, §10 names what they do.
 > exactly, a widening in which `reply`'s own enumeration is untouched, and it is named here because ADR-0015 makes this
 > document settle the contract before anything implements it.
 
-> **Normative — "once" is once per *step*, and it needs no durable announcement state.** A step is satisfied at most once,
-> because satisfaction commits it `→ SUCCEEDED` and §7 admits no move out. So the turn that satisfies a step reports it and
-> **no later turn reports that step again**; a later turn that satisfies a **different** step from the same effect reports
-> **that** step, which is correct rather than a repetition — different work was completed. **No effect row carries an
-> announced flag, no lane adds one**, and ADR-0250 §5's announcement discipline is met by the step's own one-way transition.
-> **The wording and the channel stay A9's** (§10); what this decision fixes is the field, its type, and that a silent reuse
-> is not conforming.
+> **Normative — "once" is **at most** once per *step*, it is best-effort, and it needs no durable announcement state.** A
+> step is satisfied at most once, because satisfaction commits it `→ SUCCEEDED` and §7 admits no move out. So the turn
+> that satisfies a step reports it and **no later turn reports that step again**; a later turn that satisfies a
+> **different** step from the same effect reports **that** step, which is correct rather than a repetition — different
+> work was completed. **No effect row carries an announced flag, no lane adds one**, and ADR-0250 §5's announcement
+> discipline is met by the step's own one-way transition. **The wording and the channel stay A9's** (§10); what this
+> decision fixes is the field, its type, and that a silent reuse is not conforming.
+
+> **Normative — the window in which a satisfaction is never announced is named rather than closed, and what survives it is
+> the record.** `satisfied_from_earlier` rides on `TurnOutcome`, which is one turn's value; a failure **after** the
+> `→ SUCCEEDED` commit and **before** the turn returns leaves the step durably terminal and **unreported**, and no later
+> walk reconstructs the announcement, because ADR-0255 §5 passes over a `SUCCEEDED` step. **So the guarantee is at most
+> once and not at least once**, which is ADR-0014 §4's *"We do not claim exactly-once execution"* posture applied to the
+> report rather than to the act, and it is stated here so that no lane reads the field as a delivery guarantee. **What
+> the window does not cost is the fact**: `StepExecution.satisfied_by_execution` and `satisfied_by_step` are committed in
+> the same write, so the durable record always says the step was satisfied and names the act it was satisfied from, and
+> nothing is lost but one turn's sentence. **No lane adds an announced flag, an outbox or a redelivery pass on this
+> decision's authority** — a durable announcement ledger is a reply-surface mechanism, the reply surface is **A9's**
+> (§10), and adding one here would put a second writer on a state this decision gives no authority over.
 
 > **Normative.** `Disposition` gains exactly **two** members — **`EFFECT_ALREADY_CLAIMED`**, returned for
 > `COMPLETED_OTHERWISE`, `UNCERTAIN`, `HELD` and a `COMPLETED` whose reuse conditions fail, and **`EFFECT_UNSCOPED`**,
@@ -1194,6 +1227,15 @@ arguments**, and one store member and one derived property are the whole of it.
   replan of one goal produces an equivalent-but-differently-spelled call**, or by a decision that
   gives a tool a way to declare its own effect identity and states how a wrong declaration is
   contained.
+- **An effect identity that survives a tool's redefinition under one id.** **Not decided**, and §1 states the
+  projection and which way it errs. `EffectKey` carries `tool_id` rather than the whole `ToolDefinition` that
+  `authorises` compares, so a deployment that changes a definition's code and restarts — the only route ADR-0016 leaves,
+  since an id is spent *"for the life of the process"* and the registry is *"rebuilt from scratch each run"* — can bind a
+  materially different tool to an id this decision's durable rows already name. The error is toward **suppression**, not
+  repetition. Closing it needs a durable identity for what a tool *does* rather than for what it is called, which is a
+  `ToolDefinition` surface and a registry rule this decision touches neither of. **Fired by a registry that admits
+  re-registration of a materially different definition under a spent id, or by the wiring of the first consequential
+  capability, whichever is first.**
 - **How a user asks for the same effect twice on purpose.** **The identity half is closed and the modify half is
   not**, and the two are separated here so that a reader does not take the booking for more than it now covers.
   **Closed**: a second action the user asked for is a **second `IntendedAction`** (ADR-0265 §1), so it reads a second
@@ -1310,7 +1352,10 @@ arguments**, and one store member and one derived property are the whole of it.
    `Idempotency`**; **unchanged under a post-construction mutation of `call.request`** and changed
    by the same mutation of the decision; and **equality moving** with `tool_id`, `parameters_digest`,
    `egress_account`, `egress_endpoint` and `egress_destinations` while **staying equal** across
-   `planned_with_external_content`, `coverage`, `closed_loop` and two `spans` decompositions that canonicalise alike.
+   `planned_with_external_content`, `coverage`, `closed_loop`, two `spans` decompositions that canonicalise alike, **and
+   two `ToolDefinition`s that share an `id` and differ in every other field** — the projection §1 declares, asserted
+   deliberately so that a later lane that widened the key to the whole definition would fail this row rather than
+   silently double-dispatch on a harmless re-registration.
    **`claim_effect` is table-driven over §2's second limb** — each of `StepStatus`'s seven members, crossed with the
    row naming **this** step and a **different** one, **and crossed again with the row's key being this call's key and
    not being it** — and asserts for each both the returned member **and** whether the row moved **and, where it moved,
@@ -1495,7 +1540,7 @@ stated over, and the scope is on this document's `Status` line.** §7 rules that
 are each performed **at most once across every plan of that goal**"*, and §12 states the acceptance requirement over
 *"a plan whose step would perform **the same effect**"*. §§1-2 land an identity in two parts — the **intended action**
 the step is an attempt at (ADR-0265 §1), which the row is scoped to, and the **authorised call** within it, identified by
-the tool, the digest of the supplied arguments and the binding's reach — and state in terms that two calls meaning one
+the bound tool's **id**, the digest of the supplied arguments and the binding's reach — and state in terms that two calls meaning one
 thing while spelling it differently carry two keys, so under one intended action the second is `COMPLETED_OTHERWISE` and
 under two it is dispatched. **A reader holding only ADR-0255 §7 therefore reads its obligation more widely than it now
 holds**: they expect A8's mechanism to make the *effect* at most once and get one that makes **one authorised call under
