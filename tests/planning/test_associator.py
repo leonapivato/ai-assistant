@@ -520,48 +520,85 @@ async def test_a_verdict_that_names_a_label_it_may_not_is_the_ask(verdict: str) 
     assert got.labels == ("G1",)
 
 
-@pytest.mark.parametrize(
-    ("goals", "expected"),
-    [
-        pytest.param("G1", (), id="a bare string is not a one-element list"),
-        pytest.param(17, (), id="a number is not a list"),
-        pytest.param({"first": "G1"}, (), id="an object is not a list"),
-        pytest.param(["G1", 2, None], ("G1",), id="a non-string entry is dropped"),
-    ],
-)
-async def test_a_labels_value_that_is_not_a_list_of_strings_is_read_for_what_it_is(
-    goals: object, expected: tuple[str, ...]
+#: Every shape of ``goals`` this module cannot read as labels, and why each one is a
+#: distinct way of getting it wrong rather than the same one four times.
+_MALFORMED_GOALS: Final = [
+    pytest.param("G1", id="a bare string is not a one-element list"),
+    pytest.param(17, id="a number is not a list"),
+    pytest.param({"first": "G1"}, id="an object is not a list"),
+    pytest.param(["G2", 17], id="a list carrying an entry that is not a string"),
+    pytest.param(["G2", None], id="a list carrying a null"),
+]
+
+#: The four verdicts as a model spells them. Every arm about an unreadable answer runs
+#: over all four, because the failure the arm is for is invisible under ``undecided``.
+_SPELLINGS: Final = ["associates", "fresh", "continues", "undecided"]
+
+
+@pytest.mark.parametrize("goals", _MALFORMED_GOALS)
+@pytest.mark.parametrize("verdict", _SPELLINGS)
+async def test_a_goals_value_this_module_cannot_read_is_the_ask(
+    verdict: str, goals: object
 ) -> None:
-    """Nothing is coerced into a label (§4).
+    """§4's "never a guess", at the edge where filtering would quietly break it.
 
-    A bare string is the case worth naming: reading ``"G1"`` as a one-element list
-    would accept a shape the prompt does not offer, and — under ``associates`` — would
-    turn an answer this module could not read into a pick.
+    A ``goals`` value that is not a list of usable labels is an answer this module
+    could not read, and it is **not** emptied or filtered down to the entries that
+    happened to parse. Two verdicts are what make that matter rather than being a
+    tidiness preference: ``{"verdict": "fresh", "goals": "G1"}`` would otherwise open a
+    duplicate goal and ``{"verdict": "associates", "goals": ["G2", 17]}`` would pick
+    one, each on the strength of an answer that was partly unreadable — which is
+    precisely the pair §4 names: "a parse failure read as ``FRESH`` would open a
+    duplicate goal … and one read as ``CONTINUES`` would revise the focused goal on the
+    strength of nothing at all".
+
+    Run over **all four** verdicts because the failure is invisible under ``undecided``,
+    which is where an arm written for the malformed-label case alone naturally lands:
+    the answer is the same either way there, so the decisive verdicts are the only place
+    the rule has consequences.
     """
-    got = await _answering(json.dumps({"verdict": "undecided", "goals": goals})).associate(
-        candidacy_of("book a campsite")
-    )
-
-    assert got.verdict is AssociationVerdict.UNDECIDED
-    assert got.labels == expected
-
-
-async def test_a_label_with_no_wire_form_is_dropped_rather_than_raised() -> None:
-    """A JSON string may carry an unpaired surrogate; ``EncodableText`` refuses one.
-
-    ``json.loads`` accepts ``"\\ud800"`` and hands back a ``str`` with no UTF-8
-    encoding, and :class:`~ai_assistant.core.types.GoalAssociation`'s field does not.
-    Constructing the value and letting that refusal out would raise for a *reading*
-    reason, where §4 admits exactly one raise and it is the provider being unreachable.
-    A label with no wire form could not resolve to a candidate either, so dropping it
-    leaves the ask — which is where an unreadable answer belongs.
-    """
-    got = await _answering('{"verdict": "undecided", "goals": ["\\ud800", "G2"]}').associate(
+    got = await _answering(json.dumps({"verdict": verdict, "goals": goals})).associate(
         candidacy_of("book a campsite", "file taxes")
     )
 
     assert got.verdict is AssociationVerdict.UNDECIDED
-    assert got.labels == ("G2",)
+    assert got.labels == (), "nothing unreadable is carried forward as an assertion"
+
+
+@pytest.mark.parametrize("verdict", _SPELLINGS)
+async def test_a_label_with_no_wire_form_is_the_ask_and_never_a_raise(verdict: str) -> None:
+    """A JSON string may carry an unpaired surrogate; ``EncodableText`` refuses one.
+
+    ``json.loads`` accepts it and hands back a ``str`` with no UTF-8 encoding, and
+    :class:`~ai_assistant.core.types.GoalAssociation`'s field does not. Constructing the
+    value and letting that refusal out would raise for a *reading* reason, where §4
+    admits exactly one raise and it is the provider being unreachable. So it is the ask
+    — and, by the case above, the ask for the whole answer rather than for the entries
+    beside it: a label with no wire form could not have resolved to a candidate anyway,
+    and the verdict that came with it was decided partly on it.
+    """
+    reply = '{"verdict": "VERDICT", "goals": ["\\ud800", "G2"]}'.replace("VERDICT", verdict)
+
+    got = await _answering(reply).associate(candidacy_of("book a campsite", "file taxes"))
+
+    assert got.verdict is AssociationVerdict.UNDECIDED
+    assert got.labels == ()
+
+
+async def test_an_absent_goals_key_is_no_labels_and_not_a_malformed_one() -> None:
+    """The anti-vacuity half: the shape the prompt asks for is not read as unreadable.
+
+    ``fresh`` and ``continues`` are asked for with no ``goals`` at all, so if an absent
+    key were read as a malformed one every decisive verdict would collapse into the ask
+    and this seam would answer ``UNDECIDED`` to everything — passing every arm above
+    while deciding nothing.
+    """
+    got = await _answering(json.dumps({"verdict": "fresh"})).associate(
+        candidacy_of("book a campsite")
+    )
+
+    assert got.verdict is AssociationVerdict.FRESH
+    assert got.labels == ()
 
 
 # --- the scanning parse (ADR-0071, issue #2267) ------------------------------
