@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched)
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries that decision's §1 egress member) and ADR-0200 (§1's thirty-operation enumeration, which gains `converse_spoken`, and §1's deadline carve-out, which gains that operation's turn budget) and ADR-0250 (§1's thirty-operation enumeration alone, which gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §1's every-argument-the-browser-owns clause, its caller-owned-deadline class — which gains no member, because none of the three takes a turn budget — its `learn`-is-unreached clause and its single-principal clause bind entire, and §§2-13 are untouched)
 - Date: 2026-08-22
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
   and this note retires the count rather than correcting it.** The change carrying
@@ -205,6 +205,24 @@
   out of two, and synthesises no result from a call it did not make"* are what ADR-0250 §16
   binds its adapters under rather than anything it relaxes; §1's `learn`-is-unreached clause
   and its single-principal clause bind entire; and §§2-13 are untouched.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0178, ADR-0200 and ADR-0250 — each still paired with
+  the same scope, whose extent does not move; what is re-rendered is the prose naming the
+  clauses.** **The cross-references that prose carried, on which §4 places no constraint
+  in a note:** the egress member is **ADR-0178 §1's**, ADR-0178 being the target of the
+  very scope that named it.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

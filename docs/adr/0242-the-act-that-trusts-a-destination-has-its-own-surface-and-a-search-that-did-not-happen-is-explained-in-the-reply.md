@@ -1,6 +1,6 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched) and ADR-0247 (§8's closure of `SearchNotServiced` at exactly eight members, in that count alone — the enumeration becomes seven, `SEARCH_DISABLED` and `NOT_ADMITTED` being removed with the `admit_search` refusal and the `Settings` bound they are defined over, which leaves every remaining pairwise order and every remaining value unchanged — and §8's two-members-not-one clause for that refusal, whose subject no longer exists. Those two scopes, and nothing else in this ADR beyond what ADR-0244 already recorded here: §1's trust act and its own surface, §§2-7, §8's remaining clauses including the precedence order, the totality and the non-injectivity of its mapping and the added-to-and-never-renamed rule, §9's bar on what a statement may say, and §§10-18 bind as that record left them; `TRUST_MISSING` and `AUTHORISATION_AWAITED` are expressly not removed)
+- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched) and ADR-0247 (§8's closure of `SearchNotServiced` at exactly eight members, in that count alone — the enumeration becomes seven, `SEARCH_DISABLED` and `NOT_ADMITTED` being removed with the `admit_search` refusal and the `Settings` bound they are defined over, which leaves every remaining pairwise order and every remaining value unchanged — and §8's two-members-not-one clause for that refusal, whose subject no longer exists. Those two scopes, and nothing else in this ADR beyond what the record above already recorded here: §1's trust act and its own surface, §§2-7, §8's remaining clauses including the precedence order, the totality and the non-injectivity of its mapping and the added-to-and-never-renamed rule, §9's bar on what a statement may say, and §§10-18 bind as that record left them; `TRUST_MISSING` and `AUTHORISATION_AWAITED` are expressly not removed)
 - Date: 2026-09-09
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
@@ -126,6 +126,24 @@
   added-to-and-never-renamed rule — §9's bar on what a statement may say, §§10-18, and
   ADR-0244's own record here all stand. **This line already carries the leading token, so
   under ADR-0082 §2 no amendment qualifier is written on it.**
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0244 and ADR-0247 — each still paired with the same
+  scope, whose extent does not move; what is re-rendered is the prose naming the
+  clauses.** **The cross-references that prose carried, on which §4 places no constraint
+  in a note:** the earlier record on this line is **ADR-0244's**, a target of this line by
+  a pair of its own.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 ## Context
 
 ### Where this comes from

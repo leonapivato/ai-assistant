@@ -1,6 +1,6 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`) and ADR-0233 (that same count clause of §7, narrowed by one further fact) and ADR-0247 (§7's count of what `rebind` takes from `approved`, in that count alone, which becomes four: `closed_loop` is transcribed beside the provenance, `planned_with_external_content` and `coverage`, because ADR-0244 made a `CONFIRM` on a `WEB_SEARCH` a durable park that can be answered and so falsified the premise that no such request is ever resumed. That scope, and nothing else in this ADR beyond what ADR-0157, ADR-0181 and ADR-0233 already recorded here: §7's every other clause — the derivation afresh, the refusal unless the derived binding equals `approved`, the refusal of an unmatched provenance and the two limbs of §8's partition — and §§1-6 and §§8-16 bind as those records left them)
+- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`) and ADR-0233 (that same count clause of §7, narrowed by one further fact) and ADR-0247 (§7's count of what `rebind` takes from `approved`, in that count alone, which becomes four: `closed_loop` is transcribed beside the provenance, `planned_with_external_content` and `coverage`, because a `CONFIRM` on a `WEB_SEARCH` has since become a durable park that can be answered, which falsified the premise that no such request is ever resumed. That scope, and nothing else in this ADR beyond what the three records above already recorded here: §7's every other clause — the derivation afresh, the refusal unless the derived binding equals `approved`, the refusal of an unmatched provenance and the two limbs of §8's partition — and §§1-6 and §§8-16 bind as those records left them)
 - Date: 2026-08-14
 - **Partially superseded: 2026-09-04 by ADR-0233 — §7's count of what `rebind` takes
   from `approved`, by one further fact, and nothing else in §7.** ADR-0181 §3 already
@@ -136,6 +136,25 @@
   ADR-0247 answers exactly as it does today, its stored value being `False`. **This line
   already carries the leading token, so under ADR-0082 §2 no amendment qualifier is written
   on it.**
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 4 such tokens inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0244 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0157, ADR-0181, ADR-0233 and ADR-0247 — each still
+  paired with the same scope, whose extent does not move; what is re-rendered is the prose
+  naming the clauses.** **The cross-references that prose carried, on which §4 places no
+  constraint in a note:** it is **ADR-0244** that made a `CONFIRM` on a `WEB_SEARCH` a
+  durable park that can be answered, and **ADR-0157**, **ADR-0181** and **ADR-0233** that
+  already recorded here. ADR-0244 supersedes no part of this ADR; it is cited as the fact
+  that falsified §7's premise, and the decision that acts on it is ADR-0247.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 ## Context
 
 ### What ADR-0148 §11 fixed about (b), and what it left open

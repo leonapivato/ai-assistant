@@ -1,6 +1,6 @@
 # 240. The planner asks by window and by label, and an empty structured read sends it back to plan
 
-- Status: Partially superseded by ADR-0251 (two scopes. §7's parameter declaration, "`Planner.plan` gains one keyword parameter, `empty_reads: Sequence[ReadAsk] = ()`, additive and defaulted": the parameter becomes `read_outcomes: Sequence[ReadOutcome] = ()`, carrying one entry per ask the attempt has already serviced — the same frozen `ReadAsk`, beside the typed outcome it earned — so that a refusal, a failure, an expiry, a truncation and a duplicate are as visible to the planner as an empty read is. Every other clause of §7 binds verbatim and is restated over the wider carrier: the ask is carried back byte for byte and is never edited on the way, nothing the store said crosses on it, a read the budget did not reach is not in it, `()` on the first call means no read has been serviced, the carrier and §10's audit are governed separately, and the change is flagged BREAKING under golden rule 5. And §6's narrowing to `STRUCTURED_READ`, in one respect only: an empty read of any kind now reaches the planner as a fact about that ask. §6's definition of an empty structured read, its rule that a deduplicated-out read is not one, its clause that the broadening is the planner's and never the loop's, its bound clause and its prohibition on citing ADR-0237 §7 as a ground all bind entire — and the last is honoured, no clause of the superseding ADR citing ADR-0237 §7 as a ground for anything. §§1-5 and §§8-16 are untouched)
+- Status: Partially superseded by ADR-0251 (two scopes. §7's parameter declaration, "`Planner.plan` gains one keyword parameter, `empty_reads: Sequence[ReadAsk] = ()`, additive and defaulted": the parameter becomes `read_outcomes: Sequence[ReadOutcome] = ()`, carrying one entry per ask the attempt has already serviced — the same frozen `ReadAsk`, beside the typed outcome it earned — so that a refusal, a failure, an expiry, a truncation and a duplicate are as visible to the planner as an empty read is. Every other clause of §7 binds verbatim and is restated over the wider carrier: the ask is carried back byte for byte and is never edited on the way, nothing the store said crosses on it, a read the budget did not reach is not in it, `()` on the first call means no read has been serviced, the carrier and §10's audit are governed separately, and the change is flagged BREAKING under golden rule 5. And §6's narrowing to `STRUCTURED_READ`, in one respect only: an empty read of any kind now reaches the planner as a fact about that ask. §6's definition of an empty structured read, its rule that a deduplicated-out read is not one, its clause that the broadening is the planner's and never the loop's, its bound clause and its prohibition on citing the no-assertion-of-absence clause it names as a ground all bind entire — and the last is honoured, no clause of the superseding ADR citing that clause as a ground for anything. §§1-5 and §§8-16 are untouched)
 - Date: 2026-09-08
 - **Partially superseded: 2026-09-12 by ADR-0251 — §7's parameter declaration and
   §6's narrowing to `STRUCTURED_READ`, in the scopes the `Status` line names. Nothing
@@ -155,6 +155,23 @@
   what survives the widening and what does not. **This ADR changes no code.** §12
   states what the implementing lane owes; nothing implements against it until it has
   merged (ADR-0015 §5, golden rule 5).
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 2 such tokens inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0237 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0251 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  clause §6 forbids citing as a ground is **ADR-0237 §7**, the no-assertion-of-absence
+  clause. ADR-0237 supersedes no part of this ADR; the only target is ADR-0251.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

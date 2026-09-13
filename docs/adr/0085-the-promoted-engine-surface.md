@@ -1,6 +1,6 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because ADR-0173 defines it as taking exactly `converse`'s arguments in exactly its order)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six) and ADR-0250 (§3's signature block, in `converse`'s parameter list and in the roster's count alone: `converse` gains one keyword parameter, `reference` (`TurnReference | None`, defaulting to `None`), and the surface gains `goals`, `withdraw_clarification` and `abandon_goal`. That one scope, and nothing else in this ADR: §3's every-annotation-is-spelled-out rule, its docstring obligations and its `DEFAULT_PAGE_SIZE` convention bind entire, §5's closed-graph obligation binds entire and is obeyed because every type that decision adds to the surface is `core`'s and reachable from it, and `converse_streaming` needs no record of its own because the streaming decision recorded above defines it as taking exactly `converse`'s arguments in exactly its order)
 - Date: 2026-07-31
 - Partially superseded: 2026-08-22 by ADR-0178 — **one row of one table, and
   §5's walk gains an edge without its conclusion moving.** ADR-0178 closes #1366:
@@ -186,6 +186,24 @@
   `EngagementDisposition`, `ReferenceOutcome`, `ClarificationWithdrawal` and
   `GoalAbandonment` — is a `core` type reachable from it. §3's spelled-out-annotation rule
   and its docstring obligations bind entire, and §§1-2 and §§4-8 are untouched.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0107, ADR-0173, ADR-0178 and ADR-0250 — each still
+  paired with the same scope, whose extent does not move; what is re-rendered is the prose
+  naming the clauses.** **The cross-references that prose carried, on which §4 places no
+  constraint in a note:** **ADR-0173** defines `converse_streaming` as taking exactly
+  `converse`'s arguments in exactly its order; it is the second target on this line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: ADR-0231 §6 is a second route to the seam for that one kind, ADR-0231 §5 reads the credential inside `WebSearcher.search` after ADR-0029 §2's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire) and ADR-0247 (§3's first clause in the route enumeration alone, which takes a third route (c) — the request is a `WEB_SEARCH` whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — and §3's second clause in its *"a configured base URL or host"* limb, for such a request alone. Those two scopes, and nothing else in this ADR beyond what ADR-0192 and ADR-0231 already recorded here: §3's other limbs of that enumeration, its source-grant refusal and its clause reserving three questions to the standing-grant ADR, and §1, §2, §§4-7 including §6's determinism and registry-rebuild clauses, §8's floors and §§9-15 bind as those records left them) and ADR-0254 (§3's first clause in the route enumeration alone, which takes a fourth route (d) — a live goal-scoped authorization record, established by a recorded act of the user, covers the request over fixed values and permitted ranges compared per argument. §3's second clause binds entire in every limb, its source-grant refusal and its clause reserving three questions to the standing-grant ADR bind entire, and §1, §2, §§4-9 and §§10-15 bind as the earlier records left them — §1 conspicuously so, being relied on as written)
+- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are) and ADR-0231 (§1's first clause, §7's first clause and §9's first, second and fourth clauses, each only as it reaches a `WEB_SEARCH` servicing's send: that decision's §6 is a second route to the seam for that one kind, its §5 reads the credential inside `WebSearcher.search` after the tool-invocation contract's same three checks, `PermissionDecision.step_id` is `None` on such a decision and nothing reconciles a claim left open — while §1's prohibition on adding a route by configuration, by a declaration or by an integration constructing its own client, §7's remaining five clauses, §9's third clause and its four outcomes, and every other section of this ADR stand entire) and ADR-0247 (§3's first clause in the route enumeration alone, which takes a third route (c) — the request is a `WEB_SEARCH` whose binding's account reference and canonical destination set are the deployment's configured search connection and origin — and §3's second clause in its *"a configured base URL or host"* limb, for such a request alone. Those two scopes, and nothing else in this ADR beyond what the two records above already recorded here: §3's other limbs of that enumeration, its source-grant refusal and its clause reserving three questions to the standing-grant ADR, and §1, §2, §§4-7 including §6's determinism and registry-rebuild clauses, §8's floors and §§9-15 bind as those records left them) and ADR-0254 (§3's first clause in the route enumeration alone, which takes a fourth route (d) — a live goal-scoped authorization record, established by a recorded act of the user, covers the request over fixed values and permitted ranges compared per argument. §3's second clause binds entire in every limb, its source-grant refusal and its clause reserving three questions to the standing-grant ADR bind entire, and §1, §2, §§4-9 and §§10-15 bind as the earlier records left them — §1 conspicuously so, being relied on as written)
 - Date: 2026-08-13
 - **Amended: 2026-08-22 — §8's fourth clause now has a carrier, and no clause of
   this ADR changes.** §8 requires a `CONFIRM` on an egress call to name the connected
@@ -222,6 +222,25 @@
   §§10–15 is touched, and this ADR's Decision text below is not rewritten (ADR-0070
   §1). The 2026-08-22 amendment note below is unaffected and stays whole. Refs
   #1503, #1544.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 5 such tokens inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0029 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0192, ADR-0231, ADR-0247 and ADR-0254 — each still
+  paired with the same scope, whose extent does not move; what is re-rendered is the prose
+  naming the clauses.** **The cross-references that prose carried, on which §4 places no
+  constraint in a note:** the second route to the seam is **ADR-0231 §6's** and the
+  credential read is **ADR-0231 §5's**; the three checks are **ADR-0029 §2's**; and the
+  earlier records on this line are **ADR-0192's** and **ADR-0231's**. ADR-0029 supersedes
+  no part of this ADR — it is the tool-invocation contract this ADR's §3 sits behind.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand) and ADR-0238 (§3's third clause a second time — the prohibition sentence acquires a second exception beside ADR-0233 §9's four conditions, for a search query composed over a supply ADR-0238 §2 admits, on a closed-loop request ruled `ALLOW`; §3's second clause and its absolute prohibition, §3's covered-content and covered-path definitions, the export exception and every other clause of this ADR stand)
+- Status: Partially superseded by ADR-0233 (§3's third clause, to the extent of the four conditions the commissioned approval surface states, and §4's marked no-mechanism clause, to the extent a recorded coverage makes the refusal mechanical; §3's second clause and every other clause of this ADR stand) and ADR-0238 (§3's third clause a second time — the prohibition sentence acquires a second exception beside the four conditions the record above names, for a search query composed over a supply that decision's §2 admits, on a closed-loop request ruled `ALLOW`; §3's second clause and its absolute prohibition, §3's covered-content and covered-path definitions, the export exception and every other clause of this ADR stand)
 - Date: 2026-08-14
 - **Partially superseded: 2026-09-05 by ADR-0238 — §3's third clause, in its
   prohibition sentence alone, and nothing else in this ADR.** The owner ruled arm
@@ -160,6 +160,24 @@
   was refused, in one section, so that a reader deciding whether to overrule it
   reads one place. §1's last paragraph names which clause an overrule would have to
   move and which clauses survive every reading. Refs #95, #1152, #1096.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 2 such tokens inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0233 and ADR-0238 — each still paired with the same
+  scope, whose extent does not move; what is re-rendered is the prose naming the
+  clauses.** **The cross-references that prose carried, on which §4 places no constraint
+  in a note:** the four conditions are **ADR-0233 §9's** and the supply is the one
+  **ADR-0238 §2** admits; both are targets of this line by pairs of their own.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

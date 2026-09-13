@@ -1,6 +1,6 @@
 # 172. A browser holds its web session outside the keyring, and its admission is recorded in place of a gate
 
-- Status: Partially superseded by ADR-0182 (§1's third class member, only in cardinality — each bootstrap value a gateway process mints, rather than the one ADR-0168 §5 permitted)
+- Status: Partially superseded by ADR-0182 (§1's third class member, only in cardinality — each bootstrap value a gateway process mints, rather than the one previously permitted)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-23 by ADR-0182 — **one enumerated member, one
   scope word, and the bound this ADR hangs three exemptions on is kept rather
@@ -124,6 +124,23 @@
   successful Tier 0 read on the admission path is recorded. **It is not** (§5),
   and the reason is not that the record costs too much — it is that the record
   cannot distinguish the case it would exist to reveal.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0168 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0182 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  single bootstrap value previously permitted is **ADR-0168 §5's**. ADR-0168 supersedes no
+  part of this ADR; the only target is ADR-0182.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 
