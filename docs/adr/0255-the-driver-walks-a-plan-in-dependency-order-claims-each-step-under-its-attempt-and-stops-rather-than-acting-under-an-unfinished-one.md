@@ -53,10 +53,14 @@
   weakened**: the ordering protects a turn that *"has driven nothing: no execution is open, no
   capacity slot is spent on a step and no side effect has been reached"*, which is true before a
   turn's first walk and false before its second, so the per-turn reading would forbid the
-  investigation while buying nothing. **§5's every other clause binds verbatim**: the
-  superseded-plan-drives-nothing rule, the every-plan-is-persisted rule, the oldest-first order,
-  the one-persistence-site rule, the turn-that-ends-early-persists-nothing rule and the
-  no-new-failure-mode clause.
+  investigation while buying nothing. **Two further clauses fall inside the same scope**: *"A
+  superseded plan **drives nothing** … reaches no `StepRunner`"* binds of a plan superseded
+  **before its walk began** and does not retrospectively forbid a walk that had already run when
+  the supersession was recorded; and the **no-new-failure-mode** clause held because every
+  `save_plan` preceded every drive, which a licensed round's save no longer does, so §10 states
+  what a second walk's persistence failure leaves behind. **§5's remaining clauses bind
+  verbatim**: the every-plan-is-persisted rule, the oldest-first order, the one-persistence-site
+  rule and the turn-that-ends-early-persists-nothing rule.
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
   reader would expect to be — ADR-0014, ADR-0037, ADR-0249, ADR-0042 and ADR-0253 among them.
 - Date: 2026-09-12
@@ -509,8 +513,18 @@ was settled about the step rather than by where in the plan it sat.
 > **refuses a `GoalAttempt` whose `execution_ids` names an execution any attempt of that goal
 > already carries** — because `open_attempt` takes a whole `GoalAttempt` and that tuple may arrive
 > non-empty, so a caller could otherwise open a live attempt carrying an ended attempt's execution
-> and defeat the conjunct without ever calling `commit_attempt`. Each refuses with the error class
-> §3's conjunct raises, and **each decides it in the same indivisible step as its own write**. This
+> and defeat the conjunct without ever calling `commit_attempt`. **Each decides it in the same
+> indivisible step as its own write.**
+
+> **Normative — an ownership conflict raises `PlanningError` and never `StaleExecutionError`, and
+> the distinction is what the class means to a caller.** `StaleExecutionError` is *"A write [that]
+> lost the optimistic-concurrency race"* (ADR-0014 §5), and its whole contract is that re-reading
+> and retrying can succeed. **An ownership conflict is permanent**: no re-read makes an execution
+> owned by attempt A valid for attempt B, so a caller conforming to that class's contract would
+> retry a write that can never land. The two refusals therefore raise a `PlanningError` that is
+> **not** the stale class, and §3's `→ RUNNING` conjunct keeps `StaleExecutionError` because a
+> claim refused there **is** retryable in the sense that class names — a later turn under the
+> right attempt succeeds. This
 > is a second **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
 > what makes §3's conjunct a binding rather than a coincidence: ADR-0249 §12's append-only rule —
 > *"an identifier the tuple already holds is ignored rather than duplicated or refused"* — governs
@@ -518,6 +532,27 @@ was settled about the step rather than by where in the plan it sat.
 > without this clause one execution could sit in both an ended attempt A and a live attempt B and
 > a claim naming B would pass every stated check. **Append-only prevents removal, not multiple
 > ownership**, and the conjunct needs the second.
+
+> **Normative — a store written before this decision may already hold the state it forbids, and
+> that is answered rather than assumed away.** Both members admitted two attempts of one goal
+> naming one execution before this decision, so a `schema_version` 2 database may carry one.
+> **The refusals above bind on every write and change no stored row**, so no migration is owed and
+> the store's `schema_version` does not move (§11). **What a reader does with a legacy duplicate
+> is fixed here**: `commit_transition`'s conjunct is satisfied by **any** attempt whose
+> `execution_ids` names the execution, so a claim under either owner is accepted — the guarantee
+> is prospective and no clause here claims it is retrospective — and **§5's recovered resume
+> refuses** rather than choosing, because its resolution requires exactly one owner and finding
+> two is the ambiguity it must not resolve by picking. **No lane repairs, rewrites or deletes a
+> legacy duplicate**, and none reads `PlanExport`'s closure rule as excluding one.
+
+**Prospective and refusing rather than migrated, and each half is the cheaper honest answer.** A
+migration would have to choose which attempt owns an execution two attempts name, and nothing in
+the record says — the append order is not retained, and ADR-0249 §12's tuples carry no instant. So
+the migration would invent an ownership nobody recorded, which is the fabrication ADR-0249 §12's
+own migration clause refuses for a ground it cannot show. Refusing at the one place ambiguity
+actually bites — the resume, which needs a single `attempt_id` to supply — costs a recoverable
+error on a state no code this system ships can newly create, and leaves the durable record
+untouched.
 
 > **Normative — the exclusivity is what makes §5's recovered resume total.** That section resolves
 > a parked step's attempt as *"the attempt whose `execution_ids` names that execution"*; with
@@ -781,9 +816,10 @@ restart could lose, a park could stale and a replan could point past the end of 
 > resuming path is holding. On that path alone, `orchestration` resolves it **once, before the
 > resume**, from values the plan store already holds: `get_execution` names the plan, the plan
 > names the goal, and `attempts_of(goal_id)` carries the attempt whose `execution_ids` names that
-> execution (ADR-0249 §12's append). **Where no attempt names it, the resume is refused with the
-> error class §3's conjunct raises, before any ruling is resolved and before anything is
-> claimed.**
+> execution (ADR-0249 §12's append). **Where no attempt names it, and where more than one does —
+> the legacy state §3 describes — the resume is refused, before any ruling is resolved and before
+> anything is claimed.** §3's exclusivity makes the second case unreachable through either
+> attempt-writing member, so it survives only in a store written before this decision.
 
 **Resolving it in `orchestration` is not the store-side derivation §3 refuses, and the difference
 is which of the two is the check.** §3 declines to have the **store** find the attempt because
@@ -1211,11 +1247,31 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > investigation — so it drives at most two plans and persists each set before the drive it
 > precedes.
 
-> **Normative — §5's every other clause binds verbatim, and its reason is kept rather than
-> weakened.** *"A superseded plan **drives nothing**"* binds entire and is what §7 relies on;
-> so do the every-plan-is-persisted rule itself, the oldest-first order, the
-> a-turn-that-ends-before-that-site-persists-nothing rule, the one-persistence-site rule and the
-> no-new-failure-mode clause. **§5's reason for the ordering is that a turn whose second
+> **Normative — two further clauses of §5 take the same scope, and they are named rather than
+> assumed to survive.** *"A superseded plan **drives nothing**. It starts no execution, reaches no
+> `StepRunner`…"* is stated of a plan that **is** superseded, and a first plan becomes superseded
+> by the licensed round's successor **after** it has driven. It binds **of a plan superseded
+> before its walk began**, which is every plan ADR-0228 §5 was written about; **it does not
+> retrospectively forbid a walk that had already run when the supersession was recorded**, and no
+> lane reads it as requiring a driven plan's execution to be undone. And §5's **no-new-failure-
+> mode** clause — *"A `save_plan` that raises on a superseded plan fails the turn exactly as one
+> raising on any other plan does today"* — held because every `save_plan` preceded every drive; a
+> licensed round's save can now fail **after** a side effect, which is a failure mode §5 did not
+> admit.
+
+> **Normative — what a second walk's persistence failure leaves behind, stated rather than
+> inherited.** Where the licensed round's `save_plan` raises, **the first walk's execution and its
+> effects stand exactly as they are** — nothing is undone, no step is re-dispatched and no
+> `SkipReason` is written — **no second walk begins**, and the turn fails as a turn whose
+> persistence raised already fails today. **The durable record is complete about what happened**:
+> the first plan, its execution and its outcomes are on disk because §5's own oldest-first rule
+> put them there before the drive. What is lost is the plan nobody could persist, which is the
+> same loss §5 accepts for a turn's second plan today, arriving one walk later.
+
+> **Normative — §5's remaining clauses bind verbatim, and its reason is kept rather than
+> weakened.** The every-plan-of-the-turn-is-persisted rule itself, the oldest-first order, the
+> a-turn-that-ends-before-that-site-persists-nothing rule and the one-persistence-site rule each
+> bind entire. **§5's reason for the ordering is that a turn whose second
 > `save_plan` raises *"has driven nothing: no execution is open, no capacity slot is spent on a
 > step and no side effect has been reached"*** — a protection for a turn that **has not yet
 > acted**. Before a turn's first walk that is the whole turn and the clause binds exactly as
@@ -1586,8 +1642,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     then does with the plan**: the licensed investigation's last plan is persisted **after** the
     first walk's `start_execution` and is driven by a **second walk**, the first walk's plan and
     execution are unchanged, and the turn drove **two** plans and no more — which is ADR-0228 §5's
-    two clauses read per walk (§10). A final paired arm asserts **one licence per turn**: the
-    second walk carries none, whatever it skipped.
+    two clauses read per walk (§10) — **and the second plan passes phase 4 before that walk
+    starts**, asserted by a paired case in which the licensed round returns a plan whose first
+    step's `when` no row satisfies and which waits on nothing that plan produces: phase 4 **fails**
+    it under ADR-0254 §14's unchanged limb, **`start_execution` is never called** and no
+    `ActionRequest` is built, so the second walk is gated exactly as the first. A final paired arm
+    asserts **one licence per turn**: the second walk carries none, whatever it skipped. **And a
+    persistence arm**: where the licensed round's `save_plan` raises, the first walk's execution
+    and its `SUCCEEDED` step are unchanged, no second walk begins, and nothing is re-dispatched.
 
 **Full — M34, owed there and not established here.**
 
@@ -1759,11 +1821,15 @@ scope rather than being set aside by it**: the ordering exists so that a turn wh
 `save_plan` raises *"has driven nothing: no execution is open, no capacity slot is spent on a step
 and no side effect has been reached"* — a state that obtains before a turn's first walk and cannot
 obtain before its second, so the per-turn reading forbids the investigation and protects nothing.
-**Every other clause of ADR-0228 binds entire and is relied on**: §5's superseded-plan-drives-
-nothing rule is what §7 rests on, its every-plan-is-persisted rule, its oldest-first order, its
-one-persistence-site rule, its turn-that-ends-early-persists-nothing rule and its
-no-new-failure-mode clause all stand, and §14's plan-driving deferral is **fired** rather than
-superseded (above).
+**Two further clauses of §5 fall inside the same scope rather than outside it**, and §10 names
+both: *"A superseded plan **drives nothing** … reaches no `StepRunner`"* binds of a plan superseded
+**before its walk began** and does not retrospectively forbid a walk that had already run, and the
+**no-new-failure-mode** clause held because every `save_plan` preceded every drive — which a
+licensed round's save no longer does, so §10 states what a second walk's persistence failure
+leaves behind. **Every remaining clause of ADR-0228 binds entire and is relied on**: §5's
+every-plan-is-persisted rule, its oldest-first order, its one-persistence-site rule and its
+turn-that-ends-early-persists-nothing rule all stand, and §14's plan-driving deferral is **fired**
+rather than superseded (above).
 
 **ADR-0252, ADR-0253 and ADR-0254's remainder — relied on and not superseded.**
 ADR-0252 §6's four tests are evaluated by §1 and §5 and not restated; ADR-0253's §§1, 2, 4, 5, 6,
@@ -1794,12 +1860,14 @@ clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, a
 questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
 than leaving a reader to check.
 
-**The records it owes land in the same change as this document** (ADR-0082 §7): **ADR-0254's and
-ADR-0251's `Status` pairs** — each carrying its scope, each dropping `Accepted` so a prefix match
-cannot misread the replaced part as live (ADR-0070 §3, ADR-0001) — are written with it and not
-after it, and so are the dated notes §16 states. That is the atomic pair ADR-0082 §7 permits while
-this decision stands `Proposed`, and it is why this PR touches three files where its predecessors
-touched one.
+**The records it owes land in the same change as this document** (ADR-0082 §7): **ADR-0254's,
+ADR-0251's and ADR-0228's `Status` records** — each carrying its scope, and the first two dropping
+`Accepted` so a prefix match cannot misread the replaced part as live while ADR-0228's is appended
+beside the pairs it already carries, under ADR-0070 §4's accumulation rule (ADR-0070 §3,
+ADR-0001) — are written with it and not after it, and so is **the appended dated note each of the
+three carries**, which ADR-0082 §1 makes *"the invariant half of the record"*. That is the atomic
+pair ADR-0082 §7 permits while this decision stands `Proposed`, and it is why this PR touches
+**four** files where its predecessors touched one.
 
 ## Consequences
 
