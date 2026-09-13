@@ -115,6 +115,37 @@ def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
         raise PlanningError(msg) from exc
 
 
+def _revalidated_plan(plan: ActionPlan) -> ActionPlan:
+    """Rebuild ``plan`` as a validated, detached :class:`ActionPlan`, or refuse it.
+
+    :func:`_revalidated_goal`'s reasoning over the record ADR-0253 gives a graph.
+    ``model_copy(update=...)`` skips validators, so a caller can hand in a plan whose
+    ``depends_on`` points **forward** — which ADR-0253 §1 makes unconstructible so that
+    "a cycle has no other spelling". A fake that stored one would hand a driver a plan
+    the type says cannot exist, and would disagree with the stores it stands in for.
+
+    Re-implemented here rather than imported from ``ai_assistant.planning``, for the
+    reason this module's docstring gives: a consumer's tests would then pull in the very
+    subsystem the fake stands in for, and a double that decided conformance by calling
+    the code under test would report every implementation conformant.
+
+    Args:
+        plan: The plan as the caller handed it in.
+
+    Returns:
+        The plan, validated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return ActionPlan.model_validate(plan.model_dump())
+    except ValidationError as exc:
+        subject = getattr(plan, "id", "<no id>")
+        msg = f"plan {subject!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
 def _revalidated_revision(revision: GoalRevision) -> GoalRevision:
     """Rebuild ``revision`` as a validated, detached :class:`GoalRevision`, or refuse it.
@@ -1563,51 +1594,60 @@ class FakePlanStore:
         closed at the same place as ``targets_revision``'s, one substitution later.
         **A plan declaring neither is not checked.**
 
-        The test is spelled out here rather than imported from
+        **And the plan is revalidated before it is kept, not merely copied** (ADR-0023
+        §2): ``model_copy(update=...)`` skips validators, so a caller can hand in a plan
+        whose graph ADR-0253 §§1, 6 and 8 make **unconstructible**, and "a write that
+        reaches past it must re-validate".
+
+        The tests are spelled out here rather than imported from
         :mod:`ai_assistant.planning.goals`, for the reason this module's own docstring
         gives: a fake that decided conformance by calling the code it stands in for
         would report every implementation conformant. The shared conformance suite is
         what holds the two statements honest.
         """
+        snapshot = _revalidated_plan(plan)
         async with self._resource.held():
-            held = self._goals.get(plan.goal_id)
+            held = self._goals.get(snapshot.goal_id)
             if held is None:
-                msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+                msg = f"plan {snapshot.id} refers to unknown goal {snapshot.goal_id}"
                 raise PlanningError(msg)
-            self._refuse_an_unsubstituted_condition(plan, held)
+            self._refuse_an_unsubstituted_condition(snapshot, held)
             # ADR-0249 §8: the window between the planner's return and the loop's
             # stamp is closed at the store rather than trusted to close itself.
-            if plan.targets_revision is None:
+            if snapshot.targets_revision is None:
                 msg = (
-                    f"plan {plan.id} carries no targets_revision: the unstamped state "
-                    "exists only between the planner's return and the loop's stamp, "
-                    "and the window is closed at the store (ADR-0249 §8)"
+                    f"plan {snapshot.id} carries no targets_revision: the unstamped "
+                    "state exists only between the planner's return and the loop's "
+                    "stamp, and the window is closed at the store (ADR-0249 §8)"
                 )
                 raise PlanningError(msg)
-            if plan.supersedes is not None:
-                if plan.supersedes == plan.id:
-                    msg = f"plan {plan.id} supersedes itself; a plan cannot replace the plan it is"
-                    raise PlanningError(msg)
-                predecessor = self._plans.get(plan.supersedes)
-                if predecessor is None:
-                    msg = f"plan {plan.id} supersedes unknown plan {plan.supersedes}"
-                    raise PlanningError(msg)
-                if predecessor.goal_id != plan.goal_id:
+            if snapshot.supersedes is not None:
+                if snapshot.supersedes == snapshot.id:
                     msg = (
-                        f"plan {plan.id} supersedes plan {plan.supersedes}, which is under "
-                        f"goal {predecessor.goal_id} rather than {plan.goal_id}; a revision "
-                        "replaces a plan for the same goal"
+                        f"plan {snapshot.id} supersedes itself; a plan cannot replace "
+                        "the plan it is"
                     )
                     raise PlanningError(msg)
-            existing = self._plans.get(plan.id)
-            if existing is not None and existing != plan:
+                predecessor = self._plans.get(snapshot.supersedes)
+                if predecessor is None:
+                    msg = f"plan {snapshot.id} supersedes unknown plan {snapshot.supersedes}"
+                    raise PlanningError(msg)
+                if predecessor.goal_id != snapshot.goal_id:
+                    msg = (
+                        f"plan {snapshot.id} supersedes plan {snapshot.supersedes}, which "
+                        f"is under goal {predecessor.goal_id} rather than "
+                        f"{snapshot.goal_id}; a revision replaces a plan for the same goal"
+                    )
+                    raise PlanningError(msg)
+            existing = self._plans.get(snapshot.id)
+            if existing is not None and existing != snapshot:
                 msg = (
-                    f"plan {plan.id} already exists and differs; re-planning must use a new "
-                    "id so the previous plan stays an intact audit record"
+                    f"plan {snapshot.id} already exists and differs; re-planning must "
+                    "use a new id so the previous plan stays an intact audit record"
                 )
                 raise PlanningError(msg)
-            self._plans[plan.id] = plan.model_copy(deep=True)
-        return plan.id
+            self._plans[snapshot.id] = snapshot
+        return snapshot.id
 
     @staticmethod
     def _refuse_an_unsubstituted_condition(plan: ActionPlan, goal: Goal) -> None:

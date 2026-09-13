@@ -11066,15 +11066,23 @@ class GoalEvidence(BaseModel):
         §5 adopts that vocabulary *"whole and not re-minted"* and enumerates the members
         by name, so the check reads the enumeration rather than restating it.
 
-        **An ``INTERPRETATION`` row's verdict is not one of them**, which is as much as
-        this decision can check and exactly what §5 asks it to: the members of that
-        vocabulary are *"the one the interpretation step declares"* and are A5's and
-        A7's to fix, but §5's disjointness clause is normative here and now — *"no member
-        of an interpretation enumeration takes a value equal to any of
-        ``ReadOutcomeKind``'s seven"* — because the digest carries ``verdict`` and **not**
-        ``basis``, so *"a planner told ``'empty'`` without being told of what would be
-        told nothing"*. The constraint is *"on the **later** vocabulary"*, and this is
-        where the later vocabulary reaches a stored row.
+        **An ``INTERPRETATION`` row's verdict is one of** :class:`InterpretationVerdict`'s
+        **three**, which is the check ADR-0252 §5 could not yet state and ADR-0253 §8
+        supplies. That section closes the vocabulary — *"there is **no per-declaration
+        vocabulary**: every interpretation row's ``verdict`` is a member of
+        ``InterpretationVerdict``, and what separates two readings of two propositions
+        is ADR-0252 §7's comparison of ``declaration``s"* — so what §5 left as *"the one
+        the interpretation step declares"*, for *"A5's and A7's to fix"*, is now fixed
+        and the limb tests membership rather than only disjointness. Without it the
+        field is an ``EncodableText`` and any sentence a model wrote satisfies it on
+        this basis, which is the one thing §5 opens by forbidding.
+
+        **§5's disjointness clause is subsumed rather than dropped** — *"no member of an
+        interpretation enumeration takes a value equal to any of ``ReadOutcomeKind``'s
+        seven"*, because the digest carries ``verdict`` and **not** ``basis``, so *"a
+        planner told ``'empty'`` without being told of what would be told nothing"*. It
+        is asserted over the two enumerations directly rather than row by row, which is
+        where a later member of either would break it.
 
         Raises:
             ValueError: If the verdict is not from the vocabulary the basis names.
@@ -11089,12 +11097,14 @@ class GoalEvidence(BaseModel):
                 )
                 raise ValueError(msg)
             return
-        if self.verdict in known:
+        settled = {member.value for member in InterpretationVerdict}
+        if self.verdict not in settled:
+            collides = " and is a ReadOutcomeKind" if self.verdict in known else ""
             msg = (
-                f"an INTERPRETATION evidence row's verdict is a member of the "
-                f"enumeration its declaration names, and the two vocabularies are "
-                f"disjoint in their values; {self.verdict!r} is a ReadOutcomeKind "
-                f"(ADR-0252 §5)"
+                f"an INTERPRETATION evidence row's verdict is one of "
+                f"InterpretationVerdict's three and never a prose summary; "
+                f"{self.verdict!r} is none of {sorted(settled)}{collides} "
+                f"(ADR-0252 §5, ADR-0253 §8)"
             )
             raise ValueError(msg)
 
@@ -11560,6 +11570,32 @@ class GoalDeletion(BaseModel):
         return self
 
 
+def _output_resolves(
+    named: InterpretedOutput | None, executions: Mapping[str, ExecutionState]
+) -> bool:
+    """Whether one ``interpreted_output`` resolves within an export (ADR-0253 §8).
+
+    §8's own lookup, stated once because :meth:`PlanExport._evidence_closes_over_its_records`
+    is the only reader and a second statement of it is a second place to disagree:
+    "``PlanStore.get_execution(execution_id)`` returns the state, its ``steps`` carry the
+    ``step_id``, and that step's ``output`` is the input the verdict was formed over".
+
+    Args:
+        named: The reference, or ``None`` where the row carries none.
+        executions: The executions the export carries, by id.
+
+    Returns:
+        ``True`` where the row names no output — every ``READ_OUTCOME`` row and every
+        records-backed ``INTERPRETATION`` one — and otherwise whether the execution and
+        the step it names are both in the document. The ``field`` is not consulted: a
+        key is not an identifier, and an absent one is disposed of at dispatch.
+    """
+    if named is None:
+        return True
+    execution = executions.get(named.execution_id)
+    return execution is not None and execution.step(named.step_id) is not None
+
+
 class PlanExport(BaseModel):
     """A portable snapshot of planning state (see ADR-0014 §5, ADR-0004 §6).
 
@@ -11801,7 +11837,9 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         self._questions_close_over_their_records(goal_ids, attempt_ids)
-        self._evidence_closes_over_its_records(goal_ids, execution_ids)
+        self._evidence_closes_over_its_records(
+            goal_ids, {execution.id: execution for execution in self.executions}
+        )
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -11817,7 +11855,7 @@ class PlanExport(BaseModel):
         return self
 
     def _evidence_closes_over_its_records(
-        self, goal_ids: set[str], execution_ids: set[str]
+        self, goal_ids: set[str], executions: Mapping[str, ExecutionState]
     ) -> None:
         """Enforce ADR-0252 §13's extension of ADR-0014 §5's closure rule.
 
@@ -11849,24 +11887,41 @@ class PlanExport(BaseModel):
         identifiers and **elidable** row references, and §10 and §12 both rule such a
         reference "an identifier and not a resolution guarantee".
 
-        **An ``interpreted_output``'s ``execution_id`` *is* closed over** (ADR-0253
-        §8), and it is not the case the paragraph above excuses: ADR-0014 §5's rule is
-        stated over "every ``goal_id``/``plan_id`` referenced by an included record",
-        this document already carries ``tuple[ExecutionState, ...]``, and the plan
-        store's ``delete_goal`` cascades over executions — so the reference "resolves
-        for exactly as long as the row does", which is the property §8 mints the type
-        for. It is the same extension ADR-0249 §12 made for ``attempt_id`` and
-        ADR-0250 for ``question_id``, over one more reference.
+        **An ``interpreted_output`` *is* closed over** (ADR-0253 §8), and it is not
+        the case the paragraph above excuses: ADR-0014 §5's rule is stated over "every
+        ``goal_id``/``plan_id`` referenced by an included record", this document already
+        carries ``tuple[ExecutionState, ...]``, and the plan store's ``delete_goal``
+        cascades over executions — so the reference "resolves for exactly as long as the
+        row does", which is the property §8 mints the type for. It is the same extension
+        ADR-0249 §12 made for ``attempt_id`` and ADR-0250 for ``question_id``, over one
+        more reference.
+
+        **Both identifiers of the reference, because resolving it is §8's own lookup and
+        not only its first step**: "``PlanStore.get_execution(execution_id)`` returns the
+        state, its ``steps`` carry the ``step_id``, and that step's ``output`` is the
+        input the verdict was formed over". A row naming a step its execution does not
+        carry states a warrant it cannot show, which is the defect ADR-0252 §1 refuses a
+        minted record for and the one §8 mints this type to avoid. It costs no
+        conforming document anything: this validator already requires every execution's
+        steps to line up with its plan's, so a step of the plan is a step of every
+        execution of it.
+
+        **The ``field`` is not closed over**, and the asymmetry is deliberate: a key is
+        not an identifier, and an absent one is one of ADR-0253 §6's six unresolvable
+        cases, disposed of **at dispatch** by §2's rule rather than by refusing a
+        document. Nor is the row's goal compared with the execution's plan: §8 rules
+        that "the plan is derived and never copied", and a relation this decision does
+        not state is not one this validator mints.
 
         Args:
             goal_ids: The ids of the goals this export carries.
-            execution_ids: The ids of the executions it carries.
+            executions: The executions it carries, by id.
 
         Raises:
             ValueError: If a history names a goal the export does not carry, if two
                 histories name one goal, if a goal has no history, if two rows share
                 an id, or if a row's ``interpreted_output`` names an execution the
-                export does not carry.
+                export does not carry or a step that execution does not.
         """
         named = [history.goal_id for history in self.evidence]
         if len(set(named)) != len(named):
@@ -11888,12 +11943,11 @@ class PlanExport(BaseModel):
             row.id
             for history in self.evidence
             for row in history.rows
-            if row.interpreted_output is not None
-            and row.interpreted_output.execution_id not in execution_ids
+            if not _output_resolves(row.interpreted_output, executions)
         )
         if unresolved:
             msg = (
-                "export has evidence rows whose interpreted execution is missing: "
+                "export has evidence rows whose interpreted step output is missing: "
                 f"{', '.join(unresolved)}"
             )
             raise ValueError(msg)

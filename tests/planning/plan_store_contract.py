@@ -1416,6 +1416,40 @@ class PlanStoreContract:
         with pytest.raises(StaleExecutionError):
             await store.commit_transition(_claim(state))
 
+    async def test_save_plan_refuses_a_plan_that_does_not_revalidate(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0023 §2 over the record ADR-0253 gives a graph.
+
+        "``model_copy(update=...)`` skips validators — a pydantic property no type can
+        close — so the invariant holds *at the validation boundary*, and **a write that
+        reaches past it must re-validate**." ADR-0253 §1 makes a forward dependency
+        **unconstructible**, so "acyclicity is a property of the type rather than a
+        check somebody remembered to write" — and that is only true of what reaches this
+        store if the store rebuilds the value. A store that kept this one would put a
+        cycle into the record a driver walks, and the type would have stopped saying
+        anything about it.
+
+        Driven through ``depends_on`` rather than through a scalar because that is the
+        clause whose whole safety argument is construction-time, and the arm is over
+        **every** conforming implementation: before it, one store revalidated and two
+        did not.
+        """
+        await store.save_goal(_goal())
+        forward = _plan(steps=2).model_copy(
+            update={
+                "steps": (
+                    _plan(steps=2).steps[0].model_copy(update={"depends_on": ("s2",)}),
+                    _plan(steps=2).steps[1],
+                )
+            }
+        )
+        assert forward.steps[0].depends_on == ("s2",), "the caller reached past the validator"
+
+        with pytest.raises(PlanningError):
+            await store.save_plan(forward)
+        assert await store.get_plan("p1") is None
+
     # --- ADR-0253 §9: the condition-label window, closed at the store ------
 
     async def test_save_plan_admits_a_condition_naming_an_element_of_the_revision(

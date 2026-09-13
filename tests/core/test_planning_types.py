@@ -1979,15 +1979,37 @@ def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
     ``attempt_id`` and ADR-0250 to ``question_id``. ``PlanExport`` already carries
     ``tuple[ExecutionState, ...]`` and gains **no member** for it.
 
+    **Both identifiers of the reference resolve, because resolving one is §8's own
+    lookup and not only its first step**: "``get_execution(execution_id)`` returns the
+    state, its ``steps`` carry the ``step_id``, and that step's ``output`` is the input
+    the verdict was formed over". A row naming a step its execution does not carry
+    states a warrant it cannot show — the defect ADR-0252 §1 refuses a minted record
+    for. It costs no conforming document anything, because this validator already
+    requires every execution's steps to line up with its plan's.
+
     **It is closed over where a row's ``attempt_id`` is not**, and the asymmetry is the
     point: a row's ``attempt_id`` is one no conforming store may refuse at the write
     (ADR-0252 §12), where an ``interpreted_output`` names an execution the plan store
     holds and ``delete_goal`` cascades over — "a reference that resolves for exactly as
     long as the row does", which is the property §8 mints the type for.
+
+    **The ``field`` is not closed over**: a key is not an identifier, and an absent one
+    is one of ADR-0253 §6's six unresolvable cases, disposed of at dispatch by §2's rule
+    rather than by refusing a document.
     """
     goal = _goal()
-    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN)
-    execution = ExecutionState(id="x1", plan_id="p1", steps=(), updated_at=_WHEN)
+    plan = ActionPlan(
+        id="p1",
+        goal_id="g1",
+        steps=(PlanStep(id="s1", intent="refresh", capability="refresh_forecast"),),
+        created_at=_WHEN,
+    )
+    execution = ExecutionState(
+        id="x1",
+        plan_id="p1",
+        steps=(StepExecution(step_id="s1", status=StepStatus.PENDING),),
+        updated_at=_WHEN,
+    )
     row = _evidence_row().model_copy(
         update={
             "basis": EvidenceBasis.INTERPRETATION,
@@ -2012,12 +2034,41 @@ def test_the_export_closure_reaches_an_interpreted_outputs_execution() -> None:
     )
     assert document.evidence[0].rows[0].interpreted_output == row.interpreted_output
 
-    with pytest.raises(ValidationError, match="interpreted execution is missing"):
+    with pytest.raises(ValidationError, match="interpreted step output is missing"):
         PlanExport(
             exported_at=_WHEN,
             goals=(goal,),
             evidence=(EvidenceHistory(goal_id="g1", rows=(row,)),),
         )
+
+    unnamed_step = row.model_copy(
+        update={"interpreted_output": InterpretedOutput(execution_id="x1", step_id="sX")}
+    )
+    with pytest.raises(ValidationError, match="interpreted step output is missing"):
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            plans=(plan,),
+            executions=(execution,),
+            evidence=(EvidenceHistory(goal_id="g1", rows=(unnamed_step,)),),
+        )
+
+    no_field = row.model_copy(
+        update={"interpreted_output": InterpretedOutput(execution_id="x1", step_id="s1")}
+    )
+    assert (
+        PlanExport(
+            exported_at=_WHEN,
+            goals=(goal,),
+            plans=(plan,),
+            executions=(execution,),
+            evidence=(EvidenceHistory(goal_id="g1", rows=(no_field,)),),
+        )
+        .evidence[0]
+        .rows[0]
+        .interpreted_output
+        == no_field.interpreted_output
+    )
 
 
 def test_the_export_closure_reaches_an_attempt() -> None:

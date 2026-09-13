@@ -137,9 +137,13 @@ def test_an_interpretation_verdict_is_never_a_read_outcome_kind() -> None:
     "No member of an interpretation enumeration takes a value equal to any of
     ``ReadOutcomeKind``'s seven", because "the digest carries ``verdict`` and **not**
     ``basis``", so "a planner told ``'empty'`` without being told of what would be told
-    nothing". Which members that enumeration has is A5's and A7's to fix (§15); that it
-    may not collide with these seven is fixed here, and a stored row is where the later
-    vocabulary reaches this decision.
+    nothing". Which members that enumeration has was A5's and A7's to fix (§15), and
+    ADR-0253 §8 has fixed them: the limb now tests membership of
+    ``InterpretationVerdict`` rather than only non-membership of these seven, so a
+    collision is refused **and** so is a verdict from no vocabulary at all. The
+    disjointness itself is asserted over the two enumerations directly in
+    ``tests/core/test_plan_shape_types.py``, which is where a later member of either
+    would break it; what is held here is that a stored row cannot carry one.
     """
     fields: dict[str, object] = {
         "basis": EvidenceBasis.INTERPRETATION,
@@ -151,8 +155,10 @@ def test_an_interpretation_verdict_is_never_a_read_outcome_kind() -> None:
     }
     assert _row(**fields, verdict="qualifies").verdict == "qualifies"
 
-    with pytest.raises(ValidationError, match="the two vocabularies are"):
+    with pytest.raises(ValidationError, match="is a ReadOutcomeKind"):
         _row(**fields, verdict=ReadOutcomeKind.EMPTY.value)
+    with pytest.raises(ValidationError, match="InterpretationVerdict's three"):
+        _row(**fields, verdict="free-form prose about what the record said")
 
 
 @pytest.mark.parametrize(

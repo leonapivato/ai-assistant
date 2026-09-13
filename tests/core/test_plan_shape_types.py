@@ -560,6 +560,33 @@ def test_no_third_interpretation_shape_constructs(fields: dict[str, object]) -> 
         _row(**fields)
 
 
+@pytest.mark.parametrize(
+    "verdict",
+    ["free-form prose about what the record said", "", "QUALIFIES", "qualifie", "empty"],
+    ids=["prose", "blank", "the-member-name-not-its-value", "a-near-miss", "the-other-vocabulary"],
+)
+def test_an_interpretation_rows_verdict_is_one_of_this_vocabularys_three(verdict: str) -> None:
+    """§8 closes what ADR-0252 §5 could only half-check, and this is the closing.
+
+    That section left the members "the one the interpretation step declares", "A5's and
+    A7's to fix", so its validator could assert only that an interpretation verdict is
+    **not** a ``ReadOutcomeKind``. §8 fixes them — "there is **no per-declaration
+    vocabulary**: every interpretation row's ``verdict`` is a member of
+    ``InterpretationVerdict``" — so the check is membership and the field stops
+    admitting any sentence a model wrote on this basis.
+
+    A vocabulary a model authored could not be compared, retained or audited: members
+    invented per plan would be unprovenanced strings in a durable row, and two plans
+    about one proposition would almost never agree on a spelling, so ADR-0252 §8's
+    refresh could never hold.
+    """
+    for member in InterpretationVerdict:
+        assert _row(records=("m1",), verdict=member.value).verdict == member.value
+
+    with pytest.raises(ValidationError, match="InterpretationVerdict's three"):
+        _row(records=("m1",), verdict=verdict)
+
+
 def test_a_read_outcome_row_carries_no_interpreted_output() -> None:
     """§8's shapes are the ``INTERPRETATION`` limb's and reach no other basis.
 
