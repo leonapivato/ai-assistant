@@ -106,6 +106,56 @@ def test_an_interpretation_row_constructs_and_no_count_invariant_refuses_it() ->
 
 
 @pytest.mark.parametrize(
+    "verdict",
+    ["free-form prose about what the read found", "qualifies", "", "RETURNED_RECORDS"],
+    ids=["prose", "an-interpretation-vocabulary-value", "blank", "the-member-name-not-its-value"],
+)
+def test_a_read_outcome_verdict_is_one_of_read_outcome_kinds_seven(verdict: str) -> None:
+    """§5: the vocabulary is decided by ``basis`` and by nothing else.
+
+    "``verdict`` carries the value of a typed outcome and **never a prose summary**",
+    and a ``READ_OUTCOME`` row's is "the value of the ``ReadOutcomeKind`` member
+    ADR-0251 §2's classifier assigned to that ask". The field is an ``EncodableText``,
+    so without this limb any sentence a model wrote satisfies it — and a row carrying
+    one would be persisted, reach ``EvidenceDigest``, and be read as an outcome by §6's
+    tests and §8's fifth limb.
+
+    ``"RETURNED_RECORDS"`` is in the cases because §5 adopts the vocabulary "whole and
+    not re-minted": what a row carries is the member's **value**, and the member's
+    name is not it.
+    """
+    for member in ReadOutcomeKind:
+        assert _row(verdict=member.value).verdict == member.value
+
+    with pytest.raises(ValidationError, match="one of ReadOutcomeKind's seven"):
+        _row(verdict=verdict)
+
+
+def test_an_interpretation_verdict_is_never_a_read_outcome_kind() -> None:
+    """§5's disjointness clause, which is normative on the **later** vocabulary.
+
+    "No member of an interpretation enumeration takes a value equal to any of
+    ``ReadOutcomeKind``'s seven", because "the digest carries ``verdict`` and **not**
+    ``basis``", so "a planner told ``'empty'`` without being told of what would be told
+    nothing". Which members that enumeration has is A5's and A7's to fix (§15); that it
+    may not collide with these seven is fixed here, and a stored row is where the later
+    vocabulary reaches this decision.
+    """
+    fields: dict[str, object] = {
+        "basis": EvidenceBasis.INTERPRETATION,
+        "read_kind": None,
+        "declaration": "step-decl-1",
+        "records": ("m1",),
+        "returned": 0,
+        "admitted": 0,
+    }
+    assert _row(**fields, verdict="qualifies").verdict == "qualifies"
+
+    with pytest.raises(ValidationError, match="the two vocabularies are"):
+        _row(**fields, verdict=ReadOutcomeKind.EMPTY.value)
+
+
+@pytest.mark.parametrize(
     "broken",
     [
         pytest.param({"read_kind": ReadKind.SIGHTED_QUERY}, id="a-read-kind"),
