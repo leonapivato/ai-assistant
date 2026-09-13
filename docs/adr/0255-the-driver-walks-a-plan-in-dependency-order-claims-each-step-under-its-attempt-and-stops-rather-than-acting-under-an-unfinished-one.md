@@ -330,6 +330,17 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > fails as it would have anyway, **no lane retries it from a later turn**, and A8 owns the repair:
 > §6's residual one field over, and stated rather than inherited.
 
+> **Normative — which failure surfaces when both do, and the accounting write never replaces the
+> cause.** Where the interpretation raised **and** the `commit_attempt` that charges the interval
+> then raises too, **the interpretation's failure is the exception that propagates** and the
+> ledger write's failure is **chained to it** rather than substituted for it — Python's
+> `raise … from` shape, which the corpus already relies on for `StaleExecutionError`'s cause
+> (ADR-0029 §4's *"not as a raw serialisation error from the digest"*). **The turn failed on the
+> interpretation**, and an implementation whose accounting cleanup masked that cause would report
+> a store problem for a provider outage and send the next reader to the wrong subsystem. **No lane
+> swallows either**: the ledger failure is not discarded, and the interpretation failure is not
+> demoted.
+
 > **Normative — a failed interpretation is never defaulted, and this is not a sixth stop trigger.**
 > **No lane substitutes `INCONCLUSIVE`, `DOES_NOT_QUALIFY` or any other member for a call that did
 > not return one**, writes a row with a fabricated verdict, retries the call, or proceeds as if the
@@ -371,7 +382,11 @@ per dispatch and not per plan.
 > hazard**: no consequential capability is wired into a production deployment until A8's, A9's and
 > A10's guarantees are implemented and demonstrated, so the acts the window governs cannot be
 > performed while it stands — the construction §7 uses for cross-plan at-most-once, applied to one
-> more obligation. **The two mechanisms that would close it are named in §12 and neither is taken
+> more obligation. **And §13 states the window's closure as a prerequisite of that gate in its own
+> right**, because the gate's three guarantees are A8's, A9's and A10's and **none of them is this
+> window**: without the added prerequisite all three could land and leave it open, and the
+> interval argument would expire exactly when a consequential capability was wired. **The two
+> mechanisms that would close it are named in §12 and neither is taken
 > here**: a value the claim carries, which §3's argument against a caller-supplied revision
 > applies to in full; or ADR-0252 §6's four tests evaluated inside `commit_transition`, which puts
 > a clock and a plan's conditions inside the store. **Choosing between them is not this decision's
@@ -1466,6 +1481,18 @@ nothing depends on it, and no act follows — so nothing fails open.
 > first call no more than ADR-0251 §4 does and no lane reads §9 as gating it**; whether it should
 > be gated is that decision's question and not this one's (§12).
 
+> **Normative — phase 4's evaluation is *inside* the request's budget and is not *gated* by it,
+> and the difference is stated rather than left to a reader.** §9 fixes the deadline at the entry
+> to the adapter call, **before** routing, planning and ADR-0254 §14's phase-4 evaluation, so
+> whatever phase 4 spends is **charged** to the remainder the walk then reads. **It is not
+> stopped part-way**: no clause of this decision interrupts phase 4, and a plan whose validation
+> outlives the budget reaches a walk whose first remainder is not strictly positive and which
+> therefore **starts no step** — the stop rule working rather than a gap in it. **What that costs
+> is bounded and is stated**: ADR-0254 §14 evaluates *"deterministically and over stored values
+> alone"*, so phase 4 makes no model call and reaches no egress, and its cost is linear in the
+> plan's steps over reads the store already serves. **Gating phase 4 itself is ADR-0254 §14's to
+> decide and is not taken here** (§12).
+
 > **Normative.** **A step the deadline stopped is `PENDING` and is never `SKIPPED`** (§2), and the
 > remainder is never rounded up, clamped to a minimum, borrowed from a later turn or topped up.
 
@@ -1956,10 +1983,15 @@ ledger and stops on the same three guards.
 - **Whether a second `CONFIRM` of one turn may ever be put**, so that a walk could park two steps
   and ask about both. **Not decided**, and §5 forbids it today. Fired by a decision that gives the
   façade a park queue and states what an answer to one of two parks means for the other.
-- **A bound on how many steps one walk may dispatch.** **Not decided**, and ADR-0253 §8's clause
+- **A bound on how many steps one walk may dispatch, and whether phase 4's own evaluation is
+  gated on the deadline.** **Not decided**, and ADR-0253 §8's clause
   that *"`ActionPlan.steps` is **not** bounded by this decision"* binds. A step is selected, ruled
   on and claimed one at a time, so a long plan is expensive in a way the corpus already gates
-  (ADR-0004 §7, ADR-0194 §3) and bounded in wall-clock by §9. Fired by a consumer that needs one.
+  (ADR-0004 §7, ADR-0194 §3), and **§9 bounds the *walk* in wall-clock and not ADR-0254 §14's
+  validation**: phase 4's cost is charged to the remainder but phase 4 is not stopped part-way,
+  so a very long plan can spend its budget there and reach a walk that dispatches nothing (§9).
+  Whether that evaluation should itself be gated is **ADR-0254 §14's**, which owns the phase.
+  Fired by a consumer that needs a bound, or by a decision that gates the phase.
 - **Evidence that moves between a step's evaluation and its committed claim.** **Not decided**,
   and §1 states the window rather than closing it: a concurrent turn's ADR-0252 §8 refresh
   supersedes a `STANDING` row without moving the goal's `revision`, so a step whose `when` the
@@ -1967,9 +1999,11 @@ ledger and stops on the same three guards.
   Closing it needs either **a value the claim carries** — which §3's argument against a
   caller-supplied revision applies to unchanged — or **ADR-0252 §6's four tests evaluated inside
   `commit_transition`**, which needs a clock and a plan's conditions in the store. §13's Q4 rule
-  bounds the interval meanwhile, exactly as it bounds §7's. **Fired by a decision that chooses
-  between the two**, and no lane reads this entry as licence to add either on its own authority.
-  Filed as [#2309](https://github.com/leonapivato/ai-assistant/issues/2309).
+  bounds the interval meanwhile — **and §13 makes closing this window a prerequisite of that gate
+  in its own right**, because none of the gate's three guarantees is this one. **Fired by a
+  decision that chooses between the two**, and no lane reads this entry as licence to add either
+  on its own authority. Filed as
+  [#2309](https://github.com/leonapivato/ai-assistant/issues/2309).
 - **A per-phase event log for an attempt.** ADR-0249 §13's entry, untouched; §10's high-water-mark
   clause is what makes it unnecessary rather than what forecloses it. Fired by a lane that needs
   the timings and carries its own retention and export obligations.
@@ -1980,6 +2014,26 @@ ledger and stops on the same three guards.
 > verification, uncertain-outcome and cancellation guarantees for its class are implemented and
 > demonstrated.** A milestone may demonstrate dependent execution against controlled integrations
 > with no such capability wired; **wiring one is what this rule binds.**
+
+> **Normative — this decision adds one prerequisite to that gate, and it is the window §1
+> states.** **No consequential capability is wired until the evidence-to-claim window is closed**
+> — the interval §1 names, in which a concurrent turn's ADR-0252 §8 refresh can supersede a row
+> between a step's evaluation and its committed claim (§1, §12, issue #2309). **The gate's own
+> three guarantees do not reach it**: it is assigned to no lane by §12, so A8's reconciliation,
+> A9's cancellation and A10's verification could each land and leave it exactly where it stands,
+> and a deployment reading only the three would wire a booking that can be dispatched on evidence
+> ADR-0252 §6 no longer counts as standing. **So the prerequisite is stated here rather than
+> inferred**, and it is discharged by a decision that closes the window and not by this one.
+
+**Adding the prerequisite is the honest half of stating a window rather than closing it, and
+without it the gate would be the argument that the window is safe *and* would stop being able to
+make it.** §1 declines the two mechanisms that would close the window because each is a contract
+surface of its own; what makes that declension safe is precisely that nothing consequential is
+wired while it stands. A gate whose conditions could all be met with the window open would give
+that argument away at the moment it mattered — which is what both review lenses found at round 15,
+and they were right. **The same shape is already in this document**: §7 states an obligation whose
+mechanism is A8's and names A8's acceptance requirement as what discharges it, rather than leaving
+the interval to be noticed.
 
 > **Normative.** **The lanes of this decision wire no consequential capability**, register no
 > booking integration, and enable nothing in a production deployment. §15's M33 arms are stated
@@ -2090,7 +2144,14 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    `AttemptEffort.working` has **advanced by the interval the walk consumed up to the failure**,
    over a controlled monotonic source advanced by a known amount across the raising call, and
    `planner_calls` has not moved — against an implementation that commits elapsed time only after
-   a call returns and would hand the next turn an allowance it has already spent (§1, §9).
+   a call returns and would hand the next turn an allowance it has already spent (§1, §9). **And
+   two arms over the double failure** (§1): with the interpretation raising and the charging
+   `commit_attempt` then raising too — once on a stale `expected_version`, once on a store
+   failure — the arm asserts that **the interpretation's failure is the exception that reaches the
+   caller**, that the ledger failure is **chained to it and not discarded**, and that the residual
+   is the stated one: `working` **undercounts**, the steps already dispatched stand, no step is
+   skipped and nothing is re-dispatched. They are what stop an accounting cleanup masking a
+   provider outage as a store problem.
 2. **"First action succeeds, dependent action has not yet run"** — the same plan, asserted at the
    moment between the two dispatches: step 1 `SUCCEEDED` with its output stored, the interpretation
    row written, step 2 still `PENDING`, and **the `ActionRequest` for step 2 not yet built**.
@@ -2386,7 +2447,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     controlled monotonic source still **makes its first `Planner.plan` call** — ADR-0251 §4's
     never-gated-first-call clause — and then **starts no step, makes no interpretation call and
     admits no licensed round**, so the exception is exactly one call wide and is asserted as such
-    rather than left to a reader. **And the arm that pins what the budget gates** (§9): a
+    rather than left to a reader. **And the arm that pins what a long phase 4 costs** (§9): a plan
+    whose ADR-0254 §14 validation consumes the whole `converse` budget on the controlled monotonic
+    source **passes** phase 4, the attempt advances to `EXECUTE`, `start_execution` is called, and
+    the walk **starts no step, makes no interpretation call and builds no `ActionRequest`** — the
+    deadline charging phase 4 without interrupting it, which is what §9 states and is why a long
+    plan cannot spend a second budget on its own validation. **And the arm that pins what the
+    budget gates** (§9): a
     two-step plan with an interpretation
     between the steps, where the budget expires during step 1 — the **interpretation call is
     never made**, its row is unwritten, step 2 is `PENDING` and **not** `SKIPPED`, and the walk
