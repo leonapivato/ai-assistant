@@ -294,6 +294,8 @@ from ai_assistant.core.types import (
     AnswerKind,
     Belief,
     BeliefBand,
+    Clarification,
+    ClarificationWithdrawal,
     ClassReach,
     ContinuationToken,
     CostBasis,
@@ -302,8 +304,14 @@ from ai_assistant.core.types import (
     DiscloserProvenance,
     Disposition,
     EgressBinding,
+    EngagementDisposition,
     FeedbackEvent,
     FeedbackKind,
+    GoalAbandonment,
+    GoalDisambiguation,
+    GoalEngagement,
+    GoalStatus,
+    GoalSummary,
     GrantScope,
     LearnDecision,
     MemoryKind,
@@ -326,6 +334,7 @@ from ai_assistant.core.types import (
     RecipientGrantNotEstablished,
     RecipientGrantOutcome,
     RecordedInvocation,
+    ReferenceOutcome,
     ReplyChunk,
     RoutableOperation,
     RouteOutcome,
@@ -338,6 +347,7 @@ from ai_assistant.core.types import (
     SpendTotal,
     StepStatus,
     ToolOutcome,
+    TurnReference,
     encodable_text,
     routed_listing_arm,
     secret_value,
@@ -1029,6 +1039,45 @@ def _present_optional_id(value: str | None) -> str | None:
     return None if value is None else _present_id(value)
 
 
+def _turn_reference(*, answering: str | None, goal: str | None) -> TurnReference | None:
+    """Build the turn's reference from the two keywords, or refuse the pair.
+
+    ADR-0250 §11 admits exactly two shapes — "a ``question_id`` and no ``goal_id``,
+    or a ``goal_id`` and no ``question_id``" — and states why the type refuses the
+    rest rather than documenting it: "a shape a caller cannot reach is better refused
+    by the type than documented". The model validator is therefore the authority, and
+    this is not a second statement of it: what happens here is that a pair given
+    together becomes a **usage** error, refused while Typer is still parsing, so the
+    user sees which two flags conflict instead of a validation message out of
+    ``core`` about members of a type they never named.
+
+    **Neither given is not an error.** A turn carrying no reference is the ordinary
+    turn, and ``reference`` defaults to ``None`` on ``converse`` for exactly that
+    reason — so this answers ``None`` rather than refusing.
+
+    Args:
+        answering: ``--answering``, a clarification's id, or ``None``.
+        goal: ``--goal``, a goal's id, or ``None``.
+
+    Returns:
+        The reference, or ``None`` where neither keyword was given.
+
+    Raises:
+        BadParameter: If both were given.
+    """
+    if answering is not None and goal is not None:
+        msg = (
+            "--answering names a question and --goal names a goal, and a turn "
+            "references one record or none: give one of the two"
+        )
+        raise typer.BadParameter(msg)
+    if answering is not None:
+        return TurnReference(question_id=answering)
+    if goal is not None:
+        return TurnReference(goal_id=goal)
+    return None
+
+
 def _page_argument(value: int) -> int:
     """Reject a ``--limit``/``--offset`` the store would refuse (ADR-0073 §2).
 
@@ -1389,7 +1438,7 @@ def _tuning(
 
 
 @app.command()
-def ask(
+def ask(  # noqa: PLR0913 — one parameter per thing the user gives this turn: the request, the budget, the conversation, the two references and the approval flag
     utterance: str = typer.Argument(..., help="What you want the assistant to do."),
     timeout_seconds: float = typer.Option(
         60.0,
@@ -1407,6 +1456,26 @@ def ask(
             "Omit it to start a new one; the id is printed either way."
         ),
     ),
+    answering: str | None = typer.Option(
+        None,
+        "--answering",
+        callback=_present_optional_id,
+        metavar="QUESTION_ID",
+        help=(
+            "Answer the clarification of this id, in your own words "
+            "(see 'assistant goals'). Not usable with --goal."
+        ),
+    ),
+    goal: str | None = typer.Option(
+        None,
+        "--goal",
+        callback=_present_optional_id,
+        metavar="GOAL_ID",
+        help=(
+            "Take this turn up against the goal of this id, including from another "
+            "conversation (see 'assistant goals'). Not usable with --answering."
+        ),
+    ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Approve any confirmation without prompting."
@@ -1421,6 +1490,19 @@ def ask(
 
     If the engine parks a step for confirmation, the prompt shows the action and
     the policy's reason; answering relays the opaque token back to the engine.
+
+    **``--answering`` and ``--goal`` are two keywords on this turn and not a verb of
+    their own** (ADR-0250 §11). Answering a clarification "is a turn and not an
+    operation of its own" — it restates the understanding, replans and proceeds,
+    which is everything this command already is — so the reference is a fact about
+    *this* turn, beside your request. ``--goal`` is the one route by which a goal is
+    taken up from another conversation (§13): there is no automatic
+    cross-conversation association, and nothing searches, ranks or matches across
+    conversations.
+
+    Both ids are read from ``assistant goals``. A reference naming nothing this
+    assistant holds is reported and the turn is still run, because your words are
+    still a request.
     """
     code = asyncio.run(
         _ask(
@@ -1428,6 +1510,7 @@ def ask(
             timeout_seconds=timeout_seconds,
             assume_yes=yes,
             conversation_id=conversation,
+            reference=_turn_reference(answering=answering, goal=goal),
         )
     )
     raise typer.Exit(code)
@@ -1703,6 +1786,115 @@ def cancel_read(
     sources. This one is about a single outward lookup that has not happened yet.
     """
     code = asyncio.run(_cancel_read(token))
+    raise typer.Exit(code)
+
+
+# --- the goal surface (ADR-0250 §15) ---------------------------------------
+#
+# **Three commands, and the names overload none** (§15). ``assistant questions``,
+# ``assistant answer`` and ``assistant forget-question`` above are ADR-0078 §8's
+# **deferred memory questions** — a contradiction about a belief, answered
+# ``--accept``/``--reject`` — and this decision "adds no member to them, changes no
+# argument of them, and renames nothing". A goal's clarification is a different thing
+# about a different subject: it asks *which of two things did you mean*, is answered in
+# words, and its answer revises an interpretation. §15 forbids presenting the two kinds
+# "in the same list, the same command or the same vocabulary", so nothing below lists a
+# memory question and nothing above lists a clarification.
+#
+# **And there is no fourth command for answering one** (§11). "Answering is a turn and
+# not an operation of its own, and that is the whole reason ``converse`` gains a keyword
+# rather than the surface gaining a fifth verb" — so the answer is ``assistant ask
+# --answering`` and the cross-conversation resumption is ``assistant ask --goal``.
+
+
+@app.command()
+def goals(
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_page_argument,
+        help="How many goals to show at most.",
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        callback=_page_argument,
+        help="How many goals to skip before the page begins.",
+    ),
+) -> None:
+    """List what you have me working on, most recently taken up first.
+
+    One line of work per entry: what I understand it to be aiming at, whether it is
+    still open, whether it is waiting on you, and the question it is waiting on where
+    there is one.
+
+    This is the listing the two references are read from. To answer a question here,
+    run ``assistant ask "<your answer>" --answering <question-id>``; to take a goal up
+    in the conversation you are in now — including one that started in another
+    conversation — run ``assistant ask "<what next>" --goal <goal-id>``. Pointing at
+    one is the only way a goal moves between conversations: nothing here searches,
+    ranks or matches across them on its own.
+
+    ``assistant withdraw-clarification`` takes a question back without answering it,
+    and ``assistant abandon-goal`` gives a goal up.
+
+    **This is not ``assistant questions``**, which is about what I may believe about
+    you. These are questions about work.
+
+    There is no total count — ask for the next page to find out whether there is more.
+    """
+    code = asyncio.run(_list_goals(limit=limit, offset=offset))
+    raise typer.Exit(code)
+
+
+@app.command("withdraw-clarification")
+def withdraw_clarification(
+    question_id: str = typer.Argument(
+        ...,
+        callback=_present_id,
+        help="The id of the clarification to take back (see 'assistant goals').",
+    ),
+) -> None:
+    """Take back a question I asked about a goal, without answering it.
+
+    Use this when the question is the wrong question. It settles it, clears the words
+    it held, and frees me to ask a better one about the same goal — I hold at most one
+    open question per goal, so an unwanted one is what stops the next.
+
+    **It records no answer and revises nothing.** Withdrawing is not saying no; there
+    is nothing here to say no *to*. The goal stays open and stays waiting — what this
+    removes is the question, not the pause. Say what you meant in a turn to move the
+    work on, or ``assistant abandon-goal`` to give the goal up altogether.
+
+    An id naming no open question of mine says so rather than pretending to have taken
+    something away.
+    """
+    code = asyncio.run(_withdraw_clarification(question_id))
+    raise typer.Exit(code)
+
+
+@app.command("abandon-goal")
+def abandon_goal(
+    goal_id: str = typer.Argument(
+        ..., callback=_present_id, help="The id of the goal to give up (see 'assistant goals')."
+    ),
+) -> None:
+    """Give up on a goal, so nothing more is planned for it.
+
+    This is the one thing that records a goal as given up — no silence, no deadline
+    and no timeout of mine ever does, because that would be me recording that *you*
+    gave up because you did not reply. It takes the goal out of what I consider, so
+    nothing associates to it and nothing plans for it, and it withdraws any question
+    the goal had open.
+
+    **It undoes nothing.** Anything already done for that goal stays done and is not
+    replayed, reversed or cancelled by this; what it changes is what happens next.
+
+    Nothing is destroyed either: the record stays and this listing still shows it. A
+    goal I am no longer considering is not one I will find on my own again, so taking
+    it back up means pointing at it — ``assistant ask "<what next>" --goal <goal-id>``.
+    """
+    code = asyncio.run(_abandon_goal(goal_id))
     raise typer.Exit(code)
 
 
@@ -3440,6 +3632,7 @@ async def _ask(
     timeout_seconds: float,
     assume_yes: bool,
     conversation_id: str | None = None,
+    reference: TurnReference | None = None,
 ) -> int:
     """Load settings, build the engine, drive one turn, and close it (ADR-0042 §2, §7).
 
@@ -3454,6 +3647,12 @@ async def _ask(
     conversation is the engine's question, and an unknown one comes back as an
     ``AssistantError`` this boundary renders rather than as a silently fresh
     conversation (ADR-0074 §1).
+
+    ``reference`` is relayed and resolved by nothing here (ADR-0250 §11): "it is
+    resolved by ``orchestration`` against records this system holds", and what became
+    of it comes back on the outcome as a ``ReferenceOutcome`` this adapter renders.
+    A reference naming nothing is a *result* and not a refusal — ``UNKNOWN`` — so
+    there is no id check to make before the call and none is made.
     """
     timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
     approver: Callable[[Confirmation], bool | None] = (
@@ -3478,6 +3677,7 @@ async def _ask(
         approver=approver,
         confirm_operation=confirm_operation,
         conversation_id=conversation_id,
+        reference=reference,
     )
 
 
@@ -3642,6 +3842,55 @@ async def _cancel_read(handle: str) -> int:
         return _EXIT_ERROR
 
     return await _drive_cancel_read(engine, handle)
+
+
+async def _list_goals(*, limit: int, offset: int) -> int:
+    """Obtain a client and read one page of the goal listing (ADR-0250 §15).
+
+    :func:`_list_conversations`' shape one listing over, with the same single error
+    boundary over every stage that can fail (ADR-0042 §7). The paging arguments were
+    checked at parse time (:func:`_page_argument`), so the one failure that is not an
+    ``AssistantError`` cannot reach here.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_goals(engine, limit=limit, offset=offset)
+
+
+async def _withdraw_clarification(question_id: str) -> int:
+    """Obtain a client and take one clarification back (ADR-0250 §12).
+
+    :func:`_cancel_read`'s shape one vocabulary over. The id arrives non-blank and
+    already stripped (:func:`_present_id`, ADR-0085 §3c); whether it *names* an open
+    question is the engine's, and one that does not is ``NOTHING_TO_WITHDRAW`` and
+    "never a raise".
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_withdraw_clarification(engine, question_id)
+
+
+async def _abandon_goal(goal_id: str) -> int:
+    """Obtain a client and give one goal up (ADR-0250 §12).
+
+    :func:`_withdraw_clarification`'s shape one act over, and an id naming no goal is
+    ``NO_SUCH_GOAL`` and never a raise either.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_abandon_goal(engine, goal_id)
 
 
 async def _learn_feedback(  # noqa: PLR0913 — one parameter per field of the event this builds, each a separate thing the user said
@@ -4683,6 +4932,202 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
             )
 
 
+#: What each :class:`~ai_assistant.core.types.GoalStatus` member reads as in the
+#: listing. **Total over the enumeration and written out as literals**, on
+#: :func:`_render_search_not_serviced`'s clause: a member with no words is a member
+#: rendered as its own identifier, which is this surface reporting an internal
+#: vocabulary to a person.
+#:
+#: ``GoalStatus`` is **not** one of the vocabularies ADR-0250 adds — ADR-0014 §1
+#: declares it and ADR-0249 §4 gives it its meanings — and two of its members have no
+#: producer anywhere in the tree today (ADR-0250 §20's arm 23 asserts exactly that).
+#: They are given words anyway, because what this map is for is that a member arriving
+#: from a hub is rendered rather than shown raw, and "no producer today" is not a
+#: property of the value this surface receives.
+_GOAL_STATUS_WORDS: Final[Mapping[GoalStatus, str]] = {
+    GoalStatus.ACTIVE: "open",
+    GoalStatus.ACHIEVED: "done",
+    GoalStatus.ABANDONED: "given up",
+    GoalStatus.BLOCKED: "blocked",
+}
+
+
+def _render_goals(page: tuple[GoalSummary, ...], *, limit: int, offset: int) -> None:
+    """Render one page of the goal listing (ADR-0250 §15).
+
+    **The listing from which the two references are read**, and the reason both ids
+    appear on the screen: §15 rules that "the question id is rendered because the act
+    takes it, and that is the tree's own pattern rather than an exception carved here",
+    naming ADR-0078 §8's ``Question.id`` as the precedent, and refusing the
+    alternative — "a re-minted opaque handle is ADR-0052 §1's machinery bought for a
+    record that is already durable". The goal id is on the same footing: §13 performs
+    the cross-conversation resumption by a ``TurnReference`` carrying one, "performed
+    from a surface listing the user was shown (§15)". **What §15's bar forbids is an
+    identifier in a statement rendered for a member of this decision's vocabularies**,
+    and no such statement carries one — see :func:`_render_goal_engagement`.
+
+    **Ordered, paged and counted by the engine** (§15, ADR-0085 §3, ADR-0074 §2).
+    Nothing here sorts, filters, totals or derives: ``paused`` in particular is "the
+    engine's", stated once in ADR-0249 §5 "so that two surfaces cannot render it
+    differently", and this renders the boolean it was handed rather than comparing a
+    status against an attempt state.
+
+    **Paused and open are two facts and are shown as two.** A goal's status says
+    whether the work is still live; ``paused`` says whether it is waiting. A goal can
+    be open and running, open and waiting, or closed — and collapsing the pair would
+    lose exactly the state this listing exists to make visible (#2286).
+
+    **The elements, the grounds and the attempts are not here and cannot be**:
+    ``GoalSummary`` "carries no attempt id, no revision number, no element, no ground,
+    no evidence reference and no plan", so this renders every field it has and invents
+    none.
+
+    Args:
+        page: The summaries, in the order the engine answered them.
+        limit: The page size asked for, for the "there may be more" line.
+        offset: The offset asked for, for the same line.
+    """
+    if not page:
+        _print(
+            "[dim]Nothing outstanding — 'assistant ask' starts something, and what it "
+            "starts shows up here.[/]"
+        )
+        return
+    _print(f"[bold]{len(page)} goal(s)[/], most recently taken up first.")
+    for goal in page:
+        _print(f"\n  [bold cyan]{_safe(goal.id)}[/]")
+        _print(f"  {_safe(goal.outcome)}")
+        waiting = " — waiting on you" if goal.paused else ""
+        _print(f"  [dim]State:[/] {_GOAL_STATUS_WORDS[goal.status]}{waiting}")
+        if goal.last_engaged_at is None:
+            _print("  [dim]No turn has taken it up yet.[/]")
+        else:
+            _print(f"  [dim]Last taken up:[/] {_when(goal.last_engaged_at)}")
+        _render_goal_question(goal.clarification)
+    if limit and len(page) == limit:
+        _print(f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]")
+
+
+def _render_goal_question(clarification: Clarification | None) -> None:
+    """Render the open question a listed goal is waiting on (ADR-0250 §15).
+
+    Shared by the listing and by :func:`_render_clarification`, so a question the user
+    reads in a reply and the same question read back from ``assistant goals`` say the
+    same three things — the words, the deadline, and the two acts that settle it.
+
+    **The deadline is stated and is never read as a refusal.** ADR-0250 §12: "a goal
+    whose question expired is still paused and still resumable … no lane reads an
+    expiry as a refusal, an abandonment, a denial or a decision of any kind", and §11
+    adds that an answer arriving late "reopens the work rather than vanishing". So the
+    line says when the question stops being answerable and says nothing about the work
+    stopping with it.
+
+    **Both acts are offered, because a user told only how to answer has not been told
+    everything they can do** — ADR-0244 §13's clause one record kind over, and §12's
+    own pairing of the answer with the withdrawal.
+
+    Args:
+        clarification: The goal's open question, or ``None`` where none stands.
+    """
+    if clarification is None:
+        return
+    _print(f"  [bold]Waiting on:[/] {_safe(clarification.text)}")
+    _print(f"  [dim]Answerable until {_when(clarification.expires_at)}.[/]")
+    _print(
+        f'  [dim]Answer it:[/] assistant ask "<your answer>" '
+        f"--answering {_safe(clarification.question_id)}"
+    )
+    _print(
+        f"  [dim]Or take it back:[/] assistant withdraw-clarification "
+        f"{_safe(clarification.question_id)}"
+    )
+
+
+def _render_clarification_withdrawal(outcome: ClarificationWithdrawal) -> None:
+    """ADR-0250 §12's statement for what ``withdraw_clarification`` did.
+
+    **One fixed statement per member of a closed two-member vocabulary**, which is
+    :func:`_render_read_cancellation`'s ratified shape and ADR-0250 §15's clause in
+    terms: a surface rendering no statement for a ``ClarificationWithdrawal`` member it
+    was given "has not implemented this section — it is not permissibly degraded".
+    Rendering a fixed statement per member is presentation (ADR-0242 §9); nothing here
+    reads a store, joins a row or computes a member.
+
+    **The withdrawal says it recorded no answer, because that is the whole difference
+    from an answer** (§12, ADR-0244 §11): "a denial is the user answering *no* and is a
+    ruling; a cancellation is the user withdrawing the question and is not one". A
+    withdrawal "records no answer, revises no interpretation and engages no goal".
+
+    **And it says the pause is still there**, which is the clause most easily got wrong
+    in the reassuring direction: "withdrawing removes the question and not the pause —
+    the attempt stays ``AWAITING_CLARIFICATION`` and the goal stays open. What the act
+    buys is the freedom to ask again." A sentence saying the work had resumed would be
+    false of every case.
+
+    **Neither statement carries an identifier, a goal, a deadline or a count** — §15's
+    bar, binding on this vocabulary as ADR-0242 §9's binds on that one.
+
+    Args:
+        outcome: Which of §12's two states the engine reached.
+    """
+    match outcome:
+        case ClarificationWithdrawal.WITHDRAWN:
+            _print(
+                "[bold]That question is withdrawn.[/] No answer was recorded — taking a "
+                "question back is not the same as answering it — and the words it held "
+                "are gone. The work it was about is still open and still waiting: what "
+                "this frees me to do is ask a better question about it."
+            )
+        case ClarificationWithdrawal.NOTHING_TO_WITHDRAW:
+            _print(
+                "[yellow]There was nothing here for this to take.[/] That question is "
+                "already settled, or I hold none of that id, so this took nothing back "
+                "and changed nothing. Whatever settled it stands unchanged."
+            )
+
+
+def _render_goal_abandonment(outcome: GoalAbandonment) -> None:
+    """ADR-0250 §12's statement for what ``abandon_goal`` did.
+
+    **One fixed statement per member of a closed three-member vocabulary**, on
+    :func:`_render_clarification_withdrawal`'s clause and for its reason.
+
+    **The abandonment says what it did *not* touch, and that is the load-bearing
+    half** (§12). It "does not move the attempt's state, does not write an
+    ``AttemptOutcome``, does not end an execution and does not cancel anything in
+    flight: what becomes of an attempt on an abandoned goal is A9's". So the statement
+    says the goal leaves what I consider and says nothing about work already under
+    way — a sentence promising that everything stopped would be false on a reachable
+    state, and one promising that anything already done was undone would be false
+    always.
+
+    **``ALREADY_CLOSED`` names no reason**, because the member does not carry one: §12
+    reaches it from ``ACHIEVED`` and from ``ABANDONED`` alike, and a statement guessing
+    which would be the diagnosis a member is not.
+
+    Args:
+        outcome: Which of §12's three states the engine reached.
+    """
+    match outcome:
+        case GoalAbandonment.ABANDONED:
+            _print(
+                "[bold]That goal is given up.[/] I will not take it up again on my own "
+                "and nothing more is planned for it, and any question it had open is "
+                "withdrawn. Nothing already done for it was undone, reversed or "
+                "replayed by this, and nothing under way was cancelled."
+            )
+        case GoalAbandonment.ALREADY_CLOSED:
+            _print(
+                "[yellow]That goal was already closed,[/] so this moved nothing and "
+                "recorded nothing. However it was closed before is how it still reads."
+            )
+        case GoalAbandonment.NO_SUCH_GOAL:
+            _print(
+                "[yellow]I hold no goal of that id,[/] so nothing was given up. "
+                "'assistant goals' lists the ones there are."
+            )
+
+
 def _render_act_not_offered() -> None:
     """Say why one card took the answer without the standing request (ADR-0235 §2)."""
     _print(
@@ -4739,6 +5184,93 @@ async def _drive_cancel_read(engine: AssistantEngine, handle: str) -> int:
     return _EXIT_ERROR if cancelled is ReadCancellation.NOTHING_TO_CANCEL else _EXIT_OK
 
 
+async def _drive_goals(engine: AssistantEngine, *, limit: int, offset: int) -> int:
+    """Ask the façade for one page of goals and render it (ADR-0250 §15).
+
+    **One call, and this adapter derives no part of the answer** (golden rule 3,
+    ADR-0042 §6). ``paused`` in particular is "computed and never stored" and is
+    computed **by the engine**, "so that two surfaces cannot render it differently —
+    which is why ADR-0249 §5 states the derivation once, and no adapter derives it".
+    So nothing here reads a status against an attempt state, re-orders the page, or
+    counts what is outstanding: §15 also makes the operation answer no total.
+
+    **An empty page is not an error.** A user with nothing outstanding is the ordinary
+    case, and a non-zero exit there would make "is anything waiting on me" unaskable
+    from a script.
+
+    Args:
+        engine: The façade to relay through.
+        limit: How many summaries to ask for.
+        offset: How many to skip.
+
+    Returns:
+        The process exit code.
+    """
+    try:
+        page = await engine.goals(limit=limit, offset=offset)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_goals(page, limit=limit, offset=offset)
+    return _EXIT_OK
+
+
+async def _drive_withdraw_clarification(engine: AssistantEngine, question_id: str) -> int:
+    """Take one clarification back and say what that did (ADR-0250 §12).
+
+    :func:`_drive_cancel_read`'s shape one vocabulary over, and for its reasons: the
+    act is relayed, the member that comes back is rendered, and nothing here reads a
+    store, takes a second call to find out what state the question was in, or infers
+    the answer from a listing.
+
+    **``NOTHING_TO_WITHDRAW`` exits non-zero, and that is #531's rule rather than a
+    verdict on the question.** The act took nothing away, and a scripted caller must
+    not read "that question is withdrawn" off a run in which nothing was withdrawn. It
+    says nothing about whether the *state* of the question is the one the user wanted.
+
+    Args:
+        engine: The façade to relay through.
+        question_id: The clarification named on the command line.
+
+    Returns:
+        The process exit code.
+    """
+    try:
+        withdrawal = await engine.withdraw_clarification(question_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_clarification_withdrawal(withdrawal)
+    return _EXIT_ERROR if withdrawal is ClarificationWithdrawal.NOTHING_TO_WITHDRAW else _EXIT_OK
+
+
+async def _drive_abandon_goal(engine: AssistantEngine, goal_id: str) -> int:
+    """Give one goal up and say what that did (ADR-0250 §12).
+
+    :func:`_drive_withdraw_clarification`'s shape one act over. **Both non-acting
+    members exit non-zero** for that function's reason: neither ``ALREADY_CLOSED`` nor
+    ``NO_SUCH_GOAL`` moved anything, and a script that read success off either would
+    be reading an abandonment that did not happen. Exiting zero on ``ALREADY_CLOSED``
+    because the goal is closed *anyway* would be this surface ruling on what the user
+    meant — a goal already recorded as achieved is a different state from one they
+    have just given up, and ADR-0249 §4 keeps them apart deliberately.
+
+    Args:
+        engine: The façade to relay through.
+        goal_id: The goal named on the command line.
+
+    Returns:
+        The process exit code.
+    """
+    try:
+        abandonment = await engine.abandon_goal(goal_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_goal_abandonment(abandonment)
+    return _EXIT_OK if abandonment is GoalAbandonment.ABANDONED else _EXIT_ERROR
+
+
 async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is driven through, and the two approvers are two card types
     engine: AssistantEngine,
     utterance: str,
@@ -4747,6 +5279,7 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
     approver: Callable[[Confirmation], bool | None],
     confirm_operation: Callable[[OperationConfirmation], bool],
     conversation_id: str | None = None,
+    reference: TurnReference | None = None,
 ) -> int:
     """Stream a turn, render it, and relay a confirmation if the engine parks one.
 
@@ -4800,11 +5333,23 @@ async def _drive_turn(  # noqa: PLR0913 — one parameter per seam a turn is dri
     The conversation footer is printed **once**, from the last outcome produced: a
     parked turn and the resolution that answers it are two episodes in one
     conversation, and printing the same id twice would read as two.
+
+    **``reference`` reaches the streaming twin unchanged** (ADR-0250 §11, ADR-0173).
+    ``converse_streaming`` takes "exactly ``converse``'s arguments in exactly its"
+    order, so the keyword needs no record of its own and this relays it: a turn
+    answering a clarification streams its answer exactly as any other turn does. The
+    resumption that answers a parked confirmation carries none — it is the same turn
+    continuing, and ``resume`` takes no reference.
     """
     streamed = _StreamedReply()
     try:
         settled = await _read_stream(
-            engine.converse_streaming(utterance, timeout=timeout, conversation_id=conversation_id),
+            engine.converse_streaming(
+                utterance,
+                timeout=timeout,
+                conversation_id=conversation_id,
+                reference=reference,
+            ),
             into=streamed,
         )
         if settled is None:
@@ -6990,6 +7535,16 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     unanswered = _render_read_answer(outcome.read_answer)
     if outcome.read_confirmation is not None:
         _render_parked_read(outcome.read_confirmation)
+    # ADR-0250's four outcome members, beside the reply and never in place of it
+    # (ADR-0242 §9), in the order a reader needs them: what became of the handle they
+    # gave, what this turn did with a goal, the question it could not tell two goals
+    # apart with, and the question it raised. **No member is derived from another and
+    # each is rendered on its own** (§5) — a `reference` is carried on a turn with no
+    # engagement, and a `disambiguation` only on a turn that engaged nothing at all.
+    _render_reference_outcome(outcome.reference)
+    _render_goal_engagement(outcome.goal_engagement)
+    _render_disambiguation(outcome.disambiguation)
+    _render_clarification(outcome.clarification)
     routed = outcome.routed
     if routed is not None:
         # ADR-0197 §8: `routed` and `step` are never both present, and a routed pass
@@ -7207,6 +7762,202 @@ def _render_search_not_serviced(
             _print("[dim]Note: that lookup was begun and stopped.[/]")
         case SearchNotServiced.UNAVAILABLE:
             _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
+
+
+def _render_reference_outcome(member: ReferenceOutcome | None) -> None:
+    """ADR-0250 §11's statement for what became of this turn's reference.
+
+    **One fixed statement per member of a closed four-member vocabulary**, written out
+    as literals — :func:`_render_search_not_serviced`'s ratified shape one vocabulary
+    over, and ADR-0250 §15's clause in terms: a surface rendering no statement for a
+    ``ReferenceOutcome`` member it was given "has not implemented this section — it is
+    not permissibly degraded".
+
+    **It is a member of its own and is rendered whether or not a goal was engaged**
+    (§11). "An ``UNKNOWN`` reference is reported whatever the association then does":
+    the turn falls through to §3 and may come back undecided, carrying no engagement at
+    all, "and ``reference`` is a member of its own precisely so that the user is still
+    told the handle they gave resolved to nothing". So this reads only ``reference``
+    and never infers it from, or suppresses it beside, anything else on the outcome.
+
+    **``EXPIRED`` says the work carries on, and that is decision 2 in terms** (§14):
+    where a reference names an expired question "the reply says that the question
+    expired and that the goal is still being worked on". A statement that reported the
+    answer as lost would be the refusal ADR-0250 §12 forbids — "silence is neither
+    refusal nor abandonment" — and §11 is explicit that a late answer "reopens the work
+    rather than vanishing".
+
+    **``ALREADY_SETTLED`` is never reported as an expiry** (§11, ADR-0244 §9's rule):
+    "a question answered an hour after it was asked and referenced a week later is
+    ``ALREADY_SETTLED``, not ``EXPIRED``: it was answered, and a reply saying otherwise
+    would tell the user their answer never arrived." The two statements are therefore
+    different sentences and neither is reachable from the other.
+
+    **None of the four carries an identifier**, a goal, a deadline, a count or a
+    ``GoalQuestionDisposition`` value — ADR-0250 §15's bar, which is ADR-0242 §9's
+    binding on this vocabulary for the same reason.
+
+    Args:
+        member: What ``TurnOutcome.reference`` carried, or ``None``.
+    """
+    match member:
+        case None:
+            return
+        case ReferenceOutcome.UNKNOWN:
+            _print(
+                "[yellow]Note: the reference you gave names nothing I hold.[/] Nothing "
+                "was answered and nothing was taken up by it, and this turn was run as "
+                "an ordinary one. 'assistant goals' is where a current reference is "
+                "read."
+            )
+        case ReferenceOutcome.ANSWERED:
+            _print(
+                "[dim]Note: that question is answered and settled, and what you said "
+                "went into what I understand this work to be.[/]"
+            )
+        case ReferenceOutcome.EXPIRED:
+            _print(
+                "[dim]Note: that question had run out of time, so it was not answered. "
+                "The work it was about is still open and is still being worked on — "
+                "what you said was taken as an ordinary turn about it.[/]"
+            )
+        case ReferenceOutcome.ALREADY_SETTLED:
+            _print(
+                "[dim]Note: that question was already settled before this turn, so "
+                "nothing about it changed here. What you said was taken as an ordinary "
+                "turn about the work it was on.[/]"
+            )
+
+
+def _render_goal_engagement(engagement: GoalEngagement | None) -> None:
+    """ADR-0250 §5's statement for what this turn did with the goal it engaged.
+
+    **One fixed statement per** ``EngagementDisposition`` **member**, on §15's clause —
+    a surface rendering none for a member it was given "has not implemented this
+    section — it is not permissibly degraded" — and rendering one per member is
+    presentation (ADR-0242 §9, §5's "a surface renders what ``goal_engagement``
+    says").
+
+    **What it does not do is announce.** §5 owns the announcement: "a reply carries one
+    sentence naming the goal it is about" where the disposition is ``RESUMED`` or
+    ``REOPENED``, or a revision moved a word, and that sentence "is composed by
+    ``orchestration`` from the typed value and by no model's decision", stating the
+    outcome and "every text in ``added``" and "every text in ``removed``". It is
+    already on the screen, in the reply, on exactly the turns §5 owes it. So this
+    renders **none** of ``outcome``, ``revised``, ``outcome_changed``, ``added`` or
+    ``removed``: a second account of them here would be the announcement in a second
+    place, and on a ``CONTINUED`` or an ``OPENED`` that moved no word it would be an
+    announcement §5 rules silent — "announcing it would be noise on every turn … told
+    every time, the sentence stops being read".
+
+    **What it does instead is name the act**, which is ADR-0242 §9's split at this
+    render site: "the model says **what was not done** and this says **what would
+    enable it**, and each says only the half it can say truthfully". A command name in
+    a composed reply would reach a browser and a voice channel where no terminal
+    exists, and would be a string a model may paraphrase or invent.
+
+    **And none of the four carries an identifier** — §15's bar. The goal a statement is
+    about is the one the reply named or the one the user is looking at; a goal id here
+    would be a record identifier in a statement rendered for a member of this
+    decision's vocabulary, which §15 admits for the question id alone and for the
+    reason that the answer act takes it.
+
+    **It is silent where the member is absent**, which is a turn that engaged no goal:
+    "a routed operation, a restated settled binding, and the ``UNDECIDED`` turn of §3,
+    which engaged nothing".
+
+    Args:
+        engagement: What ``TurnOutcome.goal_engagement`` carried, or ``None``.
+    """
+    if engagement is None:
+        return
+    match engagement.disposition:
+        case EngagementDisposition.OPENED:
+            _print(
+                "[dim]Note: I am treating this as a new piece of work of its own. "
+                "'assistant goals' lists what is outstanding.[/]"
+            )
+        case EngagementDisposition.CONTINUED:
+            _print(
+                "[dim]Note: this carried on the work this conversation was already on. "
+                "'assistant goals' lists what is outstanding.[/]"
+            )
+        case EngagementDisposition.RESUMED:
+            _print(
+                "[dim]Note: this took up something you already had open rather than "
+                "starting anything new. 'assistant goals' lists what is outstanding.[/]"
+            )
+        case EngagementDisposition.REOPENED:
+            _print(
+                "[dim]Note: this took up work that had been closed. Everything it had "
+                "recorded before is kept as it stands — nothing it did was replayed or "
+                "undone. 'assistant goals' lists what is outstanding.[/]"
+            )
+
+
+def _render_clarification(clarification: Clarification | None) -> None:
+    """The question this turn raised, in the exchange that raised it (ADR-0250 §10).
+
+    ``TurnOutcome.clarification`` "carries the question **this turn raised**, so the
+    question appears in the exchange that raised it", which is ADR-0244 §9's own shape
+    for a parked read one record kind over.
+
+    **The turn did not park and is not reported as having parked** (§10). "It composes,
+    its answer *is* the question, and it returns" — so there is no token here, no
+    approval control, and nothing for the user to answer *now* on this connection. What
+    paused is the goal's attempt, not the turn, and this exits zero for
+    :func:`_render_turn`'s stated reason: a question is work still to do, not work that
+    went wrong.
+
+    **The id is on the screen because the answer act takes it** (§15): "a surface that
+    showed a question but no way to name it would have put a question the user cannot
+    answer", and re-minting an opaque handle "is ADR-0052 §1's machinery bought for a
+    record that is already durable".
+
+    **And no step of the plan was driven** (§10): "a turn that raised a question drives
+    no step of its plan and produces no effect", so nothing below claims anything was.
+
+    Args:
+        clarification: What ``TurnOutcome.clarification`` carried, or ``None``.
+    """
+    if clarification is None:
+        return
+    _print(
+        "[bold]There is one thing I need cleared up before I act on this.[/] Nothing "
+        "was done for it in the meantime, and it keeps until you answer:"
+    )
+    _render_goal_question(clarification)
+
+
+def _render_disambiguation(disambiguation: GoalDisambiguation | None) -> None:
+    """Name the acts an undecided turn leaves open (ADR-0250 §5, §14).
+
+    **The question itself is in the reply and is not restated here.** §5 puts the ask
+    on the reply — "the reply is composed by ``orchestration`` from the typed value,
+    and no model writes it … the sentence is deterministic, is built from
+    ``candidates`` and ``elided``, and **cannot disagree with the member beside it**" —
+    and §14 places the mention of a paused goal in the reply of exactly this turn. A
+    second listing of the same outcome statements under it would be that mention twice
+    on one screen, and would be this adapter composing a reply (golden rule 3).
+
+    **What is added is the half a reply cannot carry**: the command a user reaches for
+    next. That is ADR-0242 §9's split, and it is why this renders a note naming the
+    acts and no part of ``candidates`` or ``elided``.
+
+    **Answering in words is named first because it is the ordinary route** (§5): "the
+    user answers in words on the next turn or by a reference". The reference is the
+    second, for the case where the words would be ambiguous again.
+
+    Args:
+        disambiguation: What ``TurnOutcome.disambiguation`` carried, or ``None``.
+    """
+    if disambiguation is None:
+        return
+    _print(
+        "[dim]Note: say which one you mean in your next turn, or name it outright "
+        "with 'assistant ask \"<what next>\" --goal <goal-id>' — 'assistant goals' is "
+        "where a goal id is read.[/]"
+    )
 
 
 def _render_read_answer(  # noqa: PLR0911 — one arm and one verdict per member of a closed seven-member vocabulary, and ADR-0242 §9 forbids the mapping that would collapse them
