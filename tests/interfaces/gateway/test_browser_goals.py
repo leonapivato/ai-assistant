@@ -493,6 +493,83 @@ async def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_
         await expect(drive.page.locator("#referencing")).to_be_hidden()
 
 
+async def test_a_wait_the_owner_ended_leaves_the_reference_offered_again(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """An abort is an ending too, and the page must not be left mid-sentence.
+
+    Pressing ``Stop waiting`` aborts the request, so the exchange leaves ``ask`` through
+    its ``catch`` — and a reconciliation written after the await would run on exactly one
+    of three endings. What that left was a hint reading "that went out with the question
+    now running" for good, on a wait the owner had just been told this browser was no
+    longer listening for, with the control hidden so the reference could be neither taken
+    back nor read. Adversarial review, round 3, ``major``.
+
+    **The reference comes back rather than being consumed**, which is the conservative
+    direction and the one ADR-0173 §9 argues for: abandoning the stream does not abandon
+    the turn, so the assistant may have taken the question — and a second send of the
+    same reference is answered ``ALREADY_SETTLED`` and rendered as its own fixed
+    statement (ADR-0250 §11). That is an honest sentence; the other way round is an
+    answer that silently goes nowhere.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+        held = await _holding(drive, "/ask/stream", at=1)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await held.reached.wait()
+        await drive.page.click("#stop-waiting")
+        # The held request is let go before the state is read, because the abort reaches
+        # the `fetch` through the interceptor: `release` returns once the browser has
+        # finished with that request, whichever way it ended, so what is asserted below
+        # is a settled state rather than a race (ADR-0216 §7).
+        await held.release()
+
+        await expect(drive.page.locator("#referencing")).to_contain_text(
+            "answers the clarification"
+        )
+        await expect(drive.page.locator("#clear-reference")).to_be_visible()
+
+        # And it is still the reference the next question carries.
+        await drive.page.click("#ask-button")
+        await expect(drive.page.locator("#referencing")).to_be_hidden()
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert turns[-1][1]["reference"] == TurnReference(question_id=QUESTION_ID)
+
+
+async def test_a_gateway_that_went_away_leaves_the_reference_offered_again(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The other thrown ending, which is a rejected ``fetch`` rather than an act.
+
+    ``ask``'s catch says ``GATEWAY_GONE`` for a connection that failed, and that ending
+    reaches the reference through the same ``finally``: nothing was sent that arrived, so
+    the value goes back on offer with the words it carried. Adversarial review, round 3,
+    ``major``.
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+
+        async def cut(route: Route) -> None:
+            await route.abort()
+
+        await drive.page.route(lambda url: urlparse(url).path == "/ask/stream", cut)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.fill("#utterance", "the one at Melides")
+        await drive.page.click("#ask-button")
+        await expect(drive.page.locator("#console .fault")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_contain_text(
+            "answers the clarification"
+        )
+        await expect(drive.page.locator("#clear-reference")).to_be_visible()
+
+
 async def test_a_reference_can_be_given_up_before_it_is_sent(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

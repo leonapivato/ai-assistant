@@ -8168,10 +8168,27 @@ def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -
     """
     functions = _functions(_code("app.js"))
 
-    ask = functions["ask"]
-    assert "if (waiting.ran) {" in ask
-    assert "restoreReference(sent)" in ask
-    assert "referenceSent(sent)" in ask
+    ask, reconcile = functions["ask"], functions["reconcileReference"]
+    assert "if (waiting.ran) {" in reconcile
+    assert "restoreReference(sent)" in reconcile
+    assert "referenceSent(waiting.reference)" in ask
+    # **In the `finally`, so every ending `ask` owns reaches it** (round 3, `major`): a
+    # rejected `fetch` leaves through the `catch`, so a reconciliation written after the
+    # await ran on one ending of three. Asserted as a position rather than as a byte
+    # sequence — what the clause is about is which block it sits in.
+    assert ask.index("reconcileReference(waiting);") > ask.index("} finally {")
+    # And under `releaseAsk`'s own guard, so a superseded ask settling late cannot move
+    # what the live one is holding.
+    assert ask.index("if (awaited === waiting) {") < ask.index("reconcileReference(")
+    # **And in `abandonAsk`, which is the ending `ask` does not own**: that site releases
+    # the ask before aborting, so `ask`'s `finally` finds `awaited !== waiting` and
+    # leaves every shared thing alone. It runs before the abort, beside the release, and
+    # it needs no guard of its own because it has just read `awaited`.
+    abandon = functions["abandonAsk"]
+    assert abandon.index("releaseAsk();") < abandon.index("reconcileReference(waiting);")
+    assert abandon.index("reconcileReference(waiting);") < abandon.index(
+        "waiting.stopping.abort();"
+    )
     whole, streamed = functions["askWhole"], functions["askStreaming"]
     assert "waiting.ran = true;" in whole
     assert whole.count("waiting.ran = true;") == 1
@@ -8199,7 +8216,9 @@ def test_a_reference_already_sent_is_not_offered_as_one_that_can_be_taken_back()
     ask = _functions(script)["ask"]
     said = _constant(script, "REFERENCE_SENT")
 
-    assert ask.index("asked.reference = sent.value;") < ask.index("referenceSent(sent);")
+    assert ask.index("asked.reference = waiting.reference.value;") < ask.index(
+        "referenceSent(waiting.reference);"
+    )
     assert "no longer be taken back" in said
     for barred in ("stop", "cancel", "abandon", "undo"):
         assert barred not in said.lower(), barred
