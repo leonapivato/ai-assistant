@@ -1496,6 +1496,7 @@ class SqlitePlanStore:
                         self._evidence_row(conn, row_id),
                         at_revision=revision.interpretation.revision,
                     ),
+                    key=row_id,
                 )
         return updated
 
@@ -1868,7 +1869,7 @@ class SqlitePlanStore:
             self._insert_evidence(conn, evidence)
             for row_id in supersedes:
                 self._mark_evidence(
-                    conn, superseded(self._evidence_row(conn, row_id), by=evidence.id)
+                    conn, superseded(self._evidence_row(conn, row_id), by=evidence.id), key=row_id
                 )
             self._elide_evidence(conn, evidence.goal_id, keep=evidence.id)
 
@@ -1886,20 +1887,51 @@ class SqlitePlanStore:
             ),
         )
 
-    def _mark_evidence(self, conn: sqlite3.Connection, marked: GoalEvidence) -> None:
+    def _mark_evidence(self, conn: sqlite3.Connection, marked: GoalEvidence, *, key: str) -> None:
         """Write a marked row back, blob and ``standing`` column together (§12).
 
         ``read_at`` and ``goal_id`` are unmoved by a mark — a marking changes exactly
         one field of the record and the argument that field's mark travels with — so
         only the two that can have changed are written.
+
+        **The write keys on the id the caller named, not on the id the decoded blob
+        carries**, and the two are held equal by :meth:`_evidence_row` rather than
+        assumed: a blob is data this store read back, and an ``UPDATE`` keyed on it
+        would let a file whose primary key and blob disagree send the mark to a
+        *different* row than the one §12 validated. The row count is checked for the
+        same reason in the other direction — an ``UPDATE`` that matched nothing is a
+        mark this method reported as applied and did not apply.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            marked: The row as the mark left it.
+            key: The id the caller named, which the update keys on.
+
+        Raises:
+            PlanningError: If the update matched no row.
         """
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE goal_evidence SET standing = ?, data = ? WHERE id = ?",
-            (marked.standing.value, marked.model_dump_json(), marked.id),
+            (marked.standing.value, marked.model_dump_json(), key),
         )
+        if cursor.rowcount != 1:  # pragma: no cover - _evidence_row read the row first
+            msg = f"marking evidence row {key} matched {cursor.rowcount} rows; the store is corrupt"
+            raise PlanningError(msg)
 
     def _evidence_row(self, conn: sqlite3.Connection, evidence_id: str) -> GoalEvidence:
         """The stored row under that id, inside an open transaction.
+
+        **The decoded record is checked against the row's own promoted columns**, and
+        that is what makes this safe to key a write off. ``goal_evidence`` holds the
+        record as a blob beside ``goal_id``, ``read_at`` and ``standing`` (§13), and
+        ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing table an outside writer
+        shaped, so the two can disagree: a SQL row keyed ``ev1`` whose blob calls itself
+        ``ev2`` would pass :meth:`_refuse_unmarkable` on ``ev1``'s columns and then hand
+        this store a record naming a **different** row. Every refusal §12 states is
+        evaluated over the columns, so a disagreement makes the validated row and the
+        marked row two different things — the one failure a marking write must not have.
+        It is refused here as the corrupt file it is, on the boundary
+        :func:`_decode_evidence` already draws for the blob's own shape.
 
         Args:
             conn: The connection the write transaction is running on.
@@ -1910,13 +1942,27 @@ class SqlitePlanStore:
 
         Raises:
             PlanningError: If no row holds that id — unreachable from either mutation,
-                each of which validates every id it marks first.
+                each of which validates every id it marks first — or if the stored
+                record disagrees with the columns promoted beside it.
         """
-        row = conn.execute("SELECT data FROM goal_evidence WHERE id = ?", (evidence_id,)).fetchone()
+        row = conn.execute(
+            "SELECT goal_id, read_at, standing, data FROM goal_evidence WHERE id = ?",
+            (evidence_id,),
+        ).fetchone()
         if row is None:  # pragma: no cover - the refusals above run first
             msg = f"evidence row {evidence_id} is no longer stored"
             raise PlanningError(msg)
-        return _decode_evidence(str(row[0]))
+        stored = _decode_evidence(str(row[3]))
+        held = (stored.id, stored.goal_id, stored.read_at.isoformat(), stored.standing.value)
+        expected = (evidence_id, str(row[0]), str(row[1]), str(row[2]))
+        if held != expected:
+            msg = (
+                f"the plan store at {str(self._path)!r} holds an evidence row whose "
+                f"record and columns disagree (row {evidence_id}: columns say "
+                f"{expected!r}, the record says {held!r}); the store is corrupt"
+            )
+            raise PlanningError(msg)
+        return stored
 
     def _refuse_unmarkable(
         self,
