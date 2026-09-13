@@ -762,6 +762,50 @@ async def test_a_round_answered_with_new_material_is_productive_however_it_is_mi
     assert len(planner.calls) == _PLANNER_CALL_ALLOWANCE, "§5's allowance and no run test"
 
 
+async def test_one_response_carrying_the_same_result_twice_enters_the_supply_once() -> None:
+    """ADR-0226 §7 within one batch, which is where §7 states the rule first.
+
+    "The deduplication ranges over the whole union and not only against the
+    pre-servicing supply … the second arrival is deduplicated out and **consumes no slot
+    of the budget**", and the mischief §7 names is a servicer that would "render one
+    record twice and spend two of the ten on it". A provider answering with two
+    identical results is that case reached without a second round: ADR-0231 §10 mints
+    "one per result the provider returned", the two records carry the same words under
+    two minted ids, and the prompt has no way to tell them apart — a fetched record is
+    the same shape of case, since ADR-0230 §5 gives one the file's text and never its
+    name.
+
+    **So the second is deduplicated rather than admitted, and the record says so**: the
+    servicing returned two and admitted one, and the round is `RETURNED_RECORDS` because
+    it admitted that one. Nothing is discarded on the ground of its class and no count
+    is quietly dropped — §9's `returned` still counts what came back.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "the bell tower is in Porto"))
+    planner = _searching_planner(ReadAsk(kind=ReadKind.WEB_SEARCH))
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(
+            planner=planner,
+            memory=memory,
+            search=_servicer(
+                searcher=_CostedSearcher(FakeWebSearcher(results=(_RESULT, _RESULT))),
+                granted=True,
+            ),
+        ).respond(_ASK, narrow=_bounded(), operation=ConversationalOperation.CONVERSE)
+
+    serviced = _serviced(captured)
+    assert (serviced["returned"], serviced["new"], serviced["deduplicated"]) == (2, 1, 1), (
+        "both results came back and one of them entered, which is what §7's own "
+        "'consumes no slot of the budget' asks of a second arrival"
+    )
+    assert serviced["outcomes"] == ("returned_records",), "§2 limb 7: it admitted one"
+    assert [record.content for record in responded.turn.memories].count(_RESULT) == 1, (
+        "and the prompt carries the result once, which is the whole of ADR-0158 §4's "
+        "reason for the rule §7 applies"
+    )
+
+
 def test_the_stop_vocabulary_holds_seven_and_every_earlier_member_kept_its_value() -> None:
     """§7: ``StopReason`` "gains two members and closes at seven".
 

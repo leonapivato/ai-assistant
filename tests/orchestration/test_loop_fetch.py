@@ -859,6 +859,60 @@ async def test_a_serviced_fetch_revises_the_plan_and_each_servicing_draws_its_ow
         assert entry["refusal"] is None
 
 
+async def test_a_second_file_holding_the_same_text_is_read_and_then_deduplicated() -> None:
+    """ADR-0226 §7 over two fetches of one turn, and what a fetched record is (#2364).
+
+    ADR-0230 §5 gives a fetched record "the file's text as extracted, **verbatim**" and
+    nothing that names the file: ``reported_by`` is the root's own source instance and
+    "never a path", ``reported_at`` is the read instant, and §9 keeps "no address
+    anywhere". So two documents of one root holding the same text mint two records that
+    are the same record in every field a prompt, a composer or a planner can read — and
+    rendering both is exactly what §7 forbids, "render one record twice and spend two of
+    the ten on it".
+
+    **The read still happens, and that is the half this asserts first.** ADR-0251 §7
+    refuses no ask — "The loop refuses no ``read_request`` and no ask of one on the
+    ground that the turn has asked for it before", and "No implementation compares one
+    ask with another to decide whether to service it" — so the second file is resolved,
+    fetched and read off the disk, and what §7 decides is only whether what came back
+    enters the supply. A lane that skipped the fetch would pass every other line here.
+    """
+    text = "the margin held at 41 percent"
+    fetcher = _RecordingFetcher({"minutes.md": text, "copy-of-minutes.md": text})
+    planner = SettlesAfter(
+        FakePlanner(
+            now=_clock,
+            read_request=_file("F1"),
+            revision=ActionPlan(
+                id="plan-2",
+                goal_id="goal-1",
+                steps=(),
+                created_at=_NOW,
+                rationale="there was a second copy of it",
+                read_request=_file("F2"),
+            ),
+        )
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        responded = await _loop(planner=planner, fetcher=fetcher).respond(
+            "how did the quarter go", narrow=_bounded(), operation=_REVISING
+        )
+
+    assert [entry.name for entry in fetcher.fetched] == ["minutes.md", "copy-of-minutes.md"], (
+        "both files were resolved and read: §7 suppresses no ask, it admits no record"
+    )
+    assert [
+        (_serviced(captured, ordinal)["returned"], _serviced(captured, ordinal)["new"])
+        for ordinal in (0, 1)
+    ] == [(1, 1), (1, 0)], "the second file held what the supply already had"
+    assert _serviced(captured, 1)["outcomes"] == ("duplicate",), (
+        "§2's `DUPLICATE`, which is what the planner is told rather than a second bullet"
+    )
+    fourth = [record.content for record in responded.turn.memories[len(planner.calls[0][3]) :]]
+    assert fourth == [text], "one bullet, carrying the text once"
+
+
 async def test_the_second_plan_sees_the_supply_the_first_fetch_produced() -> None:
     """ADR-0228 §1 over an outward read, and §7's monotonicity with it.
 
