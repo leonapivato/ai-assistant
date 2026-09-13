@@ -906,6 +906,95 @@ def test_status_has_two_writers_and_they_are_the_two_acts_arm_23_names() -> None
     ], f"and they are the abandonment (§12) and the reopen (§13). Found: {writes}"
 
 
+def test_set_goal_status_has_exactly_the_two_callers_arm_23_names() -> None:
+    """§20 arm 23 counted from the **callers**, not from the literals they pass.
+
+    The two cases above count occurrences of ``status=GoalStatus.…``. That is the right
+    subject for "which statuses are written", and the wrong one for "how many writers
+    there are": a third call passing a *name* — ``set_goal_status(..., status=chosen)``
+    — carries no literal to count and would satisfy both. §9 makes ``set_goal_status``
+    *"the goal's **only** status-mutation route"* and §12 and §13 name exactly two acts
+    that take it, so the population this arm is really about is the **call sites**.
+
+    Counted from the syntax tree: every call under ``src/`` whose callee is
+    ``set_goal_status``, each of which must sit in ``orchestration/engine.py`` and carry
+    a literal ``GoalStatus`` attribute as its ``status``.
+    """
+    callers = sorted(
+        (str(path.relative_to(_SRC)), _status_argument(node))
+        for path in _SRC.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "set_goal_status"
+    )
+    assert [where for where, _ in callers] == [
+        "ai_assistant/orchestration/engine.py",
+        "ai_assistant/orchestration/engine.py",
+    ], f"ADR-0250 §20 arm 23: exactly two callers of the one status route. Found: {callers}"
+    assert sorted(what for _, what in callers) == ["ABANDONED", "ACTIVE"], (
+        "and each names its member outright, so that no call can carry a status decided "
+        f"somewhere this test cannot read. Found: {callers}"
+    )
+
+
+def _status_argument(call: ast.Call) -> str:
+    """The ``GoalStatus`` member a ``set_goal_status`` call names, or why it names none."""
+    for keyword in call.keywords:
+        if keyword.arg != "status":
+            continue
+        value = keyword.value
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "GoalStatus"
+        ):
+            return value.attr
+        return f"not a GoalStatus literal: {ast.dump(value)}"
+    return "no status keyword at all"
+
+
+def test_no_forbidden_status_is_carried_anywhere_a_write_could_reach() -> None:
+    """§20 arm 23's permanent half, closed against propagation as well as assignment.
+
+    ``GoalStatus.ACHIEVED`` is A10's and ``GoalStatus.BLOCKED`` is A3's, and §12 rules
+    that neither *"gains a producer here"*. A test over the ``status=GoalStatus.…`` write
+    form alone leaves one route open: bind the member to a name, then pass the name.
+
+    So the two members may appear under ``src/`` **only** in a position that reads them
+    — a comparison, a membership test, a ``match`` — and never as a call argument or as
+    the value of an assignment, which are the two ways a value travels to a writer. §1's
+    own definition of an open goal (*"``ACTIVE`` or ``BLOCKED``"*) is a read and is
+    untouched by this.
+    """
+    carried = sorted(
+        f"{path.relative_to(_SRC)}:{value.lineno}"
+        for path in _SRC.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        for value in _values_that_travel(node)
+        if isinstance(value, ast.Attribute)
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "GoalStatus"
+        and value.attr in {"ACHIEVED", "BLOCKED"}
+    )
+    assert carried == [], (
+        "ADR-0250 §12: ACHIEVED is A10's and BLOCKED is A3's, so neither may be passed "
+        "to a call or bound to a name under src/ — a member that can travel can reach "
+        f"`set_goal_status`. Found: {carried}"
+    )
+
+
+def _values_that_travel(node: ast.AST) -> tuple[ast.expr, ...]:
+    """The expressions of ``node`` that hand a value somewhere else."""
+    if isinstance(node, ast.Call):
+        return (*node.args, *(keyword.value for keyword in node.keywords))
+    if isinstance(node, ast.Assign):
+        return (node.value,)
+    if isinstance(node, ast.AnnAssign | ast.AugAssign) and node.value is not None:
+        return (node.value,)
+    return ()
+
+
 def test_every_status_write_goes_through_set_goal_status() -> None:
     """§20 arm 23's third limb: "**both go through ``set_goal_status``**".
 
