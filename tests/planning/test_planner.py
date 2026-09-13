@@ -5695,7 +5695,24 @@ async def test_a_read_kind_outside_its_enumeration_is_an_extraction_failure(bad:
 
 
 @pytest.mark.parametrize(
-    "bad", [900, "900", "00:15:00", "1 day, 0:00:00", "-PT5M", "PT0S", "pt15m", True, "fifteen"]
+    "bad",
+    [
+        900,
+        "900",
+        "00:15:00",
+        "1 day, 0:00:00",
+        "-PT5M",
+        "PT0S",
+        "pt15m",
+        True,
+        "fifteen",
+        "P1D2D",
+        "PT1H2H",
+        "PT1M1H",
+        "P",
+        "PT",
+        "P1DT",
+    ],
 )
 async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_clamped(
     bad: object,
@@ -5707,6 +5724,14 @@ async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_cla
     a negative one. ``PT0S`` is the form the field's own ``gt`` refuses, and it is in
     the same list because §9 makes "not strictly positive" the same disposal as "not
     an ISO-8601 duration" rather than a different one.
+
+    **The last five are the relaxed-parser cases**, and they are the ones a leading-
+    ``P`` test alone would let through: pydantic sums repeated designators and accepts
+    misordered ones, so ``P1D2D`` reads as three days, ``PT1H2H`` as three hours and
+    ``PT1M1H`` as an hour and a minute — none of them an ISO-8601 duration, and each a
+    freshness requirement no model wrote standing as the figure a dispatch is tested
+    against. ``P``, ``PT`` and ``P1DT`` are the empty-designator forms the grammar's
+    two lookaheads refuse.
     """
     await _refused(_shaped_reply([_step(evidence_recency=bad)]))
 
@@ -6097,3 +6122,56 @@ async def test_the_supply_is_snapshotted_before_the_call_it_is_resolved_after() 
     printed = [line for line in user.splitlines() if line.startswith("  - M2 ")]
     assert len(printed) == 1, "the prompt printed two records and M2 is the second"
     assert output.plan.interpretations[0].record == _supply()[1].id
+
+
+@pytest.mark.parametrize("duration", ["PT15M", "P1D", "PT1H30M", "P1W", "PT1,5S", "P1DT2H"])
+async def test_an_iso_8601_duration_is_read_as_the_form_it_is(duration: str) -> None:
+    """ADR-0253 §9: what the grammar admits is read, and the figure is never repaired.
+
+    The companion to the refusals above: the pattern decides the **form** and settles
+    nothing about the value, so every well-formed duration reaches the field and the
+    field's own ``gt`` is what judges the bound. A pattern narrow enough to refuse
+    ``P1D2D`` and also narrow enough to refuse ``P1DT2H`` would be a second opinion
+    about what an ISO-8601 duration is, which is the failure in the other direction.
+    """
+    plan = await _shaped_plan(_shaped_reply([_step(evidence_recency=duration)]))
+
+    assert plan.steps[0].evidence_recency is not None
+    assert plan.steps[0].evidence_recency > timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "interpretations",
+    [[{"settles": "D1", "record": "M1"}], [{"settles": "D1", "reads": {"step": 1}}], None, "x"],
+)
+async def test_a_decline_carrying_interpretations_is_neither_read_nor_refused(
+    interpretations: object,
+) -> None:
+    """ADR-0253 §9 puts the member "beside ``steps``", and a decline carries none.
+
+    §8's two inputs are a record this plan will act on and the output of a step this
+    plan carries: a decline has no step, so the ``reads`` form is unconstructible
+    there, and the ``record`` form would settle a proposition on a turn that decided
+    to do nothing — a claim §8 nowhere authorises.
+
+    **Stepped over rather than refused**, because ADR-0176 §5 makes a reply carrying
+    the decline marker one that "has said what it meant" and has got the shape right;
+    spending a repair round on a key beside it would ask a model to re-decide a
+    judgement that was never in question, which is the defect #1315 records in its
+    other direction. So a malformed value costs the decline nothing either — which is
+    the case a guard written as "read it, then refuse what does not parse" would get
+    wrong.
+    """
+    plan = await _shaped_plan(
+        json.dumps(
+            {
+                "rationale": "this turn needs no capability",
+                "steps": [],
+                "no_capability_needed": True,
+                "interpretations": interpretations,
+            }
+        )
+    )
+
+    assert plan.steps == ()
+    assert plan.interpretations == ()
