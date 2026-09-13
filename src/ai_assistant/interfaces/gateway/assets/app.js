@@ -414,6 +414,33 @@ function restoreReference(sent) {
   }
 }
 
+// Drop a reference that names a record one of the goal acts has just acted on.
+//
+// **An act on the record takes the reference to it, whatever the act's member said**
+// (adversarial review, round 4, `major`). Without this, pressing "Answer this" and then
+// "Give this up" left the question's id attached: the next question — about anything at
+// all — would carry it, and ADR-0250 §11 makes a settled question's `goal_id` resolve
+// "in every case", so the turn engages that goal and §13 **reopens** it. The owner gave
+// the work up and their next sentence silently took it back.
+//
+// **It is total over both vocabularies rather than keyed on the acting member**, because
+// what the hint promises after either act is something the page can no longer stand
+// behind: there is no open question to answer, or no goal that is still being worked on.
+// And keying it on `WITHDRAWN`/`ABANDONED` alone would leave the reopen reachable
+// through `ALREADY_CLOSED`, which establishes exactly that the goal is closed.
+//
+// **Nothing is lost by dropping it** (§11): the handle is a durable record's own id and
+// is read again from the listing this act is about to re-read, at no cost.
+function forgetReferenceTo(goalId, questionId) {
+  if (reference === null) {
+    return;
+  }
+  const named = reference.value;
+  if (named.goal_id === goalId || (questionId !== null && named.question_id === questionId)) {
+    clearReference();
+  }
+}
+
 // Give it up.
 //
 // **Nothing is lost by giving one up**, which is why this page drops it after a turn
@@ -9800,6 +9827,9 @@ async function withdrawClarification(questionId) {
     // Said as a fault rather than in the row, because the row is about to be replaced
     // by a fresh read and a sentence written into it would be gone before it was read.
     sayGoalAct(goalMemberWords(CLARIFICATION_WITHDRAWAL_WORDS, done.withdrawal));
+    // The question this act was about is no longer one to answer, so a reference naming
+    // it goes with it (round 4, `major`).
+    forgetReferenceTo(null, questionId);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
@@ -9814,6 +9844,9 @@ async function withdrawClarification(questionId) {
 // ADR-0250 §12 is the source of every clause in it — the goal leaves what is
 // considered, its open question is withdrawn, and nothing already done is undone.
 async function abandonGoal(goal) {
+  // Read before the ceremony, so what is forgotten afterwards is what this act was about
+  // rather than whatever the row holds by then.
+  const asking = goal.clarification === null ? null : goal.clarification.question_id;
   const asked = window.confirm(
     `About to give this up.\n\n${goal.outcome}\n\nI will not take it up again on my ` +
       "own and nothing more will be planned for it, and any question it has open is " +
@@ -9838,6 +9871,11 @@ async function abandonGoal(goal) {
       return;
     }
     sayGoalAct(goalMemberWords(GOAL_ABANDONMENT_WORDS, done.abandonment));
+    // The goal and its open question both, because a reference to either engages the
+    // goal (§11) and a closed goal a turn associates to is **reopened** (§13). The ids
+    // are the row's, read before the act rather than off a listing this is about to
+    // re-read. Round 4, `major`.
+    forgetReferenceTo(goal.id, asking);
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
