@@ -35,15 +35,20 @@ from test_loop_reads import _belief
 from ai_assistant.core.types import (
     MAX_APPLICABILITY_VALUES,
     EvidenceApplicability,
+    EvidenceBasis,
+    EvidenceStanding,
     Goal,
     GoalBrief,
     GoalElement,
+    GoalEvidence,
     GoalInterpretation,
     Ground,
     MemorySource,
     ProposedElement,
     ProposedUnderstanding,
     Provenance,
+    ReadKind,
+    ReadOutcomeKind,
     TimeWindow,
 )
 from ai_assistant.orchestration.interpretation import RecordedUnderstanding, recorded_revision
@@ -104,27 +109,34 @@ def _budget() -> GoalElement:
     return GoalElement(text="under $100", ground=Ground.USER_STATED, span="under $100")
 
 
-def _revised(
+def _revised(  # noqa: PLR0913 — one keyword per sequence a ground resolves against, as recorded_revision itself takes
     understanding: ProposedUnderstanding,
     *,
     goal: Goal | None = None,
     utterance: str = _ASKED,
     supply: Sequence[MemoryRecord] = (),
     minted: Sequence[str] = (),
+    evidence: Sequence[GoalEvidence] = (),
 ) -> GoalInterpretation:
     """Resolve ``understanding`` against ``goal``, with this lane's own stamps."""
     return _understood(
-        goal=goal, understanding=understanding, utterance=utterance, supply=supply, minted=minted
+        goal=goal,
+        understanding=understanding,
+        utterance=utterance,
+        supply=supply,
+        minted=minted,
+        evidence=evidence,
     ).revision
 
 
-def _understood(
+def _understood(  # noqa: PLR0913 — :func:`_revised`'s own list, one layer down
     understanding: ProposedUnderstanding,
     *,
     goal: Goal | None = None,
     utterance: str = _ASKED,
     supply: Sequence[MemoryRecord] = (),
     minted: Sequence[str] = (),
+    evidence: Sequence[GoalEvidence] = (),
 ) -> RecordedUnderstanding:
     """The whole of what one resolution produced, positions included (ADR-0250 §7)."""
     return recorded_revision(
@@ -133,6 +145,7 @@ def _understood(
         utterance=utterance,
         supply=supply,
         minted=minted,
+        evidence=evidence,
         recorded_at=_LATER,
         raised_by="turn-2",
         id_factory=_ids(),
@@ -575,6 +588,76 @@ def test_a_dropped_element_is_a_none_and_its_siblings_keep_their_positions() -> 
 # --------------------------------------------------------------------------- #
 # ADR-0253 §7 — the element gains an identity and an applicability             #
 # --------------------------------------------------------------------------- #
+
+
+#: A row of this goal's history, so a ``FROM_EVIDENCE`` element can name one by ``E``
+#: label (ADR-0252 §10) — which is the fourth construction site §7's identity rides.
+_ROW: Final = GoalEvidence(
+    id="row-1",
+    goal_id="goal-1",
+    attempt_id="attempt-1",
+    basis=EvidenceBasis.READ_OUTCOME,
+    read_kind=ReadKind.STRUCTURED_READ,
+    supported=(EvidenceApplicability(topics=("weather",)),),
+    supported_elided=0,
+    records=("episode-1",),
+    read_at=_NOW,
+    returned=1,
+    admitted=1,
+    verdict=ReadOutcomeKind.RETURNED_RECORDS.value,
+    standing=EvidenceStanding.STANDING,
+)
+
+
+@pytest.mark.parametrize(
+    ("proposed", "supply", "evidence"),
+    [
+        (ProposedElement(text="the forecast is dry", ground=Ground.INFERRED), (), ()),
+        (ProposedElement(text="Sunday", ground=Ground.USER_STATED, span="Sunday"), (), ()),
+        (
+            ProposedElement(
+                text="the forecast is dry", ground=Ground.FROM_EVIDENCE, evidence_label="M1"
+            ),
+            (_belief("m-1", "the met office publishes it"),),
+            (),
+        ),
+        (
+            ProposedElement(
+                text="the forecast is dry", ground=Ground.FROM_EVIDENCE, evidence_label="E1"
+            ),
+            (),
+            (_ROW,),
+        ),
+    ],
+    ids=["inferred", "user_stated", "from_evidence_record", "from_evidence_row"],
+)
+def test_every_ground_records_the_identity_and_the_region(
+    proposed: ProposedElement,
+    supply: Sequence[MemoryRecord],
+    evidence: Sequence[GoalEvidence],
+) -> None:
+    """§7's identity rides **every** shape a new element resolves to, not one of them.
+
+    ADR-0249 §7 and ADR-0252 §10 give a new element four construction sites — ``INFERRED``,
+    ``USER_STATED``, and ``FROM_EVIDENCE`` over each of the two label spaces — and §7's
+    clause reaches all of them: "every element of every revision ``orchestration``
+    records after this decision carries one". A branch that dropped the identity would
+    record a condition no plan can ever name, and nothing else would say so.
+    """
+    revision = _revised(
+        ProposedUnderstanding(
+            retains_outcome=True,
+            conditions=(proposed.model_copy(update={"topics": ("weather",)}),),
+        ),
+        supply=supply,
+        evidence=evidence,
+    )
+
+    [element] = revision.conditions
+    assert element.id == "e-1", "minted by the caller's factory, at the one instant §7 names"
+    assert element.applicability == EvidenceApplicability(topics=("weather",)), (
+        "and the region the planner proposed, composed on the same branch"
+    )
 
 
 def test_every_element_a_revision_records_anew_carries_a_minted_id() -> None:
