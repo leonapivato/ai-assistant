@@ -1150,6 +1150,14 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > binds exactly as §10 states it. **The licence is the carrier and the phase is the record**, and
 > keeping them apart is the whole of this section.
 
+> **Normative — the licensed round is admitted before the turn composes, and composing is what
+> it displaces.** The licence is read at the instant the walk returns, and the round it admits
+> runs **before** the composing call — which is the only ordering that buys anything, because a
+> round after the answer is composed is a round the answer could not mention. Where no round is
+> admitted, for any of §4's guards or because no licence was carried, **the turn composes exactly
+> as it does today**: ADR-0251 §6's *"**Composing and verification are not gated on the attempt's
+> allowance at all**"* binds entire, and **no clause of this decision can stop a turn answering**.
+
 > **Normative — what is preserved across a licensed round.** Every `GoalEvidence` row the attempt
 > holds, every `ExecutionState` it drove, and every `SUCCEEDED` step's `output` **stay exactly as
 > they stand**; ADR-0252 §§8–9 alone decide which rows are superseded or invalidated, and §7's
