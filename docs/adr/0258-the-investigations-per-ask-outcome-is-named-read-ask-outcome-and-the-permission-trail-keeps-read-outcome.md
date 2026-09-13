@@ -23,14 +23,15 @@
   reader would expect to be — ADR-0185, ADR-0240, ADR-0249 and ADR-0015. **ADR-0185 is the one
   to check first**: its §1 `ReadOutcome` is the whole reason this decision exists, and it is untouched
   in name, in members and in every reader of it.
-- **Names symbols in `src/ai_assistant/core/types.py` and
-  `src/ai_assistant/core/protocols.py`**, so it is a **`core` contract-surface decision under
-  golden rule 5** and is flagged as one; it takes both review lenses, which is more than
-  ADR-0015 §5 asks of a supersession. **It neither adds a break nor discharges one**: ADR-0251
-  §3's own BREAKING flag on the parameter replacement binds verbatim (§2), and this decision
-  moves an identifier *inside* the break §3 already declared rather than declaring a second. It
-  authorises no implementation work, because the name it rules is what the tree already carries
-  (§4).
+- **Decides the name of a type in `src/ai_assistant/core/types.py` and the annotation on
+  `src/ai_assistant/core/protocols.py`'s `Planner.plan`.** **It is a BREAKING contract change
+  under golden rule 5** and is flagged as one: an implementation following ADR-0251 §3 as
+  ratified writes a different symbol and a different annotation than one following this. It is
+  therefore a **contract-surface decision** and takes **both** review lenses, which
+  `CONTRIBUTING.md` requires of *"the ADR deciding that surface"* however prose-only its PR.
+  ADR-0251 §3's own BREAKING flag on the parameter replacement binds verbatim beside it (§2).
+  **No implementation has to move for the break**, because the tree already carries the name
+  this ADR rules — which is itself irregular, and §4 owns it.
 - Date: 2026-09-13
 
 ## Context
@@ -108,8 +109,9 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 - **Anything else of ADR-0251.** §§1-2 and §§4-18 are outside this ADR's scope entirely, and
   within §3 only the identifier moves.
 - **Anything of ADR-0185.** §5 shows why no record is owed there.
-- **Whether the implementation's order was acceptable.** §4 records what happened and what it
-  does not license; it rules nothing about ADR-0015 §5, which is untouched.
+- **Whether ADR-0015 §5's ordering should change.** §4 records that it was breached and that the
+  breach is not cured by the record. ADR-0015 is untouched by this ADR and nothing here is a
+  precedent; a governance decision about remediation, if one is wanted, is its own ADR.
 - **Whether an implementation may conflate the two vocabularies.** They overlap on two string
   values and nothing today stops the conversion; §3 names that, files it as #2320 and rules
   nothing about it. A guard is code, and the clause that would demand one is a decision this lane
@@ -187,16 +189,26 @@ chose the second, spelled the new model in full, and filed #2281. So since PR #2
 *identifier* on the tree has run ahead of the decision that rules it, and this ADR is that
 decision.
 
-**ADR-0015 §5 does not put this ADR out of order, and its own words are why.** §5's rule attaches
-to *"a substantive contract ADR — one adding or changing a Protocol or a `core/` type crossing
-subsystem boundaries"*, which **ships as its own PR, ratified before the implementation PR that
-depends on it**. ADR-0251 was that ADR and it obeyed the rule. §5 then names its exemption in the
-same breath: *"Trivial ADRs (amendments, status changes, supersessions) are exempt, as they
-already were from architecture review."* **This is a supersession**, so the before-the-
-implementation ordering is not asked of it — and this lane takes the architecture lens anyway,
-which is strictly more than §5 requires. What §5 does *not* supply is a remedy for an
-implementation that has already departed from a ratified clause; ADR-0070 §1 supplies the only
-one there is, and it is the superseding ADR.
+**ADR-0015 §5's ordering was breached, and this ADR claims no exemption from it.** §5 requires a
+substantive contract ADR to ship *"as its own PR, ratified before the implementation PR that
+depends on it"*. An earlier draft of this section read §5's parenthetical — *"Trivial ADRs
+(amendments, status changes, supersessions) are exempt"* — as covering this document. **Both
+review lenses rejected that reading and they were right.** `CONTRIBUTING.md` fixes what the
+parenthetical means: the trivial edits are *"an in-place amendment, the `Proposed` → `Accepted`
+ratification flip, or recording on an ADR's status that a superseding ADR has landed"*, and the
+exemption *"does not lift any review the ADR's substance requires"*. It is the ADR-0251 `Status`
+edit that is trivial, not the decision making it. So this is a substantive contract ADR whose
+implementation landed first, it takes both lenses for that reason, and the ordering §5 fixes was
+breached — by PR #2287, merged 2026-09-12, the day before this document was written.
+
+**What §5 does not supply is a remedy for a breach that has already merged.** It states an
+ordering, not a repair. ADR-0070 §1 states the corpus's only mechanism for a ratified clause and
+the world disagreeing — *"Any change to what was decided requires a new ADR that supersedes the
+old one"* — and this is that ADR, written for that reason. The repository owner ruled the same
+disposition on #2281 before this lane opened, naming what it is owed clause by clause: *"one ADR,
+partially superseding **ADR-0251 §3** in the model's name alone"*. Review is advisory on exactly
+this point — `CONTRIBUTING.md`: *"the author still owns ratification; the reviewer only surfaces
+blind spots"* — and what the reviewer surfaced here is recorded above rather than argued away.
 
 **Why that is recorded here and not quietly fixed.** The order ADR-0015 §5 fixes exists so that
 nothing implements against an unreviewed contract, and the exposure here is real but bounded:
@@ -246,11 +258,11 @@ only that ADR now act differently, or read one of its clauses more widely than i
 - **ADR-0185 — nothing is recorded, and nothing is owed.** No clause of ADR-0185 §1 becomes
   false or over-wide. Its enum keeps its name, its six members, its totality claim, its
   `SourceReadRecord` home and every consumer rule §1 states about it; a reader holding ADR-0185
-  alone acts identically before and after. Under ADR-0082 §1 that is the stacked-addition case
-  — the obligation this ADR adds is recorded in the ADR that makes it and nowhere else — and
-  §1 is explicit that a record may not be demanded on book-keeping grounds absent such a clause.
-  §3 above states an obligation *about* ADR-0185 §1's enum without changing what ADR-0185
-  decided.
+  alone acts identically before and after. **This ADR adds no obligation about it either**: §3
+  is unmarked, so under ADR-0089 §3 it supplies none, and the five marked clauses are §§1-2's
+  four about ADR-0251 §3 and §4's one about this ADR's own scope. ADR-0082 §1 is explicit that
+  a record may not be demanded on book-keeping grounds where no clause of the earlier ADR fails
+  ADR-0070 §1's test, and none does.
 - **ADR-0240 — nothing is recorded.** §7's `empty_reads: Sequence[ReadAsk] = ()` was already
   replaced by ADR-0251 §3, and ADR-0251's own header carries that record. This ADR renames the
   replacement, not the clause ADR-0240 wrote, so no sentence of ADR-0240 changes its truth value
@@ -291,14 +303,15 @@ read to determine what they mean and supplies no obligation of its own. **§3 is
 purpose** (§3 says why), and §§5-6 are classification of this change, which ADR-0089 §1 puts
 outside the normative set.
 
-It names symbols in `core/types.py` and `core/protocols.py` — a **contract surface** — so this
-lane runs **both** the adversarial and the architecture lens on every round, reviews the ADR
-while it stands `Proposed`, and ratifies it in this same PR by the isolated one-line `Proposed` →
-`Accepted` flip ADR-0165 exempts from a fresh round. **Both lenses is more than is owed**, and
-deliberately: ADR-0015 §1 attaches the architecture lens to a change *touching*
-`core/protocols.py` or `core/types.py`, which this docs-only diff does not, and §5 exempts a
-supersession from architecture review by name. A decision whose whole content is the identifier
-on a `core` type is worth the lens whether or not a rule compels it.
+It decides the name of a type in `core/types.py` and the annotation on `core/protocols.py`'s
+`Planner.plan`, so it **is** a contract-surface change and **both lenses are required**, not
+elective: `CONTRIBUTING.md` → "Stop when the required reviews are green" says a change is
+contract-surface *"when it touches `core/protocols.py` or `core/types.py` — **or when it is the
+ADR deciding that surface**, even though such a PR is prose only"*, and `docs/review/guide.md`
+says the same. This lane runs both on every round, on one committed tree. The ADR is reviewed
+while it stands `Proposed` and ratified in this same PR by the isolated one-line `Proposed` →
+`Accepted` flip ADR-0165 exempts from a fresh round; that flip is the trivial edit
+`CONTRIBUTING.md` describes, and it lifts none of the review above it.
 
 ## Consequences
 
