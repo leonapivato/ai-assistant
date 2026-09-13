@@ -266,7 +266,19 @@ async def test_every_withdrawal_member_reaches_the_owner_as_a_sentence(
     was given has not implemented this section — it is not permissibly degraded." The
     statement lands in the panel's own account node rather than in its fault slot,
     because neither member is the act failing: both are something the hub established.
+
+    **And the statement carries every clause §12 gives it, not merely some sentence.**
+    ``WITHDRAWN`` says what the act *buys* — "withdrawing removes the question and not
+    the pause … **What the act buys is the freedom to ask again**" — and
+    ``NOTHING_TO_WITHDRAW`` says that whatever settled the question stands, which is the
+    half that stops a no-op reading as damage. Both were on the command line's twin and
+    missing here, which a "some sentence appeared" assertion could not see. Round 9's
+    parity sweep.
     """
+    owed = {
+        ClarificationWithdrawal.WITHDRAWN: "ask a better question about it",
+        ClarificationWithdrawal.NOTHING_TO_WITHDRAW: "Whatever settled it stands unchanged",
+    }
     async with driving(gateway_browser, tmp_path) as drive:
         drive.engine.goal_summaries = [_summary()]
         drive.engine.withdrawal = member
@@ -277,6 +289,7 @@ async def test_every_withdrawal_member_reaches_the_owner_as_a_sentence(
         said = drive.page.locator("#goal-said")
         await expect(said).to_be_visible()
         await expect(said).not_to_contain_text(QUESTION_ID)
+        await expect(said).to_contain_text(owed[member])
         assert drive.engine.calls[-2:][0] == (
             "withdraw_clarification",
             {"question_id": QUESTION_ID},

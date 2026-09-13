@@ -1718,10 +1718,12 @@ const CLARIFICATION_WITHDRAWAL_WORDS = {
   withdrawn:
     "That question is withdrawn. No answer was recorded — taking a question back is " +
     "not the same as answering it — and the words it held are gone. The work it was " +
-    "about is still open and still waiting.",
+    "about is still open and still waiting: what this frees me to do is ask a better " +
+    "question about it.",
   nothing_to_withdraw:
     "There was nothing here for this to take. That question is already settled, or I " +
-    "hold none of that id, so this took nothing back and changed nothing.",
+    "hold none of that id, so this took nothing back and changed nothing. Whatever " +
+    "settled it stands unchanged.",
 };
 
 // What an abandonment did (ADR-0250 §12).
@@ -9781,6 +9783,14 @@ const CLOSED_GOAL_STATUSES = ["achieved", "abandoned"];
 // the same mechanism: a reference attached to the ordinary composer. A row with an open
 // question offers the answer; every row offers taking the goal up here, which is the one
 // route by which a goal moves between conversations.
+//
+// **Each statement carries every clause §12 gives it, which is what the round-9 parity
+// sweep settled.** `withdrawn` says what the act *buys* — §12: "withdrawing removes the
+// question and not the pause … **What the act buys is the freedom to ask again**" — and
+// `nothing_to_withdraw` says that whatever settled the question stands, which is the
+// half that stops a no-op reading as damage. Both were on the command line's twin and
+// not here; a clause of the decision stated on one surface and not the other is the
+// defect rounds 7, 8 and 9 each were.
 //
 // **The withdrawal is offered beside the answer** and never instead of it, on ADR-0244
 // §13's clause one record kind over: an owner told only how to answer has not been told
