@@ -152,14 +152,26 @@ _MAX_EXTRACTION_MISSES: Final = 256
 #: episodes lead the supply whenever it holds any. This module neither re-ranks nor
 #: truncates that order — it now also *relies* on it, which is a dependency on a value
 #: handed across the contract rather than on a name imported across a boundary, and it
-#: is stated here because nothing in `planning` can assert it. The sentence is written
-#: to stay true where the history is empty: it points at "the earliest note recording
-#: something the user asked for", which on a first turn is the best note there is.
+#: is stated here because nothing in `planning` can assert it.
+#:
+#: **It says the opening notes are this conversation's, and deliberately does not say
+#: which of them wins.** `history` is the conversation's turns *oldest first*
+#: (`LoopEngine._turn`'s own parameter documentation), so a wording pointing at the
+#: earliest opening note points at the oldest turn, which is wrong the moment a
+#: conversation has asked for two things; measured on a two-request supply it also
+#: leaked back out of the conversation on 4 of 8 samples. Naming the most recent one
+#: instead still leaked 1 of 8 and never selected the later request anyway. Choosing
+#: *among* this conversation's own turns is not information the order carries and not
+#: a question this module is given the means to answer — the goal the turn was engaged
+#: on decides it (ADR-0249 §11, ADR-0250 §5) and no goal reaches `SearchSupply`. So the
+#: sentence claims only what the order really says, which is also the whole of the
+#: defect: the subject is this conversation's, not a note retrieved from another.
 #:
 #: Measured rather than assumed, against the two drives #2262 recorded failing and the
 #: four it recorded passing, replayed over the supplies a scratch hub actually built
 #: for them: the shape that composed a query about another conversation's subject on
-#: 10 of 10 samples composes one about its own on 8 of 8, the four passing shapes are
+#: 10 of 10 samples composes one about its own on 8 of 8, a supply carrying two
+#: requests of this conversation stays inside it on 8 of 8, the four passing shapes are
 #: unchanged, and three utterances that must compose nothing still decline 18 of 18.
 _SYSTEM_PROMPT: Final = """\
 You turn one request from a user of an AI assistant into a single web-search \
@@ -188,11 +200,12 @@ leaves implicit, a preference the query should respect. Use them only for that. 
 Do not search for a note, do not repeat one back, and do not carry a detail from \
 one into the query unless the request is asking about it.
 
-The notes are in the order this assistant selected them, and a note recording an \
-earlier turn of this same conversation comes before every other. So where the \
-request leaves its subject implicit — "that", "them", "more about it" — take that \
-subject from the earliest note recording something the user asked for, and never \
-from a want, a purchase or a plan a later note records. Search for the thing that \
+The notes are in the order this assistant selected them: any recording an earlier \
+turn of this same conversation come first, and everything after them is \
+background this assistant retrieved. So where the request leaves its subject \
+implicit — "that", "them", "more about it" — it refers to what was asked for in \
+those opening notes, and never to a want, a purchase or a plan a note further \
+down records, however close to the request it reads. Search for the thing that \
 was asked for; carry a further detail in beside it only where the detail narrows \
 that thing rather than naming something else."""
 

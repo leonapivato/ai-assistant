@@ -279,6 +279,17 @@ _B1_RECORDS: Final = (
     "The user asked: find more about that, taking my preferences into account",
 )
 
+#: The same drive on a conversation that has asked for **two** things. `history` is
+#: oldest first, so the opening notes are oldest first too: a rule pointing at the
+#: earliest of them would point at the rug on a turn whose latest request is the sofa.
+#: The instruction deliberately picks neither — what it claims is that the subject is
+#: one of *these*, and not the frame bag a note further down records.
+_B1_TWO_TURNS: Final = (
+    _B1_RECORDS[0],
+    "The user asked: and we still need a new sofa to go with it.",
+    *_B1_RECORDS[1:],
+)
+
 #: #2262's C1, whose own turn is the only one of its shape in the supply.
 _C1_RECORDS: Final = (
     "The user asked: I want to get a proper frame bag and bikepacking luggage for the "
@@ -308,6 +319,7 @@ def _echoing_the_first_record() -> FakeModelProvider:
     ("records", "expected"),
     [
         pytest.param(_B1_RECORDS, _B1_RECORDS[0], id="b1"),
+        pytest.param(_B1_TWO_TURNS, _B1_TWO_TURNS[0], id="b1-two-turns"),
         pytest.param(_C1_RECORDS, _C1_RECORDS[0], id="c1"),
     ],
 )
@@ -371,8 +383,10 @@ async def test_the_instruction_says_where_an_implicit_subject_comes_from() -> No
     assert "in the order this assistant selected them" in system.content, (
         "the order means something"
     )
-    assert "earliest note recording something the user asked for" in system.content, (
-        "and what it means"
+    assert "those opening notes" in system.content, "and what it means: the subject is one of those"
+    assert "earliest" not in system.content, (
+        "and never the earliest of them — history is oldest first, so that is the "
+        "oldest turn rather than the one a follow-up is about"
     )
 
 
