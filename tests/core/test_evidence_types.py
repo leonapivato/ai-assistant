@@ -32,8 +32,6 @@ from ai_assistant.core.types import (
     ReadOutcomeKind,
     TimeWindow,
     evidence_order,
-    marked_inapplicable,
-    marked_superseded,
     support_covers,
     support_covers_support,
     support_overlaps,
@@ -598,28 +596,6 @@ def test_the_order_is_read_at_then_id() -> None:
     ]
 
     assert [row.id for row in sorted(rows, key=evidence_order)] == ["a", "b", "b"]
-
-
-def test_marking_a_row_keeps_everything_but_the_mark() -> None:
-    """§9: "invalidation is a marking and never a deletion … exactly one field changes".
-
-    And §8's supersession is the same move with the other argument. The applicabilities,
-    the instants, the verdict and the references are kept intact, because the mark
-    changes **sufficiency** and not what the row recorded.
-    """
-    row = _row()
-
-    displaced = marked_superseded(row, by="ev2")
-    invalidated = marked_inapplicable(row, at_revision=3)
-
-    assert displaced.standing is EvidenceStanding.SUPERSEDED
-    assert displaced.superseded_by == "ev2"
-    assert invalidated.standing is EvidenceStanding.INAPPLICABLE
-    assert invalidated.inapplicable_at_revision == 3
-    for marked in (displaced, invalidated):
-        assert marked.model_dump(
-            exclude={"standing", "superseded_by", "inapplicable_at_revision"}
-        ) == row.model_dump(exclude={"standing", "superseded_by", "inapplicable_at_revision"})
 
 
 def test_a_history_refuses_a_row_of_another_goal() -> None:

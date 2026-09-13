@@ -10222,6 +10222,14 @@ def evidence_order(row: GoalEvidence) -> tuple[datetime, str]:
     drop different rows. Breaking the tie on ``id`` costs nothing and makes both
     testable in the shared conformance suite.
 
+    **It is a key and not a transition, which is why it is here and the marks are
+    not.** It constructs no record and moves nothing between lifecycle states: it is a
+    pure function of two of the row's own fields, in the class :meth:`TimeWindow.contains`
+    and :meth:`ReadCoverage.contains` are in — "a semantic intrinsic to the type rather
+    than subsystem logic". Applying ADR-0252 §8's and §9's **marks** is the other thing,
+    and it lives beside ADR-0249 §12's and ADR-0250 §9's own record transitions in
+    ``planning.goals``, where ``advanced`` and ``settled`` already are.
+
     Args:
         row: The row to key.
 
@@ -10229,69 +10237,6 @@ def evidence_order(row: GoalEvidence) -> tuple[datetime, str]:
         Its sort key.
     """
     return (row.read_at, row.id)
-
-
-def marked_superseded(row: GoalEvidence, *, by: str) -> GoalEvidence:
-    """``row`` marked ``SUPERSEDED``, naming the row that displaced it (ADR-0252 §8).
-
-    **Revalidated rather than copied**, on ADR-0023 §2's rule that
-    ``model_copy(update=...)`` skips validators and "a write that reaches past it must
-    re-validate" — which is what keeps §1's fourth axis in force over a value no
-    constructor built. Stated once so the three conforming stores cannot drift on what
-    a mark is.
-
-    **Supersession never un-marks** (§8): a row that is ``SUPERSEDED`` is never
-    returned to ``STANDING``, by a later revision, by a later refresh, by the deletion
-    of the row that displaced it, or by any other route. ADR-0252 §12's three refusals
-    — the row is not this goal's, is not ``STANDING``, or is the row being written —
-    are the **store's** and run before this.
-
-    Args:
-        row: The ``STANDING`` row being displaced.
-        by: The id of the row that refreshed it.
-
-    Returns:
-        The row as it stands after the mark.
-    """
-    return GoalEvidence.model_validate(
-        row.model_copy(
-            update={"standing": EvidenceStanding.SUPERSEDED, "superseded_by": by}
-        ).model_dump()
-    )
-
-
-def marked_inapplicable(row: GoalEvidence, *, at_revision: int) -> GoalEvidence:
-    """``row`` marked ``INAPPLICABLE`` against a revision (ADR-0252 §9).
-
-    **Invalidation is a marking and never a deletion**: the row is kept with its
-    applicabilities, its instants, its verdict and its references intact, it is still
-    exported, still reachable through ``get_evidence`` and ``evidence_of``, and still
-    in the digest the planner sees. **What changes is exactly one field**, plus the
-    argument that field's mark travels with.
-
-    **Invalidation never un-marks** (§9): a later revision that restores the old
-    requirement does not return the row to ``STANDING`` — it is read again or it is not
-    used — because un-marking would make a goal's evidence state depend on the **order**
-    of its revisions rather than on what is known.
-
-    Revalidated for :func:`marked_superseded`'s reason, and ADR-0252 §12's two
-    refusals — the row is not this goal's, or is not ``STANDING`` — are the store's.
-
-    Args:
-        row: The ``STANDING`` row the revision no longer covers.
-        at_revision: The revision being appended, which did it.
-
-    Returns:
-        The row as it stands after the mark.
-    """
-    return GoalEvidence.model_validate(
-        row.model_copy(
-            update={
-                "standing": EvidenceStanding.INAPPLICABLE,
-                "inapplicable_at_revision": at_revision,
-            }
-        ).model_dump()
-    )
 
 
 class EvidenceHistory(BaseModel):

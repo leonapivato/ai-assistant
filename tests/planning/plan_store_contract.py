@@ -591,6 +591,84 @@ class _ExportOp(_ReadOp):
         return store.export()
 
 
+class _RecordEvidenceOp:
+    """The ``record_evidence`` write, on two independent goals' histories."""
+
+    name = "record_evidence"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two goals with an attempt each, so both writes have somewhere to land."""
+        await _goal_with_attempt(store, goal_id="gA", attempt_id="aA")
+        await _goal_with_attempt(store, goal_id="gB", attempt_id="aB")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record a row on goal A — the write that is cancelled."""
+        return store.record_evidence(_evidence("evA", goal_id="gA", attempt_id="aA"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Record a row on goal B concurrently."""
+        return store.record_evidence(_evidence("evB", goal_id="gB", attempt_id="aB"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """Goal B's row landed whole; the store still serves reads."""
+        stored = await store.get_evidence("evB")
+        assert stored is not None
+        assert stored.goal_id == "gB"
+
+
+class _EvidenceReadOp(_ReadOp):
+    """A locked evidence **read**, over two independent goals' histories (#397).
+
+    ADR-0060 §3 "binds any method that acquires the resource rather than any method
+    that mutates", and both reads below hold the connection lock around their own
+    worker-thread SQL — so a regression replacing either one's ``_run_to_completion``
+    with a bare ``to_thread`` would hand the connection to a concurrent caller while
+    that read's worker still used it, and every write case would still pass.
+    """
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Seed the read chains, and one evidence row on each goal."""
+        await super().prepare(store)
+        await store.open_attempt(_attempt("aA", goal_id="gA"))
+        await store.open_attempt(_attempt("aB", goal_id="gB"))
+        await store.record_evidence(_evidence("evA", goal_id="gA", attempt_id="aA"))
+        await store.record_evidence(_evidence("evB", goal_id="gB", attempt_id="aB"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """The store is whole, and both histories still read back."""
+        await super().verify(store)
+        assert [row.id for row in (await store.evidence_of("gA")).rows] == ["evA"]
+        assert [row.id for row in (await store.evidence_of("gB")).rows] == ["evB"]
+
+
+class _GetEvidenceOp(_EvidenceReadOp):
+    """``get_evidence`` — one row by id, under the connection lock."""
+
+    name = "get_evidence"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal A's row — the call that is cancelled."""
+        return store.get_evidence("evA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal B's row concurrently."""
+        return store.get_evidence("evB")
+
+
+class _EvidenceOfOp(_EvidenceReadOp):
+    """``evidence_of`` — a goal's whole history and its count, its own lock site."""
+
+    name = "evidence_of"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal A's history — the call that is cancelled."""
+        return store.evidence_of("gA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal B's history concurrently."""
+        return store.evidence_of("gB")
+
+
 #: Every locked ``PlanStore`` operation ADR-0060's case is run against: each is a
 #: distinct lock site with its own ``_run_to_completion`` call. The writes came
 #: first (#370); the reads are the same invariant on the other half of the surface
@@ -608,6 +686,11 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _GetExecutionOp,
     _ActiveExecutionsOp,
     _ExportOp,
+    # ADR-0252 §12's three members are three more lock sites, and the reads are
+    # operations too: a regression at any one of them would otherwise be invisible.
+    _RecordEvidenceOp,
+    _GetEvidenceOp,
+    _EvidenceOfOp,
 )
 
 
@@ -2245,6 +2328,44 @@ class PlanStoreContract:
             2,
         )
 
+    @pytest.mark.parametrize("mark", ["supersede", "invalidate"])
+    async def test_a_mark_changes_exactly_one_field_and_its_argument(
+        self, store: PlanStore, mark: str
+    ) -> None:
+        """§9: "invalidation is a marking and never a deletion … exactly one field changes".
+
+        "The row is kept with its applicabilities, its instants, its verdict and its
+        references intact; it is still exported, still reachable through
+        ``get_evidence`` and ``evidence_of``." §8's supersession is the same move with
+        the other argument. A store that rebuilt the row, dropped its regions or
+        restamped an instant while marking it would be editing the audit trail, so the
+        arm compares every other field against what was written.
+        """
+        await _goal_with_evidence(store)
+        written = await store.get_evidence("ev1")
+        assert written is not None
+
+        if mark == "supersede":
+            await store.record_evidence(
+                _evidence("ev2", read_at=_WHEN + timedelta(hours=1)), supersedes=("ev1",)
+            )
+        else:
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_revision(2),
+                    expected_version=0,
+                    invalidates=("ev1",),
+                )
+            )
+
+        marked = await store.get_evidence("ev1")
+        assert marked is not None
+        moved = {"standing", "superseded_by", "inapplicable_at_revision"}
+        assert marked.model_dump(exclude=moved) == written.model_dump(exclude=moved)
+        history = await store.evidence_of("g1")
+        assert any(row.id == "ev1" for row in history.rows), "a mark is not a deletion"
+
     async def test_a_revision_applies_its_invalidations_in_the_same_step(
         self, store: PlanStore
     ) -> None:
@@ -3320,6 +3441,62 @@ class PlanStoreContract:
         raise NotImplementedError
 
     @pytest.mark.optional_obligation
+    async def test_record_evidence_observes_its_supersedes_before_its_first_await(
+        self,
+    ) -> None:
+        """``core.protocols``' second standing obligation, on the one member that takes
+        a caller-owned sequence (ADR-0065 §1).
+
+        "Arguments belong to the caller … a ``Sequence`` argument is a container the
+        caller may still be holding. So everything one call derives from one argument —
+        what it stores, what it computes, what it returns — comes from **one**
+        observation of that argument." ``record_evidence`` marks every row
+        ``supersedes`` names, and a mark is terminal (§8), so a set read twice across a
+        suspension would let a caller retire a row it never asked to retire — and
+        nothing would record that it had not.
+
+        ``evidence`` needs no case of its own on that clause's own terms: it is a frozen
+        model whose every member is frozen or a tuple, which is the "immutable all the
+        way down" the clause calls silent. The **set** is what is mutable, which is why
+        it is the subject here.
+
+        Driven mid-flight rather than after the call, for the reason ADR-0065 §3 gives
+        for its own cases: "each case must establish mid-flight observation, not
+        post-call isolation", because a post-call check passes on torn code.
+        """
+        if self.acquires_no_shared_resource:
+            pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
+
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await _goal_with_attempt(store)
+            await store.record_evidence(_evidence("ev1"))
+            await store.record_evidence(_evidence("ev2", read_at=_WHEN + timedelta(minutes=1)))
+            suspended = harness.arm("record_evidence")
+
+            named = ["ev1"]
+            writing = asyncio.ensure_future(
+                store.record_evidence(
+                    _evidence("ev3", read_at=_WHEN + timedelta(hours=1)), supersedes=named
+                )
+            )
+            try:
+                await suspended.reached()
+                named.append("ev2")  # the caller mutates what it passed, mid-flight
+                await settle()
+            finally:
+                suspended.release()
+            await writing
+
+            first = await store.get_evidence("ev1")
+            second = await store.get_evidence("ev2")
+            assert first is not None
+            assert second is not None
+            assert first.standing is EvidenceStanding.SUPERSEDED
+            assert second.standing is EvidenceStanding.STANDING, (
+                "the row appended mid-flight was never in the set this call observed"
+            )
+
     @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
     async def test_a_cancelled_operation_holds_its_resource_until_the_work_finishes(
         self, make_op: Callable[[], _CancellationOp]

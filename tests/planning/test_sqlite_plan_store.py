@@ -123,6 +123,12 @@ _SYNC_METHODS = {
     "get_execution": "_read_one",
     "active_executions": "_active_executions_sync",
     "export": "_export_sync",
+    # ADR-0252 §12's three members. `get_evidence` shares `_read_one` with the three
+    # row reads above, exactly as they share it with each other: what distinguishes a
+    # case is the lock site the call enters, and each of these enters its own.
+    "record_evidence": "_record_evidence_sync",
+    "get_evidence": "_read_one",
+    "evidence_of": "_evidence_of_sync",
 }
 
 
