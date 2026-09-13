@@ -210,6 +210,11 @@ _GOAL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
     ("evidence_elided", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+#: The five columns every evidence read selects, so that each one can be checked
+#: against the blob beside it (:func:`_checked_evidence`). Stated once because the four
+#: reads have to agree about which columns they are reconciling.
+_EVIDENCE_COLUMNS: Final[str] = "SELECT id, goal_id, read_at, standing, data FROM goal_evidence"
+
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals("
     "id TEXT PRIMARY KEY, conversation_id TEXT, last_engaged_in TEXT, "
@@ -1921,17 +1926,11 @@ class SqlitePlanStore:
     def _evidence_row(self, conn: sqlite3.Connection, evidence_id: str) -> GoalEvidence:
         """The stored row under that id, inside an open transaction.
 
-        **The decoded record is checked against the row's own promoted columns**, and
-        that is what makes this safe to key a write off. ``goal_evidence`` holds the
-        record as a blob beside ``goal_id``, ``read_at`` and ``standing`` (§13), and
-        ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing table an outside writer
-        shaped, so the two can disagree: a SQL row keyed ``ev1`` whose blob calls itself
-        ``ev2`` would pass :meth:`_refuse_unmarkable` on ``ev1``'s columns and then hand
-        this store a record naming a **different** row. Every refusal §12 states is
-        evaluated over the columns, so a disagreement makes the validated row and the
-        marked row two different things — the one failure a marking write must not have.
-        It is refused here as the corrupt file it is, on the boundary
-        :func:`_decode_evidence` already draws for the blob's own shape.
+        **The decoded record is checked against the row's own promoted columns**
+        (:func:`_checked_evidence`), and on this path that is what makes it safe to key
+        a write off: every refusal §12 states is evaluated over the columns, so a
+        disagreement would make the validated row and the marked row two different
+        things — the one failure a marking write must not have.
 
         Args:
             conn: The connection the write transaction is running on.
@@ -1945,24 +1944,11 @@ class SqlitePlanStore:
                 each of which validates every id it marks first — or if the stored
                 record disagrees with the columns promoted beside it.
         """
-        row = conn.execute(
-            "SELECT goal_id, read_at, standing, data FROM goal_evidence WHERE id = ?",
-            (evidence_id,),
-        ).fetchone()
+        row = conn.execute(_EVIDENCE_COLUMNS + " WHERE id = ?", (evidence_id,)).fetchone()
         if row is None:  # pragma: no cover - the refusals above run first
             msg = f"evidence row {evidence_id} is no longer stored"
             raise PlanningError(msg)
-        stored = _decode_evidence(str(row[3]))
-        held = (stored.id, stored.goal_id, stored.read_at.isoformat(), stored.standing.value)
-        expected = (evidence_id, str(row[0]), str(row[1]), str(row[2]))
-        if held != expected:
-            msg = (
-                f"the plan store at {str(self._path)!r} holds an evidence row whose "
-                f"record and columns disagree (row {evidence_id}: columns say "
-                f"{expected!r}, the record says {held!r}); the store is corrupt"
-            )
-            raise PlanningError(msg)
-        return stored
+        return _checked_evidence(str(self._path), row)
 
     def _refuse_unmarkable(
         self,
@@ -2075,10 +2061,24 @@ class SqlitePlanStore:
             raise PlanningError(msg) from exc
 
     async def get_evidence(self, evidence_id: str, /) -> GoalEvidence | None:
-        """Return the evidence row under that id, or ``None`` (ADR-0252 §12)."""
+        """Return the evidence row under that id, or ``None`` (ADR-0252 §12).
+
+        The row is read with the columns promoted beside it and reconciled against them
+        (:func:`_checked_evidence`), rather than through :meth:`_read_one`'s blob-only
+        read: a row keyed ``ev1`` whose record calls itself ``ev2`` would otherwise be
+        returned, under the id the caller asked for, as a row naming a different one.
+        """
         async with self._lock:
-            row = await _run_to_completion(self._read_one, "goal_evidence", evidence_id)
-        return None if row is None else _decode_evidence(row)
+            row = await _run_to_completion(self._read_evidence, evidence_id)
+        return None if row is None else _checked_evidence(str(self._path), row)
+
+    def _read_evidence(self, evidence_id: str) -> Sequence[Any] | None:
+        """One evidence row and the four columns beside it, outside a transaction."""
+        try:
+            row = self._conn.execute(_EVIDENCE_COLUMNS + " WHERE id = ?", (evidence_id,)).fetchone()
+        except sqlite3.Error as exc:
+            raise _wrap("read from goal_evidence", evidence_id, exc) from exc
+        return None if row is None else row
 
     async def evidence_of(self, goal_id: str, /) -> EvidenceHistory:
         """Return one goal's history in §12's total order, with its count.
@@ -2090,18 +2090,23 @@ class SqlitePlanStore:
         async with self._lock:
             rows, elided = await _run_to_completion(self._evidence_of_sync, goal_id)
         return EvidenceHistory(
-            goal_id=goal_id, rows=tuple(_decode_evidence(data) for data in rows), elided=elided
+            goal_id=goal_id,
+            rows=tuple(_checked_evidence(str(self._path), row) for row in rows),
+            elided=elided,
         )
 
-    def _evidence_of_sync(self, goal_id: str) -> tuple[list[str], int]:
+    def _evidence_of_sync(self, goal_id: str) -> tuple[list[Sequence[Any]], int]:
         with self._transaction(f"read evidence of goal {goal_id!r}") as conn:
-            rows = [
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT data FROM goal_evidence WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
+            # The order is the **columns'**, and every row returned is reconciled against
+            # them (:func:`_checked_evidence`) — otherwise a disagreeing `read_at` would
+            # hand a caller §12's total order over values the rows themselves contradict,
+            # and §10's `E` label is an ordinal into exactly this sequence.
+            rows: list[Sequence[Any]] = list(
+                conn.execute(
+                    _EVIDENCE_COLUMNS + " WHERE goal_id = ? ORDER BY read_at ASC, id ASC",
                     (goal_id,),
                 ).fetchall()
-            ]
+            )
             # `None` for a goal this store does not hold, which reads as a history with
             # nothing in it and nothing lost — an absent goal is not a fault to raise on
             # a read that is already a lookup.
@@ -2636,7 +2641,7 @@ class SqlitePlanStore:
             evidence=tuple(
                 EvidenceHistory(
                     goal_id=goal_id,
-                    rows=tuple(_decode_evidence(data) for data in rows),
+                    rows=tuple(_checked_evidence(str(self._path), row) for row in rows),
                     elided=elided,
                 )
                 for goal_id, rows, elided in evidence
@@ -2651,7 +2656,7 @@ class SqlitePlanStore:
         list[str],
         list[str],
         list[str],
-        list[tuple[str, list[str], int]],
+        list[tuple[str, list[Sequence[Any]], int]],
     ]:
         # All three reads inside one transaction, so the export is a single
         # database snapshot: a concurrent connection cannot commit a goal+plan
@@ -2686,13 +2691,11 @@ class SqlitePlanStore:
             # goal whose history a concurrent writer added between the two reads — the
             # dangling, `PlanExport`-rejected state ADR-0004 §6's "internally
             # consistent" forbids, arriving through the member ADR-0252 §13 adds.
-            by_goal: dict[str, list[str]] = {
+            by_goal: dict[str, list[Sequence[Any]]] = {
                 str(r[0]): [] for r in conn.execute("SELECT id FROM goals").fetchall()
             }
-            for row in conn.execute(
-                "SELECT goal_id, data FROM goal_evidence ORDER BY read_at ASC, id ASC"
-            ).fetchall():
-                by_goal[str(row[0])].append(str(row[1]))
+            for row in conn.execute(_EVIDENCE_COLUMNS + " ORDER BY read_at ASC, id ASC").fetchall():
+                by_goal[str(row[1])].append(row)
             elided = {
                 str(r[0]): _elided_count(str(self._path), str(r[0]), r[1])
                 for r in conn.execute("SELECT id, evidence_elided FROM goals").fetchall()
@@ -3016,6 +3019,56 @@ def _decode_evidence(data: str) -> GoalEvidence:
     except ValidationError as exc:
         msg = f"stored evidence row is not a valid record: {exc}"
         raise PlanningError(msg) from exc
+
+
+def _checked_evidence(path: str, row: Sequence[Any]) -> GoalEvidence:
+    """Decode one evidence row and require it to agree with its own columns.
+
+    ``goal_evidence`` holds the record as a blob beside the ``id``, ``goal_id``,
+    ``read_at`` and ``standing`` columns ADR-0252 §13 promotes, and ``CREATE TABLE IF
+    NOT EXISTS`` is a no-op against a pre-existing table an outside writer shaped
+    (#373), so the two can disagree. **Every query that reads a row reads all five and
+    comes through here**, because each of the two things the columns are used for
+    breaks differently when they lie:
+
+    - **A write keyed on the blob's id marks the wrong row.** §12's refusals are
+      evaluated over the columns, so a row keyed ``ev1`` whose record calls itself
+      ``ev2`` is validated as ``ev1`` and written back as ``ev2`` — a row the caller
+      never named marked, ``ev1`` left ``STANDING``, and the call reporting success.
+    - **A read ordered by the columns returns rows in an order they contradict.**
+      :meth:`SqlitePlanStore.evidence_of` and the export order by ``(read_at, id)``
+      and return the blobs, so a disagreeing ``read_at`` yields a sequence that is not
+      in §12's total order as the returned rows themselves state it — and §10's ``E``
+      label is an ordinal into exactly that sequence.
+
+    Refusing here puts both on the boundary :func:`_decode_evidence` already draws for
+    the blob's own shape, rather than leaving a reader to notice.
+
+    **The other five members' reads are not held to this yet** (#2328). They have the
+    same promoted-column shape and predate this decision's lane, so bringing them over
+    is its own change rather than this one's.
+
+    Args:
+        path: The store's own path, for the message.
+        row: The ``(id, goal_id, read_at, standing, data)`` the query selected.
+
+    Returns:
+        The decoded row.
+
+    Raises:
+        PlanningError: If the blob does not decode, or disagrees with its columns.
+    """
+    stored = _decode_evidence(str(row[4]))
+    held = (stored.id, stored.goal_id, stored.read_at.isoformat(), stored.standing.value)
+    expected = (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
+    if held != expected:
+        msg = (
+            f"the plan store at {path!r} holds an evidence row whose record and columns "
+            f"disagree (row {expected[0]}: columns say {expected!r}, the record says "
+            f"{held!r}); the store is corrupt"
+        )
+        raise PlanningError(msg)
+    return stored
 
 
 def _decode_goal(data: str) -> Goal:
