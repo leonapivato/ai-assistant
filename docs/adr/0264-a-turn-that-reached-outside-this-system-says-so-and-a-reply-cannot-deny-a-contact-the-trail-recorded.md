@@ -101,18 +101,16 @@ it. No clause here stops a model writing either, and §10 says why.
   `admitted_fourth_group` inside `LearningLoop.resumed_read`. ADR-0242's negative member
   already rides that path — the engine sets `search_not_serviced` from
   `answered.not_serviced` — so the mirror is owed there too.
-- `TurnOutcome` carries fifteen members today, **nine** of them added by a later ADR as
-  a `None`-defaulting widening a client renders on its own.
 
 ### The gap this closes, stated exactly
 
-ADR-0242 §6 makes eligibility *"the disposition's presence and nothing else"*, and
-its second clause states the consequence in terms: *"A turn on which every
-servicing yielded records carries **no** `SearchNotServiced` member."* That is
-correct for what §6 decides and is precisely the hole: on the successful turn the
-system says nothing, has no field in which to say anything, and hands the model a
-plan block that accounts for acting alone. The user is then told whatever the
-model infers — and #2268 records it inferring the opposite of the truth.
+ADR-0242 §6 makes eligibility *"the disposition's presence and nothing else"*, and its
+second clause states the consequence in terms: *"A turn on which every servicing yielded
+records carries **no** `SearchNotServiced` member."* That is correct for what §6 decides and
+is precisely the hole: on such a turn the system says nothing, has no field in which to say
+anything, and hands the model a plan block that accounts for acting alone. The user is then
+told whatever the model infers — #2268 records it inferring the opposite of the truth, and
+#2365 records it inventing a reach on a turn that asked for no search at all.
 
 ### What this ADR is not allowed to settle
 
@@ -233,11 +231,10 @@ a user reading one has not been told the other.
 > `failed_after_read_returned` is stated over *reads* and not over the send. A site that
 > performed no call establishes nothing either way.
 
-> **Normative.** **That partition is total over the seventeen members
-> `SearchDisposition` is closed at**, and the absence of a disposition is the eighteenth
-> case. A `SearchDisposition` member minted by a later ADR establishes **nothing either
-> way** unless that ADR's own text places it, which is the least-claiming direction and
-> ADR-0242 §8's own default read on this question.
+> **Normative.** **That partition is total over the seventeen members `SearchDisposition`
+> is closed at**, and the absence of a disposition is the eighteenth case. A member minted by
+> a later ADR establishes **nothing either way** unless that ADR's own text places it — the
+> least-claiming direction, and ADR-0242 §8's own default read.
 
 > **Normative.** **The turn's value is folded from its calls, `REACHED` outranking
 > `INDETERMINATE` and `INDETERMINATE` outranking `NOT_REACHED`.** One call that established
@@ -297,9 +294,9 @@ told it rather than a sentence this system cannot support.
 > contact from exactly that triple and would have rendered *"this turn reached outside this
 > system"* on a call that provably never left — the false statement §1 ranks below silence.
 
-> **Normative.** **That is a stated cost and not an oversight** (§12). ADR-0170 §5 already
+> **Normative.** **That is a stated cost and not an oversight** (§12): ADR-0170 §5 already
 > has the composing stage told what became of each step, so the reply has an account of the
-> *act*; what it lacks is an account of the *wire*.
+> *act* and lacks one of the *wire*.
 
 ### 4. `OutboundStatement`: what it carries, and the one count it carries
 
@@ -341,13 +338,12 @@ told it rather than a sentence this system cannot support.
 > not over any later stage, so it is defined and true on every outcome shape a contact
 > can reach, the parked and recovered ones ADR-0170 §4 composes nothing for included.
 
-**"Over the supply and not over any later stage" is the half that had to be got right.**
-A count over what the composing stage was given is undefined on a pass that composes
-nothing and false on one where a channel's withholding (ADR-0199 §3) left it holding none
-of them, and ADR-0170 §4 makes both shapes reachable beside a contact: a turn can service
-a search, admit its records, and then park its step for confirmation. Stated over the
-supply the count is defined everywhere and claims neither, and §6's fragment is then the
-only place a statement about a model's own prompt is made.
+**"Over the supply and not over any later stage" is the half that had to be got right.** A
+count over what the composing stage was given is undefined on a pass that composes nothing
+and false on one where a channel's withholding (ADR-0199 §3) left it holding none of them,
+and ADR-0170 §4 makes both shapes reachable beside a contact: a turn can service a search,
+admit its records, and then park its step for confirmation. Stated over the supply the count
+is defined everywhere and claims neither.
 
 > **Normative.** **The admitted set is recorded by the site that performs the admission
 > and never reconstructed**, and in particular it is not `ServicedCarriers.minted`
@@ -394,12 +390,11 @@ argument.
 > says that they entered the answer, that the answer rests on them, that it is more
 > current for them, or that it would have differed without them.
 
-**One count and not two.** A figure for what the provider returned would be a fact about
-the system's plumbing that the user can do nothing with, and stating both would put two
-numbers in front of a reader who has no way to tell which one matters. The count that
-entered the supply is the one that bears on the answer in front of them, and the one whose
-`0` is informative: *I reached outside this system and nothing came back that this turn
-could use.*
+**One count and not two.** A figure for what the provider returned is plumbing the user can
+do nothing with, and stating both would put two numbers in front of a reader with no way to
+tell which matters. The count that entered the supply is the one that bears on the answer in
+front of them, and the one whose `0` is informative: *I reached outside this system and
+nothing came back that this turn could use.*
 
 ### 5. `OutboundDestination`: a closed vocabulary of classes, never of destinations
 
@@ -413,10 +408,9 @@ could use.*
 > The vocabulary is **added to and never renamed**, and no implementation or later ADR
 > adds a second member without the ADR that decides it.
 
-**One member is the point rather than an embarrassment.** The vocabulary is what makes the
-next seam's addition cheap — it arrives as a second member rather than as a second carrier
-minted from scratch (§12) — so the `destinations` tuple is kept, non-empty and ordered,
-rather than collapsed into the member's absence.
+**One member is the point rather than an embarrassment.** The vocabulary makes the next
+seam's addition cheap — a second member rather than a second carrier minted from scratch
+(§12) — so the tuple is kept and ordered rather than collapsed into the member's absence.
 
 > **Normative.** **A member is a class of destination and never a destination.** No
 > member names, encodes or is derived from a provider, a host, an account, a connection
@@ -501,12 +495,12 @@ rather than collapsed into the member's absence.
 > record or a sentence assembled from any of them is refused here, for ADR-0231 §13's
 > no-message reason and ADR-0004 §5's.
 
-**Telling the model is not what makes this decision work, and that is the point.** A
-prompt fragment is an instruction to a model, and a model may ignore one — #2268 is a
-model ignoring the absence of one. What makes the guarantee structural is §7's rendered
-statement, which is composed from the typed value by code and stands beside the reply
-whatever the reply says. The fragment is there so the two ordinarily agree; the rendering
-is there so that when they do not, the user can see it.
+**Telling the model is not what makes this decision work, and that is the point.** A prompt
+fragment is an instruction a model may ignore — #2268 is a model ignoring the absence of one,
+#2365 a model inventing what none supplied. What makes the guarantee structural is §7's
+rendered statement, composed from the typed value by code and standing beside the reply
+whatever it says: the fragment is there so the two ordinarily agree, the rendering so that
+when they do not, the user can see it.
 
 ### 7. `TurnOutcome` gains one member, and a surface renders it from the value
 
@@ -647,9 +641,9 @@ is there so that when they do not, the user can see it.
 > anything having classified it, and an operator reading the trail sees the contact
 > whatever the reply said.
 
-**Booked rather than refused, and #2291's audit-recording ADR is where it belongs.** That
-work is already owed and is the right place for a question about what the system records
-about its own conduct; deciding it here would reach into a decision this ADR has not read.
+**Booked rather than refused, and #2291's audit-recording ADR is where it belongs** — that
+work is already owed, and deciding it here would reach into a decision this ADR has not
+read.
 
 ### 11. The lane cut
 
@@ -879,6 +873,18 @@ a change to the carrier — the position ADR-0242 §6's own second consumer of
 **`_PLAN_IS_ABOUT_ACTING`'s condition (§6) — no record owed.** That line and its condition
 come from issue #2213 and from code; no ADR clause fixes when it is appended. Widening the
 condition falsifies no ratified sentence.
+
+**ADR-0227 §3, ADR-0228 §10, ADR-0240 §8 and ADR-0251 §7 — the same byte-identity promise,
+four times over, and this decision records against none of them.** Each promises the prompt
+is byte-identical on the turns its own carrier does not fire on, and §6 above falsifies all
+four — but **they were false before this decision**, because the carriers compose: a turn
+ADR-0242 §6 gives its member to is already one of the "every other" turns of the three that
+predate it, and ADR-0242 recorded against ADR-0228 §10 alone, not against ADR-0227 §3 or
+ADR-0240 §8, which its own carrier falsifies identically. This decision follows that practice
+rather than inventing a rule on its own authority, and **files the gap instead of absorbing
+it**: [#2370](https://github.com/leonapivato/ai-assistant/issues/2370) asks how far such a
+record reaches and proposes ADR-0241 §10's form as the fix — that sentence alone is not
+false, and it is not false because it writes *"it is given nothing **on this account**"*.
 
 ### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
