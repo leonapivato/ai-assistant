@@ -1,6 +1,6 @@
 # 253. The plan declares what a step waits on, what fills its arguments and what must be evidenced before it is dispatched, and an interpretation settles one proposition over one record
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0265 (one scope, stated in two counts of §9. Its label-space count: "there are exactly three spaces" — the step ordinal, the `M` label and the condition label — becomes four, the fourth being the action label, the ASCII letter `A` followed by a 1-based ordinal over the goal's intended actions as the brief rendered them extended by the actions the same call proposed, which collides with none of `M`, `F`, `C`, `S`, `D`, `E` or `G`. And its fields-any-other-component-sets clause: the four-field clause becomes a five-field clause, adding `PlanStep.intended_action` under the identical discipline §9 states for `StepCondition.about` and `PlanInterpretation.settles` — taken by the loop, taken once, immediately on return, in place of the label that came back, and after that call's own record has been minted. A reader holding only §9 builds a loop that resolves no action label and therefore a plan whose steps cannot name the act they attempt, so an effect claim has nothing to scope itself to. That one scope, and nothing else in this ADR: §9's every-value-is-an-ordinal-or-a-label rule is widened by one space rather than loosened, and no identifier crosses the seam in either direction; its resolve-once-immediately-on-return ordering, its resolution-is-not-authorship argument, its one-space-in-force-per-call rule for condition labels, its strict extraction of every closed vocabulary, its refusal of a plan carrying a label that resolves to nothing and its `save_plan` window-closing rule are each adopted whole and are the constructions the new field's resolution and refusal reuse; §7 is relied on and superseded in nothing, and its element-id minting rule, its retention-does-not-re-mint rule, its restatement-mints-a-new-id rule and its id-is-never-a-condition-label disjointness are the four clauses the new record is built on; §4's `verifies` is a predicate over a step's own output and never verification against the goal's criteria, which is relied on and not widened; §10's wire, export and migration clauses bind entire; §11's deferral of retry, reconciliation and modify-before-replace is untouched; and §§1-6, §8 and §§12-15 stand entire)
 - **Partially supersedes [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md),
   in three narrowly stated scopes**, and §13 shows the working for all three.
   **§1's `GoalElement` field enumeration**, as ADR-0252 §1 already widened it — the model gains
@@ -61,6 +61,46 @@
   decision was not taken, so taking it leaves nothing to replace, and §13 records the one place
   this decision declines the shape that deferral sketched.
 - Date: 2026-09-12
+- **Partially superseded: 2026-09-13 by ADR-0265 — §9's label-space count and its
+  fields-any-other-component-sets clause, and nothing else in this ADR.** The owner's correction
+  of 2026-09-13 on #2255 requires a **stable identity for an intended action**, minted once and
+  linked to the goal elements it serves. ADR-0265 mints it as a record the `Goal` holds, and a
+  step names the one it attempts.
+
+  **The two counts that move.** §9 rules that *"every value a model writes in any of them is an
+  ordinal or a label of something rendered or returned on that call, and there are exactly three
+  spaces"*. A fourth is added: the **action label**, `A` followed by a 1-based ordinal, over the
+  goal's intended actions as the brief rendered them extended by the actions the same call
+  proposed. And §9's four-field clause — the fields any other component sets being `supersedes`,
+  `targets_revision` and, inside `steps` and `interpretations`, each `StepCondition.about` and
+  each `PlanInterpretation.settles` — becomes a **five**-field clause, adding
+  `PlanStep.intended_action`. A reader holding only §9 builds a loop that resolves no action
+  label and therefore a plan whose steps cannot say which act they attempt, which is ADR-0070
+  §1's test coming out on the supersession side and **partial** in §3's sense.
+
+  **Everything else of §9 is adopted whole rather than loosened.** Its rule that no identifier of
+  any kind is rendered to the model and none is accepted from it binds the new key entirely — the
+  planner writes a label and the loop writes the id. Its resolve-once-immediately-on-return
+  ordering is extended by one step and not reordered: the call's own actions are recorded and
+  their ids minted **before** the plan's labels are resolved, which is §9's own argument for
+  ordering resolution after recording. Its resolution-is-not-authorship argument, its strict
+  extraction of every closed vocabulary, its refusal of a plan carrying a label that resolves to
+  nothing — taken for the new field for §9's own fail-open reason — and its `save_plan`
+  window-closing rule, which gains one conjunct on §9's own strengthening footing, are each
+  adopted verbatim. Its **one-space-in-force-per-call** rule for condition labels is untouched
+  and is not extended to the new space, because the intended actions are a goal-level
+  append-only sequence rather than a per-revision tuple and have one indexing.
+
+  **§7 is relied on and superseded in nothing, and it is the section the new record rests on.**
+  Its element-id minting rule, its clause that retention *"is **not** re-minted on a later
+  revision that retains the element"*, its clause that *"A **restated** element is a new element
+  and is minted a new id"*, and its `D`-label disjointness are the four clauses ADR-0265 builds
+  on: the third is exactly why an identity **derived** from elements would be re-minted by a
+  rewording and so cannot be used, and the fourth is the construction reused to refuse an
+  `IntendedAction.id` that matches the `A`-label grammar. §4's `verifies` — *"a predicate over
+  this step's own output"* and *"never verification against the goal's criteria"* — is relied on
+  and not widened; §§1-6, §8 and §§10-15 are untouched. Appended dated note per ADR-0070 §1.
+  Refs #2255.
 
 ## Context
 
