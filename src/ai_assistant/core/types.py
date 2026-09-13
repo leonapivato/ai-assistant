@@ -14335,6 +14335,41 @@ def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     return _canonical_bytes(_thaw_json(parameters))
 
 
+def canonical_json_bytes(value: FrozenJson) -> bytes:
+    """Render one JSON value in the exact form ADR-0021 §1 pins for the digest.
+
+    **The encoding**, and never a second one. ADR-0254 §3 states the coverage
+    comparison for a fixed value over *"the canonical JSON encoding
+    ``ActionRequest.parameters_digest`` is taken over, so there is one canonical
+    form in this system and not a second"* — and a comparison written by hand at
+    the policy would be exactly that second form. Two canonicalisations that
+    disagree *"produce a false mismatch at one end and a false match at the
+    other"*, which is :attr:`ActionRequest.parameters_digest`'s own stated reason
+    for computing its form here rather than accepting one from a caller.
+
+    So this is public where :func:`_canonical_json` is not: it is the one thing
+    ADR-0254 §3's per-argument rule needs from outside ``core``, and it is a
+    **delegation** rather than an implementation, so the encoding it renders is
+    the digest's by construction rather than by agreement.
+
+    **Why ``==`` on the values will not do**, stated because it is the obvious
+    alternative and it is wrong in the permissive direction: Python compares ``1``
+    equal to ``1.0`` and ``True`` equal to ``1``, while their canonical encodings
+    are ``1``, ``1.0`` and ``true``. A comparison over ``==`` would therefore
+    cover a call the user's act did not, which is the one direction ADR-0254 §4
+    refuses.
+
+    Args:
+        value: A JSON value that has already been validated — a member of a
+            :data:`FrozenJsonMapping`, or a :data:`FrozenJsonValue`. Anything else
+            raises out of :func:`json.dumps`, at the boundary that produced it.
+
+    Returns:
+        The UTF-8 bytes of its one canonical rendering.
+    """
+    return _canonical_bytes(_thaw_json(value))
+
+
 # --- egress: the binding a ruling is taken over (ADR-0150) -------------------
 # Surface (a) of ADR-0148 §11: the canonical destination set, the connected
 # account, the transport endpoint and the payload description, as **one**
