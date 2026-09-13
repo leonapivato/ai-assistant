@@ -83,6 +83,7 @@ from ai_assistant.orchestration.evidence import (
     refreshes,
     region_of,
     rendered_region,
+    rendered_support,
     requested_of,
     supported_of,
 )
@@ -738,7 +739,7 @@ def test_a_region_renders_its_applied_axes_in_field_order_by_field_name() -> Non
 
     assert rendered == (
         "(window=[2026-09-13T00:00:00+00:00, 2026-09-14T00:00:00+00:00); "
-        "participants=  Bob  , Alice; topics=weather; elided=2)"
+        "participants=7:  Bob  ,5:Alice; topics=7:weather; elided=2)"
     )
     assert rendered_region(_region(window=TimeWindow(start=_SUNDAY.start))) == (
         "(window=[2026-09-13T00:00:00+00:00, ))"
@@ -746,6 +747,57 @@ def test_a_region_renders_its_applied_axes_in_field_order_by_field_name() -> Non
     assert rendered_region(_region(window=TimeWindow(end=_SUNDAY.end))) == (
         "(window=[, 2026-09-14T00:00:00+00:00))"
     )
+
+
+def test_a_value_carrying_a_delimiter_cannot_be_read_as_two_regions() -> None:
+    """§11: regions stay distinguishable **whatever the values contain**.
+
+    Every label axis carries model-reachable text — ``participants`` and
+    ``about_person`` are ``NonBlankEncodableText``, and a ``TopicLabel`` is constrained
+    only in case, length and whitespace runs — so a value may hold a comma, a semicolon,
+    a parenthesis or (on two of the three axes) a newline. Without a count, one region
+    holding ``"x) (topics=y"`` renders exactly as two regions holding ``"x"`` and
+    ``"y"``: a **manufactured conjunction** reaching the planner through the rendering,
+    which is the failure §2's regions exist to prevent.
+
+    The count is what separates them, and the value still reaches the seam byte for
+    byte — which is the other half §11 requires and which escaping would have broken.
+    """
+    one_region = rendered_support((_region(topics=("x) (topics=y",)),), 0)
+    two_regions = rendered_support((_region(topics=("x",)), _region(topics=("y",))), 0)
+
+    assert one_region != two_regions
+    assert one_region == "(topics=12:x) (topics=y)"
+    assert two_regions == "(topics=1:x) (topics=1:y)"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["a, b", "a; b", "a) (b", "a\nb", "elided=9", "5:spoof", "a=b", "καφές"],
+)
+def test_a_value_reaches_the_seam_byte_for_byte_behind_its_count(value: str) -> None:
+    """§11: "label values render **byte for byte**", and the count says how many.
+
+    Asserted over each delimiter the rendering uses, over a spoofed count, and over a
+    multi-byte value — the last because the count is the value's **UTF-8 byte length**
+    and a character count would disagree with it exactly there.
+    """
+    rendered = rendered_region(_region(participants=(value,)))
+
+    assert rendered == f"(participants={len(value.encode())}:{value})"
+    assert value in rendered, "the value's own bytes, unaltered and unescaped"
+
+
+def test_two_values_on_one_axis_never_read_as_one() -> None:
+    """§11 again, at the axis rather than at the region.
+
+    ``("a, b",)`` and ``("a", "b")`` are two different applicabilities — the first
+    supports one participant whose name contains a comma, the second supports two — and
+    a rendering that collapsed them would have the planner reason from an applicability
+    no record carried.
+    """
+    assert rendered_region(_region(participants=("a, b",))) == "(participants=4:a, b)"
+    assert rendered_region(_region(participants=("a", "b"))) == "(participants=1:a,1:b)"
 
 
 def test_an_absent_requested_and_an_empty_supported_render_as_absent_members() -> None:
