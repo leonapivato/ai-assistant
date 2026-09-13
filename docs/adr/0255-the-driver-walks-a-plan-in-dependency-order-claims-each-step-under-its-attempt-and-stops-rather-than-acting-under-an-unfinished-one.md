@@ -1,6 +1,6 @@
 # 255. The driver walks a plan in dependency order, claims each step under its attempt, and stops rather than acting under an unfinished one
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md),
   in two narrowly stated scopes**, and §16 shows the working for both.
   **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
