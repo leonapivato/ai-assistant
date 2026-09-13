@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Partially superseded by ADR-0162 (§2's fourth clause, in the respect that it makes ADR-0077 §2's bar the standing test for an episode recording what the user said to the assistant)
+- Status: Partially superseded by ADR-0162 (§2's fourth clause, in the respect that it makes the observer's utility bar the standing test for an episode recording what the user said to the assistant)
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
@@ -141,6 +141,23 @@
   ADR-0083 §15 states, so the `Status` line never names an ADR that does not exist.
   Appended per ADR-0070 §1: no text below is rewritten, and §2's fourth clause stands
   exactly as written. Refs #1210, #1029.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0077 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0162 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  bar is **ADR-0077 §2's** utility bar on what the observer may propose. ADR-0077
+  supersedes no part of this ADR; the only target is ADR-0162.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

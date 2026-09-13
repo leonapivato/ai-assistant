@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §5's retry conjunction where the preceding completion did not commit; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes ADR-0192 adds to `invoke`)
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §5's retry conjunction where the preceding completion did not commit; §3's "carries no cost" omission as it reaches cost and not disclosure; and §4's "the seam stops waiting" together with the delivery of an expiry's classified result, over the two audit writes that decision adds to `invoke`)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -319,6 +319,24 @@
   below is **not** rewritten. The 2026-08-25 note above, recording ADR-0194's
   discharge of §7's spend-accumulation half, is untouched by this one and neither
   narrows the other. Refs #1561, ADR-0194 §3, ADR-0194 §9.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0192 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  two audit writes **ADR-0192** adds to `invoke` — ADR-0192 being the target of the very
+  scope that named it.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

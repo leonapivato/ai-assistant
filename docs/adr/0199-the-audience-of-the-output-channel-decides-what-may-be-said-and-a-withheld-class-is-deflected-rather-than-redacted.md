@@ -1,6 +1,6 @@
 # 199. The audience of the output channel decides what may be said, and a withheld class is deflected rather than redacted
 
-- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns) and ADR-0217 (§3's third clause, only as it reaches a record whose own placement does not admit the audience of the channel it would be emitted on — whichever of the owner's explicit act, a model's proposal or ADR-0204's derivation set that placement)
+- Status: Partially superseded by ADR-0203 (§5's second clause, only as it reaches an operation whose output channel's audience is unbounded) and ADR-0204 (§3's third clause, only as it reaches a record whose provenance records that content §3 withholds from a channel of unbounded audience stood in its warrant) and ADR-0210 (§5's third clause, only as it reaches an operation whose output channel's audience is unbounded — the composing stage is told where the withholding removed something standing in the members of the turn's supply a relevance read taken with the turn's own goal statement returned, or a context facet, and not where the only thing removed stood in the conversation's own recent turns) and ADR-0217 (§3's third clause, only as it reaches a record whose own placement does not admit the audience of the channel it would be emitted on — whichever of the owner's explicit act, a model's proposal or the derivation recorded on this line set that placement)
 - Date: 2026-08-27
 - **Partially superseded: 2026-08-28 by ADR-0203 — §5's second clause, only as it
   reaches an operation whose output channel's audience is unbounded, and nothing
@@ -154,6 +154,24 @@
   neither, and its per-record act is a stacked addition recorded in its own text
   (ADR-0082 §1). §6's **fourth** clause — the Tier 0 and `about_person` floors no
   owner act may reach — is adopted verbatim by ADR-0217 §3 for the per-record act.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0203, ADR-0204, ADR-0210 and ADR-0217 — each still
+  paired with the same scope, whose extent does not move; what is re-rendered is the prose
+  naming the clauses.** **The cross-references that prose carried, on which §4 places no
+  constraint in a note:** the derivation is **ADR-0204's**, the second target on this
+  line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

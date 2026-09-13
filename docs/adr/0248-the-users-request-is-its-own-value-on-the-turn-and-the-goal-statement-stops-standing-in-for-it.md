@@ -1,6 +1,6 @@
 # 248. The user's request is its own value on the turn, and the goal statement stops standing in for it
 
-- Status: Partially superseded by ADR-0249 (§3's fallback clause in its accessor alone: where a park carries no `utterance`, `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`, because ADR-0249 §12 converts a pre-decision park's `goal` column to a `GoalBrief` that has no `statement`. The bytes are identical, the conversion setting `outcome` from the stored `statement`, so §3's "That reading is exact for the whole life of the fallback, and A1 does not change that" binds entire and is vindicated rather than weakened. That one accessor, and nothing else in this ADR: the fallback is still the only site that may take it, is still not widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table or to any other site, is still not removed, and a later change may still delete it once every park predating this decision has expired; §§1, 2, 4-13 stand entire and §8's list of what this ADR left to A1 is what ADR-0249 decides)
+- Status: Partially superseded by ADR-0249 (§3's fallback clause in its accessor alone: where a park carries no `utterance`, `Engine._resume_read` takes `park.goal.outcome` rather than the parked `Goal.statement`, because that decision's §12 converts a pre-decision park's `goal` column to a `GoalBrief` that has no `statement`. The bytes are identical, the conversion setting `outcome` from the stored `statement`, so §3's "That reading is exact for the whole life of the fallback, and A1 does not change that" binds entire and is vindicated rather than weakened. That one accessor, and nothing else in this ADR: the fallback is still the only site that may take it, is still not widened to a park carrying an `utterance`, to a blank one, to any other reader of §5's table or to any other site, is still not removed, and a later change may still delete it once every park predating this decision has expired; §§1, 2, 4-13 stand entire and §8's list of what this ADR left to A1 is what that decision decides)
 - Date: 2026-09-12
 - **Partially superseded: 2026-09-12 by ADR-0249 — §3's fallback clause in its accessor
   alone. Nothing else in this ADR.** ADR-0249 is A1: the decision this one was written to
@@ -44,6 +44,24 @@
   its `parameters` clause and its `APPROVED` clause bind entire; §3's indivisibility,
   its one-open-park-per-conversation rule, its one-park-per-decision rule and its other
   six members are untouched; and §§1, 4–23 stand entire.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 2 such tokens inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0249 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  conversion is **ADR-0249 §12's** and the decision answering §8's list is **ADR-0249** —
+  the one target of this line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

@@ -3,7 +3,7 @@
 - Status: Partially superseded by ADR-0153 (§3's cross-boundary-injection clause,
   §6's first and second clauses, §7's "no keyring is reached" limb, §8's
   `core/protocols.py` limb and §11's "destroying the resolved `data_dir` and
-  nothing else" limb — each only as this act reaches ADR-0149 §8's `INTEGRATION`
+  nothing else" limb — each only as this act reaches the `INTEGRATION`
   purge)
 - Date: 2026-08-10
 - Accepted: 2026-08-10
@@ -100,6 +100,23 @@
   `SecretStore`, which ADR-0125 §8 forbids `service` — and §11, which an earlier
   draft did not have at all. Each is recorded at the clause it changed rather than
   only here.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0149 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0153 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  purge in question is **ADR-0149 §8's** `INTEGRATION` purge. ADR-0149 supersedes no part
+  of this ADR; the only target is ADR-0153.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

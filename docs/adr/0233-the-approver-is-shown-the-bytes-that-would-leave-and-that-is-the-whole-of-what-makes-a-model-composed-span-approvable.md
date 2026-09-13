@@ -1,6 +1,6 @@
 # 233. The approver is shown the bytes that would leave, and that is the whole of what makes a model-composed span approvable
 
-- Status: Partially superseded by ADR-0238 (§9's first clause in its exclusivity alone — its "only where all four hold" admits a second exception, which ADR-0238 §7 states over a search query composed for a destination whose recorded trust is `USER_CHOSEN` — and §9's second clause for that one class; the four conditions themselves are neither weakened, reordered nor made disjunctive, §8's floor binds unchanged wherever those four are the route, and §9's third, fourth and fifth clauses and every other section of this ADR stand entire)
+- Status: Partially superseded by ADR-0238 (§9's first clause in its exclusivity alone — its "only where all four hold" admits a second exception, which that decision's §7 states over a search query composed for a destination whose recorded trust is `USER_CHOSEN` — and §9's second clause for that one class; the four conditions themselves are neither weakened, reordered nor made disjunctive, §8's floor binds unchanged wherever those four are the route, and §9's third, fourth and fifth clauses and every other section of this ADR stand entire)
 - Date: 2026-09-04
 - **Partially superseded: 2026-09-05 by ADR-0238 — §9's first clause in its
   exclusivity alone, and §9's second clause for one class. Those two scopes, and
@@ -157,6 +157,24 @@
   ADR-0150 §10's per-span enumeration is **not** amended, because the description gains
   nothing. "It holds no content" is kept rather than superseded, and §2 below is the
   whole argument for how a content-bearing surface is compatible with it.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0238 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  second exception is stated by **ADR-0238 §7**, ADR-0238 being the one target of this
+  line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

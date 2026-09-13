@@ -1,6 +1,6 @@
 # 230. The planner names a file it was shown, and the loop fetches it into the turn's supply
 
-- Status: Partially superseded by ADR-0232 (§6's account of what bounds an extraction's cost, in three sentences and no wider: the size-bound clause's second limb, *"which bounds the read **and the extraction's cost**"*, insofar as it makes `fetch_max_file_bytes` a bound on anything but the read — that field stays the file's size on disk at 4 MiB and bounds the read, and **one** `Settings` field, `fetch_max_decoded_bytes`, bounds the decoded bytes an extraction **parses, charged once per parse**: content-stream operators, and the embedded font program of a font the extraction re-parses on every page, scoped to that library's own condition for reading it; the decoded inputs read **once and cached** — a compressed object stream, a `/ToUnicode` CMap — are **not** bounded by ADR-0232, which says so in terms and defers each by name, so what replaces the limb is narrower than the limb; the same clause's count in *"**Two** size bounds"*, which becomes three; and the enumeration in *"A file over **either** bound yields a refusal and no record"*, which becomes any of the three — while that clause's ruling, a bound is enforced by refusing and never by truncating, is extended rather than replaced and binds the new bound entire. The refusal stays `TOO_LARGE` and `FetchRefusal` stays closed at five members. Everything else in §6 stands — the one configured root and its unset default, the two-stage fail-closed eligibility, the listing's ordering, cap and type allow-list, `NOT_FOUND` for an unread type, `fetch_max_content_bytes` at 32 KiB counted on the quoted rendering while extracting, the stated-domain-and-load-time-refusal clause over the four fields this ADR adds, the every-member-is-reachable clause, the resolved-outcome clause, the shape fixed for the PDF adoption including *deterministic for a given file*, and off-until-configured — and §§1–5 and 7–16 are untouched, §4's re-applied-at-fetch clause governing the new bound as it governs the other two)
+- Status: Partially superseded by ADR-0232 (§6's account of what bounds an extraction's cost, in three sentences and no wider: the size-bound clause's second limb, *"which bounds the read **and the extraction's cost**"*, insofar as it makes `fetch_max_file_bytes` a bound on anything but the read — that field stays the file's size on disk at 4 MiB and bounds the read, and **one** `Settings` field, `fetch_max_decoded_bytes`, bounds the decoded bytes an extraction **parses, charged once per parse**: content-stream operators, and the embedded font program of a font the extraction re-parses on every page, scoped to that library's own condition for reading it; the decoded inputs read **once and cached** — a compressed object stream, a `/ToUnicode` CMap — are **not** bounded by that decision, which says so in terms and defers each by name, so what replaces the limb is narrower than the limb; the same clause's count in *"**Two** size bounds"*, which becomes three; and the enumeration in *"A file over **either** bound yields a refusal and no record"*, which becomes any of the three — while that clause's ruling, a bound is enforced by refusing and never by truncating, is extended rather than replaced and binds the new bound entire. The refusal stays `TOO_LARGE` and `FetchRefusal` stays closed at five members. Everything else in §6 stands — the one configured root and its unset default, the two-stage fail-closed eligibility, the listing's ordering, cap and type allow-list, `NOT_FOUND` for an unread type, `fetch_max_content_bytes` at 32 KiB counted on the quoted rendering while extracting, the stated-domain-and-load-time-refusal clause over the four fields this ADR adds, the every-member-is-reachable clause, the resolved-outcome clause, the shape fixed for the PDF adoption including *deterministic for a given file*, and off-until-configured — and §§1–5 and 7–16 are untouched, §4's re-applied-at-fetch clause governing the new bound as it governs the other two)
 - Date: 2026-09-03
 - **Amends** [ADR-0226](0226-the-planner-names-one-more-read-beside-its-plan-and-the-loop-services-it-into-the-supply.md)
   — **§2's membership sentence and §6's cross-kind precedence sentence, in one
@@ -117,6 +117,24 @@
   This ADR's `Status` line carries the leading `Partially superseded by` token, so under
   ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0232 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  decision that bounds neither the compressed object stream nor the `/ToUnicode` CMap, and
+  defers each by name, is **ADR-0232** — the one target of this line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

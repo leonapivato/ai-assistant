@@ -1,6 +1,6 @@
 # 154. The `tools/` egress seam is designated, and the fourteen conditions are attested in code
 
-- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating ADR-0148 §1's single route through `ToolInvoker.invoke`: that send leaves by the route ADR-0231 §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire)
+- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam) and ADR-0231 (§2's second clause, only as it reaches a `WEB_SEARCH` servicing's send, and only in the limb restating the single route through `ToolInvoker.invoke`: that send leaves by the route that decision's §6 states, while the clause's other limbs, §1's designation of this module and no other, §2's remaining clauses, §4's fourteen attestations including its actuator clause, §6's residues and residency clause and §7's `DestinationProtocol` reservation all stand entire)
 - Date: 2026-08-14
 - **Note (2026-08-26): §4's condition 3 is re-attested, and now holds by both
   limbs of ADR-0017 §3's disjunct rather than by the first alone.** ADR-0193's
@@ -179,6 +179,24 @@
   ADR-0070 §4's grammar; ADR-0082 §2 governs an **amendment** qualifier on a
   leading-token line and is not reached. Appended note per ADR-0070 §1; no text below
   is rewritten. Refs #1996, #1908.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 2 such tokens inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0148 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0193 and ADR-0231 — each still paired with the same
+  scope, whose extent does not move; what is re-rendered is the prose naming the
+  clauses.** **The cross-references that prose carried, on which §4 places no constraint
+  in a note:** the single route through `ToolInvoker.invoke` is **ADR-0148 §1's**, and the
+  route the send leaves by is **ADR-0231 §6's**. ADR-0148 supersedes no part of this ADR;
+  §2's clause restates it, which is why it was named.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

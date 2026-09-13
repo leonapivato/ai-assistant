@@ -1,6 +1,6 @@
 # 252. Evidence is what a response supports, sufficiency to act is four mechanical tests, and a refresh supersedes the row it displaces
 
-- Status: Partially superseded by ADR-0253 (two scopes. §1's `GoalEvidence` field enumeration and the `INTERPRETATION` limb of its by-basis validator: the model gains `interpreted_output`, an `InterpretedOutput | None`, and the limb admits a **second** shape — such a row carries **exactly one** of one member of `records` and an `interpreted_output`, `records` being empty in the second and `returned` and `admitted` `0` in both — because an interpretation over the output of a step of the same plan has otherwise no durable way to name its own input, and #2255's dynamic plan is then not expressible in one plan at all. §1's every other clause binds verbatim, including the rule that a `records` identifier resolves in the owner's `MemoryStore` and its refusal of a search-minted or fetch-minted one, which the new shape makes costless rather than contradicts. And §14's writer clause, in **one term on one basis**: its enumeration of what *"no model supplies"* stops being true of **`applicability`** on the **`INTERPRETATION`** basis, because §3's second source composes such a row's `supported` from *"the one region the interpretation step **declared**"* and only a plan can declare one — a tension between two clauses of this decision, which ADR-0253 §7 resolves in favour of the specific rule. Every other term of §14 binds entire on both bases — no model supplies an identifier, an instant, a standing, a basis, a read kind, a source, a declaration, a count or a verdict of a read — and §14's *"exactly one thing"* is still the whole of what a model supplies at the interpretation call itself. Nothing else in this ADR: §1's row shape and its four-axis validator, §2's applicability algebra and its three relations, §3's two composition sources and its prohibition list, §4's two instants, §5's verdict vocabularies and the affirmative partition, §6's four mechanical tests, §7's conflict rules, §8's six refresh limbs, §9's invalidation predicate, §§10-13 and §§15-19 all stand entire)
+- Status: Partially superseded by ADR-0253 (two scopes. §1's `GoalEvidence` field enumeration and the `INTERPRETATION` limb of its by-basis validator: the model gains `interpreted_output`, an `InterpretedOutput | None`, and the limb admits a **second** shape — such a row carries **exactly one** of one member of `records` and an `interpreted_output`, `records` being empty in the second and `returned` and `admitted` `0` in both — because an interpretation over the output of a step of the same plan has otherwise no durable way to name its own input, and #2255's dynamic plan is then not expressible in one plan at all. §1's every other clause binds verbatim, including the rule that a `records` identifier resolves in the owner's `MemoryStore` and its refusal of a search-minted or fetch-minted one, which the new shape makes costless rather than contradicts. And §14's writer clause, in **one term on one basis**: its enumeration of what *"no model supplies"* stops being true of **`applicability`** on the **`INTERPRETATION`** basis, because §3's second source composes such a row's `supported` from *"the one region the interpretation step **declared**"* and only a plan can declare one — a tension between two clauses of this decision, which the superseding decision's §7 resolves in favour of the specific rule. Every other term of §14 binds entire on both bases — no model supplies an identifier, an instant, a standing, a basis, a read kind, a source, a declaration, a count or a verdict of a read — and §14's *"exactly one thing"* is still the whole of what a model supplies at the interpretation call itself. Nothing else in this ADR: §1's row shape and its four-axis validator, §2's applicability algebra and its three relations, §3's two composition sources and its prohibition list, §4's two instants, §5's verdict vocabularies and the affirmative partition, §6's four mechanical tests, §7's conflict rules, §8's six refresh limbs, §9's invalidation predicate, §§10-13 and §§15-19 all stand entire)
 - **Partially supersedes [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md),
   in three narrowly stated scopes**, and §16 shows the working for all three.
   **§1's `GoalElement` field enumeration and its three-shape validator** — *"A `GoalElement`
@@ -111,6 +111,23 @@
   `applicability` **is** the region §3's second source requires such a row to carry. Every other
   term of §14, every other clause of §1, and everything else of this ADR binds entire. Refs #2255,
   ADR-0253 §7, ADR-0253 §8, ADR-0253 §13.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. Every one of them named an ADR that already stands as a target of this line
+  by a pair of its own, so the extraction returned duplicates rather than a wrong ADR; the
+  constraint is restored so that it keeps returning only targets as the line accumulates.
+  **The targets are unchanged — ADR-0253 — each still paired with the same scope, whose
+  extent does not move; what is re-rendered is the prose naming the clauses.** **The
+  cross-references that prose carried, on which §4 places no constraint in a note:** the
+  tension is resolved by **ADR-0253 §7**, ADR-0253 being the one target of this line.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 

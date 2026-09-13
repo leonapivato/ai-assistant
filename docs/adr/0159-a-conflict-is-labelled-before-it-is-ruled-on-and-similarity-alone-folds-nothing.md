@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that ADR-0079 §3's retirement obligation is narrowed a second time) and ADR-0214 (§4's fourth normative clause, the unconditional precedence of the prior-assertion deferral, only as it reaches a non-asserted proposal every asserted member of whose conflict set agrees with it)
+- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that the `MemoryWriter` retirement obligation it narrows is narrowed a second time) and ADR-0214 (§4's fourth normative clause, the unconditional precedence of the prior-assertion deferral, only as it reaches a non-asserted proposal every asserted member of whose conflict set agrees with it)
 - Date: 2026-08-16
 - Partially superseded: 2026-08-29 by ADR-0214 — **§4's fourth normative clause,
   the unconditional precedence of the prior-assertion deferral, only as it reaches
@@ -160,6 +160,24 @@
   the scope named in §11, which applies ADR-0082 §1's test to each and to every ADR
   a record might look owed on.
 - Refs #1188, #1029. Disposes #868, #869, #871, #1169 and #743 in §12, each by name.
+- **Note (2026-09-13): the `Status` line's scope text now names clauses without `ADR-NNNN`
+  tokens; what the line records does not move.** ADR-0070 §4 states one authoring
+  constraint on a `Partially superseded by` line — *"a scope names a clause, not another
+  ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target"* — and this line carried 1 such token inside its scope
+  parentheses. A consumer doing what §4 says a consumer does read ADR-0079 as a
+  supersession target of this ADR, which it is not.
+  **The targets are unchanged — ADR-0161, ADR-0171 and ADR-0214 — each still paired with
+  the same scope, whose extent does not move; what is re-rendered is the prose naming the
+  clauses.** **The cross-references that prose carried, on which §4 places no constraint
+  in a note:** the obligation §5's second clause narrows is **ADR-0079 §3's**
+  `MemoryWriter` retirement obligation. ADR-0079 supersedes no part of this ADR; it is the
+  decision this ADR's own §5 narrows, and ADR-0171 narrows it a second time.
+  ADR-0082 §3 is the precedent and the authority: it corrected ADR-0045's and ADR-0050's
+  lines for this same invariant, ruling that a line written *after* ADR-0070 under a
+  reading its own §4 does not support is corrected rather than grandfathered. Appended
+  dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
+  other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
 ## Context
 
