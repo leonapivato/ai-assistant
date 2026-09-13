@@ -696,6 +696,67 @@ async def test_a_stream_that_ended_without_an_outcome_leaves_the_reference_offer
         await expect(drive.page.locator("#clear-reference")).to_be_visible()
 
 
+@pytest.mark.parametrize(
+    ("path", "act", "again", "expected"),
+    [
+        # The goal this act closed, taken back up: §13's explicit-reference resume.
+        ("/goal/abandon", "Give this up", "Take this up here", TurnReference(goal_id=GOAL_ID)),
+        # The question this act settled, selected again — which is the shape the id test
+        # matches and the identity test does not.
+        (
+            "/clarification/withdraw",
+            "Take the question back",
+            "Answer this",
+            TurnReference(question_id=QUESTION_ID),
+        ),
+    ],
+)
+async def test_a_selection_made_while_an_act_is_out_is_the_one_that_stands(  # noqa: PLR0913 — the two fixtures plus one parameter per leg of the interleaving: the act's path, the control that starts it, the control pressed while it is out, and what the next turn must then carry
+    gateway_browser: Browser,
+    tmp_path: Path,
+    path: str,
+    act: str,
+    again: str,
+    expected: TurnReference,
+) -> None:
+    """The later of the owner's two acts wins, over the **same** record.
+
+    An act's request can still be out when the owner presses "Take this up here" on the
+    same row, and matching by record id alone let the answer erase a selection made
+    *after* it. ADR-0250 §13 makes taking a closed goal up by explicit reference a
+    legitimate act — "a goal is resumed … by explicit reference and by that alone" — so
+    the newer press is a decision and not a leftover. Adversarial review, round 5,
+    ``major``.
+
+    Driven over both acts, because both settle a record the reference can name, and with
+    the act's own request held so the interleaving is the drive's rather than the
+    scheduler's (ADR-0216 §7).
+    """
+    async with driving(gateway_browser, tmp_path) as drive:
+        drive.engine.goal_summaries = [_summary()]
+        drive.engine.abandonment = GoalAbandonment.ABANDONED
+        drive.engine.withdrawal = ClarificationWithdrawal.WITHDRAWN
+        _answering(drive, accept=True)
+        held = await _holding(drive, path, at=1)
+
+        await _open_goals(drive)
+        await drive.page.click("text=Answer this")
+        await drive.page.click(f"text={act}")
+        await held.reached.wait()
+        # Taken while the act is still out, and about the same record it is settling.
+        await drive.page.click(f"text={again}")
+        await held.release()
+        await expect(drive.page.locator("#goal-said")).to_be_visible()
+
+        await expect(drive.page.locator("#referencing")).to_be_visible()
+        await drive.page.fill("#utterance", "pick it back up")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+
+        turns = [call for call in drive.engine.calls if call[0].startswith("converse")]
+        assert turns[-1][1]["reference"] == expected
+
+
 async def test_a_reference_can_be_given_up_before_it_is_sent(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
