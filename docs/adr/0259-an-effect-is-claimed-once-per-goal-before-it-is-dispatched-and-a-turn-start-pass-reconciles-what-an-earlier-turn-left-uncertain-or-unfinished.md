@@ -67,8 +67,7 @@
   **Steps 1-3 and step 6 bind entire**, as do §4's requirement that the step be
   `AWAITING_APPROVAL` in the *stored* execution and the reason it gives for it, its
   *"the turn never answers on the user's behalf"* rule, §2's decide, record, read back, claim
-  order, and §6's *"This object disposes of one step, once"* and `PENDING`-only entry. §§1-3 and
-  §§5-6 are untouched.
+  order, and §6's *"This object disposes of one step, once"* and `PENDING`-only entry. §§1-3 and §§5-6 are untouched.
 - Date: 2026-09-13
 
 ## Context
@@ -95,13 +94,12 @@ it."* And **R41**: *"The actual response, the identifier the integration supplie
 The report's own assessment is the starting point and is not repeated as a finding: R41, R43, R45 and R80 **satisfy as
 stated** on the corpus already, R46 satisfies *"as stated at the store"* and is **absent across a replan**, and R44 **needs
 a producer, not a bend** — *"ADR-0014 §7 defers 'Idempotency keys and `INDETERMINATE` resolution … Automated reconciliation
-of an `INDETERMINATE` step waits on it', and `Idempotency` already exists in `core/types.py` on the tool declaration."* This
-decision is that producer.
+of an `INDETERMINATE` step waits on it', and `Idempotency` already exists in `core/types.py` on the tool declaration."*
+This decision is that producer.
 
 The owner's addendum requirement 5 sets the posture: *"Keep 'do not blindly retry an uncertain effect'; drop 'nothing
 auto-retries, ever'."* The owner's decision 3 sets what a late answer gets: *"briefly restate the understanding, recheck
-evidence and authorization, then proceed"* — which this decision reaches by making the recheck ADR-0255 §5's, not a
-second one.
+evidence and authorization, then proceed"* — which this decision reaches by making the recheck ADR-0255 §5's, not a second one.
 
 ### What ADR-0255 §12 books here, by name
 
@@ -117,8 +115,7 @@ than invent[s] them"*. They are quoted rather than paraphrased, because they are
    claim was refused is durably recoverable — the step is re-askable or the answer is
    re-appliable — demonstrated over a paused attempt that later resumes"*, with *"**The
    superseded-plan ground is excluded by name**"*.
-3. **Repairing an attempt left `RUNNING` beside an `INDETERMINATE` step**, where ADR-0255 §6's
-   second write did not land.
+3. **Repairing an attempt left `RUNNING` beside an `INDETERMINATE` step**, where ADR-0255 §6's second write did not land.
 4. **Completing a supersession sweep that stopped part-way**, *"from either source status —
    `PENDING` and `AWAITING_APPROVAL` alike"*.
 5. **Whether the startup recovery scan writes `EFFECT_UNRESOLVED`** on the attempt of a step it
@@ -1374,7 +1371,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    the modifying plan and for the fresh one alike.
 4. **`EffectKey`'s construction and `claim_effect`'s contract each hold in full**, demonstrated
    in `core`'s own tests and in the shared conformance suite respectively, and therefore against
-   every implementation. **`EffectKey` is table-driven** over: the **two admissible shapes** and
+   every implementation. **`EffectOutcome` is table-driven** over its own validator: **both holder ids present** for
+   `COMPLETED` and **each partial pair and the empty pair refused** there, and **neither id accepted** on `CLAIMED`,
+   `COMPLETED_OTHERWISE`, `UNCERTAIN` or `HELD` — the if-and-only-if §2 states, asserted rather than assumed, since a
+   satisfaction reads the holder from it. **`EffectKey` is table-driven** over: the **two admissible shapes** and
    **every rejected mixture** (an endpoint without an account, destinations without either, an
    account and endpoint with empty destinations); `ToolCall.effect_key` **`None` for a
    non-`side_effecting` tool and present for every side-effecting one whatever its
