@@ -25,10 +25,15 @@
   routes nothing away from, the failed-check limb for every check that is **not** deferred, the
   no-phase-moves-backwards clause and the supplying-an-authorization-opens-no-attempt clause.
   **And §17's carried-and-discharged sentence**, in the **discharge** half alone: *"it is carried
-  by A5, A6 and A7 and **discharged by A8, A9 and A10**"* gains a **fourth** condition, because
+  by A5, A6 and A7 and **discharged by A8, A9 and A10**"* gains **two further** conditions, because
   §13 forbids wiring a consequential capability until the **evidence-to-claim window** §1 states
-  is closed — a window assigned to none of those three lanes, so a reader holding only §17 would
-  read A8's, A9's and A10's guarantees landing as releasing a deployment §13 still refuses.
+  is closed — a window assigned to none of those three lanes — and until §3's
+  **resolved-but-unapplied answer** is durably recoverable — a confirmation resolved at ADR-0037
+  §4's step 5 whose claim §3 then refused at step 6 — which §12 assigns to **A8** but which is
+  **no part of the reconciliation guarantee the gate names**, so A8's landing does not by itself
+  discharge it either. So a reader holding
+  only §17 would read A8's, A9's and A10's guarantees landing as releasing a deployment §13 still
+  refuses, on either condition.
   **§17's rule itself is untouched and is quoted verbatim** — the verification, uncertain-outcome
   and cancellation guarantees, the milestone clause and the *"wiring one is what this rule binds"*
   sentence — as is the **carry** half naming A5, A6 and A7, and §17's second normative clause that
@@ -996,11 +1001,48 @@ that end an attempt rather than revise a goal.
 > says. A claim it refuses leaves its step **`PENDING` at its stored version** with nothing
 > invoked and the walk stopped, exactly as every other refused claim does.
 
-> **Normative — what the refused claim then causes is not decided here in full, and what is
-> decided is stated.** A refused claim leaves the step **`PENDING` at its stored version** with
-> **nothing invoked**, and the walk **stops** under §2's rule. **Which report the turn composes,
-> whether it replans, and what a user is told** are recovery policy and are **A9's**, which is
-> ADR-0249 §13's own division for a refused stale claim.
+> **Normative — a refused claim leaves the step at its *entry* status, and there are exactly two
+> entry statuses.** A `→ RUNNING` claim is made from **`PENDING`**, by a walk, and from
+> **`AWAITING_APPROVAL`**, by `resume` (ADR-0037 §4). A refused claim leaves the step **at the one
+> it was made from, at its stored version**, with **nothing invoked**, and the walk **stops** under
+> §2's rule. **An earlier revision of this clause said `PENDING` for both and was wrong about the
+> second**, which is the status a park leaves.
+
+> **Normative — on the resume path the ruling is already recorded when the claim is refused, and
+> the one-shot approval is spent. This decision does not reorder that, and states what it
+> leaves.** ADR-0037 §4's `resume` sequence is ordered *"5. record the resolving decision with
+> `resolves` set;"* then *"6. `ALLOW` → read back and execute (§3); `DENY` → `AWAITING_APPROVAL →
+> SKIPPED`."* — and the claim §3 adds conjuncts to lives in **step 6**. So a claim this decision
+> refuses is refused **after** step 5 has committed: the confirmation is **resolved**,
+> `AuditTrail.pending_confirmation` no longer returns it, and the step stands
+> **`AWAITING_APPROVAL` with a ruling that resolved nothing it could apply**. **Making steps 5 and
+> 6 atomic is #257's remaining half and is not taken here** (§12), and **no lane reorders
+> ADR-0037 §4**: that sequence binds verbatim, and a decision about walking a plan is not where a
+> confirmation protocol is rewritten.
+
+> **Normative — the two refusal grounds leave residuals of different weight, and only one of them
+> is a loss.**
+>
+> - **The successor conjunct — a plan a stored plan supersedes.** The step **never runs again**
+>   under any future state of the store: the supersession is permanent and §7's sweep disposes of
+>   the plan. **The spent approval costs nothing**, because there is no dispatch it could ever
+>   have authorised, and re-asking would be asking a user to approve a step of a plan that has
+>   been replaced. This is the ordinary case, it is not a defect, and it is stated so that no lane
+>   builds recovery for it.
+> - **The attempt conjunct — an attempt terminal or paused.** **This is the real residual.** A
+>   *paused* attempt becomes `RUNNING` again by a user act (§3), so the step **could** have run
+>   later, and the approval that would have authorised it is **spent on a claim that never
+>   landed**. The user answered, the system recorded the answer, and nothing it authorises will
+>   happen. **Re-asking is not available to this decision**: a second `CONFIRM` is a second
+>   recorded act, and §11 mints no mechanism for reissuing one.
+>
+> **The durable recovery of a resolved-but-unapplied answer is A8's and is booked by name** (§12,
+> §13), on the same footing as §7's at-most-once obligation: stated here as an acceptance
+> requirement of that lane rather than left for someone to meet.
+
+> **Normative — what the refused claim then causes beyond that is not decided here.** **Which
+> report the turn composes, whether it replans, and what a user is told** are recovery policy and
+> are **A9's**, which is ADR-0249 §13's own division for a refused stale claim.
 
 > **Normative — the four tests of revision 1 §H.4, and which of them is owed here.** **Test 3 —
 > the store-level invariant in the shared `PlanStore` conformance suite — is this decision's**,
@@ -1331,9 +1373,24 @@ composed is a state the answer could not mention.
 > **Normative — ADR-0228 §5's not-driven rule is extended to the after-driving case.** That
 > section rules *"A superseded plan **drives nothing**"* of a plan superseded before anything was
 > driven. **A plan superseded after driving drives nothing further**: the driver dispatches no
-> further step of it, and its still-`PENDING` steps are moved **`PENDING → SKIPPED` with
+> further step of it, and its **undisposed** steps are moved to **`SKIPPED` with
 > `skip_reason=SUPERSEDED`** — ADR-0014 §4's own row, taken for the case it was written for.
-> **§6's rule overrides this one** where a branch is stopped behind an `INDETERMINATE` step.
+> **`AWAITING_APPROVAL` steps are swept as well as `PENDING` ones, and that is stated rather than
+> left to the word *pending***: `planning/execution.py`'s `_LEGAL_SKIP_REASONS` admits
+> `SUPERSEDED` from **both** statuses, so the store permits it, and a plan superseded while one of
+> its steps is parked has exactly one such step. **§6's rule overrides this one** where a branch
+> is stopped behind an `INDETERMINATE` step.
+
+**Sweeping the parked step is what stops a superseded plan spending a user's approval, and the
+seam probe found it by asking what each entry status leaves.** A sweep that moved only `PENDING`
+steps would leave the park standing `AWAITING_APPROVAL` on a plan nothing will drive; the user's
+answer would then arrive, `resume` would record the resolving decision at ADR-0037 §4's **step 5**,
+and §3's successor conjunct would refuse the claim at **step 6** — spending a one-shot approval on
+a step that could never have run. **With the parked step swept, `resume` refuses before step 5**:
+the confirmation's step is `SKIPPED`, not `AWAITING_APPROVAL`, so the sequence never reaches the
+recording. §3's superseded-plan residual is therefore the **partial-sweep** case alone — the sweep
+that did not land this step — rather than the ordinary one, and it costs nothing there for the
+reason §3 gives.
 
 > **Normative — §3's successor conjunct is what makes *drives nothing further* mechanical rather
 > than a rule the driver is trusted to obey.** `commit_transition` refuses a `→ RUNNING` claim
@@ -1675,6 +1732,20 @@ step of a plan on the third turn of a long conversation, having spent the allowa
 investigation two turns earlier — and would refuse it silently, with a durable act half-performed.
 **What bounds a walk is the request the user is waiting on**; what bounds investigation is the
 attempt.
+
+> **Normative — a cancellation delivered from outside is charged and delivered onward, and it is
+> stated once here for every seam this decision adds.** `CancelledError` is a `BaseException`, so
+> it passes an `except Exception` untouched. **Every working interval a walk consumed before a
+> cancellation reached it is charged to `AttemptEffort.working` exactly as an interval ended by a
+> raise is** — the rule above says *every* working interval and not every interval that ended
+> well — and the `commit_attempt` that charges it runs **while the resources are being made safe**,
+> which is the window ADR-0060 §1 allows: *"A method may defer delivery while it makes its
+> resources safe, but it re-raises."* **The cancellation is then delivered onward, never absorbed**
+> — not converted to a return value, not swallowed by the accounting, and not replaced by a
+> failure of the accounting itself (§1's guard, one seam over). **No lane catches it to compose an
+> answer over what ran, to sweep the remainder, or to skip a step.** Where the charging
+> `commit_attempt` itself raises under cancellation, §1's precedence binds unchanged: the
+> cancellation reaches the caller and the ledger **undercounts** (§6, §12).
 
 > **Normative — no figure of this section is configurable and none is minted here.** The deadline
 > is the caller's budget (ADR-0029 §4, ADR-0042 §3), **no `Settings` field is added**, no
@@ -2092,6 +2163,21 @@ ledger and stops on the same three guards.
   and ADR-0255's lanes land no key — so §15 asserts what a walk preserves and asserts nothing
   about a second dispatch. **Until A8 lands, §13's Q4 gate is what discharges the obligation**: no
   consequential capability is wired, so the acts it governs cannot be performed.
+- **The durable recovery of a resolved-but-unapplied answer.** **A8**, and this is an
+  **acceptance requirement of that lane stated here** rather than a gap left to be met, on the same
+  footing as the at-most-once one above. §3 states the residual: on the resume path ADR-0037 §4
+  records the resolving decision at its **step 5** and claims at its **step 6**, so a claim §3's
+  **attempt** conjunct refuses leaves the confirmation **resolved**, absent from
+  `AuditTrail.pending_confirmation`, and its step standing **`AWAITING_APPROVAL`** — a user's
+  answer that authorises a dispatch which never happened, on an attempt that can become `RUNNING`
+  again. **A8's acceptance requirement is**: *a resolved confirmation whose claim was refused is
+  durably recoverable — the step is re-askable or the answer is re-appliable — demonstrated over a
+  paused attempt that later resumes.* **The superseded-plan ground is excluded by name**, because
+  §7's sweep disposes of that step and the approval authorises nothing (§3, §7). **This decision
+  lands no mechanism for it**: re-asking mints a second `CONFIRM` and re-applying needs the
+  ruling and the transition to be atomic, which is #257's remaining half below. Fired by A8's
+  reconciliation landing.
+
 - **Whether an attempt's executions are projected into the planner's input**, so a planner can
   avoid planning a repeat. **Not decided**, and §7 states why it is an aid rather than the
   guarantee — a planner is a model, and ADR-0249 §7 forbids taking a prerequisite on a model's
@@ -2155,7 +2241,18 @@ ledger and stops on the same three guards.
 > demonstrated.** A milestone may demonstrate dependent execution against controlled integrations
 > with no such capability wired; **wiring one is what this rule binds.**
 
-> **Normative — this decision adds one prerequisite to that gate, and it is the window §1
+> **Normative — this decision adds *two* prerequisites to that gate, and the count is stated so a
+> reader does not take the first for the whole. The first is §3's resolved-but-unapplied
+> answer.** **No consequential capability is wired until the durable recovery of a resolved
+> confirmation whose claim was refused is implemented and demonstrated** (§3, §12). **The gate's
+> own three guarantees do not reach this one either**: it is A8's by §12, but it is not part of
+> A8's *reconciliation* guarantee as the gate names it, so a deployment reading the three could
+> wire a booking whose user says *yes*, whose attempt is paused at that instant, and whose answer
+> is then consumed with nothing dispatched and no way to ask again. **It is stated here for the
+> same reason the window below is** — the honest half of stating a residual rather than closing
+> it — and is discharged by A8 and not by this decision.
+
+> **Normative — the second prerequisite is the evidence-to-claim window §1
 > states.** **No consequential capability is wired until the evidence-to-claim window is closed**
 > — the interval §1 names, in which a concurrent turn's ADR-0252 §8 refresh can supersede a row
 > between a step's evaluation and its committed claim (§1, §12, issue #2309). **The gate's own
@@ -2165,9 +2262,9 @@ ledger and stops on the same three guards.
 > ADR-0252 §6 no longer counts as standing. **So the prerequisite is stated here rather than
 > inferred**, and it is discharged by a decision that closes the window and not by this one.
 
-**Adding the prerequisite is the honest half of stating a window rather than closing it, and
-without it the gate would be the argument that the window is safe *and* would stop being able to
-make it.** §1 declines the two mechanisms that would close the window because each is a contract
+**Adding the prerequisites is the honest half of stating a residual rather than closing it, and
+without them the gate would be the argument that each residual is safe *and* would stop being able
+to make it.** §1 declines the two mechanisms that would close the window because each is a contract
 surface of its own; what makes that declension safe is precisely that nothing consequential is
 wired while it stands. A gate whose conditions could all be met with the window open would give
 that argument away at the moment it mattered — which is what both review lenses found at round 15,
@@ -2235,21 +2332,24 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 > **Normative — what M33 demonstrates and what M34 owes, and the division is the owner's Q4
 > ruling applied rather than invented.** **M33 demonstrates dependent execution on controlled
 > fakes**: the arms 1–13 below, every one over `ai_assistant.testing`'s canonical fakes with no
-> consequential integration wired. **M34 owes arms 14–18**, and no lane reads an M33 arm as having
+> consequential integration wired. **M34 owes arms 14–19**, and no lane reads an M33 arm as having
 > established one of them.
 
 > **Normative — an arm is owed by the lane that lands the clause it tests, and the division above
 > is about what a *milestone* demonstrates rather than a licence to ship a clause untested.**
 > **No lane lands §6's `EFFECT_UNRESOLVED` commit and its partial-write residual, §7's
 > supersession sweep and its partial-sweep residual, or §9's deadline and its validation without
-> arms 14, 15 and 16 respectively** — each of those three is a controlled-fake arm needing no
-> integration, so nothing about them waits on a milestone. Where **L2** (§14) lands in M33 they
-> land with it and the M34 list reduces to arms 17 and 18; where L2 lands in M34 they land there
-> with it. **Arms 17 and 18 are the two that genuinely cannot move**: 17 is A9's lane's, and 18
-> needs a real integration §13 forbids until A8's, A9's and A10's guarantees are demonstrated.
-> Without this clause an implementation could swallow §6's failed `commit_attempt`, resume §7's
-> half-finished sweep or refix §9's deadline at each step and still pass every arm its own lane
-> owed, which is the gap the thin/full division exists to describe rather than to create.
+> arms 14, 15 and 16 respectively**, and **no lane lands any seam this decision opens — §1's
+> interpretation call and ledger commit, §3's claim, §5's resume, §6's second write — without
+> arm 17**, which is §9's cancellation clause driven at each of them. **All four are
+> controlled-fake arms needing no integration**, so nothing about them waits on a milestone.
+> Where **L2** (§14) lands in M33 they land with it and the M34 list reduces to arms 18 and 19;
+> where L2 lands in M34 they land there with it. **Arms 18 and 19 are the two that genuinely
+> cannot move**: 18 is A9's lane's, and 19 needs a real integration §13 forbids until A8's, A9's
+> and A10's guarantees are demonstrated. Without this clause an implementation could swallow §6's
+> failed `commit_attempt`, resume §7's half-finished sweep, refix §9's deadline at each step, or
+> let a `CancelledError` past its accounting, and still pass every arm its own lane owed — which
+> is the gap the thin/full division exists to describe rather than to create.
 
 **Thin — M33, on controlled fakes.**
 
@@ -2407,11 +2507,23 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    the paired arm that stops the limb being read as a `RUNNING` whitelist**: on the same
    construction with the attempt committed **`EFFECT_UNRESOLVED`**, the claim is **accepted** and
    the step runs — §6's own member, which a `RUNNING`-only rule would make unreachable. **And the
-   arm that pins the resume ordering** (§3, §5): a park answered while the attempt still stands
-   `AWAITING_AUTHORIZATION` is **refused** with no ruling resolved and nothing invoked, and the
-   paired case in which ADR-0254 §14's `commit_attempt` has moved the attempt to `RUNNING` first
-   resumes and dispatches — which is what makes the limb a gate on the pause rather than on the
-   park.
+   arm that pins the resume ordering and the residual it leaves** (§3, §5): a park answered while
+   the attempt still stands `AWAITING_AUTHORIZATION` is **refused**, `ToolInvoker` is **never
+   entered**, and the walk **stops**. **The arm asserts what ADR-0037 §4's order actually
+   leaves, and not that nothing was recorded**: that sequence is *"5. record the resolving decision
+   with `resolves` set;"* then *"6. `ALLOW` → read back and execute"*, and the claim is in step 6 —
+   so the arm asserts the **resolving decision is recorded** with `resolves` set, that
+   `AuditTrail.pending_confirmation` no longer returns the confirmation, that the step is **not
+   claimed** and stands **`AWAITING_APPROVAL` at its stored version**, and that nothing was
+   invoked. **An earlier revision asserted "no ruling resolved", which ADR-0037 §4's order makes
+   unsatisfiable**, and an arm nobody can pass is worse than no arm: it would have been deleted by
+   the first lane that met it. The residual it pins is §3's, and its durable recovery is A8's
+   (§12, §13). And the paired case in which ADR-0254 §14's `commit_attempt` has moved the attempt
+   to `RUNNING` first resumes and dispatches — which is what makes the limb a gate on the pause
+   rather than on the park. **And the arm that pins the superseded-plan ground is not this one**:
+   §7's sweep moves a parked step of a superseded plan to `SKIPPED`/`SUPERSEDED`, so `resume`
+   refuses **before** step 5 and no approval is spent — asserted as the confirmation still being
+   returned by `pending_confirmation` after the refusal, which is what separates the two grounds.
    **And the arms that pin the successor conjunct** (§3): with execution E open on plan P and a
    plan P2 carrying `supersedes=P` saved between step 1's success and step 2's claim, the claim is
    **refused** on the non-stale `PlanningError`, `ToolInvoker` is **never entered**, step 2 is
@@ -2662,8 +2774,26 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     not a `timedelta` each raise `ValueError` from the adapter call, with **no execution opened,
     no step claimed and no model call made** — and the same three over `resume`. They are what
     stop the stop rule swallowing ADR-0029 §4's refusal.
-17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
-18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
+17. **Cancellation on every path this decision adds** (§9, ADR-0060 §1), over a controlled
+    monotonic source advanced by a known interval before the cancellation is delivered. A
+    `CancelledError` is raised from outside into each of the seams this decision opens — **an
+    interpretation call** (§1), **a `StepRunner.run`** (§1), **the `commit_transition` claim**
+    (§3), **the `resume` that answers a park** (§5), and **the `commit_attempt` that records
+    `EFFECT_UNRESOLVED`** (§6) — and each case asserts all four: the charging **`commit_attempt`
+    is reached** and `AttemptEffort.working` has **advanced by the interval consumed up to the
+    cancellation**; the `CancelledError` **propagates to the caller as the same instance**, not
+    converted to a value and not replaced by a failure of the accounting; **no later step is
+    dispatched, none is skipped and no row is written**; and the step stands at its **entry**
+    status (§3) — `PENDING` from a walk, `AWAITING_APPROVAL` from a resume. **What each arm
+    refutes is an implementation that catches `Exception`**: `CancelledError` is a
+    `BaseException`, so such an implementation lets it past the accounting untouched, charges
+    nothing, and passes every other arm of this list — none of which delivers one. **And the
+    converse arm**: with the charging `commit_attempt` itself raising under the cancellation, the
+    **cancellation** is what reaches the caller and the ledger **undercounts** (§1's precedence,
+    §9), asserting that no lane lets a broad catch inside the accounting or the logging guard
+    absorb it.
+18. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
+19. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated **and the evidence-to-claim window
     §1 states is closed** (§13, §12, issue #2309) — **four** conditions and not three, the fourth
     being assigned to none of those three lanes.
@@ -2695,9 +2825,12 @@ of the re-entry mechanism to A7, which §10 discharges.
 
 **ADR-0254 §17 — partially superseded in the discharge half of one sentence, and the scope is on
 this document's `Status` line.** That section's normative block ends *"it is carried by A5, A6 and
-A7 and **discharged by A8, A9 and A10**"*. §13 adds a **fourth** condition to the wiring gate —
-the evidence-to-claim window §1 states, closed — and that window is assigned to **none** of those
-three lanes by §12. So a reader holding only §17 reads A8's reconciliation, A9's cancellation and
+A7 and **discharged by A8, A9 and A10**"*. §13 adds **two further** conditions to the wiring
+gate. The **evidence-to-claim window** §1 states, closed — assigned to **none** of those three
+lanes by §12. And §3's **resolved-but-unapplied answer**, durably recoverable — which §12 assigns
+to **A8**, but which is no part of the **reconciliation** guarantee the gate names, so A8's
+landing does not discharge it. So a reader holding only §17 reads A8's reconciliation,
+A9's cancellation and
 A10's verification landing as releasing a deployment to wire a consequential capability, and §13
 refuses it: ADR-0070 §1's test met, and **partial** in ADR-0070 §3's sense, the scope being that
 sentence's discharge half and nothing else. **§17's rule itself binds verbatim and is relied on**
