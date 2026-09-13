@@ -1234,7 +1234,8 @@ one of:
 not null. Send `field` and no `equals`.
 - `field_equals` — `field_present` holds AND that key's value equals `equals` \
 exactly, with no folding of case, number or type. Send both `field` and `equals`.
-A step declaring no `verifies` is checked for nothing beyond having succeeded. \
+A step declaring no `verifies` is checked for nothing beyond having succeeded; \
+leaving the key out altogether is the only way to say so, and null is refused. \
 Do not invent a predicate about a shape you have not been shown.
 
 `when` is what must already be established about this goal for the step to run. \
@@ -1254,8 +1255,9 @@ one of `sighted_query`, `citation_hop`, `local_file`, `web_search` or \
 
 `evidence_recency` says how fresh that evidence must be, as an ISO-8601 duration \
 string — `PT15M`, `PT2H`, `P1D` — and applies to every entry of that step's \
-`when`. Leave it out to require no particular freshness, which is the ordinary \
-case. Do not send a number, a zero duration or a negative one.
+`when`. Leave the key out altogether to require no particular freshness, which is \
+the ordinary case and the only way to say so. Do not send null, a number, a zero \
+duration or a negative one.
 
 Beside `steps`, a PLAN — and only a PLAN, never a DECLINE — may carry \
 `interpretations`, at most FOUR, each reading ONE thing and settling ONE \
@@ -2088,15 +2090,20 @@ def _step_shape(
     is what §12's "it changes no behaviour of a plan that declares none of the new
     keys" asks of the one site that reads them.
 
-    **A member written as ``null`` is refused where it takes a list and admitted where
-    the field itself takes ``None``.** ``after``, ``resolves`` and ``when`` are tuples
-    whose empty value is a *statement* — no dependency, no reference, no condition —
-    so a malformed member coerced into it would be §1's dropped edge arriving by
-    another route, which that section refuses in terms and for which
-    :func:`_proposed_elements` is this module's precedent. ``verifies`` and
-    ``evidence_recency`` are ``X | None`` fields on which ``None`` is the declared
-    value of *none declared* (§4, §5), so a model spelling it out has written a legal
-    value and is not sent to a repair round for saying so.
+    **A key present is a key declared, and only an absent key is "not declared".** A
+    member written as ``null`` is refused on all five, and the rule is one rule
+    because the failure is one failure: §1's "an empty ``depends_on`` means the step
+    waits on no other step", §4's "a step declaring no ``verifies`` imposes none" and
+    §5's "a step declaring none imposes none" each describe a step that said
+    **nothing**, and reading a value that is not the one the field takes as that
+    silence is §9's "defaulted into range" — a requirement the plan loses without
+    anybody deciding to drop it. Every one of those losses is in the **fail-open**
+    direction: a dependency that vanishes, a predicate that stops being checked, a
+    freshness bound that stops binding and lets an arbitrarily stale row satisfy a
+    condition. :func:`_proposed_elements` and :func:`_structured_axis` are this
+    module's precedent — "the only spelling of *not applied* is a key the object does
+    not carry" — and ADR-0253 §7 is the decision's own statement of it: "declaring
+    nothing and declaring something malformed are two different states".
 
     Args:
         raw: The step object the envelope carried.
@@ -2118,9 +2125,9 @@ def _step_shape(
         shape["resolves"] = _step_resolves(raw["resolves"], ids=ids, ordinal=ordinal, total=total)
     if "when" in raw:
         shape["when"] = _step_conditions(raw["when"], ordinal=ordinal)
-    if raw.get("verifies") is not None:
+    if "verifies" in raw:
         shape["verifies"] = _step_verifies(raw["verifies"], ordinal=ordinal)
-    if raw.get("evidence_recency") is not None:
+    if "evidence_recency" in raw:
         shape["evidence_recency"] = _iso_duration(raw["evidence_recency"], ordinal=ordinal)
     return shape
 
@@ -2386,6 +2393,12 @@ def _step_verifies(raw: object, *, ordinal: int) -> dict[str, object]:
     Raises:
         _ExtractionError: If ``verifies`` is not a JSON object.
     """
+    if raw is None:
+        msg = (
+            f"the step at position {ordinal} has a 'verifies' written as null: the one "
+            f"spelling of 'this step declares no check' is to send no 'verifies' at all"
+        )
+        raise _ExtractionError(msg)
     if not isinstance(raw, dict):
         msg = f"the step at position {ordinal} has a 'verifies' that is not a JSON object"
         raise _ExtractionError(msg)
@@ -2426,6 +2439,13 @@ def _iso_duration(value: object, *, ordinal: int) -> timedelta:
     Raises:
         _ExtractionError: If it is not an ISO-8601 duration string.
     """
+    if value is None:
+        msg = (
+            f"the step at position {ordinal} has an 'evidence_recency' written as null: "
+            f"the one spelling of 'this step requires no particular freshness' is to "
+            f"send no 'evidence_recency' at all"
+        )
+        raise _ExtractionError(msg)
     if not isinstance(value, str) or _ISO_DURATION.fullmatch(value) is None:
         msg = (
             f"the step at position {ordinal} has an 'evidence_recency' of {value!r}: "
