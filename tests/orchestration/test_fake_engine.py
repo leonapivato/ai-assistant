@@ -84,6 +84,8 @@ from ai_assistant.core.types import (
     EgressBinding,
     EgressDestination,
     EgressSpan,
+    GoalStatus,
+    GoalSummary,
     GrantScope,
     Idempotency,
     MemoryKind,
@@ -102,9 +104,14 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
     TurnOutcome,
+    TurnReference,
     UtcInstant,
 )
 from ai_assistant.testing import FakeAssistantEngine
+
+#: The per-turn budget the two ``converse`` entries take. A fixed figure rather than a
+#: clock reading: nothing in the cases that pass it turns on the duration.
+_BUDGET = timedelta(seconds=30)
 
 #: What reported an attested proposal, on the source's own clock (ADR-0092 §3). A
 #: fixed instant rather than a clock reading: nothing here turns on time.
@@ -113,10 +120,10 @@ _REPORTED = Attestation(
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import Belief, Identifier
+    from ai_assistant.core.types import Belief, Identifier, ReplyChunk
 
 
 def _binding() -> EgressBinding:
@@ -1567,3 +1574,66 @@ async def test_a_settled_park_releases_the_confirmation_it_was_bound_to() -> Non
 
     assert await engine.recipient_grants.export() == []
     assert [row.id for row in await engine.trail.export()] == [confirmed.id]
+
+
+async def test_the_goal_listing_refuses_an_oversized_result() -> None:
+    """ADR-0085 §8c over ADR-0250 §15's listing, in the direction only a sender sees.
+
+    §8c's limit is enforced by *every* implementation, and an oversized **result** is
+    the half that goes unnoticed: it is visible only to whoever tried to send it, so a
+    fake that returned one would certify a client against a page the real engine would
+    refuse to hand over. The concrete engine takes the check through ``_tracked(…,
+    checked=True)``; this is the fake taking the same one.
+
+    A scripted summary rather than a stored goal, because ADR-0250 §19's M1 gives this
+    operation no store to read — it answers ``()`` there, which is issue #2296 — so the
+    only way to put a result on the wire at all is to script one.
+    """
+    engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+    engine.goal_summaries.append(
+        GoalSummary(
+            id="g1",
+            outcome="book a campsite for the long weekend, " * 40,
+            status=GoalStatus.ACTIVE,
+        )
+    )
+
+    with pytest.raises(OversizedValueError):
+        await engine.goals()
+
+
+async def _drain_stream(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> None:
+    """Read one streamed turn whole, so the call it recorded is complete.
+
+    ``tests/orchestration/test_engine_capture.py``'s own helper, narrowed to what this
+    case needs: nothing here reads the values, only what the fake logged on the way.
+    """
+    async for _ in stream:
+        pass
+
+
+async def test_a_streamed_turn_carries_the_reference_it_was_given() -> None:
+    """ADR-0250 §11 over ADR-0173 §4's entry, asserted at the double every client uses.
+
+    ``converse_streaming`` "takes exactly ``converse``'s arguments in exactly its"
+    order, so it takes the reference by that clause. M1 **resolves** nothing — §19 is
+    explicit — but a fake that dropped the value before recording the call would make a
+    client that dropped or replaced it undetectable, and this fake is what the wire
+    client, the gateway and the CLI are all tested against.
+
+    Asserted against the non-streaming entry, so what it pins is that the two agree
+    rather than that either records something in particular.
+    """
+    reference = TurnReference(question_id="q1")
+    engine = FakeAssistantEngine()
+
+    await _drain_stream(engine.converse_streaming("make it Sunday", timeout=_BUDGET))
+    await _drain_stream(
+        engine.converse_streaming("make it Sunday", timeout=_BUDGET, reference=reference)
+    )
+    await engine.converse("make it Sunday", timeout=_BUDGET, reference=reference)
+
+    streamed = [arguments for name, arguments in engine.calls if name == "converse_streaming"]
+    assert [one["reference"] for one in streamed] == [None, reference]
+    spoken_for = next(arguments for name, arguments in engine.calls if name == "converse")
+    assert spoken_for["reference"] == reference, "and the two entries record it alike"

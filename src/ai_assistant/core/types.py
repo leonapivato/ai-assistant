@@ -20066,6 +20066,24 @@ class TurnOutcome(BaseModel):
         ``orchestration`` from the typed value, which is what keeps a spoken request
         from being answered with silence (ADR-0200 §4).
 
+        **It carries no** :attr:`clarification` **either**, and that follows from the
+        same absent planner call rather than from a separate rule: §6's first condition
+        for putting a question is that "the planner reported the interpretation
+        ambiguous … on this call", and this turn made no call. §3 states the
+        consequence directly — "a ``GoalQuestion`` is bound to a goal, and a turn that
+        could not find a goal has none to bind one to. The two are different questions
+        and this decision keeps them apart."
+
+        **And its** :attr:`reference` **is absent or** ``UNKNOWN`` **and never one of
+        the other three.** §11 admits exactly the first pair here — "an ``UNKNOWN``
+        reference is reported whatever the association then does … so it may come back
+        ``UNDECIDED``" — and forecloses the rest: ``ANSWERED``, ``EXPIRED`` and
+        ``ALREADY_SETTLED`` are each "read **off the question's own disposition**",
+        so reaching one means a record was found, which means "the reference resolves
+        to a goal in every case, and the turn **engages that goal**". A reference that
+        resolves wins §3's first step "outright and costs no model call", so no
+        ``associate`` call is made and no undecided verdict exists to carry.
+
         Raises:
             ValueError: If the outcome describes an undecided pass that could not have
                 happened.
@@ -20085,6 +20103,25 @@ class TurnOutcome(BaseModel):
                 "goal_engagement: no implementation constructs one in order to carry a "
                 "reference outcome, because that value asserts a goal was engaged "
                 "(ADR-0250 §5, §11)"
+            )
+            raise ValueError(msg)
+        if self.clarification is not None:
+            msg = (
+                "an undecided turn raised no question, so this outcome must carry no "
+                "clarification: a GoalQuestion is bound to a goal and a turn that could "
+                "not find a goal has none to bind one to — and the turn made no "
+                "Planner.plan call, so no ProposedQuestion was reported to it at all "
+                "(ADR-0250 §3, §6, §10)"
+            )
+            raise ValueError(msg)
+        if self.reference is not None and self.reference is not ReferenceOutcome.UNKNOWN:
+            msg = (
+                f"an undecided turn's reference resolved to nothing or was absent, so "
+                f"{self.reference.value} is unreachable here: ANSWERED, EXPIRED and "
+                f"ALREADY_SETTLED are each read off a question's own disposition, which "
+                f"means the reference found a record — and a reference that resolves "
+                f"engages its goal outright and costs no associate call, so the turn "
+                f"cannot come back undecided (ADR-0250 §3, §11)"
             )
             raise ValueError(msg)
         if self.reply is None:
