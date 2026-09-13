@@ -94,7 +94,9 @@ from pydantic import SecretStr
 
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
+    AssociationVerdict,
     BeliefBand,
+    GoalAssociation,
     MemorySource,
     Provenance,
     ProvisioningState,
@@ -131,6 +133,7 @@ from ai_assistant.testing import (
     FakeDeferralStore,
     FakeDestinationTrustStore,
     FakeFeedbackProcessor,
+    FakeGoalAssociator,
     FakeModelProvider,
     FakeObserver,
     FakeOutboundTransport,
@@ -638,6 +641,7 @@ def build_world(
     conversations = FakeConversationStore(now=lambda: NOW)
     engine = Engine(
         loop=loop,
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         runner=runner,
         plans=plans,
         trail=trail,

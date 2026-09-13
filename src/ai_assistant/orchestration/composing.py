@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     band_of,
     rests_on_recorded_external_content,
 )
+from ai_assistant.orchestration.goals import CLARIFICATION_PROMPT, ELISION_PROMPT, GoalFacts
 from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
 from ai_assistant.orchestration.reads import READ_BUDGET, StructuredFacts
 
@@ -635,6 +636,7 @@ class ComposingStage:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        goal: GoalFacts | None = None,
     ) -> ComposedReply:
         """Compose the answer for one turn, or say that composing it failed.
 
@@ -724,6 +726,13 @@ class ComposingStage:
                 answer, and the fragment it selects carries no destination, host,
                 query, record, count, figure, duration or command name (§7).
 
+            goal: ADR-0250 §10's and §14's two facts about this turn's goal, or
+                ``None`` where the caller has neither to give (:func:`_system_prompt`).
+                The clarification's own text is rendered into the user turn, quoted
+                like every other span this system did not author (:func:`_render_request`);
+                the instruction that its answer *is* the question is a clause of this
+                stage's own prompt.
+
         Returns:
             The answer, or a degraded report where the call raised a ``ModelError``
             or came back unusable as an answer.
@@ -744,6 +753,7 @@ class ComposingStage:
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
                     search_not_serviced=search_not_serviced,
+                    goal=goal,
                 ),
             ),
             Message(
@@ -756,6 +766,7 @@ class ComposingStage:
                     deliveries=deliveries,
                     hop_reached=hop_reached,
                     search_unserviced=search_not_serviced is not None,
+                    clarification=None if goal is None else goal.clarification,
                 ),
             ),
         )
@@ -919,6 +930,7 @@ class ComposingStage:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        goal: GoalFacts | None = None,
     ) -> AsyncIterator[ReplyChunk | ComposedReply]:
         """Compose the answer as it arrives, yielding chunks then one report.
 
@@ -989,6 +1001,10 @@ class ComposingStage:
                 it exactly as on a whole turn and the fact is not decorative here
                 either.
 
+            goal: ADR-0250 §10's and §14's two facts about this turn's goal, or
+                ``None`` where the caller has neither to give, as :meth:`compose`
+                takes it and for its reasons (:func:`_system_prompt`).
+
         Yields:
             Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
             then the :class:`ComposedReply` naming the whole answer and whether
@@ -1016,6 +1032,7 @@ class ComposingStage:
                     stopped_while_asking=stopped_while_asking,
                     structured=structured,
                     search_not_serviced=search_not_serviced,
+                    goal=goal,
                 ),
             ),
             Message(
@@ -1028,6 +1045,7 @@ class ComposingStage:
                     deliveries=deliveries,
                     hop_reached=hop_reached,
                     search_unserviced=search_not_serviced is not None,
+                    clarification=None if goal is None else goal.clarification,
                 ),
             ),
         )
@@ -1306,6 +1324,7 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
     stopped_while_asking: bool = False,
     structured: StructuredFacts | None = None,
     search_not_serviced: SearchNotServiced | None = None,
+    goal: GoalFacts | None = None,
 ) -> str:
     """The instruction for this pass, given the channel it is for and what it lost.
 
@@ -1338,6 +1357,15 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
             ADR-0240. Never ``True`` on any axis beside ``unbounded_audience``, for
             ``stopped_while_asking``'s reason one clause over: ADR-0226 §5 declines to
             service a read request on such a channel, so no structured read runs there.
+        goal: ADR-0250 §10's and §14's two facts about this turn's goal, or ``None``
+            where the caller has neither to give. Each is appended on its own
+            condition and **neither is inferred from the other**; on a turn given
+            neither the assembled prompt is byte-identical to what it is without
+            ADR-0250, which is how a reader checks that the decision costs a turn that
+            raised nothing and elided nothing exactly nothing. Never a member beside
+            ``unbounded_audience``: §15 admits no stored goal value to such a turn, so
+            no candidate set is read there and no elision can be disclosed, and a
+            clarification that turn's planner raised is spoken in the ordinary way.
         search_not_serviced: ADR-0242 §7's carrier — which class of act would have let a
             search this turn did not make happen — or ``None`` where every servicing
             yielded and where the turn asked for none. On ``None`` the assembled prompt
@@ -1373,6 +1401,15 @@ def _system_prompt(  # noqa: PLR0913 — the pass's own instruction plus one key
     # other (ADR-0242 §16).
     if search_not_serviced is not None:
         clauses.append(_SEARCH_NOT_SERVICED_PROMPTS[search_not_serviced])
+    # ADR-0250 §10 and §14, appended last because each is a fact about *what the turn
+    # did with the user's objective* rather than about the material it composed over —
+    # which a reader has to have met the material to place. The clarification clause is
+    # first because it changes what the whole answer is for.
+    about = goal or GoalFacts()
+    if about.clarification is not None:
+        clauses.append(CLARIFICATION_PROMPT)
+    if about.elided:
+        clauses.append(ELISION_PROMPT)
     return "\n\n".join(clauses)
 
 
@@ -1385,6 +1422,7 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
     deliveries: Mapping[str, SpokenDelivery],
     hop_reached: Sequence[str] = (),
     search_unserviced: bool = False,
+    clarification: str | None = None,
 ) -> str:
     """Render the whole of what the stage was given into the user-turn prompt.
 
@@ -1427,6 +1465,11 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
             that the plan block can say it is an account of no lookup (#2213). The
             **bare fact**: which member it is stays at :func:`_system_prompt`, and
             this block never sees it.
+        clarification: The text of the question this turn raised (ADR-0250 §10), or
+            ``None`` on every turn that raised none. Rendered under a heading of this
+            assembler's own and quoted by :func:`_quoted_span`, because it is the
+            planner's words about the planner's own proposal and ADR-0098 §2's rule
+            makes no exception for a span this system's own model produced.
 
     Returns:
         The user-turn prompt.
@@ -1459,6 +1502,13 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this prompt is
     lines += _render_plan(turn.plan, step, undriven, search_unserviced=search_unserviced)
     lines.append("")
     lines += _render_step_account(step)
+    # ADR-0250 §10: the question this turn raised, **quoted** like every other span
+    # this system did not author. It is the planner's own words about this turn's own
+    # proposal, so the heading is the only part of this block this assembler writes.
+    if clarification is not None:
+        lines.append("")
+        lines.append("This turn could not settle what the request means. Ask them:")
+        lines.append(f"  {_quoted_span(clarification)}")
     return "\n".join(lines)
 
 

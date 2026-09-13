@@ -48,6 +48,7 @@ from ai_assistant.core.types import (
     ProposedUnderstanding,
     Provenance,
     StepStatus,
+    TurnReference,
 )
 from ai_assistant.orchestration.composing import ComposingStage
 from ai_assistant.orchestration.loop import OpenedAttempt
@@ -63,7 +64,6 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from ai_assistant.core.types import AttemptTransition, GoalRevision
-    from ai_assistant.orchestration.loop import RespondedTurn
 
 _ASKED: Final = "what is two plus two?"
 
@@ -651,21 +651,26 @@ async def test_a_continued_goals_revision_goes_through_record_interpretation() -
     read — and the attempt this turn opens is a **new** attempt on that **same** goal
     (§5, §16 item 2).
 
-    **Which goal a turn continues is A2's** (§13), so the association is supplied here by
-    a loop that states it rather than decided by anything this lane ships.
+    **The association is the production one** (ADR-0250 §3 step 1): the turn carries a
+    ``TurnReference`` naming the goal, which "wins outright and costs no model call" and
+    reaches this route without a candidate set, an associator answer or a patched loop.
     """
     plans = _Recording()
     earlier = _earlier()
     await plans.save_goal(earlier)
     harness = Harness(planner=_Continuing(), plans=plans)
-    _continue(harness, earlier)
 
-    outcome = await harness.engine.converse("two plus two", timeout=PATIENT)
+    outcome = await harness.engine.converse(
+        "two plus two", timeout=PATIENT, reference=TurnReference(goal_id=earlier.id)
+    )
 
     assert outcome.turn is not None
     (appended,) = plans.appended
     assert appended.goal_id == earlier.id
-    assert appended.expected_version == earlier.version
+    assert appended.expected_version == earlier.version + 1, (
+        "ADR-0250 §1: the engagement stamp is a mutation of the goal and advances the "
+        "token, so the revision is written against the version that stamp returned"
+    )
     assert appended.interpretation.revision == 2
     assert appended.interpretation.raised_by is not None
     (constraint,) = appended.interpretation.constraints
@@ -673,25 +678,13 @@ async def test_a_continued_goals_revision_goes_through_record_interpretation() -
     stored = await plans.get_goal(earlier.id)
     assert stored is not None
     assert stored.interpretation[0] == earlier.interpretation[0], "prior revision unedited"
-    assert stored.version == 1, "§12: the compare-and-swap token advanced by the write"
+    assert stored.version == 2, (
+        "ADR-0250 §1's engagement stamp advanced the token once and §12's own write "
+        "advanced it again: `engage_goal` is a mutation of the goal like any other"
+    )
+    assert stored.last_engaged_in is not None, "ADR-0250 §1: the turn engaged the goal"
     (opened,) = plans.opened
     assert opened.goal_id == earlier.id, "a new attempt on the same goal"
-
-
-def _continue(harness: Harness, goal: Goal) -> None:
-    """Make this harness's loop continue ``goal`` rather than open one.
-
-    A2 decides association (§13) and nothing in this lane does, so a case that needs the
-    *continued* route states the association itself — at the one seam
-    :meth:`LearningLoop.respond` exposes for it, rather than by reaching past the engine.
-    """
-    loop = harness.engine._loop
-    responds = loop.respond
-
-    async def continuing(utterance: str, **fields: object) -> RespondedTurn:
-        return await responds(utterance, **fields, continuing=goal)  # type: ignore[arg-type]  # the keywords the engine passes
-
-    loop.respond = continuing  # type: ignore[method-assign]  # a case stating the association A2 will
 
 
 # --------------------------------------------------------------------------- #

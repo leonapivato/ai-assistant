@@ -110,12 +110,15 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    MAX_ASSOCIATION_CANDIDATES,
+    TERMINAL_ATTEMPT_STATES,
     AttemptOutcome,
     AttemptPhase,
     AttemptState,
     AttemptTransition,
     Belief,
     BeliefSummary,
+    Clarification,
     ClarificationWithdrawal,
     Confirmation,
     ConfirmationEgress,
@@ -124,10 +127,18 @@ from ai_assistant.core.types import (
     CoverageUnrecordedBinding,
     DeferralAdmissionOutcome,
     Disposition,
+    EngagementDisposition,
     Evidence,
     ExchangeDisposition,
+    Goal,
     GoalAbandonment,
+    GoalAttempt,
+    GoalDisambiguation,
+    GoalEngagement,
+    GoalQuestion,
+    GoalQuestionDisposition,
     GoalRevision,
+    GoalStatus,
     GoalSummary,
     IngestSummary,
     LearnDecision,
@@ -151,6 +162,7 @@ from ai_assistant.core.types import (
     ReadAnswerOutcome,
     ReadCancellation,
     ReadKind,
+    ReferenceOutcome,
     ReplyChunk,
     RoutableOperation,
     RouteApproval,
@@ -183,7 +195,22 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     notification_is_speakable,
 )
-from ai_assistant.orchestration.loop import ConversationalOperation, OpenedAttempt
+from ai_assistant.orchestration.goals import (
+    GoalFacts,
+    RaisedSubject,
+    candidacy_of,
+    disambiguation_of,
+    disambiguation_reply,
+    engagement_of,
+    focused_index,
+    is_open,
+)
+from ai_assistant.orchestration.goals import resolve as _resolved
+from ai_assistant.orchestration.loop import (
+    ConversationalOperation,
+    OpenedAttempt,
+    request_of,
+)
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
@@ -230,6 +257,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         AuditTrail,
         DeferralStore,
+        GoalAssociator,
         MemoryStore,
         NotificationPolicy,
         NotificationStore,
@@ -326,6 +354,16 @@ _ROOM_PROBE: Final[str] = "x"
 #: that disconnected between the park and its token would hold a ceiling slot nothing
 #: could ever free.
 _DEFAULT_ROUTED_CONFIRMATION_TTL: Final = timedelta(minutes=15)
+
+#: How long a goal's clarification stays answerable, where no operator figure reaches
+#: this engine (ADR-0250 §8).
+#:
+#: **The normative figure is ``Settings.goal_question_ttl``**, which is required,
+#: defaults to PT72H, is refused at load where it is zero or negative and admits no
+#: disable sentinel. This default exists for the same reason
+#: :data:`_DEFAULT_ROUTED_CONFIRMATION_TTL` does — a test double constructing an engine
+#: directly is not a deployment — and the composition root passes the configured value.
+_DEFAULT_GOAL_QUESTION_TTL: Final = timedelta(hours=72)
 
 #: How many times a colliding ``route_id`` is retried from the injected factory inside
 #: the reserving critical section before the pass gives up (ADR-0197 §9). Small,
@@ -1380,6 +1418,164 @@ def _outcome_of(step: StepOutcome | None) -> ExchangeDisposition:  # noqa: PLR09
             assert_never(step.disposition)
 
 
+@dataclass(frozen=True, slots=True)
+class _GoalPass:
+    """What a pass's composer is told about this turn's goal (ADR-0250 §5, §10, §14).
+
+    **Two jobs and one value, because the streaming path needs both at one call.**
+    :attr:`facts` is what reaches the composing stage's prompt; the three members
+    beside it are what the outcome will carry, and the **streaming** composer measures
+    its ceiling against a probe outcome (:meth:`Engine._reply_room`) that has to be the
+    shape the terminal frame will actually hold. A probe missing these members would
+    reserve room for a smaller outcome than the one it reserves for, and the stream
+    would publish text the frame then refuses — which is exactly what ADR-0173 §3's
+    ceiling exists to make impossible.
+
+    Attributes:
+        facts: ADR-0250 §10's and §14's two facts, for the prompt.
+        engagement: What this turn did with its goal, or ``None``.
+        clarification: The question it raised, or ``None``.
+        reference: What became of its reference, or ``None``.
+    """
+
+    facts: GoalFacts = field(default_factory=GoalFacts)
+    engagement: GoalEngagement | None = None
+    clarification: Clarification | None = None
+    reference: ReferenceOutcome | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Association:
+    """What ADR-0250 §3 decided about this turn's goal, before it planned.
+
+    **Every field is a fact ``orchestration`` computed** (§16), from the store's own
+    rows, the injected clock and one typed
+    :class:`~ai_assistant.core.types.GoalAssociation`. No model supplies one, and a
+    value a planner envelope carried would not reach here at all: the association
+    happens before the planner is called.
+
+    Attributes:
+        goal: The goal this turn continues, already engaged (§1), or ``None`` where
+            the turn opens one — which is a ``FRESH`` verdict, a ``CONTINUES`` over a
+            conversation with no focused goal, an empty candidate set, and every turn
+            of an operation whose channel audience is unbounded (§15).
+        attempt: The attempt this turn continues, or ``None`` where it opens one
+            (§12).
+        disposition: What the turn did with the goal it engaged, or ``None`` where it
+            engaged none. ``OPENED`` is stamped later, at the site that opens the
+            goal, because until then there is no goal to be the subject of it.
+        reference: What became of the turn's :class:`TurnReference` (§11), or ``None``
+            where it carried none and on a ``goal_id`` reference that resolved.
+        elided: How many goals §2's cap dropped, which §14 discloses on an ``OPENED``
+            turn and on a turn that asked, and on no other.
+        disambiguation: The goals an ``UNDECIDED`` turn asks between (§5), or ``None``
+            on every turn that decided. Its presence **is** the undecided turn.
+        open_question: The text of the goal's open question, for the brief (§8).
+        supersede: The id of a question ``SUPERSEDED`` when this turn opens its new
+            attempt (§12), or ``None``. It is carried rather than settled here so the
+            settlement happens "in the same sequence that opens the attempt".
+        resumes: Whether this turn resumes an attempt a clarification paused, which
+            moves its state to ``RUNNING`` at the persistence site (§11).
+    """
+
+    goal: Goal | None = None
+    attempt: GoalAttempt | None = None
+    disposition: EngagementDisposition | None = None
+    reference: ReferenceOutcome | None = None
+    elided: int = 0
+    disambiguation: GoalDisambiguation | None = None
+    open_question: str | None = None
+    supersede: str | None = None
+    resumes: bool = False
+
+
+#: The sort sentinel for a goal no turn has engaged (ADR-0250 §1).
+#:
+#: It is never actually compared against anything: the listing partitions the goals on
+#: ``last_engaged_at is None`` **first** and sorts only the ones carrying an instant, so
+#: this exists to give that sort a total type rather than to order anything. §1's own
+#: rule is the partition — *"a goal whose ``last_engaged_at`` is absent sorts **after**
+#: every goal carrying one"* — and reading it as "sorts as though engaged at the
+#: beginning of time" would be the same answer for the wrong reason.
+_NEVER_ENGAGED: Final = datetime.min.replace(tzinfo=UTC)
+
+
+def _summary_of(
+    goal: Goal, attempt: GoalAttempt | None, question: GoalQuestion | None
+) -> GoalSummary:
+    """Project one goal onto what a surface is shown (ADR-0250 §15).
+
+    **It carries no attempt id, no revision number, no element, no ground, no evidence
+    reference and no plan** — which is a property of the type rather than of this
+    function, and is why the attempt reaches it as a *fact* (``paused``) rather than as
+    a record.
+
+    **``paused`` is ADR-0249 §5's own derivation, computed here and by no adapter**:
+    the goal's status is ``ACTIVE`` **and** its current attempt's state is
+    ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED``. A goal with
+    no attempt is not paused, and neither is a ``BLOCKED`` **goal** — §5's derivation is
+    over the attempt's state and ADR-0249 §4 keeps the two vocabularies apart.
+
+    Args:
+        goal: The goal to project.
+        attempt: Its current attempt — the latest by ``opened_at`` — or ``None``.
+        question: Its open question, where one stands.
+
+    Returns:
+        The summary.
+    """
+    return GoalSummary(
+        id=goal.id,
+        outcome=goal.statement,
+        status=goal.status,
+        paused=(
+            goal.status is GoalStatus.ACTIVE
+            and attempt is not None
+            and attempt.state in _PAUSED_ATTEMPT_STATES
+        ),
+        last_engaged_at=goal.last_engaged_at,
+        clarification=(
+            None
+            if question is None or question.text is None
+            else Clarification(
+                question_id=question.id,
+                text=question.text,
+                expires_at=question.expires_at,
+            )
+        ),
+    )
+
+
+#: The three :class:`~ai_assistant.core.types.AttemptState` members ADR-0249 §5 calls a
+#: **pause**, stated once so the engine's derivation and a reader cannot disagree.
+_PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
+    {
+        AttemptState.AWAITING_CLARIFICATION,
+        AttemptState.AWAITING_AUTHORIZATION,
+        AttemptState.BLOCKED,
+    }
+)
+
+
+def _reference_outcome(disposition: GoalQuestionDisposition) -> ReferenceOutcome:
+    """Read ADR-0250 §11's outcome off a settled question's own disposition.
+
+    *"``EXPIRED`` is stated over the disposition and never over a clock comparison …
+    and the deadline is compared **only** where the question is still ``OPEN``."* Every
+    other terminal member is ``ALREADY_SETTLED``: *"its ``disposition`` is ``ANSWERED``,
+    ``WITHDRAWN`` or ``SUPERSEDED`` and this turn did not settle it."*
+
+    Args:
+        disposition: The question's disposition, which is terminal here.
+
+    Returns:
+        The member to report.
+    """
+    if disposition is GoalQuestionDisposition.EXPIRED:
+        return ReferenceOutcome.EXPIRED
+    return ReferenceOutcome.ALREADY_SETTLED
+
+
 def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: bool) -> str:
     """The canonical text rendering of one exchange (ADR-0005 §1, ADR-0074 §4).
 
@@ -1547,6 +1743,7 @@ type _Composer = Callable[
         bool,
         StructuredFacts,
         SearchNotServiced | None,
+        _GoalPass,
     ],
     Awaitable[ComposedReply | None],
 ]
@@ -1917,6 +2114,7 @@ class Engine:
         self,
         *,
         loop: LearningLoop,
+        associator: GoalAssociator,
         runner: StepRunner,
         plans: PlanStore,
         trail: AuditTrail,
@@ -1951,6 +2149,7 @@ class Engine:
         speakable_attested_sources: frozenset[str] = frozenset(),
         max_spoken_audio_bytes: int = DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
         routed_confirmation_ttl: timedelta = _DEFAULT_ROUTED_CONFIRMATION_TTL,
+        goal_question_ttl: timedelta = _DEFAULT_GOAL_QUESTION_TTL,
         max_notification_budget: timedelta = _DEFAULT_MAX_NOTIFICATION_BUDGET,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
@@ -1974,6 +2173,15 @@ class Engine:
 
         Args:
             loop: The turn stage. :meth:`converse` calls its ``respond``.
+            associator: ADR-0250 §4's one seam, reached **through the Protocol and by
+                no other route**. It is required and undefaulted for the reason every
+                other collaborator here is: §3 rules that "**Every turn resolves its
+                goal before it plans**", and a defaulted ``None`` would make that
+                either true or false depending on whether a composition root
+                remembered — the shape ADR-0250 §16's writer clauses exist to keep out
+                of the wiring layer. A turn makes **at most one** ``associate`` call
+                and no lane makes a second, retries one, or re-asks on a different
+                prompt (§4).
             runner: The single-step stage (selection, permission, execution). Its
                 ``registry``, ``policy``, ``plans`` and ``trail`` are already
                 wired; the façade adds only ``plans`` for the reads a driver needs
@@ -2394,6 +2602,14 @@ class Engine:
                 park and its token would hold a slot nothing could ever free. Elapse is
                 measured against ``now``, never a wall clock read at the seam, so a test
                 advances it rather than waits.
+            goal_question_ttl: ``Settings.goal_question_ttl`` (ADR-0250 §8). How long a
+                goal's clarification stays answerable, computed **once** at the instant
+                the question is written and *"never extended, refreshed or
+                recomputed"*. Required, positive and finite with **no disable
+                spelling**, for ADR-0244 §3's two reasons and one of ADR-0250's own: a
+                question nothing can free would block that goal's next question for ever,
+                *"which is the one-open rule turning from a correctness constraint into a
+                trap"*.
             recovery: ADR-0014 §4's startup scan, or ``None`` where a deployment
                 composes none. Built by the composition root over the **same**
                 plan store and audit store this façade holds, and driven once from
@@ -2537,6 +2753,7 @@ class Engine:
         # is not a laxer contract limit but no contract limit at all (#1686).
         _check_positive_int(max_payload_bytes, name="max_payload_bytes")
         self._loop = loop
+        self._associator = associator
         self._runner = runner
         self._plans = plans
         self._trail = trail
@@ -2641,6 +2858,7 @@ class Engine:
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
         self._max_spoken_audio_bytes = max_spoken_audio_bytes
         self._routed_ttl = routed_confirmation_ttl
+        self._goal_question_ttl = goal_question_ttl
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -3441,7 +3659,9 @@ class Engine:
             reference=reference,
         )
         return await self._tracked(
-            self._converse(utterance, timeout=timeout, conversation_id=selected),
+            self._converse(
+                utterance, timeout=timeout, conversation_id=selected, reference=reference
+            ),
             "converse",
             checked=True,
         )
@@ -3506,7 +3726,9 @@ class Engine:
             conversation_id=selected,
             reference=reference,
         )
-        return self._streamed(utterance, timeout=timeout, conversation_id=selected)
+        return self._streamed(
+            utterance, timeout=timeout, conversation_id=selected, reference=reference
+        )
 
     async def _streamed(
         self,
@@ -3514,6 +3736,7 @@ class Engine:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
+        reference: TurnReference | None = None,
     ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
         """Drive the turn in a tracked task and relay what it publishes.
 
@@ -3536,7 +3759,11 @@ class Engine:
         turn = self._track(
             self._checked_result(
                 self._converse_streaming(
-                    utterance, timeout=timeout, conversation_id=conversation_id, chunks=chunks
+                    utterance,
+                    timeout=timeout,
+                    conversation_id=conversation_id,
+                    chunks=chunks,
+                    reference=reference,
                 ),
                 "converse_streaming",
             ),
@@ -4115,6 +4342,7 @@ class Engine:
         stopped_while_asking: bool,
         structured: StructuredFacts,
         search_not_serviced: SearchNotServiced | None,
+        goal: _GoalPass,
         *,
         supply: UnboundedAudienceSupply,
     ) -> ComposedReply | None:
@@ -4170,6 +4398,12 @@ class Engine:
             turn: What the turn produced, over the subtracted supply. ``None`` on a
                 pass that owes no answer.
             step: What became of the driven step.
+            goal: ADR-0250 §10's and §14's facts, passed on unchanged. Its elision half
+                is always clear here — §15 has such a turn build no candidacy — and its
+                clarification half is not: a question *this* turn's planner raised is
+                composed on this turn over this supply and is spoken in the ordinary
+                way, which is the line §15 draws between this turn's own completion and
+                content an earlier turn stored.
             conversation: Accepted and dropped, as :meth:`_composed_whole` drops it.
             deliveries: What a device reported playing of each surviving turn of the
                 tail, keyed by the episode it qualifies (ADR-0205 §5).
@@ -4245,6 +4479,13 @@ class Engine:
             # bounded-audience pass produces one (ADR-0242 §5): §8 fixes it as a closed
             # vocabulary carrying no destination, account, query, figure or command.
             search_not_serviced=search_not_serviced,
+            # ADR-0250 §15: a turn of this operation builds no candidacy and makes no
+            # `associate` call, so no elision can be disclosed here and the value's
+            # elision half is always clear. A **clarification this turn's own planner
+            # raised** is another matter and is spoken in the ordinary way — §15 admits
+            # it in terms, because it "is composed on that turn over that supply" and
+            # crosses none of the line §15 draws, which is about *stored* goal content.
+            goal=goal.facts,
         )
 
     async def resume(
@@ -4433,20 +4674,20 @@ class Engine:
 
     # --- goals, and the two acts on one (ADR-0250 §§12, 15) ---------------
     #
-    # **Three promoted operations at unchanged behaviour.** ADR-0250 §19's M1 lands
-    # "the contract, the wire and the stored shapes" and rules that no behaviour
-    # changes in it; §19's M3 is the `orchestration` lane that implements the
-    # engagement acts, `abandon_goal` and the rest. So each of the three below
-    # type-checks, is promoted on the wire by `wire/surface.py`'s own derivation, and
-    # returns the **non-acting member of its closed vocabulary** — which is what the
-    # ADR gives an operation whose behaviour has not landed, in the only spelling its
-    # own types admit: `AssistantEngineContract` requires a refusal to be a result and
-    # never an exception, so `NotImplementedError` is not available here.
+    # **Three promoted operations, implemented here by §19's M3.** Each returns the
+    # non-acting member of its closed vocabulary where there is nothing to act on —
+    # `AssistantEngineContract` requires a refusal to be a result and never an
+    # exception, so an unknown id is `NOTHING_TO_WITHDRAW` or `NO_SUCH_GOAL` and never
+    # a raise (§12).
     #
-    # `goals` could not be implemented in this lane even if M1 admitted it: ADR-0250
-    # §9's eight `PlanStore` members carry **no goal listing** — `candidates_for` is
-    # per conversation — so there is no contract route to the page this operation
-    # answers. That gap is filed rather than closed here.
+    # **`goals` is built over `PlanStore.export()`, and that is a cost taken openly**
+    # (#2296). ADR-0250 §9's eight new members carry **no goal listing** —
+    # `candidates_for` is per conversation and capped at eight, and every other read is
+    # by id — so the three shapes M1 named were a ninth `PlanStore` member, a second
+    # mode on `candidates_for`, or this. The first is a contract change and needs its
+    # own ADR under golden rule 5; the second would give one member two meanings and
+    # two orders; this one is honest and is a full materialisation per page. The cost
+    # is filed rather than hidden.
 
     async def goals(
         self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
@@ -4473,18 +4714,49 @@ class Engine:
         """
         self._reject_if_closing()
         self._check_page("goals", limit=limit, offset=offset)
-        return await self._tracked(self._goals(), "goals", checked=True)
+        return await self._tracked(self._goals(limit=limit, offset=offset), "goals", checked=True)
 
-    async def _goals(self) -> tuple[GoalSummary, ...]:
-        """Answer the empty listing this lane's store surface can produce.
+    async def _goals(self, *, limit: int, offset: int) -> tuple[GoalSummary, ...]:
+        """Read the page, in ADR-0250 §1's order, and compute what §15 says is computed.
 
         Split from :meth:`goals` because ADR-0119 §8's envelope sits at
         :meth:`_tracked` and "already wraps every public method" — a public operation
-        that did not cross it would falsify the claim that makes the placement sound,
-        and a reader would have to know which methods are exempt. It is a real seam
-        crossing whatever the answer's size.
+        that did not cross it would falsify the claim that makes the placement sound.
+
+        **``paused`` is computed and never stored** (§15), by ADR-0249 §5's own
+        definition — the goal's status is ``ACTIVE`` and its current attempt's state is
+        ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or ``BLOCKED`` — and
+        **the engine computes it**, *"so that two surfaces cannot render it
+        differently"*.
+
+        **The order is §1's, and it is stated rather than left to a store's rows**: the
+        greatest ``last_engaged_at`` first, the ``goal_id`` ascending as the tie-break,
+        and a goal carrying no instant **after** every goal that does. It is computed by
+        sorting on the instants themselves and never on a number derived from them, so
+        two instants a float would round together stay apart.
+
+        Args:
+            limit: How many summaries to return.
+            offset: How many to skip.
+
+        Returns:
+            The page.
         """
-        return ()
+        export = await self._plans.export()
+        current: dict[str, GoalAttempt] = {}
+        for attempt in export.attempts:
+            held = current.get(attempt.goal_id)
+            if held is None or attempt.opened_at >= held.opened_at:
+                current[attempt.goal_id] = attempt
+        standing = await self._outstanding()
+        by_id = sorted(export.goals, key=lambda goal: goal.id)
+        engaged = [goal for goal in by_id if goal.last_engaged_at is not None]
+        engaged.sort(key=lambda goal: goal.last_engaged_at or _NEVER_ENGAGED, reverse=True)
+        ordered = engaged + [goal for goal in by_id if goal.last_engaged_at is None]
+        return tuple(
+            _summary_of(goal, current.get(goal.id), standing.get(goal.id))
+            for goal in ordered[offset : offset + limit]
+        )
 
     async def withdraw_clarification(self, question_id: Identifier, /) -> ClarificationWithdrawal:
         """Take back a clarification without answering it (ADR-0250 §12).
@@ -4511,11 +4783,46 @@ class Engine:
             "withdraw_clarification", max_bytes=self._max_payload_bytes, question_id=named
         )
         return await self._tracked(
-            self._withdraw_clarification(), "withdraw_clarification", checked=True
+            self._withdraw_clarification(named), "withdraw_clarification", checked=True
         )
 
-    async def _withdraw_clarification(self) -> ClarificationWithdrawal:
-        """Answer the vocabulary's non-acting member (see :meth:`_goals`)."""
+    async def _withdraw_clarification(self, question_id: str) -> ClarificationWithdrawal:
+        """Settle an open question ``WITHDRAWN``, and say what that did (ADR-0250 §12).
+
+        *"It settles an ``OPEN`` question ``WITHDRAWN``, clearing its content in the
+        same step and freeing the goal's one question slot. **It takes no reason, no
+        free text and no deadline.**"*
+
+        **Withdrawing removes the question and not the pause** (§12): the attempt stays
+        ``AWAITING_CLARIFICATION`` and the goal stays open, and *"What the act buys is
+        the freedom to ask again"*. It records no answer, revises no interpretation and
+        engages no goal — ADR-0244 §11's own distinction, *"a cancellation is the user
+        withdrawing the question and is not"* a ruling.
+
+        **A question past its deadline is expired and not withdrawn**, because §12 makes
+        an expiry *"settled and … never inferred"* by the operation that reads it, and
+        reporting ``WITHDRAWN`` for a question the deadline had already taken would
+        record an act the user did not perform. There is then nothing left to withdraw.
+
+        Args:
+            question_id: The clarification to withdraw.
+
+        Returns:
+            Which of the two states this call reached.
+        """
+        question = await self._plans.get_question(question_id)
+        if question is None or question.disposition is not GoalQuestionDisposition.OPEN:
+            return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
+        now = self._clock()
+        if question.expires_at <= now:
+            await self._plans.settle_question(
+                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
+            )
+            return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
+        if await self._plans.settle_question(
+            question.id, disposition=GoalQuestionDisposition.WITHDRAWN, at=now
+        ):
+            return ClarificationWithdrawal.WITHDRAWN
         return ClarificationWithdrawal.NOTHING_TO_WITHDRAW
 
     async def abandon_goal(self, goal_id: Identifier, /) -> GoalAbandonment:
@@ -4540,11 +4847,53 @@ class Engine:
         self._reject_if_closing()
         named = identifier(goal_id, name="goal_id")
         check_arguments("abandon_goal", max_bytes=self._max_payload_bytes, goal_id=named)
-        return await self._tracked(self._abandon_goal(), "abandon_goal", checked=True)
+        return await self._tracked(self._abandon_goal(named), "abandon_goal", checked=True)
 
-    async def _abandon_goal(self) -> GoalAbandonment:
-        """Answer the vocabulary's non-acting member (see :meth:`_goals`)."""
-        return GoalAbandonment.NO_SUCH_GOAL
+    async def _abandon_goal(self, goal_id: str) -> GoalAbandonment:
+        """Write ``ABANDONED``, and settle the goal's open question (ADR-0250 §12).
+
+        *"``AssistantEngine`` gains ``abandon_goal`` … and **it is the only thing in
+        this system that writes ``ABANDONED``**. No expiry, no silence, no timeout, no
+        sweep, no reclaim, no model output and no inference writes it."*
+
+        *"Abandoning writes the goal's status through ``PlanStore.set_goal_status``
+        (§9) and settles its open question ``WITHDRAWN``, and does nothing else.** It
+        does **not** move the attempt's state, does not write an ``AttemptOutcome``,
+        does not end an execution and does not cancel anything in flight: **what becomes
+        of an attempt on an abandoned goal is A9's**."*
+
+        **The question is settled first**, so a call that dies between the two writes
+        leaves an open goal whose question is gone rather than a closed goal still
+        holding one — the direction in which the next act is the ordinary one.
+
+        Args:
+            goal_id: The goal to abandon.
+
+        Returns:
+            Which of the three states this call reached.
+
+        Raises:
+            StaleExecutionError: As ``set_goal_status`` raises it (ADR-0014 §5).
+        """
+        goal = await self._plans.get_goal(goal_id)
+        if goal is None:
+            return GoalAbandonment.NO_SUCH_GOAL
+        if not is_open(goal):
+            return GoalAbandonment.ALREADY_CLOSED
+        question = await self._open_question(goal.id)
+        if question is not None:
+            await self._plans.settle_question(
+                question.id,
+                disposition=GoalQuestionDisposition.WITHDRAWN,
+                at=self._clock(),
+            )
+        await self._plans.set_goal_status(
+            goal.id,
+            status=GoalStatus.ABANDONED,
+            at=self._clock(),
+            expected_version=goal.version,
+        )
+        return GoalAbandonment.ABANDONED
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).
@@ -7980,6 +8329,7 @@ class Engine:
         *,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Run one whole turn, composing its answer atomically (ADR-0170 §1).
 
@@ -8001,6 +8351,10 @@ class Engine:
             # ADR-0228 §4: which operation this is, and nothing about how long it may
             # spend. `ConversationalOperation.CONVERSE` prices itself.
             operation=ConversationalOperation.CONVERSE,
+            # ADR-0250 §11: what this turn says it is answering, resolved by
+            # `orchestration` against records this system holds and rendered to no
+            # model on any path.
+            reference=reference,
         )
 
     async def _converse_streaming(
@@ -8010,6 +8364,7 @@ class Engine:
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
         chunks: asyncio.Queue[ReplyChunk],
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Run one whole turn, publishing its answer as it composes (ADR-0173 §4).
 
@@ -8028,6 +8383,9 @@ class Engine:
             chunks: Where each composed :class:`~ai_assistant.core.types.ReplyChunk`
                 is put as it is produced. The relaying iterator owns reading it, and
                 a reader that has gone away does not stop this turn (ADR-0173 §9).
+            reference: What this turn says it is answering (ADR-0250 §11), inherited
+                from :meth:`converse` by ADR-0173's "taking exactly ``converse``'s
+                arguments in exactly its" order.
 
         Returns:
             The turn's outcome, whose ``reply`` is the join of whatever was put on
@@ -8043,6 +8401,7 @@ class Engine:
             stopped_while_asking: bool,
             structured: StructuredFacts,
             search_not_serviced: SearchNotServiced | None,
+            goal: _GoalPass,
         ) -> ComposedReply | None:
             return await self._compose_streaming(
                 turn,
@@ -8054,6 +8413,7 @@ class Engine:
                 stopped_while_asking,
                 structured,
                 search_not_serviced,
+                goal,
             )
 
         async def compose_routed(
@@ -8077,6 +8437,10 @@ class Engine:
             # `converse` — these two differ in where the answer goes rather than in
             # how long a user waits for it, and §4 keys the budget on the operation.
             operation=ConversationalOperation.CONVERSE_STREAMING,
+            # ADR-0250 §11, by ADR-0173's "taking exactly `converse`'s arguments in
+            # exactly its order" — which is why that keyword is inherited rather than
+            # recorded as a second decision.
+            reference=reference,
         )
 
     async def _composed_whole(  # noqa: PLR0913 — :data:`_Composer`'s six, and each is a distinct fact about the pass
@@ -8089,6 +8453,7 @@ class Engine:
         stopped_while_asking: bool,
         structured: StructuredFacts,
         search_not_serviced: SearchNotServiced | None,
+        goal: _GoalPass,
     ) -> ComposedReply | None:
         """Compose atomically, ignoring the conversation the streaming twin needs.
 
@@ -8119,6 +8484,273 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            goal=goal.facts,
+        )
+
+    async def _undecided(
+        self,
+        association: _Association,
+        *,
+        conversation: str,
+        asked: str,
+        spoken: _SpokenCapture | None,
+    ) -> TurnOutcome:
+        """Ask which goal the turn is about, and do nothing else (ADR-0250 §3, §5).
+
+        *"``UNDECIDED`` → the turn **asks which goal it is about** and associates to
+        none. It opens no goal, records no revision, engages nothing (§1), takes **no
+        relevance read, no episodic supplement and no ``Planner.plan`` call**, drives no
+        plan and produces no effect."* Every one of those is a consequence of returning
+        here, before ``LearningLoop.respond`` is entered: the three reads are the loop's
+        and the loop is never called.
+
+        **The reply is composed by ``orchestration`` from the typed value, and no model
+        writes it** (§5). The turn made no model call it could compose from, so the
+        sentence is deterministic, is built from ``candidates`` and ``elided``, and
+        *"**cannot disagree with the member beside it**"*.
+
+        **It is a turn of the conversation and is captured as one.** The exchange
+        happened — the user asked something and was answered with a question — and a
+        pass that recorded nothing would leave the next turn's history missing the
+        exchange its own answer refers to.
+
+        **It is unreachable on a channel of unbounded audience** (§15), which builds no
+        candidacy at all, and §20 arm 15 asserts that absence rather than this method
+        refusing it.
+
+        Args:
+            association: What §3 decided, carrying the disambiguation this asks about.
+            conversation: The conversation this turn ran under.
+            asked: The user's own words, normalised once (ADR-0248 §1).
+            spoken: This pass's spoken capture, or ``None``.
+
+        Returns:
+            The outcome shape §5 adds beside ADR-0170 §4's: ``turn`` ``None``, a
+            non-``None`` ``reply``, ``reply_degraded`` ``False``, no engagement, and the
+            disambiguation.
+        """
+        disambiguation = association.disambiguation
+        if disambiguation is None:  # pragma: no cover — the caller tests it first
+            msg = "an undecided turn carries the goals it is asking between"
+            raise PlanningError(msg)
+        return await self._capture(
+            conversation,
+            turn=None,
+            step=None,
+            resumed=False,
+            composed=ComposedReply(text=disambiguation_reply(disambiguation), degraded=False),
+            asked=asked,
+            # This pass assembled no supply at all, so ADR-0204 §2's evaluation had
+            # nothing to evaluate and ADR-0223 §2's disjunction is over an empty
+            # selection. Both are stated rather than inherited: an undecided turn
+            # withheld nothing because it read nothing.
+            supplied_withheld=False,
+            modality=Modality.TEXT if spoken is None else Modality.SPEECH,
+            derived_from_external=False,
+            spoken=spoken,
+            disambiguation=disambiguation,
+            # §11: "An ``UNKNOWN`` reference is reported whatever the association then
+            # does", which is the whole reason `reference` is a member of its own.
+            reference=association.reference,
+        )
+
+    async def _engagement(
+        self,
+        record: RecordedGoal | None,
+        association: _Association,
+        *,
+        conversation_id: str,
+    ) -> GoalEngagement | None:
+        """Say what this turn did with its goal, engaging one it opened (ADR-0250 §1, §5).
+
+        **A goal this turn opened is engaged here and not earlier**, because until
+        :meth:`_save_goal` there is no row to stamp: ADR-0249 §12 rules that *"A turn
+        that ends before that site writes no attempt row, exactly as it writes no goal
+        row and no plan row"*, and §1 makes the opening turn one of its four engaging
+        acts — *"a turn that associates to it under §3, **including the turn that opens
+        it**"*. A goal the store already held was engaged at the association, which is
+        the instant the act happened.
+
+        **The disposition of an opening turn is ``OPENED``**, and it is stamped here
+        rather than carried: the association could not name it, having no goal to name
+        it about.
+
+        Args:
+            record: What the loop decided about this turn's goal, or ``None``.
+            association: What §3 decided.
+            conversation_id: The conversation this turn ran under, which
+                ``engage_goal`` writes into ``Goal.last_engaged_in``.
+
+        Returns:
+            The typed value the outcome carries, or ``None`` where the turn engaged no
+            goal.
+
+        Raises:
+            StaleExecutionError: As ``engage_goal`` raises it (ADR-0014 §5).
+        """
+        if record is None:  # pragma: no cover — every RespondedTurn carries a record
+            return None
+        if association.goal is None:
+            await self._plans.engage_goal(
+                record.goal.id,
+                at=self._clock(),
+                conversation_id=conversation_id,
+                expected_version=record.goal.version,
+            )
+        return engagement_of(
+            record.goal,
+            disposition=association.disposition or EngagementDisposition.OPENED,
+            recorded=record.revisions,
+        )
+
+    async def _persist_attempt(
+        self,
+        opened: OpenedAttempt | None,
+        *,
+        association: _Association,
+        plans: Sequence[ActionPlan],
+        charged: GoalAttempt | None,
+    ) -> OpenedAttempt | None:
+        """Write the attempt by whichever of ADR-0249 §12's two routes it takes.
+
+        **An attempt this turn opened** is written by ``open_attempt``, *"carrying the
+        phase and state it stands at and the references it has accumulated by that
+        moment"* — which is why this follows :meth:`_save_goal` and
+        :meth:`_persist_plans`, since that member refuses an attempt whose ``goal_id``
+        names no stored goal or whose ``plan_ids`` its goal does not hold.
+
+        **An attempt an earlier turn persisted** takes ``commit_attempt`` instead,
+        because §12 rules that *"after the first write, every change goes through
+        ``commit_attempt``, in this turn as in any later one"*. Its ledger is already
+        durable — each planner call committed its own charge before it was made
+        (ADR-0251 §12) — so what is left is the plans it produced, the phase its work
+        reached and the interval it worked, each written against the version the charge
+        before it returned.
+
+        **``SUPERSEDED`` is settled in the same sequence that opens the attempt**
+        (ADR-0250 §12), which is the whole of that disposition's one producer: *"opening
+        a new attempt on a goal whose earlier attempt's question is still ``OPEN``"*.
+
+        **A resumed attempt's state moves to ``RUNNING``** (§11, §20 arm 31): an answer
+        resumes the attempt a clarification paused, and so does the next ordinary turn
+        that associates to that goal — *"the next turn that associates to it resumes the
+        attempt"*. No other state is moved here.
+
+        Args:
+            opened: The attempt as the loop left it, or ``None``.
+            association: What §3 decided, carrying the question to supersede and
+                whether this turn resumes a paused attempt.
+            plans: Every plan this turn produced, oldest first.
+            charged: The stored attempt row as ADR-0251 §12's charges left it, or
+                ``None`` on an attempt this turn opened.
+
+        Returns:
+            The attempt as the store now holds it, or ``None``.
+
+        Raises:
+            PlanningError: As ``open_attempt`` and ``commit_attempt`` raise it.
+        """
+        if opened is None:  # pragma: no cover — every RespondedTurn carries an attempt
+            return None
+        if association.supersede is not None:
+            await self._plans.settle_question(
+                association.supersede,
+                disposition=GoalQuestionDisposition.SUPERSEDED,
+                at=self._clock(),
+            )
+        if opened.opened:
+            await self._plans.open_attempt(opened.attempt)
+            return opened
+        row = charged or opened.attempt
+        for plan in plans:
+            if plan.id in row.plan_ids:
+                continue
+            row = await self._plans.commit_attempt(
+                AttemptTransition(
+                    attempt_id=row.id, expected_version=row.version, add_plan_id=plan.id
+                )
+            )
+        phase = None if opened.attempt.phase is row.phase else opened.attempt.phase
+        working = opened.attempt.effort.working
+        state = (
+            AttemptState.RUNNING
+            if association.resumes and row.state is AttemptState.AWAITING_CLARIFICATION
+            else None
+        )
+        if phase is not None or state is not None or working > row.effort.working:
+            row = await self._plans.commit_attempt(
+                AttemptTransition(
+                    attempt_id=row.id,
+                    expected_version=row.version,
+                    to_phase=phase,
+                    to_state=state,
+                    working=working if working > row.effort.working else None,
+                )
+            )
+        return replace(opened, attempt=row)
+
+    async def _raise(
+        self,
+        raised: RaisedSubject | None,
+        *,
+        record: RecordedGoal | None,
+        opened: OpenedAttempt | None,
+    ) -> Clarification | None:
+        """Write the question this turn's planner raised, if the store takes it (§8, §10).
+
+        **The id, the two instants, the deadline and the disposition are stamped here**
+        (§16): *"the question's id, its ``asked_at``, its ``expires_at``, its
+        ``attempt_id`` and every disposition it ever carries … are each stamped by the
+        loop from the injected clock, the injected id factory and typed outcomes"*. The
+        planner supplied the two content fields and nothing else, and a value coming
+        back carrying any of these has it discarded silently — which is structural here,
+        because :class:`~ai_assistant.core.types.ProposedQuestion` carries no field one
+        could arrive on.
+
+        **``expires_at`` is computed once, at the instant the question is written, and
+        is never extended, refreshed or recomputed** (§8), from
+        ``Settings.goal_question_ttl`` — required, positive, with no disable spelling.
+
+        **A question exists only where the store accepted it** (§10). Where
+        ``record_question`` answered ``False`` — that goal already holds an open one — or
+        raised, *"no question exists: ``clarification`` is ``None``, the attempt's state
+        is **not** moved, and nothing durable is outstanding"*. The turn still declines
+        to act, which is the caller's branch and not this method's: *"The decision not to
+        drive a side-effecting step was taken on the ambiguity and not on the write."*
+
+        Args:
+            raised: The question the loop took from the planner, or ``None``.
+            record: This turn's goal record, which names the goal the question is bound
+                to.
+            opened: This turn's attempt, which names the attempt that raised it.
+
+        Returns:
+            The clarification to put on the outcome, or ``None`` where nothing was
+            written.
+        """
+        if raised is None or record is None or opened is None:
+            return None
+        now = self._clock()
+        question = GoalQuestion(
+            id=self._id_factory(),
+            goal_id=record.goal.id,
+            attempt_id=opened.attempt.id,
+            text=raised.text,
+            about=raised.about,
+            asked_at=now,
+            expires_at=now + self._goal_question_ttl,
+        )
+        try:
+            written = await self._plans.record_question(question)
+        except PlanningError:
+            # §10: a write that *raised* leaves no question either, and the turn is not
+            # failed for it — "not an error, not a park, not a degradation of the turn".
+            _log.warning("goal_question_not_written", goal_id=question.goal_id, exc_info=True)
+            return None
+        if not written:
+            return None
+        return Clarification(
+            question_id=question.id, text=raised.text, expires_at=question.expires_at
         )
 
     async def _persist_plans(self, plans: Sequence[ActionPlan]) -> None:
@@ -8165,6 +8797,410 @@ class Engine:
         """
         for plan in plans:
             await self._plans.save_plan(plan)
+
+    # --- ADR-0250 §3: a turn resolves its goal before it plans ---------------
+
+    async def _engage(self, goal_id: str | None, *, conversation_id: str | None) -> None:
+        """Stamp a goal's engagement from a resumption (ADR-0250 §1, acts 3 and 4).
+
+        *"3. A **resumed park of that goal**: ``AssistantEngine.resume`` answering a
+        ``ParkedRead`` whose ``goal_id`` names it (ADR-0249 §11), on the path that
+        dispatches. 4. A **resumed step of that goal**: ``AssistantEngine.resume``
+        answering a parked confirmation whose execution's plan carries that
+        ``goal_id``."*
+
+        **A goal id that resolves to nothing is not a fault.** ADR-0249 §11 rules that
+        *"``ParkedRead.goal_id`` is an identifier and **not a resolution guarantee**"* —
+        a park whose turn ended before its persistence site names a goal no row holds —
+        and *"No lane repairs, back-fills or refuses such a park"*. The same is true of
+        a plan whose goal a later ``delete_goal`` removed.
+
+        Args:
+            goal_id: The goal the resumption reached, or ``None`` where the record
+                carries none.
+            conversation_id: The conversation the resumption was recorded in, or
+                ``None`` where it resolved to none — ADR-0074 §3's *"not captured at
+                all, and no conversation invented"*, which leaves nothing to stamp
+                ``last_engaged_in`` with.
+
+        Raises:
+            StaleExecutionError: As ``engage_goal`` raises it (ADR-0014 §5).
+        """
+        if goal_id is None or conversation_id is None:
+            return
+        goal = await self._plans.get_goal(goal_id)
+        if goal is None:
+            return
+        await self._plans.engage_goal(
+            goal.id,
+            at=self._clock(),
+            conversation_id=conversation_id,
+            expected_version=goal.version,
+        )
+
+    async def _engage_execution(self, execution_id: str, *, conversation_id: str) -> None:
+        """ADR-0250 §1's fourth act: the goal the resumed step's plan carries.
+
+        The id is read **off the execution's own plan** rather than off the parked
+        turn, because §1 names it there — *"a parked confirmation whose execution's plan
+        carries that ``goal_id``"* — and because a park recovered after a restart has no
+        turn to read it from (ADR-0052 §3).
+
+        Args:
+            execution_id: The execution the resumed step belongs to.
+            conversation_id: The conversation the resolution was recorded in.
+        """
+        state = await self._plans.get_execution(execution_id)
+        if state is None:  # pragma: no cover — the resume already resolved it
+            return
+        plan = await self._plans.get_plan(state.plan_id)
+        if plan is None:  # pragma: no cover — an execution's plan is its own row
+            return
+        await self._engage(plan.goal_id, conversation_id=conversation_id)
+
+    async def _outstanding(self) -> dict[str, GoalQuestion]:
+        """Every goal's open question, expiring what is due (ADR-0250 §12, §15).
+
+        ``outstanding_questions`` is one of the four operations §12 names as *"the first
+        operation that reads it"*, so a question past its deadline is settled ``EXPIRED``
+        here rather than rendered as though it still stood. The settlement *"clears the
+        content (§8) and moves **nothing else**: not the goal's status, not the attempt's
+        state, not ``last_engaged_at``"*.
+
+        Returns:
+            The open questions, keyed by the goal each is about. A goal holds at most
+            one (§8), so the mapping loses nothing.
+        """
+        now = self._clock()
+        standing: dict[str, GoalQuestion] = {}
+        for question in await self._plans.outstanding_questions():
+            if question.expires_at > now:
+                standing[question.goal_id] = question
+                continue
+            await self._plans.settle_question(
+                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
+            )
+        return standing
+
+    async def _associate(
+        self,
+        request: str,
+        *,
+        conversation_id: str,
+        reference: TurnReference | None,
+        associates: bool,
+    ) -> _Association:
+        """Resolve which goal this turn is about, in ADR-0250 §3's order.
+
+        *"Every turn resolves its goal before it plans, in this order, and the first
+        step that answers is the answer.*
+
+        1. *A ``TurnReference`` wins outright and costs no model call.*
+        2. *An empty candidate set opens a new goal, and costs no model call.*
+        3. *Otherwise exactly one ``GoalAssociator.associate`` call."*
+
+        **A turn on a channel of unbounded audience takes none of the three** (§15):
+        *"no ``GoalCandidacy`` is built and no ``GoalAssociator.associate`` call is
+        made: §3's second step governs and the turn **opens a goal of its own**"*. So
+        the candidate set is not even read there — nothing stored reaches any stage of
+        such a turn, which is a property of which operation is running rather than of a
+        filter over content.
+
+        **The candidate read precedes the reference, and the reference still costs no
+        model call.** §5 defines ``CONTINUED`` as *the focused goal* and ``RESUMED`` as
+        *an open goal that was not the focused goal*, so the disposition of **any**
+        engagement is a fact about this conversation's focus — which is §1's derivation
+        over §2's set. The read is a store read; §3's *"costs no model call"* and §13's
+        *"no ``associate`` call is made"* both bind and are both kept.
+
+        Args:
+            request: The turn's own request, normalised once (ADR-0248 §1).
+            conversation_id: The conversation this turn runs under.
+            reference: What the turn says it is answering, or ``None``.
+            associates: Whether this operation associates at all — ``False`` on an
+                operation whose channel audience is unbounded (§15).
+
+        Returns:
+            What the turn does with a goal: one to continue, an ask to put, or neither,
+            which is the turn opening one.
+        """
+        if not associates:
+            return _Association()
+        candidates = await self._plans.candidates_for(
+            conversation_id, limit=MAX_ASSOCIATION_CANDIDATES
+        )
+        index = focused_index(candidates.goals)
+        focused = None if index is None else candidates.goals[index].id
+        unknown: ReferenceOutcome | None = None
+        if reference is not None:
+            found = await self._referenced(
+                reference,
+                conversation_id=conversation_id,
+                focused=focused,
+                elided=candidates.elided,
+            )
+            if found is not None:
+                return found
+            # §11: *"naming no question this store holds → nothing is settled, nothing
+            # is engaged, and the turn is associated by §3 like any other"*, and §11
+            # again: *"An ``UNKNOWN`` reference is reported whatever the association
+            # then does"* — which is why the value is carried through every branch
+            # below rather than returned here.
+            unknown = ReferenceOutcome.UNKNOWN
+        candidacy = candidacy_of(request, candidates)
+        if candidacy is None:
+            return _Association(reference=unknown, elided=candidates.elided)
+        association = await self._associator.associate(candidacy)
+        resolution = _resolved(association, candidates.goals)
+        if resolution.asks:
+            return _Association(
+                reference=unknown,
+                elided=candidates.elided,
+                disambiguation=disambiguation_of(resolution.asked_about, elided=candidates.elided),
+            )
+        if resolution.goal is None:
+            return _Association(reference=unknown, elided=candidates.elided)
+        return await self._engaged(
+            resolution.goal,
+            conversation_id=conversation_id,
+            reference=unknown,
+            elided=candidates.elided,
+            focused=focused,
+        )
+
+    async def _referenced(
+        self,
+        reference: TurnReference,
+        *,
+        conversation_id: str,
+        focused: str | None,
+        elided: int,
+    ) -> _Association | None:
+        """Resolve ADR-0250 §3's first step against records this system holds (§11).
+
+        **A reference is never rendered to a model and never accepted from one** (§11):
+        it is resolved here, against the ``PlanStore`` and against nothing else, and no
+        prompt this decision builds prints it or the goal id it resolves to.
+
+        **A ``question_id`` settles, whatever the disposition.** ``goal_id`` survives
+        settlement (§8), so the reference resolves to a goal in every case and the turn
+        engages it; :meth:`_settlement` says which of §11's four
+        :class:`~ai_assistant.core.types.ReferenceOutcome` members that came to.
+
+        **A ``goal_id`` that resolves reports nothing** (§11): *"A resolved goal
+        reference has nothing to report beyond the engagement itself, which
+        ``disposition`` already carries."*
+
+        Args:
+            reference: The turn's reference, of one of §11's two shapes.
+            conversation_id: The conversation this turn runs under.
+            focused: The id of this conversation's focused goal, or ``None``.
+            elided: How many goals the candidate-set cap dropped (§2).
+
+        Returns:
+            The engagement, or ``None`` where the reference named no record this store
+            holds — which the caller reports as ``UNKNOWN`` and then associates past.
+        """
+        if reference.question_id is not None:
+            question = await self._plans.get_question(reference.question_id)
+            if question is None:
+                return None
+            goal = await self._plans.get_goal(question.goal_id)
+            if goal is None:  # pragma: no cover — delete_goal cascades to its questions
+                return None
+            outcome = await self._settlement(question)
+            return await self._engaged(
+                goal,
+                conversation_id=conversation_id,
+                reference=outcome,
+                elided=elided,
+                focused=focused,
+            )
+        goal = await self._plans.get_goal(str(reference.goal_id))
+        if goal is None:
+            return None
+        return await self._engaged(
+            goal,
+            conversation_id=conversation_id,
+            reference=None,
+            elided=elided,
+            focused=focused,
+        )
+
+    async def _settlement(self, question: GoalQuestion) -> ReferenceOutcome:
+        """Settle what a referenced question came to, and say which (ADR-0250 §11, §12).
+
+        **Settled first, before anything else is written** (§11), which is ADR-0244
+        §6's own reason: *"settling first has no window in which a second party sees an
+        answered question beside an open one and has to guess whether the first
+        answerer is still running"*. What the turn then loses if it dies is one
+        answer — §11 states that cost, and *"Nothing repairs it, nothing re-opens the
+        question, and no lane adds a reconciliation walk, a tombstone or a second
+        lifecycle."*
+
+        **An expiry is settled and never inferred** (§12), by *"the first operation
+        that reads it"* — here, a turn whose reference names it. The deadline is
+        compared **only** where the question is still ``OPEN``, and every other answer
+        is read off the disposition: *"A question answered an hour after it was asked
+        and referenced a week later is ``ALREADY_SETTLED``, not ``EXPIRED``: it was
+        answered, and a reply saying otherwise would tell the user their answer never
+        arrived."*
+
+        **A caller that loses the compare-and-swap records nothing and reports the
+        settled state** (§9), which is why a ``False`` from ``settle_question`` re-reads
+        rather than assuming.
+
+        Args:
+            question: The question the reference named, as it was read.
+
+        Returns:
+            Which of §11's four members this turn's reference came to.
+        """
+        if question.disposition is not GoalQuestionDisposition.OPEN:
+            return _reference_outcome(question.disposition)
+        now = self._clock()
+        if question.expires_at <= now:
+            await self._plans.settle_question(
+                question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
+            )
+            return ReferenceOutcome.EXPIRED
+        if await self._plans.settle_question(
+            question.id, disposition=GoalQuestionDisposition.ANSWERED, at=now
+        ):
+            return ReferenceOutcome.ANSWERED
+        again = await self._plans.get_question(question.id)
+        if again is None:  # pragma: no cover — a settled question keeps its row (§8)
+            return ReferenceOutcome.UNKNOWN
+        return _reference_outcome(again.disposition)
+
+    async def _engaged(
+        self,
+        goal: Goal,
+        *,
+        conversation_id: str,
+        reference: ReferenceOutcome | None,
+        elided: int,
+        focused: str | None,
+    ) -> _Association:
+        """Engage a goal the store already holds, and say what that turn will do (§1, §12).
+
+        **Engagement is one of §1's four acts and it is taken here**, at the moment the
+        association happens: *"Exactly four acts engage a goal … 1. A turn that
+        associates to it under §3."* The write is ``PlanStore.engage_goal``, *"the one
+        writer"* of both engagement fields, from the injected clock and this turn's
+        conversation. A goal this turn **opens** is engaged later instead, at the site
+        that first writes its row — there is nothing to stamp before it exists (ADR-0249
+        §12).
+
+        **A reopen writes ``ACTIVE`` first** (§13), through ``set_goal_status``, *"the
+        goal's **only** status-mutation route"* — before the engagement, so the brief
+        the planner receives says what the goal now is rather than what it was. A turn
+        that then dies leaves an ``ACTIVE`` goal with no runnable attempt, which is the
+        state §12's third act is written for and which the next turn resolves by opening
+        one.
+
+        **Which acts open an attempt** (§12): a reopened goal starts a new one, and so
+        does *"a turn that associates to an open goal that has no runnable attempt — its
+        current attempt is in a terminal ``AttemptState`` … **or it has no attempt at
+        all**"*, the second limb being every goal ADR-0249 §12 migrated. Everything else
+        continues the attempt that stands.
+
+        **``SUPERSEDED`` has exactly one producer** (§12): opening a new attempt on a
+        goal whose earlier attempt's question is still ``OPEN``. The id travels to the
+        persistence site, so the settlement happens *"in the same sequence that opens
+        the attempt"*.
+
+        Args:
+            goal: The goal this turn engages, as it was read.
+            conversation_id: The conversation this turn runs under.
+            reference: What became of the turn's reference, or ``None``.
+            elided: How many goals the candidate-set cap dropped (§2).
+            focused: The id of this conversation's focused goal, or ``None``.
+
+        Returns:
+            The engagement, with the goal at the version its stamp left it.
+        """
+        disposition = (
+            EngagementDisposition.REOPENED
+            if not is_open(goal)
+            else EngagementDisposition.CONTINUED
+            if goal.id == focused
+            else EngagementDisposition.RESUMED
+        )
+        if disposition is EngagementDisposition.REOPENED:
+            goal = await self._plans.set_goal_status(
+                goal.id,
+                status=GoalStatus.ACTIVE,
+                at=self._clock(),
+                expected_version=goal.version,
+            )
+        goal = await self._plans.engage_goal(
+            goal.id,
+            at=self._clock(),
+            conversation_id=conversation_id,
+            expected_version=goal.version,
+        )
+        attempts = await self._plans.attempts_of(goal.id)
+        current = attempts[-1] if attempts else None
+        opens = (
+            disposition is EngagementDisposition.REOPENED
+            or current is None
+            or current.state in TERMINAL_ATTEMPT_STATES
+        )
+        question = await self._open_question(goal.id)
+        return _Association(
+            goal=goal,
+            attempt=None if opens else current,
+            disposition=disposition,
+            reference=reference,
+            elided=elided,
+            # §8: the brief carries the goal's open question so *"a planner does not
+            # raise a question the system is already asking"* — and carries none where
+            # the attempt this turn opens is about to supersede it.
+            open_question=None if opens or question is None else question.text,
+            supersede=question.id if opens and question is not None else None,
+            # §11, arm 31: an answer resumes the attempt, and so does the next ordinary
+            # turn that associates to a goal a clarification paused. No other state is
+            # moved here: a park is somebody else's outstanding question and this turn
+            # did not answer it.
+            resumes=(
+                current is not None
+                and not opens
+                and current.state is AttemptState.AWAITING_CLARIFICATION
+            ),
+        )
+
+    async def _open_question(self, goal_id: str) -> GoalQuestion | None:
+        """The goal's open question, settling it where its deadline has passed (§12).
+
+        *"An expiry is settled and is never inferred. A question whose ``expires_at``
+        is at or before the clock's reading is settled ``EXPIRED`` by the **first
+        operation that reads it** — a ``record_question`` on the same goal, an
+        ``open_question`` read, an ``outstanding_questions`` enumeration, or a turn
+        whose reference names it. The settlement clears the content (§8) and moves
+        **nothing else**: not the goal's status, not the attempt's state, not
+        ``last_engaged_at``."*
+
+        **The goal stays paused and stays resumable** (§12): *"no lane reads an expiry
+        as a refusal, an abandonment, a denial or a decision of any kind."*
+
+        Args:
+            goal_id: The goal to read.
+
+        Returns:
+            Its open question, or ``None`` where it holds none or held one this call
+            has just expired.
+        """
+        question = await self._plans.open_question(goal_id)
+        if question is None:
+            return None
+        now = self._clock()
+        if question.expires_at > now:
+            return question
+        await self._plans.settle_question(
+            question.id, disposition=GoalQuestionDisposition.EXPIRED, at=now
+        )
+        return None
 
     async def _save_goal(self, record: RecordedGoal | None) -> None:
         """Persist the goal record the loop built for this turn (ADR-0249 §11, §12).
@@ -8577,7 +9613,7 @@ class Engine:
         stamped = opened.phases + (() if to_phase is None else (to_phase,))
         return replace(opened, attempt=moved, phases=stamped)
 
-    async def _run_turn(  # noqa: PLR0913, PLR0915 — PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
+    async def _run_turn(  # noqa: C901, PLR0913, PLR0915 — C901: ADR-0250 §3 and §10 add two branches to one sequence — a turn that could not decide which goal it was about returns before the loop, and a turn that raised a question takes the undriven path whatever its plan proposed — and each is a fact about *this* pass that a helper could only take back by threading this pass's whole local state through a parameter list. PLR0913: the utterance, the budget, the conversation, the two composers, the supply filter and the spoken capture; every one is a distinct fact about the pass, and collapsing any pair would put a flag where a value belongs. PLR0915: one pass is one sequence — admit, persist, authorise, drive, compose, capture — and the four statements ADR-0249 §12's authorization boundary adds are a closure over this pass's own attempt carrier, which a helper could only take back by putting that carrier in a mutable cell
         self,
         utterance: str,
         *,
@@ -8588,6 +9624,7 @@ class Engine:
         supply: TurnSupply,
         operation: ConversationalOperation,
         spoken: _SpokenCapture | None = None,
+        reference: TurnReference | None = None,
     ) -> TurnOutcome:
         """Route the ask, or resolve the conversation, plan the turn and drive its step.
 
@@ -8690,6 +9727,45 @@ class Engine:
                 spoken=spoken,
             )
         history = await self._conversations.history(conversation.id)
+        # ADR-0250 §3: **every turn resolves its goal before it plans**, and the
+        # association precedes the relevance read, the episodic supplement and the
+        # planner call because all three are the goal's. The request is normalised
+        # **once**, here, by the same function the turn stage uses (ADR-0248 §1), so the
+        # candidacy and the goal are built from one string rather than from two strips
+        # that happen to agree.
+        request = request_of(utterance)
+        association = await self._associate(
+            request,
+            conversation_id=conversation.id,
+            reference=reference,
+            # §15: a turn on a channel of unbounded audience associates to no stored
+            # goal, builds no candidacy and makes no `associate` call. The test is over
+            # **which operation is running** and over no content at all, which is what
+            # §15 says makes the rule checkable.
+            associates=operation is not ConversationalOperation.CONVERSE_SPOKEN,
+        )
+        if association.disambiguation is not None:
+            return await self._undecided(
+                association, conversation=conversation.id, asked=request, spoken=spoken
+            )
+        # ADR-0251 §12's second case, wired as a callable and never as a store (#2294).
+        # `charged` follows the stored row, because each charge advances the attempt's
+        # `version` and the next compare-and-swap is computed against what the last one
+        # returned. A turn that opens its attempt is given neither.
+        charged = association.attempt
+
+        async def charge(total: int) -> None:
+            nonlocal charged
+            if charged is None:  # pragma: no cover — no charge is wired without one
+                return
+            charged = await self._plans.commit_attempt(
+                AttemptTransition(
+                    attempt_id=charged.id,
+                    expected_version=charged.version,
+                    planner_calls=total,
+                )
+            )
+
         # ADR-0227 §3: the turn and, beside it, which of its records this turn's
         # citation hop reached. Supplied by the loop — the servicer under it is the
         # one component that can distinguish the two kinds — and carried to the
@@ -8708,6 +9784,16 @@ class Engine:
             # other stage of this method acquires a conversation identity it did not
             # already hold (ADR-0181 §5's third clause, ADR-0097 §7).
             conversation_id=conversation.id,
+            # ADR-0250 §3: what the association decided, handed over as data. `None`
+            # on both means the turn opens a goal and its first attempt, which is every
+            # turn of a fresh conversation and every turn of an unbounded-audience
+            # operation (§15).
+            continuing=association.goal,
+            continuing_attempt=association.attempt,
+            # §8: the one text `GoalBrief.open_questions` ever carries, read from the
+            # store here because the loop holds none (ADR-0249 §11).
+            open_question=association.open_question,
+            charge=None if association.attempt is None else charge,
         )
         # ADR-0249 §5's ledger: when this pass's **remaining** work began. The turn
         # stage's own interval is already on the attempt it handed over, so the two do
@@ -8789,19 +9875,54 @@ class Engine:
         # and every later change goes through `commit_attempt` at the moment the fact
         # becomes true.
         attempt = responded.attempt
-        if not turn.plan.steps:
+        # ADR-0250 §10: the question this turn's planner raised, if any. **A turn that
+        # raised one drives no step of its plan and produces no effect** — "the plan is
+        # persisted exactly as ADR-0228 §5 and ADR-0249 §11 already have it persisted;
+        # it is not driven, no execution is started, and no `ToolCall` is constructed" —
+        # so it takes the undriven branch whatever its plan proposed.
+        raised = responded.raised
+        # §14: the elision is disclosed on a turn that **opened** a goal and on a turn
+        # that asked, and on no other — "a goal was found, and reciting what was not
+        # looked at would be noise on the turns the mechanism worked". The test is the
+        # turn's disposition and never the verdict: a `CONTINUES` over a capped set that
+        # displaced the conversation's only open goal opens a goal while reporting that
+        # one was found, and `association.disposition` is `None` exactly where this turn
+        # opened the goal.
+        elided = association.elided > 0 and association.disposition is None
+        if raised is not None or not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
             # could park — so it needs no capacity slot, and its goal and plan are
             # persisted as an auditable record (ADR-0014 §2).
             await self._save_goal(goal_record)
+            engagement = await self._engagement(
+                goal_record, association, conversation_id=conversation.id
+            )
             await self._persist_plans(plans)
-            await self._open_attempt(attempt)
-            # ADR-0249 §6: "a phase whose work is vacuous is stamped and left in the
-            # same instant". A no-action turn authorises nothing and executes nothing,
-            # so both phases are stamped and left — six responsibilities and six
-            # observable transitions, on the turn §6 names as passing through all six.
-            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
-            attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
+            attempt = await self._persist_attempt(
+                attempt, association=association, plans=plans, charged=charged
+            )
+            clarification = await self._raise(raised, record=goal_record, opened=attempt)
+            if raised is not None:
+                # ADR-0250 §10: "The attempt's state becomes `AWAITING_CLARIFICATION`
+                # and its phase does not move" — "a question is a pause, not a retreat,
+                # and the attempt resumes at the phase it stood" (§11). Where
+                # `record_question` refused, "the attempt's state is **not** moved and
+                # nothing durable is outstanding", so only the ledger is written.
+                attempt = await self._move_attempt(
+                    attempt,
+                    to_state=(
+                        None if clarification is None else AttemptState.AWAITING_CLARIFICATION
+                    ),
+                    working=self._worked(attempt, drove_from),
+                )
+            else:
+                # ADR-0249 §6: "a phase whose work is vacuous is stamped and left in the
+                # same instant". A no-action turn authorises nothing and executes
+                # nothing, so both phases are stamped and left — six responsibilities
+                # and six observable transitions, on the turn §6 names as passing
+                # through all six.
+                attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.AUTHORIZE)
+                attempt = await self._move_attempt(attempt, to_phase=AttemptPhase.EXECUTE)
             composed = await compose(
                 turn,
                 None,
@@ -8811,6 +9932,15 @@ class Engine:
                 stopped_while_asking,
                 structured,
                 search_not_serviced,
+                _GoalPass(
+                    facts=GoalFacts(
+                        clarification=(None if clarification is None else clarification.text),
+                        elided=elided,
+                    ),
+                    engagement=engagement,
+                    clarification=clarification,
+                    reference=association.reference,
+                ),
             )
             # §5, §6: written **after the answer exists**, and only where §5's own
             # three conjuncts are literally true (:meth:`_answered`). Nothing here claims
@@ -8818,15 +9948,19 @@ class Engine:
             # `ACHIEVED` no producer, and "producing a reply never by itself establishes
             # that a goal was achieved". `VERIFY` is stamped either way — the phase says
             # where the attempt stands, not what it earned.
-            answered = self._answered(composed, None)
-            attempt = await self._move_attempt(
-                attempt,
-                to_phase=AttemptPhase.VERIFY,
-                to_state=AttemptState.ENDED if answered else None,
-                outcome=AttemptOutcome.ANSWERED if answered else None,
-                ended_at=self._clock() if answered else None,
-                working=self._worked(attempt, drove_from),
-            )
+            # ADR-0250 §10 again: a turn that raised a question is **paused**, not
+            # finished, so nothing here verifies, ends or earns an outcome for it — and
+            # its phase stays where §10 left it.
+            answered = raised is None and self._answered(composed, None)
+            if raised is None:
+                attempt = await self._move_attempt(
+                    attempt,
+                    to_phase=AttemptPhase.VERIFY,
+                    to_state=AttemptState.ENDED if answered else None,
+                    outcome=AttemptOutcome.ANSWERED if answered else None,
+                    ended_at=self._clock() if answered else None,
+                    working=self._worked(attempt, drove_from),
+                )
             return await self._capture(
                 conversation.id,
                 turn=turn,
@@ -8850,6 +9984,10 @@ class Engine:
                 search_not_serviced=search_not_serviced,
                 # ADR-0244 §9's first member, on the same terms.
                 read_confirmation=read_confirmation,
+                # ADR-0250 §5's members, each computed above by the site that knows it.
+                goal_engagement=engagement,
+                clarification=clarification,
+                reference=association.reference,
             )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
@@ -8862,6 +10000,9 @@ class Engine:
         handle = self._admit_and_reserve()
         try:
             await self._save_goal(goal_record)
+            engagement = await self._engagement(
+                goal_record, association, conversation_id=conversation.id
+            )
             # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
             # `start_execution`, so a turn whose second `save_plan` raises has driven
             # nothing — no execution is open, no capacity slot is spent on a step and
@@ -8871,7 +10012,9 @@ class Engine:
             # decided and recorded nothing, not one that acted and then lost the
             # record of why.
             await self._persist_plans(plans)
-            await self._open_attempt(attempt)
+            attempt = await self._persist_attempt(
+                attempt, association=association, plans=plans, charged=charged
+            )
             # ADR-0249 §6: `AUTHORIZE` is stamped before the step is driven, because the
             # permission decision the runner takes is that phase's work — and it is
             # stamped whether or not a decision is reached, since §6 makes the six
@@ -8980,6 +10123,15 @@ class Engine:
             stopped_while_asking,
             structured,
             search_not_serviced,
+            # ADR-0250 §10, §14: a turn that reached this branch drove a step, so it
+            # raised no question; and §14's disclosure is keyed on the disposition,
+            # which is what `elided` already is. The outcome's own members ride here
+            # too, because the streaming composer measures its ceiling against them.
+            _GoalPass(
+                facts=GoalFacts(elided=elided),
+                engagement=engagement,
+                reference=association.reference,
+            ),
         )
         # §5, §6: `VERIFY` is stamped once the answer exists, and the attempt **ends**
         # only where §5's own definition of `ANSWERED` is literally satisfied
@@ -9033,6 +10185,10 @@ class Engine:
             # outcome carries both — what ADR-0244 §9's validator refuses is a read
             # *question* beside a read *answer*, never a question beside a step.
             read_confirmation=read_confirmation,
+            # ADR-0250 §5's members. A driven turn raised no question (§10) and decided
+            # which goal it was about (§3), so only these two can be present here.
+            goal_engagement=engagement,
+            reference=association.reference,
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -9770,6 +10926,7 @@ class Engine:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        goal: GoalFacts | None = None,
     ) -> ComposedReply | None:
         """Compose this pass's answer, or decline to on the shapes that owe none.
 
@@ -9831,6 +10988,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            goal=goal,
         )
 
     async def _compose_streaming(  # noqa: PLR0913 — the turn, the step, the conversation, the chunk queue, the delivery facts, the hop's reach, ADR-0228 §10's stop fact and ADR-0240 §8's three; each is a distinct input, as on :meth:`_compose`
@@ -9844,6 +11002,7 @@ class Engine:
         stopped_while_asking: bool = False,
         structured: StructuredFacts | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        goal: _GoalPass | None = None,
     ) -> ComposedReply | None:
         """Stream this pass's answer onto ``chunks``, and report what it composed.
 
@@ -9882,12 +11041,13 @@ class Engine:
             turn=turn,
             step=step,
             undriven=undriven,
-            room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id),
+            room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id, goal=goal),
             deliveries=deliveries,
             hop_reached=hop_reached,
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
+            goal=None if goal is None else goal.facts,
         )
         async with closing_stream(stream) as composing:
             async for produced in composing:
@@ -9906,7 +11066,12 @@ class Engine:
         return composed
 
     def _reply_room(
-        self, *, turn: TurnResult, step: StepOutcome | None, conversation_id: str
+        self,
+        *,
+        turn: TurnResult,
+        step: StepOutcome | None,
+        conversation_id: str,
+        goal: _GoalPass | None = None,
     ) -> int:
         """How many escaped bytes the terminal outcome has left for its reply (§3).
 
@@ -9935,6 +11100,11 @@ class Engine:
             step: The step it will carry, or ``None``.
             conversation_id: The conversation it will name — the one
                 ``ConversationLifecycle.capture`` reports back for this turn.
+            goal: ADR-0250 §5's members the outcome will carry, or ``None`` where it
+                will carry none. **They are measured and not omitted**: each adds bytes
+                to the terminal frame, and a probe that left them out would reserve
+                room for an outcome smaller than the one it is reserving for — which is
+                the one thing ADR-0173 §3's ceiling exists to prevent.
 
         Returns:
             The escaped byte budget for the reply. Zero or negative means no chunk
@@ -9942,6 +11112,7 @@ class Engine:
             which leaves an answerless outcome to be measured on its own way out
             (ADR-0173 §3's third case, ``OversizedValueError`` as on ``converse``).
         """
+        carried = goal or _GoalPass()
         probe = TurnOutcome(
             turn=turn,
             step=step,
@@ -9949,6 +11120,9 @@ class Engine:
             capture_degraded=False,
             reply=_ROOM_PROBE,
             reply_degraded=False,
+            goal_engagement=carried.engagement,
+            clarification=carried.clarification,
+            reference=carried.reference,
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
@@ -10256,6 +11430,12 @@ class Engine:
         # `plan` are: `settle` cleared them in the same step that closed the question
         # (ADR-0244 §3), so a second read of the row would find them gone. That is the
         # retention rule working, not a value to recover.
+        # ADR-0250 §1's third engaging act: "a resumed park of that goal —
+        # `AssistantEngine.resume` answering a `ParkedRead` whose `goal_id` names it
+        # (ADR-0249 §11), **on the path that dispatches**". So it is stamped here,
+        # below the early return every non-`DISPATCHED` answer takes, and never on an
+        # answer that denied, expired or lost the race.
+        await self._engage(park.goal_id, conversation_id=conversation_id)
         goal, plan = park.goal, park.plan
         if goal is None or plan is None:  # pragma: no cover — an OPEN park carries both
             msg = (
@@ -10680,6 +11860,13 @@ class Engine:
                 reply_degraded=composed is not None and composed.degraded,
                 recipient_grant=recipient_grant,
             )
+        # ADR-0250 §1's fourth engaging act: "a resumed step of that goal —
+        # `AssistantEngine.resume` answering a parked confirmation whose execution's
+        # plan carries that `goal_id`". It is taken here because this is the one place
+        # holding both halves the stamp needs: the execution the resolution belongs to,
+        # and the conversation `last_engaged_in` names, which a resume resolves from the
+        # durable binding rather than being handed.
+        await self._engage_execution(parked.execution_id, conversation_id=origin.conversation_id)
         return await self._capture(
             origin.conversation_id,
             turn=parked.turn,
@@ -10744,6 +11931,10 @@ class Engine:
         search_not_serviced: SearchNotServiced | None = None,
         read_confirmation: Confirmation | None = None,
         read_answer: ReadAnswerOutcome | None = None,
+        goal_engagement: GoalEngagement | None = None,
+        clarification: Clarification | None = None,
+        reference: ReferenceOutcome | None = None,
+        disambiguation: GoalDisambiguation | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -10911,6 +12102,16 @@ class Engine:
             # routed park included.
             read_confirmation=read_confirmation,
             read_answer=read_answer,
+            # ADR-0250 §5's four members, folded in at the one place a `TurnOutcome` is
+            # built and each computed by the site that knows it: the engagement by the
+            # site that engaged the goal, the clarification by the site that saw
+            # `record_question` accept it, the reference by the association, and the
+            # disambiguation by the turn that could not decide. **No member is derived
+            # from another** (§5) and none is inferred here.
+            goal_engagement=goal_engagement,
+            clarification=clarification,
+            reference=reference,
+            disambiguation=disambiguation,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:

@@ -21,6 +21,7 @@ its prompt (``test_engine_revision``).
 from __future__ import annotations
 
 import inspect
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -710,20 +711,30 @@ def test_nothing_in_this_lane_writes_a_goal_status() -> None:
     assembled supply meets exactly that shape, and answers perfectly well".
 
     So the lane ships the prohibition rather than a call, and "``set_goal_status`` is
-    asserted not to be called with ``BLOCKED`` anywhere in this decision's lanes" is an
-    **absence over the package** — the only shape such a claim can take. ADR-0250 §9
-    ratifies that member and its implementation has not landed, so there is no writer
-    to call either.
+    asserted not to be called with ``BLOCKED``" is an **absence over the package**.
+
+    **What the absence is stated over moved when ADR-0250 §19's M3 landed**, and it is
+    narrowed rather than weakened. That decision gives ``set_goal_status`` its two
+    callers — the reopen path writes ``ACTIVE`` (§13) and ``abandon_goal`` writes
+    ``ABANDONED`` (§12) — so the member is now named in this package and "no file names
+    it" would fail for a reason that has nothing to do with ``BLOCKED``. What ADR-0251
+    §9 actually forbids is the **value**, and that is what this case pins: no line of
+    ``orchestration`` passes ``GoalStatus.BLOCKED`` to anything.
+
+    ``GoalStatus.BLOCKED`` is still *named* in ``goals.py``, in ADR-0250 §1's
+    definition of an **open** goal — "a goal is open where its ``GoalStatus`` is
+    ``ACTIVE`` or ``BLOCKED``" — which is a membership test and not a write, so the
+    test is over the write form and never over the mention.
     """
     package = Path(orchestration.__file__).parent
-    naming = sorted(
-        path.name
+    writing = sorted(
+        f"{path.name}:{number}"
         for path in package.rglob("*.py")
-        if "set_goal_status" in path.read_text(encoding="utf-8")
-        or "GoalStatus.BLOCKED" in path.read_text(encoding="utf-8")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if re.search(r'(?:\bstatus=|"status":\s*)GoalStatus\.BLOCKED\b', line)
     )
 
-    assert naming == [], f"§9 names no reason that passes its three-limb test (found in {naming})"
+    assert writing == [], f"§9 names no reason that passes its three-limb test (found {writing})"
 
 
 def test_no_planner_envelope_carries_a_value_this_decision_mints() -> None:

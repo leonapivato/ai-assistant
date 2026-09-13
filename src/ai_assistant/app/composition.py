@@ -106,6 +106,7 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.permissions.spend import SpendConfiguration
 from ai_assistant.planning import (
+    ModelBackedGoalAssociator,
     ModelBackedPlanner,
     ModelBackedQueryComposer,
     SqlitePlanStore,
@@ -1687,6 +1688,26 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         )
         engine = Engine(
             loop=loop,
+            # ADR-0250 §4's one seam, over the **same** model seam the planner and the
+            # composing stage reach through — one provider, one router, one retry
+            # policy. It holds a `ModelProvider` and "nothing else that reads": no
+            # store, no context provider, and no parameter a record could arrive
+            # through, which is what makes §4's containment a property of the wiring as
+            # well as of the type. `complete` is called with no `model=` override, for
+            # ADR-0013 §4's reason.
+            #
+            # **§19 puts the candidate read and the association in M3, which is
+            # `orchestration`'s lane, and this line is why that lane reaches this
+            # file**: an associator is constructed nowhere else, so a root that did not
+            # name it would leave ADR-0250 §3 — "every turn resolves its goal before it
+            # plans" — unimplemented in the shipped tree while the code that implements
+            # it sat in the engine.
+            associator=ModelBackedGoalAssociator(model),
+            # ADR-0250 §8's one `Settings` field, straight off `Settings`: how long a
+            # goal's clarification stays answerable. Positive and finite with no
+            # spelling for "never" — a question nothing can free would block that
+            # goal's next question for ever.
+            goal_question_ttl=settings.goal_question_ttl,
             runner=runner,
             plans=plans,
             trail=trail,

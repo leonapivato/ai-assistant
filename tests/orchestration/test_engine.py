@@ -47,6 +47,7 @@ from ai_assistant.core.protocols import (
 from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
+    AssociationVerdict,
     Attestation,
     BeliefBand,
     BeliefSummary,
@@ -62,6 +63,7 @@ from ai_assistant.core.types import (
     EvidenceDigest,
     FeedbackEvent,
     FeedbackKind,
+    GoalAssociation,
     GoalBrief,
     Idempotency,
     IngestSummary,
@@ -143,6 +145,7 @@ from ai_assistant.testing import (
     FakeDestinationTrustStore,
     FakeEgressBinder,
     FakeFeedbackProcessor,
+    FakeGoalAssociator,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -930,6 +933,7 @@ class Harness:
             clock=self.clock,
         )
         self.engine = Engine(
+            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
             composing=self.composing,
             grant_operations=_grant_operations(),
             # The harness's **own** trail and policy, so the act this surface performs
@@ -1811,6 +1815,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     the same ``plans`` and ``trail``.
     """
     return Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -1935,6 +1940,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
     goals = iter(f"g-{n}" for n in range(2, 100))
     harness.engine._loop._id_factory = lambda: next(goals)  # fresh goal ids for new turns
     facade = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -2002,6 +2008,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade_a = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -2061,6 +2068,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -2207,6 +2215,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
             return getattr(self._inner, name)
 
     facade = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -3005,6 +3014,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     traces.hold(ancient)
     harness = Harness(traces=traces)
     facade = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -3453,6 +3463,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     engine = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -3540,6 +3551,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         tools=(confirmable(),), planner=GatedConfirmPlanner(), loop_id_factory=lambda: next(goals)
     )
     engine = Engine(
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
         composing=_composing(),
         grant_operations=_grant_operations(),
         recipient_grant_operations=_recipient_grant_operations(),
@@ -3581,6 +3593,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
     harness = Harness()
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
+            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
             composing=_composing(),
             grant_operations=_grant_operations(),
             recipient_grant_operations=_recipient_grant_operations(),
@@ -3611,6 +3624,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
     harness = Harness()
     with pytest.raises(TypeError, match="must be an integer"):
         Engine(
+            associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.FRESH)),
             composing=_composing(),
             grant_operations=_grant_operations(),
             recipient_grant_operations=_recipient_grant_operations(),

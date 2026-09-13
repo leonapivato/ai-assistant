@@ -984,6 +984,35 @@ class _Spent:
     elapsed: timedelta
 
 
+def request_of(utterance: str) -> str:
+    """The user's words as a pass received them, normalised **once** (ADR-0248 §1).
+
+    Surrounding whitespace is stripped and nothing else is touched: the value is the
+    request, *"unrewritten, unrendered and uninterpreted"*.
+
+    **A module function because two components need the same one string** (ADR-0250
+    §4). ``Engine`` builds a :class:`~ai_assistant.core.types.GoalCandidacy` carrying
+    *"the turn's own request as ADR-0248 §1 carries it"* **before** this loop is
+    entered, and §1 puts the normalisation in **one** place — so the associator and
+    the goal see the same bytes because they are the same call, rather than because
+    two strips happen to agree.
+
+    Args:
+        utterance: What the caller was given, verbatim.
+
+    Returns:
+        The request.
+
+    Raises:
+        PlanningError: If the utterance is blank.
+    """
+    request = utterance.strip()
+    if not request:
+        msg = "a turn needs a non-empty utterance"
+        raise PlanningError(msg)
+    return request
+
+
 def _brief_of(goal: Goal, open_question: str | None) -> GoalBrief:
     """Project the goal onto a brief, carrying its open question (ADR-0250 §8).
 
@@ -3219,7 +3248,9 @@ class LearningLoop:
 
         **The blank refusal is this one and there is no second.** It is the refusal
         ``_goal_from`` raised before ADR-0248, at the same point of the same pass, with
-        the same class and the same message — the point being that
+        the same class and the same message. It is :func:`request_of`, one name over,
+        so that ``Engine``'s candidacy and this pass's goal are built from one call —
+        the point being that
         :data:`~ai_assistant.core.types.NonBlankEncodableText` tightens ``TurnResult``
         by *"a rejection alone"* (ADR-0096 §2) and would otherwise surface the same
         fault as a ``ValidationError`` this stage does not owe its caller.
@@ -3227,11 +3258,7 @@ class LearningLoop:
         Raises:
             PlanningError: If the utterance is blank.
         """
-        request = utterance.strip()
-        if not request:
-            msg = "a turn needs a non-empty utterance"
-            raise PlanningError(msg)
-        return request
+        return request_of(utterance)
 
     async def _raised(self, produced: PlannerOutput, *, goal: Goal) -> RaisedSubject | None:
         """Take at most one question from one planner call (ADR-0250 §6, §7).
