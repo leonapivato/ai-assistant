@@ -216,6 +216,35 @@ async def test_a_closed_goal_is_offered_no_abandonment(
         await expect(drive.page.get_by_role("button", name="Give this up")).to_have_count(0)
 
 
+@pytest.mark.parametrize("viewport", _VIEWPORTS)
+async def test_a_blocked_goal_is_open_and_keeps_the_abandonment(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0250 §1 names **two** open statuses, and this page offered the control on one.
+
+    §1: *"A goal is **open** where its ``GoalStatus`` is ``ACTIVE`` or ``BLOCKED``, and
+    **closed** where it is ``ACHIEVED`` or ``ABANDONED`` … **``BLOCKED`` is open**"* —
+    ADR-0249 §4 defining it as *"this objective cannot **currently** be achieved"*. The
+    engine's ``abandon_goal`` tests ``orchestration.goals.is_open`` over
+    ``{ACTIVE, BLOCKED}`` and abandons such a goal, so hiding the control here took the
+    one act that ends a goal away from the row that most wants it. Adversarial review,
+    round 8, ``blocker``.
+
+    Driven at both of ADR-0233 §15's figures, because a control restored at one width
+    and lost to the other is still a control the owner cannot reach.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.engine.goal_summaries = [
+            _summary(paused=False, asking=False).model_copy(update={"status": GoalStatus.BLOCKED})
+        ]
+
+        await _open_goals(drive)
+
+        await expect(drive.page.locator("#goal-list")).to_contain_text("State: blocked")
+        await expect(drive.page.get_by_role("button", name="Give this up")).to_be_visible()
+        await expect(drive.page.get_by_role("button", name="Take this up here")).to_be_visible()
+
+
 async def test_an_empty_listing_says_so(gateway_browser: Browser, tmp_path: Path) -> None:
     """Nothing outstanding is the ordinary case, and a blank panel answers nothing."""
     async with driving(gateway_browser, tmp_path) as drive:

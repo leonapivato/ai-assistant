@@ -472,6 +472,57 @@ def test_a_closed_goal_is_offered_the_resume_and_not_the_abandonment(
     assert "abandon-goal" not in screen
 
 
+def test_a_blocked_goal_is_open_and_is_offered_the_abandonment(
+    monkeypatch: pytest.MonkeyPatch, output: StringIO
+) -> None:
+    """ADR-0250 §1 names **two** open statuses, and this surface offered the act on one.
+
+    §1: *"A goal is **open** where its ``GoalStatus`` is ``ACTIVE`` or ``BLOCKED``, and
+    **closed** where it is ``ACHIEVED`` or ``ABANDONED``. No lane reads a third state off
+    the status, and **``BLOCKED`` is open** because ADR-0249 §4 defines it as 'this
+    objective cannot **currently** be achieved' — a goal nobody has given up on and the
+    kind a user most often comes back to."*
+
+    So a blocked goal is one ``abandon_goal`` abandons: the engine tests
+    ``orchestration.goals.is_open``, whose set is ``{ACTIVE, BLOCKED}``, and answers
+    ``ABANDONED``. Withholding the command here made the one act that ends a goal
+    unreachable from the listing §13 makes the sole route to it — and did so for the goal
+    a user is most likely to want to give up, the one that cannot currently be achieved.
+    Adversarial review, round 8, ``blocker``.
+    """
+    _wire(
+        monkeypatch,
+        _listing(
+            _summary(paused=False, asking=False).model_copy(update={"status": GoalStatus.BLOCKED})
+        ),
+    )
+
+    assert CliRunner().invoke(cli.app, ["goals"]).exit_code == 0
+
+    screen = _flat(output.getvalue())
+    assert "State: blocked" in screen
+    assert f"assistant abandon-goal {GOAL_ID}" in screen
+    assert f"--goal {GOAL_ID}" in screen
+
+
+def test_the_abandonment_is_offered_on_every_open_status_and_no_closed_one() -> None:
+    """The rule over the whole enumeration, rather than one member at a time.
+
+    Rounds 6 and 7 were one clause applied to one id and then, a round later, to the
+    other, and round 8 was one clause applied to one status of two. An arm stated over
+    ``GoalStatus`` in full is what stops the next member — whoever adds it, under
+    whichever ADR — from inheriting the same omission silently: ADR-0250 §1 partitions
+    the enumeration into open and closed with nothing left over, so the two sets are
+    checkable against each other rather than against a list written out here.
+    """
+    closed = {GoalStatus.ACHIEVED, GoalStatus.ABANDONED}
+    assert {GoalStatus(value) for value in cli._CLOSED_STATUSES} == closed
+    assert {status for status in GoalStatus if status not in closed} == {
+        GoalStatus.ACTIVE,
+        GoalStatus.BLOCKED,
+    }
+
+
 def test_the_listing_renders_the_engines_paused_and_derives_nothing(
     monkeypatch: pytest.MonkeyPatch, output: StringIO
 ) -> None:

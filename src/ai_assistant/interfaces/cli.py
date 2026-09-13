@@ -4953,13 +4953,29 @@ def _render_read_cancellation(outcome: ReadCancellation) -> None:
 #: no need to name the member to render it, ``GoalStatus`` being a ``StrEnum``. So the
 #: keys are the values, the guard stays as strict as ADR-0249 §16 wants it, and
 #: ``test_the_status_words_are_total_over_the_enumeration`` is what keeps this total.
-#: The one status on which the abandonment is offered, as the **value** rather than the
-#: member, for :data:`_GOAL_STATUS_WORDS`' reason: this module names no ``GoalStatus``
+#: The statuses on which the abandonment is **not** offered, as **values** rather than
+#: members, for :data:`_GOAL_STATUS_WORDS`' reason: this module names no ``GoalStatus``
 #: member at all, so ADR-0249 §16 item 7's producer guard has nothing here to weigh.
-#: ADR-0250 §12 answers ``ALREADY_CLOSED`` on a goal that is achieved or abandoned, so a
-#: command offered there is one that reports having done nothing — which is the browser's
-#: own rule for that control, stated once per surface.
-_OPEN_STATUS: Final = "active"
+#:
+#: **Stated as the closed set, because that is the set ADR-0250 §12 turns on and it is
+#: the safe direction to be wrong in.** §12 answers ``ALREADY_CLOSED`` on a goal that is
+#: achieved or abandoned, so a command offered there is one that reports having done
+#: nothing. The complement is the rule, and §1 states it: *"A goal is **open** where its
+#: ``GoalStatus`` is ``ACTIVE`` or ``BLOCKED``, and **closed** where it is ``ACHIEVED``
+#: or ``ABANDONED``. No lane reads a third state off the status, and **``BLOCKED`` is
+#: open**"*. This surface previously tested for ``active`` alone, which withheld the
+#: abandonment from a blocked goal the engine would have abandoned — ``abandon_goal``
+#: tests ``orchestration.goals.is_open``, whose set is ``{ACTIVE, BLOCKED}``. Adversarial
+#: review, round 8, ``blocker``.
+#:
+#: **The two directions fail differently and only one of them fails quietly.** Keyed on
+#: the open set, a status this version does not know — a member arriving from a hub at
+#: another version, which is the case :data:`_GOAL_STATUS_WORDS` exists for — withholds
+#: an act the engine would perform, and the user is told nothing. Keyed on the closed
+#: set, the command is offered and, if the goal turns out to be closed after all, the
+#: engine answers ``ALREADY_CLOSED`` and this surface renders it: a truthful sentence
+#: rather than a missing one. That is the browser's rule too, stated once per surface.
+_CLOSED_STATUSES: Final[frozenset[str]] = frozenset({"achieved", "abandoned"})
 
 _GOAL_STATUS_WORDS: Final[Mapping[str, str]] = {
     "active": "open",
@@ -5068,7 +5084,11 @@ def _render_goal_acts(goal: GoalSummary) -> None:
     **The abandonment is offered on an open goal and on no other**, which is ADR-0250
     §12's own reading — a closed goal answers ``ALREADY_CLOSED``, so a command there is
     one that reports having done nothing — and it is the browser's rule for that control,
-    stated once per surface rather than derived from the other.
+    stated once per surface rather than derived from the other. **Open is §1's two
+    statuses and not one of them**: ``BLOCKED`` is open, is the status of a goal that
+    *"cannot **currently** be achieved"*, and is exactly the kind a user gives up on, so
+    testing for ``active`` alone withheld the act from the goal that most wants it
+    (:data:`_CLOSED_STATUSES`; adversarial review, round 8, ``blocker``).
 
     **What a lossy id costs is the copyable line and never the act.** Both commands are
     still named, and each still takes the value from anything that can carry the exact
@@ -5077,7 +5097,7 @@ def _render_goal_acts(goal: GoalSummary) -> None:
     Args:
         goal: The summary this row is about.
     """
-    open_goal = goal.status.value == _OPEN_STATUS
+    open_goal = goal.status.value not in _CLOSED_STATUSES
     if not _is_pasteable(goal.id):
         _print(
             "  [dim]Take it up here with[/] 'assistant ask' [dim]and[/] --goal"
