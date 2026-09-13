@@ -493,13 +493,20 @@ was settled about the step rather than by where in the plan it sat.
 > **Normative.** **`PlanStore.commit_transition` gains one claim condition**: a `→ RUNNING`
 > transition is accepted only where the `GoalAttempt` its `attempt_id` names **exists**, carries
 > the transition's own **`execution_id` among its `execution_ids`**, is in a **non-terminal
-> `AttemptState`**, and is the **only** attempt of that goal naming that execution. **The refusal
-> takes one of two classes, and which it takes is decided by whether a corrected claim or a later
-> turn could ever satisfy the limb.** A claim naming **no attempt**, an **unknown** attempt, an
-> attempt that **did not open this execution**, or an attempt whose `state` is **`CANCELLED` or
-> `ENDED`**, is **refused with the
+> `AttemptState`**, and is the **only** attempt of that goal naming that execution. **It refuses
+> on exactly four limbs, and the case a reader would expect as a fifth is removed at construction
+> rather than refused here**: a `→ RUNNING` transition carrying **no** `attempt_id` is **not
+> constructible** under the validator above, so `commit_transition` never receives one and this
+> decision requires no store to refuse it. Naming the absent case as a store limb as well would
+> be a rule no conforming implementation could be shown to obey, and would put the boundary in
+> two places — which is the `to_status` shape the store already declines to re-check.
+
+> **Normative — the refusal takes one of two classes, and which it takes is decided by whether a
+> corrected claim or a later turn could ever satisfy the limb.** A claim naming an **unknown**
+> attempt, an attempt that **did not open this execution**, or an attempt whose `state` is
+> **`CANCELLED` or `ENDED`**, is **refused with the
 > error class a stale `expected_version` already raises** (`StaleExecutionError`), which is
-> ADR-0249 L1's precedent for the revision conjunct: each of those four names a row the caller
+> ADR-0249 L1's precedent for the revision conjunct: each of those three names a row the caller
 > could have named correctly, or a state a later turn under a live attempt reaches. A claim
 > against an execution **more than one attempt names** is refused with the **non-stale
 > `PlanningError`** the two ownership refusals below take, because that limb is **permanent** and
@@ -1144,16 +1151,38 @@ nothing depends on it, and no act follows — so nothing fails open.
 > duration rather than the whole figure. **No lane passes the adapter's figure unchanged to more
 > than one disposal, and no lane fixes a second deadline inside one call.**
 
-> **Normative — it gates starting and never cancels what is running.** Immediately before it
-> begins a step's disposal, the driver reads that same monotonic source and computes the
-> remainder. Where
-> the remainder is **not strictly positive** it **starts no further step** and the walk stops
-> (§2). **A step already begun runs to its own completion**, which is ADR-0228 §4's posture in its
+> **Normative — it gates starting and never cancels what is running, and what it gates is every
+> unit of work the walk starts.** Immediately before it begins **any** of them — **a step's
+> disposal**, and **an interpretation call the plan declares** (§1), which is a model call the
+> walk makes between two dispatches — the driver reads that same monotonic source and computes
+> the remainder. Where
+> the remainder is **not strictly positive** it **starts neither**, the walk stops (§2), and the
+> steps after it stay `PENDING` exactly as on any other stop trigger — an interpretation the walk
+> did not make leaves its row unwritten and the steps conditioned on it **`PENDING` and not
+> `SKIPPED`**, because nothing settled them. **Gating the dispatch alone would leave the budget
+> bounding only part of the walk**: ADR-0253 §8 bounds the *number* of interpretation calls by
+> the plan and says nothing about their duration, so a plan declaring several could spend a
+> multiple of the user's wait without ever starting a second step. **A step or an interpretation
+> already begun runs to its own completion**, which is ADR-0228 §4's posture in its
 > own words — *"a planner call already begun runs to its own completion, and a turn's total
 > duration may therefore exceed its budget by one planner call and one servicing"*, read one level
 > over as one step's disposal. **The figure passed to
 > `StepRunner` is therefore always strictly positive**, which ADR-0029 §4 requires: *"a zero or
 > negative duration is refused rather than treated as an instantly-expired deadline"*.
+
+> **Normative — the adapter's figure is validated before the deadline is fixed, and a
+> never-positive budget is refused rather than stopped.** Before it computes anything, the driver
+> applies **ADR-0029 §4's own test** to the `timeout` it was handed — a `timedelta`, **strictly
+> positive** — and raises `ValueError` where it is not, which is `orchestration/executor.py`'s
+> existing `_checked_timeout` applied one level up rather than a new rule. **The two cases are
+> not the same and must not collapse into one**: a budget that **expires during** the walk stops
+> it and leaves the remaining steps `PENDING` (§2), while a budget that was **never** positive —
+> `timedelta(0)`, a negative one, or a value that is not a `timedelta` at all — is a caller fault
+> ADR-0029 §4 rules *"refused rather than treated as an instantly-expired deadline"*. Without
+> this clause the driver's stop rule would swallow it: the first remainder would be non-positive,
+> the walk would stop having started nothing, and the `ValueError` `StepExecutor` raises today
+> would never be reached, turning a refusal into a silent empty turn. **It is checked once per
+> adapter call**, at the same instant the deadline is fixed and before any I/O.
 
 > **Normative — the deadline is an elapsed duration, so it is measured on a monotonic source and
 > never on the injected `Clock`.** The driver takes both the deadline and every remainder from
@@ -1338,6 +1367,18 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > entire**: a round is one planner call with its servicing, the turn is assembled once, the supply
 > stays monotone across a turn's rounds and is inherited by no later turn, and each round's call
 > receives the `GoalBrief` as it stands.
+
+> **Normative — a licensed round is gated on §9's remainder as well as on ADR-0251 §4's guards,
+> and it is the third unit of work the request's budget bounds.** A licensed round is a
+> `Planner.plan` call with its servicing, made inside the same adapter call as the walk that
+> licensed it, so **it is admitted only where §9's remainder is strictly positive at the moment
+> of the check**, read from the same monotonic source and the same deadline. Where it is not,
+> **no round is admitted and no second walk begins**: the turn composes over the first walk's
+> outcome, which is what it does when the ledger is spent. ADR-0251 §4's (a) and (g) gate the
+> round on the **planning** budget, which is ADR-0228 §4's and is a different quantity (§9); a
+> round admitted by those and unbounded by the request's deadline would let one `converse` spend
+> its user's whole wait and then start a model call, which is the guarantee §9's first clause
+> states of *"the **whole request's** budget"*.
 
 > **Normative — the allowance is charged and never reset, and no attempt is opened.** ADR-0251
 > §13 binds entire: *"**A replan never resets an allowance.** A revision within an attempt
@@ -1717,7 +1758,7 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    that class's contract would then retry a permanently invalid write forever. Each of the three
    ownership paths — `commit_attempt`'s, `open_attempt`'s, and `commit_transition`'s
    duplicate-ownership limb, the seeded legacy claim included — asserts a `PlanningError` that is
-   **not** a `StaleExecutionError`, and the four retryable limbs of §3's conjunct assert
+   **not** a `StaleExecutionError`, and the three retryable limbs of §3's conjunct assert
    `StaleExecutionError` positively, so an implementation cannot satisfy the set by collapsing the
    two. **And the same case through the other door**: `open_attempt` with a
    `GoalAttempt` whose `execution_ids` already names E is **refused** on the same terms, because
@@ -1742,9 +1783,10 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    arm above is reduced to refusing.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
-   goal revision is not the stored one, and none whose attempt is absent, does not carry this
-   execution in its `execution_ids`, or is terminal. **And `attempt_id` on any other `to_status`
-   is not constructible.**
+   goal revision is not the stored one, and none whose attempt is unknown, does not carry this
+   execution in its `execution_ids`, or is terminal. **And two constructions are asserted
+   unconstructible rather than refused**: `attempt_id` on any other `to_status`, and a
+   `→ RUNNING` transition carrying **none** — which is why neither is a store limb (§3).
 8. **A parked middle step, answered and resumed** — a three-step plan whose **second** step rules
    `CONFIRM`: the walk stops, step 3 is `PENDING` and **not** `SKIPPED`, no third step is
    dispatched, the attempt is `AWAITING_AUTHORIZATION`, and the turn carries the confirmation.
@@ -1881,6 +1923,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     instant twice — the second step's remainder is still **strictly smaller** than the first's and
     the budget is **not** topped up, so a driver that computed the remainder from the wall clock
     fails it. It is what stops ADR-0026's reserved contract being reached for here by accident.
+    **And the arm that pins what the budget gates** (§9): a two-step plan with an interpretation
+    between the steps, where the budget expires during step 1 — the **interpretation call is
+    never made**, its row is unwritten, step 2 is `PENDING` and **not** `SKIPPED`, and the walk
+    stopped; and the paired case where it expires during the walk that carried a licence — **no
+    licensed round is admitted, `Planner.plan` is never entered** and no second walk begins (§10),
+    asserted against a fake planner that records entry. **And the arms that pin a never-positive
+    budget** (§9): `converse(timeout=timedelta(0))`, a negative `timedelta`, and a value that is
+    not a `timedelta` each raise `ValueError` from the adapter call, with **no execution opened,
+    no step claimed and no model call made** — and the same three over `resume`. They are what
+    stop the stop rule swallowing ADR-0029 §4's refusal.
 17. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
 18. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
