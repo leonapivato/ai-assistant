@@ -73,6 +73,12 @@ remaining failures. This decision closes that one.
   and the executor committed **something**, not that the something succeeded"*, and it
   makes reading the addressed `StepExecution` by `step_id` an addressable operation
   rather than advice.
+- **And the servicing is not the only site that performs the call.** ADR-0244 §7's
+  resume runs the parked read's one call from `ParkedReadOperations._dispatched`, which is
+  no servicing and drives no step; the records it returns are admitted later, by
+  `admitted_fourth_group` inside `LearningLoop.resumed_read`. ADR-0242's negative member
+  already rides that path — the engine sets `search_not_serviced` from
+  `answered.not_serviced` — so the mirror is owed there too.
 - **The egress side holds its own.** `orchestration.runner` builds the
   `ActionRequest` the policy rules on and sets `egress_binding` from what
   `EgressBinder.bind` returned, so a step whose call carried a binding is known
@@ -311,9 +317,7 @@ passes that have one.
 
 > **Normative.** **The admitted set is recorded by the site that performs the admission
 > and never reconstructed**, and in particular it is not `ServicedCarriers.minted`
-> filtered after the fact: `minted` is every id the call produced, and the supply's budget
-> can stop one of them entering (`_Union.admit`'s truncation). On an ordinary turn that
-> site is the servicing; on ADR-0244 §7's resume it is **the admission in
+> filtered after the fact. On an ordinary turn that site is the servicing; on ADR-0244 §7's resume it is **the admission in
 > `LearningLoop.resumed_read`**, where `admitted_fourth_group` applies the resumed
 > supply's deduplication and budget, and which is a different site from the dispatch that
 > classified the contact. The rule is ADR-0249 §7's own for `minted` — *"supplied by the
@@ -329,21 +333,26 @@ passes that have one.
 > provider returned, of what a servicing fetched before deduplication, or of anything a
 > step produced.
 
-> **Normative.** `records` is `0` on a turn whose only contact was an egress one, on a
-> search answered with nothing, and on one whose every returned record the budget
-> stopped. **A `0` means this turn's supply holds no record its contacts brought in**,
-> and it means nothing else.
+> **Normative.** `records` is `0` on a turn whose only contact was an egress one and on a
+> search answered with nothing. **A `0` means this turn's supply holds no record its
+> contacts brought in**, and it means nothing else.
 
-**Deduplication is deliberately absent from that list, and the reason is worth stating
-because its absence looks like an omission.** A search's records are minted with a fresh
+**Nothing between the call and the supply can drop a record on today's bounds, and
+stating the count over admission anyway is a forward-compatibility guard rather than a
+claim that it bites.** Deduplication cannot: a search's records are minted with a fresh
 identifier and ADR-0231 §16 keeps them out of every store, so *"no id in here is ever seen
-again"*: a minted id is never already in `_Union.held`, and `_Union.admit`'s deduplication
-therefore cannot remove one. What can remove one is the **budget**, which is why the
-clause above names truncation and not deduplication. The admitted set is nonetheless what
-the site records rather than the returned set, because a count defined over a fact its own
-site holds does not have to be argued from an identifier scheme at all — and an earlier
-draft of this section, which defined the count by filtering `minted` against the final
-supply, is what made that argument load-bearing.
+again"* and a minted id is never already in `_Union.held`. The read budget cannot either:
+`READ_BUDGET` is ten, `search_max_results` is capped at three, and the search is serviced
+second behind a one-record file — the arithmetic `SearchDisposition.NO_BUDGET`'s own
+docstring already states, *"at least nine of the ten slots therefore always remain"*. So
+**`records` equals what the call returned on every turn reachable today**, and no clause
+here depends on their differing. The count is nonetheless defined over admission, for
+`NO_BUDGET`'s own stated reason — that is *"the forward-compatibility guard §11 states in
+terms for the lane that reorders the kinds"* — and because a count defined over a fact its
+own site holds needs no arithmetic to be argued from. An earlier draft defined it by
+filtering `minted` against the final supply, and a later one made a read-budget truncation
+a required arm; the first made an identifier scheme load-bearing and the second required a
+turn these bounds cannot produce.
 
 > **Normative.** **A `records` of `0` never suppresses the statement.** The fact is the
 > contact, and a turn that reached outside itself and brought nothing into its supply
@@ -357,11 +366,11 @@ supply, is what made that argument load-bearing.
 > says that they entered the answer, that the answer rests on them, that it is more
 > current for them, or that it would have differed without them.
 
-**One count and not two, and it is the count of what reached the prompt.** A figure for
-what the provider returned would be a fact about the system's plumbing that the user can do
-nothing with, and stating both would put two numbers in front of a reader who has no way
-to tell which one matters. The count that reached the supply is the one that bears on the
-answer in front of them, and the one whose `0` is informative: *I reached outside this
+**One count and not two, and it is the count of what entered the turn's supply.** A figure
+for what the provider returned would be a fact about the system's plumbing that the user
+can do nothing with, and stating both would put two numbers in front of a reader who has
+no way to tell which one matters. The count that entered the supply is the one that bears
+on the answer in front of them, and the one whose `0` is informative: *I reached outside this
 system and nothing came back that this turn could use.* That sentence is unavailable
 today, which is why #2268 was reported as a contradiction rather than as a thin reply.
 
@@ -569,9 +578,15 @@ not read. §12 names the trigger.
 >    `TurnOutcome.outbound_contact` in `core/types.py`; §2's and §3's establishment at
 >    every site that performs a call or drives a step; §4's admitted sets and §6's
 >    assembly; the composing fragment and `_PLAN_IS_ABOUT_ACTING`'s widened condition.
->    The two packages ride in one lane under ADR-0137 §2 — a contract seam and the
->    primary production implementation whose demands shape it — and under no wider
->    reading of it.
+>    **It is one lane under ADR-0137 §1 and expressly not under §2**: every piece of new
+>    machinery this decision builds — the establishment, the carriers, the assembly, the
+>    fragment — is in `ai_assistant.orchestration` and in no other subsystem, and what
+>    lands in `core/types.py` is two type declarations and a `None`-defaulting field,
+>    which is not *"a store, a loop, a codec, a producer, a policy engine"* but the
+>    adaptation §1 puts outside its bound. §2 is unavailable here and is not invoked: it
+>    widens the exception for **a contract triad with its primary implementation**, this
+>    decision adds no Protocol and no triad, and §2 says in terms that *"any other
+>    cross-subsystem pairing remains outside the exception"*.
 > 2. **The terminal surface.** `interfaces/cli.py` renders §7's statement. No logic, no
 >    store read, no computation (golden rule 3).
 >
@@ -579,15 +594,17 @@ not read. §12 names the trigger.
 
 > **Normative.** **Each arm of §13 is owed by the lane that owns the code it asserts
 > over, and no arm obliges a lane to touch the other's paths.** Every arm's assertions
-> about the member, the establishment, the admitted count and the composing prompt are
-> lane 1's; every arm's assertions about a **rendered statement** — arm 2's stated `0`,
-> arm 3's two statements, arm 6's — are lane 2's, landed with the renderer they are
-> about. Lane 1 is complete when it owes no rendering assertion, and a lane that lands an
+> about the member, the establishment, the admitted count, the composing prompt and
+> `OutboundContact`'s own construction are lane 1's; every arm's assertions about a
+> **rendered statement** — arm 2's stated `0` and arm 3's two statements, which are the
+> only two — are lane 2's, landed with the renderer they are about. Lane 1 is complete when it owes no rendering assertion, and a lane that lands an
 > assertion over code it does not own has broken the cut rather than honoured §13.
 
 > **Normative.** Lane 1 changes `core/types.py`, so **this ADR is ratified and merged as
-> its own PR before anything implements against it** (golden rule 5, ADR-0015 §5). This
-> PR is that one, and it changes no code.
+> its own PR before anything implements against it** — golden rule 5 and ADR-0015 §5,
+> which bind on a `core` change whether or not ADR-0137 §2's pairing is available, and
+> which ADR-0137 §2's own third clause restates rather than creates. This PR is that one,
+> and it changes no code.
 
 ### 12. What this decision does not decide, by name, each with what fires it
 
@@ -621,17 +638,19 @@ not read. §12 names the trigger.
 
 ### 13. The arms this decision owes
 
-> **Normative.** The implementing lane owes these six arms, each over representative
-> input, and a lane that lands fewer has not implemented this decision.
+> **Normative.** The implementing lanes owe these six arms **between them**, each over
+> representative input, split by §11's rule that an arm's assertions belong to the lane
+> that owns the code they are about. A lane that lands fewer of the assertions it owns
+> has not implemented this decision.
 >
 > 1. **A search that brought records into the supply, over a turn whose pre-existing
->    supply is non-empty, and with the read budget stopping one returned record.**
->    `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the **admitted** records and
->    neither the pre-existing ones nor the truncated one; `search_not_serviced` is `None`;
->    the prompt carries §6's fragment and `_PLAN_IS_ABOUT_ACTING`. The non-empty supply is
->    what makes the arm discriminate — a lane reading `ServicedRead.supplied` passes every
->    other arm and fails this one — and the truncation is what makes admitted differ from
->    returned.
+>    supply is non-empty.** `destinations` is `(SEARCH_PROVIDER,)`; `records` counts the
+>    records the search brought in and **not** the pre-existing ones; `search_not_serviced`
+>    is `None`; the prompt carries §6's fragment and `_PLAN_IS_ABOUT_ACTING`. The
+>    non-empty pre-existing supply is what makes the arm discriminate: a lane reading
+>    `ServicedRead.supplied` passes every other arm and fails this one. **No arm requires
+>    a truncated or deduplicated search record**, because today's bounds make neither
+>    reachable (§4).
 > 2. **A search that reached the provider and returned nothing** (`SearchRefusal.NO_RESULT`),
 >    on a turn whose pre-existing supply is **non-empty**. `outbound_contact` is set with
 >    `records` `0`, `search_not_serviced` is `None` (ADR-0242 §6's third clause), and the
@@ -662,8 +681,10 @@ not read. §12 names the trigger.
 >    where `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both — the declared order
 >    and not the encounter order (§4) — and §6's one fragment is given once, stating the
 >    contact rather than a lookup; **and the construction invariants over `OutboundContact`
->    itself**: an empty `destinations`, and one carrying a class twice, are each refused by
->    the model rather than accepted and rendered.
+>    itself, asserted on the model and not on its producer**, because it is a
+>    boundary-crossing value a wire decode also builds: an empty `destinations`, one
+>    carrying a class twice, and one carrying `(EGRESS_TOOL, SEARCH_PROVIDER)` are each
+>    refused rather than accepted and rendered in the order they arrived.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
@@ -736,9 +757,9 @@ condition falsifies no ratified sentence.
   world.** The statement is composed from a typed value by code, renders beside the
   reply, and cannot be talked out of by the prose next to it. That is the whole of what
   #2268 asks for and the whole of what this decision claims.
-- **A `0` becomes sayable.** *I reached outside this system and nothing from it was in
-  front of me* is a sentence the system has never been able to make; it is the honest account of a search
-  that found nothing, and it is the sentence whose absence made #2268 read as a
+- **A `0` becomes sayable.** *I reached outside this system and nothing came back that
+  this turn could use* is a sentence the system has never been able to make; it is the
+  honest account of a search that found nothing, and it is the sentence whose absence made #2268 read as a
   contradiction rather than as a thin reply.
 - **Three dispositions stay silent, on purpose.** A transport failure, a deadline expiry
   and a raised fault carry no contact statement, because the system does not know. Each
@@ -751,9 +772,9 @@ condition falsifies no ratified sentence.
   the only thing under it that separates a call from a refusal. That is stated rather
   than discovered, and it is the narrow direction: the statement is never false, only
   sometimes absent.
-- **`TurnOutcome` grows to sixteen members**, ten of them `None`-defaulting facts a
-  client renders on its own. That is ADR-0244 §9's rule working as designed and also the
-  thing to watch: an eleventh and a twelfth make a client's rendering order a decision
-  nobody has taken.
+- **`TurnOutcome` grows to sixteen members**, and `outbound_contact` is the **tenth** a
+  later ADR has added as a `None`-defaulting fact a client renders on its own. That is
+  ADR-0244 §9's rule working as designed and also the thing to watch: an eleventh and a
+  twelfth make a client's rendering order a decision nobody has taken.
 - **Revisit when** a second outbound seam lands, when `StepOutcome` gains the dispatch
   fact, or when a deployment reports a user misled by the silence §2's third group keeps.
