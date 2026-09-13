@@ -12,6 +12,7 @@ The arm numbers below are ADR-0254 §20's.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from authorization_builders import (
     GOAL,
     NOW,
     OTHER_ACCOUNT,
+    OTHER_GOAL,
     OTHER_SITE,
     SEARCH_ACCOUNT,
     SEARCH_ORIGIN,
@@ -1600,3 +1602,117 @@ class TestRfc3339sUnknownLocalOffsetSpelling:
         )
         outside = await gate.decide(request(binding(SITE), stay_from="2026-09-13T11:30:00-00:00"))
         assert outside.outcome is PermissionOutcome.CONFIRM
+
+
+class TestARulingIsDecidedOverOneObservationOfItsRequest:
+    """ADR-0065, over the suspension ADR-0254 §6's seam read introduces.
+
+    ``decide`` awaits ``live_for``, and a frozen model is rewritable through
+    ``__dict__`` — so a caller holding the request can replace its goal, its
+    arguments or its binding while the seam is out. The corpus already answers this
+    one seam over: ``permissions/recipient_grants.py::covering`` *"reads every value
+    the comparison is decided over before the first await"* and compares the
+    detached capture afterwards. These arms hold the seam open and rewrite the
+    request inside it.
+
+    **Every one of them asserts the ruling the request *as presented* earns.** A
+    torn ruling is not merely the wrong answer for one of the two requests; it is an
+    answer to a third request that was never made, and the fail-closed direction is
+    the one the user was going to be asked about anyway.
+    """
+
+    async def test_a_goal_and_arguments_rewritten_mid_ruling_earn_no_route_d(self) -> None:
+        """The row is selected for the goal read on the way in; the arguments must
+        not be the ones read on the way out.
+
+        The row covers ``amount`` up to 60. The request as presented asks for 80
+        under that goal, which §3's condition 6 does not cover, so the bar fires and
+        the ruling is ``CONFIRM``. Rewriting the goal to one with no row at all and
+        the amount to one inside the bound, while ``live_for`` is suspended, must not
+        turn that into an ``ALLOW`` citing a record about **neither** request.
+        """
+        gate, authorizations, _ = policy(live(id="a1"))
+        assert authorizations is not None
+        action = request(binding(SITE), amount="80", currency="GBP")
+        held = authorizations.suspend_next_operation()
+        ruling = asyncio.ensure_future(gate.decide(action))
+        await held.reached()
+        action.__dict__["goal"] = OTHER_GOAL
+        action.__dict__["parameters"] = {**action.parameters, "amount": "50"}
+        held.release()
+        decided = await ruling
+        assert decided.outcome is PermissionOutcome.CONFIRM
+        assert (decided.authorised_by, decided.authorised_goal) == (None, None)
+
+    async def test_the_request_as_presented_and_as_rewritten_both_draw_confirm(self) -> None:
+        """Neither of the two requests is covered, which is what makes the arm above
+        a tear rather than a disagreement about which answer is right."""
+        gate, _, _ = policy(live(id="a1"))
+        presented = await gate.decide(request(binding(SITE), amount="80", currency="GBP"))
+        assert presented.outcome is PermissionOutcome.CONFIRM
+        gate, _, _ = policy(live(id="a1"))
+        rewritten = await gate.decide(
+            request(binding(SITE), goal=OTHER_GOAL, amount="50", currency="GBP")
+        )
+        assert rewritten.outcome is PermissionOutcome.CONFIRM
+
+    async def test_a_binding_rewritten_mid_ruling_earns_no_route_b(self) -> None:
+        """The grant seam takes its own subject at its own first executed line, which
+        since §6 is **after** this suspension — so the request handed to it is checked
+        against the observation this ruling was decided over first.
+
+        The grant covers :data:`SITE`. The request as presented discloses to
+        :data:`OTHER_SITE`, which no grant covers, and the ruling is the ``CONFIRM``
+        the disclosure floor reached. Swapping the binding for one at ``SITE`` while
+        ``live_for`` is suspended must not buy the grant.
+        """
+        gate, authorizations, recipients = policy(recipients=grants())
+        assert authorizations is not None
+        assert recipients is not None
+        action = request(binding(OTHER_SITE), amount="50", currency="GBP")
+        held = authorizations.suspend_next_operation()
+        ruling = asyncio.ensure_future(gate.decide(action))
+        await held.reached()
+        action.__dict__["egress_binding"] = binding(SITE)
+        held.release()
+        decided = await ruling
+        assert decided.outcome is PermissionOutcome.CONFIRM
+        assert decided.authorised_by is None
+
+    async def test_the_grant_that_arm_refuses_is_reachable_when_it_is_presented(self) -> None:
+        """The control: the same policy, the same grant, the binding presented rather
+        than substituted — ``ALLOW`` on route (b)."""
+        gate, _, recipients = policy(recipients=grants())
+        assert recipients is not None
+        decided = await gate.decide(booking())
+        assert decided.outcome is PermissionOutcome.ALLOW
+        assert decided.authorised_by == "g-1"
+        assert recipients.call_count == 1
+
+    async def test_a_request_torn_past_reading_mid_ruling_earns_no_grant(self) -> None:
+        """A request that cannot be re-read at all is answered the way a seam fault
+        is — no grant, and the ``CONFIRM`` the table already reached.
+
+        ``request.__dict__.pop("egress_binding")`` leaves a frozen model with no such
+        attribute, which is ``_coverage_subject``'s own case one seam over: *"a
+        request that cannot be read as one at all is answered the same way, which is
+        the fail-closed direction"*.
+
+        **What this arm proves is that a ruling comes back at all.** The check above
+        it re-reads the request, and an unguarded re-read would replace this
+        ``CONFIRM`` with an ``AttributeError`` leaving ``decide`` — a builtin out of
+        the policy's own error boundary, on the path that exists to make a mid-flight
+        rewrite fail closed.
+        """
+        gate, authorizations, recipients = policy(recipients=grants())
+        assert authorizations is not None
+        assert recipients is not None
+        action = booking()
+        held = authorizations.suspend_next_operation()
+        ruling = asyncio.ensure_future(gate.decide(action))
+        await held.reached()
+        action.__dict__.pop("egress_binding")
+        held.release()
+        decided = await ruling
+        assert decided.outcome is PermissionOutcome.CONFIRM
+        assert decided.authorised_by is None

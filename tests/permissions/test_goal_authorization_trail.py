@@ -34,6 +34,7 @@ from recipient_builders import route_b_decision
 from ai_assistant.core.errors import InvalidAuthorisationError
 from ai_assistant.core.types import (
     AuthorizationDisposition,
+    AuthorizationSettlement,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -204,6 +205,35 @@ class TestTheFourRouteDiscriminator:
         finally:
             held.close()
 
+    async def test_a_route_a_resolution_carrying_a_goal_scope_is_refused(self, path: Path) -> None:
+        """§7: ``authorised_goal`` *"is set **only** on a route-(d) ``ALLOW``"*.
+
+        Route (a) is *"``resolves`` set, ``authorised_by`` equal to it"* in §7's
+        partition, and carries no goal scope. The resolving branch returns before
+        anything below looks at the scope, and ``_check_authorisation`` checks the
+        **pointer** alone — so without a refusal here a durable row would carry a
+        goal scope on a route no clause of §7 validates a scope on, and the
+        four-route partition would stop being a partition.
+        """
+        held = _Trail(path)
+        try:
+            with pytest.raises(
+                InvalidAuthorisationError, match="scopes its authorisation to a goal"
+            ):
+                await held.trail.record(
+                    decision(
+                        "d-route-a",
+                        request=request(binding(SITE)),
+                        ruled=ruling(
+                            PermissionOutcome.ALLOW, authorised_by="d-0", authorised_goal=GOAL
+                        ),
+                        resolves="d-0",
+                        decided_at=NOW,
+                    )
+                )
+        finally:
+            held.close()
+
     async def test_no_row_predating_this_decision_can_be_classified_as_route_d(
         self, path: Path
     ) -> None:
@@ -287,14 +317,25 @@ class TestTheTenChecks:
         ``DECLINED`` one is the user's refusal; an ``EXPIRED`` one is the answer a
         question never got. **Every other disposition is retired and none of them is
         live**, which is why one check does the work of five.
+
+        **The arrangement is asserted before the refusal is.** ``EXPIRED`` leaves
+        ``PROPOSED`` only *"at or after the row's ``expires_at``"* (ADR-0254 §1,
+        §12), so settling it at :data:`AT` is answered ``NOT_AT_SOURCE`` and leaves
+        the row ``PROPOSED`` — the parameter above it, refused for its own reason,
+        and a case proving nothing about a lapsed row.
         """
         row = established()
         held = _Trail(path, row, establish=False)
         try:
             if disposition is not AuthorizationDisposition.PROPOSED:
-                held.authorizations.settle("a1", to=disposition, settled_at=AT)
+                at = EXPIRES if disposition is AuthorizationDisposition.EXPIRED else AT
+                assert (
+                    held.authorizations.settle("a1", to=disposition, settled_at=at)
+                    is AuthorizationSettlement.SETTLED
+                )
             stored = await held.authorizations.resolve("a1")
             assert stored is not None
+            assert stored.disposition is disposition
             await _refuses(
                 held,
                 route_d_decision(stored, binding(SITE)),
