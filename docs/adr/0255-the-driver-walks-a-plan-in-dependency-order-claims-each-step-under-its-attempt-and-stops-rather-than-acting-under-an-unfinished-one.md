@@ -683,8 +683,12 @@ that end an attempt rather than revise a goal.
 > **Normative — the four tests of revision 1 §H.4, and which of them is owed here.** **Test 3 —
 > the store-level invariant in the shared `PlanStore` conformance suite — is this decision's**,
 > and it is owed for **both** conjuncts: no `→ RUNNING` transition is ever accepted whose goal
-> revision is not the stored one, and none whose attempt is **absent**, **does not name this
-> execution**, or is **terminal**. **Tests 1, 2 and 4 —
+> revision is not the stored one, and none whose attempt is **unknown**, **does not name this
+> execution**, or is **terminal**, and none naming an execution **more than one attempt names** —
+> §3's four limbs, each asserting the **non-stale `PlanningError`** §3 fixes. **The absent case is
+> not among them**: §3's validator makes a `→ RUNNING` transition carrying no `attempt_id`
+> unconstructible, so it is asserted unconstructible rather than refused (§3, arm 7). **Tests 1,
+> 2 and 4 —
 > interleaved cancel before the claim, interleaved cancel after it, and the exhaustive two-writer
 > interleaving — are A9's**, because each is stated over a cancellation whose semantics that lane
 > decides. **No lane reads this decision as having established them.**
@@ -1719,8 +1723,9 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   `orchestration/`, the walk, §1's three driver evaluations and **`StepRunner`'s resolution of a
   step's `resolves` from the stored plan and execution while it builds the request** (§1), §2's
   stop and skip rules, §5's park re-evaluation and the fresh walk that follows it, §6's
-  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call **and
-  its validation of the caller's `timeout` at each public entry point**, **§10's
+  `EFFECT_UNRESOLVED` commit, §7's supersession skip, **§9's one deadline per adapter call —
+  `timeout` validated and the monotonic deadline fixed at each public entry point, before routing
+  or planning, and threaded from there rather than fixed when driving begins** — **§10's
   walk outcome and the licensed investigation round it admits — which is where ADR-0251 §4's (j)
   is read with its new alternative** — and the retirement of `engine.py`'s single-step path.
   **It adds no `core` type and no field**, both
@@ -1974,7 +1979,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     strictly smaller where the controlled monotonic source was advanced between them: **the budget
     is not topped up**, so a driver that computed the remainder from the wall clock fails it. It
     is what stops ADR-0026's reserved contract being reached for here by accident.
-    **And the arm that pins what the budget gates** (§9): a two-step plan with an interpretation
+    **And the arm that pins when the budget starts** (§9): a `converse(timeout=PT10S)` whose
+    first `Planner.plan` call consumes PT9S on a controlled monotonic source leaves the walk's
+    first step approximately **PT1S** and not PT10S, and a second case in which that call
+    consumes the whole budget **starts no step at all** — asserted against an implementation that
+    fixed its deadline when driving began, which would hand that step a fresh PT10S and spend
+    PT19S against a budget of ten. **And the arm that pins what the budget gates** (§9): a
+    two-step plan with an interpretation
     between the steps, where the budget expires during step 1 — the **interpretation call is
     never made**, its row is unwritten, step 2 is `PENDING` and **not** `SKIPPED`, and the walk
     stopped; and the paired case where it expires during the walk that carried a licence — **no
@@ -2062,7 +2073,11 @@ step-dependencies bullet stay deferred and are named in §12; §7's **idempotenc
 its two qualifying grounds, ADR-0029 §4's deadline enforcement and its `INDETERMINATE`
 classification, ADR-0029 §5's retry mechanism, and ADR-0039 §2's `failure`-required rule over
 `{FAILED, INDETERMINATE}` each bind exactly as they stand; §4 states them rather than moving them,
-and §11's validator is ADR-0039 §2's shape borrowed for a different field.
+and §11's validator is ADR-0039 §2's shape borrowed for a different field. **ADR-0029 §4's
+strictly-positive test is applied at one more seam and is not changed by it**: §9 runs it on the
+adapter's `timeout` at each public entry point, which is the same rule `orchestration/executor.py`
+already runs at the invocation seam, read earlier so that the walk's stop rule cannot swallow the
+refusal it requires.
 
 **ADR-0037 §2, §4, ADR-0044, ADR-0052 and ADR-0058 — relied on and not superseded.** §2's
 decide → record → read back → claim ordering is untouched and is where coverage is compared
