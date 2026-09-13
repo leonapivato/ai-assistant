@@ -23,7 +23,7 @@ import unicodedata
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum, StrEnum
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
@@ -8582,6 +8582,51 @@ class ReadAsk(BaseModel):
             raise ValueError(msg)
 
 
+def _own_vocabularys_member(value: object, vocabulary: type[Enum], *, cited: str) -> object:
+    """Refuse a member of some *other* enumeration, however its value compares.
+
+    Pydantic validates a :class:`~enum.StrEnum` field **by value**, so a member of a
+    different vocabulary that happens to share a spelling is accepted and silently
+    converted into the annotated one. Where two vocabularies in this module describe
+    different acts and overlap on a value, that conversion turns one fact into another
+    with no error — the defect issue #2320 records, and the hazard ADR-0258 §3 names,
+    files and expressly declines to rule on ("a guard is code, and the clause that would
+    demand one is a decision this lane is not fenced for"). This is that code.
+
+    **Run before pydantic's own coercion**, which is the only point at which the
+    incoming member's own type is still visible: by the time an ``after`` validator
+    sees it, the foreign member has already become a native one and the evidence is
+    gone.
+
+    **A bare** ``str`` **is left alone**, exactly as pydantic takes it today. A stored
+    row, a wire frame and a ``model_validate`` of a dumped mapping all present the value
+    as a string, there is no second vocabulary for a string to have come from, and
+    refusing one would narrow a decoding path this guard has no quarrel with (ADR-0087).
+    What it refuses is the one thing a JSON document cannot express: an enum member of
+    the wrong type, which only in-process code can pass.
+
+    Args:
+        value: The value as it arrived, before coercion.
+        vocabulary: The enumeration the field is annotated with.
+        cited: Where that annotation is decided, for the refusal's message.
+
+    Returns:
+        ``value`` unchanged, for pydantic to validate as it otherwise would.
+
+    Raises:
+        ValueError: If ``value`` is an enum member of any other enumeration.
+    """
+    if isinstance(value, Enum) and not isinstance(value, vocabulary):
+        msg = (
+            f"expected a {vocabulary.__name__} member ({cited}); got "
+            f"{type(value).__name__}.{value.name}, which is a different vocabulary about "
+            f"a different act. The two overlap on at least one value, so pydantic would "
+            f"convert it silently rather than refuse it (#2320, ADR-0258 §3)"
+        )
+        raise ValueError(msg)
+    return value
+
+
 class ReadOutcomeKind(StrEnum):
     """What became of one serviced ask, as the planner is told it (ADR-0251 §2).
 
@@ -8685,13 +8730,21 @@ class ReadOutcomeKind(StrEnum):
 class ReadAskOutcome(BaseModel):
     """One ask this turn serviced, and what became of it (ADR-0251 §3).
 
-    **The name is this lane's and the ADR's is** ``ReadOutcome`` (issue #2281).
-    ADR-0251 §3 mints a model of that name, which ADR-0185 §1 has held since for the
-    permission trail's own record of how a gated read ended; the two are different
-    facts about different things, so this one is spelled out in full rather than
-    shadowing or overloading the other. Nothing else of §3 moves: the field names,
-    their types, the ``extra="forbid"`` and the parameter this rides on are the
-    ADR's as written.
+    **The name is decided, and it is this one** (ADR-0258 §1, beside ADR-0251 §3).
+    ADR-0251 §3 minted the model as ``ReadOutcome``, a name ADR-0185 §1 has held for
+    the permission trail's own record of how a gated read ended; the two are different
+    facts about different things, so ADR-0258 partially supersedes §3 in the model's
+    name alone and rules this one ``ReadAskOutcome`` — here and at every site ADR-0251
+    writes the old name for this model. Nothing else of §3 moves: the field names,
+    their types, the ``extra="forbid"`` and the parameter this rides on are the ADR's
+    as written, and ADR-0258 §2 says so verbatim. (#2281, #2319.)
+
+    **A member of** :class:`ReadOutcome` **is refused here rather than converted**
+    (#2320). The two vocabularies overlap in exactly ``{"refused", "failed"}`` and
+    pydantic validates a ``StrEnum`` by value, so ``outcome=ReadOutcome.REFUSED`` was
+    accepted and became :attr:`ReadOutcomeKind.REFUSED` — see
+    :meth:`_outcome_is_this_vocabularys_member`. A bare ``str`` of a member's value is
+    still accepted, as it is everywhere else in this module.
 
     **Exactly two fields, and it carries nothing else** (§3). :attr:`ask` is the
     frozen ask the planner itself emitted, carried back **byte for byte**, and
@@ -8722,6 +8775,26 @@ class ReadAskOutcome(BaseModel):
 
     ask: ReadAsk = Field(description="The ask the planner emitted, carried back byte for byte.")
     outcome: ReadOutcomeKind = Field(description="What became of it (ADR-0251 §2).")
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def _outcome_is_this_vocabularys_member(cls, value: object) -> object:
+        """Refuse :class:`ReadOutcome`'s member at the seam the two names meet (#2320).
+
+        The vocabularies intersect in exactly ``{"refused", "failed"}`` — pinned in
+        ``tests/core/test_read_outcome_types.py`` — so before this guard
+        ``ReadAskOutcome(ask=…, outcome=ReadOutcome.REFUSED)`` was accepted and became
+        :attr:`ReadOutcomeKind.REFUSED`. That is a gated read's *the first grant check
+        answered ``None`` and nothing was opened* (ADR-0097 §5, ADR-0185 §1) reaching
+        the planner as *the source **decided** not to answer, on a ground it owns*
+        (ADR-0251 §2): two facts about two acts, conflated with no error, at the seam
+        that hands the planner its input.
+
+        :attr:`ReadOutcome.COMPLETED` and the other three non-overlapping members were
+        refused already, because no member of this vocabulary carries their values.
+        What this adds is the two that overlap, which are precisely the bad case.
+        """
+        return _own_vocabularys_member(value, ReadOutcomeKind, cited="ADR-0251 §2")
 
 
 class ReadRequest(BaseModel):
@@ -17858,6 +17931,14 @@ class SourceReadRecord(BaseModel):
     **Any field a later ADR adds is optional with a default** (ADR-0185 §12), on
     ADR-0008 §1's additive pattern: a required addition would make every stored row
     fail validation, which is the failure ADR-0184 records and repairs.
+
+    **A member of** :class:`ReadOutcomeKind` **is refused for** :attr:`outcome`
+    **rather than converted** (#2320). That vocabulary is the planner's, about an ask
+    a planner composed, and it shares the values ``refused`` and ``failed`` with this
+    one; see :meth:`_outcome_is_this_vocabularys_member` for why a conversion here
+    would be a fabricated authorisation fact rather than a mislabelled one. A bare
+    ``str`` of a member's value is still accepted, so decoding a stored row is
+    untouched.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -17944,6 +18025,29 @@ class SourceReadRecord(BaseModel):
             '"it carried none".'
         ),
     )
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def _outcome_is_this_vocabularys_member(cls, value: object) -> object:
+        """Refuse :class:`ReadOutcomeKind`'s member here — #2320's reciprocal seam.
+
+        The same overlap, read the other way. ``ReadOutcomeKind.REFUSED`` says *the
+        source decided not to answer, on a ground it owns* (ADR-0251 §2); accepted
+        here it would become :attr:`ReadOutcome.REFUSED`, whose meaning is *the first
+        grant check answered ``None``, so the source is not resolved, not opened and
+        not parsed* (ADR-0097 §5, ADR-0185 §1) — and, through
+        :meth:`_grant_matches_outcome`, would then be a row asserting that no live
+        grant was found. **That is a fabricated authorisation fact in the permission
+        trail**, which ADR-0185 §1 forbids in terms over the neighbouring
+        :attr:`ReadOutcome.UNANSWERED`: folding one outcome into another "would put the
+        claim *there was no live grant* into a store whose premise is that its records
+        are not fabricated". The trail is durable, exported and rendered to an operator
+        (:attr:`source`), so this direction is the costlier of the two.
+
+        Only the two shared values could ever arrive; the remaining five members of the
+        planner's vocabulary carry no value of these six and were refused already.
+        """
+        return _own_vocabularys_member(value, ReadOutcome, cited="ADR-0185 §1")
 
     @model_validator(mode="after")
     def _grant_matches_outcome(self) -> SourceReadRecord:
