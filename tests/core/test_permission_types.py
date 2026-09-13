@@ -264,12 +264,19 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
     counter-example: it is a ``Sha256Hex``, so it names no subsystem's type and
     nothing can be read back out of it. It says **which grant**, not which tool,
     which payload or which step, and a digest is not a projection.
+
+    ``authorised_goal`` (ADR-0254 §7) joins it on the same ground. It is an
+    ``Identifier`` naming the **goal** of the record a route-(d) ``ALLOW`` rests on
+    — read off that record and carried from nowhere else — so it says which
+    authority, not which tool, which payload or which step, and it is the conjunct
+    that completes §7's four-route partition from the row alone.
     """
     assert set(PermissionRuling.model_fields) == {
         "outcome",
         "reason",
         "authorised_by",
         "authorised_subject",
+        "authorised_goal",
     }
 
 
