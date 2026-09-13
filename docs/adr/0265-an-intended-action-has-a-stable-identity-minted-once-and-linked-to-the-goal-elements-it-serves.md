@@ -1,6 +1,6 @@
 # 265. An intended action has a stable identity, minted once, linked to the goal elements it serves
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **three narrowly stated scopes, and §8 shows the working for all three. §1's `Goal` model
