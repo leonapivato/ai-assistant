@@ -3,16 +3,23 @@
 - Status: Proposed
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0089](0089-a-ruling-is-marked-and-nothing-else-binds.md)
-  — **one scope: §2's first clause, in its first-line sentence alone.** *"Its first line
-  begins `> **Normative.**`"* gains a second admitted opening — the token followed by a
-  **label separator** and a non-empty label. §2's every other part binds **verbatim**: the
-  run's column-0 `> `-or-bare-`>` shape, the blank-line precedence, the run's end at the
-  first line of neither shape, the no-fenced-block rule, the fenced-line-is-display clause,
-  the *"fails any part of that grammar is not a mark"* clause and the one-obligation rule —
-  the last three read over the widened first line. **§5 is untouched and is what rules out
-  the alternative**: no mark is added to any ratified ADR here and no byte of one changes.
+  — **two scopes, each narrow, and §6 shows the working for both.**
+  **§2's first clause, in its first-line sentence alone**: *"Its first line begins
+  `> **Normative.**`"* gains a second admitted opening — the token followed by a **label
+  separator** and a non-empty label. §2's every other part binds **verbatim**: the run's
+  column-0 `> `-or-bare-`>` shape, the blank-line precedence, the run's end at the first
+  line of neither shape, the no-fenced-block rule, the fenced-line-is-display clause, the
+  *"fails any part of that grammar is not a mark"* clause and the one-obligation rule — the
+  last three read over the widened first line.
+  **And §5's second clause, in this decision's own reclassification alone**: *"No mark is
+  added to a ratified ADR, by a dated note or otherwise"* does not reach the 321 clauses §3
+  recognises in documents ratified after ADR-0089, no byte of which changes. It binds
+  **entire** against every edit, which is what leaves §7's alternative declined and what
+  stops a later decision reclassifying further ratified lines without superseding this one
+  in turn. §5's first clause — *"Every ADR ratified after this one marks every normative
+  clause it states"* — is **untouched**, and is what the 321 were written under.
   §§1, 3, 4, 6, 7, 8 and 9 stand entire, and §7's *"whether any check runs"* is left exactly
-  where it was. §6 shows the working.
+  where it was.
 - **No other ADR is superseded in whole or in part**, and §6 says why none of the seven
   ADRs this decision reaches owes a record: not one sentence of any of them becomes false
   or over-wide, because not one of their bytes moves.
@@ -64,7 +71,7 @@ or lane has ever acted on the literal reading. What is being decided is not what
 documents mean — that was never in doubt — but which of two instruments makes the text say
 it.
 
-### The two candidate fixes are not symmetric, and one of them is forbidden
+### The two candidate fixes are not symmetric
 
 **Normalising the 321 lines** — rewriting each to the exact prefix and preserving the label
 after it — edits **seven ratified ADRs**. ADR-0070 §1 is flat: *"ratified decision text —
@@ -77,13 +84,15 @@ still, and is precisely about this operation:
 > added to a ratified ADR, by a dated note or otherwise.
 ```
 
-So normalising would itself need to partially supersede ADR-0089 §5 *as well as* editing
-1,300-odd bytes across seven ratified documents, two of which (ADR-0251, ADR-0254) are under
-edit by another lane as this is written.
+So normalising would itself need to partially supersede **both** of those — §5's second
+clause *and* ADR-0070 §1's never-rewritten rule — before it may edit 1,300-odd bytes across
+seven ratified documents, two of which (ADR-0251, ADR-0254) are under edit by another lane as
+this is written.
 
-**Widening the grammar** edits one clause of one ADR and no ratified byte anywhere. §7 gives
-the rest of the comparison; this section records only that the cheaper instrument is also
-the one the corpus's own rules permit.
+**Widening the grammar** changes two clauses of one ADR and no ratified byte anywhere. It is
+not free of §5 either — §3 below supersedes its second clause too, in a scope that expressly
+excludes editing a ratified ADR — but it leaves ADR-0070 §1 entire, which the alternative
+cannot. §7 gives the rest of the comparison.
 
 ### The obvious widening is too narrow, and the corpus says so
 
@@ -116,12 +125,21 @@ mechanical — *"the checker touches only what it can pick out of the text witho
 what the author meant"* — and the widened opening is picked out without guessing: the token,
 then one of three fixed byte sequences.
 
-**It is still greppable to zero**, which is §2's second reason for a literal token. One
-pattern finds every ruling in a document and a reviewer can diff the set:
+**The opening is still greppable, which is §2's second reason for a literal token, and it is
+greppable exactly as far as it was before.** One pattern finds every candidate opening in a
+document, so an author can enumerate their own rulings and a reviewer can diff the set
+between two revisions:
 
 ```text
-grep -n '^> \*\*Normative\(\.\*\*\|\. \| — \)' docs/adr/<file>.md
+grep -n '^> \*\*Normative\(\.\*\*\|\. \S\| — \S\)' docs/adr/<file>.md
 ```
+
+**What it does not do is decide which candidates are marks, and neither did its predecessor.**
+`grep '^> \*\*Normative\.\*\*'` matches a token line inside a fence and a token line in the
+middle of a run just as this one does — 7 lines of the corpus at this decision's base are one
+or the other — so the blank-line precedence and the fence rule have always had to be applied
+to the candidates the pattern returns. That is unchanged here, and it is why §3's
+measurement is a fence-aware scan rather than a grep.
 
 **And a near-mark still fails closed.** `> **Normative —**` with no label, `> **Normative—x`
 with no spaces, `> **Normatively` and an indented or fenced token line are all not marks, so
@@ -151,6 +169,26 @@ obligation a second way, having just admitted the line.
 > documents under ADR-0089 §3, from each document's own ratification and not from this
 > decision's date.
 
+> **Normative.** ADR-0089 §5's second clause — *"No mark is added to a ratified ADR, by a
+> dated note or otherwise"* — is replaced in one scope and one only: the reclassification
+> the clause above performs, over documents ratified after ADR-0089, changing no byte of
+> any of them. It binds entire everywhere else, and in particular against every edit: no
+> later change adds a mark to a ratified ADR by writing one into it, by a dated note, or by
+> re-marking a line, and no later decision reclassifies a further line of a ratified ADR
+> without superseding this clause in turn. §5's first clause is untouched.
+
+**The exception is stated rather than argued away, because both review lenses were right to
+refuse the argument.** The first draft of this decision held that §5's second clause governs
+*edits* and that changing no byte therefore satisfies it. Read against §5 that is too
+convenient: ADR-0089 defines a mark by the grammar of §2, not by who typed the characters,
+so a reader comparing ADR-0249's mark set before and after this decision sees sixteen marks
+added to a ratified ADR, and *"or otherwise"* is wide enough to reach the route by which they
+arrived. ADR-0070 §1's test settles it the same way — a reader of ADR-0089 §5 alone would
+have said "ADR-0249 carries exactly the marks it carried at ratification" before, and cannot
+after. So §5's second clause is superseded, in a scope narrow enough that the prohibition it
+exists for survives whole: **this decision buys no licence to edit a ratified ADR**, which is
+the operation §5 was written against and the one §7 declines.
+
 **Retroactive by construction, and that is the point rather than a cost.** The clauses were
 written as marks by authors under ADR-0089 §5's first clause — *"Every ADR ratified after
 this one marks every normative clause it states"* — reviewed as marks, and implemented as
@@ -175,8 +213,10 @@ widening could reopen, so it was measured at this decision's base:
 The measurement is a scan of `docs/adr/*.md` implementing §2 fence-aware, reported in this
 change's PR body with its before/after figures: **7,498 recognised marks before, 7,819
 after, and 321 near-misses before and 0 after.** It is a measurement, so it is unmarked and
-will go stale; the two properties above are what the reasoning rests on and either can be
-recomputed with the `grep` in §1.
+will go stale. The two properties above are what the reasoning rests on: the first is
+recomputable with the token grep alone, since it asks whether a file carries the token *at
+all* and a fence cannot change that answer; the second asks which candidates are marks, so
+it takes the fence-aware scan and not a grep (§1).
 
 ### 4. The exact form stays the one the template teaches
 
@@ -210,20 +250,34 @@ to every lane in flight. Filed as an issue, named in Consequences.
 
 ### 6. This ADR classified under ADR-0070 §1 and ADR-0082 §1, edit by edit
 
-- **ADR-0089 — a partial supersession of §2's first clause, and the header record is owed.**
+- **ADR-0089 §2's first clause — a partial supersession, and the header record is owed.**
   ADR-0070 §1's test comes out on the supersession side without argument: a reader holding
   only ADR-0089 reads `> **Normative — x.**` as not a mark before and as a mark after, and
-  acts differently on 321 lines. The record is the `Status` line edit ADR-0070 §1 permits
-  and ADR-0001 requires, carrying the scope; no other byte of ADR-0089 moves.
-- **ADR-0089 §5 — untouched, and deliberately.** Its first clause (*"marks every normative
-  clause it states"*) is what the seven authors were writing under; its second (*"No mark is
-  added to a ratified ADR"*) forbids the alternative in §7 and is satisfied here by
-  construction, since this decision edits no ratified ADR's text. ADR-0089's leading header
-  note — *"It is deliberately forward-only: §5 marks nothing that is already ratified"* — is
-  a true statement about **ADR-0089's own change** and stays exactly as written; ADR-0070 §1
-  forbids rewriting it and nothing here needs it rewritten. The forward-only property it
-  protects also survives this decision on the measurement in §3: every ADR this widening
-  reaches was ratified *after* ADR-0089 and authored under its §5.
+  acts differently on 321 lines.
+- **ADR-0089 §5's second clause — a partial supersession too, in the one scope §3 states.**
+  A reader holding only §5 would have said that a ratified ADR carries exactly the marks it
+  carried at ratification; after §3 they cannot, for seven documents. Whether that reader
+  *acts* differently is the whole of ADR-0070 §1's test and the answer is yes, so the clause
+  is superseded rather than distinguished. §5's **first** clause is untouched and is the
+  ground the reclassification stands on: the 321 were written by authors already bound to
+  *"mark every normative clause"*, so §3 finishes an obligation §5 imposed rather than
+  creating one. ADR-0089's leading header note — *"It is deliberately forward-only: §5 marks
+  nothing that is already ratified"* — is a true statement about **ADR-0089's own change**
+  and stays exactly as written; ADR-0070 §1 forbids rewriting it and nothing here needs it
+  rewritten. The property it protects also survives, on the measurement in §3: every ADR
+  this decision reaches was ratified *after* ADR-0089 and authored under it, and no ADR
+  older than ADR-0089 carries the token at all.
+- **The record on ADR-0089 is the `Status` line, and no dated note is owed.** ADR-0070 §1
+  splits the two mechanisms explicitly: an **amendment** *"is recorded as an appended, dated
+  note"*, while *"recording a supersession that has landed on the `Status` line"* is a
+  permitted header edit in its own right. ADR-0082 §§1-2 are about the first of those — §1's
+  rule fires *"exactly when the later ADR **amends** a named clause"* — and this decision
+  amends nothing; it supersedes, which ADR-0070 §1 says is the other branch of the same
+  test. The corpus is consistent with that reading and not with the other: ADR-0250 and
+  ADR-0252 each carry a `Partially superseded by` line with the scope in its parenthesis and
+  no dated note beside it, while ADR-0226's dated note records an **amendment** by ADR-0227.
+  A note here would restate the `Status` scope in a second place, with ADR-0070 §4's
+  single-line canonical status already carrying it.
 - **ADR-0152, ADR-0249, ADR-0250, ADR-0251, ADR-0252, ADR-0253, ADR-0254 — nothing owed on
   any of them, and this is the one a reader should check.** ADR-0082 §1's test is applied to
   *the earlier ADR's text*: no sentence of any of the seven becomes false or over-wide,
@@ -237,6 +291,10 @@ to every lane in flight. Filed as an issue, named in Consequences.
   ADR-0082 §1, recorded here and nowhere else.
 - **ADR-0070, ADR-0082, ADR-0001 — nothing owed.** Their amend-vs-supersede test, their
   record-placement rule and the append-only `Status` mechanism are used as written.
+  ADR-0070 §4's authoring constraint on the scope text — *"a scope names a clause, not
+  another ADR: it carries no `ADR-NNNN` token, so every `ADR-NNNN` after the leading
+  `Partially superseded by` is a target"* — is observed: the scope written on ADR-0089
+  carries no `ADR-NNNN` token, so the only target extractable from that line is this ADR.
 - **ADR-0015, ADR-0027 — nothing owed.** §5's ADR-number assignment and contract sequencing
   are untouched; `docs/adr/**` stays in ADR-0027 §3's floor and this decision does not ask
   to change that.
@@ -251,13 +309,15 @@ to every lane in flight. Filed as an issue, named in Consequences.
 
 - **Normalising the 321 lines to the exact prefix.** The alternative #2303 recommends, and
   the honest one: it leaves §2's grammar at its narrowest and edits the documents that are
-  wrong. Declined on ratified grounds rather than on cost. ADR-0089 §5's second clause
-  forbids adding a mark to a ratified ADR *"by a dated note or otherwise"*, and re-marking
-  a line is adding a mark to it by any reading; ADR-0070 §1 forbids rewriting ratified
-  decision text, and 321 lines in seven Decision sections is that rewrite at scale. So the
-  cheap-looking fix needs **two** partial supersessions before it may touch anything, after
-  which it still edits seven ratified documents — two of them under concurrent edit — to
-  reach a state the widening reaches by changing one clause. The cost argument only breaks
+  wrong. Declined on ratified grounds rather than on cost, and the comparison is made after
+  §3 has conceded that this decision supersedes ADR-0089 §5's second clause as well. The
+  concession §3 takes is bounded by **not editing**: the prohibition stands whole against
+  every edit, which is the operation §5 was written against. Normalising needs the *other*
+  half — the licence to write into a ratified ADR — and then needs ADR-0070 §1 as well,
+  whose *"ratified decision text … is never rewritten"* is not a clause this decision touches
+  or would want to. So it takes a strictly wider supersession of §5 **plus** one of ADR-0070
+  §1, after which it still rewrites seven ratified documents, two of them under concurrent
+  edit, to reach the state §1 reaches by widening a grammar. The cost argument only breaks
   the tie: on the evidence in Context the labels wrap, nest bold, and end without a full
   stop, so a mechanical rewrite of 321 lines would need review line by line, and the failure
   mode of getting one wrong is a silently discarded obligation, which is the exact defect
@@ -289,8 +349,16 @@ them built to these clauses already.
 
 **The mark is two shapes instead of one**, which is a real cost paid against a real one. A
 reader now checks the token and then one of three byte sequences rather than one. The
-mitigation is that all three are found by a single `grep` and that a near-miss still fails
-closed, so the failure direction — the one §2 bought — is unchanged.
+mitigation is that a single pattern still returns all three openings, that the candidates it
+returns are filtered by the same fence and blank-line rules as before, and that a near-mark
+still fails closed — so the failure direction, the one ADR-0089 §2 bought, is unchanged.
+
+**ADR-0089 §5's second clause now carries an exception, and that is the cost worth watching.**
+The prohibition was absolute and is now absolute-except-once. §3 bounds the exception to a
+reclassification that edits nothing, and requires any further one to supersede it again, so
+the next such decision is as visible as this one. What it cannot do is make the exception
+unattractive to cite, which is why §3 states the bound in the clause rather than in prose
+beside it.
 
 **What would trigger revisiting this.** A third separator appearing in the corpus would mean
 the widening taught authors that the opening is negotiable, which it is not; that is the
