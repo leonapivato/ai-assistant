@@ -1,6 +1,6 @@
 # 264. A turn that reached outside this system says so, and a reply cannot deny it on a surface that renders the statement
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
   — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
