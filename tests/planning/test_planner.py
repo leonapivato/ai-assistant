@@ -5499,6 +5499,31 @@ async def test_the_prompt_states_both_sequences_a_condition_label_may_index() ->
     assert "`conditions` list" in block, "and the reply's own positions"
 
 
+async def test_the_prompt_keeps_a_condition_label_apart_from_a_question_s_subject() -> None:
+    """ADR-0253 §9 beside ADR-0250 §7: two members named ``about``, one label space each.
+
+    A ``questions`` entry's ``about`` is "a label of the understanding you are sending
+    in THIS reply" and may name a constraint, a criterion, a condition or the objective
+    — ``C1``, ``S1``, ``D1`` or ``null``. A ``StepCondition.about`` and a
+    ``PlanInterpretation.settles`` are the **condition label** and nothing else (§9),
+    because ADR-0253 §5 makes ``about`` "the ``id`` of a **condition element**" and
+    §7's element grammar is what the loop resolves it against.
+
+    Both blocks reach the same model in the same turn, so the prompt has to say which
+    is which: a ``when`` naming ``C1`` would resolve to nothing at the loop and §9's
+    disposal for that is the whole plan refused, never the condition dropped.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
+
+    prompt = _system_turn(model)
+    assert _UNDERSTANDING_GUIDANCE in prompt, "the questions block, with its own `about`"
+    assert "`C1`, `S1`, `D1` or " in _PLAN_SHAPE_GUIDANCE, "what a question's about admits"
+    assert "about a CONDITION and " in _PLAN_SHAPE_GUIDANCE, "and what a step's does not"
+
+
 async def test_a_plan_declaring_none_of_the_new_keys_is_the_plan_it_always_was() -> None:
     """ADR-0253 §12: "it changes no behaviour of a plan that declares none of the new keys".
 
