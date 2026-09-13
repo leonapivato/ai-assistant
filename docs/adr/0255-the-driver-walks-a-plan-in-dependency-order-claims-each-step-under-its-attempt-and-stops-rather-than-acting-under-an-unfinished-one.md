@@ -6,31 +6,59 @@
   **§14's where-phase-4-leaves-an-attempt enumeration**, in its two-case shape alone: *"**Every
   check passed** — the attempt's `phase` advances to `AttemptPhase.EXECUTE`"* and *"**A
   deterministic check failed on the plan** — the attempt stays `RUNNING` and the plan is replanned
-  within the attempt"* gain a **third** case. A check **of a step** whose operands a step earlier
-  in the same plan will produce and has not yet produced is **deferred**, not failed: it neither
-  blocks the advance to `EXECUTE` nor triggers a replan, and it is decided at that step's own
-  dispatch. Without it every plan carrying a `depends_on` replans forever, because a dependent
-  step's checks are unsatisfied at phase 4 for every such plan by construction. **§14's every
-  other clause binds verbatim**: the four checks and their order, the no-fifth-check rule, the
-  no-capability-vocabulary-check and no-spend-ceiling clauses, the advisory-in-one-direction rule
-  for an intent-match assessment, the `AWAITING_AUTHORIZATION` limb and its single-writer clause,
-  the failed-check limb for every check that is **not** deferred, the no-phase-moves-backwards
-  clause, and the supplying-an-authorization-opens-no-attempt clause.
+  within the attempt"* gain a **third** case. A check **of a step** whose operands **this same
+  plan** will produce before that step is dispatched, and has not produced yet, is **deferred**,
+  not failed — and the plan has exactly two such producers: **a step earlier in `steps` that has
+  not been disposed of**, and **an interpretation of this plan that has not been performed,
+  including one carrying a `record`**, which is performed before the plan's first step is
+  dispatched and therefore after phase 4. A deferred check neither blocks the advance to `EXECUTE`
+  nor triggers a replan, and the attempt advances where every check either **passed or was
+  deferred**. Without it every plan carrying a `depends_on` replans forever, and a one-step plan
+  conditioned on its own record-backed interpretation never runs it. **§14's every other clause
+  binds verbatim**: the four checks and their order, the no-fifth-check rule, the
+  no-capability-vocabulary-check and no-spend-ceiling clauses, the `MONEY`-bound clause, the
+  advisory-in-one-direction rule for an intent-match assessment, **the uncovered-arguments limb
+  and its `CONFIRM` park**, which is neither a deferral nor a failure and which this decision
+  routes nothing away from, the failed-check limb for every check that is **not** deferred, the
+  no-phase-moves-backwards clause and the supplying-an-authorization-opens-no-attempt clause.
 - **Partially supersedes [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md),
+  in two narrowly stated scopes**, and §16 shows the working for both.
+  **§4's trigger group** — the read conditions **(b)**, **(c)** and **(d)** together with **(j)**,
+  *"The attempt's `phase` is `AttemptPhase.INVESTIGATE`"* — is satisfied, in place of a serviced
+  read, by a **re-investigation licence**: a typed outcome of a plan-driving walk that ran to the
+  end of the plan and skipped at least one step because the world did not meet what the plan
+  declared. **And §1's occupancy clause**, in one term: *"Every round of one attempt's
+  investigation sits inside one occupancy of `AttemptPhase.INVESTIGATE`"* becomes *"inside one
+  occupancy of `AttemptPhase.INVESTIGATE` **or** under a re-investigation licence"*. Without the
+  pair, an attempt that executed and learned something may make its turn's one ungated planner
+  call and may **not** iterate over what it learned, while the decisions fixing which acts open an
+  attempt forbid opening a fresh one to escape the bar — so investigating an alternative is
+  unreachable inside that attempt. **§4's every guard binds verbatim and is checked** — (a), (g),
+  (f′)'s planner-call allowance, (h)'s working allowance less the reserve, and (i)'s
+  unproductive-rounds test — so a licensed round is charged from the same ledger and stops on the
+  same guards; **§1's clauses that no round moves the phase and that there is no re-entry into
+  `INVESTIGATE` from a later phase bind verbatim and are obeyed rather than lifted**, a licensed
+  round re-entering no phase at all; and §4's never-gated-first-call clause, its (e)-is-dissolved
+  clause and (j)'s own `NOT_ITERATED` record are untouched.
+- **Partially supersedes [ADR-0228](0228-a-serviced-read-may-revise-the-plan-once-and-the-turn-stops-looking-at-a-bound-or-a-deadline.md),
   in one narrowly stated scope**, and §16 shows the working.
-  **§4's condition (j)** — *"The attempt's `phase` is `AttemptPhase.INVESTIGATE`"* — gains one
-  alternative: it is also satisfied where the turn holds a walk outcome carrying an **unexpected
-  finding** (§10), so an attempt that executed and learned something may investigate again inside
-  itself under its remaining allowance. **The phase still never moves backwards**, which is the
-  first of the two hazards (j) names, and the loop is placed by the licence rather than by a phase
-  it does not occupy, which is the second. **§4's every other clause binds verbatim** — (a), (b),
-  (c), (d) and (g) as ADR-0228 §2 wrote them, the never-gated first call, (f′)'s planner-call
-  allowance, (h)'s working allowance less the reserve, (i)'s unproductive-rounds test, (e)'s
-  dissolution and (j)'s own `NOT_ITERATED` record — and so does every other clause of ADR-0251,
-  §5's figures and §13's no-reset rule among them.
+  **§5's two per-turn clauses** — *"**Every plan of the turn is persisted before anything is
+  driven.** The whole sequence of `save_plan` calls precedes `start_execution`"* and *"**Exactly
+  one plan of a turn is driven and it is the last**"* — become statements over a **walk**: the
+  plans produced for a walk are all persisted before that walk's `start_execution`, and exactly
+  one plan is driven per walk and it is the last produced for it. A turn makes at most **two**
+  walks, its first and one after a licensed investigation, so it drives at most two plans.
+  Without the scope a licensed investigation cannot persist the plan it produces, because that
+  save necessarily follows the first walk's `start_execution`. **§5's reason is kept rather than
+  weakened**: the ordering protects a turn that *"has driven nothing: no execution is open, no
+  capacity slot is spent on a step and no side effect has been reached"*, which is true before a
+  turn's first walk and false before its second, so the per-turn reading would forbid the
+  investigation while buying nothing. **§5's every other clause binds verbatim**: the
+  superseded-plan-drives-nothing rule, the every-plan-is-persisted rule, the oldest-first order,
+  the one-persistence-site rule, the turn-that-ends-early-persists-nothing rule and the
+  no-new-failure-mode clause.
 - **No other ADR is superseded in whole or in part**, and §16 shows the working for each one a
-  reader would expect to be — ADR-0014, ADR-0037, ADR-0228, ADR-0249, ADR-0042 and ADR-0253 among
-  them.
+  reader would expect to be — ADR-0014, ADR-0037, ADR-0249, ADR-0042 and ADR-0253 among them.
 - Date: 2026-09-12
 
 ## Context
@@ -475,9 +503,14 @@ was settled about the step rather than by where in the plan it sat.
 > removes, reorders or replaces an identifier"* — and membership in it is a comparison against
 > one stored row rather than a scan.
 
-> **Normative — an execution belongs to exactly one attempt, and `commit_attempt` is where that
-> is made true.** `PlanStore.commit_attempt` **refuses an `add_execution_id` naming an execution
-> that any attempt of that goal already carries**, with the error class §3's conjunct raises. This
+> **Normative — an execution belongs to exactly one attempt, and **both** attempt-writing members
+> are where that is made true.** `PlanStore.commit_attempt` **refuses an `add_execution_id` naming
+> an execution that any attempt of that goal already carries**, and `PlanStore.open_attempt`
+> **refuses a `GoalAttempt` whose `execution_ids` names an execution any attempt of that goal
+> already carries** — because `open_attempt` takes a whole `GoalAttempt` and that tuple may arrive
+> non-empty, so a caller could otherwise open a live attempt carrying an ended attempt's execution
+> and defeat the conjunct without ever calling `commit_attempt`. Each refuses with the error class
+> §3's conjunct raises, and **each decides it in the same indivisible step as its own write**. This
 > is a second **strengthening of an existing member** on ADR-0249 §12's own footing, and it is
 > what makes §3's conjunct a binding rather than a coincidence: ADR-0249 §12's append-only rule —
 > *"an identifier the tuple already holds is ignored rather than duplicated or refused"* — governs
@@ -868,6 +901,17 @@ composed is a state the answer could not mention.
 > modifies the earlier one or is planned afresh. **No lane reads a replan as licence to repeat
 > an act.**
 
+> **Normative — the obligation is undischarged until A8, and §13's rule is what makes that
+> interval safe rather than a hazard.** **L2 does not discharge it**, and no lane reads its
+> landing as having done so. What stops the interval being a live duplicate-booking risk is the
+> rule §13 carries: **no consequential capability is wired into a production deployment until the
+> verification, uncertain-outcome and cancellation guarantees for its class are implemented and
+> demonstrated** — and A8's key is one of those guarantees. So the requirement is stated, its
+> discharge is named, and the window in which it is unmet is a window with **no real consequential
+> integration in it**, which is ADR-0253 §3's construction applied to one more obligation. **A
+> normative requirement a lane cannot yet satisfy is not a contradiction where the acts it governs
+> cannot yet be performed**, and this decision states both halves rather than softening the first.
+
 > **Normative — the driver discharges it within one execution today, and the mechanism that
 > discharges it across plans is A8's, by name.** Within one `ExecutionState` a step already
 > `RUNNING`, `SUCCEEDED`, `FAILED`, `SKIPPED` or `INDETERMINATE` is **never re-dispatched by the
@@ -1119,11 +1163,17 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > licence lifts no budget and no allowance**, and an attempt whose ledger is spent gets no
 > licensed round.
 
-> **Normative — the licence admits one round, and what follows is ADR-0251's own loop unchanged.**
-> A round the licence admitted returns a plan that may itself carry a `read_request`; where it
-> does and the servicing completes, **further rounds are admitted by (b), (c) and (d) as written**
-> and the licence is spent. **No licence admits two rounds**, and no implementation re-derives one
-> from the same walk.
+> **Normative — the licence places the turn's investigation and is not spent by a round.** It
+> satisfies (j) and §1's occupancy **for every round of that turn**, so a round the licence
+> admitted that returns a `read_request` is serviced and the **next** round is admitted by (b),
+> (c) and (d) as written, with (j) satisfied by the same licence. **Whether there is a further
+> round is (b), (c), (d) and the guards' question, and never the licence's**; the licence answers
+> *where* the loop is placed and nothing about *how far* it goes.
+
+> **Normative — one licence per turn, and a walk under it carries none.** A turn holds **at most
+> one** re-investigation licence however many walks it makes: **a second walk carries no licence**,
+> whatever it skipped, so a turn cannot alternate walking and investigating without bound.
+> **No implementation re-derives a licence from a walk that already ran under one.**
 
 > **Normative — ADR-0251 §1's occupancy clause is partially superseded in the same scope.** That
 > section rules *"**Every round of one attempt's investigation sits inside one occupancy of
@@ -1149,6 +1199,29 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
 > **it does not return to `INVESTIGATE`**, no lane re-stamps a phase it has left, and ADR-0249 §6
 > binds exactly as §10 states it. **The licence is the carrier and the phase is the record**, and
 > keeping them apart is the whole of this section.
+
+> **Normative — a turn that investigates again drives again, and ADR-0228 §5's two per-turn
+> clauses become per-walk. This partially supersedes ADR-0228 §5** in the one scope §16 states.
+> That section rules *"**Every plan of the turn is persisted before anything is driven.** The whole
+> sequence of `save_plan` calls precedes `start_execution`"* and *"**Exactly one plan of a turn is
+> driven and it is the last**"*. Both are stated over a **turn** and both become statements over a
+> **walk**: the plans produced for a walk are **all persisted before that walk's
+> `start_execution`**, and **exactly one plan is driven per walk and it is the last of the plans
+> produced for it**. A turn makes **at most two** walks — its first, and one after a licensed
+> investigation — so it drives at most two plans and persists each set before the drive it
+> precedes.
+
+> **Normative — §5's every other clause binds verbatim, and its reason is kept rather than
+> weakened.** *"A superseded plan **drives nothing**"* binds entire and is what §7 relies on;
+> so do the every-plan-is-persisted rule itself, the oldest-first order, the
+> a-turn-that-ends-before-that-site-persists-nothing rule, the one-persistence-site rule and the
+> no-new-failure-mode clause. **§5's reason for the ordering is that a turn whose second
+> `save_plan` raises *"has driven nothing: no execution is open, no capacity slot is spent on a
+> step and no side effect has been reached"*** — a protection for a turn that **has not yet
+> acted**. Before a turn's first walk that is the whole turn and the clause binds exactly as
+> written. Before a second walk the turn **has** acted, an execution **is** open and a side effect
+> **has** been reached, so there is no such state left to protect and the per-turn reading would
+> forbid the licensed investigation while buying nothing at all.
 
 > **Normative — the licensed round is admitted before the turn composes, and composing is what
 > it displaces.** The licence is read at the instant the walk returns, and the round it admits
@@ -1210,9 +1283,10 @@ ledger and stops on the same three guards.
 > the Protocol rather than for the constructor. `StepRunner` and `StepExecutor` are concrete
 > `orchestration` classes and **not** Protocols, so §3's threaded keyword changes no contract
 > surface at all. `PlanStore`'s signatures do **not** move and `PlanStore` gains **no member**;
-> what changes is what a conforming implementation must
-> **refuse** — §3 adds one conjunct to `commit_transition`, which is a **strengthening of an
-> existing member**, exactly as ADR-0249 §12 classifies the first one. **The existing `PlanStore`
+> what changes is what a conforming implementation must **refuse**, on **three** members. §3 adds
+> one conjunct to **`commit_transition`**, and the execution-ownership refusal to
+> **`commit_attempt`** and to **`open_attempt`**. Each is a **strengthening of an existing
+> member** rather than a new one, exactly as ADR-0249 §12 classifies the first one. **The existing `PlanStore`
 > conformance suite and the canonical fake in `ai_assistant.testing` gain the new obligation in
 > the same change that adds it** (`CONTRIBUTING.md` → "Adding a Protocol": *"The triad is what a
 > Protocol *change* is measured against too"*). **No new Protocol is created**, so no new
@@ -1348,9 +1422,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 > **Normative.** This decision is implemented in **two lanes**, in this order.
 
-- **L1 — the conjunct.** `core/types.py`'s one field and its validator; `commit_transition`'s
-  added claim condition in `InMemoryPlanStore` and `SqlitePlanStore`; the shared `PlanStore`
-  conformance suite arm (§3's test 3) and the canonical fake in `ai_assistant.testing`; and the
+- **L1 — the conjunct and the ownership invariant.** `core/types.py`'s one field and its
+  validator; **all three** of §3's strengthenings in `InMemoryPlanStore` and `SqlitePlanStore` —
+  `commit_transition`'s added claim condition, and the execution-ownership refusal on
+  `commit_attempt` **and** on `open_attempt`; the shared `PlanStore` conformance suite arms for
+  each (§3's test 3 and arm 6's two ownership cases) and the canonical fake in
+  `ai_assistant.testing`; and the
   `wire/envelope.py` log entry and version bump **only if** the tree contradicts §11's dated
   observation; and §3's threading — the `attempt_id` keyword on `StepRunner.run`,
   `StepRunner.resume` and `StepExecutor.execute`, supplied by `engine.py`'s existing single-step
@@ -1425,8 +1502,12 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    in the shared `PlanStore` conformance suite: `commit_attempt(add_execution_id=E)` on **B**
    after A already holds E is **refused**, so the state in which E belongs to two attempts —
    under which a claim naming B would pass every conjunct — **cannot be reached through the
-   store** (§3). A paired arm asserts the append is still idempotent on the attempt that owns it,
-   which is ADR-0249 §12's own clause and is untouched.
+   store** (§3). **And the same case through the other door**: `open_attempt` with a
+   `GoalAttempt` whose `execution_ids` already names E is **refused** on the same terms, because
+   that member takes a whole attempt and the tuple may arrive non-empty — a caller could otherwise
+   reach the forbidden state without calling `commit_attempt` at all. A paired arm asserts the
+   append is still idempotent on the attempt that owns it, which is ADR-0249 §12's own clause and
+   is untouched.
 7. **The store-level invariant, in the shared `PlanStore` conformance suite** (§3's test 3), over
    both implementations and the canonical fake: no `→ RUNNING` transition is ever accepted whose
    goal revision is not the stored one, and none whose attempt is absent, does not carry this
@@ -1500,8 +1581,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     terms and the round is admitted by the licence alone — which is what a supersession of (j)
     by itself would not have bought. A further paired arm asserts the licence admits **one** round:
     where the round it admitted returns a plan carrying a `read_request` that is serviced, the next
-    round is admitted by (b), (c) and (d) as written, and where it returns none, no second round
-    is admitted.
+    round is admitted by (b), (c) and (d) as written **with (j) satisfied by the same licence**,
+    and where it returns none, no second round is admitted. **And the arm that pins what the turn
+    then does with the plan**: the licensed investigation's last plan is persisted **after** the
+    first walk's `start_execution` and is driven by a **second walk**, the first walk's plan and
+    execution are unchanged, and the turn drove **two** plans and no more — which is ADR-0228 §5's
+    two clauses read per walk (§10). A final paired arm asserts **one licence per turn**: the
+    second walk carries none, whatever it skipped.
 
 **Full — M34, owed there and not established here.**
 
@@ -1533,8 +1619,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
 
-**Exactly two documents are partially superseded — ADR-0254 and ADR-0251, in one scope each** —
-and the entries below
+**Exactly three documents are partially superseded — ADR-0254 in one scope, ADR-0251 in two and
+ADR-0228 in one** — and the entries below
 show the working for it and for each other document a reader would expect to be superseded and is
 not: ADR-0037, ADR-0228, ADR-0249, ADR-0014, ADR-0042 and ADR-0253 among them. ADR-0082 §1's test
 is applied to each earlier ADR's **text**.
@@ -1638,22 +1724,46 @@ stage, and is named here as a follow-on rather than pretended to be solved"*. §
 `timeout`'s keyword-only, no-default, caller's-budget character is unchanged, and nothing about
 §3's two call shapes moves.
 
-**ADR-0251 §4 — partially superseded in condition (j) alone, and the scope is on this document's
-`Status` line.** A reader holding only (j) builds an attempt that executes, learns from a
+**ADR-0251 §4 and §1 — partially superseded in two scopes, each on this document's `Status`
+line.** A reader holding only §4 builds an attempt that executes, learns from a
 `SKIPPED`/`UNMET_DEPENDENCY` step that the world is not as it planned, makes its turn's one
-ungated call, and **cannot iterate over what it just learned** — while ADR-0249 §5 and ADR-0250
-§12 forbid opening a fresh attempt to escape the bar, so *investigate alternatives* is unreachable
-inside that attempt without the user asking again. That is ADR-0070 §1's test met and **partial**
-in ADR-0070 §3's sense: the scope is (j)'s single condition and nothing else. §10 states the
-alternative and the typed walk outcome that carries it, and **(j)'s own two hazards are each
-avoided rather than accepted** — the phase does not move, and the loop is placed by the licence
-rather than by a phase it does not occupy. **(j)'s own reservation is the warrant**: *"**How a
-later turn's planning relates to an attempt that is authorizing, executing or verifying is A7's
-and A9's**"*. §10 takes the **executing** limb; §12 leaves the authorizing and verifying limbs to
-A9. **Every other clause of ADR-0251 binds entire and is relied on** — §4's (a) to (i), its
-never-gated first call and its `NOT_ITERATED` record, §5's figures, §6's reserve and its
-ungated-composing clause (§9), and §13's *"A replan never resets an allowance"*, which is what
+ungated call, and **cannot iterate over what it just learned**: (j) is false because the phase has
+advanced, and (b), (c) and (d) are false because the finding came from an executed step rather
+than from a serviced read. A reader holding only §1 refuses the round on a second ground — every
+round *"sits inside one occupancy of `AttemptPhase.INVESTIGATE`"*. Meanwhile the decisions fixing
+which acts open an attempt forbid opening a fresh one to escape either bar, so *investigate
+alternatives* is unreachable inside that attempt without the user asking again. **Both are
+ADR-0070 §1's test met and both are partial in ADR-0070 §3's sense**: the scopes are §4's four
+trigger conditions and §1's one occupancy term, and nothing else. §10 states the licence, the
+typed walk outcome that carries it and the guards that still bind. **(j)'s own two hazards are
+each avoided rather than accepted** — the phase does not move, and the loop is placed by the
+licence rather than by a phase it does not occupy — and §1's no-re-entry clause is obeyed rather
+than lifted, a licensed round re-entering no phase at all. **(j)'s own reservation is the
+warrant**: *"**How a later turn's planning relates to an attempt that is authorizing, executing or
+verifying is A7's and A9's**"*. §10 takes the **executing** limb; §12 leaves the authorizing and
+verifying limbs to A9. **Every other clause of ADR-0251 binds entire and is relied on** — §4's
+(a), (e), (f′), (g), (h) and (i), its never-gated first call and its `NOT_ITERATED` record; §1's
+round definition, its no-round-moves-the-phase rule, its turn-assembled-once rule, its
+monotone-supply rule and its brief-as-it-stands rule; §5's figures; §6's reserve and its
+ungated-composing clause (§9, §10); and §13's *"A replan never resets an allowance"*, which is what
 makes a licensed round **charge** rather than refresh.
+
+**ADR-0228 §5 — partially superseded in its two per-turn clauses, and the scope is on this
+document's `Status` line.** A reader holding only §5 requires *"The whole sequence of `save_plan`
+calls precedes `start_execution`"* and *"Exactly one plan of a turn is driven and it is the last"*
+of a **turn** — so a turn whose licensed investigation produces a plan after its first walk may
+neither persist that plan nor drive it, and the investigation §10 licenses can change nothing.
+That is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense: the scope is those two
+clauses' subject, which becomes the **walk**, and nothing else. **§5's reason is what decides the
+scope rather than being set aside by it**: the ordering exists so that a turn whose second
+`save_plan` raises *"has driven nothing: no execution is open, no capacity slot is spent on a step
+and no side effect has been reached"* — a state that obtains before a turn's first walk and cannot
+obtain before its second, so the per-turn reading forbids the investigation and protects nothing.
+**Every other clause of ADR-0228 binds entire and is relied on**: §5's superseded-plan-drives-
+nothing rule is what §7 rests on, its every-plan-is-persisted rule, its oldest-first order, its
+one-persistence-site rule, its turn-that-ends-early-persists-nothing rule and its
+no-new-failure-mode clause all stand, and §14's plan-driving deferral is **fired** rather than
+superseded (above).
 
 **ADR-0252, ADR-0253 and ADR-0254's remainder — relied on and not superseded.**
 ADR-0252 §6's four tests are evaluated by §1 and §5 and not restated; ADR-0253's §§1, 2, 4, 5, 6,
@@ -1674,10 +1784,11 @@ terms is *"the system as ratified"* — leaves `depends_on`, `when`, `resolves`,
 after a park, an uncertain effect or an expired budget. That is ADR-0070 §1's test met, and a new
 ADR is the instrument.
 
-**It is a partial supersession of exactly two documents** (ADR-0070 §3) — **ADR-0254**, in §14's
-two-case enumeration alone, and **ADR-0251**, in §4's condition (j) alone — and the `Status` line
-names each scope without an `ADR-NNNN` token inside the parentheses, so ADR-0070 §4's extraction
-invariant holds. Every other ADR it touches is
+**It is a partial supersession of exactly three documents** (ADR-0070 §3) — **ADR-0254** in
+§14's two-case enumeration, **ADR-0251** in §4's trigger group and §1's occupancy clause, and
+**ADR-0228** in §5's two per-turn clauses — and each record it writes names its scope without an
+`ADR-NNNN` token inside the parentheses, so ADR-0070 §4's extraction invariant holds. Every other
+ADR it touches is
 **relied on**, and what it takes it takes by **firing deferrals** rather than by replacing
 clauses: ADR-0228 §14's, ADR-0249 §13's two, ADR-0042 §3's named follow-on, and the three
 questions ADR-0253 hands here by name in §2, §9 and §11. §16 shows the working for each rather
