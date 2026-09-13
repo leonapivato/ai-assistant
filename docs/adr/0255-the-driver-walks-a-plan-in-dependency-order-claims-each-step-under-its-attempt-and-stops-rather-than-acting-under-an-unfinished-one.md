@@ -351,7 +351,8 @@ ADR-0254 §14's own enumeration — *"1. Dependency validity … 2. Arguments pr
 > stay exactly as they stood, so a transport failure underneath a provider error is still the
 > cause a reader sees. **The ledger failure is recorded where the driver owns the state**: a
 > structured log warning, carrying the **ledger** failure's class and **nothing at all** taken
-> from the interpretation's exception. **The turn failed on the interpretation**, and an implementation whose accounting cleanup masked that
+> from the interpretation's exception. **The turn failed on the interpretation**, and an
+> implementation whose accounting cleanup masked that
 > cause would report a store problem for a provider outage and send the next reader to the wrong
 > subsystem. **No lane swallows either, and no lane rewrites either.**
 
@@ -598,9 +599,14 @@ and ADR-0254 §14 wrote its enumeration before any lane could walk a plan and me
 > **Normative.** **A step the walk did not reach is `PENDING` when the walk ends**, and **the
 > walk itself never skips it**. No lane sweeps the remainder of a stopped walk into `SKIPPED`,
 > writes a `SkipReason` for a step nothing evaluated, or reads `PENDING` after a stopped walk as
-> a terminal state. **Exactly one later event disposes of such a step, and it is not the walk**:
-> §7's supersession, on a different ground, at a different moment, and forbidden by §6 behind an
-> `INDETERMINATE` step.
+> a terminal state. **Two later events dispose of such a step, and neither is the walk that left
+> it `PENDING`**: **a fresh walk of the same plan**, which is reached by the one route the block
+> below names — `StepRunner.resume` answering a park of that plan, after which the driver walks
+> that plan again from its first position (§5) and disposes of the step as any other `PENDING`
+> one; and **§7's supersession**, on a different ground, at a different moment, and forbidden by
+> §6 behind an `INDETERMINATE` step. **The list is closed at those two**: no sweep, no timer and
+> no background continuation disposes of one, which is the block below stated from the step's side
+> rather than the walk's.
 
 > **Normative — what re-enters a stopped walk, and this decision provides no automatic route.** A
 > stopped walk is re-entered by **exactly one** route: `StepRunner.resume` answering a park of
@@ -1220,12 +1226,25 @@ wider blast radius, filed there and **not taken here** (§12).
 > **Normative — the two writes are not one, and what a failure between them leaves is stated.**
 > The step's `→ INDETERMINATE` transition and the attempt's `commit_attempt` are **two writes
 > under two compare-and-swaps**, and `PlanStore` offers no multi-write commit (#257's own
-> observation, one store over). Where the attempt write does not land — a stale
-> `expected_version`, a store failure — **the step stays durably `INDETERMINATE` and the attempt
-> stays `RUNNING`**, the turn fails as a turn whose store write raised already fails, **nothing is
-> re-dispatched and no step is skipped**. **The step's status is the authoritative record of the
-> uncertainty** and the attempt's state is the derived convenience, so the residual is a record
-> that is *less* informative rather than one that is wrong.
+> observation, one store over). Where the attempt write does not land, **the step stays durably
+> `INDETERMINATE`**, the turn fails as a turn whose store write raised already fails, and
+> **nothing is re-dispatched and no step is skipped**. **What the attempt is left holding depends
+> on which failure it was, and the two are not alike**:
+>
+> - **A store failure** — the write never reached a decision. The attempt stays **`RUNNING`**, as
+>   it stood when the driver read it.
+> - **A stale `expected_version`** — the compare-and-swap was *decided*, against the driver.
+>   Another writer moved the attempt between the driver's read and this write, and **the attempt
+>   holds whatever that writer committed** — which may be `CANCELLED`, `ENDED` or any of the three
+>   §3 derives *paused* from. **No lane states that it stays `RUNNING` here and no lane restores
+>   it**: the driver lost the race and **writes nothing**, so the concurrent writer's state stands
+>   exactly as committed. Two turns of one conversation are not serialized (§3, ADR-0014's and
+>   ADR-0029's notes of 2026-08-25), which is what makes this limb reachable at all.
+>
+> **The step's status is the authoritative record of the uncertainty** and the attempt's state is
+> the derived convenience, so on the first limb the residual is a record that is *less* informative
+> rather than one that is wrong; on the second it is a record that is *differently* informative,
+> and the loser of a compare-and-swap overwriting the winner would be the worse outcome by far.
 
 > **Normative — repairing that residual is A8's, and no lane derives around it.** A8's
 > reconciliation reads `INDETERMINATE` steps and is the lane that can write the attempt's state
@@ -1449,8 +1468,13 @@ nothing depends on it, and no act follows — so nothing fails open.
 
 ### 9. The deadline: one budget the driver reads, on a monotonic source, and what a walk charges
 
-> **Normative.** **ADR-0042 §3's per-request deadline is attached here, and it is the driver's.**
-> The `timeout` an adapter supplies to `converse` or `resume` is the **whole request's** budget.
+> **Normative.** **ADR-0042 §3's named follow-on is discharged here, and the per-request deadline
+> it books is the driver's.** §3 does not already carry one: it ratifies the `timeout` as the
+> **per-attempt** budget and says in terms that it is *"**not** an overall wall-clock deadline for
+> the whole request"*, booking the overall one as *"a decision that belongs with that plan-driving
+> stage"*. **This is that stage and this section is that decision** (§16), so the figure's meaning
+> is **fixed here** rather than read off §3. **The `timeout` an adapter supplies to `converse` or
+> `resume` is the whole request's budget.**
 > **The deadline is fixed once per adapter call**, from the **monotonic** source §9 names below,
 > **at the entry to that call and immediately after the `timeout` is validated** — before
 > routing, before context assembly, before the turn's first `Planner.plan` call, and therefore
@@ -1560,10 +1584,19 @@ nothing depends on it, and no act follows — so nothing fails open.
 > stopped part-way**: no clause of this decision interrupts phase 4, and a plan whose validation
 > outlives the budget reaches a walk whose first remainder is not strictly positive and which
 > therefore **starts no step** — the stop rule working rather than a gap in it. **What that costs
-> is bounded and is stated**: ADR-0254 §14 evaluates *"deterministically and over stored values
-> alone"*, so phase 4 makes no model call and reaches no egress, and its cost is linear in the
-> plan's steps over reads the store already serves. **Gating phase 4 itself is ADR-0254 §14's to
-> decide and is not taken here** (§12).
+> is bounded and is stated, and it is bounded *conditionally***: ADR-0254 §14's **four checks**
+> evaluate *"deterministically and over stored values alone"*, so **where a deployment takes no
+> phase-4 model call** the evaluation makes none and reaches no egress, and its cost is linear in
+> the plan's steps over reads the store already serves. **Where a deployment does take one, that
+> bound does not hold and this decision does not supply another.** ADR-0254 §14's second normative
+> block licenses exactly such a call — *"A **phase-4 model call**, where a deployment makes one, is
+> given the plan and the `GoalBrief`"* — and this document's `Status` record keeps that block
+> binding verbatim. So a deployment that lands one can begin a provider call at phase 4 **after
+> the request deadline has already expired**, and the walk that follows correctly starts no step
+> while the user has waited out a call nothing gated. **That is booked, not solved**: whether the
+> optional call is gated on the remainder, bounded by a timeout of its own, or left ungated with
+> the cost accepted is **issue #2312**, and **gating phase 4 itself is ADR-0254 §14's to decide
+> and is not taken here** (§12). **No lane reads this section as having bounded that call.**
 
 > **Normative.** **A step the deadline stopped is `PENDING` and is never `SKIPPED`** (§2), and the
 > remainder is never rounded up, clamped to a minimum, borrowed from a later turn or topped up.
@@ -2236,7 +2269,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    stood, so a driver that re-raised the interpretation from inside its ledger handler satisfies
    every other assertion here and still hands a reader **a store failure as the chain underneath a
    provider outage** — the one substitution §1 states these arms exist to stop, reached through
-   the one channel they did not read. **And the two arms ADR-0013 §5's own wrong turn earns**: a fake whose
+   the one channel they did not read. **And the two arms ADR-0013 §5's own wrong turn earns**: a
+   fake whose
    interpretation calls raise **one cached exception instance**, failed **twice**, asserting
    `__notes__` is unchanged and no longer after the second failure than after the first; and **two
    walks failing concurrently over that one instance**, asserting neither leaves anything on it
@@ -2272,7 +2306,18 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 5. **A stale-revision claim is refused through the driver** — the goal's revision advances between
    step 1's success and step 2's claim; `commit_transition` refuses, **`ToolInvoker` is never
    entered** (a fake that records entry), step 2 is `PENDING` at its stored version, and the walk
-   stops.
+   stops. **And the arm that puts the ledger on this path** (§9): over a controlled monotonic
+   source advanced by a known interval across the refused claim, `AttemptEffort.working` has
+   **advanced by the interval the walk consumed up to the refusal** and `planner_calls` has not
+   moved. §9 states the charging rule of **every** working interval a walk consumes rather than of
+   the intervals that end well, and an implementation charging only normal dispositions and §1's
+   interpretation failures passes every other arm of this list while handing the next turn an
+   allowance it has already spent. **Parameterized over the failure paths that reach it**: a
+   `StepRunner.run` that consumes the interval and then **raises** — an audit failure, a planning
+   store failure, and the refused claim above — and, over each, **the paired case in which the
+   charging `commit_attempt` then raises too**, asserting §1's own precedence one seam over: the
+   **originating** exception is the one that reaches the caller, the driver does not touch it, and
+   the residual is a `working` that **undercounts**.
 6. **A claim under an attempt that is not driving is refused** — the attempt is committed
    `ENDED` between step 1's success and step 2's claim; same four assertions. A paired arm asserts
    the **goal's revision did not move**, which is what makes this conjunct not redundant with the
@@ -2490,9 +2535,16 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
     (§6's override of §7). **And two arms over the partial write** (§6): with the step's
     `→ INDETERMINATE` transition committed and the following `commit_attempt` failing — once on a
     stale `expected_version`, once on a store failure — the arm asserts the exact residual, that
-    **the step stays `INDETERMINATE`**, **the attempt stays `RUNNING`**, the turn **fails**, **no
-    later step is dispatched and none is skipped**, and the committed step transition is **not
-    lost or retried**. They are what stop an implementation composing over the failure, sweeping
+    **the step stays `INDETERMINATE`**, the turn **fails**, **no later step is dispatched and none
+    is skipped**, and the committed step transition is **not lost or retried**. **The two cases
+    assert different things about the attempt, because §6 states different residuals for them**:
+    on the **store failure** the attempt **stays `RUNNING`**; on the **stale `expected_version`**
+    the arm moves the attempt to `ENDED` through a second writer *before* the driver's
+    `commit_attempt`, and asserts the attempt **still reads `ENDED`** afterwards — that the
+    driver wrote nothing and did not restore `RUNNING` over the winner of the race. An arm
+    asserting `RUNNING` on that limb would be unsatisfiable, since the stale version is stale
+    *because* another writer moved it. They are what stop an implementation composing over the
+    failure, sweeping
     the remainder, or re-driving the step. **And the arm that pins the scope of the no-skip
     rule** (§6): a three-step plan whose **first** step is independent of the others and is
     `SKIPPED`/`UNMET_DEPENDENCY` on an unsatisfied `when`, whose **second** returns
@@ -2719,6 +2771,20 @@ and that bounding a whole multi-step request *"is a decision that belongs with t
 stage, and is named here as a follow-on rather than pretended to be solved"*. §9 takes it. The
 `timeout`'s keyword-only, no-default, caller's-budget character is unchanged, and nothing about
 §3's two call shapes moves.
+
+**And the sentence a reader would raise is quoted and disposed of rather than left standing**:
+§3 also says *"This `timeout` is the **per-attempt** budget of ADR-0029 §4 … **not** an overall
+wall-clock deadline for the whole request"*, and §9 makes it the whole request's. **That is the
+follow-on firing and not ADR-0070 §1's test met**, because §3 states the per-attempt reading as a
+description of the system *as ratified* and says so twice in the same paragraph — the distinction
+*"is dormant today"* because *"a turn drives at most one call"*, and *"Once the plan-driving stage
+across a plan's steps lands … a 10-second budget would not bound a two-step turn to 10 seconds"*.
+**A reader holding only §3 is not led to build something §9 refuses; they are told in terms that
+the decision is outstanding and is this lane's** — §3's own words, *"rather than pretended to be
+solved by threading one figure through unchanged"*, refuse the threading an unwarned reader would
+have chosen. A deferral fired by the lane it names is a **record** under ADR-0082 §1 and not a
+supersession under ADR-0070 §3, which is how §17 classifies ADR-0228 §14's and ADR-0249 §13's two
+alongside it.
 
 **ADR-0251 §4 and §1 — partially superseded in two scopes, each on this document's `Status`
 line.** A reader holding only §4 builds an attempt that executes, learns from a
