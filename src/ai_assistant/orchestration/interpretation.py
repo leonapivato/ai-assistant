@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         Goal,
+        GoalEvidence,
         MemoryRecord,
         ProposedUnderstanding,
     )
@@ -83,8 +84,10 @@ __all__ = [
     "CONDITIONS_LETTER",
     "CONSTRAINTS_LETTER",
     "CRITERIA_LETTER",
+    "EVIDENCE_LETTER",
     "RecordedUnderstanding",
     "recorded_revision",
+    "resolved_evidence_row",
     "resolved_ordinal",
 ]
 
@@ -94,6 +97,24 @@ __all__ = [
 CONSTRAINTS_LETTER: Final = "C"
 CRITERIA_LETTER: Final = "S"
 CONDITIONS_LETTER: Final = "D"
+
+#: ADR-0252 §10's fourth label space, over the ``evidence`` sequence ADR-0249 §7 put on
+#: the same seam: "the label of the digest at 1-based index *n* of ``Planner.plan``'s
+#: ``evidence`` sequence is the ASCII string ``E`` followed by *n* in decimal with no
+#: padding".
+#:
+#: **The prefix rather than a second field, because the label space is already per
+#: sequence and the planner already knows which one it read** (§10). A
+#: ``ProposedElement.evidence_label`` carries either an ``M`` label or an ``E`` label
+#: and **gains no field**: a second field would let a planner emit both and the loop
+#: choose, which is the "two carriers for one fact" defect, where the prefix makes the
+#: two spaces mutually exclusive at the value.
+#:
+#: It sits here, beside the three ADR-0249 §9 added, because this is where a label is
+#: parsed: :func:`resolved_ordinal` is the one parser for all four, and "a second parser
+#: for one rule is a second place to get the padding, the digit class and the bound
+#: wrong".
+EVIDENCE_LETTER: Final = "E"
 
 #: The label form, per letter: the letter followed by a 1-based decimal ordinal with no
 #: padding, **bounded in width** — the same form
@@ -173,6 +194,84 @@ def _resolved_record(
     return record.id
 
 
+def resolved_evidence_row(label: str | None, evidence: Sequence[GoalEvidence]) -> str | None:
+    """Resolve an ``E`` label to the id of the row it names, or to nothing (ADR-0252 §10).
+
+    **The planner names an evidence row by label, never by identifier**, and the scheme
+    is ADR-0226 §3's applied to a fourth sequence in the shape ADR-0249 §9 applied it
+    to three: the label of the digest at 1-based index *n* of ``Planner.plan``'s
+    ``evidence`` sequence is :data:`EVIDENCE_LETTER` followed by *n* in decimal with no
+    padding. Both sides derive it from the sequence they hold, neither consults the
+    other, and **no label survives the call that rendered it**.
+
+    **A row id is stamped by ``orchestration`` and never parsed out of model output**:
+    the digest carries no row id (ADR-0249 §10), the label is an ordinal, and the loop
+    stamps the id of the row **it itself labelled**. So this resolves over the very
+    sequence the call was handed, and a caller passing a different one would be
+    labelling a different history.
+
+    **A label of neither form, an *n* below 1 or beyond the sequence's length, and an
+    ``E`` label naming a row the store no longer holds each resolve to nothing** — and
+    the element is then dropped silently, which is ADR-0249 §7's disposal binding
+    unchanged over one more way to fail to resolve. The third case needs no test of its
+    own: a row ADR-0252 §13's elision dropped is not in the history the call was handed,
+    so every ordinal past its end resolves to nothing like any other.
+
+    Args:
+        label: What the planner named, or ``None``. Model-supplied text, treated as a
+            label and never as an identifier (ADR-0228 §8).
+        evidence: The rows the ``evidence`` sequence of **that call** was projected
+            from, in ADR-0252 §12's total order.
+
+    Returns:
+        The row's identifier, or ``None``.
+    """
+    if not label:
+        return None
+    index = resolved_ordinal(label, EVIDENCE_LETTER, len(evidence))
+    return None if index is None else evidence[index].id
+
+
+def _from_evidence(
+    text: str,
+    *,
+    label: str | None,
+    supply: Sequence[MemoryRecord],
+    minted: Collection[str],
+    evidence: Sequence[GoalEvidence],
+) -> GoalElement | None:
+    """Stamp a ``FROM_EVIDENCE`` element from whichever label space it names (§10).
+
+    **The prefix is the whole of what decides which sequence is resolved against**
+    (ADR-0252 §10): ``M`` against the ``memories`` passed on that call, ``E`` against
+    the ``evidence`` passed on that call. The element carries **exactly one** of
+    ``evidence_id`` and ``evidence_row_id``, which its own validator enforces — so the
+    two spaces are mutually exclusive at the value as well as at the label.
+
+    A label of neither form resolves to nothing on the ``M`` path, exactly as it did
+    before this fourth space existed, and the element is dropped.
+
+    Args:
+        text: What the element says.
+        label: The label the planner named, or ``None``.
+        supply: The sequence the loop passed the planner on this call.
+        minted: The ids of the records this turn's searches minted.
+        evidence: The rows this call's ``evidence`` sequence was projected from.
+
+    Returns:
+        The element to record, or ``None`` where its ground resolved to nothing.
+    """
+    if label is not None and label.startswith(EVIDENCE_LETTER):
+        row_id = resolved_evidence_row(label, evidence)
+        if row_id is None:
+            return None
+        return GoalElement(text=text, ground=Ground.FROM_EVIDENCE, evidence_row_id=row_id)
+    evidence_id = _resolved_record(label, supply, minted)
+    if evidence_id is None:
+        return None
+    return GoalElement(text=text, ground=Ground.FROM_EVIDENCE, evidence_id=evidence_id)
+
+
 def _resolved_span(span: str | None, utterance: str) -> str | None:
     """Resolve a ``USER_STATED`` span against the turn's own request (§7).
 
@@ -200,7 +299,7 @@ def _resolved_span(span: str | None, utterance: str) -> str | None:
     return span
 
 
-def _resolved_element(  # noqa: PLR0913, PLR0911 — one parameter per thing a ground is resolved against, and one return per way a ground resolves or fails to; collapsing either would hide which rule decided
+def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is resolved against, and one return per way a ground resolves or fails to; collapsing either would hide which rule decided
     proposed: ProposedElement,
     *,
     letter: str,
@@ -208,6 +307,7 @@ def _resolved_element(  # noqa: PLR0913, PLR0911 — one parameter per thing a g
     utterance: str,
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
+    evidence: Sequence[GoalEvidence],
 ) -> GoalElement | None:
     """Resolve one proposed element, or drop it (§7).
 
@@ -224,6 +324,8 @@ def _resolved_element(  # noqa: PLR0913, PLR0911 — one parameter per thing a g
         utterance: This turn's own request.
         supply: The sequence the loop passed the planner on this call.
         minted: The ids of the records this turn's searches minted.
+        evidence: The rows this call's ``evidence`` sequence was projected from
+            (ADR-0252 §10).
 
     Returns:
         The element to record, or ``None`` where it is dropped.
@@ -238,10 +340,13 @@ def _resolved_element(  # noqa: PLR0913, PLR0911 — one parameter per thing a g
     if text is None or ground is None:  # pragma: no cover — the validator admits no such value
         return None
     if ground is Ground.FROM_EVIDENCE:
-        evidence_id = _resolved_record(proposed.evidence_label, supply, minted)
-        if evidence_id is None:
-            return None
-        return GoalElement(text=text, ground=ground, evidence_id=evidence_id)
+        return _from_evidence(
+            text,
+            label=proposed.evidence_label,
+            supply=supply,
+            minted=minted,
+            evidence=evidence,
+        )
     if ground is Ground.USER_STATED:
         span = _resolved_span(proposed.span, utterance)
         if span is None:
@@ -258,6 +363,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
     utterance: str,
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
+    evidence: Sequence[GoalEvidence],
 ) -> tuple[GoalElement | None, ...]:
     """Resolve one tuple of proposed elements, dropping what does not resolve (§7).
 
@@ -273,6 +379,8 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
         utterance: This turn's own request.
         supply: The sequence the loop passed the planner on this call.
         minted: The ids of the records this turn's searches minted.
+        evidence: The rows this call's ``evidence`` sequence was projected from
+            (ADR-0252 §10).
 
     **One entry per *proposed* position, and a dropped element is a ``None``** rather
     than an absence. ADR-0250 §7 resolves a raised question's subject to "the position it
@@ -294,6 +402,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
             utterance=utterance,
             supply=supply,
             minted=minted,
+            evidence=evidence,
         )
         for element in proposed
     )
@@ -330,6 +439,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
     utterance: str,
     supply: Sequence[MemoryRecord],
     minted: Collection[str] = (),
+    evidence: Sequence[GoalEvidence] = (),
     recorded_at: datetime,
     raised_by: str,
 ) -> RecordedUnderstanding:
@@ -365,6 +475,11 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
         minted: The ids of the records this turn's ``WEB_SEARCH`` servicings minted,
             which resolve in no store (ADR-0231 §16). Empty on a turn that searched
             nothing, which is every turn on a deployment with no search wired.
+        evidence: The rows this call's ``evidence`` sequence was projected from, in
+            ADR-0252 §12's total order. An ``E`` label resolves against **this**
+            sequence and an ``M`` label against ``supply``, and the prefix is the whole
+            of what decides which (ADR-0252 §10). Empty on a goal whose history the
+            store holds no row of, which is every goal this turn opened.
         recorded_at: This turn's instant.
         raised_by: The turn whose message caused this revision. Required and
             undefaulted: §1 forbids writing ``None`` into it on a value
@@ -382,6 +497,10 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
     if understanding.retains_outcome:
         outcome, ground = current.outcome, current.outcome_ground
         evidence_id, span = current.outcome_evidence_id, current.outcome_span
+        # ADR-0252 §10: the outcome's fourth ground argument is copied forward on the
+        # same rule as the other three — §7's "byte for byte", which a retained outcome
+        # that quietly lost its row reference would break.
+        row_id = current.outcome_evidence_row_id
     else:
         # `ProposedUnderstanding`'s validator admits only a fully stated outcome on
         # this branch, so both values are present; the narrowing is mypy's and is not a
@@ -392,14 +511,23 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
         ):  # pragma: no cover — the validator admits no such value
             stated, declared = current.outcome, Ground.INFERRED
         outcome, ground = stated, declared
-        evidence_id = _resolved_record(understanding.outcome_evidence_label, supply, minted)
+        # ADR-0252 §10: `GoalInterpretation` gains `outcome_evidence_row_id` "on the
+        # same rule", because ADR-0249 §1 validates the outcome's arguments "as a
+        # `GoalElement`'s are" — so the outcome resolves through the same two label
+        # spaces an element does, and carries exactly one of the two arguments.
+        label = understanding.outcome_evidence_label
+        evidence_id, row_id = None, None
+        if label is not None and label.startswith(EVIDENCE_LETTER):
+            row_id = resolved_evidence_row(label, evidence)
+        else:
+            evidence_id = _resolved_record(label, supply, minted)
         span = _resolved_span(understanding.outcome_span, utterance)
-        unresolved = (ground is Ground.FROM_EVIDENCE and evidence_id is None) or (
-            ground is Ground.USER_STATED and span is None
-        )
+        unresolved = (
+            ground is Ground.FROM_EVIDENCE and evidence_id is None and row_id is None
+        ) or (ground is Ground.USER_STATED and span is None)
         if unresolved:
             # §7: recorded `INFERRED` with neither argument rather than dropped.
-            ground, evidence_id, span = Ground.INFERRED, None, None
+            ground, evidence_id, row_id, span = Ground.INFERRED, None, None, None
     groups = (
         (
             "constraints",
@@ -423,6 +551,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             utterance=utterance,
             supply=supply,
             minted=minted,
+            evidence=evidence,
         )
         for name, letter, proposed, held in groups
     }
@@ -435,6 +564,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             outcome=outcome,
             outcome_ground=ground,
             outcome_evidence_id=evidence_id,
+            outcome_evidence_row_id=row_id,
             outcome_span=span,
             constraints=kept["constraints"],
             criteria=kept["criteria"],
