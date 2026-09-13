@@ -1,7 +1,34 @@
 # 242. The act that trusts a destination has its own surface, and a search that did not happen is explained in the reply
 
-- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched) and ADR-0247 (§8's closure of `SearchNotServiced` at exactly eight members, in that count alone — the enumeration becomes seven, `SEARCH_DISABLED` and `NOT_ADMITTED` being removed with the `admit_search` refusal and the `Settings` bound they are defined over, which leaves every remaining pairwise order and every remaining value unchanged — and §8's two-members-not-one clause for that refusal, whose subject no longer exists. Those two scopes, and nothing else in this ADR beyond what the record above already recorded here: §1's trust act and its own surface, §§2-7, §8's remaining clauses including the precedence order, the totality and the non-injectivity of its mapping and the added-to-and-never-renamed rule, §9's bar on what a statement may say, and §§10-18 bind as that record left them; `TRUST_MISSING` and `AUTHORISATION_AWAITED` are expressly not removed)
+- Status: Partially superseded by ADR-0244 (§8's eight-member closure of `SearchNotServiced` in that count alone (the enumeration becomes nine with `ANSWER_AWAITED`, declared first; the eight members, their values, their order relative to one another, the added-to-and-never-renamed rule, the mapping's totality and its non-injectivity all stand), the three `RULING_CONFIRM` rows of §8's mapping table, which are discriminated by whether a park was written rather than re-pointed — obligatory, because a parked decision is not one the establishing act may ride and §8's `AUTHORISATION_AWAITED` clause asserts that it is — and §9's one-fixed-statement-per-member enumeration by the ninth member alone; every statement §9 fixes for the existing eight binds verbatim, §9's bars bind on the ninth, and §6's eligibility condition, §7's carrier, §9's `TurnOutcome` field and `SpokenTurn` clause, §§1–5 and §§10–18 are untouched) and ADR-0247 (§8's closure of `SearchNotServiced` at exactly eight members, in that count alone — the enumeration becomes seven, `SEARCH_DISABLED` and `NOT_ADMITTED` being removed with the `admit_search` refusal and the `Settings` bound they are defined over, which leaves every remaining pairwise order and every remaining value unchanged — and §8's two-members-not-one clause for that refusal, whose subject no longer exists. Those two scopes, and nothing else in this ADR beyond what the record above already recorded here: §1's trust act and its own surface, §§2-7, §8's remaining clauses including the precedence order, the totality and the non-injectivity of its mapping and the added-to-and-never-renamed rule, §9's bar on what a statement may say, and §§10-18 bind as that record left them; `TRUST_MISSING` and `AUTHORISATION_AWAITED` are expressly not removed) and ADR-0264 (§6's first clause, in its second sentence alone: "On every other turn it is given nothing, and the assembled prompt is byte-identical to what it is today" is false of a turn on which a search reached the provider and was answered, which records no SearchDisposition and so carries no SearchNotServiced member — one of the "every other" turns — and for which §6 of the superseding decision gives the composing stage a fragment stating that this turn reached outside the system and how many records it took in. §6's first sentence binds entire, so a turn on which at least one servicing recorded a disposition is still given one member of §8's vocabulary and still composes an answer that says so; §6's eligibility condition, its NO_RESULT clause, its notification clause and its reply_degraded clause bind entire; §7's carrier, §8's vocabulary, its mapping's totality and its non-injectivity, and §9's statements, its bars and its TurnOutcome and SpokenTurn clauses are untouched; and §§1-5 and §§10-18 stand entire)
 - Date: 2026-09-09
+- **Partially superseded: 2026-09-13 by ADR-0264 — §6's first clause, in its second
+  sentence alone. Nothing else in this ADR.** Issue #2268 records the asymmetry: §6 below
+  makes a turn say a search did *not* happen, and nothing said that one *did*, so a reply
+  could deny an outbound call this trail recorded. ADR-0264 is the mirror.
+
+  **The sentence that moves.** §6's first clause reads *"On a turn in which **at least one
+  search servicing recorded a `SearchDisposition`**, the composing stage is given one member
+  of §8's closed vocabulary and composes an answer that says so. On every other turn it is
+  given nothing, and the assembled prompt is byte-identical to what it is today."* A search
+  that reached the provider and was answered records no disposition — `SearchRefusal.NO_RESULT`
+  maps to none (ADR-0231 §13), which §6's third clause states in terms — so that turn is one
+  of the "every other" turns, and the superseding decision gives the composing stage a
+  fragment on it. The second sentence is therefore false of that turn.
+
+  **What does not move.** The first sentence binds entire: eligibility is still the
+  disposition's presence and nothing else, and a turn on which a servicing recorded one is
+  still given one member and still composes an answer that says so. §6's `NO_RESULT` clause,
+  its `UNAVAILABLE` clause, its reply-and-not-a-notification clause and its `reply_degraded`
+  clause all bind entire. §7's carrier and its computed-at-the-servicing-site rule, §8's
+  vocabulary, precedence, totality and non-injectivity, and §9's fixed statements, its bars
+  on what a statement may say and its `TurnOutcome` and `SpokenTurn` clauses are untouched,
+  and §§1-5 and §§10-18 stand entire.
+
+  **Why a record rather than a per-carrier reading.** This ADR's own header records
+  **Partially supersedes ADR-0228 — §10's first clause, in its second sentence alone**, for a
+  sentence of the same form falsified the same way by a second carrier. The same test gives
+  the same answer here.
 - **Partially supersedes** [ADR-0231](0231-the-planner-asks-for-a-search-the-turns-own-words-compose-it-and-the-results-come-back-as-records.md)
   — **§9's third clause, and nothing else in that ADR.** That clause reads *"The composing
   stage is told nothing new, and the assembled prompt on a turn whose search was refused is

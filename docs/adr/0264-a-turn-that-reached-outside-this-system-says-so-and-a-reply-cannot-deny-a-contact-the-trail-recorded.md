@@ -1,7 +1,20 @@
-# 264. A turn that reached outside this system says so, and a reply cannot deny a contact the trail recorded
+# 264. A turn that reached outside this system says so, and a reply cannot deny it on a surface that renders the statement
 
 - Status: Proposed
 - Date: 2026-09-13
+- **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
+  — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
+  other turn it is given nothing, and the assembled prompt is byte-identical to what it is
+  today"*, and it is false of a turn §6 below's carrier covers: a search that reached the
+  provider and was answered records no `SearchDisposition`, so that turn carries no
+  `SearchNotServiced` member and is one of the "every other" turns — and §6 below gives
+  the composing stage a fragment on it. **The first sentence binds entire**: a turn on which
+  at least one servicing recorded a disposition is still given one member of §8's vocabulary
+  and still composes an answer that says so. §6's eligibility condition, its
+  `NO_RESULT` clause, its notification clause and its `reply_degraded` clause bind entire,
+  §7's carrier, §8's vocabulary and mapping and §9's statements are untouched, and §§1-5 and
+  §§10-18 stand entire. ADR-0070 §1's test is met and its §3's partial form is the sanctioned
+  tool: a reader holding only that ADR would assert a byte-identity that no longer holds.
 
 ## Context
 
@@ -72,11 +85,6 @@ remaining failures. This decision closes that one.
   `admitted_fourth_group` inside `LearningLoop.resumed_read`. ADR-0242's negative member
   already rides that path — the engine sets `search_not_serviced` from
   `answered.not_serviced` — so the mirror is owed there too.
-- **The egress side holds its own.** `orchestration.runner` builds the
-  `ActionRequest` the policy rules on and sets `egress_binding` from what
-  `EgressBinder.bind` returned, so a step whose call carried a binding is known
-  inside `orchestration` at the time the step is driven. `tools/send_email.py` is
-  a live egress tool.
 - `TurnOutcome` carries fifteen members today, **nine** of them added by a later ADR as
   a `None`-defaulting widening a client renders on its own.
 
@@ -92,8 +100,10 @@ model infers — and #2268 records it inferring the opposite of the truth.
 
 ### What this ADR is not allowed to settle
 
-- **ADR-0242 §6's not-serviced statement.** Every clause of §§6-9 binds entire and
-  none is narrowed, widened or re-read here.
+- **ADR-0242 §6's not-serviced statement.** Every clause of §§6-9 binds entire and none is
+  narrowed, widened or re-read here — **with one exception, recorded in the header rather
+  than taken quietly**: §6's byte-identity sentence, which this decision falsifies and
+  partially supersedes (§14).
 - **The browser's rendering arrears.** Issue #2237 records that the browser renders none
   of ADR-0242 §9's statements; that is its own lane, not this one (§9).
 - **What the model writes.** No clause here inspects, classifies or corrects a
@@ -104,7 +114,7 @@ model infers — and #2268 records it inferring the opposite of the truth.
 ### 1. The eligibility condition: this turn reached outside itself, and the trail is what establishes it
 
 > **Normative.** A turn carries the statement this decision mints on, and only on, a
-> turn for which **at least one outbound contact is established** by §2 or §3. On every
+> turn for which **at least one outbound contact is established** by §2. On every
 > other turn it carries nothing, the composing stage is given nothing, and the assembled
 > prompt is byte-identical to what it is without this decision — the guarantee ADR-0242
 > §6 makes for its own carrier, ADR-0228 §10 for its own and ADR-0227 §3 for its own.
@@ -241,43 +251,29 @@ them would be false; `INDETERMINATE` is what it buys. Here the statement is pres
 is not, and an absent one claims nothing about the wire — so the user is told the honest
 indeterminate rather than a sentence this system cannot support.
 
-### 3. An egress contact, established from the binding the request carried
+### 3. No other outbound seam establishes a contact here, and the egress one expressly does not
 
-> **Normative.** A driven step establishes an outbound contact where **all three** hold:
-> the `ActionRequest` the policy ruled on carried an `EgressBinding`; the step's
-> `StepOutcome` disposition is `EXECUTED`; **and** the `StepExecution` that outcome
-> addresses — the one whose `step_id` is `StepOutcome.step_id`, the operation
-> `StepOutcome`'s docstring makes addressable rather than advisory — carries
-> `StepStatus.SUCCEEDED`.
+> **Normative.** **This decision establishes a contact from a `WEB_SEARCH` call and from
+> nothing else.** A driven step establishes none, whatever its binding, its disposition or
+> its addressed status; no component mints an `OutboundContact` from an `EgressBinding`,
+> from `Disposition.EXECUTED`, from `StepStatus.SUCCEEDED` or from any combination of them;
+> and a turn whose only outbound act was a send carries no member and leaves the assembled
+> prompt byte-identical to what it is without this decision.
 
-> **Normative.** **The third condition is not decoration, and a reader dropping it
-> builds a defect.** `Disposition.EXECUTED` is the *gate's* verdict: it says the call was
-> authorised and handed to the executor and that the executor committed something, not
-> that the callable was entered. A claim the `InvocationLedger` refused, and a
-> `ToolBindingError` the seam raises before the claim (ADR-0192 §1), both commit a
-> `FAILED` step beneath an `EXECUTED` disposition and reached nothing. Establishing a
-> contact from the disposition alone would state a call that provably never left.
+> **Normative.** **The reason is that no value this system holds establishes it**, and
+> ADR-0192 §4 says so in terms. `SUCCEEDED` is *"bounded by ADR-0031 §4 to exactly three
+> facts — a validated callable return, an unexpired deadline, and no increase in the
+> cancellation count — and none of them is a transmission"*; *"an egress callable that
+> returns normally without putting a byte on the wire produces `SUCCEEDED` like any
+> other"*; and *"nothing available today could carry it"*, because *"a transmission fact
+> would have to come from the integration, and `ToolImplementation` returns `FrozenJson`
+> with no channel for one"*. An earlier draft of this decision established an egress
+> contact from exactly that triple and would have rendered *"this turn reached outside this
+> system"* on a call that provably never left — the false statement §1 ranks below silence.
 
-> **Normative.** A step whose addressed status is `FAILED` or `INDETERMINATE`
-> establishes **nothing either way**, and that is the same ruling §2's third group takes
-> for the same reason: `FAILED` covers a pre-callable refusal and a post-dispatch failure
-> without separating them, and `INDETERMINATE` is ADR-0029 §4's expiry shape, which
-> exists precisely because the call *may* have acted. The condition is therefore
-> **under-inclusive and is stated as such rather than widened** — a callable that was
-> entered and then failed reached the world, and ADR-0192 §1's ledger claim, appended
-> *"immediately before the callable is entered"*, is the record of it, behind
-> `ToolInvoker` where `StepOutcome` cannot see it. §12 defers the rest with its trigger.
-
-> **Normative.** No component reads the `EgressBinding`, the tool, the connection, the
-> destination or any parameter of the call in order to compute this fact. What is read is
-> **that the binding was present**, and nothing of it crosses into the statement or into
-> the prompt.
-
-**This half is included because the rule is about the world and not about search.** #2268
-is a search defect and search is where the failure is acute — an egress send is driven as a
-*step*, and ADR-0170 §5 already has the composing stage told what became of each one.
-Ruling only on search would have made this a second search clause rather than the general
-one the issue asks for, and would have left the next outbound seam to mint its own member.
+> **Normative.** **That is a stated cost and not an oversight** (§12). ADR-0170 §5 already
+> has the composing stage told what became of each step, so the reply has an account of the
+> *act*; what it lacks is an account of the *wire*.
 
 ### 4. `OutboundContact`: what it carries, and the one count it carries
 
@@ -331,8 +327,8 @@ only place a statement about a model's own prompt is made.
 > provider returned, of what a servicing fetched before deduplication, or of anything a
 > step produced.
 
-> **Normative.** `records` is `0` on a turn whose only contact was an egress one and on a
-> search answered with nothing. **A `0` means this turn's supply holds no record its
+> **Normative.** `records` is `0` on a search that reached the provider and was answered
+> with nothing. **A `0` means this turn's supply holds no record its
 > contacts brought in**, and it means nothing else.
 
 **The count is stated over admission because that is the fact its own site holds, and no
@@ -370,15 +366,19 @@ could use.*
 ### 5. `OutboundDestination`: a closed vocabulary of classes, never of destinations
 
 > **Normative.** `core/types.py` gains **`OutboundDestination`**, a `StrEnum` valued by
-> lower-cased member name, **closed at exactly two members** and declared in this order,
-> which is also the order `destinations` renders in:
+> lower-cased member name, **closed at exactly one member**, which is also the order
+> `destinations` renders in:
 >
 > 1. **`SEARCH_PROVIDER`** — the configured web search provider, which ADR-0247 §1 makes
 >    the destination the owner chose and the recipient they granted.
-> 2. **`EGRESS_TOOL`** — a tool whose authorised call carried an `EgressBinding`.
 >
 > The vocabulary is **added to and never renamed**, and no implementation or later ADR
-> adds a third member without the ADR that decides it.
+> adds a second member without the ADR that decides it.
+
+**One member is the point rather than an embarrassment.** The vocabulary is what makes the
+next seam's addition cheap — it arrives as a second member rather than as a second carrier
+minted from scratch (§12) — so the `destinations` tuple is kept, non-empty and ordered,
+rather than collapsed into the member's absence.
 
 > **Normative.** **A member is a class of destination and never a destination.** No
 > member names, encodes or is derived from a provider, a host, an account, a connection
@@ -388,15 +388,15 @@ could use.*
 > decode the `authorised_subject` on a row in front of the user who owns it.
 
 > **Normative.** A later outbound seam adds its own member with its own ADR. **It does
-> not render as `SEARCH_PROVIDER`, does not render as `EGRESS_TOOL`, and does not render
-> as nothing**: a contact class with no member is a contact this system made and did not
-> state, which is the defect this decision exists to close.
+> not render as `SEARCH_PROVIDER` and does not render as nothing**: a contact class with no
+> member is a contact this system made and did not state, which is the defect this decision
+> exists to close.
 
 ### 6. The carrier, and what the composing stage is told
 
 > **Normative.** The value is assembled **once per turn**, inside
-> `ai_assistant.orchestration`, from the carriers §2, §3 and §4 name and from nothing
-> else — the contact classification each performing site computed (§2, §3), and the
+> `ai_assistant.orchestration`, from the carriers §2 and §4 name and from nothing
+> else — the contact classification each performing site computed (§2), and the
 > admitted ids each admitting site recorded (§4). On ADR-0244 §7's resume those are two
 > different sites and the engine is where the pair is brought together; no site
 > recomputes another's fact, and nothing is inferred at the assembly point. It travels to
@@ -413,7 +413,7 @@ could use.*
 > **Normative.** **The fragment obligation binds on a contact-carrying pass that
 > composes a reply, and on no other.** ADR-0170 §4 requires no composition on a pass whose
 > step parked for confirmation or whose `turn` is `None`, and a recovered resume can
-> finish an egress-bound step and satisfy §3 with no composing stage in the pass at all.
+> step parked for confirmation, with the member carried and no composing stage in the pass.
 > On such a pass the member is carried and the surface statement is rendered exactly as
 > §7 fixes, and there is no fragment because there is nothing to give one to — which is
 > not a degradation, because the reply the fragment guards does not exist.
@@ -423,10 +423,10 @@ could use.*
 > `ai_assistant.orchestration`, interpolating **`records` and nothing else**. The
 > fragment states the two facts every contact has and no others: that **this turn reached
 > outside this system**, and **how many records it took in from doing so — which may be
-> none, and the fragment says so where it is none**. It asserts
-> nothing about what was reached, nothing about a lookup, and nothing about material
-> having arrived, because a turn that only sent something outward reached the world and
-> brought nothing back. It carries no destination, no host, no origin, no provider name, no connection
+> none, and the fragment says so where it is none**. It asserts nothing about what was
+> reached and nothing about material having arrived, because a contact that came back with
+> nothing is still a contact and a record in the supply is not a record in the answer. It
+> carries no destination, no host, no origin, no provider name, no connection
 > reference, no account identity, no query or fragment of one, no record, no title, no
 > snippet, no monetary figure, no duration, no `Settings` field name, no
 > `SearchDisposition` value, no id and no command name — ADR-0242 §7's bar, binding here
@@ -434,10 +434,10 @@ could use.*
 
 > **Normative.** The fragment **forbids the reply from denying that this turn reached
 > outside this system**, and forbids it from saying that the answer is more current, more
-> reliable or better for it. **The prohibition is stated over the contact and never over
-> a lookup**: a turn whose only contact was outward made no lookup, so a fragment barring
-> the denial of one would put a false instruction in front of the model on exactly the
-> shape §3 admits. `_STOPPED_ASKING_PROMPT`'s own bar is the form — *"you have not been
+> reliable or better for it. **The prohibition is stated over the contact**, which on this
+> decision's one established seam is a lookup, and a later seam's member takes the
+> prohibition in whatever terms its own ADR fixes rather than inheriting this one's.
+> `_STOPPED_ASKING_PROMPT`'s own bar is the form — *"you have not been
 > told any of that"* — and the fragment is stated at both ends: the model is told the fact
 > so that it need not guess, and told what the fact does not license so that it does not
 > embroider it.
@@ -480,8 +480,17 @@ is there so that when they do not, the user can see it.
 > shapes and its one `reply_degraded` shape are untouched, no new outcome shape is
 > minted, and no member is derived from another — the move ADR-0242 §9, ADR-0235 §4 and
 > ADR-0250 §5 each made, none of which recorded a supersession of ADR-0170 for it and
-> neither does this one. `SpokenTurn` gains **nothing**, for ADR-0242 §9's reason: on
-> `converse_spoken` the spoken reply is the whole of what the user is told.
+> neither does this one.
+
+> **Normative.** **`converse_spoken` gains no parameter and `SpokenTurn` gains nothing**,
+> for ADR-0242 §9's reason: ADR-0200 §4 makes `spoken` *"the rendering of `outcome.reply`
+> and of nothing else"*, so the spoken reply is the whole of what that user is told.
+> **What is therefore not available on the spoken surface is this decision's guarantee**,
+> and that is a stated cost rather than a gap (§12), taking ADR-0250 §15's shape. A spoken
+> turn still carries `outbound_contact` and still gets §6's fragment, so the reply is
+> composed under the same instruction — but no code-composed statement stands beside it.
+> **This decision's title is bounded by that**: a reply cannot deny a contact **on a surface
+> that renders the statement**, and the spoken one does not.
 
 > **Normative.** **A surface renders, beside the reply and never in place of it, one
 > statement composed from the value**: that this turn reached outside this system, naming
@@ -492,8 +501,7 @@ is there so that when they do not, the user can see it.
 > statement for a value it was not given.
 
 > **Normative.** **No statement says a record reached, entered, supported or affected the
-> answer**, and none says the turn looked something up on a turn whose only contact was
-> outward. `records` establishes that the records entered this turn's supply and nothing
+> answer.** `records` establishes that the records entered this turn's supply and nothing
 > beyond it (§4) — not that a model was given them, and not that one used them — and a
 > surface asserting more would be attributing the answer's content to material a model
 > may never have seen.
@@ -519,10 +527,15 @@ is there so that when they do not, the user can see it.
 > true.
 
 > **Normative.** **Neither member is computed from the other, and no clause of ADR-0242
-> §§6-9 is narrowed, widened or re-read here.** §6's eligibility stays *the disposition's
-> presence and nothing else*; §7's precedence order, at-most-one rule and
-> success-does-not-clear rule stay exactly as written; §8's vocabulary and total mapping
-> are untouched; §9's statements bind verbatim.
+> §§6-9 is narrowed, widened or re-read here — save the one sentence the header records as
+> superseded.** §6's eligibility stays *the disposition's presence and nothing else*; §7's
+> precedence order, at-most-one rule and success-does-not-clear rule stay exactly as
+> written; §8's vocabulary and total mapping are untouched; §9's statements bind verbatim.
+> **The exception is §6's byte-identity sentence alone** (§14): this decision gives the
+> composing stage a fragment on a turn that carries no `SearchNotServiced` member, which
+> that sentence promised would leave the prompt unchanged. Nothing else of §6 moves, and
+> the eligibility condition in particular is untouched — which is why the two conditions
+> still do not overlap and neither member is read off the other.
 
 > **Normative.** **One turn's `UNAVAILABLE` now rides beside a contact, and that is the
 > design.** Where a response arrived and was refused — `PROVIDER_REFUSED`,
@@ -582,8 +595,8 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > absorb the other's paths.
 >
 > 1. **Contract and `orchestration`.** `OutboundDestination`, `OutboundContact` and
->    `TurnOutcome.outbound_contact` in `core/types.py`; §2's and §3's establishment at
->    every site that performs a call or drives a step; §4's admitted sets and §6's
+>    `TurnOutcome.outbound_contact` in `core/types.py`; §2's establishment at every site
+>    that performs a `WEB_SEARCH` call; §4's admitted sets and §6's
 >    assembly; the composing fragment and `_PLAN_IS_ABOUT_ACTING`'s widened condition.
 >    **It is one lane under ADR-0137 §1 and expressly not under §2**: every piece of new
 >    machinery this decision builds — the establishment, the carriers, the assembly, the
@@ -624,12 +637,15 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 > carries. **Fires** when a seam records it, or when a deployment reports a user misled
 > by the silence on one of those three.
 
-> **Normative.** **An egress step whose callable was entered and then failed, and one
-> whose addressed status is `INDETERMINATE`** (§3). ADR-0192 §1's ledger claim is the
-> record of the first and it is behind `ToolInvoker`; the second is ADR-0029 §4's
-> may-have-acted shape, which no value on the step separates. **Fires** on the first
-> widening that brings the claim, or an equivalent fact, out to `StepOutcome` — which is
-> a `core` change and takes its own ADR.
+> **Normative.** **Whether an egress send establishes an outbound contact** (§3). §3
+> refuses it because nothing this system holds establishes it, and ADR-0192 §4 states the
+> gap rather than leaving it to be discovered: *"a transmission fact would have to come
+> from the integration, and `ToolImplementation` returns `FrozenJson` with no channel for
+> one"*. **Fires** when a seam carries that a byte was put on the wire — a typed
+> transmission fact reaching `orchestration`, which is a `core` change and takes its own
+> ADR. That ADR adds `OutboundDestination`'s second member (§5) and states its own
+> establishment rule; it does **not** reuse `EXECUTED`, `StepStatus.SUCCEEDED` or an
+> `EgressBinding`'s presence, each of which ADR-0192 §4 has already ruled insufficient.
 
 > **Normative.** **Whether a reply that denies a recorded contact is recorded as a
 > defect** (§10). **Fires** with the audit-recording ADR #2291 already owes.
@@ -647,7 +663,7 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 
 ### 13. The arms this decision owes
 
-> **Normative.** The implementing lanes owe these seven arms **between them**, each over
+> **Normative.** The implementing lanes owe these eight arms **between them**, each over
 > representative input and split by §11's ownership rule. A lane that lands fewer of the
 > assertions it owns has not implemented this decision.
 
@@ -692,24 +708,16 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    returned (§4); and one that reaches the provider and returns nothing, which carries a
 >    contact with `records` `0`. Neither is a servicing and neither drives a step, and an
 >    implementation that computes the fact only in `reads` fails this arm (§2).
-> 5. **Three egress steps over one tool, and only the first carries a contact**: one
->    whose addressed `StepExecution` is `SUCCEEDED`, where `destinations` is
->    `(EGRESS_TOOL,)` and `records` is `0`; one whose disposition is `EXECUTED` and whose
->    addressed step is **`FAILED`** because the invocation claim was refused before the
->    callable, which carries **no** contact; and one refused at the gate, which carries
->    none either.
-> 6. **A turn that both searched and sent, in that encounter order and in the reverse**,
->    where `destinations` is `(SEARCH_PROVIDER, EGRESS_TOOL)` in both — the declared order
->    and not the encounter order (§4) — and **`records` is the search's admitted count in
->    both**, the egress contact neither zeroing nor replacing it, and a second search
->    servicing that also admits records adding to it, because §4 counts one population
->    over the turn; **a later servicing that refuses before the send (`RULING_DENY`) or
->    that fails after a response leaves both the contact and the count standing** (§6).
->    §6's one fragment is given once, stating the contact rather than a lookup. **And
->    `OutboundContact`'s own construction invariants, asserted on the model and not on its
->    producer**, because a wire decode builds it too: an empty `destinations`, one carrying
->    a class twice, `(EGRESS_TOOL, SEARCH_PROVIDER)`, a negative `records` and an unknown
->    field are each refused rather than accepted and carried as they arrived.
+> 5. **A turn with two search servicings that both admit records, in both encounter
+>    orders**, where `records` is the **sum** of what the two admitted — §4 counts one
+>    population over the turn — and `destinations` carries `SEARCH_PROVIDER` **once** and
+>    not twice (§4). **A later servicing that refuses before the send (`RULING_DENY`), and
+>    one that fails after a response, each leave the contact and the count standing** (§6),
+>    and §6's one fragment is given once.
+> 6. **`OutboundContact`'s own construction invariants, asserted on the model and not on
+>    its producer**, because it is a boundary-crossing value a wire decode also builds: an
+>    empty `destinations`, one carrying a class twice, one carrying a **negative**
+>    `records` and one carrying an **unknown field** are each refused rather than accepted.
 
 > 7. **A servicing that failed after its search had already been answered**, in three
 >    shapes, which are what separate the ruling from the record it cannot be read off.
@@ -723,14 +731,21 @@ about its own conduct; deciding it here would reach into a decision this ADR has
 >    servicing's contact fails the first, and one that classifies from the ended
 >    servicing's record rather than at the performing site cannot tell the first from the
 >    third (§2).
+> 8. **A driven egress step establishes nothing** (§3): a step whose `ActionRequest`
+>    carried an `EgressBinding`, whose disposition is `EXECUTED` and whose addressed
+>    `StepExecution` is `SUCCEEDED` carries **no** `outbound_contact`, gets **no** fragment,
+>    and leaves the composing prompt byte-identical to what it is without this decision. An
+>    implementation that mints a contact from that triple fails this arm.
 
 ### 14. Scope, and what this records against earlier ADRs under ADR-0082 §1
 
-> **Normative.** This decision is a **stacked addition**: it adds obligations that
-> contradict no sentence any earlier ADR wrote, so under ADR-0082 §1 it is recorded in
-> this ADR and **nowhere else** — no `Status` qualifier and no dated note on any earlier
-> ADR. The paragraphs below apply ADR-0070 §1's test to each clause a reader might expect
-> a record for, naming the sentence and the verdict.
+> **Normative.** This decision is a **partial supersession of one clause and a stacked
+> addition everywhere else.** One sentence of one earlier ADR is falsified — ADR-0242 §6's
+> byte-identity sentence — and under ADR-0082 §1 that is recorded in **three** places and
+> no others: this ADR's header, ADR-0242's `Status` line, and a dated note on ADR-0242.
+> Every other clause a reader might expect a record for is a stacked addition, recorded in
+> this ADR and nowhere else. The paragraphs below apply ADR-0070 §1's test to each, naming
+> the sentence and the verdict.
 
 **ADR-0242 §9's *"`TurnOutcome` gains exactly one field"* — no record owed.** That clause
 states what *that* decision adds, not a closure on `TurnOutcome`; ADR-0244 §9 and ADR-0250
@@ -738,14 +753,21 @@ states what *that* decision adds, not a closure on `TurnOutcome`; ADR-0244 §9 a
 A reader holding only ADR-0242 builds `search_not_serviced` exactly as §9 describes it and
 is wrong about nothing.
 
-**ADR-0242 §6's byte-identity guarantee — no record owed, and this is the one worth being
-explicit about.** §6 promises that on a turn carrying no `SearchNotServiced` member *"the
-assembled prompt is byte-identical to what it is today"*, and **§6 scopes that promise in
-the same sentence**: it is *"the same guarantee ADR-0228 §10 makes for its own carrier and
-ADR-0227 §3 for its own"*. Held per carrier is the only reading on which those three stand
-together over one prompt, and it is the reading §6 wrote rather than one inferred for it.
-This decision adds nothing on a turn carrying no contact, which is that promise in the
-sense §6 states it.
+**ADR-0242 §6's byte-identity guarantee — a record IS owed, and it is made.** §6 promises
+that on a turn carrying no `SearchNotServiced` member *"the assembled prompt is
+byte-identical to what it is today"*. A search that reached the provider and was answered
+records no `SearchDisposition`, so that turn is one of §6's "every other" turns — and §6
+below gives the composing stage a fragment on precisely it.
+
+**The corpus settles this and settles it against the self-scoped reading.** An earlier draft
+argued that §6 scopes the promise per carrier, citing its own *"the same guarantee ADR-0228
+§10 makes for its own carrier"*. But ADR-0242's header records **Partially supersedes
+ADR-0228 — §10's first clause, in its second sentence alone**, for a sentence of that same
+form, falsified in that same way, by that same kind of second carrier. ADR-0242 did for
+ADR-0228 exactly what this decision does for ADR-0242, and it recorded it. The phrase
+describes where the guarantee came from; it does not exempt the next carrier from recording
+against it. The record is therefore made rather than argued away, and ADR-0070 §1's test is
+met: a reader holding only ADR-0242 would assert a byte-identity that no longer holds.
 
 **ADR-0170 §4 — no record owed.** A `None`-defaulting member changes neither the three
 shapes on which `reply` is `None` nor the one on which `reply_degraded` is `True`. ADR-0197
@@ -776,10 +798,12 @@ condition falsifies no ratified sentence.
 
 ### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
-> **Normative.** Under ADR-0070 §1 this is a decision **standing on its own**: no reader
-> holding any earlier ADR would now act differently about what that ADR decided, and no
-> clause of one is read more widely. It is therefore neither a supersession nor an
-> amendment, and §14 records the test's answer for each candidate.
+> **Normative.** Under ADR-0070 §1 this is a **partial supersession**, in one clause of
+> one ADR and in nothing else: a reader holding only ADR-0242 would act differently about
+> §6's byte-identity sentence, which ADR-0070 §1's test makes a record owed rather than a
+> matter of taste, and ADR-0070 §3's partial form is the sanctioned tool. **It is not an
+> amendment** — no clause of any ADR is read more widely here — and against every other
+> earlier decision it stands on its own, which §14 records candidate by candidate.
 
 > **Normative.** This ADR is **marked** under ADR-0089: every obligation it imposes is in
 > a marked clause, and text beside a mark is read to determine what the clause means and
@@ -801,13 +825,17 @@ condition falsifies no ratified sentence.
   already carries a `SearchNotServiced` member whose statement is true, so the user is
   told something rather than nothing — but the honest sentence about the wire is not
   available, and §12 says what would make it so.
-- **The egress half is under-inclusive until `StepOutcome` carries the claim.** A call
-  dispatched and then failed goes unstated, and so does an `INDETERMINATE` step (§3).
-  That is stated rather than discovered: the statement is never false, only sometimes
-  absent.
+- **An egress send says nothing at all, and that is the honest position.** ADR-0192 §4
+  rules that `SUCCEEDED` is consistent with no byte on the wire and that nothing available
+  today carries the transmission fact, so §3 refuses the contact rather than approximating
+  it. A send that did reach the world goes unstated until a seam carries that it did (§12).
+- **The spoken surface does not carry the guarantee.** `SpokenTurn` gains nothing, so a
+  spoken reply that denies a contact is contradicted by nothing the user hears (§7). The
+  title is bounded to the surfaces that render the statement, and §12 books the rest.
 - **`TurnOutcome` grows to sixteen members**, and `outbound_contact` is the **tenth** a
   later ADR has added as a `None`-defaulting fact a client renders on its own. That is
   ADR-0244 §9's rule working as designed and also the thing to watch: an eleventh and a
   twelfth make a client's rendering order a decision nobody has taken.
-- **Revisit when** a second outbound seam lands, when `StepOutcome` gains the dispatch
-  fact, or when a deployment reports a user misled by the silence §2's third group keeps.
+- **Revisit when** a seam carries that a byte was put on the wire, when the spoken
+  surface gains a rendering of its own, or when a deployment reports a user misled by the
+  silence §2's third group keeps.
