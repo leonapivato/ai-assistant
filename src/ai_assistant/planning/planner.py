@@ -2054,11 +2054,27 @@ _DURATION: Final = TypeAdapter(timedelta)
 #:
 #: The two lookaheads refuse the empty designators: ``P`` and ``PT`` carry no
 #: component, and ``P1DT`` opens a time part it never fills. ``[.,]`` is the decimal
-#: separator ISO-8601 admits in either spelling. Nothing here judges the **value**:
-#: ``PT0S`` matches the grammar and is refused by ``PlanStep.evidence_recency``'s own
-#: ``gt``, because a bound is the field's to state and a form is not.
+#: separator ISO-8601 admits in either spelling, and it is admitted **on every
+#: designator** rather than on the seconds alone: a fraction belongs on a duration's
+#: lowest-order component, so ``PT1.5H`` and ``P0.5D`` are durations and refusing them
+#: would be the false refusal in the other direction. That the fraction sits on the
+#: *last* component is the parser's to enforce and it does — ``PT1.5H30M`` and
+#: ``P1.5D1H`` are both refused there — so this pattern does not state it a second
+#: time.
+#:
+#: **It refuses what the parser would misread and no more**, which is the whole of
+#: what it is for. ``P1D2D`` is refused because three days is a figure no reading of
+#: that string yields; ``P1W2D`` is admitted because nine days is exactly the sum of
+#: the two designators written, so §9's harm — "a figure rounded, clamped or defaulted
+#: into range" — does not arise, and whether ISO-8601's week form may combine with
+#: others is a point readings of the standard differ on which §9 does not adjudicate.
+#: Nothing here judges the **value** either: ``PT0S`` matches the grammar and is
+#: refused by ``PlanStep.evidence_recency``'s own ``gt``, because a bound is the
+#: field's to state and a form is not.
 _ISO_DURATION: Final = re.compile(
-    r"P(?!$)(\d+Y)?(\d+M)?(\d+W)?(\d+D)?(T(?!$)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?"
+    r"P(?!$)"
+    r"(\d+([.,]\d+)?Y)?(\d+([.,]\d+)?M)?(\d+([.,]\d+)?W)?(\d+([.,]\d+)?D)?"
+    r"(T(?!$)(\d+([.,]\d+)?H)?(\d+([.,]\d+)?M)?(\d+([.,]\d+)?S)?)?"
 )
 
 
@@ -2393,7 +2409,10 @@ def _iso_duration(value: object, *, ordinal: int) -> timedelta:
     three days and ``PT1M1H`` as an hour and a minute. Neither is an ISO-8601
     duration, and §9 makes a value that is not one an extraction failure "rather than
     a figure rounded, clamped or defaulted into range": a summed one is that figure,
-    arriving as a freshness requirement no model wrote. What survives the test is
+    arriving as a freshness requirement no model wrote. **The pattern refuses those
+    and no more**, so a fraction on a duration's lowest-order component — ``PT1.5H``,
+    ``P0.5D`` — is a duration and passes, and that it is the *last* component is left
+    to the parser, which refuses ``PT1.5H30M`` itself. What survives the test is
     judged by ``PlanStep.evidence_recency``'s own ``gt=timedelta(0)``, so ``"PT0S"``
     is refused as the zero it is.
 
