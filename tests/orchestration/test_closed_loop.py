@@ -62,6 +62,7 @@ from test_loop_search import (
     _grant,
     _loop,
     _record,
+    _RefiningSearcher,
     _search,
     _serviced,
     _servicer,
@@ -285,7 +286,10 @@ async def test_a_second_servicing_of_one_turn_refines_over_the_first_result() ->
     about the deployment changed.
     """
     searcher = FakeWebSearcher(results=(_RESULT,))
-    servicer = _servicer(searcher=_CostedSearcher(searcher), granted=True)
+    # Arm 1a's own word is **refinement**, so the second servicing answers with material
+    # the first did not bring back: an identical answer is deduplicated out under
+    # ADR-0226 §7 and the arm's second record would not exist (#2364).
+    servicer = _servicer(searcher=_RefiningSearcher(_CostedSearcher(searcher)), granted=True)
 
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(

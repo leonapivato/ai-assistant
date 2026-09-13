@@ -526,6 +526,136 @@ class _CostedSearcher:
         return await self.inner.search(call, timeout=timeout)
 
 
+class _RefiningSearcher:
+    """A searcher whose every call answers with material the supply has not seen.
+
+    **What a canonical fake cannot model, and why a case about refinement needs it.**
+    ``FakeQueryComposer`` answers one *utterance* with one query, and a turn has one
+    utterance — ADR-0231 §3 gives the composer the turn's own words and nothing
+    else — so every round of one turn composes the same query, and a
+    ``FakeWebSearcher`` scripted by query hands back the same three results to each.
+    That is #2364's shape exactly: a turn asking the same question over and over. It is
+    the **right** input for a case about the unproductive-run test and the wrong one for
+    a case whose subject is a turn that refines, because ADR-0226 §7 deduplicates an
+    identical answer out and a round that admitted nothing is unproductive (ADR-0251 §7).
+
+    So this appends a per-call marker to each record's content, which is the smallest
+    thing that makes "the provider's index answered with something new this time" true.
+    It mints nothing of its own and moves no instant: ``content`` is the one field it
+    touches, and the inner fake's records, their ids and their attestation are what
+    they were.
+    """
+
+    def __init__(self, inner: WebSearcher) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return self.inner.name
+
+    async def request(self, query: str, /) -> ActionRequest | None:
+        """Propose the search, exactly as the searcher this wraps proposes it."""
+        return await self.inner.request(query)
+
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Perform the authorised search, and answer with this call's own material."""
+        outcome = await self.inner.search(call, timeout=timeout)
+        self.calls += 1
+        if not outcome.records:
+            return outcome
+        marker = f" Read on pass {self.calls}."
+        return outcome.model_copy(
+            update={
+                "records": tuple(
+                    record.model_copy(update={"content": record.content + marker})
+                    for record in outcome.records
+                )
+            }
+        )
+
+
+class _RereadingSearcher:
+    """The same results, declared a little later on each call — a provider re-read.
+
+    **This is the production shape of #2364 and the canonical fake is not.**
+    ``FakeWebSearcher`` declares one fixed instant for the life of the double, where a
+    concrete searcher takes ``reported_at`` from the instant the provider's response
+    declares (ADR-0231 §10) — so two rounds of one turn asking one composed query six
+    seconds apart mint records identical in every word and different in three instants:
+    ``Provenance.last_updated``, ``Provenance.last_confirmed_at`` and
+    ``Attestation.reported_at``. The production journal on the hub shows exactly that
+    gap, four asks at 19:02:12, :18, :23 and :29.
+
+    A case driven over the fixed-instant fake cannot tell a deduplication that reads the
+    whole record from one that steps over the instants a re-reading moves, and only the
+    second of those is the one #2364 needs. So this moves them, by the same six seconds,
+    over the inner fake's own records otherwise untouched.
+    """
+
+    #: The gap between two of a turn's rounds on the hub journal #2364 quotes.
+    _APART = timedelta(seconds=6)
+
+    def __init__(self, inner: WebSearcher) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        """The configured source this searcher serves."""
+        return self.inner.name
+
+    async def request(self, query: str, /) -> ActionRequest | None:
+        """Propose the search, exactly as the searcher this wraps proposes it."""
+        return await self.inner.request(query)
+
+    async def search(self, call: ToolCall, /, *, timeout: timedelta) -> SearchOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2)
+        """Perform the authorised search, and declare this call's own instant for it."""
+        outcome = await self.inner.search(call, timeout=timeout)
+        self.calls += 1
+        if not outcome.records or outcome.reported_at is None:
+            return outcome
+        declared = outcome.reported_at + self._APART * self.calls
+        return outcome.model_copy(
+            update={
+                "reported_at": declared,
+                "records": tuple(_declared_at(record, declared) for record in outcome.records),
+            }
+        )
+
+
+def _declared_at(record: MemoryRecord, declared: datetime) -> MemoryRecord:
+    """``record`` as a searcher mints it from a response declaring ``declared``.
+
+    The three instants ADR-0231 §10 takes off one declared value, moved together —
+    nothing else about the record, its id included.
+
+    Args:
+        record: The record the inner fake minted.
+        declared: The instant this call's response declares.
+
+    Returns:
+        The record, re-declared.
+    """
+    attestation = record.provenance.attestation
+    return record.model_copy(
+        update={
+            "provenance": record.provenance.model_copy(
+                update={
+                    "last_updated": declared,
+                    "last_confirmed_at": declared,
+                    "attestation": (
+                        None
+                        if attestation is None
+                        else attestation.model_copy(update={"reported_at": declared})
+                    ),
+                }
+            )
+        }
+    )
+
+
 def _binder(*, definition: Any = _COSTED) -> FakeEgressBinder:
     """A binding seam holding the search declaration against a connected account."""
     binder = FakeEgressBinder()
@@ -900,7 +1030,15 @@ async def test_a_second_search_in_the_same_turn_is_serviced_at_the_configured_pr
     with structlog.testing.capture_logs() as captured:
         responded = await _loop(
             planner=planner,
-            search=_servicer(searcher=_CostedSearcher(searcher), trail=trail, granted=True),
+            search=_servicer(
+                # A **refinement**, so the second servicing's answer is material the
+                # supply does not already hold: an identical one deduplicates out under
+                # ADR-0226 §7 and would make the last line below a statement about
+                # nothing (#2364).
+                searcher=_RefiningSearcher(_CostedSearcher(searcher)),
+                trail=trail,
+                granted=True,
+            ),
         ).respond(_ASK, narrow=_bounded(), operation=_REVISING)
 
     assert len(planner.calls) == 3, "two asking rounds, and a third call that settled"

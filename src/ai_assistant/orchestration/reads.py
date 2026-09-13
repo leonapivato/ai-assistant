@@ -78,6 +78,7 @@ episode it never saw" — and it is what makes the widest possible abuse of the 
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -1060,8 +1061,90 @@ def classified_reads(facts: Sequence[AskFacts]) -> tuple[AskYield, ...]:
     )
 
 
+#: The fields a re-reading of the same material moves, dropped from a record's
+#: :func:`held_names` body name.
+#:
+#: All three answer *when this reading was taken* rather than *what this record is*.
+#: ``last_updated`` is transaction time — ADR-0109 §2's "when **we** last revised the
+#: belief" — ``last_confirmed_at`` is when the world last confirmed it, and
+#: ``Attestation.reported_at`` is "the instant the reporting source asserts the fact was
+#: current, **on that source's own clock**" (ADR-0092 §3). Two servicings of one turn
+#: that read the same material twice differ in exactly these and in the minted id: a
+#: ``WEB_SEARCH`` takes its three instants from the provider's declared instant
+#: (ADR-0231 §10), and a provider answering the same query six seconds later declares a
+#: later one for the same results. Keeping them in the name is what made ADR-0226 §7's
+#: deduplication unreachable on that path (#2364).
+#:
+#: Nothing here is reconciled, substituted or rewritten: the held record keeps every
+#: instant it arrived with, and §7's "the copy the supply already held keeps its
+#: position" is what disposes of the second arrival.
+_READING_INSTANTS: Final = ("last_updated", "last_confirmed_at")
+
+
+def held_names(record: MemoryRecord) -> tuple[str, str]:
+    """The two names one record answers to in ADR-0226 §7's deduplication.
+
+    §7 says what is deduplicated — "A record the servicer returns that the supply
+    already holds is deduplicated out, and the copy the supply already held keeps its
+    position" — and names no field the sameness is decided on. It states the mischief
+    instead: a servicer that seeds too narrowly "would satisfy the clause above and
+    still **render one record twice and spend two of the ten on it**", and it applies
+    ADR-0158 §4's rule "for its reason", which is what a prompt may not repeat. So a
+    record answers to **two** names and is already held where the supply holds either.
+
+    **The id, because a store record's id is its name.** ADR-0158 §4's own case is the
+    continuity tail and a relevance read returning "records of the same store, with the
+    same ids", and the store is free to hand a second read of one turn a *revised* copy
+    of a record the supply already holds — ADR-0113 §5's "no cross-call read consistency
+    of any kind", which ADR-0251 §7 quotes for this exact case. Same id, moved bytes:
+    the body name would miss it and this one does not.
+
+    **The body, because a record that has no durable name has nothing else to be known
+    by.** A minted record's id "is minted for one turn, rendered to no model, accepted
+    from none, and resolves in no store" (ADR-0231 §16, ADR-0230 §10) — so two
+    servicings of one turn that search for the same thing and are handed the same
+    results mint two ids that can never match, and a deduplication keyed on the id alone
+    is vacuous on that path however identical the records are (#2364). The body is the
+    record as this system holds it, less its minted name and less
+    :data:`_READING_INSTANTS`.
+
+    **This mints nothing and changes nothing about what a record is.** ADR-0092 §6's
+    ruling stands untouched: it governs the ``id`` an ``EXTERNAL`` producer **proposes**
+    a record at — "the address a record is written at, and … an instruction to replace
+    whatever already lives there" — and refuses to derive one from content. Nothing
+    here reaches a producer, a proposal or a store: the names are computed by the
+    consumer, over the supply it is assembling, and are discarded with the turn. A
+    searcher minting a content-derived id would be the ruling ADR-0092 §6 declined to
+    make, which is why the deduplication and not the mint is where this is decided.
+
+    **And it compares no ask with another.** ADR-0251 §7 forbids that under any
+    spelling, and this reads neither ask: it reads the records a source handed back,
+    after a read the loop refused nothing about and serviced in full.
+
+    Args:
+        record: The record to name. Read, never written.
+
+    Returns:
+        The id name and the body name, in that order. Both are namespaced, so a name of
+        one sort can never be a name of the other.
+    """
+    body = record.model_dump(mode="json")
+    body.pop("id", None)
+    provenance = body.get("provenance")
+    if isinstance(provenance, dict):
+        for instant in _READING_INSTANTS:
+            provenance.pop(instant, None)
+        attestation = provenance.get("attestation")
+        if isinstance(attestation, dict):
+            attestation.pop("reported_at", None)
+    return (
+        f"id:{record.id}",
+        "body:" + json.dumps(body, sort_keys=True, separators=(",", ":"), default=str),
+    )
+
+
 def admitted_fourth_group(
-    records: Sequence[MemoryRecord], *, held: Collection[str]
+    records: Sequence[MemoryRecord], *, held: Collection[MemoryRecord]
 ) -> tuple[MemoryRecord, ...]:
     """ADR-0226 §6's budget and §7's deduplication, over one kind's records.
 
@@ -1075,8 +1158,13 @@ def admitted_fourth_group(
 
     **The seen set grows with every admission**, which is §7's deduplication "over the
     whole union and not only against the pre-servicing supply": two records of one batch
-    sharing an id enter once, and the second consumes no slot. A caller seeding from the
+    sharing a name enter once, and the second consumes no slot. A caller seeding from the
     supply alone would satisfy the narrower clause and still render one record twice.
+
+    **It takes the held records and not their ids**, because §7's sameness is
+    :func:`held_names`' two names and a caller cannot be trusted to compute them: an
+    argument of ids would let a call site silently ask for the narrower test, which is
+    the state #2364 records.
 
     **The budget is not a parameter, and that is ADR-0226 §6 rather than an
     inflexibility.** §6 fixes it at ten and rules that "no configuration, setting or
@@ -1085,19 +1173,20 @@ def admitted_fourth_group(
 
     Args:
         records: The candidates, in the order the kind that produced them minted them.
-        held: The ids the supply already holds. Read, never written.
+        held: The records the supply already holds. Read, never written.
 
     Returns:
         What ADR-0226 §6 and §7 admit, in the order given.
     """
-    seen = set(held)
+    seen = {name for record in held for name in held_names(record)}
     admitted: list[MemoryRecord] = []
     for record in records:
         if len(admitted) >= READ_BUDGET:
             break
-        if record.id in seen:
+        names = held_names(record)
+        if seen.intersection(names):
             continue
-        seen.add(record.id)
+        seen.update(names)
         admitted.append(record)
     return tuple(admitted)
 
@@ -1524,6 +1613,11 @@ class _Union:
     group once, at the hop's position, and its second arrival "consumes no slot of
     the budget". A servicer seeding from the supply alone would satisfy the narrower
     clause and still render one record twice.
+
+    **:attr:`held` holds** :func:`held_names`' **names and never bare ids** — both of
+    a record's two, seeded and added together — because §7's sameness is what the
+    supply already holds and a minted record has no durable name to hold it by
+    (#2364). :meth:`admit` is the only writer.
     """
 
     held: set[str]
@@ -1544,6 +1638,21 @@ class _Union:
         """How many slots of the budget are still unspent."""
         return self.budget - len(self.admitted)
 
+    def holds(self, record: MemoryRecord) -> bool:
+        """Whether the supply holds this record, by §7's sameness (:func:`held_names`).
+
+        The one reader of :attr:`held` outside :meth:`admit`, so that "the supply holds
+        this record" is asked in exactly one way. A caller testing a bare id against the
+        set would be asking the narrower question the names exist to widen.
+
+        Args:
+            record: The record to ask about. Read, never written.
+
+        Returns:
+            Whether the pre-servicing supply held it or an admission has added it.
+        """
+        return bool(self.held.intersection(held_names(record)))
+
     def admit(self, candidates: Sequence[MemoryRecord]) -> bool:
         """Take what fits, in order, and say whether the budget cut the rest.
 
@@ -1558,10 +1667,11 @@ class _Union:
         for record in candidates:
             self.offered.append(record)
             self.returned += 1
-            if record.id in self.held:
+            names = held_names(record)
+            if self.held.intersection(names):
                 self.deduplicated += 1
             elif self.remaining > 0:
-                self.held.add(record.id)
+                self.held.update(names)
                 self.admitted.append(record)
             else:
                 truncated = True
@@ -3219,7 +3329,9 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         posture.
     """
     reads = _Reads()
-    union = _Union(held={record.id for record in supply}, budget=READ_BUDGET)
+    union = _Union(
+        held={name for record in supply for name in held_names(record)}, budget=READ_BUDGET
+    )
     completed: ServicedRead | None = None
     carried = ServicedCarriers()
     empty_read: ReadAsk | None = None
@@ -3442,10 +3554,10 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # sequence projected onto its outcomes, with the asks left behind.
             outcomes=tuple(one.outcome for one in classified),
         )
-        # ADR-0227 §3's carrier, computed on the success path alone and over
-        # `union.held` — which is seeded from the pre-servicing supply and grown by
-        # every admission, so membership of it *is* "the supply holds this record
-        # after servicing". A named record passes that test by construction
+        # ADR-0227 §3's carrier, computed on the success path alone and through
+        # `_Union.holds` — the union's seen set is seeded from the pre-servicing supply
+        # and grown by every admission, so membership of it *is* "the supply holds this
+        # record after servicing". A named record passes that test by construction
         # (ADR-0229 §2), so the restriction bites on truncated evidence alone.
         # `dict.fromkeys` is ADR-0227 §4's deduplication over ADR-0229 §3's
         # expansion sequence, with the first occurrence keeping the place:
@@ -3455,9 +3567,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # required result rather than a case to repair.
         carried = ServicedCarriers(
             hop_reached=tuple(
-                identifier
-                for identifier in dict.fromkeys(record.id for record in resolved_by_hop)
-                if identifier in union.held
+                dict.fromkeys(record.id for record in resolved_by_hop if union.holds(record)).keys()
             ),
             empty_read=empty_read,
             # ADR-0251 §3's carrier, classified **on the success path alone** — a
