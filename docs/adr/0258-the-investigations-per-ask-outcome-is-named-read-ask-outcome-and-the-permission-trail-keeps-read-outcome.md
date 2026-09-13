@@ -6,7 +6,7 @@
   — **one scope, and it is a name: `ReadOutcome` → `ReadAskOutcome`, wherever ADR-0251 writes it
   for the model §3 mints.** That is §3's minting clause, *"`core/types.py` gains
   **`ReadOutcome`**, a frozen model with `extra="forbid"` carrying exactly two fields"*, and its
-  parameter clause, *"**`read_outcomes: Sequence[ReadOutcome] = ()`**"* — **and five further
+  parameter clause, *"**`read_outcomes: Sequence[ReadOutcome] = ()`**"* — **and six further
   sites outside §3**, two of them marked: **§12's writer clause** (*"each round's
   `ReadOutcomeKind` and the `ReadOutcome` carrying it"*) and **§16's L1 clause** (*"`core/types.py`
   gains `ReadOutcomeKind`, `ReadOutcome` and `AttemptKind`"*), plus §15's working for ADR-0240 §7,
@@ -113,9 +113,9 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 - **Whether the two vocabularies should ever be reconciled, merged or ordered.** They are
   different facts (above) and this decision keeps them apart; anything further is a decision of
   its own.
-- **Anything of ADR-0251 but one identifier.** The name reaches seven sites across §3, §12,
-  §15, §16, §17, the header and the Alternatives (§1 lists them); at every one of them the name
-  is the only thing replaced, and no other clause of any section moves.
+- **Anything of ADR-0251 but one identifier.** The name is written nine times across §3, §12,
+  §15, §16, §17, the header bullet and the Alternatives (§1 counts and lists them); at every one
+  of them the name is the only thing replaced, and no other clause of any section moves.
 - **Anything of ADR-0185.** §5 shows why no record is owed there.
 - **Whether ADR-0015 §5's ordering should change.** §4 records that it was breached and that the
   breach is not cured by the record. ADR-0015 is untouched by this ADR and nothing here is a
@@ -139,11 +139,11 @@ from the other. One name cannot carry both, and no reading of either ADR asks it
 > `read_outcomes`, its default `()`, its keyword position and its additive-in-shape character
 > are ADR-0251 §3's and are not touched by this clause.
 
-**The sites, so a reader can check the clause rather than trust it.** ADR-0251 as ratified writes
-`ReadOutcome` for this model in seven places, and the clause above reaches all seven. Two of them
-are **marked**, which is why the scope could not stop at §3 — two marked clauses reading
-`ReadOutcome` beside a supersession reading `ReadAskOutcome` would leave the ADR instructing an
-implementation two ways at once:
+**The sites, so a reader can check the clause rather than trust it.** ADR-0251's ratified text
+writes `ReadOutcome` for this model **nine times**: three in §3, and **six at six further sites
+outside it**. The clause above reaches all nine. Two of the six are **marked**, which is why the
+scope could not stop at §3 — two marked clauses reading `ReadOutcome` beside a supersession
+reading `ReadAskOutcome` would leave the ADR instructing an implementation two ways at once:
 
 - **§3's minting clause and its parameter clause**, and the heading above them.
 - **§12's writer clause** (marked) — *"each round's `ReadOutcomeKind` and the `ReadOutcome`
@@ -155,6 +155,12 @@ implementation two ways at once:
 - **§17's arm 2** — *"rather than from a constructed `ReadOutcome`"*.
 - **The Alternatives entry** — *"Make `ReadOutcome` carry the source vocabulary's own member
   rather than one of seven"*.
+
+**Two further occurrences are deliberately not reached**, and they are not an oversight in the
+count above: PR #2315's appended dated note of 2026-09-13 quotes §3's minting clause and names
+ADR-0185 §1's enum. It is an appended note rather than ratified decision text, it directs a
+reader to neither name by its own terms, and under ADR-0070 §1 an appended note is never
+rewritten. The note this change adds directly below it is what supersedes what it records.
 
 Nothing else of any of them moves: §12's writer clause still says `orchestration` mints every
 value and no model output sets one; §16 still cuts two lanes in that order; §15's working for
@@ -283,8 +289,8 @@ only that ADR now act differently, or read one of its clauses more widely than i
   holding §12 mints a `ReadOutcome` per round; a reader holding §16 adds one to `core/types.py`;
   a reader holding this ADR writes `ReadAskOutcome` at every one of them. That is acting
   differently on the decision itself, so under ADR-0070 §1 it is a supersession and not an
-  amendment, and it is **partial** — one identifier across the seven sites §1 lists, and nothing
-  else (§3 of ADR-0070 makes the partial form first-class). ADR-0251's `Status` takes the leading
+  amendment, and it is **partial** — one identifier across the nine occurrences §1 counts, and
+  nothing else (§3 of ADR-0070 makes the partial form first-class). ADR-0251's `Status` takes the leading
   `Partially superseded by` token with the scope naming exactly what was replaced (ADR-0070
   §4), and the record itself lives in the appended dated note this change adds (ADR-0082 §2,
   ADR-0070 §1). **It is the second note ADR-0251 carries**: PR #2315's note of 2026-09-13 —
