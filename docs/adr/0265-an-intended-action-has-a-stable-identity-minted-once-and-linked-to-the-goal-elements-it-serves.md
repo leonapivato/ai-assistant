@@ -736,7 +736,10 @@ The owner's two cases are arms 1 and 2.
    compare-and-swap, and refuses a stale `expected_version`, an `id` the goal already holds, and a
    minting that would carry the goal past `MAX_INTENDED_ACTIONS` — the last over a goal at 63
    handed **two** actions, so the all-or-nothing limb is exercised and **neither** is recorded.
-   Assert that each refusal writes nothing, that the **last two carry a class distinct from the
+   Assert **before** that refusal that the same goal at 63 handed **one** action **records** it
+   and reaches exactly `MAX_INTENDED_ACTIONS`, which is the last legal mint and which a
+   `>=`-shaped comparison refuses while every refusal named here still passes. Assert that each
+   refusal writes nothing, that the **last two carry a class distinct from the
    stale-write class** (§5), and that a goal at the bound holds every action it held before the
    refusal — **no member elided, no count advanced**. An `IntendedActionMinting` two of whose
    `actions` carry one `id` is **not constructible** (§5). And `record_intended_actions` refuses a
@@ -757,7 +760,8 @@ The owner's two cases are arms 1 and 2.
    bare `A` **is** constructible, those being outside the reserved grammar. Assert the same
    boundary is refused by `PlanStore.save_plan`'s membership check (§4), so the two halves cannot
    drift. And an `IntendedActionMinting` carrying an empty `actions` is not constructible, nor is
-   a `ProposedAction` carrying no `intent`.
+   a `ProposedAction` carrying no `intent`, nor one carrying an `id` of any spelling — that
+   field being one `extra="forbid"` refuses rather than one a planner may name (§2).
 8. **The seam discloses no identifier and no history.** Over a goal with two intended actions, one
    already performed in an earlier turn's execution, assert that the rendered request contains
    **no** `IntendedAction.id`, no execution, no step and no outcome — and that the `A` block
