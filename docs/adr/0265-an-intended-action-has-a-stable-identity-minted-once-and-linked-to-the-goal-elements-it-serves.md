@@ -36,6 +36,18 @@
   restatement-mints-a-new-id rule and its id-is-never-a-label disjointness are the four clauses §1
   and §3 are built on.
 
+- **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md)
+  — **one scope, and it is a count. §15 item 19's enumeration of what must hold before a
+  consequential capability is wired — *"**five** conditions and not three"* — becomes six**, the
+  sixth being §6's containment for a wrongly minted intended action. A reader holding only item 19
+  wires an integration after five and is wrong, because none of the five reaches a duplicate that
+  is correctly claimed, correctly authorised and correctly verified. **§13's rule binds verbatim
+  and is relied on**, and its own *"this decision adds **two** prerequisites"* stays true of that
+  decision — what grows is the gate's total. **§7 is relied on and superseded in nothing**: its
+  at-most-once obligation is what this identity serves and its refusal of a **derived** identity
+  is honoured, since this one is declared. §12's executions-projection booking is untouched, and
+  §§1-6, §§8-12, §14 and §§16-17 stand entire.
+
 ## Context
 
 ### Where this comes from
@@ -166,7 +178,9 @@ declines and §7 books with what fires it, and which is the same decision that t
 
 > **Normative — an `IntendedAction.id` is never an action label, and the type refuses one.** An
 > `IntendedAction` whose `id` matches §4's action-label grammar — the ASCII letter `A` followed by
-> one or more decimal digits and nothing else — is **not constructible**. This is ADR-0253 §7's
+> one or more **ASCII** decimal digits `0`-`9` and nothing else — is **not constructible**. **The
+> two spellings are one grammar and no lane writes a second**: the validator's refusal and §4's
+> resolution are complementary halves of it, so a spelling one admits the other refuses, exactly. This is ADR-0253 §7's
 > construction for `GoalElement.id` reused without alteration and for its reason: `Identifier`
 > admits any non-blank encodable string, so without the rule an unsubstituted label could equal
 > some action's id and pass §4's membership check **as a reference to a different action**,
@@ -324,7 +338,11 @@ refuses, and it would be bought to keep a field nothing reads accurate.
 > nothing where it is not.
 
 > **Normative.** **The label of the action at 1-based index *n* of `GoalBrief.actions` is the
-> ASCII string `A` followed by *n* in decimal with no padding.** That is the whole of the scheme,
+> ASCII string `A` followed by *n* in **ASCII** decimal digits `0`-`9`, with no padding and no
+> sign.** Nothing else is a label — not `A01`, not `A+1`, not `a1`, not a digit outside `0`-`9`,
+> and not a value carrying whitespace — and each of those **resolves to nothing** and is refused by
+> the clause below rather than parsed, repaired or case-folded, which is ADR-0253 §9's
+> strict-extraction rule applied to one more vocabulary. That is the whole of the scheme,
 > it is the same on both sides of the seam, both sides derive it from the value they hold and
 > neither consults the other, and **no label survives the call that rendered it and none is
 > persisted as a reference.** It is ADR-0226 §3's scheme applied to one more sequence, and **`A`
@@ -395,13 +413,25 @@ the whole of it.
 > which a decision is taken. **Two actions minted on one turn are appended in one call**, so the
 > two-rooms case takes one compare-and-swap and not two.
 
-> **Normative — the member refuses an id the goal already holds, and refuses a minting that would
-> carry the goal past `MAX_INTENDED_ACTIONS` (§1), writing nothing in either case.** Both take the
-> error class ADR-0249 §12 gives `save_goal` for *"a goal whose `id` the store already holds"* —
-> *"the same error class an unknown goal already raises"* — and **neither takes the stale-write
-> class**: a duplicate id and a full tuple are **invariant breaches at the current version**, not
-> lost races, and a caller that re-read and retried would re-raise for ever. §1's append-only rule
-> and its bound are closed at the store rather than trusted to close themselves, on §4's footing.
+> **Normative — the member refuses an id the goal already holds, refuses a minting that would
+> carry the goal past `MAX_INTENDED_ACTIONS` (§1), and refuses a `serves` value that is not the
+> `id` of an element of the goal's **current** interpretation at the instant of the append, writing
+> nothing in any of the three.** All three take the error class ADR-0249 §12 gives `save_goal` for
+> *"a goal whose `id` the store already holds"* — *"the same error class an unknown goal already
+> raises"* — and **none takes the stale-write class**: each is an **invariant breach at the
+> current version**, not a lost race, and a caller that re-read and retried would re-raise for
+> ever. §1's append-only rule, its bound and §3's resolution are closed at the store rather than
+> trusted to close themselves, on §4's footing.
+
+**The `serves` conjunct is checkable exactly once, and that instant is the only one at which it is
+true by construction.** §2's ordering records this call's revision **before** its actions, and §3
+resolves each label against the sequence in force on that call — so at the append every entry
+names an element of the **current** interpretation, and a value that does not is a caller reaching
+past `orchestration` with a dangling or foreign identifier. Afterwards the entry may go stale by
+§3's own rule and **nothing re-checks it and nothing repairs it**: staleness is a truthful record
+of an earlier revision, where a dangling id would be a warrant the goal could never show — which
+is ADR-0249 §7's reason for dropping an element whose ground does not resolve, taken one record
+over, and it is why the check cannot be deferred to a later read.
 
 > **Normative — `PlanExport` gains no member and `schema_version` moves for the record's shape
 > alone.** `IntendedAction` rides **inside `Goal`**, which `PlanExport.goals` already carries, so
@@ -567,6 +597,15 @@ built on: its element-id minting rule is what makes a retained element's id surv
 restatement rule is what makes a **derived** identity unusable, and its `D`-label disjointness is
 the construction §1 reuses for `A`.
 
+**ADR-0255 — partially superseded in one scope, and it is a count.** §15 item 19 enumerates what
+§13's rule requires before a consequential capability is wired and closes the enumeration in terms
+— *"**five** conditions and not three"*. §6 adds a sixth, and a reader holding only item 19 wires
+an integration after five and is wrong: the duplicate §2's residual admits is **correctly claimed,
+correctly authorised and correctly verified**, so none of the five reaches it. ADR-0070 §1's test
+on the supersession side, **partial** in §3's sense, and the count is the whole of the scope —
+§13's rule binds verbatim, its own *"this decision adds **two** prerequisites"* stays true of that
+decision, and what grows is the gate's total rather than that decision's contribution to it.
+
 **ADR-0255 §7 — its obligation is unchanged and its named absence is filled in one half.** That
 section's *"a goal records no completed effect that a driver could compare against"* stays true:
 this decision records no effect. What it lands is the missing **identity** that section says a
@@ -658,11 +697,14 @@ The owner's two cases are arms 1 and 2.
    say what it said. Assert: two new element ids, `intended_actions` unchanged, and `serves`
    naming neither of the two new ids — and that no clause of the implementation reads that as a
    reason to mint, withdraw or re-point anything.
-4. **Selection and refusal at the seam.** A plan naming `A1` where the goal holds one action
-   resolves to that action's id; a plan naming `A2` where it holds one, a plan naming `A0`, and a
-   plan naming `banana` are each **refused** with the `PlanningError` class `save_plan` raises,
-   are not passed to `save_plan`, and dispatch nothing. A plan whose step names no action is saved
-   and carries `None`.
+4. **Selection and refusal at the seam, over the grammar's own boundary.** A plan naming `A1`
+   where the goal holds one action resolves to that action's id. A plan naming `A2` where it holds
+   one, and plans naming `A0`, `A01`, `A+1`, `a1`, `A 1`, `A1 `, `A１` (a non-ASCII digit) and
+   `banana` are each **refused** with the `PlanningError` class `save_plan` raises, are not passed
+   to `save_plan`, and dispatch nothing. A plan whose step names no action is saved and carries
+   `None`. The padded, signed, lower-cased, whitespace-bearing and non-ASCII-digit spellings are
+   named because an `int()`-based or Unicode-`\d`-based parse accepts them while every other arm
+   still passes.
 5. **The store closes the windows, the append is atomic, and the bound refuses rather than
    elides.** `save_plan` refuses a plan whose `intended_action` is not a member of that goal's
    `intended_actions`; `record_intended_actions` appends **two** actions in one
@@ -671,15 +713,20 @@ The owner's two cases are arms 1 and 2.
    handed **two** actions, so the all-or-nothing limb is exercised and **neither** is recorded.
    Assert that each refusal writes nothing, that the **last two carry a class distinct from the
    stale-write class** (§5), and that a goal at the bound holds every action it held before the
-   refusal — **no member elided, no count advanced**. And an `IntendedActionMinting` two of whose
-   `actions` carry one `id` is **not constructible** (§5).
+   refusal — **no member elided, no count advanced**. An `IntendedActionMinting` two of whose
+   `actions` carry one `id` is **not constructible** (§5). And `record_intended_actions` refuses,
+   writing nothing, an action whose `serves` names an identifier of **no** element of the goal's
+   current interpretation and one whose `serves` names an element of a **different** goal.
 6. **The record round-trips and the export closes.** A goal carrying two intended actions
    round-trips through `model_dump()` and construction; `PlanExport` carries them inside `goals`
    with no new member; `delete_goal` removes them with the goal; and a stored goal written before
    this decision decodes with `intended_actions` empty.
-7. **The two disjointness refusals.** An `IntendedAction` whose `id` is `A1` is not constructible;
-   an `IntendedActionMinting` carrying an empty `actions` is not constructible; and a
-   `ProposedAction` carrying no `intent` is not constructible.
+7. **The disjointness refusals, over the same boundary as arm 4 and asserted to be its exact
+   complement.** An `IntendedAction` whose `id` is `A1` or `A12` is not constructible, while one
+   whose `id` is `A01`, `A+1`, `a1`, `A 1`, `A１` or `A` **is** — each being a value arm 4 shows
+   no label resolves to, so no id is both refused as a label and refused as an id, and none is
+   accepted as both. And an `IntendedActionMinting` carrying an empty `actions` is not
+   constructible, nor is a `ProposedAction` carrying no `intent`.
 8. **The seam discloses no identifier and no history.** Over a goal with two intended actions, one
    already performed in an earlier turn's execution, assert that the rendered request contains
    **no** `IntendedAction.id`, no execution, no step and no outcome — and that the `A` block
@@ -687,12 +734,12 @@ The owner's two cases are arms 1 and 2.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
-A **new decision** that partially supersedes ADR-0249 in three scopes and ADR-0253 in one, each
-named on the header and shown in §8. **Against every other ADR it cites, without exception, it is
+A **new decision** that partially supersedes ADR-0249 in three scopes, ADR-0253 in one and
+ADR-0255 in one, each named on the header and shown in §8. **Against every other ADR it cites, without exception, it is
 a stacked addition** — no sentence of any of them becomes false or over-wide, and each is joined
 by an obligation stated here; §8 shows the working for the ones a reader would expect to be
-superseded, ADR-0014, ADR-0226, ADR-0228, ADR-0230, ADR-0249 §12, ADR-0250, ADR-0252 and ADR-0255
-among them. It is **marked** under ADR-0089, and every obligation it imposes is inside a mark.
+superseded, ADR-0014, ADR-0226, ADR-0228, ADR-0230, ADR-0249 §12, ADR-0250, ADR-0252 and
+ADR-0255 §7 among them. It is **marked** under ADR-0089, and every obligation it imposes is inside a mark.
 
 ## Consequences
 
