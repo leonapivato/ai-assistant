@@ -14,7 +14,7 @@ import json
 import re
 import sys
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     CurrentContext,
     EmailFacet,
     EpisodicMemory,
+    EvidenceBasis,
     EvidenceDigest,
     EvidenceStanding,
     ExchangeDisposition,
@@ -40,6 +41,7 @@ from ai_assistant.core.types import (
     GoalBrief,
     GoalInterpretation,
     Ground,
+    InterpretationVerdict,
     MemorySource,
     Message,
     PreferenceMemory,
@@ -51,9 +53,13 @@ from ai_assistant.core.types import (
     Role,
     SemanticMemory,
     ShownFile,
+    StepCondition,
+    StepOutputRef,
+    StepVerification,
     StructuredAsk,
     TimeOfDay,
     TimeWindow,
+    VerificationKind,
 )
 from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.planning.planner import (
@@ -66,6 +72,7 @@ from ai_assistant.planning.planner import (
     _FILES_HEADING,
     _LOCAL_FILE_GUIDANCE,
     _MAX_EXTRACTION_MISSES,
+    _PLAN_SHAPE_GUIDANCE,
     _READ_REQUEST_DROPPED,
     _READ_REQUEST_GUIDANCE,
     _REQUEST_HEADING,
@@ -5379,3 +5386,633 @@ async def test_a_first_turn_outcome_is_the_request_and_neither_forges() -> None:
     assert lines.count("Goal:") == 1
     assert lines.count(_CONSTRAINTS_HEADING) == 0, "the brief carries no elements"
     assert len([line for line in lines if line.startswith("  statement: ")]) == 1
+
+
+# --- ADR-0253: the planner's side of the plan shape ---------------------------
+
+
+#: The two memories the ``M``-label arms below are driven over.
+#:
+#: Two rather than one, because ADR-0253 §8's resolution is positional: a supply of
+#: one cannot tell a resolver that indexes correctly from one that returns whatever
+#: it holds, which is :func:`_label`'s own argument for deriving the label from the
+#: position rather than from the record.
+def _supply() -> list[MemoryRecord]:
+    return [_turn("m0", "Ada said she wants a quiet street"), _preference()]
+
+
+def _shaped_reply(steps: list[dict[str, object]], **overrides: object) -> str:
+    """A plan envelope over ``steps``, with whatever else a case needs beside it."""
+    envelope: dict[str, object] = {"rationale": "shaped", "steps": steps}
+    envelope.update(overrides)
+    return json.dumps(envelope)
+
+
+def _step(**keys: object) -> dict[str, object]:
+    """One plain step object, plus whichever of ADR-0253 §9's five keys a case adds."""
+    return {"intent": "find a place", "capability": "search_housing", "parameters": {}} | keys
+
+
+async def _shaped_plan(reply: str, *, memories: Sequence[MemoryRecord] | None = None) -> ActionPlan:
+    """Drive one reply through a real planner and return the plan it extracted."""
+    planner = _planner(reply)
+    output = await planner.plan(
+        _goal(),
+        utterance=_REQUEST,
+        context=_context(),
+        memories=_supply() if memories is None else memories,
+        capabilities=_VOCABULARY,
+    )
+    return output.plan
+
+
+async def _refused(reply: str, *, memories: Sequence[MemoryRecord] | None = None) -> None:
+    """Assert one reply is an extraction failure the bounded repair cannot save."""
+    with pytest.raises(PlanningError):
+        await _shaped_plan(reply, memories=memories)
+
+
+async def test_the_system_prompt_asks_for_the_plan_shape() -> None:
+    """ADR-0253 §9: the envelope gains five step keys and one member, so the prompt asks.
+
+    Pinned as the block reaching the model rather than by string-matching its wording,
+    which is :data:`_STATED_FACT_GUIDANCE`'s own reason for being a named constant.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
+
+    assert _PLAN_SHAPE_GUIDANCE in _system_turn(model)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        *(one.value for one in VerificationKind),
+        *(one.value for one in EvidenceBasis),
+        *(one.value for one in InterpretationVerdict),
+        *(one.value for one in ReadKind),
+    ],
+)
+async def test_every_vocabulary_member_the_extraction_refuses_is_spelled_in_the_prompt(
+    member: str,
+) -> None:
+    """ADR-0253 §9: "every member of every vocabulary is spelled in the prompt".
+
+    The section pairs the two halves deliberately — spelled in the prompt **and**
+    "extracted strictly", "never coerced, case-folded, aliased or repaired into a
+    member" — because a vocabulary named without being listed invites exactly the
+    near-miss spellings that then cost a repair round. That is ADR-0176 §1's own
+    reason for spelling the decline marker as "the JSON boolean ``true`` and nothing
+    else" rather than as "a boolean".
+
+    ``INCONCLUSIVE`` is in the list because §5 forbids a condition requiring it: a
+    model can only avoid writing a member it has been shown.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
+
+    assert f"`{member}`" in _system_turn(model)
+
+
+async def test_the_prompt_states_both_sequences_a_condition_label_may_index() -> None:
+    """ADR-0253 §9: "the prompt states which sequence is in force, and states both cases".
+
+    "Stating only the first would make a condition on a proposition the same reply
+    introduces unnameable in practice, which is the case §9's ordering exists to
+    admit; stating only the second would make every ordinary follow-up turn's label
+    wrong." So both sentences are owed, and each is pinned by the thing it names —
+    the heading the brief's labels are printed under, and the reply's own
+    ``conditions`` list — rather than by the wording around them.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY)
+
+    block = _PLAN_SHAPE_GUIDANCE
+    assert block in _system_turn(model)
+    assert _CONDITIONS_HEADING.split(",")[0] in block, "the brief's own D labels"
+    assert "`conditions` list" in block, "and the reply's own positions"
+
+
+async def test_a_plan_declaring_none_of_the_new_keys_is_the_plan_it_always_was() -> None:
+    """ADR-0253 §12: "it changes no behaviour of a plan that declares none of the new keys".
+
+    Every one of the six fields is at its default and the plan carries no
+    interpretation, so a plan written against the previous prompt extracts into
+    exactly the value it extracted into before — which is the claim §12 makes and the
+    one an implementation reading a key it was not handed would break silently.
+    """
+    plan = await _shaped_plan(_VALID_REPLY)
+
+    assert plan.interpretations == ()
+    for step in plan.steps:
+        assert step.depends_on == ()
+        assert step.resolves == ()
+        assert step.when == ()
+        assert step.verifies is None
+        assert step.evidence_recency is None
+
+
+async def test_a_model_supplied_step_id_is_refused_and_the_ids_are_the_factory_s() -> None:
+    """ADR-0253 §14 arm 15, which is §1's writer rule at the seam it could be broken from.
+
+    "No step identifier is rendered to a model and none is accepted from one"
+    (ADR-0228 §8), and the prompt has told a model so since ADR-0176 — "Do not include
+    step ids; they are assigned downstream". So an envelope carrying one is refused
+    rather than stepped over: a silently discarded ``id`` would leave a model no
+    signal that the dependency spelling this seam reads is positional, which is the
+    failure the refusal exists to surface early.
+    """
+    await _refused(_shaped_reply([_step(id="s1")]))
+
+    plan = await _shaped_plan(_shaped_reply([_step(), _step(capability="book_movers")]))
+    assert [step.id for step in plan.steps] == ["id-0", "id-1"], "the factory's, in order"
+
+
+@pytest.mark.parametrize("ordinal", [0, -1, 1.5, "1", True, 9])
+@pytest.mark.parametrize("site", ["after", "resolves", "reads"])
+async def test_a_step_ordinal_outside_the_envelope_is_an_extraction_failure(
+    site: str, ordinal: object
+) -> None:
+    """ADR-0253 §14 arm 16: §1's refusals bind all three sites (§6, §8, §9).
+
+    "An ordinal that is **not an integer**, is **less than 1** … or exceeds the number
+    of steps in the envelope … is an **extraction failure** for that envelope, on the
+    same footing as a step missing its ``capability``. It is not silently dropped and
+    it is not repaired."
+
+    ``True`` is in the list because it is an ``int`` in Python and would otherwise
+    resolve to the first step; ``"1"`` because a string ordinal is the shape a model
+    reaches for when it has confused this space with a label.
+    """
+    second = {
+        "after": _step(capability="book_movers", after=[ordinal]),
+        # ``after=[1]`` so that the plan the ordinal check refuses would otherwise
+        # **construct**: without it, a ``source.step`` outside ``depends_on`` is
+        # refused by ``ActionPlan`` and this arm would pass on a seam that read the
+        # ordinal wrongly or not at all (§6's refusal standing in for §1's).
+        "resolves": _step(
+            capability="book_movers",
+            after=[1],
+            resolves=[{"parameter": "city", "source": {"step": ordinal}}],
+        ),
+        "reads": _step(capability="book_movers"),
+    }[site]
+    overrides: dict[str, object] = (
+        {"interpretations": [{"settles": "D1", "reads": {"step": ordinal}}]}
+        if site == "reads"
+        else {}
+    )
+
+    await _refused(_shaped_reply([_step(), second], **overrides))
+
+
+@pytest.mark.parametrize("site", ["after", "resolves"])
+@pytest.mark.parametrize("ordinal", [2, 3])
+async def test_a_step_may_name_only_a_step_earlier_than_itself(site: str, ordinal: int) -> None:
+    """ADR-0253 §1: "backwards only, so a cycle is unconstructible".
+
+    "A tuple in which every reference points strictly earlier admits no cycle at all:
+    any cycle needs at least one edge pointing forward or at itself, and both are
+    refused one member at a time by a comparison of two positions." ``2`` is the
+    declaring step itself and ``3`` is a later one; both are refused at the envelope,
+    before an id exists for either, so the graph algorithm the alternative would have
+    needed has nothing to run on.
+    """
+    second = {
+        "after": _step(capability="book_movers", after=[ordinal]),
+        "resolves": _step(
+            capability="book_movers",
+            resolves=[{"parameter": "city", "source": {"step": ordinal}}],
+        ),
+    }[site]
+
+    await _refused(_shaped_reply([_step(), second, _step(capability="book_movers")]))
+
+
+async def test_a_dependency_named_twice_is_an_extraction_failure() -> None:
+    """ADR-0253 §1: an ordinal that "repeats another ordinal of the same list" is refused.
+
+    Caught before the ids are substituted, so the repair turn can name the position
+    the model actually wrote rather than an identifier it has never seen.
+    """
+    await _refused(_shaped_reply([_step(), _step(capability="book_movers", after=[1, 1])]))
+
+
+async def test_a_step_ordinal_resolves_to_the_id_this_planner_minted() -> None:
+    """ADR-0253 §1: "the implementation that mints the step ids resolves each ordinal".
+
+    The whole of the scheme in one arm: the model wrote ``1``, the plan carries the
+    first step's id, and the model was shown no identifier at any point. The same
+    resolution serves a ``resolves`` entry's producing step, which is why §6 makes
+    ``StepOutputRef`` "the one spelling of *a place in a producing step's output*".
+    """
+    plan = await _shaped_plan(
+        _shaped_reply(
+            [
+                _step(),
+                _step(
+                    capability="book_movers",
+                    after=[1],
+                    resolves=[{"parameter": "city", "source": {"step": 1, "field": "name"}}],
+                ),
+            ]
+        )
+    )
+
+    first, second = plan.steps
+    assert second.depends_on == (first.id,)
+    assert second.resolves[0].source == StepOutputRef(step=first.id, field="name")
+    assert first.id not in json.dumps(_shaped_reply([_step()])), "no id was ever rendered"
+
+
+@pytest.mark.parametrize("bad", [1, "true", "INTERPRETATION", "interpretations", True, None])
+async def test_a_basis_outside_its_enumeration_is_an_extraction_failure(bad: object) -> None:
+    """ADR-0253 §14 arm 17 over the ``basis``, on ADR-0176 §1's own arm shape.
+
+    That section's marker "is the JSON boolean ``true`` and nothing else", refusing
+    ``1``, ``"true"`` and ``"yes"``; §9 applies the same strictness to five more
+    vocabularies — "a value outside it is an **extraction failure** for that envelope
+    and is never coerced, case-folded, aliased or repaired into a member". The
+    case-variant and the near-miss spelling are the two a repairing implementation
+    would quietly accept.
+    """
+    await _refused(_shaped_reply([_step(when=[{"about": "D1", "basis": bad}])]))
+
+
+@pytest.mark.parametrize("bad", [1, "true", "QUALIFIES", "qualify", True])
+async def test_a_requires_outside_its_enumeration_is_an_extraction_failure(bad: object) -> None:
+    """ADR-0253 §14 arm 17 over the required ``InterpretationVerdict`` (§5)."""
+    await _refused(
+        _shaped_reply([_step(when=[{"about": "D1", "basis": "interpretation", "requires": bad}])])
+    )
+
+
+@pytest.mark.parametrize("bad", [1, "true", "FIELD_PRESENT", "field_exists", True])
+async def test_a_verification_kind_outside_its_enumeration_is_an_extraction_failure(
+    bad: object,
+) -> None:
+    """ADR-0253 §14 arm 17 over the ``VerificationKind`` (§4)."""
+    await _refused(_shaped_reply([_step(verifies={"kind": bad, "field": "summary"})]))
+
+
+@pytest.mark.parametrize("bad", [1, "true", "LOCAL_FILE", "file", True])
+async def test_a_read_kind_outside_its_enumeration_is_an_extraction_failure(bad: object) -> None:
+    """ADR-0253 §14 arm 17 over the ``ReadKind`` (§5)."""
+    await _refused(
+        _shaped_reply([_step(when=[{"about": "D1", "basis": "read_outcome", "read_kind": bad}])])
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", [900, "900", "00:15:00", "1 day, 0:00:00", "-PT5M", "PT0S", "pt15m", True, "fifteen"]
+)
+async def test_an_evidence_recency_that_is_not_an_iso_8601_duration_is_never_clamped(
+    bad: object,
+) -> None:
+    """ADR-0253 §9: the figure is refused rather than "rounded, clamped or defaulted".
+
+    Each of these is a shape pydantic would otherwise read: a bare number and a
+    numeric string as **seconds**, the two clock forms as durations, and ``-PT5M`` as
+    a negative one. ``PT0S`` is the form the field's own ``gt`` refuses, and it is in
+    the same list because §9 makes "not strictly positive" the same disposal as "not
+    an ISO-8601 duration" rather than a different one.
+    """
+    await _refused(_shaped_reply([_step(evidence_recency=bad)]))
+
+
+async def test_an_evidence_recency_is_read_as_the_duration_it_names() -> None:
+    """ADR-0253 §5: the figure lives on the step and applies to every condition of it."""
+    plan = await _shaped_plan(
+        _shaped_reply(
+            [_step(when=[{"about": "D1", "basis": "read_outcome"}], evidence_recency="PT15M")]
+        )
+    )
+
+    assert plan.steps[0].evidence_recency == timedelta(minutes=15)
+
+
+async def test_a_verification_is_read_into_the_predicate_the_model_declared() -> None:
+    """ADR-0253 §4: a model supplies the **declaration** and the comparison is arithmetic.
+
+    "What a model supplies is the declaration — a member of a closed enumeration, a
+    key name and a literal — and the comparison is arithmetic." So the three values
+    cross as written and nothing here evaluates them: §4 has this predicate read by
+    A7's driver, over the producing step's own output, and no lane of this decision
+    drives (§12).
+    """
+    plan = await _shaped_plan(
+        _shaped_reply([_step(verifies={"kind": "field_equals", "field": "status", "equals": "ok"})])
+    )
+
+    assert plan.steps[0].verifies == StepVerification(
+        kind=VerificationKind.FIELD_EQUALS, field="status", equals="ok"
+    )
+
+
+async def test_a_condition_about_crosses_as_the_label_the_model_wrote() -> None:
+    """ADR-0253 §9: "the loop resolves the label, once, and the planner never does".
+
+    The planner cannot resolve it and must not try: on a turn that first proposes a
+    condition, the element's ``GoalElement.id`` is minted by ``orchestration`` a
+    moment *after* this call returns, so a planner that substituted its own would
+    make the ordinary shape of "book only if the forecast qualifies" inexpressible.
+    So ``about`` comes back carrying exactly the four characters the model wrote, and
+    ``PlanStore.save_plan`` is what refuses a plan on which nothing has substituted
+    for it.
+    """
+    plan = await _shaped_plan(
+        _shaped_reply(
+            [
+                _step(
+                    when=[
+                        {"about": "D2", "basis": "interpretation", "requires": "does_not_qualify"}
+                    ]
+                )
+            ]
+        )
+    )
+
+    assert plan.steps[0].when[0] == StepCondition(
+        about="D2",
+        basis=EvidenceBasis.INTERPRETATION,
+        requires=InterpretationVerdict.DOES_NOT_QUALIFY,
+    )
+
+
+@pytest.mark.parametrize("bad", ["M3", "M0", "M01", "m1", "1", "D1", 2, None])
+async def test_an_interpretation_naming_a_record_outside_the_shown_range_is_refused(
+    bad: object,
+) -> None:
+    """ADR-0253 §14 arm 19, over the half a planner holds the sequence to answer.
+
+    §8 makes "a record label outside the shown range … an **extraction failure** for
+    that envelope, on §1's footing", and this call rendered two records — so ``M3``
+    resolves to nothing. ``M0`` and ``M01`` are refused by ADR-0226 §3's grammar
+    ("in decimal with no padding"), ``m1`` and ``D1`` by the letter, and ``2`` and
+    ``None`` because a label is a string.
+
+    **The minted half of that arm is not asserted here and is not implemented here.**
+    §8 also refuses "a label naming a record ADR-0231 §1's search or ADR-0230 §5's
+    fetch **minted**", and the planner is handed no such set: ``ServicedRead.minted``
+    is the loop's carrier, a minted record "sits in ``memories`` beside every other",
+    and ``Planner.plan``'s signature "does not move" (``core/protocols.py``). That
+    refusal belongs with the loop's own ``record`` check, which §8 already states and
+    which already sits beside the set.
+    """
+    await _refused(_shaped_reply([_step()], interpretations=[{"settles": "D1", "record": bad}]))
+
+
+async def test_an_interpretation_record_resolves_against_the_sequence_this_call_rendered() -> None:
+    """ADR-0253 §9: an ``M`` label is "resolved by the implementation that rendered them".
+
+    This module rendered the labels (:func:`_label`), so this module reads them back,
+    against its own copy of the sequence and against nothing shared — ADR-0226 §10
+    forbids any value crossing the two packages other than that sequence and the plan
+    itself, which is what keeps the scheme a published one rather than a private
+    protocol between two subsystems.
+    """
+    supply = _supply()
+
+    plan = await _shaped_plan(
+        _shaped_reply([_step()], interpretations=[{"settles": "D1", "record": "M2"}]),
+        memories=supply,
+    )
+
+    assert plan.interpretations[0].record == supply[1].id
+
+
+async def test_an_interpretation_id_a_model_wrote_reaches_nothing() -> None:
+    """ADR-0253 §8: four keys, so an id, a verdict or a ``when`` beside them is discarded.
+
+    "Do not include interpretation ids; they are assigned downstream" is the prompt's
+    half; this is the structural half — the payload carries four keys and the id in it
+    is the factory's, so a value a model invented has nowhere to go rather than being
+    refused by a rule someone remembered to write. An interpretation carries no
+    ``when`` and no ``verifies`` either: "its eligibility is its input's availability
+    and nothing else".
+    """
+    plan = await _shaped_plan(
+        _shaped_reply(
+            [_step()],
+            interpretations=[
+                {
+                    "settles": "D1",
+                    "record": "M1",
+                    "id": "forged",
+                    "verdict": "qualifies",
+                    "when": [{"about": "D1"}],
+                }
+            ],
+        )
+    )
+
+    one = plan.interpretations[0]
+    assert one.id != "forged", "the id is the factory's"
+    assert one.settles == "D1", "and the label crosses as written, for the loop"
+    assert one.model_dump().keys() == {"id", "settles", "record", "reads"}
+
+
+@pytest.mark.parametrize(
+    "interpretation",
+    [
+        {"settles": "D1"},
+        {"settles": "D1", "record": "M1", "reads": {"step": 1}},
+        {"record": "M1"},
+    ],
+)
+async def test_an_interpretation_with_no_input_or_two_is_not_constructible(
+    interpretation: dict[str, object],
+) -> None:
+    """ADR-0253 §8: "a model validator requires exactly one of ``record`` and ``reads``".
+
+    The refusal is the type's and the disposal is this seam's: a plan the type will not
+    construct reaches ADR-0047 §6's bounded repair rather than a half-built value. The
+    third case is the ``settles`` the type requires, for the same reason.
+    """
+    await _refused(_shaped_reply([_step()], interpretations=[interpretation]))
+
+
+async def test_the_dynamic_plan_of_the_decision_is_extracted_whole() -> None:
+    """ADR-0253 §8's worked plan, read off one envelope (§14 arm 25's seam half).
+
+    "*Refresh the forecast, read what came back, and book only if it qualifies* is one
+    plan with one step, one interpretation and one conditioned step." Extraction is
+    what this arm covers — the ordinals resolved to the ids this planner minted, the
+    condition label left for the loop, the interpretation reading step 1's own output
+    at ``"summary"`` — and no lane of this decision drives it (§12), so what the
+    verdict then enables is asserted as a predicate elsewhere and not here.
+
+    The ordering is the one §8 fixes at construction: the conditioned step sits after
+    the step its interpretation reads, "so the driver A7 lands walks it in one pass
+    and no cycle has a spelling".
+    """
+    plan = await _shaped_plan(
+        _shaped_reply(
+            [
+                _step(intent="refresh the forecast", capability="refresh_forecast"),
+                _step(
+                    intent="book the campsite",
+                    capability="book_campsite",
+                    after=[1],
+                    when=[{"about": "D1", "basis": "interpretation", "requires": "qualifies"}],
+                ),
+            ],
+            interpretations=[
+                {"settles": "D1", "reads": {"step": 1, "field": "summary"}},
+            ],
+        )
+    )
+
+    forecast, booking = plan.steps
+    assert booking.depends_on == (forecast.id,)
+    assert booking.when[0].about == "D1", "the loop's to substitute"
+    assert plan.interpretations[0].reads == StepOutputRef(step=forecast.id, field="summary")
+    assert plan.interpretations[0].record is None
+
+
+async def test_a_shape_the_plan_type_refuses_reaches_the_repair_round() -> None:
+    """ADR-0253 §6: "a reference is a dependency and is not a second way of saying so".
+
+    ``ActionPlan`` refuses a ``source.step`` outside the declaring step's
+    ``depends_on``, and this seam's disposal for a plan the type will not construct is
+    the one it has always had — ADR-0047 §6's bounded repair, then a clean
+    ``PlanningError``. So the type stays the single authority on the shape and this
+    module neither restates the rule nor repairs around it.
+    """
+    await _refused(
+        _shaped_reply(
+            [
+                _step(),
+                _step(
+                    capability="book_movers",
+                    resolves=[{"parameter": "city", "source": {"step": 1}}],
+                ),
+            ]
+        )
+    )
+
+
+async def test_an_element_proposing_no_axis_is_recorded_with_none() -> None:
+    """ADR-0253 §7: an element proposing no axis "is recorded with ``applicability`` absent".
+
+    §5 already makes such an element "a legal element that imposes no coverage
+    requirement" (ADR-0252 §6 test 1), and the ordinary element proposes nothing — so
+    this is the shape every element written before the decision still has.
+    """
+    planner = _planner(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "conditions": [
+                    {"text": "the weather permits it", "ground": "inferred"},
+                ],
+            }
+        )
+    )
+
+    output = await planner.plan(
+        _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+    )
+
+    assert output.understanding is not None
+    proposed = output.understanding.conditions[0]
+    assert (proposed.window, proposed.participants, proposed.topics, proposed.about_person) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "axes",
+    [
+        {"window": {}},
+        {"window": {"start": None, "end": None}},
+        {"window": {"start": "2026-03-08T00:00:00+00:00", "end": "2026-03-01T00:00:00+00:00"}},
+        {"window": {"start": 20260301}},
+        {"window": {"start": "20260301"}},
+        {"window": "2026-03-01"},
+        {"topics": []},
+        {"participants": []},
+        {"about_person": []},
+    ],
+)
+async def test_an_axis_that_does_not_compose_an_applicability_is_an_extraction_failure(
+    axes: dict[str, object],
+) -> None:
+    """ADR-0253 §14 arm 18's first half, and §7's own reason for it.
+
+    "An element proposing **one or more axes that do not compose an
+    ``EvidenceApplicability``** — an empty sequence axis, a window with both ends
+    unset, or a window whose ``end`` is not strictly after its ``start`` — is an
+    **extraction failure** for that envelope … it is **never** recorded as an element
+    with an absent applicability."
+
+    Recording one would *widen* every condition later written against the element:
+    "an element whose proposed window ran Sunday to Saturday states a Sunday
+    requirement its author meant mechanically; recorded with ``applicability`` absent
+    … a standing, answering **Saturday** row satisfies the condition". The two numeric
+    spellings are here because pydantic would otherwise read each as a Unix timestamp
+    in 1970 — an interval the planner did not propose.
+    """
+    planner = _planner(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "conditions": [{"text": "the weather permits it", "ground": "inferred"} | axes],
+            }
+        )
+    )
+
+    with pytest.raises(PlanningError):
+        await planner.plan(
+            _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+        )
+
+
+async def test_an_element_proposing_axes_carries_the_requirement_it_proposed() -> None:
+    """ADR-0253 §7: "the planner proposes the applicability and ``orchestration`` records it".
+
+    The four axes are ADR-0252 §9's two operands and ADR-0252 §6 test 1's region, and
+    "the axes are the ones the planner already composes an ask from, so the seam gains
+    no new vocabulary" — the window and the three label axes, spelled the one way this
+    system spells them.
+    """
+    planner = _planner(
+        _understanding_reply(
+            {
+                "retains_outcome": True,
+                "conditions": [
+                    {
+                        "text": "the weather over the trip permits it",
+                        "ground": "inferred",
+                        "window": {
+                            "start": "2026-03-01T00:00:00+00:00",
+                            "end": "2026-03-08T00:00:00+00:00",
+                        },
+                        "topics": ["weather"],
+                    }
+                ],
+            }
+        )
+    )
+
+    output = await planner.plan(
+        _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+    )
+
+    assert output.understanding is not None
+    proposed = output.understanding.conditions[0]
+    assert proposed.window == TimeWindow(
+        start=datetime(2026, 3, 1, tzinfo=UTC), end=datetime(2026, 3, 8, tzinfo=UTC)
+    )
+    assert proposed.topics == ("weather",)
+    assert proposed.participants is None
+    assert proposed.about_person is None
