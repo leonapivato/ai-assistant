@@ -299,29 +299,33 @@ def _knn(conn: sqlite3.Connection, query: Embedding, *, k: int) -> list[tuple[st
     ]
 
 
-async def test_a_record_the_metric_cannot_rank_is_left_out_of_a_relevance_read(
+async def test_a_record_with_no_direction_is_served_at_the_floor_and_never_leads(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
-    """#2355: an undefined distance is left out, not arithmetic'd into a ``TypeError``.
+    """#2355: an undefined distance is the documented floor, not a ``TypeError``.
 
     Before this, ``max(0.0, 1.0 - distance)`` met the ``None`` the test above pins
     and raised ``TypeError: unsupported operand type(s) for -: 'float' and
     'NoneType'`` — not a ``MemoryStoreError``, so not the class
     ``LoopEngine._retrieve`` and ``_supplement`` catch, and the turn aborted rather
-    than degrading (ADR-0158 §4).
+    than degrading (ADR-0158 §4). The two records here are the whole eligible set
+    and ``limit`` is above it, which is the shape that lets the undefined row back
+    out of the KNN at all.
 
-    **Left out is not a similarity floor.** This store has none: it serves rows of
-    any similarity at all, which the case below pins with a ``rocket ship`` record
-    coming back for ``coffee``. A floor compares a similarity against a threshold,
-    and there is no similarity here to compare — ADR-0112 §1 makes this read's one
-    ordering axis relevance, and a row with no relevance value has no place in a
-    relevance ordering. Scoring it at the floor instead would have put it *ahead*
-    of records that genuinely match, since SQL orders ``NULL`` first.
+    It is **served, not dropped**, and the alternative was tried across a review
+    round before the texts sent it back. ADR-0128 §1 rules that "what the KNN
+    returns is servable, and the cut is a prefix of it"; and withholding the row
+    leaves ``capped`` with no true value — §2's first clause has ``False`` on a
+    short result assert that the store "holds **no** further record matching the
+    call's filters and passing its read-time eligibility axes", which a withheld
+    row contradicts, while its second has ``True`` mean the candidate ceiling bound
+    the read, which it did not. ``0.0`` is where ``max(0.0, 1.0 - distance)``
+    already puts every row no closer than orthogonal, so an undefined similarity
+    joins a populated class rather than getting a value of its own.
 
-    **And ``capped`` says so.** The result is short of ``limit`` and the withheld
-    row matches the call's filters and passes every eligibility axis, so ``False``
-    — which under ADR-0128 §2 asserts the store holds no further such record — is
-    exactly what this read may not say.
+    And it is ranked **last**: SQL sorts ``NULL`` first, so the unrankable row led
+    the result until the ordering said otherwise — which contradicts ``search``'s
+    "most relevant first" exactly where a caller reads the top of the list.
     """
     store = make_store()
     await store.add(_semantic("blank", ""))
@@ -329,53 +333,53 @@ async def test_a_record_the_metric_cannot_rank_is_left_out_of_a_relevance_read(
 
     found = await store.search("coffee", limit=10)
 
-    assert [record.id for record in found.records] == ["c1"]
-    assert found.capped is True
-    assert await store.get("blank") is not None  # reachable, just not by relevance
+    assert [record.id for record in found.records] == ["c1", "blank"]
+    assert found.records[-1].score == 0.0
+    assert found.capped is False
 
 
-async def test_a_floor_scored_row_is_kept_where_a_row_with_no_score_is_not(
+async def test_a_direction_less_record_is_ranked_last_among_several_floored_ones(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
-    """``0.0`` from a real distance stays; no distance at all does not.
+    """The floor is shared with orthogonal rows, and the ordering still holds.
 
-    ``rocket ship`` shares no token with ``coffee``, so its cosine distance is a
-    defined ``1.0`` and its score the floored ``0.0`` — the same number the blank
-    record would have been given had it been scored. One is a measured similarity
-    and the other is the absence of one, and this is the case that keeps the two
-    apart.
+    ``rocket ship`` scores ``0.0`` too — cosine distance ``1.0``, the same floor —
+    so this pins that the undefined row is ordered against defined *distances*
+    rather than against the scores they collapse to, and that the ranked row still
+    leads.
     """
     store = make_store()
     await store.add(_semantic("blank", ""))
     await store.add(_semantic("r1", "rocket ship"))
     await store.add(_semantic("c1", "coffee tea"))
 
-    found = await store.search("coffee", limit=10)
+    records = (await store.search("coffee", limit=10)).records
 
-    assert [record.id for record in found.records] == ["c1", "r1"]
-    assert found.records[-1].score == 0.0
-    assert found.capped is True
+    assert records[0].id == "c1"
+    assert records[-1].id == "blank"
+    assert [record.score for record in records[1:]] == [0.0, 0.0]
 
 
-async def test_an_unrankable_row_still_spends_a_knn_slot_so_the_page_is_not_certified(
+async def test_a_record_with_no_direction_reaches_a_result_over_a_crowded_eligible_set(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
-    """What leaving the row out does **not** buy back, pinned rather than implied.
+    """The fault is not confined to a store smaller than the ``limit`` it is asked for.
 
-    The exclusion happens on the rows the KNN returned, and the unrankable row has
-    already held one of its ``k`` slots by then — a ``NaN`` is never displaced from
-    a slot it holds, so a blank record written **before** thirty that match takes
-    one of five and the fifth-best match is never fetched. Recovering it needs a
-    second pass at a larger ``k``, which ADR-0128 §4 refuses to pre-bless ("no
-    second pass, no re-search, and nothing in it may be read as pre-blessing one").
+    #2355 reasoned that "production stores hold hundreds of episodes, which is why
+    this has not been seen there". That holds only while the degenerate row is not
+    among the first the KNN sees: an undefined distance is never displaced from a
+    top-``k`` slot it already holds, so a blank record written **before** thirty
+    that match is served by a ``limit`` of five over an eligible set six times it.
+    Ranked last, and the four best-matching records still lead it.
 
-    So the page comes back **one short**, and this is why ``capped`` is not the
-    ceiling's alone: ``True`` here is the refusal to certify that ADR-0128 §2's
-    fourth clause requires, and it is the whole of what the caller is owed.
-
-    This also corrects #2355's reading that the fault needs an eligible set at or
-    below the ``limit`` asked for: thirty-one records against a ``limit`` of five
-    is neither, and it reaches it.
+    **This is also where the slot it spent is visible** (#2363): the page's fifth
+    record is the blank one rather than the fifth-best match, because that match
+    was never fetched. Nothing this method does with the returned rows recovers it
+    — removing the blank row from the page leaves four, not five — so the remedy
+    is the second pass ADR-0128 §4 declines to pre-bless, or a write path that
+    never indexes a directionless vector. ADR-0128 §2's third clause is why a full
+    page carrying it breaks no promise: "a full page never asserts that the store
+    holds no more eligible records below the cut".
     """
     store = make_store()
     await store.add(_semantic("blank", ""))
@@ -384,9 +388,10 @@ async def test_an_unrankable_row_still_spends_a_knn_slot_so_the_page_is_not_cert
 
     found = await store.search("coffee", limit=5)
 
-    assert len(found.records) == 4
-    assert all((record.score or 0.0) > 0.0 for record in found.records)
-    assert found.capped is True
+    assert len(found.records) == 5
+    assert found.records[-1].id == "blank"
+    assert all((record.score or 0.0) > 0.0 for record in found.records[:4])
+    assert found.records[-1].score == 0.0
 
 
 async def test_add_overwrites_same_id(make_store: Callable[..., SqliteMemoryStore]) -> None:
