@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, final
 
 import pytest
@@ -35,10 +36,15 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     AssociationVerdict,
     CandidateGoal,
+    Goal,
     GoalAssociation,
     GoalCandidacy,
+    GoalInterpretation,
     GoalStatus,
+    Ground,
+    MemorySource,
     Message,
+    Provenance,
     Role,
 )
 from ai_assistant.planning.associator import (
@@ -58,6 +64,38 @@ if TYPE_CHECKING:
 #: A reply that associates to the first candidate, for the cases that need a readable
 #: one and do not care which.
 _VALID_REPLY: Final = json.dumps({"verdict": "associates", "goals": ["G1"]})
+
+
+#: The instant every goal a case builds carries, so the arm about what does **not**
+#: reach the prompt has a concrete string to look for.
+_WHEN: Final = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+
+
+def _goal(goal_id: str, *, conversation_id: str, outcome: str) -> Goal:
+    """A goal opened at revision 1, carrying every value a candidate does not (§4).
+
+    Built here rather than imported so the case below can look for each of its
+    identifiers by name: what the arm asserts is that an id, a conversation, a turn and
+    an instant are all on the record and none of them reaches the prompt.
+    """
+    return Goal(
+        id=goal_id,
+        conversation_id=conversation_id,
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=outcome,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=outcome,
+                recorded_at=_WHEN,
+                raised_by="turn-4de0aa",
+            ),
+        ),
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
+        ),
+        created_at=_WHEN,
+    )
 
 
 def _answering(content: str) -> ModelBackedGoalAssociator:
@@ -276,28 +314,39 @@ async def test_a_conversation_with_no_focused_goal_says_so() -> None:
 
 
 async def test_the_prompt_carries_no_identifier_of_any_kind() -> None:
-    """ADR-0250 §20 arm 22(b), the behavioural half of the namer rule.
+    """ADR-0250 §20 arm 22(b), the half reachable from this side of the seam.
 
-    "Given a candidacy built from goals with distinctive ids and a turn carrying a
-    ``TurnReference`` with a distinctive ``goal_id``, the prompt the production
-    associator builds contains neither string." The structural half — that
-    :class:`~ai_assistant.core.types.GoalCandidacy` and
-    :class:`~ai_assistant.core.types.CandidateGoal` carry no field an identifier could
-    sit in — is arm 22(a), over the types themselves.
+    The arm reads: "given a candidacy built from goals with distinctive ids and a turn
+    carrying a ``TurnReference`` with a distinctive ``goal_id``, the prompt the
+    production associator builds contains neither string". So the candidacy here is
+    **built from real goals** — each carrying an id, a ``conversation_id``, a
+    provenance, an instant and a revision chain — and projected the way §4 says a
+    candidate is projected, onto the outcome and the status. The assertion is that none
+    of the values the goals carry survives into the prompt.
 
-    The ids are put on the *goals a caller would project from*, because that is the
-    shape the loop holds; the assertion is that none of them survives the projection
-    into the prompt. It cannot, and that is the point: "an implementation that rendered
-    every field of every value it was handed, logged them all, or returned them,
-    discloses none of those, because there is none on the value to disclose" (§4).
+    **What it cannot reach, and why that is not this lane's gap.** A ``TurnReference``
+    exists only on a turn, and the act that builds a ``GoalCandidacy`` out of a
+    conversation's goals is the loop's — ADR-0250 §19 puts the candidate read and the
+    association in M3. So the projection *step* is asserted there; what is asserted here
+    is the property §4 rests the containment on, that the associator cannot leak an
+    identifier because "there is none on the value to disclose". The two halves are
+    complementary rather than redundant: a leak introduced in M3's projection is M3's
+    arm to catch, and a leak introduced here — a module that started logging, echoing or
+    rendering more of what it was handed — is this one's.
+
+    ``goal.statement`` is the projection ADR-0249 §1 makes read-only, so the candidate's
+    outcome is genuinely derived from the goal rather than restated beside it: an
+    implementation that rendered the goal instead of the candidate would fail this.
     """
     model = FakeModelProvider(_VALID_REPLY)
-    distinctive = ("goal-2c9f1a", "goal-7b31de", "question-4de0aa")
+    goals = (
+        _goal("goal-2c9f1a", conversation_id="conversation-8ae41b", outcome="book a campsite"),
+        _goal("goal-7b31de", conversation_id="conversation-8ae41b", outcome="file the tax return"),
+    )
     candidacy = GoalCandidacy(
         request=REQUEST,
-        candidates=(
-            CandidateGoal(outcome="book a campsite", status=GoalStatus.ACTIVE),
-            CandidateGoal(outcome="file the tax return", status=GoalStatus.ACTIVE),
+        candidates=tuple(
+            CandidateGoal(outcome=goal.statement, status=goal.status) for goal in goals
         ),
         focused="G1",
     )
@@ -305,8 +354,18 @@ async def test_the_prompt_carries_no_identifier_of_any_kind() -> None:
     await _over(model).associate(candidacy)
 
     prompt = _prompt(model)
-    for identifier in distinctive:
-        assert identifier not in prompt
+    assert "book a campsite" in prompt, "the statements did cross, so the arm is not vacuous"
+    assert "file the tax return" in prompt
+    for goal in goals:
+        conversation_id = goal.conversation_id
+        raised_by = goal.interpretation[0].raised_by
+        assert conversation_id is not None, "the record carries a conversation"
+        assert raised_by is not None, "and the turn that raised its first revision"
+        assert goal.id not in prompt, "no goal id"
+        assert conversation_id not in prompt, "no conversation id"
+        assert raised_by not in prompt, "no turn id"
+        assert goal.created_at.isoformat() not in prompt, "and no instant"
+    assert "revision" not in prompt, "nor a revision number the chain carries"
 
 
 async def test_the_prompt_is_three_messages_and_nothing_else_reaches_it() -> None:
