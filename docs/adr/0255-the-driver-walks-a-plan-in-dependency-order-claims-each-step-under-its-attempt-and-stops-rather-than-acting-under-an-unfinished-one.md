@@ -252,6 +252,15 @@ evaluation is what decides a dispatch.
 > `SkipReason` for a step nothing evaluated, or reads `PENDING` after a stopped walk as a
 > terminal state.
 
+> **Normative — what re-enters a stopped walk, and this decision provides no automatic route.** A
+> stopped walk is re-entered by **exactly one** route: `StepRunner.resume` answering a park of
+> that plan, after which the driver resumes at the first `PENDING` step (§5). **There is no
+> sweep, no timer, no queue, no background continuation and no automatic re-drive** of a plan the
+> walk stopped on any of the other four triggers. A later turn of the same attempt **plans
+> again** — which produces a **new** plan, driven over a **new** execution, and §7 governs what
+> becomes of the old one — rather than resuming the old walk. **What causes that later turn is a
+> user act** (ADR-0250 §12), and **what the user is told about the stopped plan is A9's report**.
+
 **Stopping rather than skipping past is the whole of this rule, and the reason is that every one
 of the five says the same thing: nothing has decided that the remaining steps will not run.** A
 skip is a durable claim, carried in `StepExecution`, `PlanExport` and the wire, that a step was
@@ -339,10 +348,9 @@ was settled about the step rather than by where in the plan it sat.
 > the `GoalAttempt` it is driving under**, which is the value ADR-0249 §12 already has
 > `orchestration` holding in memory from the instant the attempt is opened. **No stage of the
 > walk fetches the attempt to fill it**, `StepExecutor` gains **no `PlanStore` read it does not
-> already have
-> and no collaborator** (ADR-0058), and no other parameter of either entry point moves. **The one
-> path on which `orchestration` has no attempt to supply is ADR-0052's recovered resume, and §5
-> states what it does there.**
+> already have and no collaborator** (ADR-0058), and no other parameter of either entry point
+> moves. **The one path on which `orchestration` has no attempt to supply is ADR-0052's recovered
+> resume, and §5 states what it does there.**
 
 > **Normative — this is not the substitution hazard ADR-0037 §2 and ADR-0253 §6 close, and the
 > distinction is what the store's own refusal makes true.** Those clauses refuse a caller-supplied
@@ -916,6 +924,13 @@ ADR-0249 §6 already rules that recording one *"does not move the phase"*.
   commit, which #257 itself calls *"a contract change with a much wider blast radius, and arguably
   the wrong shape for a store whose whole write API is a single compare-and-swap."* Fired by an
   ADR that takes it.
+- **An automatic re-drive of a stopped walk** — continuing a plan after an `INDETERMINATE` step
+  is resolved, or re-reaching a step an `AMBIGUOUS_CAPABILITY`, `INVALID_PARAMETERS` or
+  `EGRESS_UNBINDABLE` disposition left `PENDING`. **A8** for the first, which is the lane that
+  resolves an `INDETERMINATE` step and is the only one with something new to drive on; **not
+  decided** for the rest, each of which is a deployment or a plan defect corrected by the user
+  asking again rather than by a mechanism. §2 leaves every such step `PENDING` and adds no route
+  back to it beyond §5's resume. Fired by A8's reconciliation landing.
 - **Parallel execution of two steps, and the leases, in-process synchronisation and recovery it
   would need.** ADR-0014 §7's second half and ADR-0253 §1's clause, **untouched** (§1). Fired by a
   decision that takes it.
@@ -987,8 +1002,8 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
 
 > **Normative — what M33 demonstrates and what M34 owes, and the division is the owner's Q4
 > ruling applied rather than invented.** **M33 demonstrates dependent execution on controlled
-> fakes**: the arms 1–9 below, every one over `ai_assistant.testing`'s canonical fakes with no
-> consequential integration wired. **M34 owes arms 10–14**, and no lane reads an M33 arm as having
+> fakes**: the arms 1–10 below, every one over `ai_assistant.testing`'s canonical fakes with no
+> consequential integration wired. **M34 owes arms 11–15**, and no lane reads an M33 arm as having
 > established one of them.
 
 **Thin — M33, on controlled fakes.**
@@ -1038,26 +1053,34 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
    and the driver re-enters at step 3. The arm asserts the recovery is over steps and not
    positions, by parking at a middle step rather than a first.
 
+10. **A commits-nothing disposition stops the walk** — a three-step plan whose **second** step
+    draws `AMBIGUOUS_CAPABILITY`: the walk stops, step 2 is `PENDING` **at its stored version**
+    with no ruling recorded and no audit entry written, step 3 is `PENDING` and **not** `SKIPPED`,
+    and no `ActionRequest` is built for step 3. Parameterized over `INVALID_PARAMETERS` and
+    `EGRESS_UNBINDABLE`, which §2 treats alike and whose member docstrings assert the same durable
+    state. The arm is what distinguishes this trigger from `NO_CAPABLE_TOOL`, which **does** commit
+    a skip and whose dependents are therefore disposed of by §2's skip rule rather than left.
+
 **Full — M34, owed there and not established here.**
 
-10. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
+11. **Mid-plan `INDETERMINATE`** — a three-step plan whose second step returns `INDETERMINATE`:
     the walk stops, step 3 stays **`PENDING`** whether or not it depends on step 2, **no step is
     `SKIPPED`**, and the attempt's `state` is `EFFECT_UNRESOLVED` **before** the turn composes. A
     paired arm asserts a plan superseded in that state moves **no** step to `SKIPPED`/`SUPERSEDED`
     (§6's override of §7).
-11. **Replan after partial execution** — a plan driven to its second step, superseded on a later
+12. **Replan after partial execution** — a plan driven to its second step, superseded on a later
     turn: the first plan's `ExecutionState` and its `SUCCEEDED` step's `output` are unchanged, the
     attempt's `execution_ids` names both executions, the superseded plan's still-`PENDING` steps
     are `SKIPPED`/`SUPERSEDED`, and **the new plan's booking step dispatches** — which is the arm
     that records §7's stated limit rather than a property, and is why it is M34's beside A8's
     idempotency work.
-12. **The deadline, decremented across steps** — a three-step plan under a budget that two steps
+13. **The deadline, decremented across steps** — a three-step plan under a budget that two steps
     exhaust: each `StepRunner.run` receives a **strictly smaller and strictly positive** remainder,
     the third step is never started, it is `PENDING` and not `SKIPPED`, and a step already begun
     ran to completion past the deadline. A paired arm asserts `AttemptEffort.working` advanced by
     the walk and `planner_calls` did not.
-13. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
-14. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
+14. **A9's tests 1, 2 and 4**, stated here so the set is legible and **owed on A9's lane**.
+15. **Real integrations**, under §13's rule: a consequential capability is wired only once A8's,
     A9's and A10's guarantees are implemented and demonstrated.
 
 ### 16. Records owed on earlier ADRs, under ADR-0082 §1
