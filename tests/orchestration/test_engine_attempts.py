@@ -667,9 +667,10 @@ async def test_a_continued_goals_revision_goes_through_record_interpretation() -
     assert outcome.turn is not None
     (appended,) = plans.appended
     assert appended.goal_id == earlier.id
-    assert appended.expected_version == earlier.version + 1, (
-        "ADR-0250 §1: the engagement stamp is a mutation of the goal and advances the "
-        "token, so the revision is written against the version that stamp returned"
+    assert appended.expected_version == earlier.version, (
+        "ADR-0250 §20 arm 34: the engagement stamp is written at the persistence "
+        "boundary and not at the association, so the revision is written against the "
+        "version the loop read and the stamp follows it"
     )
     assert appended.interpretation.revision == 2
     assert appended.interpretation.raised_by is not None
@@ -679,7 +680,7 @@ async def test_a_continued_goals_revision_goes_through_record_interpretation() -
     assert stored is not None
     assert stored.interpretation[0] == earlier.interpretation[0], "prior revision unedited"
     assert stored.version == 2, (
-        "ADR-0250 §1's engagement stamp advanced the token once and §12's own write "
+        "§12's own write advanced the token once and ADR-0250 §1's engagement stamp "
         "advanced it again: `engage_goal` is a mutation of the goal like any other"
     )
     assert stored.last_engaged_in is not None, "ADR-0250 §1: the turn engaged the goal"

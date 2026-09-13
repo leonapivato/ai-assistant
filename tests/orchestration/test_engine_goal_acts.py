@@ -493,6 +493,54 @@ async def test_a_settled_question_is_not_reported_expired() -> None:
     assert again.reference is ReferenceOutcome.ALREADY_SETTLED
 
 
+@pytest.mark.parametrize(
+    ("disposition", "expected"),
+    [
+        pytest.param(
+            GoalQuestionDisposition.ANSWERED, ReferenceOutcome.ALREADY_SETTLED, id="answered"
+        ),
+        pytest.param(
+            GoalQuestionDisposition.WITHDRAWN, ReferenceOutcome.ALREADY_SETTLED, id="withdrawn"
+        ),
+        pytest.param(
+            GoalQuestionDisposition.SUPERSEDED, ReferenceOutcome.ALREADY_SETTLED, id="superseded"
+        ),
+        pytest.param(GoalQuestionDisposition.EXPIRED, ReferenceOutcome.EXPIRED, id="expired"),
+    ],
+)
+async def test_every_terminal_disposition_reads_the_member_it_is_stated_over(
+    disposition: GoalQuestionDisposition, expected: ReferenceOutcome
+) -> None:
+    """§20 arm 17 over all four, not over ``ANSWERED`` alone.
+
+    "one settled ``WITHDRAWN`` and one settled ``SUPERSEDED`` read the same; and **only**
+    a question whose ``disposition`` is ``EXPIRED`` reads ``EXPIRED``. The arm fails if
+    any of the three is reported expired on a clock comparison."
+
+    Each question is settled directly and then referenced **a week past its original
+    deadline**, so the clock comparison and the disposition disagree for three of the
+    four: a lane that compared instants would report every one of them ``EXPIRED``.
+    """
+    clock = _Advancing()
+    planner = _Asking()
+    harness = Harness(planner=planner, now=clock)
+    paused = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert paused.clarification is not None
+    question_id = paused.clarification.question_id
+    planner.understanding = None
+    assert await harness.plans.settle_question(question_id, disposition=disposition, at=clock())
+    clock.advance(timedelta(days=7))
+
+    outcome = await harness.engine.converse(
+        "the river one", timeout=PATIENT, reference=TurnReference(question_id=question_id)
+    )
+
+    assert outcome.reference is expected
+    settled = await harness.plans.get_question(question_id)
+    assert settled is not None
+    assert settled.disposition is disposition, "and nothing re-settled it on the way past"
+
+
 async def test_a_turn_that_fails_before_its_persistence_site_writes_no_question() -> None:
     """§20 arm 34: a turn that ends early persists nothing new.
 
@@ -507,6 +555,42 @@ async def test_a_turn_that_fails_before_its_persistence_site_writes_no_question(
 
     assert await harness.plans.outstanding_questions() == ()
     assert (await harness.plans.export()).goals == (), "no goal row, so no stamp either"
+
+
+async def test_a_turn_that_fails_leaves_an_existing_goals_engagement_where_it_was() -> None:
+    """§20 arm 34's other half: the goal the turn *selected* is not stamped either.
+
+    An empty store shows only that no row was written. The stamp is a mutation of a goal
+    that already exists, so the arm is only really asserted over a turn that resolved its
+    association to a **stored** goal and then failed: *"A turn whose planner raises … each
+    leave no question row **and no engagement stamp**"*.
+
+    Moving focus for a turn that wrote nothing and answered nothing would reorder the very
+    candidate set the next turn is associated over (§1, §2), on the strength of a request
+    the system never acted on.
+    """
+    harness = Harness(planner=_Raising())
+    conversation = (await harness.conversations.begin(None)).id
+    campsite = await _seed(
+        harness.plans,
+        _goal("goal-campsite", "book a campsite", conversation=conversation),
+        engaged_in=conversation,
+    )
+
+    with pytest.raises(PlanningError):
+        await harness.engine.converse(
+            "make it Sunday",
+            timeout=PATIENT,
+            conversation_id=conversation,
+            reference=TurnReference(goal_id=campsite.id),
+        )
+
+    held = await harness.plans.get_goal(campsite.id)
+    assert held is not None
+    assert held.last_engaged_at == campsite.last_engaged_at, "§20 arm 34: no engagement stamp"
+    assert held.last_engaged_in == campsite.last_engaged_in
+    assert held.version == campsite.version, "and the token the stamp would advance is unmoved"
+    assert held.interpretation == campsite.interpretation, "nor was a revision recorded"
 
 
 class _Raising(NoStepPlanner):

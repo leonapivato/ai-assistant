@@ -8619,16 +8619,26 @@ class Engine:
         association: _Association,
         *,
         conversation_id: str,
+        version: int,
     ) -> GoalEngagement | None:
-        """Say what this turn did with its goal, engaging one it opened (ADR-0250 §1, §5).
+        """Say what this turn did with its goal, and engage it (ADR-0250 §1, §5).
 
-        **A goal this turn opened is engaged here and not earlier**, because until
-        :meth:`_save_goal` there is no row to stamp: ADR-0249 §12 rules that *"A turn
-        that ends before that site writes no attempt row, exactly as it writes no goal
-        row and no plan row"*, and §1 makes the opening turn one of its four engaging
-        acts — *"a turn that associates to it under §3, **including the turn that opens
-        it**"*. A goal the store already held was engaged at the association, which is
-        the instant the act happened.
+        **Every goal this turn engages is stamped here, at the persistence boundary,
+        and never at the association.** §1 makes the act *"a turn that associates to it
+        under §3, **including the turn that opens it**"*, and §20 arm 34 says what a
+        turn that does not get that far leaves behind: *"A turn whose planner raises,
+        one rejected for capacity and one that fails before the planner is reached each
+        leave **no question row** and no engagement stamp"*. Stamping at the association
+        would move focus onto a goal for a turn that then wrote nothing and answered
+        nothing — which is ADR-0228 §5's clause, asserted over this decision's record
+        kinds as arm 34 asks. A goal this turn **opened** has no row to stamp before
+        :meth:`_save_goal` either, so both cases land at one site.
+
+        **The version is the store's own answer**, carried from :meth:`_save_goal`:
+        the version ``save_goal`` wrote for an opened goal, and the version the last
+        ``record_interpretation`` returned for one the store already held. Recomputing
+        it here would be the second authority over the compare-and-swap token that
+        ADR-0014 §5 gives the store alone.
 
         **The disposition of an opening turn is ``OPENED``**, and it is stamped here
         rather than carried: the association could not name it, having no goal to name
@@ -8639,6 +8649,7 @@ class Engine:
             association: What §3 decided.
             conversation_id: The conversation this turn ran under, which
                 ``engage_goal`` writes into ``Goal.last_engaged_in``.
+            version: The version the goal stands at after :meth:`_save_goal`.
 
         Returns:
             The typed value the outcome carries, or ``None`` where the turn engaged no
@@ -8649,13 +8660,12 @@ class Engine:
         """
         if record is None:  # pragma: no cover — every RespondedTurn carries a record
             return None
-        if association.goal is None:
-            await self._plans.engage_goal(
-                record.goal.id,
-                at=self._clock(),
-                conversation_id=conversation_id,
-                expected_version=record.goal.version,
-            )
+        await self._plans.engage_goal(
+            record.goal.id,
+            at=self._clock(),
+            conversation_id=conversation_id,
+            expected_version=version,
+        )
         return engagement_of(
             record.goal,
             disposition=association.disposition or EngagementDisposition.OPENED,
@@ -9117,7 +9127,6 @@ class Engine:
         if reference is not None:
             found = await self._referenced(
                 reference,
-                conversation_id=conversation_id,
                 focused=focused,
                 elided=candidates.elided,
             )
@@ -9144,7 +9153,6 @@ class Engine:
             return _Association(reference=unknown, elided=candidates.elided)
         return await self._engaged(
             resolution.goal,
-            conversation_id=conversation_id,
             reference=unknown,
             elided=candidates.elided,
             focused=focused,
@@ -9154,7 +9162,6 @@ class Engine:
         self,
         reference: TurnReference,
         *,
-        conversation_id: str,
         focused: str | None,
         elided: int,
     ) -> _Association | None:
@@ -9175,7 +9182,6 @@ class Engine:
 
         Args:
             reference: The turn's reference, of one of §11's two shapes.
-            conversation_id: The conversation this turn runs under.
             focused: The id of this conversation's focused goal, or ``None``.
             elided: How many goals the candidate-set cap dropped (§2).
 
@@ -9193,7 +9199,6 @@ class Engine:
             outcome = await self._settlement(question)
             return await self._engaged(
                 goal,
-                conversation_id=conversation_id,
                 reference=outcome,
                 elided=elided,
                 focused=focused,
@@ -9203,7 +9208,6 @@ class Engine:
             return None
         return await self._engaged(
             goal,
-            conversation_id=conversation_id,
             reference=None,
             elided=elided,
             focused=focused,
@@ -9280,27 +9284,27 @@ class Engine:
         self,
         goal: Goal,
         *,
-        conversation_id: str,
         reference: ReferenceOutcome | None,
         elided: int,
         focused: str | None,
     ) -> _Association:
         """Engage a goal the store already holds, and say what that turn will do (§1, §12).
 
-        **Engagement is one of §1's four acts and it is taken here**, at the moment the
-        association happens: *"Exactly four acts engage a goal … 1. A turn that
-        associates to it under §3."* The write is ``PlanStore.engage_goal``, *"the one
-        writer"* of both engagement fields, from the injected clock and this turn's
-        conversation. A goal this turn **opens** is engaged later instead, at the site
-        that first writes its row — there is nothing to stamp before it exists (ADR-0249
-        §12).
+        **The engagement itself is not taken here.** §1's first act is *"a turn that
+        associates to it under §3"*, but §20 arm 34 requires a turn that raises, is
+        rejected for capacity, or fails before the planner to leave **no engagement
+        stamp** — and every one of those failures happens after this method has run. So
+        the association is resolved here and the stamp is written at the persistence
+        boundary (:meth:`_engagement`), which is where a goal this turn *opened* is
+        stamped too and where ADR-0228 §5's "a turn that ends before this site persists
+        nothing" already puts every other record of the turn.
 
-        **A reopen writes ``ACTIVE`` first** (§13), through ``set_goal_status``, *"the
-        goal's **only** status-mutation route"* — before the engagement, so the brief
-        the planner receives says what the goal now is rather than what it was. A turn
-        that then dies leaves an ``ACTIVE`` goal with no runnable attempt, which is the
-        state §12's third act is written for and which the next turn resolves by opening
-        one.
+        **The reopen is the exception, and it is deliberate.** ``set_goal_status``
+        writes ``ACTIVE`` here, before the planner, so the brief the planner receives
+        says what the goal now is rather than what it was; a turn that then dies leaves
+        an ``ACTIVE`` goal with no runnable attempt, which is the state §12's third act
+        is written for. Arm 34 is stated over the engagement stamp and the question row,
+        and over neither the status nor the attempt.
 
         **Which acts open an attempt** (§12): a reopened goal starts a new one, and so
         does *"a turn that associates to an open goal that has no runnable attempt — its
@@ -9315,13 +9319,13 @@ class Engine:
 
         Args:
             goal: The goal this turn engages, as it was read.
-            conversation_id: The conversation this turn runs under.
             reference: What became of the turn's reference, or ``None``.
             elided: How many goals the candidate-set cap dropped (§2).
             focused: The id of this conversation's focused goal, or ``None``.
 
         Returns:
-            The engagement, with the goal at the version its stamp left it.
+            The association, with the goal at the version this method leaves it —
+            unchanged, or advanced by the reopen's status write.
         """
         disposition = (
             EngagementDisposition.REOPENED
@@ -9337,12 +9341,6 @@ class Engine:
                 at=self._clock(),
                 expected_version=goal.version,
             )
-        goal = await self._plans.engage_goal(
-            goal.id,
-            at=self._clock(),
-            conversation_id=conversation_id,
-            expected_version=goal.version,
-        )
         attempts = await self._plans.attempts_of(goal.id)
         current = attempts[-1] if attempts else None
         opens = (
@@ -9405,7 +9403,7 @@ class Engine:
         )
         return None
 
-    async def _save_goal(self, record: RecordedGoal | None) -> None:
+    async def _save_goal(self, record: RecordedGoal | None) -> int:
         """Persist the goal record the loop built for this turn (ADR-0249 §11, §12).
 
         **The loop builds the goal record and its revisions; this component persists
@@ -9434,6 +9432,11 @@ class Engine:
         Args:
             record: What the loop decided about this turn's goal, or ``None``.
 
+        Returns:
+            The ``version`` the goal stands at afterwards, which
+            :meth:`_engagement` stamps against — the store's own answer, never a count
+            kept here.
+
         Raises:
             PlanningError: As ``save_goal`` and ``record_interpretation`` raise it —
                 including where the store already holds a goal under that id, which
@@ -9442,10 +9445,10 @@ class Engine:
                 stored ``Goal.version`` has moved on since the loop read it (§12).
         """
         if record is None:  # pragma: no cover — every RespondedTurn carries a record
-            return
+            return 0
         if record.opened:
             await self._plans.save_goal(record.goal)
-            return
+            return record.goal.version
         # §12: the version the loop computed against, then the version each write
         # returns — read from the store's own answer rather than incremented here, so
         # the token stays the store's and a second authority cannot drift from it.
@@ -9459,6 +9462,7 @@ class Engine:
                 )
             )
             expected = stored.version
+        return expected
 
     async def _open_attempt(self, opened: OpenedAttempt | None) -> None:
         """Write the attempt the loop opened, at §11's site (ADR-0249 §11, §12).
@@ -10103,9 +10107,9 @@ class Engine:
             # A no-action decision is still a decision, and drives nothing that
             # could park — so it needs no capacity slot, and its goal and plan are
             # persisted as an auditable record (ADR-0014 §2).
-            await self._save_goal(goal_record)
+            version = await self._save_goal(goal_record)
             engagement = await self._engagement(
-                goal_record, association, conversation_id=conversation.id
+                goal_record, association, conversation_id=conversation.id, version=version
             )
             await self._persist_plans(plans)
             attempt = await self._persist_attempt(
@@ -10220,9 +10224,9 @@ class Engine:
         # a raising id factory fails with no durable state committed (#287).
         handle = self._admit_and_reserve()
         try:
-            await self._save_goal(goal_record)
+            version = await self._save_goal(goal_record)
             engagement = await self._engagement(
-                goal_record, association, conversation_id=conversation.id
+                goal_record, association, conversation_id=conversation.id, version=version
             )
             # ADR-0228 §5: the **whole** sequence of `save_plan` calls precedes
             # `start_execution`, so a turn whose second `save_plan` raises has driven
