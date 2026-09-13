@@ -498,17 +498,23 @@ wants — one write, no separate read, the store adjudicating — is bought **by
 the revision**, and a field would spend the property to buy it.
 
 **The attempt id is a different kind of value, and that is why it is a field where the revision is
-not.** What the store derives, it derives from a chain it holds: execution → plan → goal.
-**Which attempt a claim is made under is not on that chain.** One goal may carry many attempts
-(ADR-0249 §5, ADR-0250 §12), and `GoalAttempt.execution_ids` is appended by `commit_attempt` at
-the moment an execution is opened — so a reverse lookup would work only where an earlier write
-landed, would make the conjunct's strength depend on a write the driver must remember to make,
-and would have the **store** choosing which attempt is claiming. The driver is the one component
-that knows. **So the caller supplies the identity and the store reads the state**, which is the
-division `approval_ref` already uses: ADR-0014 §4 has the caller name the decision and the store
-refuse a `→ RUNNING` without one, and the `approval_ref` does not thereby become a value the
-caller can stale. There is nothing here for a time-of-check-to-time-of-use gap to open on: the
-caller's value is an id, and an id does not go stale.
+not.** What the store derives for the revision, it derives from a chain that **names exactly one
+value at each hop**: execution → plan → goal → `revision`. **Which attempt a claim is made under is
+not that shape.** One goal may carry many attempts (ADR-0249 §5, ADR-0250 §12) and one execution
+sits under exactly one of them, so a store deriving the attempt would be **selecting** rather than
+following — searching `attempts_of(goal_id)` for the row whose `execution_ids` names this
+execution, on the hot path of every claim, and then comparing its own choice against nothing.
+**The caller names the row and the store checks it**, which is the division `approval_ref` already
+uses: ADR-0014 §4 has the caller name the decision and the store refuse a `→ RUNNING` without one.
+
+**Naming and checking in two components is what gives the conjunct something to refuse, and it is
+why the check is `execution_ids` membership rather than a goal comparison.** A derivation is its
+own answer and cannot be wrong about itself; a supplied id can be, and the store holds the fact
+that decides it — the attempt's own `execution_ids`, appended by `commit_attempt` before any step
+of that execution is dispatched (ADR-0249 §12) and never removed or reordered. There is no
+time-of-check-to-time-of-use gap for a caller's value to open, because the caller's value is an
+**id**: an id does not go stale, and everything that can go stale about the row it names — the
+membership and the state — is read inside the same indivisible step as the claim.
 
 **And the conjunct is not redundant with the revision's, which is the first objection to it.** A
 cancellation of an **attempt** is not a revision of an **understanding**: it commits the attempt
@@ -1161,10 +1167,13 @@ and ADR-0236's fail-closed on a missing declaration are the corpus's own shape f
   drive from the `GoalAttempt` it already holds. It **drives nothing** and changes no behaviour of
   a turn: the one `→ RUNNING` claim in the tree is `StepExecutor._claim`, and after L1 it carries
   the attempt the engine opened.
-- **L2 — the driver.** The plan-driving stage in `orchestration/`, the walk, §1's four
-  evaluations, §2's stop and skip rules, §5's park and re-entry, §6's `EFFECT_UNRESOLVED` commit,
-  §7's supersession skip, §9's deadline, and the retirement of `engine.py`'s single-step path.
-  **It adds no `core` type and no field**, both being L1's.
+- **L2 — the driver, and the runner's request construction.** The plan-driving stage in
+  `orchestration/`, the walk, §1's three driver evaluations and **`StepRunner`'s resolution of a
+  step's `resolves` from the stored plan and execution while it builds the request** (§1), §2's
+  stop and skip rules, §5's park re-evaluation and the fresh walk that follows it, §6's
+  `EFFECT_UNRESOLVED` commit, §7's supersession skip, §9's one deadline per adapter call, and the
+  retirement of `engine.py`'s single-step path. **It adds no `core` type and no field**, both
+  being L1's, and **it gives no entry point a parameter for a resolved value** (ADR-0253 §6).
 
 > **Normative — L2 lands after ADR-0253's L1 and L2 and after ADR-0254's Lane 1 and Lane 2.** The
 > walk reads `depends_on`, `when`, `resolves`, `verifies` and `interpretations`, which ADR-0253
@@ -1476,12 +1485,14 @@ read and the caller's claim moves the stored revision while the copy the caller 
 matching itself. §H.1's property is right and its construction spends it; deriving the revision in
 the store buys the property outright.
 
-**The store derives the attempt too, by scanning `GoalAttempt.execution_ids`.** Rejected. It works
-only where `commit_attempt` already appended the execution id, so a conjunct meant to be a
-guarantee would silently be a no-op on any path that had not; it makes the store choose which
-attempt a claim belongs to, which is a fact only the driver holds; and it is an unindexed reverse
-scan over every attempt of a goal on the hot path of every claim. The caller supplies an identity
-and the store reads the state, which is `approval_ref`'s own division. Where `orchestration`
+**The store derives the attempt itself, by searching `attempts_of(goal_id)` for the row whose
+`execution_ids` names this execution.** Rejected — and note that the **field** is the one §3's
+conjunct checks against, so what is rejected is the store **choosing** the attempt rather than the
+field's authority. A derivation is its own answer: it cannot be wrong about itself, so the
+conjunct would have nothing to refuse and a caller claiming under the wrong attempt would be
+silently corrected rather than stopped. It also makes the store select where it otherwise follows,
+on the hot path of every claim, and puts a fact only the driver holds — which attempt is driving —
+inside the component that is meant to adjudicate it. Where `orchestration`
 itself has no attempt to supply — ADR-0052's recovered resume, the one such path — it does take
 that lookup, and §5 states why its result being **checked** by the store's conjunct is what makes
 the same query safe there and unsafe inside the claim.
