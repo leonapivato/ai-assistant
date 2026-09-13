@@ -31,6 +31,7 @@ from threading import Lock
 from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import Draft202012Validator
@@ -13802,6 +13803,31 @@ def _refused_parameters(violations: Sequence[ParameterViolation]) -> str:
     return f"parameters do not satisfy the tool's parameters_schema: {shown}{more}"
 
 
+def _system_supplied(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Require ADR-0254 §3's duplicate-free set of key names.
+
+    Possibly **empty**, which is the default and is the one exception to
+    :class:`ToolDefinition`'s required-field rule (§3, §18): the empty tuple makes
+    the claim *"nothing here is system-supplied"*, so every argument is user-facing
+    and needs coverage — a question rather than a widening.
+
+    A duplicate is refused because a key named twice is a second spelling of one
+    classification. **The order is the declaration's own** and is not sorted:
+    nothing compares this tuple by value, and §3's two readers ask it only for
+    membership.
+
+    Raises:
+        ValueError: If the tuple names a key twice.
+    """
+    if len(set(value)) != len(value):
+        msg = (
+            "a declaration classifies each key system-supplied once; a duplicate is a "
+            "second spelling of one classification (ADR-0254 §3)"
+        )
+        raise ValueError(msg)
+    return value
+
+
 # --- tools: the declaration a permission decision rules on (ADR-0016 §1) -----
 # States facts and draws no conclusions — `permissions` does that (ADR-0016
 # §3). Every field a decision depends on is required, because a default is a
@@ -13849,6 +13875,32 @@ class ToolDefinition(BaseModel):
     )
     latency: timedelta | None = Field(
         default=None, description="Expected duration of a typical call; advisory, not a timeout."
+    )
+    system_supplied: Annotated[tuple[EncodableText, ...], AfterValidator(_system_supplied)] = Field(
+        default=(),
+        description=(
+            "The keys of ``parameters`` the **system** fills — an idempotency key, a "
+            "client reference, a locale — possibly empty and duplicate-free, each a "
+            "key name at depth **one** exactly as "
+            ":attr:`~ai_assistant.core.types.CoverageMember.argument` is (ADR-0254 §3). "
+            "**Every key it does not name is user-facing**, and only a user-facing "
+            "argument needs coverage: §3's condition 6 and §6's argument-authority bar "
+            "each read this field, so a system-supplied key neither needs a coverage "
+            'member nor ever fires the bar — which is the whole of *"implementation '
+            'choices must not become user-facing questions"*. '
+            "``orchestration`` supplies the value for every key named here, **before** "
+            "the candidate fit test, and refuses to build a request whose plan step's "
+            "own arguments name one: a user is never asked to approve an idempotency "
+            "key, and a model that reached for one is a fault and not a question. "
+            "``ActionRequest.parameters_digest`` is still taken over **every** "
+            "argument, so a system-supplied value cannot move between the ruling and "
+            "the dispatch. **This is the one exception to this class's "
+            "required-field rule** and it is recorded rather than argued away "
+            "(ADR-0254 §18): the empty default makes the **opposite** claim to the "
+            "one ADR-0016 §1 refuses — an unclassified argument is user-facing, so a "
+            "declaration that says nothing needs coverage for every argument and asks "
+            "where it has none. It costs a question and can never authorise a call."
+        ),
     )
     parameters_schema: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
@@ -16126,6 +16178,22 @@ class ActionRequest(BaseModel):
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
     )
+    goal: Identifier | None = Field(
+        default=None,
+        description=(
+            "The goal the step this request performs belongs to (ADR-0254 §6). "
+            "``orchestration`` sets it from the plan the execution names; **no policy, "
+            "no seam, no interface adapter and no model output writes it**, and no "
+            "component infers it at read time. **A request carrying ``None`` reaches "
+            "ADR-0148 §3's route (d) in no case** and reads the authorization seam "
+            "**zero** times — the fail-closed direction, and the same shape ADR-0021 §3 "
+            "gives a policy with no authorisation source. It is deliberately **not** "
+            "transcribed onto :class:`PermissionDecision` (ADR-0254 §16): the trail has "
+            "no use for a value it cannot compare against the arguments, and a decision "
+            "carrying a goal id would put a second, unvalidated assertion of the same "
+            "fact on the durable record."
+        ),
+    )
     step_id: DurableIdentifier | None = Field(
         default=None, description="The plan step this action belongs to, if any."
     )
@@ -16357,6 +16425,22 @@ class PermissionRuling(BaseModel):
             "(ADR-0004 §7's minimisation)."
         ),
     )
+    authorised_goal: Identifier | None = Field(
+        default=None,
+        description=(
+            "The ``goal`` of the :class:`Authorization` a **route-(d)** ``ALLOW`` rests "
+            "on (ADR-0254 §7). Set **only** on a route-(d) ``ALLOW``, and set **only** "
+            "to the goal of the record the policy's one ``live_for`` read returned — "
+            "read off that record and carried from nowhere else. A policy constructed "
+            "with no ``GoalAuthorizations`` leaves it unset, as it leaves "
+            "``authorised_by`` unset.\n\n"
+            "**It is the conjunct that completes the four-route partition**, read from "
+            "the row alone with no store read: route (b) is a digest with this field "
+            "**unset** and route (d) a digest with it **set**, which narrows ADR-0247 "
+            "§2's discriminator in its route-(b) limb alone, by one conjunct, and "
+            "breaks none of it."
+        ),
+    )
 
     @field_validator("reason")
     @classmethod
@@ -16415,6 +16499,31 @@ class PermissionRuling(BaseModel):
             msg = (
                 f"a ruling that names no authorisation fingerprints none, got "
                 f"authorised_subject={self.authorised_subject!r} (ADR-0193 §6)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_scope_needs_the_authorisation_it_scopes(self) -> PermissionRuling:
+        """Refuse an ``authorised_goal`` where ``authorised_by`` is unset (ADR-0254 §7).
+
+        **The same shape and the same reason** as the refusal above: a scope for an
+        authorisation the row names none of is incoherent.
+
+        **It does not require the converse**, and the asymmetry is this type's
+        already. A route-(a), route-(b) or route-(c) ``ALLOW`` sets
+        ``authorised_by`` and carries no goal scope, so a pointer without one is the
+        ordinary shape; which of the four shapes is *owed* is decided at
+        :meth:`~ai_assistant.core.protocols.AuditTrail.record`, the only component
+        that can see ``resolves`` and ``egress_binding``.
+
+        Raises:
+            ValueError: If ``authorised_goal`` is set and ``authorised_by`` is not.
+        """
+        if self.authorised_goal is not None and self.authorised_by is None:
+            msg = (
+                f"a ruling that names no authorisation scopes none, got "
+                f"authorised_goal={self.authorised_goal!r} (ADR-0254 §7)"
             )
             raise ValueError(msg)
         return self
@@ -17666,6 +17775,1130 @@ class RecipientGrantOutcome(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+# --- goal authorizations: what a recorded act of the user bounds (ADR-0254 §1) -
+# A durable row proposed before a question is put and settled by the answer, or
+# written already established by an act that needed no question. It bounds the
+# **argument values** of one goal's calls through one declaration, which is the
+# one thing no other record in this corpus speaks for: a recipient grant is about
+# a destination set (ADR-0193 §5) and a configuration is about a provider
+# (ADR-0247 §1).
+
+
+class BoundKind(StrEnum):
+    """Which kind of permitted range a :class:`ValueBound` states (ADR-0254 §2).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed*.
+
+    **Three kinds and not a general expression language, because the failure modes
+    are asymmetric** (§2). A comparison this system gets wrong in the permissive
+    direction authorises a call the user did not authorise, and that is
+    undetectable afterwards; one it gets wrong in the restrictive direction costs
+    a question. Each member below has a total order or a membership relation the
+    corpus already states somewhere, and each is compared without parsing anything
+    the user wrote.
+
+    **Every other argument is fixed-only** (§2). An argument whose bound would be
+    of any other kind — a count, a distance, a free-text field, a nested object, a
+    list, a boolean — takes a fixed value or no member at all, and **no lane adds a
+    fourth member without its own ratified decision**. That is ADR-0148 §2's
+    exactness default one axis over: where the corpus does not establish a total,
+    exact ordering over an argument's values, a range over it is a comparison it
+    cannot prove.
+    """
+
+    MONEY = "money"
+    """An amount denominated in a currency the record names (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.currency`, :attr:`ValueBound.currency_argument` and
+    :attr:`ValueBound.maximum`, and optionally :attr:`ValueBound.minimum`. The
+    owner's *"additional costs"*."""
+
+    PERIOD = "period"
+    """A half-open interval of instants, ``[starts_at, ends_at)`` (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.starts_at`, :attr:`ValueBound.ends_at` and
+    :attr:`ValueBound.timezone`. Half-open is ADR-0194 §1's own convention for a
+    period, adopted so the corpus has one. The owner's *"make it Sunday"*."""
+
+    TERMS = "terms"
+    """A named set a value must be a member of (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.terms`. Membership is **equality of the stored
+    characters and nothing else**, which is ADR-0237 §3's rule for a
+    ``TopicLabel`` — *"No fold is applied and none is needed"* — read onto a set
+    the user named. The owner's *"materially different terms"*."""
+
+
+def _iana_zone_name(value: str) -> str:
+    """Require a name the tz database knows, without normalising it.
+
+    Shape is not enough here and an offset is not a zone: ADR-0254 §4 reads a
+    calendar-date argument as *"the start of that day in the bound's own
+    ``timezone``"*, so a name nothing resolves would make that reading
+    unavailable at the one comparison that decides whether a call is authorised —
+    and §4's answer to an unproven comparison is to refuse rather than to guess.
+
+    ``ZoneInfo`` rather than ``available_timezones()``, which is
+    ``readers/calendar.py``'s own choice for the same check: the constructor is
+    cached, and building the whole key set to answer one membership question
+    costs a directory walk per validation.
+
+    Raises:
+        ValueError: If ``value`` is not a zone the tz database resolves.
+    """
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        msg = f"timezone must be an IANA zone name, got {value!r} ({type(exc).__name__})"
+        raise ValueError(msg) from None
+    return value
+
+
+def _named_terms(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Require ADR-0254 §2's non-empty, duplicate-free, ordered term set.
+
+    The order is the **user's own**, not a sort: a ``TERMS`` bound records the set
+    a user named and §4 compares membership, so nothing here reorders what they
+    said. What is refused is an empty set — a bound permitting nothing is a bound
+    in shape and nothing in effect — and a repeated term, which is a second
+    spelling of one membership.
+
+    Raises:
+        ValueError: If the tuple is empty or carries a duplicate.
+    """
+    if not value:
+        msg = "a TERMS bound names at least one term; an empty set permits nothing (ADR-0254 §2)"
+        raise ValueError(msg)
+    if len(set(value)) != len(value):
+        msg = (
+            "a TERMS bound names each term once; a duplicate is a second spelling of one "
+            "membership (ADR-0254 §2)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+class ValueBound(BaseModel):
+    """A permitted range over one argument's value (ADR-0254 §2).
+
+    One of the two shapes a :class:`CoverageMember` takes — the other is a fixed
+    value — and **there is no third kind**. A model validator admits exactly the
+    three shapes :class:`BoundKind` names and refuses every other, which is
+    ``GoalElement``'s construction (ADR-0249 §1) applied here for its reason: *"The
+    type is what expresses the correspondence rather than a rule to remember."*
+
+    **No comparison against it consults a schema** (§4). Every fact a reading
+    needs is on this value or in the request: which key holds an amount, which key
+    holds its currency, which zone a date is read in, which strings a term may
+    take. ADR-0145 §1's schema check decides whether a call is well-formed and
+    decides nothing about coverage.
+
+    **Normalisation is part of the resolution that minted this bound and is never
+    applied at the comparison** (§10). Whatever normalising an act needed happened
+    once, when the member was minted; a second normalisation at comparison time
+    would be the second shape of one fact ADR-0150 is named after.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: BoundKind = Field(description="Which of the three kinds this bound states.")
+    currency: EncodableText | None = Field(
+        default=None,
+        description=(
+            "``MONEY`` only: the ISO-4217 code the amount is denominated in, three "
+            "uppercase ASCII letters validated for **shape** and not against a "
+            "register. ``ToolCost.currency``'s rule and not a second one."
+        ),
+    )
+    currency_argument: EncodableText | None = Field(
+        default=None,
+        description=(
+            "``MONEY`` only: the key of ``parameters`` that carries the currency for "
+            "this amount — a key name at depth one, exactly as "
+            ":attr:`CoverageMember.argument` is. **It is the whole of the association "
+            "between an amount and the currency it is denominated in**, and no lane "
+            "infers one from a field name, a type, a schema keyword or a neighbouring "
+            "argument (ADR-0254 §2, §4)."
+        ),
+    )
+    maximum: Decimal | None = Field(
+        default=None,
+        description=(
+            "``MONEY`` only: the greatest amount this bound permits, finite and not "
+            "negative. ``ToolCost``'s two refusals, reused rather than restated."
+        ),
+    )
+    minimum: Decimal | None = Field(
+        default=None,
+        description=(
+            "``MONEY``, optional: the least amount this bound permits, under the same "
+            "two refusals and less than or equal to :attr:`maximum`."
+        ),
+    )
+    starts_at: UtcInstant | None = Field(
+        default=None, description="``PERIOD`` only: the interval's inclusive start."
+    )
+    ends_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "``PERIOD`` only: the interval's **exclusive** end, strictly after "
+            ":attr:`starts_at`. The interval is half-open, ``[starts_at, ends_at)``, "
+            "which is ADR-0194 §1's own convention for a period."
+        ),
+    )
+    timezone: Annotated[NonBlankEncodableText, AfterValidator(_iana_zone_name)] | None = Field(
+        default=None,
+        description=(
+            "``PERIOD`` only: the IANA zone in which a **calendar date** argument is "
+            "read, which §4 reads as the start of that day in this zone. Read off the "
+            "bound rather than off ``Settings``, so the comparison is over two "
+            "recorded values and reads no configuration at the moment it is taken "
+            "(ADR-0247 §2's posture for a policy, kept). **Two facts and neither "
+            "derived from the other**: a ``DATE_FROM_CONTEXT`` resolution carries its "
+            "own zone, the one the act's span was resolved under, and nothing requires "
+            "the two to be equal (ADR-0254 §8)."
+        ),
+    )
+    terms: Annotated[tuple[EncodableText, ...], AfterValidator(_named_terms)] | None = Field(
+        default=None,
+        description=(
+            "``TERMS`` only: the set the user named, non-empty, duplicate-free and in "
+            "**their** order. Membership is equality of the stored characters and "
+            "nothing else (ADR-0254 §2, §4)."
+        ),
+    )
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_is_iso_4217_shaped(cls, value: str | None) -> str | None:
+        """Require exactly three uppercase ASCII letters, without normalising.
+
+        ``ToolCost.currency``'s rule and not a second one (ADR-0254 §2). Shape
+        only, for that field's stated reason: validating against the live ISO-4217
+        register would make a record's decoding depend on a table that changes
+        when currencies are withdrawn, and silently upcasing ``"gbp"`` would treat
+        a lowercase code and a typo'd one differently for no reason a caller can
+        see.
+
+        Raises:
+            ValueError: If the code is not three uppercase ASCII letters.
+        """
+        if value is None:
+            return None
+        if len(value) != _CURRENCY_CODE_LENGTH or not (
+            value.isascii() and value.isupper() and value.isalpha()
+        ):
+            msg = f"currency must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _the_kind_carries_its_own_arguments_and_no_others(self) -> ValueBound:
+        """Admit exactly the three shapes :class:`BoundKind` names (ADR-0254 §2).
+
+        **A bound of any fourth shape is not constructible**, which is what makes
+        §2's *"there is no third kind"* a property of the type rather than a rule
+        an implementation remembers. The check is stated in both directions per
+        kind — every argument that kind takes is present, and every argument it
+        does not take is absent — because a ``PERIOD`` carrying a ``maximum`` is as
+        much a record of nothing as one carrying no ``ends_at``.
+
+        **The money refusals are** ``ToolCost``'s (§2): ``Decimal`` admits
+        ``Infinity`` and ``NaN``, *"neither of which has a JSON representation or
+        survives arithmetic in a running total, and comparing ``NaN`` with ``<``
+        raises rather than answering"*.
+
+        Raises:
+            ValueError: If an argument this kind does not take is present, if one
+                it takes is absent, if an amount is not finite or is negative, if
+                ``minimum`` exceeds ``maximum``, or if ``ends_at`` is not strictly
+                after ``starts_at``.
+        """
+        money = ("currency", "currency_argument", "maximum", "minimum")
+        period = ("starts_at", "ends_at", "timezone")
+        taken = {BoundKind.MONEY: money, BoundKind.PERIOD: period, BoundKind.TERMS: ("terms",)}[
+            self.kind
+        ]
+        stray = [
+            name
+            for name in (*money, *period, "terms")
+            if name not in taken and getattr(self, name) is not None
+        ]
+        if stray:
+            msg = f"a {self.kind} bound carries no {', '.join(sorted(stray))} (ADR-0254 §2)"
+            raise ValueError(msg)
+        missing = [name for name in taken if name != "minimum" and getattr(self, name) is None]
+        if missing:
+            msg = f"a {self.kind} bound states its {', '.join(missing)} (ADR-0254 §2)"
+            raise ValueError(msg)
+        if self.kind is BoundKind.MONEY:
+            return self._checked_money()
+        if self.kind is BoundKind.PERIOD:
+            assert self.starts_at is not None  # noqa: S101 — required above
+            assert self.ends_at is not None  # noqa: S101 — required above
+            if self.ends_at <= self.starts_at:
+                msg = (
+                    f"a PERIOD bound ends strictly after it starts; "
+                    f"[{self.starts_at.isoformat()}, {self.ends_at.isoformat()}) is empty "
+                    f"(ADR-0254 §2)"
+                )
+                raise ValueError(msg)
+        return self
+
+    def _checked_money(self) -> ValueBound:
+        """``ToolCost``'s two amount refusals, over both ends of a ``MONEY`` bound.
+
+        Raises:
+            ValueError: If an amount is not finite or is negative, or if
+                ``minimum`` exceeds ``maximum``.
+        """
+        for name in ("maximum", "minimum"):
+            amount: Decimal | None = getattr(self, name)
+            if amount is None:
+                continue
+            if not amount.is_finite():
+                msg = f"a MONEY bound's {name} must be finite, got {amount!r} (ADR-0254 §2)"
+                raise ValueError(msg)
+            if amount < 0:
+                msg = f"a MONEY bound's {name} must not be negative, got {amount!r} (ADR-0254 §2)"
+                raise ValueError(msg)
+        assert self.maximum is not None  # noqa: S101 — required above
+        if self.minimum is not None and self.minimum > self.maximum:
+            msg = (
+                f"a MONEY bound's minimum is at most its maximum, got "
+                f"{self.minimum!r} > {self.maximum!r} (ADR-0254 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class ResolutionRule(StrEnum):
+    """How a span became the value a coverage member carries (ADR-0254 §8, §10).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed*.
+    **Exactly three resolutions exist and there is no fourth** (§10), each a total
+    function of inputs recorded on the turn the act rode.
+
+    **No resolution reads memory, a preference, a prior goal, a prior turn's
+    supply, or a model's recollection** (§10). A resolution whose inputs are not
+    on the turn it names is not one.
+
+    **A resolution the loop cannot take is not taken, and no member is minted**
+    (§10): where the zone is unset, where ``now`` is unreadable, where the
+    reference names nothing shown, or where the span admits two values, the
+    argument is simply uncovered and the user is asked about the concrete action
+    when it is dispatched. Nothing falls back to a default, to the previous turn's
+    value, or to the model's own reading.
+    """
+
+    AS_STATED = "as_stated"
+    """The span read as itself, normalised by nothing (ADR-0254 §8, §10).
+
+    Neither argument. A figure the user wrote, a term the user named. That is
+    ADR-0248 §1's discipline — the pass strips once and nothing re-normalises."""
+
+    DATE_FROM_CONTEXT = "date_from_context"
+    """A date or a period resolved from the turn's own context (ADR-0254 §8, §10).
+
+    Carries :attr:`ValueResolution.now` and :attr:`ValueResolution.timezone`, **both
+    required and neither absent**: ``CurrentContext.now`` as that turn read it, and
+    the configured zone as it then stood. *"Sunday"* becomes a half-open interval in
+    that zone, and the recorded ``now`` is what makes the working checkable
+    afterwards."""
+
+    FROM_SHOWN_RECORD = "from_shown_record"
+    """A reference to a record the loop put in front of the user on that turn (§10).
+
+    Carries :attr:`ValueResolution.record`, required — the id of a record shown on
+    that turn, which *"the usual campsite"* or *"the second one"* resolved to. **A
+    record whose id resolves in no store is not a resolution here**, exactly as
+    ADR-0249 §7 drops a ``FROM_EVIDENCE`` ground naming a search-minted record, on
+    ADR-0231 §16's ruling that such an id *"resolves in no store"*."""
+
+
+class ValueResolution(BaseModel):
+    """The rule and the inputs that turned a span into a value (ADR-0254 §8, §10).
+
+    Carried on every :class:`AuthorizationBasis`, so an auditor reading a coverage
+    member sees **both** the words the user actually said and the value the system
+    took them to mean, with the rule and the inputs that took it. *"Both halves
+    survive, and neither is derivable from the other"* (§8) — a resolved value need
+    not appear literally in the message, and the message is not thereby lost.
+
+    A model validator admits exactly the three shapes :class:`ResolutionRule` names
+    and refuses every other, which is ``GoalElement``'s construction (ADR-0249 §1)
+    applied here for its reason.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rule: ResolutionRule = Field(description="Which of the three resolutions was taken.")
+    now: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "``DATE_FROM_CONTEXT`` only, required there: ``CurrentContext.now`` as the "
+            "turn the act rode read it. Recorded because it is what makes the working "
+            "checkable afterwards (ADR-0254 §10)."
+        ),
+    )
+    timezone: Annotated[NonBlankEncodableText, AfterValidator(_iana_zone_name)] | None = Field(
+        default=None,
+        description=(
+            "``DATE_FROM_CONTEXT`` only, required there: the configured IANA zone as it "
+            "then stood. **Not derived from, and not deriving, a ``PERIOD`` bound's own "
+            "``timezone``** — a configuration changed after the act leaves the record "
+            "saying what it said, which is ADR-0193 §9's prospectivity in the one place "
+            "a zone could otherwise be re-read (ADR-0254 §8)."
+        ),
+    )
+    record: Identifier | None = Field(
+        default=None,
+        description=(
+            "``FROM_SHOWN_RECORD`` only, required there: the id of the record shown to "
+            "the user on that turn which the reference resolved to (ADR-0254 §10)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_rule_carries_its_own_arguments_and_no_others(self) -> ValueResolution:
+        """Admit exactly the three shapes :class:`ResolutionRule` names (ADR-0254 §8).
+
+        Stated in both directions per rule: an ``AS_STATED`` resolution carrying
+        either argument is refused, a ``DATE_FROM_CONTEXT`` missing ``now`` or
+        ``timezone`` is refused, and a ``FROM_SHOWN_RECORD`` missing ``record`` is
+        refused. **A fourth shape is not constructible.**
+
+        Raises:
+            ValueError: If an argument this rule does not take is present, or one
+                it takes is absent.
+        """
+        taken = {
+            ResolutionRule.AS_STATED: (),
+            ResolutionRule.DATE_FROM_CONTEXT: ("now", "timezone"),
+            ResolutionRule.FROM_SHOWN_RECORD: ("record",),
+        }[self.rule]
+        stray = [
+            name
+            for name in ("now", "timezone", "record")
+            if name not in taken and getattr(self, name) is not None
+        ]
+        if stray:
+            msg = f"a {self.rule} resolution carries no {', '.join(sorted(stray))} (ADR-0254 §8)"
+            raise ValueError(msg)
+        missing = [name for name in taken if getattr(self, name) is None]
+        if missing:
+            msg = f"a {self.rule} resolution states its {', '.join(missing)} (ADR-0254 §8)"
+            raise ValueError(msg)
+        return self
+
+
+class AuthorizationBasis(BaseModel):
+    """The act, the span and the interpretation behind one coverage member (§8).
+
+    **All three kept**, and every :class:`CoverageMember` carries one: a member
+    without a basis is **not constructible**, which is ADR-0254 §9 clause (i) as a
+    property of the type. *"There is no code path that builds one from a model
+    output alone"* — no constructor, factory, migration, import, replay or test
+    helper admits a member with no basis.
+
+    **The basis is per member and never per record** (§8). Two members of one
+    record may name two different acts, which is how a correction supplies one
+    argument while the first act's members are carried forward beside it (§5) — and
+    it is why :class:`Authorization` carries no basis of its own.
+
+    **What this type cannot check, stated rather than implied.** ADR-0254 §8
+    requires ``span`` to be a span of the turn ``act`` names — of that turn's own
+    ``TurnResult.utterance`` (ADR-0248 §1) — and §9 clause (i) requires ``act`` to
+    name a **recorded** turn. Neither is a rule about this value alone: both
+    compare it against a record in a store, and §1's division of refusals puts a
+    rule comparing a basis against a recorded turn in ``orchestration``, *"resolved
+    exactly as ADR-0249 §7 resolves a ``USER_STATED`` ground … before the row is
+    built"*. **No ``core`` type reads a store, a trail or a turn**, which is golden
+    rule 2. What this type holds is the non-blank shape and the required
+    resolution.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    act: Identifier = Field(
+        description=(
+            "The id of the recorded conversation turn this coverage member rests on "
+            "(ADR-0254 §8). **A recorded turn**, checked by ``orchestration`` against "
+            "the store before the row is built (§1, §9)."
+        )
+    )
+    span: NonBlankEncodableText = Field(
+        description=(
+            "The user's own words **inside that turn's stored utterance** — ADR-0248 "
+            "§1's *\"the user's own words on the pass, as the pass received them, "
+            'unrewritten, unrendered and uninterpreted"*. That it is a span of that '
+            "value is ``orchestration``'s check, for the reason this class's docstring "
+            "gives."
+        )
+    )
+    resolution: ValueResolution = Field(
+        description=(
+            "The rule that turned :attr:`span` into the member's value, with the "
+            "inputs it used. **Required**: both halves survive and neither is "
+            "derivable from the other (ADR-0254 §8)."
+        )
+    )
+
+
+class CoverageMember(BaseModel):
+    """What one recorded act fixed or bounded about one argument (ADR-0254 §2).
+
+    **Two shapes and no third**: a fixed value, or a permitted range. A model
+    validator admits exactly those, so a member of any third kind is **not
+    constructible**.
+
+    **``argument`` is a key name and never a path.** The depth is **one**: never a
+    dotted expression, an index, a wildcard or a selector, and **no lane adds an
+    addressing syntax**. That is ADR-0253 §6's rule for a ``StepOutputRef.field``
+    stated once more rather than re-derived, and for its reason — a path language
+    is a second thing to get wrong at the one comparison that decides whether a
+    call is authorised.
+
+    **An interpretation fills a slot the act opened and never opens one** (§9
+    clause (ii)). A resolution turns a span into a value *for an argument the act's
+    own words bear on*; it may not add a member for an argument the act never
+    mentioned, raise a ``maximum``, lower a ``minimum``, add a term, widen
+    ``destinations``, change ``account`` or ``tool``, or move ``expires_at``. Those
+    comparisons are between **two rows** and so are the store's, at the write (§1).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    argument: EncodableText = Field(
+        description=(
+            "The key of ``ActionRequest.parameters`` this member is about, at depth "
+            "**one** (ADR-0254 §2)."
+        )
+    )
+    fixed: FrozenJsonValue | None = Field(
+        default=None,
+        description=(
+            "The exact value the act fixed, or ``None`` where this member states a "
+            "bound instead. §3 compares it against the argument by the **canonical "
+            "JSON encoding** ``ActionRequest.parameters_digest`` is taken over, byte "
+            "for byte — one canonical form in this system and not a second."
+        ),
+    )
+    bound: ValueBound | None = Field(
+        default=None,
+        description=(
+            "The permitted range the act stated, or ``None`` where this member fixes "
+            "a value instead."
+        ),
+    )
+    basis: AuthorizationBasis = Field(
+        description=(
+            "The act, the span and the interpretation this member rests on "
+            "(ADR-0254 §8). **Required**, and a member without one is not "
+            "constructible (§9 clause (i))."
+        )
+    )
+
+    @model_validator(mode="after")
+    def _a_member_fixes_a_value_or_states_a_bound(self) -> CoverageMember:
+        """Admit exactly two shapes and refuse every third (ADR-0254 §2).
+
+        A ``fixed`` and no ``bound``, or a ``bound`` and no ``fixed``.
+
+        **What this costs, said rather than discovered**: a member whose ``fixed``
+        value is JSON ``null`` is not representable, because ADR-0254 §2 closes the
+        field list at ``fixed: FrozenJsonValue | None`` and ``None`` is the
+        spelling of *"states a bound instead"*. Such an act simply mints no member,
+        and §3's per-argument rule then leaves that argument **uncovered** — the
+        fail-closed direction, and the user is asked about the concrete call.
+
+        Raises:
+            ValueError: If both are set, or neither is.
+        """
+        if self.fixed is not None and self.bound is not None:
+            msg = (
+                f"a coverage member for {self.argument!r} fixes a value or states a bound, "
+                f"never both; a precedence rule between them is one somebody would have to "
+                f"remember at the comparison (ADR-0254 §2)"
+            )
+            raise ValueError(msg)
+        if self.fixed is None and self.bound is None:
+            msg = (
+                f"a coverage member for {self.argument!r} fixes a value or states a bound; "
+                f"one that does neither records nothing the user said (ADR-0254 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class AuthorizationOrigin(StrEnum):
+    """How the authority this row records came into being (ADR-0254 §1).
+
+    A **closed** enumeration of exactly **two** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed*.
+
+    **A correction transcribes it unchanged** (§1's path (ii)), so the fact
+    survives any chain of corrections and §6's recipient recheck is stated over it
+    rather than over a shape a correction changes. **The pointer shape is not the
+    test and must not be used as one**: a path-(ii) correction of an opening act
+    carries ``supersedes``, so a rule stated over *"both pointers unset"* would
+    lose the recipient dependency at the first correction. Exactly one thing
+    changes this field — a path-(i) supersession, where the user is asked again, is
+    shown the destination set, and answers.
+    """
+
+    CONFIRMED = "confirmed"
+    """The authority was put to the user as a question and answered (§1's path (i)).
+
+    The destination set is named in the question the user answers (ADR-0148 §8's
+    fourth clause), so such a row carries its own recipient authority and route (d)
+    over it consults the grant seam **zero** times (ADR-0254 §6)."""
+
+    OPENING_ACT = "opening_act"
+    """The authority was opened by a recorded instruction, no question put (path (iii)).
+
+    *"You may spend up to fifty pounds on this"*, said while the goal is being
+    understood. **An opening act bounds argument values and supplies no recipient
+    authority** (§1): it says nothing about who may be reached, so route (d) over
+    such a row re-takes the grant seam at **every** dispatch, and withdrawing the
+    recipient grant ends the authority at the next one."""
+
+
+class AuthorizationDisposition(StrEnum):
+    """Where one :class:`Authorization` stands (ADR-0254 §1).
+
+    A **closed** enumeration of exactly **six** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed*.
+
+    **The transition graph has exactly five edges** (§1):
+
+    * ``PROPOSED → ESTABLISHED`` — the user approved;
+    * ``PROPOSED → DECLINED`` — the user refused;
+    * ``PROPOSED → EXPIRED`` — the deadline passed before an answer;
+    * ``ESTABLISHED → REVOKED`` — the user withdrew the authority;
+    * ``ESTABLISHED → SUPERSEDED`` — a later row replaced it (§5).
+
+    :attr:`DECLINED`, :attr:`EXPIRED`, :attr:`REVOKED` and :attr:`SUPERSEDED` are
+    **retired**: no edge leaves them, and
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.settle` refuses a row
+    already in one. There is no ``DECLINED → ESTABLISHED``, no ``EXPIRED →
+    ESTABLISHED``, no ``SUPERSEDED → ESTABLISHED`` and no ``REVOKED →
+    ESTABLISHED``.
+
+    **The disposition is itself the compare-and-swap token** (§1), which is why no
+    version field is on :class:`Authorization`: a settlement succeeds only where the
+    row currently stands at that edge's source, so two racing settlements cannot
+    both win.
+    """
+
+    PROPOSED = "proposed"
+    """The question has been put and not yet answered (ADR-0254 §1).
+
+    **Never live**, and no clause of ADR-0254 reads a proposal as an authority: a
+    row the user has not answered authorises nothing whatever else is true of it.
+    A ``PROPOSED`` row nobody reads again **stays** ``PROPOSED`` — no sweep, no
+    timer, no reclaim and no start-up scan settles it, which is ADR-0250 §12's
+    posture read onto this row."""
+
+    ESTABLISHED = "established"
+    """The authority stands (ADR-0254 §1).
+
+    The only disposition on which a row can be **live**, and liveness is the
+    further condition that the clock stands at or after :attr:`Authorization.
+    settled_at` and strictly before :attr:`Authorization.expires_at`. An
+    ``ESTABLISHED`` row past its ``expires_at`` is **not live** and **is not
+    settled** :attr:`EXPIRED` — that member is the answer a question never got —
+    but it is still :attr:`REVOKED` by a withdrawal and :attr:`SUPERSEDED` by a
+    renewal, so a lapsed row never becomes an obstacle."""
+
+    DECLINED = "declined"
+    """The user refused the question (ADR-0254 §1).
+
+    Retired. **A refused widening is not a revocation of what the user already
+    authorised** (§5): declining a superseding proposal leaves the row it named
+    exactly as it was."""
+
+    EXPIRED = "expired"
+    """The deadline passed before an answer (ADR-0254 §1).
+
+    Retired, and reachable from :attr:`PROPOSED` alone. **An expiry is settled and
+    is never inferred** (§1, ADR-0244 §10's mechanism): a ``PROPOSED`` row whose
+    ``expires_at`` is at or before the clock's reading is settled by the **first
+    operation that reads it**, and there are exactly two — a ``live_for`` read and
+    the answer that names it."""
+
+    REVOKED = "revoked"
+    """The user withdrew the authority (ADR-0254 §1).
+
+    Retired. Reachable from :attr:`ESTABLISHED` alone, **whether the row is live or
+    lapsed** — which is why ``standing(goal)`` returns a lapsed row and why the
+    withdrawal path needs no history query."""
+
+    SUPERSEDED = "superseded"
+    """A later row replaced it (ADR-0254 §1, §5).
+
+    Retired, and **permanently so**: revoking the superseding row leaves neither
+    live, because no edge leaves this member and nothing un-supersedes one. That is
+    the fail-closed direction, and the one that refuses to resurrect a broader
+    authority the user has already moved on from."""
+
+
+class AuthorizationSettlement(StrEnum):
+    """What one settlement step answered (ADR-0254 §16).
+
+    A **closed** enumeration of exactly **four** members, each valued by its
+    lower-cased name, **total over what**
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.settle`'s indivisible
+    step can answer, and the vocabulary is *added to and never renamed*.
+
+    **A refusal is a result and never an exception**, which is
+    ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
+    rule. **A ``bool`` return was considered and refused**: it cannot tell an
+    unknown id from a row that was not at the source, which ADR-0254 §11's
+    revocation surface must tell apart.
+
+    **It is the value ``AssistantEngine.revoke_authorization`` returns as well**
+    (§11), unmapped and unrenamed — a second vocabulary for one fact would be the
+    second carrier ADR-0150 is named after — and the surface renders prose from the
+    member rather than the member itself.
+    """
+
+    SETTLED = "settled"
+    """The row stood at that edge's source and now stands at its target (§16)."""
+
+    NOT_AT_SOURCE = "not_at_source"
+    """The store holds the row and it does not stand at that edge's source (§16).
+
+    **One member and not four.** It covers a ``PROPOSED`` row asked for an edge
+    that leaves ``ESTABLISHED``, a retired row asked for anything, a move that is
+    not an edge at all, **and the loser of two racing settlements of one row** —
+    which ADR-0254 §1 makes one fact rather than several, because the row's own
+    ``disposition`` is the compare-and-swap's token and *"it was not there"* is the
+    whole of what the store can honestly say."""
+
+    WOULD_DUPLICATE = "would_duplicate"
+    """Another ``ESTABLISHED`` row of that pair would remain after this step (§16).
+
+    Reachable **only** on a settlement to ``ESTABLISHED``, and only where the
+    surviving row is one this write does not itself retire — because this row's
+    ``supersedes`` does not name it, or names a row that has already left
+    ``ESTABLISHED``.
+
+    **It exists because ADR-0254 §1's uniqueness is a two-row rule and a settlement
+    is where two rows can meet**: two proposals of one pair may each be recorded,
+    since neither write leaves two rows established, and approving both is where
+    the invariant would break. **A lane that answered** :attr:`SETTLED` **here has
+    written the state §1 forbids**, and one that raised has made a refusal an
+    exception.
+
+    **Unreachable on** ``AssistantEngine.revoke_authorization`` (§16): a revocation
+    settles to ``REVOKED``, so the member is excluded by the **edge** rather than
+    by the vocabulary, and no narrower type is minted for it."""
+
+    NO_SUCH_AUTHORIZATION = "no_such_authorization"
+    """The store holds no row with that id (ADR-0254 §16)."""
+
+
+def _coverage_tuple(value: tuple[CoverageMember, ...]) -> tuple[CoverageMember, ...]:
+    """Require ADR-0254 §2's rule that no two members name one argument.
+
+    **A precedence rule between two members about one argument is a rule somebody
+    would have to remember at the comparison, and it is better not to have one**
+    (§2). The order is the record's own and is not sorted here: §3's comparison is
+    per argument and reads no order.
+
+    Raises:
+        ValueError: If two members name the same ``argument``.
+    """
+    named = [member.argument for member in value]
+    if len(set(named)) != len(named):
+        msg = (
+            "no two coverage members of one authorization name the same argument; a "
+            "precedence rule between them is one somebody would have to remember at the "
+            "comparison (ADR-0254 §2)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+#: The five fields :attr:`Authorization.subject_digest` is taken over (ADR-0254 §7).
+#: Named once, here, so the projection and the roster test read one list.
+_AUTHORIZATION_SUBJECT: Final = ("goal", "tool", "account", "destinations", "coverage")
+
+
+class Authorization(BaseModel):
+    """One recorded act of the user bounding one goal's calls through one declaration.
+
+    ADR-0254 §1's durable row: **proposed before the question is put and settled by
+    the answer** on path (i), or written already ``ESTABLISHED`` by a correcting
+    instruction (path (ii)) or an opening act (path (iii)). It is what ADR-0148 §3's
+    **route (d)** rests on, what
+    :attr:`PermissionRuling.authorised_goal` scopes, and what
+    :meth:`~ai_assistant.core.protocols.AuditTrail.record`'s route-(d) invariant is
+    taken over.
+
+    **The record is written before the question is put, not after the answer** (§1).
+    That is ADR-0244's ratified shape for exactly this problem — a durable row
+    carrying what is put to the user, settled by a later answer, surviving a
+    restart, with its deadline *"computed … once, at the instant the park is
+    written"* — adopted rather than re-derived. The confirmation's projection (§11)
+    is rendered from this row, so the coverage and the expiry a user is shown are
+    read from a durable record rather than recomputed from a configuration that may
+    have moved.
+
+    **The declaration is embedded by value and the capability is never the
+    subject** (§1). ADR-0021 §1 closed #54 by embedding the whole
+    :class:`ToolDefinition` — *"there is no name left to rebind"* — and ADR-0193 §1
+    read that forward onto a record that outlives the call. Coverage compares the
+    declaration **whole and by value**, so any edit to a registered declaration
+    leaves every authorization established about the previous one covering nothing
+    and the user is asked again: the cost accepted in the safe direction.
+
+    **The goal is a field and the scope is never the conversation** (§1). An
+    authorization of goal A covers no request of goal B, however adjacent, however
+    recent and whatever the conversation — which is the *tool*-keyed standing
+    authorisation ADR-0193 §3 names as the shape to avoid, one axis over.
+
+    **Coverage is always taken over one row** (§1, §3). Superseding at the moment of
+    the act, rather than composing at the moment of the ruling, is what keeps that
+    true: the policy reads one row, ``authorised_by`` names one row, the trail
+    resolves one row, and **a revocation of the authority behind any argument is a
+    revocation of the row the ruling would cite**.
+
+    **``coverage`` may be empty, and an empty ``coverage`` covers no request whose
+    user-facing arguments are non-empty** (§1, §3). Emptiness is not a wildcard; it
+    is the record of an act that fixed nothing, and the only request it covers is
+    one carrying no user-facing argument at all.
+
+    **The field list is closed** (§1), and a lane adding a member is changing
+    ADR-0254 rather than implementing it.
+
+    **Where each refusal lives, because they are not all the same kind** (§1). A
+    rule true of **every state a row is ever persisted in** is a model validator
+    here. A rule about the state a row may be **first written in** — a row carrying
+    ``confirmation`` written ``PROPOSED``, a path-(ii) row written ``ESTABLISHED``
+    with ``settled_at`` equal to ``proposed_at`` — is the **store's**, at
+    ``record``, and is deliberately *not* stated here: the same row is later
+    persisted ``ESTABLISHED`` with that same ``confirmation``, so a validator
+    stating it would refuse to decode the row it had just written. A rule comparing
+    **two rows** — the transcription check, the non-widening check, the uniqueness
+    check, the atomic settlement of the superseded row, and the transition graph —
+    is the store's too. And a rule comparing a basis against a **recorded turn** is
+    ``orchestration``'s. **No ``core`` type reads a store, a trail or a turn**,
+    which is golden rule 2.
+
+    **Frozen and boundary-crossing** (ADR-0068). ``frozen=True`` refuses
+    ``row.coverage = …`` and does *not* refuse ``row.__dict__["coverage"] = …``,
+    which is why the store's obligation is a detached, validated snapshot on both
+    the read and the write path rather than a reliance on this config.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "This row's own id, minted by the caller that records it, as "
+            ":attr:`PermissionDecision.id` and :attr:`RecipientGrant.id` are — a store "
+            "neither mints ids nor reads a clock (ADR-0021 §3)."
+        )
+    )
+    goal: Identifier = Field(
+        description=(
+            "The goal whose calls this authority is about. **The scope is never the "
+            "conversation** (ADR-0254 §1): an authorization of one goal covers no "
+            "request of another, and §3's condition 2 is stated over this field."
+        )
+    )
+    tool: ToolDefinition = Field(
+        description=(
+            "The declaration this authority was established about, verbatim and by "
+            "value. §3's condition 3 compares it **whole**, so a declaration edit "
+            "re-prompts rather than silently widening what the user authorised "
+            "(ADR-0254 §1, §3)."
+        )
+    )
+    account: BoundAccount = Field(
+        description=(
+            "The connected account this authority was established against, by value — "
+            "**both** facts, identity and connection reference, never one (ADR-0148 §6, "
+            "ADR-0254 §3)."
+        )
+    )
+    destinations: Annotated[
+        tuple[CanonicalDestination, ...], AfterValidator(_canonical_destination_tuple)
+    ] = Field(
+        description=(
+            "The canonical destination set this row names. Non-empty, duplicate-free, "
+            "and in the one canonical order "
+            ":attr:`EgressBinding.canonical_destination_set` produces — ADR-0193 §1's "
+            "tuple, by the same validator and not a second one. §3's condition 5 is "
+            "**set membership** and is not restated over the order."
+        )
+    )
+    origin: AuthorizationOrigin = Field(
+        description=(
+            "How the authority came into being (ADR-0254 §1). **Read off the row, with "
+            "no store read and no walk back through a chain**, which is §7's discipline "
+            "for a discriminator — and never inferred from the pointer shape, which a "
+            "correction changes."
+        )
+    )
+    coverage: Annotated[tuple[CoverageMember, ...], AfterValidator(_coverage_tuple)] = Field(
+        description=(
+            "What the act fixed or bounded, one member per argument. Possibly empty: "
+            "an empty coverage is the record of an act that fixed nothing and covers "
+            "only a request carrying no user-facing argument at all (ADR-0254 §1, §3)."
+        )
+    )
+    proposed_at: UtcInstant = Field(
+        description=(
+            "When this row was written: the recorded ``CONFIRM``'s ``decided_at`` on "
+            "path (i), and the recorded turn's instant on paths (ii) and (iii) "
+            "(ADR-0254 §1, §12)."
+        )
+    )
+    expires_at: UtcInstant = Field(
+        description=(
+            "The instant this authority ceases to be live. **Required, with no "
+            "unbounded spelling** — no null, no sentinel, no 'forever' — and "
+            "**strictly after** :attr:`proposed_at`, refused at construction otherwise "
+            "(ADR-0254 §12, on ADR-0193 §9's clause and its reason). Taken once, when "
+            "the row is written, by §12's ladder as ADR-0256 §1 leaves it, and **never "
+            "recomputed**: a later edit to the goal's ``deadline`` or to "
+            "``Settings.episode_retention`` moves no row already written."
+        )
+    )
+    confirmation: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The recorded ``CONFIRM`` the question rode, on path (i); **unset** on "
+            "paths (ii) and (iii) (ADR-0254 §1). A row carrying it is **written** "
+            "``PROPOSED`` and reaches every later disposition through ``settle`` "
+            "alone — a rule of the **write path** and not of this type, because the "
+            "same row is later persisted ``ESTABLISHED`` still carrying it."
+        ),
+    )
+    supersedes: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The row this one replaces, on a path-(i) widening or renewal and on every "
+            "path-(ii) correction; unset on an opening act (ADR-0254 §1, §5). On a "
+            "path-(i) proposal it states **what approving this would replace**: the "
+            "proposal retires nothing, and the named row is settled ``SUPERSEDED`` in "
+            "the same write as this row's ``ESTABLISHED`` settlement, where it still "
+            "stands ``ESTABLISHED`` at that instant."
+        ),
+    )
+    disposition: AuthorizationDisposition = Field(
+        description="Where this row stands (ADR-0254 §1)."
+    )
+    settled_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The instant of this row's most recent settlement, **present exactly on a "
+            "row whose disposition is not** ``PROPOSED`` (ADR-0254 §1). On an "
+            "``ESTABLISHED`` row it is therefore the instant the authority came into "
+            "being, because no edge leaves ``ESTABLISHED`` — which is what §7's trail "
+            "check compares against and why that check reads the disposition first."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_settled_row_states_when_and_a_proposal_does_not(self) -> Authorization:
+        """Pair :attr:`settled_at` with a disposition that is not ``PROPOSED`` (§1).
+
+        Stated in both directions, because each half is a different false record: a
+        ``PROPOSED`` row carrying a settlement instant claims an answer it never
+        got, and a settled row carrying none loses the instant §7's trail check
+        compares the ruling against.
+
+        Raises:
+            ValueError: If the pairing does not hold.
+        """
+        proposed = self.disposition is AuthorizationDisposition.PROPOSED
+        if proposed and self.settled_at is not None:
+            msg = (
+                f"a PROPOSED authorization has not been settled, so it states no "
+                f"settled_at, got {self.settled_at.isoformat()!r} (ADR-0254 §1)"
+            )
+            raise ValueError(msg)
+        if not proposed and self.settled_at is None:
+            msg = (
+                f"a {self.disposition} authorization states the instant it was settled "
+                f"in settled_at (ADR-0254 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _an_authorization_is_live_for_some_duration(self) -> Authorization:
+        """Require :attr:`expires_at` strictly after :attr:`proposed_at` (§12).
+
+        ADR-0193 §9's clause and its reason adopted whole: a record expiring at or
+        before the instant it was proposed *"is a grant in shape and nothing in
+        effect"*.
+
+        Raises:
+            ValueError: If it does not.
+        """
+        if self.expires_at <= self.proposed_at:
+            msg = (
+                "an authorization expires strictly after it was proposed; one that does "
+                "not is live for no duration (ADR-0254 §12, on ADR-0193 §9)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _an_opening_act_that_fixed_nothing_is_not_an_act(self) -> Authorization:
+        """Require a non-empty coverage where both pointers are unset (§1).
+
+        Path (iii)'s invariant: a row carrying **neither** ``confirmation`` **nor**
+        ``supersedes`` is an opening act, and *"an opening act that fixed nothing is
+        not an act of the user"*. An empty ``coverage`` is only ever a path-(i)
+        proposal about an argument-free call (§11).
+
+        Raises:
+            ValueError: If an opening-act row carries no coverage member.
+        """
+        if self.confirmation is None and self.supersedes is None and not self.coverage:
+            msg = (
+                "an authorization carrying neither a confirmation nor a supersedes is an "
+                "opening act, and an opening act that fixed nothing is not an act of the "
+                "user; its coverage is non-empty (ADR-0254 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _coverage_names_no_system_supplied_argument(self) -> Authorization:
+        """Refuse a member naming a key the declaration fills itself (§3).
+
+        **A user is never asked to approve an idempotency key** — and never records
+        one either. The row embeds the declaration whole, so both facts are on the
+        row and this is a rule true of every state it is ever persisted in.
+
+        Raises:
+            ValueError: If a coverage member names a member of
+                ``tool.system_supplied``.
+        """
+        supplied = set(self.tool.system_supplied)
+        named = sorted({member.argument for member in self.coverage} & supplied)
+        if named:
+            msg = (
+                f"an authorization's coverage names no system-supplied argument; this "
+                f"declaration fills {', '.join(repr(key) for key in named)} itself "
+                f"(ADR-0254 §3)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_money_bound_and_a_fixed_currency_agree(self) -> Authorization:
+        """Refuse a row bounding one currency and fixing another (§2).
+
+        Where this row carries a ``MONEY`` bound and also a ``fixed`` member naming
+        that bound's own ``currency_argument``, the fixed value equals the bound's
+        ``currency``: *"a row that bounds sixty pounds and fixes the currency to
+        something else is not a record of anything the user said"*.
+
+        **A rule about two members of one row**, so it belongs here rather than on
+        :class:`CoverageMember`, which can see only itself.
+
+        Raises:
+            ValueError: If a ``MONEY`` bound's currency argument is fixed to
+                anything but that bound's own ``currency``.
+        """
+        fixed = {member.argument: member.fixed for member in self.coverage if member.bound is None}
+        for member in self.coverage:
+            bound = member.bound
+            if bound is None or bound.kind is not BoundKind.MONEY:
+                continue
+            key = bound.currency_argument
+            if key not in fixed:
+                continue
+            if fixed[key] != bound.currency:
+                msg = (
+                    f"an authorization bounding {member.argument!r} in {bound.currency!r} "
+                    f"fixes {key!r} to that same currency; a row that bounds one and fixes "
+                    f"another is not a record of anything the user said (ADR-0254 §2)"
+                )
+                raise ValueError(msg)
+        return self
+
+    @property
+    def subject_digest(self) -> Sha256Hex:
+        """A fingerprint of what this row authorises (ADR-0254 §7).
+
+        SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of **five** of
+        this row's fields — ``goal``, ``tool``, ``account``, ``destinations`` and
+        ``coverage`` — which is its **subject** in
+        :attr:`RecipientGrant.subject_digest`'s sense and is derived by the same
+        discipline: a non-field member of the type, computed from the record and
+        never supplied.
+
+        **A selection and not a removal**, which is where it departs from
+        :attr:`RecipientGrant.subject_digest`, and ADR-0254 §7 names the five. The
+        fields left out are the ones that move while the subject does not — the
+        disposition and its instant, the expiry, the pointers, the origin and the
+        id — so a row settled ``ESTABLISHED`` fingerprints exactly as the proposal
+        did, which is what lets the policy compute the digest from the record
+        ``live_for`` returned and the trail **recompute** it from the record
+        ``resolve`` returns. ``tests/core`` pins the roster off ``model_fields``, so
+        a field added later without deciding its place is a red test rather than a
+        silent inclusion or exclusion.
+
+        **A property and never a stored field**, for the reason
+        :attr:`EgressBinding.canonical_destination_set` is one: a stored digest can
+        be read back disagreeing with the fields it was computed from, and nothing
+        downstream would catch it. It reads no clock, no store and no seam; it is
+        total and never raises.
+
+        **ADR-0004 §7's minimisation is served exactly as ADR-0193 §6 serves it**:
+        sixty-four characters whatever the record's size, and **nothing about the
+        authorization travels by value** — not the coverage, not the declaration,
+        not the account, not the basis, not the expiry.
+
+        **What it is for, at the strength the evidence carries.** A route-(d)
+        ``ALLOW`` carries this value in
+        :attr:`PermissionRuling.authorised_subject`, so a pointer whose id was
+        recycled after a ``clear`` resolves to a record that fails the comparison.
+        The guarantee is **one-directional**: a mismatch is conclusive, and a match
+        establishes only that this record agrees with the row in every field the
+        subject names.
+        """
+        return sha256(_canonical_bytes(self._digest_projection())).hexdigest()
+
+    def _digest_projection(self) -> dict[str, Any]:
+        """The canonical projection :attr:`subject_digest` digests.
+
+        Built from ``model_dump(mode="json")`` rather than from the live objects,
+        so a record reconstructed from a serialised form projects identically to
+        the one it was serialised from — the parity :attr:`subject_digest`'s whole
+        use depends on, since the two sides of the comparison are a decision read
+        back out of a trail and a row read back out of a store.
+
+        **Serialised by this class's own serializer, never through
+        ``self.model_dump``.** That method is an ordinary attribute: a subclass can
+        override it and an instance can shadow it through ``__dict__``, and either
+        can return a valid-but-false mapping. This digest is the value ADR-0254 §7
+        has ``AuditTrail.record`` *recompute* on the row the resolution seam
+        returns, so a record whose dump described a different subject would let a
+        route-(d) row rest on one the record does not carry.
+
+        ``Authorization``'s serializer and not ``type(self)``'s, so a subclass's own
+        fields are outside the schema the digest is taken under rather than silently
+        inside it. ``warnings=False`` because serialising a subclass through the
+        base's schema warns, and the warning is noise here.
+        """
+        projection: dict[str, Any] = Authorization.__pydantic_serializer__.to_python(
+            self, mode="json", warnings=False
+        )
+        return {name: projection[name] for name in _AUTHORIZATION_SUBJECT}
 
 
 # --- destination trust: what the user said about a destination (ADR-0238 §1) --
