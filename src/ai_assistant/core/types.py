@@ -19817,6 +19817,12 @@ class TurnOutcome(BaseModel):
             A turn carries at most one, and **a question exists only where the store
             accepted it**: a ``record_question`` that answered ``False`` leaves this
             ``None``, the attempt's state unmoved and nothing durable outstanding.
+
+            **The goal it is about is what** :attr:`goal_engagement` **names**, which
+            is why a :class:`Clarification` carries "no goal id, no attempt id, no
+            subject and no disposition" — so an outcome carrying one and no engagement
+            is refused by the type, leaving nothing to say which goal a durable
+            question paused.
         reference: What became of the turn's :class:`TurnReference`, or ``None`` on a
             turn that carried none **and** on a ``goal_id`` reference that resolved
             (ADR-0250 §11). A resolved goal reference has nothing to report beyond the
@@ -19982,9 +19988,27 @@ class TurnOutcome(BaseModel):
         constructed." So a clarification beside a driven step is an outcome describing
         a turn that both declined to act and acted.
 
+        **And the outcome names the goal the question is about**, which is what makes
+        §10's own account of :class:`Clarification` true: it "carries **no goal id, no
+        attempt id, no subject and no disposition**: the subject is what the question
+        text is about and the user reads it there, and **the goal is what
+        ``goal_engagement`` names**". A clarification beside no engagement is therefore
+        unattributable — the one member that was to name its goal says nothing — and
+        the type refuses it rather than leaving a reader to wonder which goal a durable
+        question paused.
+
+        **What it does not test is** :attr:`GoalEngagement.revised`, and that is §5's
+        rule rather than an omission: "**No member is derived from another and a client
+        renders each on its own**", and "**``revised`` says a revision was recorded, and
+        nothing more**". Computing a clarification's admissibility from ``revised``
+        would be one member derived from another and would read that flag as more than
+        what it says; that a raising turn will in practice also have recorded a revision
+        is a property of the loop ADR-0250 §19's M3 writes, not a shape this type is
+        asked to close.
+
         Raises:
             ValueError: If a clarification is carried by a pass that could not have
-                raised one.
+                raised one, or by an outcome that names no goal for it to be about.
         """
         if self.clarification is None:
             return self
@@ -20002,6 +20026,14 @@ class TurnOutcome(BaseModel):
                 "a turn that raised a question drives no step of its plan and produces "
                 "no effect, so this outcome carries a clarification or a driven step "
                 "and never both: the plan is persisted and not driven (ADR-0250 §10)"
+            )
+            raise ValueError(msg)
+        if self.goal_engagement is None:
+            msg = (
+                "a clarification carries no goal id, no attempt id, no subject and no "
+                "disposition, so the goal it is about is what goal_engagement names: an "
+                "outcome carrying a question and no engagement leaves that question "
+                "unattributable (ADR-0250 §10)"
             )
             raise ValueError(msg)
         return self
