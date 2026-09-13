@@ -37,6 +37,9 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    refuse_a_second_owner,
+    refuse_a_superseded_plan,
+    refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
     revalidated_plan,
@@ -577,9 +580,16 @@ class InMemoryPlanStore:
     async def open_attempt(self, attempt: GoalAttempt) -> str:
         """Persist a new attempt for a stored goal (ADR-0249 §12).
 
+        **An execution belongs to exactly one attempt** (ADR-0255 §3), and this member
+        is half of where that is made true: the tuple may arrive non-empty, so a
+        caller could otherwise open a live attempt carrying an ended attempt's
+        execution and defeat the claim conjunct without ever calling
+        :meth:`commit_attempt`. Decided in the same step as the write.
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, or the store already
-                holds an attempt under this ``id``.
+            PlanningError: If ``goal_id`` names no stored goal, the store already
+                holds an attempt under this ``id``, or any ``execution_ids`` member
+                is already carried by another attempt of that goal (ADR-0255 §3).
         """
         if attempt.goal_id not in self._goals:
             msg = f"attempt {attempt.id} refers to unknown goal {attempt.goal_id}"
@@ -594,6 +604,11 @@ class InMemoryPlanStore:
             self._refuse_a_dangling_plan(attempt, plan_id)
         for execution_id in attempt.execution_ids:
             self._refuse_a_dangling_execution(attempt, execution_id)
+            refuse_a_second_owner(
+                attempt_id=attempt.id,
+                execution_id=execution_id,
+                owners=self._owners_of(attempt.goal_id, execution_id),
+            )
         self._attempts[attempt.id] = attempt.model_copy(deep=True)
         return attempt.id
 
@@ -623,11 +638,18 @@ class InMemoryPlanStore:
         :meth:`record_interpretation` — the read, the comparison and the write are
         one step.
 
+        **An ``add_execution_id`` naming an execution another attempt of that goal
+        already carries is refused** (ADR-0255 §3), which is the other half of
+        :meth:`open_attempt`'s invariant. ADR-0249 §12's append-only rule is
+        untouched: a repeat of the same append **on the owning attempt** is still
+        ignored rather than refused.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from where it stands.
-            PlanningError: If the attempt does not exist, or the result is not a shape
-                ADR-0249 §5 admits.
+            PlanningError: If the attempt does not exist, the result is not a shape
+                ADR-0249 §5 admits, or the execution it names is already another
+                attempt's (ADR-0255 §3).
         """
         stored = self._attempts.get(transition.attempt_id)
         if stored is None:
@@ -643,6 +665,11 @@ class InMemoryPlanStore:
             self._refuse_a_dangling_plan(stored, transition.add_plan_id)
         if transition.add_execution_id is not None:
             self._refuse_a_dangling_execution(stored, transition.add_execution_id)
+            refuse_a_second_owner(
+                attempt_id=stored.id,
+                execution_id=transition.add_execution_id,
+                owners=self._owners_of(stored.goal_id, transition.add_execution_id),
+            )
         updated = advanced(stored, transition)
         self._attempts[updated.id] = updated
         return updated.model_copy(deep=True)
@@ -836,19 +863,29 @@ class InMemoryPlanStore:
         between the read and the write, so nothing can interleave and no decision is
         taken on a separate read.
 
+        **And ADR-0255 §3's two further conjuncts**, read in that same step: the
+        attempt the claim names owns this execution and is neither terminal nor
+        paused (:meth:`_refuse_an_unclaimable_attempt`), and no stored plan supersedes
+        the plan it runs (:meth:`_refuse_a_superseded_plan`). Both refuse on a
+        ``PlanningError`` that is **not** a ``StaleExecutionError``, because no
+        re-read makes either claim land.
+
         Raises:
             StaleExecutionError: If the stored version has moved on, or a
                 ``→ RUNNING`` claim names a plan that does not target its goal's
                 current revision.
             IllegalTransitionError: If the move is not legal from the step's current
                 status.
-            PlanningError: If the execution or step does not exist.
+            PlanningError: If the execution or step does not exist, or a
+                ``→ RUNNING`` claim fails either of ADR-0255 §3's conjuncts.
         """
         stored = self._executions.get(transition.execution_id)
         if stored is None:
             msg = f"unknown execution {transition.execution_id}"
             raise PlanningError(msg)
         self._refuse_a_stale_target(stored, transition)
+        self._refuse_an_unclaimable_attempt(stored, transition)
+        self._refuse_a_superseded_plan(stored, transition)
         updated = self._tracker.apply(stored, transition)
         self._executions[updated.id] = updated
         return updated.model_copy(deep=True)
@@ -884,6 +921,74 @@ class InMemoryPlanStore:
                 f"goal's current understanding is not driven (ADR-0249 §8)"
             )
             raise StaleExecutionError(msg)
+
+    def _refuse_an_unclaimable_attempt(
+        self, stored: ExecutionState, transition: StepTransition
+    ) -> None:
+        """Refuse a claim whose attempt cannot carry it (ADR-0255 §3).
+
+        The rows are read **inside the same step** as the write, for
+        :meth:`_refuse_a_stale_target`'s reason: there is no ``await`` between this
+        read and the commit, so no decision is taken on a separate read.
+
+        Args:
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+
+        Raises:
+            PlanningError: On any of the conjunct's four limbs
+                (:func:`~ai_assistant.planning.goals.refuse_an_unclaimable_attempt`).
+        """
+        if transition.to_status is not StepStatus.RUNNING:
+            return
+        assert transition.attempt_id is not None  # noqa: S101 — the validator's guarantee (§3)
+        plan = self._plans.get(stored.plan_id)
+        if plan is None:  # pragma: no cover — save_plan refuses an orphan
+            return
+        refuse_an_unclaimable_attempt(
+            attempt_id=transition.attempt_id,
+            execution_id=stored.id,
+            named=self._attempts.get(transition.attempt_id),
+            owners=self._owners_of(plan.goal_id, stored.id),
+        )
+
+    def _refuse_a_superseded_plan(self, stored: ExecutionState, transition: StepTransition) -> None:
+        """Refuse a claim on a plan a stored plan supersedes (ADR-0255 §3).
+
+        Derived by the store over rows it already holds and in the same step as the
+        write: ``save_plan`` refuses a ``supersedes`` naming a plan under a different
+        ``goal_id``, so the only plans that can name this one are its own goal's.
+
+        Args:
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+
+        Raises:
+            PlanningError: If any stored plan supersedes the one this execution runs.
+        """
+        if transition.to_status is not StepStatus.RUNNING:
+            return
+        refuse_a_superseded_plan(
+            plan_id=stored.plan_id,
+            successors=[one.id for one in self._plans.values() if one.supersedes == stored.plan_id],
+        )
+
+    def _owners_of(self, goal_id: str, execution_id: str) -> list[GoalAttempt]:
+        """Every attempt of ``goal_id`` whose ``execution_ids`` names ``execution_id``.
+
+        Args:
+            goal_id: The goal whose attempts are searched.
+            execution_id: The execution being claimed or referenced.
+
+        Returns:
+            The attempts naming it — **exactly one** in any store written since
+            ADR-0255 §3, and more only in one written before it.
+        """
+        return [
+            one
+            for one in self._attempts.values()
+            if one.goal_id == goal_id and execution_id in one.execution_ids
+        ]
 
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""

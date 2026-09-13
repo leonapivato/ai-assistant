@@ -4389,10 +4389,21 @@ class PlanStore(Protocol):
         **The references an attempt arrives with resolve, or it is refused** — see
         :meth:`commit_attempt`, which states the rule the two writes share.
 
+        **An execution belongs to exactly one attempt** (ADR-0255 §3), and this member
+        is half of where that is made true: it takes a whole attempt whose
+        ``execution_ids`` may arrive **non-empty**, so a caller could otherwise open a
+        live attempt carrying an ended attempt's execution and defeat
+        :meth:`commit_transition`'s conjunct without ever calling
+        :meth:`commit_attempt`. An ``execution_ids`` entry any attempt of that goal
+        already carries is refused, in the same indivisible step as the write.
+
         Raises:
             PlanningError: If ``goal_id`` names no stored goal, the store already holds
-                an attempt under this ``id``, or a ``plan_ids``/``execution_ids`` entry
-                is not one this attempt's goal holds.
+                an attempt under this ``id``, a ``plan_ids``/``execution_ids`` entry
+                is not one this attempt's goal holds, or an ``execution_ids`` entry is
+                already carried by another attempt of that goal (ADR-0255 §3). Never
+                ``StaleExecutionError``: no re-read makes an execution owned by one
+                attempt valid for another.
         """
         ...
 
@@ -4440,14 +4451,25 @@ class PlanStore(Protocol):
         confined cannot outlive its target. ``add_authorization_id`` carries no such
         rule, because an authorization id is neither a ``goal_id`` nor a ``plan_id``.
 
+        **An ``add_execution_id`` naming an execution another attempt of that goal
+        already carries is refused** (ADR-0255 §3), which is the other half of
+        :meth:`open_attempt`'s ownership invariant and what makes
+        :meth:`commit_transition`'s attempt conjunct a binding rather than a
+        coincidence. The append-only rule above is untouched and answers a different
+        question: "an identifier the tuple already holds is ignored rather than
+        duplicated or refused" governs a repeat of the same append **on the same
+        attempt** and says nothing about two attempts, so a repeat on the owner still
+        lands. Append-only prevents removal, not multiple ownership.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from where the attempt
                 stands — a phase earlier than the one held, or any move out of a
                 terminal state.
             PlanningError: If the attempt does not exist, an appended plan or execution
-                is not one this attempt's goal holds, or the resulting record is not a
-                shape ADR-0249 §5 admits.
+                is not one this attempt's goal holds, the appended execution is already
+                another attempt's (ADR-0255 §3), or the resulting record is not a shape
+                ADR-0249 §5 admits.
         """
         ...
 
@@ -4835,7 +4857,44 @@ class PlanStore(Protocol):
         and a user act that advanced the goal's revision between the two would
         overtake it. **``StepTransition`` gains no member for this**: the execution
         names its plan and the plan names its goal, so the store already holds every
-        value the comparison needs.
+        value the comparison needs — and that refusal of a caller-supplied revision
+        binds entire, ``attempt_id`` below notwithstanding.
+
+        **And a ``→ RUNNING`` claim carries ADR-0255 §3's two further conjuncts, each
+        decided in that same indivisible step.** *The attempt conjunct*: the
+        :class:`~ai_assistant.core.types.GoalAttempt` the transition's ``attempt_id``
+        names **exists**, carries this ``execution_id`` among its ``execution_ids``, is
+        in an :class:`~ai_assistant.core.types.AttemptState` that is neither terminal
+        **nor paused** — ``CANCELLED`` and ``ENDED``, and the three ADR-0249 §5 derives
+        *paused* from, with ``EFFECT_UNRESOLVED`` **accepted**, so this is not a
+        ``RUNNING`` whitelist — and is the **only** attempt of that goal naming that
+        execution. *The successor conjunct*: **no plan the store holds names this
+        transition's plan in its** ``supersedes``, derived by the store from the
+        execution → plan chain and supplied by no caller.
+
+        **The attempt id is a field where the revision is not**, and the asymmetry is
+        the one above read twice: the revision is a chain naming one value at each
+        hop, so the store derives it; which attempt a claim is made under is a
+        **selection** over a goal's several attempts, so the caller names the row and
+        the store checks it against the row's own ``execution_ids`` and state. A caller
+        that names the wrong row is **refused rather than obeyed**, which is
+        ``approval_ref``'s own division under ADR-0014 §4.
+
+        **Both refuse with a ``PlanningError`` that is not a ``StaleExecutionError``**,
+        and the class is decided by what the class means: that one directs a caller to
+        re-read and retry, and none of these grounds moves under a re-read. An unknown
+        attempt stays unknown; an attempt that did not open this execution can never
+        acquire it, ``execution_ids`` being append-only and ownership exclusive; a
+        terminal attempt never lives again; a **paused** one lives again only by a user
+        act answering what it is paused on; a duplicated ownership is refused whichever
+        attempt is supplied; and a persisted successor is never un-persisted. Naming a
+        different attempt or acting on a later turn is a **different claim**, not a
+        retry of this one. The stale-revision refusal above keeps
+        ``StaleExecutionError`` and is untouched: it compares a value that **moves**.
+
+        **A ``→ RUNNING`` transition carrying no ``attempt_id`` is unconstructible**
+        (:class:`~ai_assistant.core.types.StepTransition`), so no implementation is
+        asked to refuse one — the boundary is in one place rather than two.
 
         Raises:
             StaleExecutionError: If the stored version has moved on, or a
@@ -4843,7 +4902,8 @@ class PlanStore(Protocol):
                 current revision.
             IllegalTransitionError: If the move is not legal from the step's
                 current status.
-            PlanningError: If the execution or step does not exist.
+            PlanningError: If the execution or step does not exist, or a
+                ``→ RUNNING`` claim fails either of ADR-0255 §3's conjuncts.
         """
         ...
 

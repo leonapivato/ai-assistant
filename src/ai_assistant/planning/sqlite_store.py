@@ -66,6 +66,9 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    refuse_a_second_owner,
+    refuse_a_superseded_plan,
+    refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
     revalidated_revision,
@@ -2245,10 +2248,17 @@ class SqlitePlanStore:
         Revalidated before it is persisted, for :meth:`save_goal`'s own reason, and
         that revalidation is this method's ADR-0065 snapshot.
 
+        **An execution belongs to exactly one attempt** (ADR-0255 §3), and this member
+        is half of where that is made true: the tuple may arrive non-empty, so a
+        caller could otherwise open a live attempt carrying an ended attempt's
+        execution and defeat the claim conjunct without ever calling
+        :meth:`commit_attempt`. Decided in the same transaction as the write.
+
         Raises:
             PlanningError: If ``goal_id`` names no stored goal, the store already
-                holds an attempt under this ``id``, or the attempt does not
-                revalidate.
+                holds an attempt under this ``id``, the attempt does not revalidate,
+                or any ``execution_ids`` member is already carried by another attempt
+                of that goal (ADR-0255 §3).
         """
         snapshot = _revalidated_attempt(attempt)
         async with self._lock:
@@ -2274,6 +2284,11 @@ class SqlitePlanStore:
                 self._refuse_a_dangling_plan(conn, attempt, plan_id)
             for execution_id in attempt.execution_ids:
                 self._refuse_a_dangling_execution(conn, attempt, execution_id)
+                refuse_a_second_owner(
+                    attempt_id=attempt.id,
+                    execution_id=execution_id,
+                    owners=self._owners_of(conn, attempt.goal_id, execution_id),
+                )
             conn.execute(
                 "INSERT INTO attempts(id, goal_id, opened_at, data) VALUES (?, ?, ?, ?)",
                 (
@@ -2320,11 +2335,18 @@ class SqlitePlanStore:
         :meth:`record_interpretation` — the read, the comparison and the write run
         inside one ``BEGIN IMMEDIATE`` transaction.
 
+        **An ``add_execution_id`` naming an execution another attempt of that goal
+        already carries is refused** (ADR-0255 §3), which is the other half of
+        :meth:`open_attempt`'s invariant. ADR-0249 §12's append-only rule is
+        untouched: a repeat of the same append **on the owning attempt** is still
+        ignored rather than refused.
+
         Raises:
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from where it stands.
-            PlanningError: If the attempt does not exist, or the result is not a shape
-                ADR-0249 §5 admits.
+            PlanningError: If the attempt does not exist, the result is not a shape
+                ADR-0249 §5 admits, or the execution it names is already another
+                attempt's (ADR-0255 §3).
         """
         async with self._lock:
             return await _run_to_completion(self._commit_attempt_sync, transition)
@@ -2349,6 +2371,11 @@ class SqlitePlanStore:
                 self._refuse_a_dangling_plan(conn, stored, transition.add_plan_id)
             if transition.add_execution_id is not None:
                 self._refuse_a_dangling_execution(conn, stored, transition.add_execution_id)
+                refuse_a_second_owner(
+                    attempt_id=stored.id,
+                    execution_id=transition.add_execution_id,
+                    owners=self._owners_of(conn, stored.goal_id, transition.add_execution_id),
+                )
             updated = advanced(stored, transition)
             conn.execute(
                 "UPDATE attempts SET data = ? WHERE id = ?",
@@ -2640,13 +2667,21 @@ class SqlitePlanStore:
         on which a decision is taken and nothing can advance the goal between the
         comparison and the claim.
 
+        **And ADR-0255 §3's two further conjuncts**, on that same connection and in
+        that same transaction: the attempt the claim names owns this execution and is
+        neither terminal nor paused (:meth:`_refuse_an_unclaimable_attempt`), and no
+        stored plan supersedes the plan it runs (:meth:`_refuse_a_superseded_plan`).
+        Both refuse on a ``PlanningError`` that is **not** a ``StaleExecutionError``,
+        because no re-read makes either claim land.
+
         Raises:
             StaleExecutionError: If the stored version has moved on, or a
                 ``→ RUNNING`` claim names a plan that does not target its goal's
                 current revision.
             IllegalTransitionError: If the move is not legal from the step's current
                 status.
-            PlanningError: If the execution or step does not exist.
+            PlanningError: If the execution or step does not exist, or a
+                ``→ RUNNING`` claim fails either of ADR-0255 §3's conjuncts.
         """
         async with self._lock:
             return await _run_to_completion(self._commit_transition_sync, transition)
@@ -2662,6 +2697,8 @@ class SqlitePlanStore:
                 raise PlanningError(msg)
             stored = _decode_execution(row[0])
             self._refuse_a_stale_target(conn, stored, transition)
+            self._refuse_an_unclaimable_attempt(conn, stored, transition)
+            self._refuse_a_superseded_plan(conn, stored, transition)
             updated = self._tracker.apply(stored, transition)
             conn.execute(
                 "UPDATE executions SET version = ?, active = ?, data = ? WHERE id = ?",
@@ -2715,6 +2752,94 @@ class SqlitePlanStore:
                 f"goal's current understanding is not driven (ADR-0249 §8)"
             )
             raise StaleExecutionError(msg)
+
+    def _refuse_an_unclaimable_attempt(
+        self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
+    ) -> None:
+        """Refuse a claim whose attempt cannot carry it (ADR-0255 §3).
+
+        The attempt, and every attempt of the execution's goal, are read on the
+        commit transaction's own connection — so the membership, the state and the
+        write are one indivisible step, exactly as :meth:`_refuse_a_stale_target`
+        reads the plan and the goal.
+
+        Args:
+            conn: The connection the commit transaction is running on.
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+
+        Raises:
+            PlanningError: On any of the conjunct's four limbs
+                (:func:`~ai_assistant.planning.goals.refuse_an_unclaimable_attempt`).
+        """
+        if transition.to_status is not StepStatus.RUNNING:
+            return
+        assert transition.attempt_id is not None  # noqa: S101 — the validator's guarantee (§3)
+        row = conn.execute(
+            "SELECT p.goal_id FROM executions e JOIN plans p ON e.plan_id = p.id WHERE e.id = ?",
+            (stored.id,),
+        ).fetchone()
+        if row is None:  # pragma: no cover — the foreign keys make an orphan unreachable
+            return
+        named = conn.execute(
+            "SELECT data FROM attempts WHERE id = ?", (transition.attempt_id,)
+        ).fetchone()
+        refuse_an_unclaimable_attempt(
+            attempt_id=transition.attempt_id,
+            execution_id=stored.id,
+            named=None if named is None else _decode_attempt(named[0]),
+            owners=self._owners_of(conn, str(row[0]), stored.id),
+        )
+
+    def _refuse_a_superseded_plan(
+        self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition
+    ) -> None:
+        """Refuse a claim on a plan a stored plan supersedes (ADR-0255 §3).
+
+        Derived by the store over rows it already holds, on the transaction's own
+        connection. ``save_plan`` refuses a ``supersedes`` naming a plan under a
+        different ``goal_id``, so only the plans of this plan's own goal can name it
+        and the scan is confined to them.
+
+        Args:
+            conn: The connection the commit transaction is running on.
+            stored: The execution the transition claims a step of.
+            transition: The move being applied.
+
+        Raises:
+            PlanningError: If any stored plan supersedes the one this execution runs.
+        """
+        if transition.to_status is not StepStatus.RUNNING:
+            return
+        rows = conn.execute(
+            "SELECT data FROM plans WHERE goal_id = "
+            "(SELECT goal_id FROM plans WHERE id = ?) AND id != ?",
+            (stored.plan_id, stored.plan_id),
+        ).fetchall()
+        held = [_decode_plan(one[0]) for one in rows]
+        refuse_a_superseded_plan(
+            plan_id=stored.plan_id,
+            successors=[one.id for one in held if one.supersedes == stored.plan_id],
+        )
+
+    @staticmethod
+    def _owners_of(conn: sqlite3.Connection, goal_id: str, execution_id: str) -> list[GoalAttempt]:
+        """Every attempt of ``goal_id`` whose ``execution_ids`` names ``execution_id``.
+
+        Args:
+            conn: The connection the write transaction is running on.
+            goal_id: The goal whose attempts are searched.
+            execution_id: The execution being claimed or referenced.
+
+        Returns:
+            The attempts naming it — **exactly one** in any store written since
+            ADR-0255 §3, and more only in one written before it. The rows are decoded
+            rather than matched in SQL because ``execution_ids`` lives in the record
+            blob, which is where every reference this store keeps lives.
+        """
+        rows = conn.execute("SELECT data FROM attempts WHERE goal_id = ?", (goal_id,)).fetchall()
+        held = [_decode_attempt(one[0]) for one in rows]
+        return [one for one in held if execution_id in one.execution_ids]
 
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
