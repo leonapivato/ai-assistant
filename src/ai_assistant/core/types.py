@@ -23274,6 +23274,296 @@ class GoalAbandonment(StrEnum):
     """No goal of that id is held, which is a result and never a raise (§12)."""
 
 
+# --- the turn's own account of reaching outside this system (ADR-0264) -------
+# Three declarations and one `None`-defaulting member on `TurnOutcome`, which is
+# the whole of what ADR-0264 §11 puts in `core`. Every piece of machinery that
+# establishes, folds, assembles or renders one of these values is
+# `orchestration`'s or an interface adapter's; nothing here computes anything.
+
+
+class OutboundReach(StrEnum):
+    """What one turn did about reaching outside this system (ADR-0264 §1, §4).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name, which are ADR-0264 §2's three groups folded to the turn and
+    nothing else. The vocabulary is *added to and never renamed*, and no fourth
+    member arrives without the ADR that decides it (§4).
+
+    **The three exist because the requirement is two-directional.** Issue #2268
+    records a reply denying a contact the trail recorded and issue #2365 one
+    claiming a contact the trail does not, so a value that reported only the first
+    would leave the second unanswered — and a two-valued one would have to force
+    every call whose producing paths disagree about the wire into a claim its
+    inputs do not establish. :attr:`INDETERMINATE` is what §1 buys instead: *"a
+    value that might be false is worse than none in either direction"*.
+
+    **It is never inferred** (§1). No component reads :attr:`REACHED` off a
+    latency, a supply that grew, a record's shape, a provider's name in a
+    configuration or the absence of a refusal, and none reads
+    :attr:`NOT_REACHED` off a supply that did not grow, off a reply naming no
+    source, or off any call §2 places in its third group.
+
+    **It is stated over what the trail establishes and never over what the turn
+    produced** (§1): not over whether records reached the supply, whether the
+    supply ended non-empty, whether the reply looks complete, or anything a model
+    returned.
+    """
+
+    REACHED = "reached"
+    """At least one outbound contact was established (ADR-0264 §1, §2).
+
+    A contact is established where a call **completed and recorded no**
+    ``SearchDisposition`` — a search that reached the provider and was answered,
+    records or none — or where the disposition it recorded is
+    ``RESPONSE_TOO_LARGE`` or ``UNATTESTED``, each of which this system reaches
+    only from octets the provider's channel had already returned (§2).
+
+    **Nothing that happens to the enclosing servicing afterwards unmakes it**
+    (§2). A servicing whose ``WEB_SEARCH`` was answered and whose later read then
+    raised carries the contact its call established; what ADR-0226 §5 discards is
+    the records and not the call, so such a turn carries a contact with
+    :attr:`OutboundStatement.records` ``0``.
+
+    **It says nothing about what was reached or about what the answer rests on**
+    (§4, §7). A contact that came back with nothing is still a contact, and a
+    record in the supply is not a record in the answer."""
+
+    NOT_REACHED = "not_reached"
+    """Every call fell before the send, or the turn made no call at all (§1, §2).
+
+    ADR-0264 §2's third group folded to the turn: a disposition of
+    ``NOT_CONFIGURED``, ``NO_BUDGET``, any of the four composer refusals,
+    ``BINDING_FAILED``, ``RULING_CONFIRM``, ``RULING_DENY``,
+    ``RULING_UNAVAILABLE`` or ``SPEND_REFUSED`` — each a stage before the send —
+    **and** the turn that asked for no search, which is #2365's shape and the
+    value that turn needed and did not have.
+
+    It is also what a turn whose only outbound act was a send the executor
+    **proved** never reached the callable carries, because there nothing is
+    uncertain (§3)."""
+
+    INDETERMINATE = "indeterminate"
+    """This system holds no value that decides the question, and says so (§1, §2).
+
+    **ADR-0014 §4's own word in its own sense.** Four dispositions answer here
+    rather than either side — ``TRANSPORT_FAILED``, ``DEADLINE_EXPIRED``,
+    ``SEARCH_FAILED`` and ``PROVIDER_REFUSED`` — because each is reached from
+    producing paths that disagree about the wire: a refused connection, an expiry
+    of the seam's deadline and a fault raised out of the searcher are each
+    consistent with a request that left and with one that did not, and
+    ``PROVIDER_REFUSED`` is recorded both for a response the provider gave and for
+    an account change that *"discarded the credential and wrote nothing to any
+    channel — none was opened"* (ADR-0148 §6).
+
+    **A driven egress step contributes it too, and establishes no contact** (§3).
+    ADR-0192 §4 rules that ``SUCCEEDED`` is consistent with no byte on the wire,
+    so a turn whose only outbound act was a send the executor reached the callable
+    for — or cannot say it did — is this, with
+    :attr:`OutboundStatement.destinations` empty. That is §2 taking from the step
+    the *absence of a ground for either answer* and never a contact."""
+
+
+class OutboundDestination(StrEnum):
+    """A class of destination a turn contacted (ADR-0264 §5).
+
+    A **closed** enumeration of exactly **one** member, valued by its lower-cased
+    name, whose declaration order is also the order
+    :attr:`OutboundStatement.destinations` renders in. The vocabulary is *added to
+    and never renamed*, and no implementation or later ADR adds a second member
+    without the ADR that decides it.
+
+    **A member is a class of destination and never a destination** (§5). No member
+    names, encodes or is derived from a provider, a host, an account, a connection
+    or a tool, and no later member may be one that identifies a particular
+    destination — which would put a destination's identity into a reply, on every
+    surface and on a channel of unbounded audience, when ADR-0193 §11 will not let
+    even an audit surface decode the ``authorised_subject`` on a row in front of
+    the user who owns it.
+
+    **One member is the point rather than an embarrassment** (§5). The vocabulary
+    makes the next seam's addition cheap — a second member rather than a second
+    carrier minted from scratch — so the tuple is kept and ordered rather than
+    collapsed into the member's absence. A later outbound seam adds its own member
+    with its own ADR; it does **not** render as :attr:`SEARCH_PROVIDER` and does
+    not render as nothing.
+    """
+
+    SEARCH_PROVIDER = "search_provider"
+    """The configured web search provider (ADR-0264 §5).
+
+    ADR-0247 §1 makes the configured provider *"the destination the owner chose
+    and the recipient they granted"*, so the class names what the owner already
+    decided rather than a fact about this turn's routing. It carries no provider
+    name, no host, no origin, no account identity and no connection reference."""
+
+
+class OutboundStatement(BaseModel):
+    """What one turn did about reaching outside this system, as a typed value (§4).
+
+    ADR-0264 §7's carrier on :attr:`TurnOutcome.outbound_statement`, composed once
+    per turn inside ``ai_assistant.orchestration`` from the carriers §2 and §4 name
+    and **never recomputed downstream**. A rendering surface builds one statement
+    from it, by code and by no model's decision, and that statement **stands where
+    the reply contradicts it** (§7, §10).
+
+    **It carries no destination, no host, no origin, no provider name, no
+    connection reference, no account identity, no tool identifier, no query and no
+    fragment of one, no record, no title, no snippet, no monetary figure, no
+    duration, no** ``Settings`` **field name, no** ``SearchDisposition`` **value,
+    no record id, no decision id and no instant** (§4). The three fields below are
+    the whole of it, and ``extra="forbid"`` is what keeps that true of a value a
+    wire decode builds as well as of one this tree constructs.
+
+    **Neither the value nor any rendering of it says what the reply did with the
+    records** (§4). :attr:`records` says the records entered this turn's supply and
+    no more — not that a model was given them, not that the answer rests on them,
+    not that it is more current for them, and not that it would have differed
+    without them.
+
+    **It is not ADR-0242 §9's** :attr:`TurnOutcome.search_not_serviced` **and
+    neither is read off the other** (§8). That member's eligibility is *the
+    disposition's presence*; this one's is *the contact's establishment*. A turn
+    may carry both — one servicing refused before it sent, another sent and was
+    answered — and where it does both are rendered, neither suppressing nor
+    qualifying the other.
+
+    Attributes:
+        reach: What this turn did about reaching outside itself, folded from its
+            calls with :attr:`OutboundReach.REACHED` outranking
+            :attr:`OutboundReach.INDETERMINATE` and that outranking
+            :attr:`OutboundReach.NOT_REACHED` (§2). The order is the
+            least-claiming one available: a turn is never reported as having
+            reached nothing while one of its own calls may have reached something.
+        destinations: Each **class** this turn contacted, once, in
+            :class:`OutboundDestination`'s declared order and never in encounter
+            order (§4). A turn that contacted one class through three servicings
+            carries that class once. **It is not an enumeration of a turn's
+            servicings**, which is the direction ADR-0226 §9's
+            counts-and-no-copy reasoning and ADR-0228 §10's *"no count, no
+            duration, no guard name"* both refuse.
+        records: How many records this turn's established contacts put into the
+            turn's **supply** — the records admitted from those calls, counted as
+            one population over the turn (§4). **Stated over the supply and not
+            over any later stage**, so it is defined and true on every outcome
+            shape a contact can reach, the parked and recovered ones ADR-0170 §4
+            composes nothing for included: a count over what the composing stage
+            was given is undefined on a pass that composes nothing and false on
+            one where a channel's withholding (ADR-0199 §3) left it holding none
+            of them.
+
+            **It is not** ``ServicedRead.supplied`` **and no lane derives it from
+            that field** (§4). ADR-0238 §11's count is what a servicing supplied
+            to the *query* composer, assigned before the query is composed and
+            before anything is sent; it counts what left. It is also **not** a
+            count of what the provider returned, of what a servicing fetched
+            before deduplication, or of anything a step produced: where one
+            response carries two records under one id the supply takes one and
+            this is ``1``, because ADR-0226 §7's deduplication is over the whole
+            union.
+
+            **A** ``0`` **means this turn's supply holds no record its contacts
+            brought in, and it means nothing else** (§4) — and it never
+            suppresses the statement. A turn that reached outside itself and
+            brought nothing into its supply is the case this decision most needs
+            to state: it is the one a user cannot tell from a turn that did not
+            look, and telling them apart is what #2268 asks for.
+
+            **What validation it carries beyond** ``ge=0`` **is this module's to
+            settle and ADR-0264 §4 settles none of it.**
+            `#2362 <https://github.com/leonapivato/ai-assistant/issues/2362>`_
+            holds that question for every bounded ``int`` declared here, and this
+            field takes whatever answer it gets rather than being given a stricter
+            posture than its neighbours inside one ADR.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reach: OutboundReach = Field(
+        description="What this turn did about reaching outside this system (ADR-0264 §1)."
+    )
+    destinations: tuple[OutboundDestination, ...] = Field(
+        default=(),
+        description=(
+            "Each class of destination this turn contacted, once, in "
+            ":class:`OutboundDestination`'s declared order (ADR-0264 §4). Empty on "
+            "every value that is not ``REACHED``."
+        ),
+    )
+    records: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many records this turn's established contacts put into its supply "
+            "(ADR-0264 §4). ``0`` where they brought none in, which never suppresses "
+            "the statement."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_three_fields_are_coupled(self) -> OutboundStatement:
+        """ADR-0264 §4: refuse a value no reach could have produced.
+
+        **The model refuses an uncoupled value rather than accepting one a surface
+        would then render as a reach nothing established.** On
+        :attr:`OutboundReach.REACHED` :attr:`destinations` is non-empty; on the
+        other two it is empty and :attr:`records` is ``0``. A destination beside a
+        ``NOT_REACHED``, or a count beside an ``INDETERMINATE``, is a statement
+        this system cannot have computed.
+
+        **Asserted on the model and not on its producer** (§13 item 6), because
+        this is a boundary-crossing value a wire decode also builds: a rule stated
+        only at the assembly site is a rule a decoded frame is not held to.
+
+        **The two empty-**:attr:`destinations`**, zero-**:attr:`records` **shapes
+        are accepted**, because they are what §4 requires of ``NOT_REACHED`` and
+        ``INDETERMINATE`` — so emptiness is refused only beside ``REACHED`` and
+        never outright.
+
+        The order check is what states §4's *"in ``OutboundDestination``'s
+        declared order and never in encounter order"*: a strictly increasing
+        sequence of declaration indices is that clause and the no-duplicate clause
+        at once, so the two cannot come apart as the vocabulary grows.
+
+        Raises:
+            ValueError: If the three fields describe a reach that could not have
+                happened.
+        """
+        order = tuple(OutboundDestination)
+        places = [order.index(one) for one in self.destinations]
+        if any(later <= earlier for earlier, later in pairwise(places)):
+            msg = (
+                f"destinations names each class contacted once, in OutboundDestination's "
+                f"declared order; {[one.value for one in self.destinations]} repeats a class "
+                f"or states them in encounter order, and a reader would be told of a contact "
+                f"naming nothing (ADR-0264 §4)"
+            )
+            raise ValueError(msg)
+        if self.reach is OutboundReach.REACHED:
+            if not self.destinations:
+                msg = (
+                    "a REACHED statement names the class it contacted, so destinations must "
+                    "be non-empty: a reach with no class is a contact this system made and "
+                    "did not state (ADR-0264 §4, §5)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.destinations:
+            msg = (
+                f"a {self.reach.value} statement established no contact, so it names no "
+                f"destination class: {[one.value for one in self.destinations]} would be "
+                f"rendered as a reach nothing established (ADR-0264 §4)"
+            )
+            raise ValueError(msg)
+        if self.records:
+            msg = (
+                f"a {self.reach.value} statement established no contact, so no record entered "
+                f"this turn's supply on one: records is {self.records} beside a reach that "
+                f"brought nothing in (ADR-0264 §4)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class TurnOutcome(BaseModel):
     """One unit of what a turn call produced (ADR-0042 §3).
 
@@ -23400,6 +23690,44 @@ class TurnOutcome(BaseModel):
             request they made concludes it was granted — and it never derives the
             answer from a ``standing_recipient_grants`` read taken afterwards or
             from ``resume`` having returned normally.
+        outbound_statement: What this turn did about reaching outside this system,
+            or ``None`` on a pass that **neither established a contact nor composed a
+            reply** (ADR-0264 §7). ADR-0264 is the decision that added it, as ADR-0242
+            is :attr:`search_not_serviced`'s.
+
+            **It carries the value ADR-0264 §6 computed, by value, and never a second
+            computation** (§7). No surface derives it from a plan, a supply, a latency,
+            a reply, an audit or a store read of its own, and no component recomputes it
+            downstream.
+
+            **It is** ``None`` **on exactly two shapes**: a **routed park**, on which
+            ADR-0197 §10 rules "the composing stage is not reached", and every other
+            pass ADR-0170 §4 composes nothing for that established no contact. It is
+            **not** ``None`` on an ordinary turn that reached nothing — ADR-0198 §1's
+            restatement, ADR-0250 §3's ``UNDECIDED`` turn and every ``converse`` whose
+            planner asked for no search each carry
+            :attr:`OutboundReach.NOT_REACHED`, which is the value issue #2365 needed and
+            did not have, and a routed pass that is not a park carries it too. That adds
+            a value to ADR-0198 §2's enumeration without changing any value it fixes.
+
+            **A widening and not a change** (§7), which is :attr:`recipient_grant`'s
+            move and :attr:`search_not_serviced`'s: ADR-0170 §4's three ``reply``-``None``
+            shapes and its one :attr:`reply_degraded` shape are untouched, no new
+            outcome shape is minted, and no member is derived from another. In
+            particular **this fact does not set** :attr:`reply_degraded`.
+
+            **A rendering surface renders one statement composed from the value** —
+            the terminal today, the browser when #2237's lane runs — **beside the reply
+            where one exists and never in place of it** (§7, §9). The **spoken surface
+            is expressly not one**: ADR-0200 §4 makes ``spoken`` the rendering of
+            :attr:`reply` and of nothing else, so a spoken turn carries this member and
+            no code-composed statement stands beside what that user hears, which
+            ADR-0264 §12 books as a stated cost rather than a gap.
+
+            **Both statements ride together** (§8). A turn may carry this member and
+            :attr:`search_not_serviced`, and where it does both are rendered, each in
+            its own statement and neither read off the other: one says this turn reached
+            outside itself, the other says what act would change what a lookup produced.
         search_not_serviced: Which class of act would have let a search this turn did
             **not** make happen, or ``None`` where it serviced every search it asked
             for and where it asked for none (ADR-0242 §9). ADR-0242 is the decision
@@ -23599,6 +23927,13 @@ class TurnOutcome(BaseModel):
         description=(
             "The goals an UNDECIDED turn is asking between, and ``None`` on every other "
             "outcome (ADR-0250 §5)."
+        ),
+    )
+    outbound_statement: OutboundStatement | None = Field(
+        default=None,
+        description=(
+            "What this turn did about reaching outside this system, or ``None`` on a "
+            "pass that neither established a contact nor composed a reply (ADR-0264 §7)."
         ),
     )
 

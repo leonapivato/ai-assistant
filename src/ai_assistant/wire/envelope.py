@@ -1755,7 +1755,58 @@ from ai_assistant.wire.errors import (
 #: :class:`~ai_assistant.core.errors.InvalidAuthorizationError`, and **neither crosses a
 #: frame**: no member of any of the three new Protocols is promoted, so no call that can
 #: raise one reaches a client.
-PROTOCOL_VERSION: Final[int] = 42
+#: **43 since ADR-0264 §7**, and the ground is ADR-0124 §9's **second** limb, quoted
+#: rather than restated: *"a change to a wire-carried `core` type that makes a value one
+#: peer emits invalid for the other, whether the change widens or narrows the type"*.
+#:
+#: :class:`~ai_assistant.core.types.TurnOutcome` gains **one** ``None``-defaulting
+#: member, ``outbound_statement`` (ADR-0264 §7). That model sets ``extra="forbid"``,
+#: ``wire/codec.py`` renders a model by ``model_dump()``, and a ``TurnOutcome`` is what
+#: the promoted surface returns from every turn call — so a hub at 43 emits
+#: ``"outbound_statement": null`` on **every** turn it sends and a client at 42 fails it
+#: with ``extra_forbidden``. **A defaulted member is still a shape change**, exactly as
+#: the entries at 39, 40 and 42 state of ``AttemptEffort.kind``, ``TurnOutcome``'s four
+#: and ``PermissionRuling.authorised_goal``.
+#:
+#: **No integer is fixed in the ADR.** ADR-0264 §11 cuts two lanes and says nothing
+#: about this constant; 42 is what the tree held when this lane branched, and 43 is one
+#: more. **Lane 2 carries no bump**: it renders §7's statement in ``interfaces/cli.py``
+#: and changes no `core` type at all.
+#:
+#: **No new class of content crosses.**
+#: :class:`~ai_assistant.core.types.OutboundReach` and
+#: :class:`~ai_assistant.core.types.OutboundDestination` are ``StrEnum`` values spelled
+#: by lower-cased member name, and
+#: :class:`~ai_assistant.core.types.OutboundStatement` carries those two vocabularies
+#: and one bounded ``int``. ADR-0264 §4's bar is the whole of what may sit in it: no
+#: destination, host, origin, provider name, connection reference, account identity,
+#: tool identifier, query or fragment of one, record, title, snippet, monetary figure,
+#: duration, ``Settings`` field name, ``SearchDisposition`` value, record id, decision
+#: id or instant. A member of ``destinations`` is a **class** of destination and never a
+#: destination (§5), so nothing here identifies where a turn went. No row is minted in
+#: ADR-0087 §2c's scalar table — ``project`` already renders every ``Enum`` as its
+#: ``value`` and every bounded ``int`` as itself.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 42 and a peer at 43 refuse each other and say so.
+#:
+#: **The promoted method set does not move** and ADR-0177 §1's browser enumeration does
+#: not move: ADR-0264's lane 1 adds no method to the promoted ``AssistantEngine``
+#: surface, removes none, and adds no gateway route.
+#:
+#: **No stored-record version moves and no migration is owed.** A ``TurnOutcome``
+#: crosses a frame and is stored by nothing: the plan store's ``schema_version`` stays
+#: where it is, ``PlanExport.schema_version`` stays where it is, the parked-read store's
+#: stays at **3**, and ``ConversationExport.schema_version`` stays at **2**. The
+#: captured episode is untouched — ADR-0264 mints no ``Notification``, no notification
+#: kind and no delivery (§12) — and ``core.config.Settings`` gains nothing at all.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0264's lane 1 mints no error
+#: class and removes none.
+PROTOCOL_VERSION: Final[int] = 43
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
