@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, PATIENT, Harness, NoStepPlanner
+from test_engine import AT, GOAL_QUESTION_TTL, PATIENT, Harness, NoStepPlanner
 from test_engine_goal_association import (
     _Advancing,
     _Asking,
@@ -581,15 +581,22 @@ async def test_a_lifetime_with_no_representable_deadline_is_refused_before_any_w
 
     **A bound on the lifetime alone cannot answer it**, which is why the check is the
     actual ``clock + ttl``: the same figure is representable from one instant and not
-    from another, and the **default** lifetime overflows from a clock near the end of the
-    calendar.
+    from another.
+
+    **And it is the turn that would have *asked* that is refused**, before it wrote
+    anything — a deployment whose lifetime has no representable deadline is not a
+    deployment that cannot answer a question, it is one that cannot put one.
     """
-    harness = Harness(planner=NoStepPlanner(), goal_question_ttl=ttl)
+    harness = Harness(planner=_Asking(), goal_question_ttl=ttl)
 
     with pytest.raises(ConfigurationError, match="goal_question_ttl"):
         await harness.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert (await harness.plans.export()).goals == (), "and nothing was written first"
+    export = await harness.plans.export()
+    assert export.goals == (), "and no goal row was written first"
+    assert export.plans == (), "nor a plan"
+    assert export.attempts == (), "nor an attempt"
+    assert export.questions == (), "and of course no question"
 
 
 def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> None:
@@ -607,7 +614,7 @@ def test_a_clock_near_the_end_of_the_calendar_is_refused_by_the_clock_seam() -> 
     )
 
     with pytest.raises(ClockReadingError, match="localizable range"):
-        harness.engine._checked_deadline()
+        harness.engine._asked_at()
 
 
 async def test_a_reference_to_an_already_terminal_question_settles_nothing_at_all() -> None:
@@ -710,25 +717,23 @@ class _UnreadableBindings:
         raise ConversationStoreError(msg)
 
 
-async def test_a_deadline_a_clock_advance_invalidates_raises_rather_than_writing_nothing() -> None:
-    """§8's time-of-check/time-of-use pair, and the use half is not silent.
+async def test_the_questions_two_instants_come_from_one_reading_under_a_moving_clock() -> None:
+    """§8: ``expires_at`` is "computed from it **once**, at the instant the question is written".
 
-    §8 computes ``expires_at`` "**once**, at the instant the question is written", so the
-    write's addition is taken from a **later** reading than the one
-    ``_checked_deadline`` validated. What that leaves open is a lifetime within one
-    turn's duration of the end of the calendar — and it raises, because a material
-    ambiguity that quietly produced no question is the failure this section exists to
-    prevent.
+    There is no time-of-check/time-of-use pair left to get wrong, because there is only
+    one reading: :meth:`Engine._asked_at` takes the instant and the addition **together**,
+    before the turn persists anything. A clock that moves on every read is what makes
+    that observable — two readings would put the deadline more than one lifetime after
+    the asking.
     """
-    ticking = _Ticking(AT)
-    harness = Harness(
-        planner=_Asking(),
-        goal_question_ttl=datetime.max.replace(tzinfo=UTC) - AT,
-        now=ticking,
-    )
+    harness = Harness(planner=_Asking(), now=_Ticking(AT))
 
-    with pytest.raises(ConfigurationError, match="goal_question_ttl"):
-        await harness.engine.converse(_ASKED, timeout=PATIENT)
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.turn is not None
+    question = await harness.plans.open_question(outcome.turn.goal.goal_id)
+    assert question is not None
+    assert question.expires_at - question.asked_at == GOAL_QUESTION_TTL
 
 
 class _Ticking:
