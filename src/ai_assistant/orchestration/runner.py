@@ -272,11 +272,31 @@ def _detached_state(state: ExecutionState) -> ExecutionState:
         raise PlanningError(msg) from exc
 
 
+@dataclass(frozen=True, slots=True)
+class _Planned:
+    """One stored step and the goal the plan carrying it was written against.
+
+    Two facts taken from a single read of a single stored plan
+    (:meth:`StepRunner._planned`), because ADR-0254 §15 sources
+    ``ActionRequest.goal`` from *"the plan the execution names"* and a second read
+    could answer about a plan that moved in between.
+
+    Attributes:
+        step: The step, detached from the store's copy.
+        goal_id: The plan's ``goal_id``, which the request carries.
+    """
+
+    step: PlanStep
+    goal_id: str
+
+
 def _requested(
     tool: ToolDefinition,
     step: PlanStep,
     state: ExecutionState,
     bound: BoundEgressCall | None,
+    *,
+    goal: str,
 ) -> ActionRequest:
     """Build the request from what the binding seam returned, never from what was retained.
 
@@ -297,22 +317,39 @@ def _requested(
     ``egress_binding=None`` (ADR-0152 §8). There is no binding, so there is no pair
     to hold together and no divergence to falsify anything.
 
+    **``goal`` is set here and nowhere else** (ADR-0254 §15): *"``orchestration``
+    sets ``ActionRequest.goal``, from the plan the execution names. No policy, no
+    seam, no adapter and no model output writes it, and no component infers it at
+    read time."* It is taken from the **stored** plan the **stored** execution names
+    (:meth:`StepRunner._planned`) rather than from the caller's state, for that
+    method's own reason: a hand-built state could otherwise name one execution and
+    carry another's plan, and the goal an authorization is keyed on would be the
+    caller's word. A request whose ``goal`` is wrong is worse than one carrying
+    ``None``, which reaches ADR-0148 §3's route (d) in no case.
+
     Args:
         tool: The selected or confirmed definition, used only on the ``None`` path.
         step: The plan step, for its id and its parameters on the ``None`` path.
         state: The execution, for its id.
         bound: What the seam returned, or ``None``.
+        goal: The goal the plan this execution runs was written against
+            (:meth:`StepRunner._planned`).
 
     Returns:
         The request the policy will rule on.
     """
     if bound is None:
         return ActionRequest(
-            tool=tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
+            tool=tool,
+            parameters=step.parameters,
+            goal=goal,
+            step_id=step.id,
+            execution_id=state.id,
         )
     return ActionRequest(
         tool=bound.tool,
         parameters=bound.parameters,
+        goal=goal,
         step_id=step.id,
         execution_id=state.id,
         egress_binding=bound.binding,
@@ -661,7 +698,8 @@ class StepRunner:
         # rewrite the execution out from under the guards (`_detached_state`).
         state = _detached_state(state)
         opened = await self._opened(state)
-        step = await self._planned(opened, step_id)
+        planned = await self._planned(opened, step_id)
+        step = planned.step
         self._check_pending(opened, step_id)
         capability = await self._resolve_capability(step)
         candidates = await self._registry.find(capability)
@@ -691,7 +729,7 @@ class StepRunner:
         # No `await` sits between the seam returning and this construction, so
         # nothing interleaves on the one event loop and the copies it handed back
         # cannot be reached or replaced before the request is built (ADR-0152 §1).
-        request = _requested(tool, step, state, bound)
+        request = _requested(tool, step, state, bound, goal=planned.goal_id)
         # The policy rules on its *own* copy, and never on the object that is
         # then bound and executed (`_detached_request`).
         ruling = await self._policy.decide(_detached_request(request))
@@ -843,7 +881,8 @@ class StepRunner:
         # `state` a caller can rewrite mid-await (`_detached_state`).
         state = _detached_state(state)
         opened = await self._opened(state)
-        step = await self._planned(opened, step_id)
+        planned = await self._planned(opened, step_id)
+        step = planned.step
         confirmed = await self._confirmation_for(state, step.id, confirmation_id)
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             msg = (
@@ -925,7 +964,7 @@ class StepRunner:
             # callable's own four-way refusal at transmission (ADR-0148 §6).
             _log.info("egress_unbindable_on_resume", step_id=step.id, tool_id=confirmed.tool.id)
             return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
-        request = _requested(confirmed.tool, step, state, bound)
+        request = _requested(confirmed.tool, step, state, bound, goal=planned.goal_id)
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
@@ -1657,13 +1696,21 @@ class StepRunner:
         msg = f"step {step_id!r} is {stored.status}, so there is nothing here left to dispose of"
         raise PlanningError(msg)
 
-    async def _planned(self, opened: ExecutionState, step_id: str) -> PlanStep:
-        """Read the step from the plan this execution belongs to (ADR-0037 §2).
+    async def _planned(self, opened: ExecutionState, step_id: str) -> _Planned:
+        """Read the step, and its plan's goal, from the plan this execution belongs to.
 
-        The execution names its plan and the plan owns the steps, so this is the
-        one place the capability and the parameters can come from without a
-        caller's word for it. Detached on the way out (:func:`_detached_step`), since
-        ``PlanStore`` contracts no snapshot.
+        ADR-0037 §2. The execution names its plan and the plan owns the steps, so
+        this is the one place the capability and the parameters can come from
+        without a caller's word for it. Detached on the way out
+        (:func:`_detached_step`), since ``PlanStore`` contracts no snapshot.
+
+        **It returns the plan's ``goal_id`` beside the step because ADR-0254 §15
+        puts the goal on the request and names this as its source** — *"from the
+        plan the execution names"*. Reading it here rather than at the request
+        keeps the two facts taken from **one** read of **one** stored plan: a
+        second read could answer about a plan that moved in between, and the goal
+        an authorization is keyed on would then be about a different objective
+        from the step being dispatched.
 
         ``opened`` is the *stored* execution (:meth:`_opened`), so the plan is
         the one this execution really belongs to: taking ``state.plan_id`` would
@@ -1689,7 +1736,7 @@ class StepRunner:
         if planned is None:
             msg = f"plan {plan.id!r} has no step {step_id!r}"
             raise PlanningError(msg)
-        return _detached_step(planned)
+        return _Planned(step=_detached_step(planned), goal_id=plan.goal_id)
 
     def _select(
         self,
