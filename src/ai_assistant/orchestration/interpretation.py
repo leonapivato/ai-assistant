@@ -53,6 +53,19 @@ from a model's output.** Those are ``orchestration``'s under §6's writer clause
 :class:`~ai_assistant.core.types.ProposedUnderstanding` has no field one could arrive
 on: the containment is a property of the type (L1), and this module then supplies each
 from values the loop holds.
+
+**ADR-0253 adds two acts to this module, and both are the same act this module already
+performed.** §7 gives a :class:`~ai_assistant.core.types.GoalElement` an ``id`` and an
+``applicability``, and ``orchestration`` *"mints the id, once, at the instant the element
+is first recorded"* — which is here, one line from where its ground is resolved, so that
+the two members §7 stamps together are stamped together. §9 then has the loop take each
+:attr:`~ai_assistant.core.types.StepCondition.about` and each
+:attr:`~ai_assistant.core.types.PlanInterpretation.settles` *"for its own"* and replace
+the **condition label** it came back carrying with the id that label resolves to
+(:func:`substituted_plan`). It is the same resolution the paragraphs above describe, over
+a fourth value: a planner names a position in a sequence it was rendered or returned, and
+this package supplies the name of the thing named. No identifier crosses the seam in
+either direction, in either act.
 """
 
 from __future__ import annotations
@@ -61,7 +74,10 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    MAX_APPLICABILITY_VALUES,
+    EvidenceApplicability,
     GoalElement,
     GoalInterpretation,
     Ground,
@@ -70,13 +86,16 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.reads import resolve_label
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from datetime import datetime
 
     from ai_assistant.core.types import (
+        ActionPlan,
         Goal,
         GoalEvidence,
         MemoryRecord,
+        PlanInterpretation,
+        PlanStep,
         ProposedUnderstanding,
     )
 
@@ -89,6 +108,7 @@ __all__ = [
     "recorded_revision",
     "resolved_evidence_row",
     "resolved_ordinal",
+    "substituted_plan",
 ]
 
 #: ADR-0249 §9's three label letters, one per tuple of the brief. They are the whole of
@@ -232,9 +252,91 @@ def resolved_evidence_row(label: str | None, evidence: Sequence[GoalEvidence]) -
     return None if index is None else evidence[index].id
 
 
-def _from_evidence(
+@dataclass(frozen=True, slots=True)
+class _Identity:
+    """What ADR-0253 §7 adds to a **newly recorded** element, carried as one value.
+
+    Both members are ``orchestration``'s and neither crosses the seam as itself: the
+    planner writes four axes and ``orchestration`` composes the region
+    (:func:`_applicability_of`), and no identifier is rendered to a model or accepted
+    from one (ADR-0228 §8). They travel together because they are stamped together, at
+    the one instant §7 names — *"once, at the instant the element is first recorded"*.
+
+    Attributes:
+        id: The element's durable name, minted here and **not** re-minted by a later
+            revision that retains it.
+        applicability: What the element is about, or ``None`` where it applied no axis.
+    """
+
+    id: str
+    applicability: EvidenceApplicability | None
+
+
+def _applicability_of(proposed: ProposedElement) -> EvidenceApplicability | None:
+    """Compose ADR-0253 §7's applicability from what the planner proposed, or nothing.
+
+    **"The planner proposes the applicability and ``orchestration`` records it"** (§7),
+    from the four axes :class:`~ai_assistant.core.types.ProposedElement` carries on its
+    new-element shape, *"under ADR-0252 §2's own validator"*. A **retaining** element
+    never reaches here: it carries ``retains`` and nothing else, and its applicability
+    travels in the copy retention makes.
+
+    **Declaring nothing and declaring something malformed are two different states, and
+    only the first records an absent applicability** (§7). An element proposing **no
+    axis at all** is recorded with ``applicability`` absent — a legal element imposing
+    no coverage requirement (ADR-0252 §6 test 1). Every shape §7 names as *not
+    composing* an ``EvidenceApplicability`` — an empty sequence axis, a window with both
+    ends unset, a window whose ``end`` is not after its ``start`` — is refused **before**
+    this function ever sees it: the two window cases by ``TimeWindow``'s own validator
+    at the planning seam, the empty axis by ``ProposedElement``'s. So nothing here
+    records a malformed requirement as no requirement, which is the widening §7 exists
+    to refuse.
+
+    **An axis longer than** :data:`~ai_assistant.core.types.MAX_APPLICABILITY_VALUES`
+    **keeps the first values and advances** ``elided``, which is ADR-0252 §2's own
+    composition rule for that bound rather than a disposal invented here —
+    ``EvidenceApplicability``'s validator names it in terms, *"a composition that would
+    exceed it keeps the first … and advances this region's elided"*. It is the one
+    over-long case §7's enumeration does not reach, and the count is the disclosure
+    ADR-0086 §4 asks for.
+
+    Args:
+        proposed: The new element the planner stated.
+
+    Returns:
+        The region, or ``None`` where the element applied no axis at all.
+    """
+    axes = (proposed.participants, proposed.topics, proposed.about_person)
+    if proposed.window is None and all(values is None for values in axes):
+        return None
+    participants, topics, about_person = (_capped(values) for values in axes)
+    return EvidenceApplicability(
+        window=proposed.window,
+        participants=participants[0],
+        topics=topics[0],
+        about_person=about_person[0],
+        elided=participants[1] + topics[1] + about_person[1],
+    )
+
+
+def _capped[T](values: tuple[T, ...] | None) -> tuple[tuple[T, ...] | None, int]:
+    """Keep at most :data:`MAX_APPLICABILITY_VALUES` of one axis, and count the rest.
+
+    Args:
+        values: One label axis as the planner stated it, or ``None``.
+
+    Returns:
+        The axis to record, and how many values it dropped.
+    """
+    if values is None or len(values) <= MAX_APPLICABILITY_VALUES:
+        return values, 0
+    return values[:MAX_APPLICABILITY_VALUES], len(values) - MAX_APPLICABILITY_VALUES
+
+
+def _from_evidence(  # noqa: PLR0913 — the text, §7's identity, and one parameter per sequence a label may resolve against; collapsing any pair would hide which rule decided
     text: str,
     *,
+    identity: _Identity,
     label: str | None,
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
@@ -253,6 +355,7 @@ def _from_evidence(
 
     Args:
         text: What the element says.
+        identity: ADR-0253 §7's two members, stamped on whichever shape resolves.
         label: The label the planner named, or ``None``.
         supply: The sequence the loop passed the planner on this call.
         minted: The ids of the records this turn's searches minted.
@@ -265,11 +368,23 @@ def _from_evidence(
         row_id = resolved_evidence_row(label, evidence)
         if row_id is None:
             return None
-        return GoalElement(text=text, ground=Ground.FROM_EVIDENCE, evidence_row_id=row_id)
+        return GoalElement(
+            text=text,
+            ground=Ground.FROM_EVIDENCE,
+            evidence_row_id=row_id,
+            id=identity.id,
+            applicability=identity.applicability,
+        )
     evidence_id = _resolved_record(label, supply, minted)
     if evidence_id is None:
         return None
-    return GoalElement(text=text, ground=Ground.FROM_EVIDENCE, evidence_id=evidence_id)
+    return GoalElement(
+        text=text,
+        ground=Ground.FROM_EVIDENCE,
+        evidence_id=evidence_id,
+        id=identity.id,
+        applicability=identity.applicability,
+    )
 
 
 def _resolved_span(span: str | None, utterance: str) -> str | None:
@@ -308,6 +423,7 @@ def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is 
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
     evidence: Sequence[GoalEvidence],
+    id_factory: Callable[[], str],
 ) -> GoalElement | None:
     """Resolve one proposed element, or drop it (§7).
 
@@ -316,6 +432,19 @@ def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is 
     exactly as the earlier revision recorded them". A **new** element carries its own
     ground and is resolved by the two rules above. Anything that resolves to nothing is
     dropped from the recorded revision, silently and without failing the turn.
+
+    **ADR-0253 §7's identity is minted here and only here**, because here is where an
+    element is *first recorded*. A retained element is copied whole, so its ``id`` and
+    its ``applicability`` travel in that copy and are **not** re-minted — which is what
+    makes the id a durable name for a proposition rather than for a revision. A
+    **restated** element reaches the ``new`` branch and is minted a different one,
+    "because a revision that restates a proposition has stated a different one".
+
+    **The id is minted before the ground is resolved, and a dropped element spends
+    one.** Nothing reads an element id as an ordinal, a count or a position — it is an
+    opaque durable name — so a spent value costs nothing, where minting *after* the
+    resolution would put the one call that may fail between the two members §7 stamps
+    together.
 
     Args:
         proposed: What the planner returned for this position.
@@ -326,6 +455,7 @@ def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is 
         minted: The ids of the records this turn's searches minted.
         evidence: The rows this call's ``evidence`` sequence was projected from
             (ADR-0252 §10).
+        id_factory: Mints a new element's ``id`` (§7).
 
     Returns:
         The element to record, or ``None`` where it is dropped.
@@ -339,9 +469,11 @@ def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is 
     text, ground = proposed.text, proposed.ground
     if text is None or ground is None:  # pragma: no cover — the validator admits no such value
         return None
+    identity = _Identity(id=id_factory(), applicability=_applicability_of(proposed))
     if ground is Ground.FROM_EVIDENCE:
         return _from_evidence(
             text,
+            identity=identity,
             label=proposed.evidence_label,
             supply=supply,
             minted=minted,
@@ -351,8 +483,16 @@ def _resolved_element(  # noqa: PLR0913 — one parameter per thing a ground is 
         span = _resolved_span(proposed.span, utterance)
         if span is None:
             return None
-        return GoalElement(text=text, ground=ground, span=span)
-    return GoalElement(text=text, ground=ground)
+        return GoalElement(
+            text=text,
+            ground=ground,
+            span=span,
+            id=identity.id,
+            applicability=identity.applicability,
+        )
+    return GoalElement(
+        text=text, ground=ground, id=identity.id, applicability=identity.applicability
+    )
 
 
 def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same values `_resolved_element` resolves against, threaded once per element
@@ -364,6 +504,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
     evidence: Sequence[GoalEvidence],
+    id_factory: Callable[[], str],
 ) -> tuple[GoalElement | None, ...]:
     """Resolve one tuple of proposed elements, dropping what does not resolve (§7).
 
@@ -381,6 +522,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
         minted: The ids of the records this turn's searches minted.
         evidence: The rows this call's ``evidence`` sequence was projected from
             (ADR-0252 §10).
+        id_factory: Mints each new element's ``id`` (ADR-0253 §7).
 
     **One entry per *proposed* position, and a dropped element is a ``None``** rather
     than an absence. ADR-0250 §7 resolves a raised question's subject to "the position it
@@ -403,6 +545,7 @@ def _resolved_group(  # noqa: PLR0913 — the tuple, its letter, and the same va
             supply=supply,
             minted=minted,
             evidence=evidence,
+            id_factory=id_factory,
         )
         for element in proposed
     )
@@ -442,6 +585,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
     evidence: Sequence[GoalEvidence] = (),
     recorded_at: datetime,
     raised_by: str,
+    id_factory: Callable[[], str],
 ) -> RecordedUnderstanding:
     """Resolve ``understanding`` into the revision that follows ``goal``'s current one.
 
@@ -484,6 +628,13 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
         raised_by: The turn whose message caused this revision. Required and
             undefaulted: §1 forbids writing ``None`` into it on a value
             ``orchestration`` authors, and a default would let a call site forget it.
+        id_factory: Mints ADR-0253 §7's ``GoalElement.id`` for every element this
+            revision records **anew**. Required and undefaulted for ``raised_by``'s
+            reason one field over: §7 makes ``orchestration`` the minter, every element
+            *"of every revision ``orchestration`` records after this decision carries
+            one"*, and an element that quietly took ``None`` would be an element *"named
+            by no ``StepCondition`` and settled by no interpretation"* — a condition
+            about it could never be satisfied and nothing would say why.
 
     Returns:
         The revision to append, beside the correspondence ADR-0250 §7 resolves a
@@ -552,6 +703,7 @@ def recorded_revision(  # noqa: PLR0913 — the goal, what the planner proposed,
             supply=supply,
             minted=minted,
             evidence=evidence,
+            id_factory=id_factory,
         )
         for name, letter, proposed, held in groups
     }
@@ -594,3 +746,246 @@ def _positions(group: Sequence[GoalElement | None]) -> tuple[int | None, ...]:
         mapped.append(kept)
         kept += 1
     return tuple(mapped)
+
+
+def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and one parameter per sequence a value on it resolves against; every one is a distinct fact and a bundle would mint a type for an argument list
+    plan: ActionPlan,
+    *,
+    goal: Goal,
+    understanding: ProposedUnderstanding | None,
+    positions: Mapping[str, tuple[int | None, ...]],
+    supply: Sequence[MemoryRecord],
+    minted: Collection[str],
+) -> ActionPlan:
+    """Substitute each condition label for an element id, or refuse the plan (§9).
+
+    **"The loop resolves the label, once, and the planner never does"** (ADR-0253 §9).
+    Every :attr:`~ai_assistant.core.types.StepCondition.about` and every
+    :attr:`~ai_assistant.core.types.PlanInterpretation.settles` the planner returned
+    carries a **condition label**; what the store holds is a
+    :attr:`~ai_assistant.core.types.GoalElement.id`. This is the one act that turns the
+    first into the second, and it is taken **once per plan**, immediately on return,
+    after this same call's understanding has been recorded and its element ids minted,
+    after ADR-0249 §8's ``targets_revision`` stamp, and before the plan is persisted,
+    driven or interpreted.
+
+    **Which sequence a label indexes is decided by the envelope and by nothing else**
+    (§9). Where the call returned an ``understanding``, the label indexes **that
+    understanding's own ``conditions`` tuple**; where it returned none, it indexes the
+    ``GoalBrief.conditions`` the call received — which
+    :meth:`~ai_assistant.core.types.GoalBrief.of` projects one-for-one and in order
+    from the goal's current revision, so that revision's own tuple is the same
+    sequence read without a second projection. *"Exactly one of the two is in force per
+    call, and it is always the sequence that describes the revision the plan will
+    target."*
+
+    **The correspondence is the loop's own and never a length comparison** (§9): *"a
+    proposed element ADR-0249 §7 dropped resolves to nothing rather than to its
+    neighbour"*. That is what ``positions`` carries, and it is ADR-0250 §7's argument
+    one field over — a caller that indexed the **recorded** tuple would silently point
+    every label after a dropped element at its neighbour.
+
+    **The substitution is a resolution and not an authorship** (§9, ADR-0228 §5). The
+    planner chose which element each condition is about, by naming a position in a
+    sequence it was rendered or returned; what is supplied here is the **name** of the
+    thing chosen, which is a value only ``orchestration`` holds because only
+    ``orchestration`` mints element ids. Every other field of the plan, of every step
+    and of every interpretation is left exactly as the planner returned it.
+
+    **A plan declaring none of the new keys is returned unchanged**, by identity and
+    not by a copy: it carries no label to substitute and no ``record`` to check, which
+    is what makes ADR-0253 §12's *"It changes no behaviour of a plan that declares none
+    of the new keys"* a property of this function rather than a claim about it.
+
+    **Refused before the save, and never repaired** (§9). A label outside the range, a
+    value that is not such a label, a label naming a proposed element the loop dropped,
+    and a label naming an element carrying no ``id`` each resolve to nothing, and so
+    does an interpretation naming a record this call did not pass. The plan is **not**
+    handed to ``save_plan``, no step of it is dispatched and no interpretation of it is
+    performed. *"No lane drops the condition instead"*, because a step whose condition
+    was dropped is a step with fewer requirements than the plan declared — the
+    fail-open direction, and the one §1 refuses for a dropped dependency for the same
+    reason. **What the refusal then causes is recovery policy and is A7's and A9's.**
+
+    Args:
+        plan: The plan this call returned, already stamped (ADR-0249 §8).
+        goal: The goal **as it stands after this call's understanding was recorded**,
+            so ``interpretation[-1]`` is the revision the plan targets and the one
+            whose elements carry the ids substituted in.
+        understanding: What this same call proposed, or ``None`` where it proposed no
+            change. It is what decides which sequence is in force, and no other value
+            does.
+        positions: Which position of the recorded tuple each **proposed** position
+            produced (:class:`RecordedUnderstanding`), or ``None`` where its ground did
+            not resolve. Empty where no understanding was recorded, and unread there.
+        supply: The ``memories`` sequence this call was handed, which is ADR-0226 §3's
+            label space for this call and the population an interpretation's ``record``
+            must name.
+        minted: The ids of the records this turn's searches and fetches minted, which
+            ADR-0231 §16 rules *"resolves in no store"*.
+
+    Returns:
+        The plan with every condition label replaced by the id it resolves to, or the
+        plan itself where it named none.
+
+    Raises:
+        PlanningError: If any label resolves to nothing, or an interpretation carrying
+            a ``record`` names one this call did not pass.
+    """
+    _refuse_an_unpassed_record(plan, supply=supply, minted=minted)
+    labels = frozenset(
+        [condition.about for step in plan.steps for condition in step.when]
+        + [one.settles for one in plan.interpretations]
+    )
+    if not labels:
+        return plan
+    elements = _named_conditions(goal, understanding=understanding, positions=positions)
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+    for label in sorted(labels):
+        index = resolved_ordinal(label, CONDITIONS_LETTER, len(elements))
+        element = None if index is None else elements[index]
+        if element is None or element.id is None:
+            unresolved.append(label)
+        else:
+            resolved[label] = element.id
+    if unresolved:
+        msg = (
+            f"plan {plan.id} names {', '.join(unresolved)}, which "
+            f"{'resolves' if len(unresolved) == 1 else 'resolve'} to no condition "
+            f"element of revision {plan.targets_revision} of goal {plan.goal_id}: a "
+            f"label that resolves to nothing refuses the plan, which is neither saved "
+            f"nor driven (ADR-0253 §9)"
+        )
+        raise PlanningError(msg)
+    return plan.model_copy(
+        update={
+            "steps": tuple(_substituted_step(step, resolved) for step in plan.steps),
+            "interpretations": tuple(
+                _substituted_interpretation(one, resolved) for one in plan.interpretations
+            ),
+        }
+    )
+
+
+def _named_conditions(
+    goal: Goal,
+    *,
+    understanding: ProposedUnderstanding | None,
+    positions: Mapping[str, tuple[int | None, ...]],
+) -> tuple[GoalElement | None, ...]:
+    """The sequence a ``D`` label indexes on this call, one entry per position (§9).
+
+    Where the call proposed an understanding, the sequence is **that understanding's
+    own ``conditions``** and each position holds the element it produced in the
+    recorded revision, or ``None`` where ADR-0249 §7 dropped it. Where it proposed
+    none, the sequence is the brief's, which ``GoalBrief.of`` projects one-for-one from
+    the goal's current revision — so the revision's own tuple is that same sequence
+    with nothing dropped and nothing to map.
+
+    Args:
+        goal: The goal after this call's understanding, if any, was recorded.
+        understanding: What this call proposed, or ``None``.
+        positions: The proposal-to-revision correspondence.
+
+    Returns:
+        One entry per label position: the element it names, or ``None``.
+    """
+    recorded = goal.interpretation[-1].conditions
+    if understanding is None:
+        return recorded
+    produced = positions.get("conditions", ())
+    return tuple(
+        None if kept is None or kept >= len(recorded) else recorded[kept] for kept in produced
+    )
+
+
+def _substituted_step(step: PlanStep, resolved: Mapping[str, str]) -> PlanStep:
+    """One step with each of its conditions' ``about`` replaced (§9).
+
+    Args:
+        step: The step as the planner returned it.
+        resolved: Each label this plan named, and the element id it resolves to.
+
+    Returns:
+        The step, or the step itself where it declared no condition.
+    """
+    if not step.when:
+        return step
+    return step.model_copy(
+        update={
+            "when": tuple(
+                one.model_copy(update={"about": resolved[one.about]}) for one in step.when
+            )
+        }
+    )
+
+
+def _substituted_interpretation(
+    interpretation: PlanInterpretation, resolved: Mapping[str, str]
+) -> PlanInterpretation:
+    """One interpretation with its ``settles`` replaced (§9).
+
+    Args:
+        interpretation: The interpretation as the planner returned it.
+        resolved: Each label this plan named, and the element id it resolves to.
+
+    Returns:
+        The interpretation, carrying the element id its label resolved to.
+    """
+    return interpretation.model_copy(update={"settles": resolved[interpretation.settles]})
+
+
+def _refuse_an_unpassed_record(
+    plan: ActionPlan, *, supply: Sequence[MemoryRecord], minted: Collection[str]
+) -> None:
+    """Refuse a plan whose interpretation names a record this call did not pass (§9).
+
+    **"For each interpretation that carries a ``record``, the loop verifies it is the
+    ``id`` of a record of the ``memories`` sequence **it** passed on that call"** (§8),
+    and a plan failing that check *"is refused before it is saved — not persisted, not
+    driven, and not interpreted"*. **The loop is the only component that can run it**:
+    it holds the sequence, and the ``Planner`` contract renders no identifier and
+    accepts none (ADR-0228 §8), so the value on the returned plan is one a conforming
+    planner resolved against a sequence this loop handed it — and a non-conforming one
+    is exactly what this closes the window on.
+
+    **A record this turn's own search or fetch minted fails the same check**, and this
+    is issue #2345's disposal. §8 forbids such a label in terms — *"a label naming a
+    record ADR-0231 §1's search or ADR-0230 §5's fetch **minted**"* — on ADR-0252 §1's
+    ground that a minted record *"resolves in no store"*, so a durable row naming one
+    *"would state a warrant it cannot show"*. §8 spells the disposal as an *extraction
+    failure for that envelope*, which is the planning seam's; but **the planner is
+    handed no minted set** and can therefore produce no such refusal, so the check has
+    no producer there. It is run here instead, and its disposal is §9's — the plan is
+    refused before it is saved. The refusing direction is the same and the cost differs
+    only in that this one reaches no repair prompt; the ADR text is flagged for a §8
+    amendment rather than read as authorising a second disposal on its own.
+
+    **An interpretation carrying a ``reads`` is checked by neither** (§9): *"its input
+    is a value this plan will itself produce, and §8's construction rules are the whole
+    of what it owes"* — its ``reads.step`` is a step of this plan and the ordering rule
+    is ``ActionPlan``'s, both settled at construction.
+
+    Args:
+        plan: The plan this call returned.
+        supply: The ``memories`` sequence this call was handed.
+        minted: The ids of the records this turn's searches and fetches minted.
+
+    Raises:
+        PlanningError: If an interpretation names a record outside that sequence, or
+            one this turn minted.
+    """
+    named = [one.record for one in plan.interpretations if one.record is not None]
+    if not named:
+        return
+    durable = frozenset(record.id for record in supply) - frozenset(minted)
+    unpassed = sorted(set(named) - durable)
+    if unpassed:
+        msg = (
+            f"plan {plan.id} interprets {', '.join(unpassed)}, which "
+            f"{'is' if len(unpassed) == 1 else 'are'} not a durable record of the "
+            f"supply this call passed: a minted record resolves in no store, so the "
+            f"plan is refused before it is saved (ADR-0253 §8, §9)"
+        )
+        raise PlanningError(msg)
