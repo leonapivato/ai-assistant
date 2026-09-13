@@ -54,9 +54,8 @@
   to read."* §3 lands it with no such lookup, on a **read alone** — a `ToolDefinition` that is not
   `side_effecting`, whose recorded decision carries **no `egress_binding`** — where the call **is**
   the read, and where ADR-0192 §1 rules the authorisation not spendable so its further-claim
-  admission covers it. **§1's spendability
-  rule and its further-claim enumeration bind verbatim** and are what §3 cites and §10 books
-  behind; **no clause here widens either, adds an admission, or changes any signature on
+  admission covers it. **§1's spendability rule and its further-claim enumeration bind verbatim** and are what §3 cites
+  and §10 books behind; **no clause here widens either, adds an admission, or changes any signature on
   `InvocationLedger`**; and §3's own no-reconciliation-here statement, its recovery-scan clause
   and its spending-on-`INDETERMINATE` argument all bind entire.
 - **Partially supersedes [ADR-0037](0037-joining-selection-permission-and-execution.md),
@@ -91,8 +90,7 @@ completed effect and its evidence survive recovery, restart and replanning; noth
 *"No claim is made that local persistence alone gives exactly-once remote effects; reconciliation is defined and
 integration-supported idempotency is used where available."* **R81**: *"A restart during clarification, approval or recovery
 preserves task identity, usable evidence, permission state and completed/uncertain effects, and revalidates what requires
-it."* And **R41**: *"The actual response, the identifier the integration supplied, errors and uncertainty are all
-recorded."*
+it."* And **R41**: *"The actual response, the identifier the integration supplied, errors and uncertainty are all recorded."*
 
 The report's own assessment is the starting point and is not repeated as a finding: R41, R43, R45 and R80 **satisfy as
 stated** on the corpus already, R46 satisfies *"as stated at the store"* and is **absent across a replan**, and R44 **needs
@@ -102,8 +100,8 @@ decision is that producer.
 
 The owner's addendum requirement 5 sets the posture: *"Keep 'do not blindly retry an uncertain effect'; drop 'nothing
 auto-retries, ever'."* The owner's decision 3 sets what a late answer gets: *"briefly restate the understanding, recheck
-evidence and authorization, then proceed"* — which this decision reaches by making the recheck ADR-0255 §5's, not a second
-one.
+evidence and authorization, then proceed"* — which this decision reaches by making the recheck ADR-0255 §5's, not a
+second one.
 
 ### What ADR-0255 §12 books here, by name
 
@@ -453,15 +451,15 @@ intended action, the same tool called with the same concrete arguments under the
 
 > **Normative — a satisfied step is recorded as satisfied and never as executed, and `StepExecution` gains the two fields that
 > make that representable.** `_claimed_step_is_authorised` requires of every `SUCCEEDED` step an `approval_ref`, a
-> `bound_tool`, a `started_at` and `attempts >= 1`, and a satisfied step has none of them: nothing ran under it. So
+> `bound_tool`, a `started_at` and `attempts >= 1`, and a satisfied step has no **execution** mark: nothing ran under it. So
 > `core/types.py` gains **`satisfied_by_execution`** and **`satisfied_by_step`**, both `DurableIdentifier | None` defaulting
 > to `None`, **non-`None` together and only on a `SUCCEEDED` step reached by this clause**, naming the holder whose act it
-> was. **The claim marks are then not required and none is present** — `attempts` stays `0`, `started_at` and
-> `approval_ref` stay `None`, and **`bound_tool` is cleared by the commit**, since an `AWAITING_APPROVAL` source carries
-> one from its park and a satisfied step made no call with it. The correlation ADR-0004 §7 wants is to the act that
-> happened, which these two fields carry. **A `SUCCEEDED` step carrying neither is unchanged and still requires all four.** ADR-0014 §3's *"what
-> actually happened"* reading is **honoured rather than bent**: the record says the work was done elsewhere in this goal and
-> names where, instead of claiming a tool call this step never made. §13 carries the record that scope owes.
+> was. **The execution marks are then not required and none is present** — `approval_ref` and `started_at` stay `None` and
+> `attempts` stays `0`. **`bound_tool` is neither required nor cleared**, because ADR-0014 §3 makes it *"which tool the
+> **selection stage** chose"* and not a claim mark: **a `PENDING` source had no tool bound for it, an `AWAITING_APPROVAL`
+> source had one** from its park, and the commit leaves each as it stands. **A `SUCCEEDED` step carrying neither new field
+> is unchanged and still requires all four**, and §13 carries both the record that scope owes and the working for ADR-0014
+> §3's *"what actually happened"* reading, which these fields honour rather than bend.
 
 > **Normative — the reuse is conditional, and the conditions are checked at the instant it is taken.** A `COMPLETED` answer
 > satisfies the step **only where all three hold**: the **intended action is the same and the keys are equal**, which
@@ -1111,20 +1109,19 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > **effect row for the target step's intended action names that execution and step as its holder**, **that row's `key`
 > equals `satisfied_by_key`**, and the **stored source status is `PENDING` or `AWAITING_APPROVAL`** — §2's two entry
 > statuses and the two rows §4's table gains for this route, so a **`RUNNING` or `INDETERMINATE` source is refused** and no
-> row carries execution marks and satisfaction marks together. It refuses on the **non-stale `PlanningError`** ADR-0255 §3
-> fixes for its own conjuncts, and for that section's reason: no re-read makes one goal's execution another's, one key
-> another, or a run that happened one that did not. **The fourth limb closes the same-action, different-arguments
-> case** the Sunday booking makes, which §2 forbids and arm 14 asserted only at the stage.
+> row carries a spent authorisation or a started run beside satisfaction marks, and **the fourth limb closes the
+> same-action, different-arguments case** the Sunday booking makes. It refuses on the **non-stale `PlanningError`**
+> ADR-0255 §3 fixes for its own conjuncts, and for that section's reason: no re-read makes one goal's execution another's,
+> one key another, or a run that happened one that did not.
 
 > **Normative — and on a satisfaction the store writes `output` and `finished_at` itself.** It copies `output` from the
-> **holder row it has just verified**, stamps `finished_at` from its own clock and **clears `bound_tool`**, which an
-> `AWAITING_APPROVAL` source carries and a satisfied step must not; **the transition carries none of the three, and the
-> validator refuses one that does**. **A value the caller never supplies cannot be mis-stated**, which is why §2's
-> copy-the-holder's-output rule needs no further limb. **So every value a satisfaction lands is verified against a store
-> row or written by the store**, and §2's reuse identity is **mechanical rather than advisory** in all three of its
-> directions. **The satisfaction itself is never derived** — a different thing, and that would need the
-> store to know which commits are satisfactions and to hold the `ToolCall` the key comes from, neither of which is its.
-> **This reopens ADR-0255 §11's *"Nothing else"* closure in that one scope** (§13).
+> **holder row it has just verified** and stamps `finished_at` from its own clock; **the transition carries neither, and
+> the validator refuses one that does**. **`bound_tool` it does not touch** — ADR-0014 §3's selection record, kept as
+> found (§2). **A value the caller never supplies cannot be mis-stated**, so **every value a satisfaction lands is verified
+> against a store row or written by the store**, and §2's reuse identity is **mechanical rather than advisory** in all
+> three directions. **The satisfaction itself is never
+> derived** — that would need the store to know which commits are satisfactions and to hold the `ToolCall` the key comes
+> from, neither of which is its. **This reopens ADR-0255 §11's *"Nothing else"* closure in that one scope** (§13).
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is flagged here rather than inferred from a
 > version number.** `PlanStore` gains exactly one member, **`claim_effect`** (§2), so **every implementation and every fake
@@ -1401,9 +1398,9 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    **refusal** paths — an unknown `execution_id`, a `step_id` that is not a step of that execution, and a `step_id`
    whose stored step carries **no `intended_action`** — each raising `PlanningError` with **no row written**; the
    **satisfaction marks**, where a `→ SUCCEEDED` `StepTransition` carrying the two identifiers persists **both exactly as
-   given** onto the committed `StepExecution` with `attempts` at `0` and `started_at`, `approval_ref` and **`bound_tool`
-   all `None`** — the last **cleared**, asserted from an `AWAITING_APPROVAL` source that carried one — the validator's own
-   refusals sitting in `core`'s construction table (§9) — **and the claim condition's six refusals**: a trio naming **another goal's** execution, a
+   given** onto the committed `StepExecution` with `attempts` at `0` and `started_at` and `approval_ref` `None`, while
+   **`bound_tool` is left as the source had it** — absent from a `PENDING` one, **kept** from an `AWAITING_APPROVAL` one —
+   the validator's own refusals sitting in `core`'s construction table (§9) — **and the claim condition's six refusals**: a trio naming **another goal's** execution, a
    step **not of** that execution, a step **not standing `SUCCEEDED`**, one the goal's **effect row does not name as
    holder**, one whose **`satisfied_by_key` is not the row's key** — the Sunday case at the store — and one whose **stored
    source status is `RUNNING` or `INDETERMINATE`**, each raising the **non-stale `PlanningError`** with **no write**, and
@@ -1415,9 +1412,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    `(goal_id, intended_action_id)` concurrently, **over both write paths** — **no row**, and an existing **`SKIPPED`** holder
    two callers would each re-point, because a uniqueness constraint on insertion passes the first and leaves the second
    racing. In each, **exactly one** receives `CLAIMED`, the other `HELD`, and exactly one durable row names a holder.
-   The store under test is not permitted to pass either by serialising the two calls in the test's own control flow. It adds one **upgrade** case: a store written before this decision opens with an **empty**
-   effects table, exports and deletes cleanly, and answers **`CLAIMED`** for the key of a legacy `SUCCEEDED`
-   side-effecting step — the delimited guarantee §9 states, asserted rather than discovered.
+   The store under test is not permitted to pass either by serialising the two calls in the test's own control flow. It adds the **two erase paths over a non-empty table** — a goal holding an effect row, with `delete_goal` and `clear`
+   exercised **separately** and each asserting **no row survives in storage or in the export** — and one **upgrade** case:
+   a store written before this decision opens with an **empty** effects table, exports and deletes cleanly, and answers
+   **`CLAIMED`** for the key of a legacy `SUCCEEDED` side-effecting step — the delimited guarantee §9 states.
 5. A resolved confirmation whose claim was refused, over a **paused attempt that later resumes**: the `ALLOW` is
    **replayed**, no second permission record is authored, and the step reaches its dispatch exactly once. **And the
    replay is withheld wherever it must be**, in a table over ADR-0255 §5's three predicates — a dependency that no
@@ -1555,13 +1553,15 @@ execution"* statement — which this decision quotes as its own ground rather th
 
 **ADR-0014 §3 — partially superseded in the marks it requires of a `SUCCEEDED` step, and that scope is on this document's
 `Status` line.** `_claimed_step_is_authorised` requires an `approval_ref`, a `bound_tool`, a `started_at` and `attempts >=
-1` of every step in `_CLAIMED_STATUSES`, `SUCCEEDED` among them. §2's satisfied step has none: no tool was bound for it, no
+1` of every step in `_CLAIMED_STATUSES`, `SUCCEEDED` among them. §2's satisfied step has no **execution** mark: no
 authorisation was spent on it, nothing started and nothing was attempted. A reader holding only §3 therefore builds a record
 that **cannot represent a satisfied step at all**, which is ADR-0070 §1's test met and **partial** in ADR-0070 §3's sense —
 the scope is that one requirement, on a `SUCCEEDED` step carrying `satisfied_by_execution` and `satisfied_by_step`, and
 nothing else. **Every other clause of §3 binds entire**, including its *"what actually happened"* reading, which the two new
-fields keep rather than bend: the record says the act happened elsewhere in this goal and names where, instead of claiming a
-call this step never made.
+fields keep rather than bend: the record says the act happened elsewhere in this goal and names where, instead of claiming
+a call this step never made. **`bound_tool`'s own semantics are relied on and superseded in nothing** — §3 makes it the
+**selection** stage's record, so a `PENDING` source had none and an `AWAITING_APPROVAL` source had one, each left as
+found (§2).
 
 **ADR-0014 §5 — partially superseded in its `PlanStore` member enumeration, its `PlanExport` shape and `delete_goal`'s
 cascade, and that scope is on this document's `Status` line too.** §5's code block enumerates the store's members and its
