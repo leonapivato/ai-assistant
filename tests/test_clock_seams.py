@@ -145,7 +145,11 @@ from ai_assistant.orchestration import traces as operation_traces
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.orchestration.reads import _SearchCounts
 from ai_assistant.orchestration.traces import OperationTraces
-from ai_assistant.permissions import SqliteAuditTrail, SqliteRecipientGrantStore
+from ai_assistant.permissions import (
+    SqliteAuditTrail,
+    SqliteGoalAuthorizationStore,
+    SqliteRecipientGrantStore,
+)
 from ai_assistant.planning import (
     InMemoryPlanStore,
     ModelBackedPlanner,
@@ -170,6 +174,8 @@ from ai_assistant.testing import (
     FakeFeedbackProcessor,
     FakeFetcher,
     FakeGoalAssociator,
+    FakeGoalAuthorizations,
+    FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -830,6 +836,16 @@ async def _fake_recipient_grants(now: Clock) -> None:
     await FakeRecipientGrants(now=now).covering(_request())
 
 
+async def _fake_goal_authorizations(now: Clock) -> None:
+    """``live_for`` is the one member that evaluates liveness (ADR-0254 §16)."""
+    await FakeGoalAuthorizations(now=now).live_for("goal-1", "tool-1")
+
+
+async def _fake_goal_authorization_store(now: Clock) -> None:
+    """The store fake answers the query face's one liveness-evaluating member."""
+    await FakeGoalAuthorizationStore(now=now).live_for("goal-1", "tool-1")
+
+
 async def _fake_transcript_archive(now: Clock) -> None:
     """A retention floor is evaluated at the read, which is what reads the clock."""
     await FakeTranscriptArchive(retention=timedelta(days=7), now=now).size()
@@ -978,6 +994,16 @@ async def _sqlite_recipient_grant_store(now: Clock) -> None:
         )
         try:
             await store.standing()
+        finally:
+            store.close()
+
+
+async def _sqlite_goal_authorization_store(now: Clock) -> None:
+    """``live_for`` evaluates liveness and is the store's only clock read."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = SqliteGoalAuthorizationStore(path=Path(directory) / "authorizations.db", now=now)
+        try:
+            await store.live_for("goal-1", "tool-1")
         finally:
             store.close()
 
@@ -1178,6 +1204,8 @@ SEAMS = [
     Seam("FakeFeedbackProcessor", _fake_feedback_processor, ClockReadingError),
     Seam("FakeNotificationOutbox", _fake_notification_outbox, NotificationOutboxError),
     Seam("FakeNotificationStore", _fake_notification_store, NotificationStoreError),
+    Seam("FakeGoalAuthorizationStore", _fake_goal_authorization_store, ClockReadingError),
+    Seam("FakeGoalAuthorizations", _fake_goal_authorizations, ClockReadingError),
     Seam("FakeRecipientGrantStore", _fake_recipient_grant_store, ClockReadingError),
     Seam("FakeRecipientGrants", _fake_recipient_grants, ClockReadingError),
     Seam("FakeTranscriptArchive", _fake_transcript_archive, TranscriptArchiveError),
@@ -1193,6 +1221,7 @@ SEAMS = [
     Seam("SqliteNotificationOutbox", _sqlite_notification_outbox, NotificationOutboxError),
     Seam("SqliteNotificationStore", _sqlite_notification_store, NotificationStoreError),
     Seam("SqlitePlanStore", _sqlite_plan_store, PlanningError),
+    Seam("SqliteGoalAuthorizationStore", _sqlite_goal_authorization_store, ClockReadingError),
     Seam("SqliteRecipientGrantStore", _sqlite_recipient_grant_store, ClockReadingError),
     Seam("SqliteTranscriptArchive", _sqlite_transcript_archive, TranscriptArchiveError),
     Seam("StepExecutor", _executor, PlanningError),
@@ -1500,6 +1529,12 @@ PROPAGATED: Final[dict[str, str]] = {
     "FakeFeedbackProcessor": (
         "documented at ``testing/learning.py:207``, doubling a `learning` seam that propagates"
     ),
+    "FakeGoalAuthorizationStore": (
+        "documented at ``testing/goal_authorizations.py``'s constructors, doubling the "
+        "store seam above, whose clause it quotes: a double that translated what the store "
+        "propagates would leave a consumer's own handling untested"
+    ),
+    "FakeGoalAuthorizations": ("the second face of that same double, with its clause verbatim"),
     "FakeRecipientGrantStore": _UNDECLARED,
     "FakeRecipientGrants": _UNDECLARED,
     "IngestionStage": _UNDECLARED,
@@ -1509,6 +1544,12 @@ PROPAGATED: Final[dict[str, str]] = {
     "ObservationStage": _UNDECLARED,
     "RuleBasedFeedbackProcessor": (
         "documented at ``learning/processor.py:146``, on the observer's precedent"
+    ),
+    "SqliteGoalAuthorizationStore": (
+        "documented at ``permissions/goal_authorizations.py``'s constructor: a clock this "
+        "process cannot read is a **wiring bug** rather than a store fault, and translating "
+        "it would have the policy take ADR-0254 §6's bar — and log that the store could not "
+        "be read — about a store that answered perfectly well"
     ),
     "SqliteRecipientGrantStore": _UNDECLARED,
     "StoreHealthReader": _UNDECLARED,
