@@ -1025,6 +1025,31 @@ _STRUCTURED_AXES: Final[tuple[str, ...]] = ("participants", "topics", "about_per
 #: named them even to forbid them would invite the emission it forbids. They are
 #: discarded structurally by :func:`_optional_understanding` instead.
 #:
+#: **A question names what it is about, and the label space is the reply's own**
+#: (ADR-0250 §7). ``about`` is "a label of the same ``ProposedUnderstanding``'s own
+#: tuples, spelled by ADR-0249 §9's scheme read over the proposal rather than over the
+#: brief", and ``None`` means the outcome — "which every understanding has". So the
+#: block counts the model's *own* constraints, criteria and conditions and says in
+#: terms that these are not the printed labels, which are ``retains``'s alone: one
+#: spelling with two meanings on one call is the confusion §7 accepts as the cost of
+#: labelling against the set the model is looking at, and the reason it is worth it is
+#: stated there — a question is "frequently about an element that is not in the brief
+#: at all", and labelling against the brief "would leave exactly those unnameable".
+#:
+#: **The subject is asked for because materiality is code's** (§6). The loop's test
+#: runs over a *subject* — the outcome, a ``criteria`` element or a ``conditions``
+#: element — so with no subject condition 2 "could only be a review convention", which
+#: is the shape #2255's addendum rules out. What the block does **not** say is that a
+#: subject makes a question more likely to be asked: the three conditions are the
+#: loop's and naming them here would be inviting the model to satisfy them.
+#:
+#: **And the goal's own open question is printed so it is not asked twice** (§8): a
+#: brief's ``open_questions`` "is there so that a planner does not raise a question the
+#: system is already asking", and the line above is the only thing that tells a model
+#: what the ``open_question`` lines in the next message are for. It is stated as an
+#: instruction not to re-raise and **not** as an instruction to answer it, to plan
+#: around it or to treat it as missing information — §8 forbids all three in terms.
+#:
 #: A separate constant for the reason :data:`_STATED_FACT_GUIDANCE` is one: the prompt
 #: test can assert it **reaches the model** without string-matching its wording.
 _UNDERSTANDING_GUIDANCE = """\
@@ -1044,7 +1069,8 @@ for — add an `understanding` to whichever object you are sending:
                     "span": "<the words of the request that say so>"}],
    "criteria": [],
    "conditions": [],
-   "questions": ["<something you would need to ask the user>"]
+   "questions": [{"text": "<something you would need to ask the user>",
+                  "about": "C1"}]
  }
 
 State the understanding IN FULL. An element printed under those three headings \
@@ -1075,7 +1101,17 @@ required. Where this turn does not change what the goal is for, send \
 `questions` is for something you genuinely cannot proceed without asking. A goal \
 printed with no constraints, no criteria and no conditions is an ordinary, \
 complete goal — usually a plain request — and is never on its own a reason to ask \
-anything."""
+anything. A question already printed as an `open_question` in the next message is \
+one the assistant is asking the user right now; do not raise it again.
+
+Each question says what it is about, as `about`. That is a label of the \
+understanding you are sending in THIS reply, NOT one of the labels printed in the \
+next message — those are for `retains` alone. Count your own `constraints` as \
+`C1`, `C2`, …, your own `criteria` as `S1`, `S2`, … and your own `conditions` as \
+`D1`, `D2`, …, retained and new elements alike, in the order you wrote them. \
+Where the question is about the objective itself, send `"about": null` or leave \
+`about` out. A question about something you are sending no element for is \
+dropped, so name the element it is about."""
 
 
 def _system_prompt(
@@ -1712,10 +1748,12 @@ def _proposed_questions(understanding: dict[str, object]) -> object:
     extraction failure — a question the model raised correctly, lost because of a key
     beside it.
 
-    **What this function does not do is read an ``about`` label from a *string*
-    entry**, because the prompt does not yet ask for one: rendering the brief's
-    ``open_questions`` and proposing a subject beside each question is ADR-0250 §19's
-    M2, and until then every legacy entry is a question about the outcome.
+    **A *string* entry carries no ``about`` and is a question about the outcome.**
+    The prompt asks for the two-key object (:data:`_UNDERSTANDING_GUIDANCE`), so a
+    bare string is a model answering the shape it was asked for before this lane, or
+    one answering loosely now; either way §7's "``None`` means the question is about
+    the outcome" is the honest reading, and inventing a subject for it would be
+    inventing the very value §6's materiality test runs over.
 
     A value that is not a sequence is passed through unchanged, so
     :class:`~ai_assistant.core.types.ProposedUnderstanding` refuses it exactly as it

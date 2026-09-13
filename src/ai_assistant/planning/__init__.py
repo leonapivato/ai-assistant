@@ -8,11 +8,14 @@ Contract: :class:`~ai_assistant.core.protocols.Planner` produces an
 ``ActionPlan`` from a ``Goal``; :class:`~ai_assistant.core.protocols.PlanStore`
 holds the durable goals, plans and execution state (ADR-0014);
 :class:`~ai_assistant.core.protocols.QueryComposer` turns a turn's own utterance
-into the one query a web search would be made with (ADR-0231 §3).
+into the one query a web search would be made with (ADR-0231 §3);
+:class:`~ai_assistant.core.protocols.GoalAssociator` decides which of a
+conversation's goals a turn is about, before anything is planned (ADR-0250 §4).
 """
 
 from __future__ import annotations
 
+from ai_assistant.planning.associator import ModelBackedGoalAssociator
 from ai_assistant.planning.composer import (
     DEFAULT_SEARCH_QUERY_MAX_CHARS,
     ModelBackedQueryComposer,
@@ -27,6 +30,7 @@ __all__ = [
     "DEFAULT_PLAN_ATTEMPTS",
     "DEFAULT_SEARCH_QUERY_MAX_CHARS",
     "InMemoryPlanStore",
+    "ModelBackedGoalAssociator",
     "ModelBackedPlanner",
     "ModelBackedQueryComposer",
     "PlanExecution",
