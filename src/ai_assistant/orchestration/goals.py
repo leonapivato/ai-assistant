@@ -591,7 +591,7 @@ _REVISED_LEAD: Final[str] = "I have changed what I understand you are asking for
 
 #: What is added to an engagement lead where a revision moved a word on the **same**
 #: turn, so that a resumption which also revised states both facts in one sentence.
-_ALSO_REVISED: Final[str] = ", and I have changed what I understand it to be"
+_ALSO_REVISED: Final[str] = ", which I now understand as"
 
 
 def announcement_of(engagement: GoalEngagement | None) -> str | None:
@@ -654,15 +654,20 @@ def announcement_of(engagement: GoalEngagement | None) -> str | None:
         lead = _REVISED_LEAD
     elif moved:
         lead += _ALSO_REVISED
-    sentence = f"{lead}: {_quoted(engagement.outcome)}."
-    # The two tuples, each read out entire. They are stated **after** the outcome
-    # because each is a change to it, and `removed` last because "as something no
-    # longer held" reads as a qualification of what now stands.
+    # The two tuples, each read out entire, as clauses of the **same** sentence: §5
+    # says "A reply carries **one** sentence naming the goal it is about", and that
+    # same sentence "states the goal's `outcome` as this turn recorded it, **every
+    # text in `added`**, and **every text in `removed`** as something no longer
+    # held". They come after the outcome because each is a change to it, and
+    # `removed` last because "no longer holding" reads as a qualification of what now
+    # stands.
+    moves: list[str] = []
     if engagement.added:
-        sentence += f" I have added {_listed(engagement.added, joiner='and')}."
+        moves.append(f"adding {_listed(engagement.added, joiner='and')}")
     if engagement.removed:
-        sentence += f" I am no longer holding {_listed(engagement.removed, joiner='and')}."
-    return sentence
+        moves.append(f"no longer holding {_listed(engagement.removed, joiner='and')}")
+    stated = "" if not moves else f", {' and '.join(moves)}"
+    return f"{lead}: {_quoted(engagement.outcome)}{stated}."
 
 
 @dataclass(frozen=True, slots=True)

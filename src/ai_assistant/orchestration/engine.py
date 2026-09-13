@@ -11543,17 +11543,21 @@ class Engine:
         # ADR-0250 §5's sentence is part of the terminal ``reply``, so it is part of
         # what ADR-0173 §3's ceiling bounds: the room the stage is given is the room
         # left **after** it. Escaping is additive over concatenation, which is what
-        # makes the subtraction exact rather than an estimate (:meth:`_reply_room`).
-        # Where it will not fit beside an answer the ceiling wins and nothing is
-        # announced — "No ``ReplyChunk`` is yielded whose text the engine is not
-        # already able to carry in the terminal ``TurnOutcome``".
+        # makes the subtraction exact rather than an estimate (:meth:`_reply_room`),
+        # and the **body** cost is what is subtracted — ``room`` is already net of
+        # the reply string's two quotes, so charging ``encoded_text_bytes``' pair a
+        # second time would refuse a reply the ceiling admits.
+        #
+        # **The subtraction is unconditional, and a room too small for the sentence
+        # is the pre-commit degradation rather than a silent drop.** §5 owes the
+        # sentence on every turn that resumed, reopened or moved a word; turning an
+        # owed announcement into an ordinary unannounced answer is the failure #2332
+        # records, not a graceful fallback. A negative room fits no chunk at all, so
+        # the stage publishes none and reports ADR-0173 §3's third case — "having
+        # yielded none … it terminates with §6's pre-commit shape".
         pending = _announcement_lead(carried.engagement)
         if pending is not None:
-            cost = encoded_text_bytes(pending)
-            if cost < room:
-                room -= cost
-            else:  # pragma: no cover — a ceiling smaller than one sentence
-                pending = None
+            room -= encoded_text_bytes(pending) - JSON_STRING_QUOTE_BYTES
         lead = pending
         composed: ComposedReply | None = None
         stream = self._composing.compose_streaming(
