@@ -117,6 +117,18 @@
   the 2026-09-12 record's *"a user is never asked to approve an idempotency key"* now that the
   validator stating it over a member's argument key is gone.
 
+  **And `ToolDefinition` gains a second field, `quoted_outputs`**, a possibly-empty tuple of
+  `QuotedOutput` carrying **at most one member per kind** and defaulting to the empty tuple, each
+  naming the key of this tool's **own output** that carries a quoted value of that kind and, on an
+  amount, the key carrying its currency. It is what lets a completed read of this tool be recorded
+  as a durable quote for the goal's intended action, which is the **primary** route above; without
+  it no read of this declaration becomes a quote and a money ceiling is proved against nothing.
+  **The fact is on the declaration and never on a plan**, and the reason is the direction of the
+  failure: a plan-carried selector let a model name an output field, and a number of the right
+  shape in the wrong field — a rating where a price is — produces a *smaller* value that satisfies
+  a ceiling and authorises the larger charge, which no validator of shape catches. The
+  required-field exception below covers this field on the same grounds as the first.
+
   **The second scope: the required-field clause, for this one further field, recorded as an
   exception rather than argued away.** §1 reads *"Every field that a permission decision depends
   on is required"*, unconditionally, and a permission decision does depend on this one — it is
