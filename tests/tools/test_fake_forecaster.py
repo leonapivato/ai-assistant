@@ -24,7 +24,7 @@ import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 from forecaster_contract import (
@@ -347,6 +347,62 @@ def test_the_fake_refuses_every_state_a_deployment_cannot_be_in(
     """
     with pytest.raises(error):
         FakeForecaster(**fields)
+
+
+@final
+class _Shifty(float):
+    """A ``float`` subclass whose ``__float__`` answers differently on each call.
+
+    The shape a guard that validates one conversion and stores another cannot see:
+    ``float()`` consults ``__float__`` on a subclass, so two calls are two values. It is
+    the hostile-``__repr__`` hazard one axis over, and this repository's own threat model
+    admits it (ADR-0018 §3, §4).
+    """
+
+    __slots__ = ("_calls",)
+
+    _calls: list[float]
+
+    def __new__(cls, *, first: float, then: float) -> _Shifty:
+        """Answer ``first`` once and ``then`` afterwards.
+
+        Args:
+            first: What the first conversion sees — a value inside the domain.
+            then: What every later one sees — a value outside it.
+
+        Returns:
+            The value.
+        """
+        value = super().__new__(cls, first)
+        value._calls = [first, then]
+        return value
+
+    def __float__(self) -> float:
+        """The next answer in the script.
+
+        Returns:
+            ``first`` on the first call and ``then`` on every one after it.
+        """
+        return self._calls.pop(0) if len(self._calls) > 1 else self._calls[0]
+
+
+def test_a_coordinate_that_answers_twice_is_stored_as_the_value_that_was_judged() -> None:
+    """One conversion, and the guard's own — never the guard's and then the store's.
+
+    ``float()`` consults ``__float__`` on a subclass, so a value that answers ``0.0``
+    to the check and ``999.0`` to the store passes every domain assertion and leaves the
+    fake configured for a place no deployment can be in — and ADR-0260 §4 says
+    ``request`` returns an ``ActionRequest`` or ``None``, where this fake would then
+    raise from its own schema. **A fake configurable into a state no deployment can be
+    in is the failure this module refuses**, and the production forecaster's guard
+    returns its value for the same reason.
+    """
+    shifty = _Shifty(first=41.0, then=999.0)
+
+    forecaster = FakeForecaster(latitude=shifty)
+
+    assert forecaster._latitude == pytest.approx(41.0)
+    assert type(forecaster._latitude) is float
 
 
 def test_a_cost_pair_with_no_provider_is_refused() -> None:
