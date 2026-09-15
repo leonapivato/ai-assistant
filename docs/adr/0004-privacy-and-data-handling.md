@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential) and ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause), ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential), ADR-0202 (§3's keyring clause and §7's gating clause, each only as it reaches the remote browser listener's TLS key material) and ADR-0268 (§6's view and export limbs, each only as they reach one datum: the goal authorization store's per-goal closure record — a goal identifier, a goal version and whether that store's write fence stands — which is reached by no export and no viewing surface and carries no content of the user's. §6's deletion limb binds entire and the record is erased with the store's rows; §6's retention limb is reached by those rows before it is reached by the record; no other store and no other datum takes this scope)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -377,6 +377,36 @@
   than surviving on ADR-0172's, ADR-0124 §6's or ADR-0126 §11's. That §7 now carries
   a fourth narrow exemption, and whether the clause should be restated rather than
   exempted again, remains **#1321**.
+- Partially superseded: 2026-09-15 by ADR-0268 — **two limbs of one clause, one datum, and the
+  datum exists because an authority now has to be refused while its goal is closed.** ADR-0268
+  ends every authorization of a goal when a closing act of that goal is taken, and makes the
+  ending total by having the authorization store hold a **closure record** per goal: a goal
+  identifier, the `goal_version` the act carried, and whether the store's write fence stands. The
+  record is raised by the ending, lowered by nothing, and lifted — not removed — when a reopen
+  clears the fence, because a record that could be removed leaves a paused earlier act able to
+  retire an authorization the reopened request established and to fence a live goal. That it
+  survives is what engages this ADR.
+
+  **Replaced — §6's view and export limbs, each only as they reach that record.** *"The user can
+  **view, export, and delete** their data."* The record is Tier 1 by its key, and ADR-0268 states
+  that no `export` and no surface carries it: ADR-0254 §16 fixes that store's export over its
+  **rows**, and the record is not a row. The sharpest case is a goal fenced while the store holds
+  no row of it, where no row of that store carries the identifier either.
+
+  **What stands in its place, and it is stated rather than assumed.** The record carries **no
+  content** — no goal statement, no argument value, no span of the user's words, no basis, no
+  instant, no disposition — which is the Tier-1 content §1 and ADR-0254 §16 name. Its identifier
+  is the goal's, which `PlanStore.export` carries as a matter of course. And it accumulates one
+  record per goal the user closed, against one row per authorization that ADR-0254 §16 retains
+  forever with no `delete(id)`, so §6's *"data does not accumulate indefinitely"* limb is reached
+  by those rows before it is reached by the record.
+
+  **§6's deletion limb binds entire** and is what the record takes: `clear` erases it with the
+  rows, and §6's Tier-0-and-Tier-1 purge clause is untouched. **§§1-5 and §7 stand entire**, and
+  **no other store and no other datum takes this scope** — a lane reading it as licence to retain
+  anything else outside an export has breached it. Whether the projection that would satisfy both
+  limbs should be built, and what it would cost (a `core` type, a third store member and a scope
+  on ADR-0254 §16's export clause), is **#2410**.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
