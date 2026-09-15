@@ -294,7 +294,13 @@ which §14 defers with what fires it.
 > with one word changed. **A keyless provider reads no credential at all**, and that is a
 > property of the registration rather than an exemption: no credential value is in a
 > binding (ADR-0148 §6), so nothing about the ruling, the trail or the resumability
-> changes either way.
+> changes either way. **A keyless provider is still provisioned as a connection like any
+> other, and this ADR gives it no exemption**: §6's binding needs the ACTIVE record
+> `Settings.forecast_connection` names, ADR-0148 §6's and ADR-0149 §3's shape for that
+> record is untouched, and its credential slot is one the forecaster never reads rather
+> than one that does not exist. **A credential-free connection representation is
+> explicitly not decided here** — it would amend ADR-0148, ADR-0149 and ADR-0151 in
+> `tools/`, which is another decision in another lane, and no clause of this ADR needs it.
 
 > **Normative.** `core/types.py` gains **`ForecastOutcome`**, a frozen model refusing
 > mutation and unknown fields, carrying exactly `records: tuple[MemoryRecord, ...]`,
@@ -1027,6 +1033,17 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > its own**: every lettered arm is owed separately and in full, and a lane discharges the
 > arms under its own heading.
 
+> **Normative.** **The enumeration below is a floor and not a ceiling**, on ADR-0219 §7's
+> ground and in its words, as ADR-0264 §13 already takes it. **Every normative clause of
+> this decision that an implementation can fail is owed an arm**; what is named below are
+> *"the ones whose absence would otherwise be non-obvious, each with the failure it exists
+> to catch"*, written that way deliberately, because *"a conformance list read as
+> exhaustive is ADR-0108 §4's 'false-shelter shape' at one more remove, this time in the
+> suite rather than in the contract"*. So **a lane adds the arm a normative clause needs
+> whether or not that clause is listed here**, and no implementation is conformant on the
+> ground that a rule it breaches has no arm below. **This is also what the count of fifteen
+> does and does not bound**: it bounds what this ADR names, never what a lane owes.
+
 > **Normative — L1: the contract, what it mints, and the model.**
 >
 > - **(a) The empty ask.** A `ReadAsk` of this kind carrying a `query`, carrying `labels`,
@@ -1040,7 +1057,9 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   documented field, supplies it as `null`, or supplies a type its format does not admit
 >   mints its **siblings only**; a response naming one day in **two** rows mints no record
 >   for that day and mints its siblings, asserted over agreeing rows and conflicting ones
->   alike; a response every day of which is so dropped mints nothing
+>   alike **and with the second occurrence placed beyond `forecast_max_days`**, because an
+>   implementation capping before it looks for duplicates mints the first row and passes
+>   every arm that keeps the duplicate inside the cap; a response every day of which is so dropped mints nothing
 >   and yields `NO_RESULT`; and a response declaring no instant, and one carrying an
 >   unreadable value in that position, each mint **no record** and yield `UNATTESTED`. In
 >   none of them does any minted value equal a clock the test controls.
