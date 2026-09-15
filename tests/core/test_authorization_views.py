@@ -350,10 +350,10 @@ def test_an_expiry_without_a_zone_is_refused() -> None:
     this surface show is exactly a value two peers must agree about.
     """
     with pytest.raises(ValidationError):
-        AuthorizationProjection(coverage=(), expires_at=datetime(2026, 9, 13, 21, 0))  # noqa: DTZ001
+        AuthorizationProjection(coverage=(), expires_at=datetime(2026, 9, 13, 21, 0), quote=None)  # noqa: DTZ001
     assert (
         AuthorizationProjection(
-            coverage=(), expires_at=datetime(2026, 9, 13, 21, 0, tzinfo=UTC)
+            coverage=(), expires_at=datetime(2026, 9, 13, 21, 0, tzinfo=UTC), quote=None
         ).expires_at.tzinfo
         is not None
     )

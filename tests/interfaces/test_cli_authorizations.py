@@ -102,6 +102,7 @@ def test_the_confirmation_says_what_answering_would_leave_standing(output: Strin
             CoverageView(kind=BoundKind.TERMS, fixed="A", span="the one by the lake"),
         ),
         expires_at=AUTHORIZATION_EXPIRES_AT,
+        quote=None,
     )
 
     cli._render_confirmation_authorization(projection)
@@ -137,7 +138,7 @@ def test_an_empty_coverage_says_what_it_covers_rather_than_nothing(output: Strin
     wildcard over nothing"*.
     """
     cli._render_confirmation_authorization(
-        AuthorizationProjection(coverage=(), expires_at=AUTHORIZATION_EXPIRES_AT)
+        AuthorizationProjection(coverage=(), expires_at=AUTHORIZATION_EXPIRES_AT, quote=None)
     )
 
     rendered = _flat(output.getvalue())
@@ -159,6 +160,7 @@ def test_the_question_names_no_identifier(output: StringIO) -> None:
                 CoverageView(kind=BoundKind.MONEY, bound=money_bound(), span="up to fifty pounds"),
             ),
             expires_at=row.expires_at,
+            quote=None,
         )
     )
 
@@ -182,6 +184,7 @@ def test_the_projection_is_rendered_before_the_answer_is_collected(output: Strin
                 CoverageView(kind=BoundKind.MONEY, bound=money_bound(), span="up to fifty pounds"),
             ),
             expires_at=AUTHORIZATION_EXPIRES_AT,
+            quote=None,
         ),
     )
 

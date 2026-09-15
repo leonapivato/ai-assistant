@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     AuthorizationSettlement,
     AuthorizationView,
     CoverageView,
+    QuoteView,
 )
 from ai_assistant.orchestration.authorizing import authorization_id_for
 
@@ -89,13 +90,32 @@ def projection_of(row: Authorization, /) -> AuthorizationProjection:
     Rendered **from the proposed row**, so a restart between the question and the
     answer recovers the row and renders this same projection (ADR-0052 §1).
 
+    **The quote is transcribed and never re-selected** (ADR-0267 §7). Its three values
+    come off the row's own ``quoted``, and it is absent exactly where that field is
+    absent; **no surface, no adapter and no engine re-selects a governing quote in
+    order to render one**, and a refresh landing between the question and the answer
+    changes the **ruling** — ADR-0254 §13's recheck reads the current quote at dispatch
+    — and the rendering in no way. **Nothing here populates ``quoted``**: ADR-0267 §11
+    assigns that to ADR-0254 §20's Lane 2, so on this tree every row carries ``None``
+    and every projection renders no figure.
+
     Args:
         row: The ``PROPOSED`` row the question is about.
 
     Returns:
-        The coverage the answer would establish and the instant it would expire.
+        The coverage the answer would establish, the figure it was quoted at, and the
+        instant it would expire.
     """
-    return AuthorizationProjection(coverage=coverage_views(row), expires_at=row.expires_at)
+    quoted = row.quoted
+    return AuthorizationProjection(
+        coverage=coverage_views(row),
+        expires_at=row.expires_at,
+        quote=(
+            None
+            if quoted is None
+            else QuoteView(amount=quoted.amount, currency=quoted.currency, read_at=quoted.read_at)
+        ),
+    )
 
 
 def view_of(row: Authorization, /, *, goal_statement: str, live: bool) -> AuthorizationView:

@@ -1260,6 +1260,7 @@ async def test_the_confirmation_says_what_answering_would_leave_standing(
                     ),
                 ),
                 expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+                quote=None,
             ),
         )
 
@@ -1324,7 +1325,7 @@ async def test_an_empty_coverage_says_what_it_covers_rather_than_nothing(
         drive.engine.park(
             "h-1",
             authorization=AuthorizationProjection(
-                coverage=(), expires_at=AUTHORIZATION_NOW + timedelta(hours=1)
+                coverage=(), expires_at=AUTHORIZATION_NOW + timedelta(hours=1), quote=None
             ),
         )
 
