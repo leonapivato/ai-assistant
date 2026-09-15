@@ -27,6 +27,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     Ground,
     MemorySource,
+    ProposedAction,
+    ProposedUnderstanding,
     Provenance,
     ReadAsk,
     ReadKind,
@@ -394,6 +396,87 @@ async def test_a_scripted_revision_answers_the_call_after_the_first() -> None:
 
     assert first is first_plan
     assert second is revision
+
+
+async def test_a_scripted_planner_proposes_no_action_by_default() -> None:
+    """ADR-0265 §2: empty "is the semantically correct answer for a planner that knows
+    nothing of this envelope", and this fake defaults to it.
+
+    So every consumer written before ADR-0265 keeps meaning what it meant, and nothing
+    reads the default as an error, a degradation or an instruction to re-plan.
+    """
+    planner = FakePlanner(now=_fixed_now)
+
+    output = await planner.plan(
+        _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+    )
+
+    assert output.actions == ()
+
+
+async def test_scripted_actions_ride_on_every_call_beside_the_understanding() -> None:
+    """``actions`` is the hook L2 drives ADR-0265 §2's recording from.
+
+    **Returned unchanged on every call**, for ``understanding``'s reason: "what a
+    planner proposes is not a function of the iteration, and a fake that varied it would
+    hold an opinion the contract leaves to an implementation". A turn makes at most two
+    calls, so both are asserted.
+
+    **Two actions, because the case this envelope exists for is the owner's two rooms**
+    — "*book two identical rooms* warrants two because the user asked for two" — and
+    because minting them "in one ``IntendedActionMinting``" is what makes that one
+    compare-and-swap rather than two. Their ``serves`` carries **labels** and no
+    identifier, which this fake passes through unresolved exactly as it passes an ``M``
+    label: §3's resolution and its drop rule are the loop's, not this seam's.
+    """
+    actions = (
+        ProposedAction(intent="book the first room", serves=("C1",)),
+        ProposedAction(intent="book the second room", serves=("C1", "C99")),
+    )
+    planner = FakePlanner(now=_fixed_now, actions=actions)
+
+    first = await planner.plan(
+        _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+    )
+    second = await planner.plan(
+        _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+    )
+
+    assert first.actions == actions
+    assert second.actions == actions
+    assert first.actions[1].serves == ("C1", "C99"), "the unresolvable label is not dropped here"
+
+
+async def test_actions_are_scripted_beside_an_understanding_and_without_one() -> None:
+    """ADR-0265 §2's carrier rule, made reachable from a consumer's tests.
+
+    ``actions`` rides on ``PlannerOutput`` "and never inside ``ProposedUnderstanding``",
+    because ADR-0249 §7 makes omission removal there and "an intended action must
+    survive every revision that does not mention it". **Minting is therefore independent
+    of revising**: a turn may propose an action with no understanding at all, and an
+    understanding that mentions no action removes none. Both are shapes L2 has to drive,
+    so both are scriptable here.
+    """
+    proposing = FakePlanner(now=_fixed_now, actions=(ProposedAction(intent="book it"),))
+    revising = FakePlanner(
+        now=_fixed_now,
+        understanding=ProposedUnderstanding(retains_outcome=True),
+        actions=(ProposedAction(intent="book it"),),
+    )
+
+    without = await proposing.plan(
+        _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+    )
+    beside = await revising.plan(
+        _goal_for(), utterance=_REQUEST, context=_context_for(), capabilities=()
+    )
+
+    assert (without.understanding, len(without.actions)) == (None, 1)
+    assert beside.understanding is not None
+    assert len(beside.actions) == 1
+    assert not hasattr(beside.understanding, "actions"), (
+        "the understanding is not the carrier: omission there is removal (ADR-0265 §2)"
+    )
 
 
 async def test_a_scripted_revision_reusing_the_first_plans_id_is_refused() -> None:

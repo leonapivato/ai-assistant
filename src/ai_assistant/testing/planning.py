@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     IntendedActionMinting,
     PlanExport,
     PlannerOutput,
+    ProposedAction,
     SkipReason,
     StepExecution,
     StepStatus,
@@ -478,7 +479,7 @@ class FakePlanner:
     that had been told something no planner is told.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one keyword per thing a consumer scripts about a call, as the seam's own envelope declares them; ADR-0226 §4, ADR-0228 §3, ADR-0249 §7 and ADR-0265 §2 each add one
         self,
         plan: ActionPlan | None = None,
         *,
@@ -486,6 +487,7 @@ class FakePlanner:
         read_request: ReadRequest | None = None,
         revision: ActionPlan | None = None,
         understanding: ProposedUnderstanding | None = None,
+        actions: tuple[ProposedAction, ...] = (),
     ) -> None:
         """Create a planner.
 
@@ -514,6 +516,27 @@ class FakePlanner:
                 every call, because what a planner proposes is not a function of the
                 iteration and a fake that varied it would hold an opinion the contract
                 leaves to an implementation.
+            actions: What every call proposes the goal now intends (ADR-0265 §2), or
+                ``()`` — the default, and the true answer for a planner that knows
+                nothing of that envelope, which §2 says "no implementation reads as an
+                error, a degradation or an instruction to re-plan". Returned unchanged
+                on every call, for ``understanding``'s reason: what a planner proposes
+                is not a function of the iteration.
+
+                **It is scripted beside ``understanding`` rather than inside it**,
+                which is §2's carrier rule made reachable from a consumer's tests: an
+                intended action "must survive every revision that does not mention it",
+                so a turn may propose actions with no understanding at all and an
+                understanding that mentions no action removes none. Both shapes are
+                scriptable here, because both are shapes L2 has to drive.
+
+                **No ``IntendedAction`` and no ``id``**: a ``ProposedAction`` carries
+                neither, "a planner names no identifier and mints none", and the minting
+                is ``orchestration``'s. A consumer scripting ``serves`` writes the
+                ``C``/``S``/``D`` **labels** of the brief or understanding in force on
+                that call — this fake resolves none of them, exactly as it resolves no
+                ``M`` label, so a scripted label naming nothing is emitted unchanged and
+                §3's drop rule stays the loop's to demonstrate.
 
         Raises:
             ValueError: If both ``plan`` and ``read_request`` are given. A scripted
@@ -534,6 +557,7 @@ class FakePlanner:
         self._read_request = read_request
         self._revision = revision
         self._understanding = understanding
+        self._actions = actions
         #: The id of the plan this fake answered a turn's **first** call with, which
         #: a scripted revision may not reuse. Recorded rather than derived: the
         #: synthesised id is a function of the goal, so it is not knowable until the
@@ -721,7 +745,11 @@ class FakePlanner:
                         "ids (ADR-0014 §2, ADR-0228 §5)"
                     )
                     raise RuntimeError(msg)
-                return PlannerOutput(plan=self._revision, understanding=self._understanding)
+                return PlannerOutput(
+                    plan=self._revision,
+                    understanding=self._understanding,
+                    actions=self._actions,
+                )
         if self._plan is not None:
             # Exactly as scripted on the first call, and with a fresh id afterwards
             # (ADR-0014 §2, ADR-0228 §3, §5). Only `id` moves — every other field is
@@ -730,10 +758,13 @@ class FakePlanner:
             # certify nothing.
             if ordinal == 1:
                 self._first_id = self._plan.id
-                return PlannerOutput(plan=self._plan, understanding=self._understanding)
+                return PlannerOutput(
+                    plan=self._plan, understanding=self._understanding, actions=self._actions
+                )
             return PlannerOutput(
                 plan=self._plan.model_copy(update={"id": f"{self._plan.id}-{ordinal}"}),
                 understanding=self._understanding,
+                actions=self._actions,
             )
         synthesised = ActionPlan(
             # Distinct on every call after the first (ADR-0228 §3, ADR-0014 §2). The
@@ -751,7 +782,9 @@ class FakePlanner:
         )
         if ordinal == 1:
             self._first_id = synthesised.id
-        return PlannerOutput(plan=synthesised, understanding=self._understanding)
+        return PlannerOutput(
+            plan=synthesised, understanding=self._understanding, actions=self._actions
+        )
 
 
 class FakeGoalAssociator:

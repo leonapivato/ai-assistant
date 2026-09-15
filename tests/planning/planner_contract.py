@@ -59,6 +59,14 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: calling the code under test would report every implementation conformant.
 _CONDITION_LABEL: Final = re.compile(r"D[1-9][0-9]*")
 
+#: ADR-0265 §3's ``serves`` vocabulary: a ``C``, ``S`` or ``D`` label of the sequence in
+#: force on that call — "ADR-0253 §9's rule decides which, and this decision states no
+#: second rule" — in the canonical 1-based, unpadded ASCII spelling a renderer produces.
+#: Narrower than :data:`_CONDITION_LABEL`'s sibling reservation on purpose: that one is a
+#: disjointness guarantee over every string a plan could still carry, this one is what a
+#: conforming planner is allowed to have **emitted**.
+_ELEMENT_LABEL: Final = re.compile(r"[CSD][1-9][0-9]*")
+
 #: A vocabulary to drive the contract over — two plausible advertised names.
 #:
 #: The contents decide nothing, and that is the point: ADR-0211 §9 item 2 forbids
@@ -183,6 +191,43 @@ class PlannerContract:
             )
         ).plan
         assert plan.goal_id == "g1"
+
+    async def test_the_envelope_carries_proposed_actions_and_empty_is_conforming(
+        self, planner: Planner
+    ) -> None:
+        """ADR-0265 §2: ``PlannerOutput.actions`` is on the envelope, and empty is an
+        answer rather than a failure.
+
+        "**Empty means the planner proposes no new intended action**, and it is the
+        semantically correct answer for a planner that knows nothing of this envelope
+        and for every turn that acts on an intent the goal already holds. No
+        implementation reads an empty ``actions`` as an error, a degradation or an
+        instruction to re-plan." So what every conforming planner owes is the **field**,
+        not a value in it: this suite drives planners that know nothing of ADR-0265 and
+        must keep passing.
+
+        **What is asserted of a non-empty one is the containment, not the content**
+        (§2). A ``ProposedAction`` carries exactly ``intent`` and ``serves`` and **no
+        id** — "a planner names no identifier and mints none, which is ADR-0228 §8's
+        namer rule binding this field as it binds every other" — and each ``serves``
+        entry is a **label** of the brief or understanding in force on that call, never
+        an identifier. Whether a given planner proposes any is its own judgement, which
+        §2 leaves to the model: "a count of acts the user asked for is interpretation".
+        """
+        output = await planner.plan(
+            _goal(), utterance=_REQUEST, context=_context(), capabilities=_VOCABULARY
+        )
+
+        assert isinstance(output.actions, tuple)
+        for proposed in output.actions:
+            assert proposed.intent.strip()
+            assert not hasattr(proposed, "id")
+            for label in proposed.serves:
+                assert _ELEMENT_LABEL.fullmatch(label), (
+                    f"a ProposedAction.serves entry is a C/S/D label of the sequence in "
+                    f"force on that call and never an identifier, and {label!r} is not "
+                    f"one (ADR-0265 §3)"
+                )
 
     async def test_step_ids_are_unique(self, planner: Planner) -> None:
         plan = (
