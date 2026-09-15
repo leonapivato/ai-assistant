@@ -24,6 +24,7 @@ from io import StringIO
 from typing import Final
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -720,19 +721,33 @@ def test_a_count_past_cpythons_conversion_cap_still_renders(output: StringIO) ->
     digits to text: an f-string here would replace §7's statement with a stack trace on
     the one surface obliged to render it.
 
+    **The limit is pinned rather than read from the ambient interpreter**, which is
+    #406's lesson and the reason :func:`pinned_int_str_digits` exists.
+    ``PYTHONINTMAXSTRDIGITS=0`` makes :func:`sys.get_int_max_str_digits` return ``0``,
+    which would silently turn this case into one about ``records=1`` — an arm the
+    f-string it exists to forbid passes. Adversarial review, round 4, ``major``.
+
+    **The conversion this arm is about is asserted to be live**, so the case cannot pass
+    for the wrong reason: if ``str`` of this count ever stopped raising, the arm would be
+    green over a renderer that had never been exercised past the cap.
+
     Asserted by **counting the digits on screen** rather than by matching the number as a
     substring, because Rich wraps a 4301-digit word across display lines and a substring
     assertion would be about the console's width.
     """
-    digits = sys.get_int_max_str_digits() + 1
-    cli._render_outbound_statement(
-        OutboundStatement(
-            reach=OutboundReach.REACHED,
-            destinations=(OutboundDestination.SEARCH_PROVIDER,),
-            records=10 ** (digits - 1),
-        ),
-        composed_a_reply=True,
-    )
+    with pinned_int_str_digits():
+        digits = sys.get_int_max_str_digits() + 1
+        records = 10 ** (digits - 1)
+        with pytest.raises(ValueError, match="Exceeds the limit"):
+            str(records)
+        cli._render_outbound_statement(
+            OutboundStatement(
+                reach=OutboundReach.REACHED,
+                destinations=(OutboundDestination.SEARCH_PROVIDER,),
+                records=records,
+            ),
+            composed_a_reply=True,
+        )
     rendered = _flat(output.getvalue())
 
     assert "this turn reached outside this system" in rendered
