@@ -1,7 +1,7 @@
 # 271. The quote a dispatch was proved against is pinned to that dispatch, and a charge that
 disagrees with it is a reported finding
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0262](0262-verification-compares-the-goals-criteria-with-what-the-record-establishes-at-a-strength-the-consequence-class-fixes-and-is-achieveds-only-producer.md)
   — **two scopes, and §7 shows the working for each. §2's `MONEY` clause, which rules that *"a
