@@ -48,6 +48,7 @@ from forecast_harness import (
     suspendable,
 )
 from forecaster_contract import (
+    CannotDescribeItself,
     ConfiguredProvider,
     ForecasterContract,
     GatedRead,
@@ -1535,6 +1536,10 @@ async def test_a_configured_per_call_figure_reaches_the_registered_declaration()
         pytest.param("latitude", float("nan"), id="latitude-nan"),
         pytest.param("longitude", -180.1, id="longitude-out-of-range"),
         pytest.param("longitude", float("inf"), id="longitude-infinite"),
+        # The type is refused first, so the value reaching the message is anything at
+        # all: a bound that will not describe itself must still earn the `ValueError`
+        # this constructor documents, and not whatever its `__repr__` threw.
+        pytest.param("max_days", CannotDescribeItself(), id="days-a-value-whose-repr-raises"),
     ],
 )
 async def test_a_forecaster_is_refused_where_it_is_configured(field: str, value: Any) -> None:

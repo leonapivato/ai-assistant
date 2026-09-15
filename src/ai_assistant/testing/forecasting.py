@@ -435,7 +435,11 @@ def _check_bounds(max_days: int, max_day_chars: int) -> None:
         ("max_day_chars", max_day_chars, None),
     ):
         if isinstance(bound, bool) or type(bound) is not int:
-            msg = f"{label} must be an integer, got {bound!r}"
+            # Rendered through `describe_untrusted`, as every guard in this module
+            # renders a value whose *type* it has just refused: the value is anything at
+            # all there, and a message interpolating its `__repr__` could raise in place
+            # of the class this function promises.
+            msg = f"{label} must be an integer, got {describe_untrusted(bound)}"
             raise TypeError(msg)
         if bound < 1:
             msg = f"{label} must be at least 1, got {bound}"
@@ -557,7 +561,7 @@ def _checked_cost(amount: Decimal | None, currency: str | None) -> ToolCost | No
     if amount is None or currency is None:
         return None
     if type(amount) is not Decimal:
-        msg = f"cost_per_call must be a Decimal, got {amount!r}"
+        msg = f"cost_per_call must be a Decimal, got {describe_untrusted(amount)}"
         raise TypeError(msg)
     if not amount.is_finite():
         msg = f"cost_per_call must be finite (ADR-0236 §2), got {amount!r}"
@@ -612,7 +616,10 @@ def _check_source(name: str, origin: str | None, reported_at: datetime) -> None:
         msg = f"origin must hold text, or be None entirely, got {origin!r}"
         raise ValueError(msg)
     if reported_at.tzinfo is None or reported_at.utcoffset() is None:
-        msg = f"reported_at must be timezone-aware, got {reported_at!r}"
+        # `datetime.__repr__` embeds `repr(tzinfo)`, which is the very case
+        # `describe_untrusted` was written for: a hostile `tzinfo` would raise from
+        # inside the message reporting it.
+        msg = f"reported_at must be timezone-aware, got {describe_untrusted(reported_at)}"
         raise ValueError(msg)
 
 
@@ -706,7 +713,10 @@ class FakeForecaster:
             # rather than `isinstance`, because the annotation already forbids this and
             # mypy reads an `isinstance` narrowing as unreachable: this guard is for the
             # caller who ignored it, who is the only caller who can reach it.
-            msg = f"a scripted refusal must be a ForecastRefusal member, got {refusal!r}"
+            msg = (
+                f"a scripted refusal must be a ForecastRefusal member, got "
+                f"{describe_untrusted(refusal)}"
+            )
             raise TypeError(msg)
         cost = _checked_cost(cost_per_call, cost_currency)
         if cost is not None and origin is None:

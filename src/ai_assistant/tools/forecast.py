@@ -1232,7 +1232,11 @@ def _checked_bound(label: str, value: int, *, ceiling: int | None) -> None:
             bound of one while satisfying the range.
     """
     if type(value) is not int:
-        msg = f"{label} is an exact int; got {value!r}"
+        # Rendered through `describe_untrusted` for `_checked_coordinate`'s reason, one
+        # function down: the type has just been refused, so the value is anything at all
+        # and its `__repr__` is the caller's — a message interpolating it directly could
+        # raise in place of the `ValueError` this function promises.
+        msg = f"{label} is an exact int; got {describe_untrusted(value)}"
         raise ValueError(msg)
     if value < 1:
         msg = f"{label} is an integer of at least 1; got {value}"

@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, final
 
 import pytest
 from forecaster_contract import (
     A_BOUND,
+    CannotDescribeItself,
     ConfiguredProvider,
     ForecasterContract,
     GatedRead,
@@ -65,6 +66,63 @@ _DECIDED_AT: Final = datetime(2026, 9, 4, 11, 30, tzinfo=UTC)
 
 #: A content bound small enough that the boundary cases script a handful of characters.
 _SMALL_CONTENT_BOUND: Final = 64
+
+
+class _UndescribableZone(tzinfo):
+    """A ``tzinfo`` that declares no offset and will not describe itself.
+
+    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so an instant carrying this one cannot
+    be rendered into the very message that refuses it — which is the case
+    :func:`~ai_assistant.core.types.describe_untrusted` exists for, and the reason this
+    fake's guard reaches for it rather than for an f-string's ``!r``.
+    """
+
+    __slots__ = ()
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        """Declare no offset, which is what makes the instant naive in effect.
+
+        Args:
+            dt: Unread.
+
+        Returns:
+            ``None``.
+        """
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        """Declare no daylight-saving offset.
+
+        Args:
+            dt: Unread.
+
+        Returns:
+            ``None``.
+        """
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        """Name no zone, which is the whole of what this one declares.
+
+        Args:
+            dt: Unread.
+
+        Returns:
+            ``None``.
+        """
+        return None
+
+    def __repr__(self) -> str:
+        """Raise instead of describing this zone.
+
+        Returns:
+            Never.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        msg = "a zone that will not say what it is"
+        raise RuntimeError(msg)
 
 
 def _authorised(proposal: ActionRequest) -> ToolCall:
@@ -339,6 +397,30 @@ def test_the_fake_declares_the_production_safety_fields() -> None:
         pytest.param({"name": " forecast "}, ValueError, id="a-name-identifier-would-strip"),
         pytest.param({"name": ""}, ValueError, id="a-blank-name"),
         pytest.param({"refusal": "no_result"}, TypeError, id="a-refusal-that-is-a-string"),
+        # Each of these is refused for its *type*, so the value reaching the message is
+        # anything at all — and the class this constructor documents must survive a value
+        # that raises when asked to describe itself.
+        pytest.param(
+            {"max_days": CannotDescribeItself()}, TypeError, id="days-a-value-whose-repr-raises"
+        ),
+        pytest.param(
+            {"refusal": CannotDescribeItself()},
+            TypeError,
+            id="a-refusal-whose-repr-raises",
+        ),
+        pytest.param(
+            {"cost_per_call": CannotDescribeItself(), "cost_currency": "USD"},
+            TypeError,
+            id="a-cost-whose-repr-raises",
+        ),
+        # `datetime.__repr__` embeds `repr(tzinfo)`, which is the case `core`'s describer
+        # was written for: the naive-instant message reports a value whose own rendering
+        # can raise from inside it.
+        pytest.param(
+            {"reported_at": datetime(2026, 9, 4, 12, 0, tzinfo=_UndescribableZone())},
+            ValueError,
+            id="an-instant-whose-zone-will-not-describe-itself",
+        ),
         pytest.param(
             {"reported_at": datetime(2026, 9, 4, 12, 0)},  # noqa: DTZ001 — the point of the case
             ValueError,

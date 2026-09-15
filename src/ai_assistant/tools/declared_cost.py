@@ -26,7 +26,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Final
 
-from ai_assistant.core.types import CostBasis, ToolCost
+from ai_assistant.core.types import CostBasis, ToolCost, describe_untrusted
 
 #: ADR-0194 §1's magnitude bound on any amount that mechanism reads, restated here
 #: for :func:`checked_per_call_cost` at the one site an integration is built without
@@ -136,7 +136,10 @@ def checked_per_call_cost(amount: Decimal | None, currency: str | None) -> ToolC
         # An exact ``Decimal`` and not an ``isinstance`` match, for ``_checked_bound``'s
         # reason: a subclass overriding comparison would satisfy the range below while
         # declaring something else entirely.
-        msg = f"cost_per_call is an exact Decimal; got {amount!r}"
+        # Rendered through `describe_untrusted`: the type has just been refused, so the
+        # value is anything at all and its `__repr__` is the caller's — a message
+        # interpolating it directly could raise in place of this `ValueError`.
+        msg = f"cost_per_call is an exact Decimal; got {describe_untrusted(amount)}"
         raise ValueError(msg)
     if not amount.is_finite():
         msg = f"cost_per_call must be finite (ADR-0236 §2); got {amount!r}"
