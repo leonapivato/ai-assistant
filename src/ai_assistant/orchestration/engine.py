@@ -1746,7 +1746,18 @@ def _routed_exchange_of(utterance: str | None, *, resumed: bool) -> str:
 #: reply is exactly what issue #2365 records: a turn whose trail said ``not_asked``
 #: telling the user its figures were "already in front of me from this turn's searches",
 #: with nothing beside the reply to contradict it.
-_REACHED_NOTHING: Final = OutboundStatement(reach=OutboundReach.NOT_REACHED)
+#:
+#: **A factory and not a module-level instance**, for the reason the plan store details
+#: at its own detachment: ``frozen=True`` stops ``statement.reach = ...`` but not
+#: ``statement.__dict__["reach"] = ...`` (ADR-0018 §3, §4), so one shared instance
+#: handed out on every routed, restatement and ``UNDECIDED`` outcome would let a caller
+#: holding any one of them rewrite what every other outcome — including every later one
+#: — says this system did. ADR-0264 §7 makes the member "composed once per turn", and a
+#: value minted per pass is what makes that true of the object as well as of the
+#: computation.
+def _reached_nothing() -> OutboundStatement:
+    """ADR-0264 §7's ``NOT_REACHED`` value, minted fresh for one outcome to carry."""
+    return OutboundStatement(reach=OutboundReach.NOT_REACHED)
 
 
 type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable[ComposedReply | None]]
@@ -8777,7 +8788,7 @@ class Engine:
             # the disambiguation — and takes "no relevance read, no episodic supplement
             # and no `Planner.plan` call", so it reached nothing and says so. §7 names
             # this turn among the three that carry `NOT_REACHED` rather than `None`.
-            outbound_statement=_REACHED_NOTHING,
+            outbound_statement=_reached_nothing(),
         )
 
     async def _engagement(
@@ -11294,7 +11305,7 @@ class Engine:
             # §7 leaves `None`: that is the pass that *parked*, on which ADR-0197 §10
             # rules "the composing stage is not reached"; this is the pass that answered
             # it, and an answer is owed here.
-            outbound_statement=_REACHED_NOTHING,
+            outbound_statement=_reached_nothing(),
         )
 
     async def _finish_route(
@@ -11360,7 +11371,7 @@ class Engine:
             # ADR-0197 §6's closure of the routed composer's inputs at "exactly two"
             # unnarrowed: the member is carried and the statement is rendered, and the
             # instruction the guarantee does not rest on is what the pass does without.
-            outbound_statement=None if compose is None else _REACHED_NOTHING,
+            outbound_statement=None if compose is None else _reached_nothing(),
         )
 
     async def _composed_routed_whole(
@@ -11491,7 +11502,7 @@ class Engine:
             # composing routed pass measures the member it will carry. Omitting it
             # would over-state the room by exactly the bytes the terminal frame spends
             # on it.
-            outbound_statement=_REACHED_NOTHING,
+            outbound_statement=_reached_nothing(),
         )
         fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
         return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
@@ -11956,7 +11967,7 @@ class Engine:
             # enumeration without changing any value it fixes". It composes no prose of
             # its own, but §7's rendering asymmetry is the *surface's* rule and not a
             # reason to leave the member absent here.
-            return TurnOutcome(turn=None, step=step, outbound_statement=_REACHED_NOTHING)
+            return TurnOutcome(turn=None, step=step, outbound_statement=_reached_nothing())
         # **No delivery facts on this path, and none is fetched to make some**
         # (ADR-0205 §5). The facts ride the replay tail
         # ``ConversationLifecycle.history`` reads, and a resume reads none: it is
