@@ -449,6 +449,30 @@ def _declared_day(text: str) -> tuple[int, int, int] | None:
     return year, month, day
 
 
+def _named_day(row: Mapping[str, FrozenJson]) -> tuple[int, int, int] | None:
+    """The day one row names, whatever else that row carries (ADR-0260 §5).
+
+    **Read independently of every other drop rule, and that is the point.** §5's
+    duplicate clause is stated over the day *the response names* — "A day the response
+    names more than once is dropped in every one of its rows" — so a row that names a
+    day and is then dropped for some other reason has still named it. A count taken over
+    the *surviving* rows would let a complete row through beside an incomplete sibling
+    naming the same day, which is the response describing that day twice and this system
+    preferring one of the two.
+
+    A row whose ``date`` is absent, ``null``, of a type the format does not admit, or not
+    this format's one spelling names **no** day and is counted toward none.
+
+    Args:
+        row: One day object from the documented response.
+
+    Returns:
+        The year, month and day, or ``None`` where the row names none.
+    """
+    text = _documented_text(row, _DATE_FIELD)
+    return None if text is None else _declared_day(text)
+
+
 def _declared_offset(text: str) -> timedelta | None:
     """The ``+HH:MM`` the provider declared for that day, as an offset from UTC.
 
@@ -938,6 +962,26 @@ class ForecastEgress:
                 f"so there is no authorised request to make (ADR-0148 §8, ADR-0260 §6)"
             )
             raise ToolBindingError(msg)
+        if (latitude, longitude) != (self._latitude, self._longitude):
+            # **§3's clause at the seam, and it is ADR-0231 §5's origin pin one value
+            # over.** "The place is the deployment's own configured place, and the
+            # configuration is the naming act … held by the forecaster as its own
+            # configuration", and §3 is absolute that no caller widens, narrows or
+            # offsets the read — "a caller able to widen the read is a caller able to
+            # defeat the bound" (ADR-0093 §10). §6's "every subsequent step reads the
+            # revalidated copy" says which *copy* to trust, not that a copy may name a
+            # place this forecaster was not configured for: a validly authorised call
+            # carrying another coordinate passes all three checks and would send it.
+            #
+            # Refused **before** the credential is read and before any channel is
+            # opened, and synchronously with the three above, so nothing observed here
+            # can move between the check and the send.
+            msg = (
+                f"{self._declaration.id}: this call names a place this forecaster is not "
+                f"configured for, so the request would ask about somewhere the "
+                f"deployment did not choose (ADR-0260 §3, §6)"
+            )
+            raise ToolBindingError(msg)
         return binding, origin, latitude, longitude
 
     async def _asked(
@@ -1052,16 +1096,27 @@ class ForecastEgress:
             The outcome: the records, or ``NO_RESULT`` where the response described no
             day and where §5 dropped every one it did.
         """
-        read = [self._day_of(row) for row in rows]
-        # **Counted in one pass over the days, not one pass per day.** A response well
-        # inside ``forecast_max_response_bytes`` can carry thousands of compact rows,
-        # and a membership count taken per row would be quadratic — tens of millions of
+        # **The duplicate rule is taken over the day each row *names*, and over every
+        # row that names one** — not over the rows that survived the other drops. §5
+        # says "the response has not described that day **once**", so a day named by a
+        # complete row and again by an incomplete one is a day described twice; keeping
+        # the complete row would be this system preferring one of the provider's rows
+        # over another, which is the one thing the clause forbids in terms.
+        #
+        # **Counted in one pass, not one pass per row.** A response well inside
+        # ``forecast_max_response_bytes`` can carry thousands of compact rows, and a
+        # membership count taken per row would be quadratic — tens of millions of
         # comparisons on the event loop's own thread, with no ``await`` anywhere in this
         # method for the deadline to be delivered at. The bound §4 puts over "the
         # response read and the transcription" is only as good as the work under it
         # being linear.
-        seen = Counter(day.named for day in read if day is not None)
-        kept = [day for day in read if day is not None and seen[day.named] == 1]
+        named = [_named_day(row) for row in rows]
+        seen = Counter(day for day in named if day is not None)
+        kept = [
+            read
+            for row, day in zip(rows, named, strict=True)
+            if day is not None and seen[day] == 1 and (read := self._day_of(row)) is not None
+        ]
         minted = tuple(self._record(day, reported_at) for day in kept[: self._max_days])
         if not minted:
             return _refused(ForecastRefusal.NO_RESULT)
@@ -1069,6 +1124,12 @@ class ForecastEgress:
 
     def _day_of(self, row: Mapping[str, FrozenJson]) -> _Day | None:
         """One row read into a day, or ``None`` where ADR-0260 §5 drops it whole.
+
+        **The duplicate rule is not applied here**, deliberately: it is a fact about the
+        *response* rather than about one row, and §5 states it over the day a row names
+        — which :func:`_named_day` reads without regard to whether the rest of the row
+        survives. Folding it in here would make a complete row survive a day an
+        incomplete sibling also named.
 
         Args:
             row: One day object from the documented response.
@@ -1086,7 +1147,7 @@ class ForecastEgress:
             for character in present[field]
         ):
             return None
-        named = _declared_day(present[_DATE_FIELD])
+        named = _named_day(row)
         offset = _declared_offset(present[_OFFSET_FIELD])
         if named is None or offset is None:
             return None

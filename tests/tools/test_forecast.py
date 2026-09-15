@@ -466,6 +466,83 @@ async def test_a_day_the_response_names_twice_mints_no_record_and_mints_its_sibl
     assert _days(outcome) == ["2026-09-06"]
 
 
+@pytest.mark.parametrize(
+    "order",
+    [
+        pytest.param(("complete", "incomplete"), id="the-complete-row-first"),
+        pytest.param(("incomplete", "complete"), id="the-incomplete-row-first"),
+    ],
+)
+async def test_a_day_named_by_a_complete_row_and_an_incomplete_one_is_dropped(
+    order: tuple[str, str],
+) -> None:
+    """§5: the duplicate rule is over the day the response **names**, not over survivors.
+
+    "A day the response names more than once is dropped in every one of its rows … the
+    response has not described that day **once**, and preferring one row over another
+    would be this system deciding what the provider said."
+
+    **An incomplete sibling still names its day**, so a count taken over the rows that
+    survived the *other* drops sees the day once and mints the complete row — which is
+    exactly the preference the clause forbids. Both encounter orders are cases, because
+    an implementation that dropped the row it met second would pass one of them.
+    """
+    complete = day(date="2026-09-05")
+    incomplete = day(date="2026-09-05", conditions=None)
+    rows = [complete if name == "complete" else incomplete for name in order]
+    subject = await built(channels=[answering(*rows, day(date="2026-09-06"))])
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
+async def test_a_day_named_by_two_rows_one_of_them_over_the_content_bound_is_dropped() -> None:
+    """§5's duplicate clause meeting its content clause, which are two drops and one day.
+
+    The oversized row is dropped on its own account and still **named** the day, so the
+    ordinary row is a second description of a day the response described twice. An
+    implementation applying the content bound before counting the names keeps the
+    ordinary one.
+    """
+    subject = await built(
+        channels=[
+            answering(
+                day(date="2026-09-05"),
+                day(date="2026-09-05", conditions="x" * 4096),
+                day(date="2026-09-06"),
+            )
+        ],
+        max_day_chars=64,
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
+async def test_a_row_naming_no_day_is_counted_toward_none() -> None:
+    """The other half of the same clause: a row with no readable date names nothing.
+
+    Two rows with no ``date`` would be two rows naming one *absence*, and counting them
+    as a duplicate of each other would drop a third row that shares nothing with them.
+    Both are dropped on their own account; the day they did not name is minted.
+    """
+    subject = await built(
+        channels=[
+            answering(
+                day(date=None),
+                day(date="not a date"),
+                day(date="2026-09-06"),
+            )
+        ]
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
 async def test_a_duplicate_beyond_the_cap_still_drops_both_of_its_rows() -> None:
     """§13's arm (b), stated as the arm states it, with its own reason.
 
@@ -985,6 +1062,32 @@ async def test_a_call_whose_decision_authorises_another_request_is_refused() -> 
     call.__dict__["request"] = await request(subject, latitude=0.0, longitude=0.0)
 
     with pytest.raises(ToolBindingError, match="not the call that was authorised"):
+        await subject.forecaster.read(call, timeout=_BOUND)
+
+    assert subject.keyring.reads == []
+    assert subject.transport.attempts == ()
+
+
+async def test_a_separately_authorised_call_naming_another_place_is_refused() -> None:
+    """§3: "the place is the deployment's own configured place", pinned at the seam.
+
+    **The call here is entirely valid**: a fresh request carrying this forecaster's own
+    declaration and origin with another coordinate, with its **own** recorded ``ALLOW``
+    — so it survives revalidation, carries the registered declaration, and its decision
+    authorises it. All three of §6's checks pass, and only a comparison against the
+    forecaster's own held configuration stands between it and a request asking about
+    somewhere the deployment did not choose.
+
+    §3 is absolute that no caller widens, narrows or offsets the read, on ADR-0093 §10's
+    ground — "a caller able to widen the read is a caller able to defeat the bound" —
+    and §6's "every subsequent step reads the revalidated copy" says which *copy* to
+    trust rather than licensing the copy to name a place. **Refused before the
+    credential and before the channel**, which the two absences below are what assert.
+    """
+    subject = await built(channels=[answering(day())])
+    call = authorised_read(await request(subject, latitude=0.0, longitude=0.0))
+
+    with pytest.raises(ToolBindingError, match="not configured for"):
         await subject.forecaster.read(call, timeout=_BOUND)
 
     assert subject.keyring.reads == []
