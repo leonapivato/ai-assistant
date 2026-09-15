@@ -10466,7 +10466,18 @@ async function listAuthorizations(goal) {
     const body = await relay(half, "/authorizations", { goal_id: goal.id }, "authorizations");
     // A response that is not the latest is dropped whole: the run that overtook it owns
     // the panel, and rendering this one would draw one goal's rows under another's name.
-    if (body === null || run !== authorizationRuns) {
+    //
+    // **And a response admitted under a session this page no longer holds is dropped on
+    // the same terms.** The generation counter orders two *listings*; it says nothing
+    // about the session under them. Let this request hang, let any other request meet
+    // `no-live-session`, and `sessionLost` forgets the header half and puts the
+    // bootstrap entry back — but this run is still the latest, so resuming would call
+    // `show("authorizations", true)` and reveal a goal's standing authorities beside a
+    // form asking the owner to start a session. Comparing the half this request was
+    // sent under closes it in the one direction that matters and also covers re-entry:
+    // rows fetched under the old session are not this session's answer, and the new one
+    // asks for its own. Adversarial review, round 9, `major`.
+    if (body === null || run !== authorizationRuns || headerHalf() !== half) {
       return;
     }
     const list = el("authorization-list");
