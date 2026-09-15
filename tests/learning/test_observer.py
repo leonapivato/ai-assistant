@@ -943,7 +943,7 @@ async def test_an_episode_carrying_no_outcome_grows_no_assistant_line() -> None:
 
 #: ADR-0221 §2's phrase table, written out here.
 #:
-#: **Deliberately a fourth copy** of the sixteen strings the three render sites each
+#: **Deliberately a fourth copy** of the strings the three render sites each
 #: hold (§3). A test importing ``observer._disposition_phrase`` would assert that a
 #: function equals itself and would pass on a table with every phrase wrong; written
 #: out, this module pins the values §2 fixes as well as the byte-identity §11's test
@@ -963,6 +963,12 @@ _PHRASES: Final[dict[ExchangeDisposition, str]] = {
     ),
     ExchangeDisposition.STEP_EGRESS_UNBINDABLE: (
         "the outbound call could not be described, so nothing was asked or sent"
+    ),
+    ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED: (
+        "this goal had already claimed the act, so nothing was dispatched"
+    ),
+    ExchangeDisposition.STEP_EFFECT_UNSCOPED: (
+        "the plan did not say which act the step was, so nothing was dispatched"
     ),
     ExchangeDisposition.ROUTED_PERFORMED: (
         "the assistant performed the operation the user asked for"
@@ -995,7 +1001,7 @@ async def test_a_typed_disposition_renders_what_the_stored_phrase_used_to(
     """ADR-0221 §11's test 5 at this site, **narrowed** by ADR-0222 §8.
 
     §11's test 5 asked for byte-identity of the whole rendered prompt across the
-    ``disposition`` flip, for each of the sixteen members. ADR-0222 §8 narrows it:
+    ``disposition`` flip, for each member of the enum. ADR-0222 §8 narrows it:
     it "no longer binds for ``learning/observer.py``'s ``_outcome_lines`` on a record
     carrying **both** fields", because such a record now renders a second line by
     design. It binds unchanged everywhere else, and the population it still binds on

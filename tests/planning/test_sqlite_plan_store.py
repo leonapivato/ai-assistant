@@ -3409,7 +3409,7 @@ async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -3454,7 +3454,7 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -3505,7 +3505,7 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -3630,7 +3630,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
 
 

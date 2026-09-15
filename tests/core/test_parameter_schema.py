@@ -954,4 +954,8 @@ def test_disposition_gains_invalid_parameters_as_an_additive_wire_value() -> Non
         # (ADR-0084 §4), and what this still pins is that no *existing* value
         # string moved when one arrived.
         "egress_unbindable",
+        # ADR-0259 §9's two, listed for the same reason and pinning the same thing:
+        # no existing value string moved when they arrived.
+        "effect_already_claimed",
+        "effect_unscoped",
     }
