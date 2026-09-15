@@ -83,22 +83,20 @@ The project owner's ruling of 2026-09-12 on #2255, decision 8:
 > separate, scheduled after the investigation foundation is stable; it need not wait for
 > M34.
 
-and the design report's Q3, over *"A weather `Reader` (ADR-0095)"* and a booking
-integration at the `tools/` seam: it demonstrates investigation, dependent execution and
-verification *"**without any new destination-trust decision**, because a configured reader
-and a registered integration are already-governed shapes."*
+and the design report's Q3, over *"A weather `Reader` (ADR-0095)"* and a booking integration
+at the `tools/` seam: it demonstrates investigation, dependent execution and verification
+*"**without any new destination-trust decision** … already-governed shapes."*
 
 **This ADR is the forecast half and nothing else.** It decides one read kind and one seam,
 and decides no booking integration (a `tools/` integration at ADR-0154's seam, its own
 decision), no fetch, no autonomous web research, no second reader kind, no geocoding, no
-cache, no scheduled or proactive forecast, and no relaxation reachable by anything that is
-not a forecast read at the configured forecast provider. **§14 names each with what fires
-it.**
+cache, no scheduled forecast, and no relaxation reachable by anything that is not a forecast
+read at the configured provider. **§14 names each with what fires it.**
 
 The owner's ruling of 2026-09-14 fixes the reference provider: **Open-Meteo**, free and
 keyless, configured the way the search provider is. No vendor is named in any normative
-clause — §6's authority is stated over *the configured provider* — and §12 records that the
-implementing lane delivers the real one, and what would make it deliver a mock instead.
+clause — §6's authority is stated over *the configured provider* — and §12 records what L1
+delivers.
 
 ### The tree, read rather than assumed, at `origin/main` `8dbfddf0`
 
@@ -109,9 +107,6 @@ implementing lane delivers the real one, and what would make it deliver a mock i
 - **`tools/web_search.py` is the worked shape** for a configured HTTPS provider at that
   seam — a declaration, a provider adapter and a searcher driving the seam's own
   `HttpsExchange`, reaching no transport of its own, bound by the import contract.
-- **`readers/calendar.py` is the only site in the tree that constructs a
-  `ReportedExtent`**, which ADR-0252 §3 records as a dated observation: the evidence window
-  axis applies *"on nothing else until decision 8's reader lands"*.
 
 ### What the corpus already decides, and is used here as given
 
@@ -132,20 +127,13 @@ implementing lane delivers the real one, and what would make it deliver a mock i
   will accept for what a reader covered"* — while *"how a reader's read is asked for,
   serviced, budgeted or audited is that lane's"*.
 
-### Two premises in the framing that do not survive contact with the tree
+### The premise in the framing that does not survive contact with the tree
 
-Each is recorded because, taken at face value, it would have produced a different and wrong
-decision, and a reader comparing this ADR against #2255's wording is owed the difference.
-The third — that the evidence window could be a `Validity` — is refused by §5's own clause.
+It is recorded because, taken at face value, it would have produced a different and wrong
+decision. Of the other two, that it could be a `Reader` is refused under "Alternatives
+considered", and that the evidence window could be a `Validity` by §5's own clause.
 
-**1. It cannot be a `Reader`, and the corpus has already ruled on exactly this shape.**
-ADR-0093 §10 gives `read()` no arguments *by decision* — *"a caller able to widen the read
-is a caller able to defeat the bound"* — and ADR-0230 §4 met the same question for the
-fetch seam: *"Reusing `Reader` was never available … an argument is exactly what this
-contract needs"*, so *"it is a `core/protocols.py` addition and this is its ADR (golden
-rule 5)"*. "Alternatives considered" argues the shape out so the ruling is reversible.
-
-**2. `SourceReadRecord` is not what a forecast read returns.** ADR-0185 §2 makes it an
+**`SourceReadRecord` is not what a forecast read returns.** ADR-0185 §2 makes it an
 audit row that *"carries **no source content**, no entry, no path and no configured
 location"* — no `Provenance`, no `Validity`, no `Attestation`. What a serviced read returns
 into the supply is `MemoryRecord`s (ADR-0226 §1), and §5 fixes their provenance.
@@ -193,12 +181,11 @@ it currently says about the days ahead*, so the seam is a **`Forecaster`**.
 **The difference from `Reader` is the one ADR-0230 §4 already named, and it is not about
 the weather.** A `Reader` is bound by its own configuration and takes no address; a
 turn-time read must be a contract that can be *asked*. This seam takes the smallest ask —
-§3 makes it none at all — so ADR-0093 §10's reason is honoured and not worked around:
-there is nothing for a caller to widen.
+§3 makes it none at all — so ADR-0093 §10's reason is honoured, not worked around.
 
-**And the difference from a `ContextProvider` is the cadence again.** ADR-0252 §3 rules
-that no facet produces an evidence row, and ADR-0096 §3 that *"No facet is served from a
-cached, carried-over or previously assembled reading"*.
+**And the difference from a `ContextProvider` is the cadence again.** ADR-0252 §3 rules that
+no facet produces an evidence row, and ADR-0096 §3 that *"No facet is served from a cached,
+carried-over or previously assembled reading"*.
 
 ### 2. The kind: `FORECAST_READ`, an additive sixth member and not a second seam
 
@@ -225,15 +212,14 @@ cached, carried-over or previously assembled reading"*.
 **A sixth member rather than a widening of `WEB_SEARCH`, and ADR-0226 decides it twice
 over.** §1 of that ADR rules that *"no lane widens an admitted kind's meaning to carry a
 read the ADR that admitted it did not describe"*, and ADR-0231 §1 says what a `WEB_SEARCH`
-**is**: one search of the web whose query is composed from the turn's own utterance. A
-forecast read sends no query and composes nothing, and answers with a table rather than a
-result list — so folding the two would widen an admitted kind's meaning and change its
-servicing, against those two sentences in turn.
+**is**: one search whose query is composed from the turn's own utterance. A forecast read
+composes nothing and answers with a table — so folding the two would widen an admitted
+kind's meaning and change its servicing, against those two sentences in turn.
 
 **And the two do not reach the same records.** A search mints transcriptions carrying no
-structural axis at all — ADR-0252 §3 records that *"every `WEB_SEARCH` and every
-`LOCAL_FILE` row carries `supported` empty"* — where a forecast mints records that each
-declare an extent, which is the whole reason this kind is worth adding (§9).
+structural axis — ADR-0252 §3 records *"every `WEB_SEARCH` and every `LOCAL_FILE` row
+carries `supported` empty"* — where a forecast mints records that each declare an extent,
+the whole reason this kind is worth adding (§9).
 
 ### 3. The ask carries nothing at all, and that is this kind's whole safety mechanism
 
@@ -273,9 +259,7 @@ content"*.
 **The honest cost is that one deployment reads one place**, stated rather than glossed.
 The campsite walkthrough's forecast half is answered for the owner's own configured place;
 a forecast *at the campsite* needs a recorded coordinate no type on the tree carries today.
-§14 defers the place listing with what fires it, and that is a narrowing rather than a gap:
-answering "what is the weather this weekend" where the owner lives is the useful reader
-decision 8 asks for, and every later place widens §3 rather than adding a seam.
+§14 defers the place listing with what fires it.
 
 ### 4. The contract: `Forecaster`, and the bound the caller cannot widen
 
@@ -359,7 +343,13 @@ decision 8 asks for, and every later place widens §3 rather than adding a seam.
 > (ADR-0241 §1, §4): `read` takes the remaining time as its `timeout` keyword, an expiry
 > is `DEADLINE_EXPIRED` and is an outcome of its own rather than a failure, and a caller
 > wrapping this member in `asyncio.timeout` would cancel the forecaster mid-await and
-> could not classify its own expiry.
+> could not classify its own expiry. **The keyword takes ADR-0241 §1's form exactly** —
+> `timeout: timedelta`, **required and with no default**, so there is no spelling for
+> unbounded — and **a value that is not a `timedelta`, or is not strictly positive, is
+> refused with `ValueError` before the call is revalidated, before any credential is read
+> and before any channel is opened**. Zero and negative durations are refused and never
+> read as instantly expired, which is that section's own disposal of them at a second
+> seam.
 
 > **Normative.** **It carries no lifecycle member, deliberately**, exactly as `Fetcher`
 > and `WebSearcher` do: a concrete forecaster holding an opened resource exposes a
@@ -459,8 +449,7 @@ decision 8 asks for, and every later place widens §3 rather than adding a seam.
 
 **This is the producer ADR-0252 §3 says the corpus is missing, and names**: the window axis
 applies *"on nothing else until decision 8's reader lands"*. ADR-0117 §8 says why the
-calendar was the hard case — *"its entries lie ahead of the read, so a position-stating
-envelope window would not yet be open"* — and a forecast is that in its purest form.
+calendar was the hard case — *"its entries lie ahead of the read"*.
 
 ### 6. The egress: a configured provider, and the authority that reaches it
 
@@ -538,20 +527,19 @@ envelope window would not yet be open"* — and a forecast is that in its purest
 > very same turn. **This is ADR-0238 §5's own last clause, restated because this ADR widens
 > the exception ADR-0247 §3 guards.**
 
-**Why the rule is stated over the request and not over the destination**, which is
-ADR-0247 §1's argument inherited whole: a fact about a *destination* is readable by every
-kind, so a call of another kind bound to the forecast provider's set would inherit an
-authorisation the owner gave about forecasts — unreachable today, and *"unreachable today
-is exactly the argument this corpus refuses to rest on"*.
+**Why the rule is stated over the request and not over the destination**, which is ADR-0247
+§1's argument inherited whole: a fact about a *destination* is readable by every kind, so a
+call of another kind bound to the forecast provider's set would inherit an authorisation the
+owner gave about forecasts — *"unreachable today is exactly the argument this corpus refuses
+to rest on"*.
 
 **And why the third conjunct is a carried fact rather than `closed_loop`.** ADR-0247 §4
 defines `closed_loop` as *"the request's kind is `WEB_SEARCH` and this deployment holds a
-search registration"*, so it is the conjunct that says *which act this is* — the derived
-fact *"cannot assert which account and origin the binding carries; a lane reading it alone
-reopens the hole §3's limbs are stated to close"*, and the converse holds too. §11 therefore
-gives `CarriedProvenance` **one more boolean in `closed_loop`'s own shape** rather than
-widening `closed_loop`, which would rewrite every stored row and supersede a clause
-ADR-0247 §4 states as unchanged. §14 books the fold.
+search registration"* — the conjunct saying *which act this is*, which *"cannot assert which
+account and origin the binding carries"*, and conversely. §11 therefore gives
+`CarriedProvenance` **one more boolean in `closed_loop`'s own shape** rather than widening
+`closed_loop`, which would rewrite every stored row and supersede a clause ADR-0247 §4
+states as unchanged. §14 books the fold.
 
 ### 7. Servicing: one site, one budget, and where the forecast sits
 
@@ -686,9 +674,8 @@ ADR-0247 §4 states as unchanged. §14 books the fold.
 > ask and never why a source ruled the way it did.**
 
 **Two vocabularies and not one, which is ADR-0231's shape taken for its reason.** The seam
-answers for what *it* did; the servicing answers for the stages the seam never sees — a
-deployment that configured nothing, a budget that did not reach the ask, a binding that
-would not derive, a ruling that was not an `ALLOW`.
+answers for what *it* did; the servicing answers for the stages the seam never sees — no
+registration, no budget, no derivable binding, no `ALLOW`.
 
 ### 9. The evidence row: `requested` absent, `supported` composed from the extent
 
@@ -743,9 +730,9 @@ would not derive, a ruling that was not an `ALLOW`.
 one field.** That section observes that *"every `WEB_SEARCH` and every `LOCAL_FILE` row
 carries `supported` empty, fails §6's first test, and satisfies no condition"*, neither
 minting clause declaring an extent. A forecast record declares one per day, so a goal whose
-criterion is about Saturday meets a region that covers it and one that does not. **What it
-still does not establish is whether the forecast is right**: an extent says where the
-reported entry lies, never that the report is accurate.
+criterion is about Saturday meets a region that covers it and one that does not. **It still
+does not establish whether the forecast is right**: an extent says where the reported entry
+lies, never that the report is accurate.
 
 ### 10. What the user is told, and the contact this turn made
 
@@ -761,6 +748,13 @@ reported entry lies, never that the report is accurate.
 > own member. **`None` means the servicing recorded no `ForecastDisposition`, and means
 > nothing else**: a turn that serviced no forecast read, and a read the provider answered.
 > **`SpokenTurn` gains nothing**, and no lane adds a second field for this fact anywhere.
+>
+> **Where a revising turn serviced more than one forecast read** (§2), the members are
+> declared **in precedence order** and the field carries the **earliest-declared** member
+> any servicing of the turn recorded — ADR-0242 §7's rule at this seam, unchanged. **A
+> later read does not clear an earlier one's member**: a turn that was denied and then
+> answered still reports `DECLINED`, because the user was told about a read this turn did
+> not make and a second read does not unmake it.
 
 > **Normative — the fold, stated totally over the twelve dispositions**, because a fold
 > whose domain is not enumerated is a fold two implementations will disagree about:
@@ -831,7 +825,10 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > field**, so that an operator configuring the second provider configures the same shape
 > twice: `forecast_connection: str | None` and `forecast_origin: str | None`, **set
 > together or neither**; `forecast_latitude: float | None` and `forecast_longitude: float
-> | None`, set together and only where the pair above is set; `forecast_cost_per_call:
+> | None`, **all four set together or all four unset** — a connection and an origin
+> without a coordinate would start a deployment whose `request` must answer a proposal it
+> has no place to build, so the four are one pair of pairs and the load-time refusal
+> covers every half-set combination of them; `forecast_cost_per_call:
 > Decimal | None` and `forecast_cost_currency: str | None`, in
 > `web_search_cost_per_call`'s own cross-field shape; and the three bounds
 > `forecast_max_days: int`, `forecast_max_day_chars: int` and
@@ -1027,7 +1024,10 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > **Normative.** **(f) The budget and the order.** A servicing whose file and search have
 > taken nine slots admits **one** forecast record and records the kind as truncated; one
 > reached with no slots left composes no request, opens no channel, and yields **no
-> outcome entry** for the ask. **L3.**
+> outcome entry** for the ask; and a servicing carrying an ask of **all six** kinds
+> services them in §7's stated order, asserted over the whole sequence and not only over
+> the kinds ahead of the forecast, so that no later kind can take the slot this one was
+> reached with. **L3.**
 
 > **Normative.** **(g) The evidence row.** A forecast servicing on a goal turn writes a
 > row whose `requested` is absent, whose `records` is empty, and whose `supported` carries
@@ -1041,7 +1041,10 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > **both** producers of `PROVIDER_REFUSED` — a response the provider gave and this system
 > refused, and an account that changed across the credential read — carry `INDETERMINATE`
 > with `destinations` empty, asserted separately so that neither can regress to `REACHED`
-> or `NOT_REACHED` while the other holds. **L3.**
+> or `NOT_REACHED` while the other holds; and **`RESPONSE_TOO_LARGE` and `UNATTESTED` each
+> carry `UNAVAILABLE` with `FORECAST_PROVIDER` `REACHED`**, asserted separately too,
+> because §10 classes both as reached from octets this system took off the channel and
+> either folded to `INDETERMINATE` would deny a contact the trail recorded. **L3.**
 
 ### 14. Deferred, by name, each with what fires it
 
@@ -1084,8 +1087,8 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 
 ### 15. Scope, and what this records against earlier ADRs
 
-**The six records this ADR owes are declared here, each with ADR-0070 §1's test applied to
-the earlier ADR's text — what ADR-0082 §1 asks of an author.**
+**The six records are declared here, each with ADR-0070 §1's test applied to the earlier
+ADR's text — what ADR-0082 §1 asks of an author.**
 
 > **Normative.** **ADR-0155 §3's second clause, ADR-0233 §7 and ADR-0233 §9's four
 > conditions are untouched and are not reachable from here.** A span carrying covered
@@ -1129,17 +1132,15 @@ the earlier ADR's text — what ADR-0082 §1 asks of an author.**
   from a forecast call's recorded disposition and from nothing that clause names.
 
 **The second thing this section states is the clauses a reader would expect to have moved,
-and which did not.** **ADR-0093 §10's no-arguments rule** — `Reader.read()` still takes
-none, and its reason is **honoured** by §3 rather than worked around: this seam's ask
-carries nothing either. **ADR-0092 §3** — unamended; §5 takes the provider's declared
-instant with no substitute, and ADR-0230 §5's local-substitute scope expressly does not
-reach a remote source's earlier answer. **ADR-0208 §1** — honoured by §1 rather than
-approached; this kind is no relevance selection over the store. **ADR-0252 §3** — its
-`requested` enumeration is scoped in terms to *"the vocabulary ADR-0226 §2, ADR-0230 §1,
-ADR-0231 §1 and ADR-0240 §1 leave closed"*, so a sixth member is outside what it names, and
-§9 is a **stacked addition** owing that ADR no record under ADR-0082 §1. **ADR-0117 §2** —
-used as given. **ADR-0185, ADR-0097, ADR-0132 and ADR-0133** — untouched; §4 contracts no
-grant seam, for ADR-0230 §11's reason.
+and which did not.** **ADR-0093 §10** — `Reader.read()` still takes no arguments, its reason
+**honoured** by §3 rather than worked around. **ADR-0092 §3** — unamended; §5 takes the
+declared instant with no substitute, and ADR-0230 §5's local-substitute scope expressly does
+not reach a remote source's earlier answer. **ADR-0208 §1** — honoured by §1; this kind is no
+relevance selection over the store. **ADR-0252 §3** — its `requested` enumeration is scoped
+to *"the vocabulary ADR-0226 §2, ADR-0230 §1, ADR-0231 §1 and ADR-0240 §1 leave closed"*, so
+a sixth member is outside it and §9 is a **stacked addition** owing no record (ADR-0082 §1).
+**ADR-0117 §2, ADR-0185, ADR-0097, ADR-0132, ADR-0133** — used as given or untouched; §4
+contracts no grant seam, for ADR-0230 §11's reason.
 
 ### 16. Marking, review and ratification
 
@@ -1158,14 +1159,13 @@ against any clause until this ADR is merged** (golden rule 5, ADR-0015 §5).
 **What becomes easier.** A turn can ask the world a structured question whose answer is
 records rather than prose, and ADR-0252's evidence machinery acquires its first producer
 that can make a `supported` window mean something. §6 also writes the configuration-based
-authority over more than one kind, so the lane that adds a third finds it general.
+authority over more than one kind.
 
 **What becomes harder, stated rather than glossed.** There are now **two** carried facts
 about being at a configured provider where there was one, and §14 books the fold rather
 than pretending the drift is not there. The egress relaxations reach two kinds, a wider
 surface for a later ADR to widen again — §6's last clause and ADR-0247 §9's bar hold that
-line, both over the *request*. And a forecast draws up to three of ADR-0226 §6's ten
-slots.
+line, both over the *request*. And a forecast draws up to three of §6's ten slots.
 
 **What would trigger revisiting this.** A measurement that the three-day cap is wrong; a
 place listing from the booking side, firing §14's first bullet; a third configured-provider
@@ -1179,11 +1179,11 @@ This is #2255's own wording and the alternative a reader will most want. It is r
 because the two consumers it would have are the wrong two: ADR-0095's `Reader` feeds the
 situational-context facet and the ingestion stage, both *cadences*, and ADR-0096 §3 and
 ADR-0252 §3 between them forbid a facet from serving a carried-over reading or producing an
-evidence row at all. A forecast a turn asks for, whose answer becomes that turn's evidence,
-is a turn-time read — and ADR-0230 §4 already ruled *"Reusing `Reader` was never available"*
-for that shape. The refusal costs one more Protocol in `core`; accepting it would have cost
-a scheduled ingester writing durable weather beliefs about the owner, which ADR-0230 §11's
-third firing condition makes a **stop**.
+evidence row. ADR-0093 §10 also gives `read()` no arguments *by decision*, and ADR-0230 §4
+already ruled *"Reusing `Reader` was never available … an argument is exactly what this
+contract needs"* for this shape. The refusal costs one more Protocol in `core`; accepting it
+would have cost a scheduled ingester writing durable weather beliefs about the owner, which
+ADR-0230 §11's third firing condition makes a **stop**.
 
 **An ask carrying a planner-composed `TimeWindow`.** It would give ADR-0252 §3's
 `requested` a typed part and let a planner ask about a specific weekend. It is refused
