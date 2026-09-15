@@ -195,31 +195,41 @@ does not take that decision by another route.
 
 ### 1. A goal that closes ends every authorization of it and admits no more, in one step
 
-> **Normative — the ending, the set it is stated over, and the trigger.** **A *closing act* of a
-> goal — an act whose own write names a closed `GoalStatus`, `ACHIEVED` or `ABANDONED`,
-> ADR-0250 §1's own division and no wider set — ends every `Authorization` of that goal standing
-> `PROPOSED` or `ESTABLISHED`**, a live row and a lapsed one alike, each settled **`GOAL_CLOSED`**
-> (§2) at the instant of the act; **and in the same indivisible step the goal is fenced in the
-> authorization store, so that no row of it comes into being while that fence stands.**
-> **The trigger is the act and not the status the goal ends up holding**, which is what makes the
-> ending total: the ending is taken **before** the status write (below), so a closing write that
-> then fails leaves rows this decision has ended under a goal that is still open — stated here,
-> truthful under §2's meaning, and the reason §3 states the backstop over the rows no closing act
-> ends rather than over the goals that never close. **An act is a closing act by the write it
-> takes and not by that write landing**, which is why the definition above is stated over what
-> the act writes: defined over the status the goal ends up holding it would make §2's member
-> untruthful on exactly the path this clause states, and the ending would have to follow the
-> status write — the race the order below exists to close. **The ending is stated over the set and never
-> over one row**: a goal whose plan reached two declarations holds two rows under ADR-0254 §1's
-> per-declaration uniqueness, and an act that ended one would leave the other standing under a
-> closed goal.
+> **Normative — the ending, the set it is stated over, and the trigger.** **A *closing act* of a goal
+> — an act whose own write names a closed `GoalStatus`, `ACHIEVED` or `ABANDONED`, ADR-0250 §1's own
+> division and no wider set — ends every `Authorization` of that goal standing `PROPOSED` or
+> `ESTABLISHED`**, a live row and a lapsed one alike, each settled **`GOAL_CLOSED`** (§2) at the
+> instant of the act; **and in the same indivisible step the goal is fenced in the authorization
+> store, so that no row of it comes into being while that fence stands.** **The trigger is the act and
+> not the status the goal ends up holding**, which is what makes the ending total: the ending is taken
+> **before** the status write (below), so a closing write that then fails leaves rows this decision
+> has ended under a goal that is still open — stated here, truthful under §2's meaning, and the reason
+> §3 states the backstop over the rows no closing act ends rather than over the goals that never
+> close. **An act is a closing act by the write it takes and not by that write landing**, which is why
+> the definition above is stated over what the act writes: defined over the status the goal ends up
+> holding it would make §2's member untruthful on exactly the path this clause states, and the ending
+> would have to follow the status write — the race the order below exists to close. **The ending is
+> stated over an attempt the store accepts, and an overtaken attempt closes nothing and so ends
+> nothing**: an attempt whose `goal_version` the store's record already stands above ends no row and
+> fences nothing (the watermark, below), and the universal holds rather than admitting an exception:
+> **a record standing above that version means some act read the goal above it**, so the goal itself
+> has advanced past the version this attempt carries and **its own closing write is refused stale** by
+> ADR-0250 §9's compare-and-swap. **The implication runs one way and that is the way that matters**: a
+> refused ending guarantees a refused closing write, while a closing write refused on its own — the
+> goal advanced by a write that fenced nothing — is the ordinary stale loss the retry clause below
+> governs. **Nothing is lost**: ADR-0261 §2's re-read and retry takes a fresh attempt with a fresh
+> ending at the version it then finds, and the rows the overtaken attempt would have ended are of a
+> request established after its read, which it never had an authority over. **The ending is stated
+> over the set and never over one row**: a goal whose plan reached two declarations holds two rows
+> under ADR-0254 §1's per-declaration uniqueness, and an act that ended one would leave the other
+> standing under a closed goal.
 
-> **Normative — `BLOCKED` ends nothing, and this decision reaches no other status write.**
-> ADR-0250 §1 rules `BLOCKED` **open**, on ADR-0249 §4's ground that it means *"this objective
-> cannot currently be achieved"*: such a goal is still associated to, still planned for and
-> still holds attempts, so its request has not ended and neither has its authority. **A lane that
-> ended an authorization on a `→ BLOCKED` write has breached this clause**, and a reader who
-> takes *terminal* to mean *any status but `ACTIVE`* has read a set this decision does not state.
+> **Normative — `BLOCKED` ends nothing, and this decision reaches no other status write.** ADR-0250 §1
+> rules `BLOCKED` **open**, on ADR-0249 §4's ground that it means *"this objective cannot currently be
+> achieved"*: such a goal is still associated to, still planned for and still holds attempts, so its
+> request has not ended and neither has its authority. **A lane that ended an authorization on a `→
+> BLOCKED` write has breached this clause**, and a reader who takes *terminal* to mean *any status but
+> `ACTIVE`* has read a set this decision does not state.
 
 > **Normative — the two store members, in full, because a roster of names is not a contract.**
 > **`GoalAuthorizationStore` gains exactly two members and no third.**
@@ -253,323 +263,323 @@ does not take that decision by another route.
 > the store's whole defence against an act that read the goal before an intervening closure or
 > reopen and arrived after it.
 
-> **The version a caller passes is the one its own status write *expects*, never the one that
-> write returns**, and that holds at every call site. `set_goal_status` **advances**
-> `Goal.version` and answers the goal as written (ADR-0250 §9), so an act holds two versions and
-> **the record is keyed to the earlier**: a closing act passes the version the read its attempt
-> came from found and its own closing write names as `expected_version`, and §2's reopen passes
-> the version *its* `ACTIVE` write named. **A later act reads the goal only after the earlier
-> act's write has landed**, so its version is strictly higher and its call raises the record above
-> the earlier act's — and **the earlier act's later call, of either member, changes nothing**: a
-> delayed `clear_closure` unfences nothing, and a delayed `end_for_goal` ends no row of the
-> request written since and leaves the fence exactly as it found it. **A lane passing the returned
-> version at any call site has breached this clause**, and the failures it buys are the two the
-> version exists to close: a reopen unfencing a closure that overtook it, and a closing act
-> retiring the authority of a request established after it.
+> **The version a caller passes is the one its own status write *expects*, never the one that write
+> returns**, and that holds at every call site. `set_goal_status` **advances** `Goal.version` and
+> answers the goal as written (ADR-0250 §9), so an act holds two versions and **the record is keyed to
+> the earlier**: a closing act passes the version the read its attempt came from found and its own
+> closing write names as `expected_version`, and §2's reopen passes the version *its* `ACTIVE` write
+> named. **A later act reads the goal only after the earlier act's write has landed**, so its version
+> is strictly higher and its call raises the record above the earlier act's — and **the earlier act's
+> later call, of either member, changes nothing**: a delayed `clear_closure` unfences nothing, and a
+> delayed `end_for_goal` ends no row of the request written since and leaves the fence exactly as it
+> found it. **A lane passing the returned version at any call site has breached this clause**, and the
+> failures it buys are the two the version exists to close: a reopen unfencing a closure that overtook
+> it, and a closing act retiring the authority of a request established after it.
 
-> **Normative — the record is a write fence and not a second kind of record, and it binds
-> `record` alone.** **`GoalAuthorizationStore.record` refuses a row whose `goal` stands
-> fenced**, decided **in the same indivisible step as the write**, and refuses it with
-> **`InvalidAuthorizationError`** — the class ADR-0254 §16 gives *"a write this store does not
-> admit"*, one further entry in that section's list and **no new class**. **`settle` gains no
-> conjunct and needs none**: `end_for_goal` leaves the goal no `PROPOSED` row, so a settlement
-> naming one finds it `GOAL_CLOSED` and answers **`NOT_AT_SOURCE`** truthfully on ADR-0254 §1's
-> ratified graph. **`AuthorizationSettlement` therefore stays closed at four members** and no
-> refusal of this decision is an exception where a result is owed. **What the record holds is
-> one goal's closure watermark — a version, and whether this store admits a row of that goal —
-> and it is neither an authority, nor coverage, nor a row**: it carries no basis, no instant, no expiry and no
-> disposition, and `export` returns the rows exactly as ADR-0254 §16 fixes them.
+> **Normative — the record is a write fence and not a second kind of record, and it binds `record`
+> alone.** **`GoalAuthorizationStore.record` refuses a row whose `goal` stands fenced**, decided **in
+> the same indivisible step as the write**, and refuses it with **`InvalidAuthorizationError`** — the
+> class ADR-0254 §16 gives *"a write this store does not admit"*, one further entry in that section's
+> list and **no new class**. **`settle` gains no conjunct and needs none**: `end_for_goal` leaves the
+> goal no `PROPOSED` row, so a settlement naming one finds it `GOAL_CLOSED` and answers
+> **`NOT_AT_SOURCE`** truthfully on ADR-0254 §1's ratified graph. **`AuthorizationSettlement`
+> therefore stays closed at four members** and no refusal of this decision is an exception where a
+> result is owed. **What the record holds is one goal's closure watermark — a version, and whether
+> this store admits a row of that goal — and it is neither an authority, nor coverage, nor a row**: it
+> carries no basis, no instant, no expiry and no disposition, and `export` returns the rows exactly as
+> ADR-0254 §16 fixes them.
 
 > **Normative — `clear` erases the records with the rows, and §1's universal is stated absent a
-> `clear`.** ADR-0254 §16 rules that **`clear` erases the store wholesale and returns the count**,
-> and **the closure records go with the rows**: a record is keyed by a goal identifier, a goal
-> identifier is Tier-1 user data (ADR-0254 §16, ADR-0004 §1), and one surviving a wholesale
-> erasure would be a retained identifier of a user who asked for everything to be forgotten.
-> **A record whose fence is lifted goes exactly as a standing one does, and `clear` is the only
-> thing that erases either** — the watermark's cost, one record per goal this store was ever
-> told closed, alongside the rows of that goal it already holds. **`clear` answers the count of
-> rows unchanged**, a record being no row. **So the ending's
-> universal — no row of a closed goal stands and none can be recorded — holds *absent a `clear`*,
-> and after one a turn that read the goal open before the closure can record a row under it.** That
-> is stated rather than closed, because **the alternative is worse in the direction that
-> matters**: the only fix is retaining the goal identifiers of a cleared store, and what a
-> `clear` leaves is a store with no rows, no history and no authority to inherit. **No lane
-> retains a record across `clear`, reconstructs one afterwards, or reads `PlanStore` to rebuild
-> one.**
+> `clear`.** ADR-0254 §16 rules that **`clear` erases the store wholesale and returns the count**, and
+> **the closure records go with the rows**: a record is keyed by a goal identifier, a goal identifier
+> is Tier-1 user data (ADR-0254 §16, ADR-0004 §1), and one surviving a wholesale erasure would be a
+> retained identifier of a user who asked for everything to be forgotten. **A record whose fence is
+> lifted goes exactly as a standing one does, and `clear` is the only thing that erases either** — the
+> watermark's cost, one record per goal this store was ever told closed, alongside the rows of that
+> goal it already holds. **`clear` answers the count of rows unchanged**, a record being no row. **So
+> the ending's universal — no row of a closed goal stands and none can be recorded — holds *absent a
+> `clear`*, and after one a turn that read the goal open before the closure can record a row under
+> it.** That is stated rather than closed, because **the alternative is worse in the direction that
+> matters**: the only fix is retaining the goal identifiers of a cleared store, and what a `clear`
+> leaves is a store with no rows, no history and no authority to inherit. **No lane retains a record
+> across `clear`, reconstructs one afterwards, or reads `PlanStore` to rebuild one.** **The record is
+> deleted with the rows and is carried by no export and no surface, and that is stated rather than
+> left silent.** ADR-0254 §16 states the data rights over the store's **rows** — *"`export` returns a
+> portable snapshot of every row"* — and names what is Tier 1 in one, *"a goal statement, an argument
+> value and a span of the user's words"*. **A closure record carries none of it**: no statement, no
+> value, no span, no basis, no instant, no disposition — a goal identifier, a version and whether the
+> fence stands — and that identifier is one the store's own rows of that goal carry and export
+> already, `PlanStore`'s export carrying the goal itself besides (ADR-0250 §9). **What it is owed and
+> takes is deletion**: `clear` erases it with the rows, on §16's own terms and with no `delete(id)`
+> for either. **And it accumulates no faster than what §16 already keeps for good** — one record per
+> goal the user closed, against one row per authorization retained forever under that same
+> no-`delete(id)` rule — so ADR-0004 §6's accumulation limb is not reached by the record before it is
+> reached by the rows this store is ratified to keep. **A lane that adds a closure record to `export`,
+> mints a type for one or renders one on ADR-0254 §11's surfaces has breached this clause**; a surface
+> for it, if one is ever wanted, is that section's decision and not this one's.
 
-> **Normative — two writes, not one, and the fence is taken first.** The ending and the
-> `GoalStatus` write are **two writes in two stores** and the corpus offers no transaction across
-> them — ADR-0255 §6 states the constraint one store over, *"`PlanStore` offers no multi-write
-> commit"* — so **no lane states, implements or tests them as one**. `orchestration` calls
-> `end_for_goal` **after the read a closing-write attempt's `expected_version` comes from has
-> found the goal open, and strictly before that attempt**, and on the `ABANDONED` path that
-> closing write is
-> `PlanStore.close_goal_abandoned` (ADR-0261 §2), whose three writes stay one indivisible step and
-> gain nothing here. **The order is what makes the ending total rather than best-effort**: from the
-> instant `end_for_goal` returns, and for as long as the fence it raised stands, no row of that
-> goal stands `PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write cannot be
-> raced by an establishment. **Taken after the status write it would be exactly that race**, and no
-> lane reverses it.
+> **Normative — two writes, not one, and the fence is taken first.** The ending and the `GoalStatus`
+> write are **two writes in two stores** and the corpus offers no transaction across them — ADR-0255
+> §6 states the constraint one store over, *"`PlanStore` offers no multi-write commit"* — so **no lane
+> states, implements or tests them as one**. `orchestration` calls `end_for_goal` **after the read a
+> closing-write attempt's `expected_version` comes from has found the goal open, and strictly before
+> that attempt**, and on the `ABANDONED` path that closing write is `PlanStore.close_goal_abandoned`
+> (ADR-0261 §2), whose three writes stay one indivisible step and gain nothing here. **The order is
+> what makes the ending total rather than best-effort**: from the instant `end_for_goal` returns, and
+> for as long as the fence it raised stands, no row of that goal stands `PROPOSED` or `ESTABLISHED`
+> and none can be recorded, so the closing write cannot be raced by an establishment. **Taken after
+> the status write it would be exactly that race**, and no lane reverses it.
 
 > **Normative — what each failure leaves, and the closing act compensates nothing.** **Where
-> `end_for_goal` raises, the closing act ends there having written nothing on that attempt**, and
-> on a **first** attempt that is nothing at all — no status, no attempt commit, no fence — and a
-> retry re-runs the act whole. **On a retry attempt it leaves what the first attempt and any
-> intervening act left** — a fence standing where nothing has lifted it, repaired as below. **Where it succeeds and the
-> closing write does not, the act propagates and clears nothing**: the rows stand `GOAL_CLOSED`,
+> `end_for_goal` raises, the closing act ends there having written nothing on that attempt**, and on a
+> **first** attempt that is nothing at all — no status, no attempt commit, no fence — and a retry
+> re-runs the act whole. **On a retry attempt it leaves what the first attempt and any intervening act
+> left** — a fence standing where nothing has lifted it, repaired as below. **Where it succeeds and
+> the closing write does not, the act propagates and clears nothing**: the rows stand `GOAL_CLOSED`,
 > truthfully under §2's meaning — they were ended by a closing act of their goal, which is what
-> happened — the goal is left open and fenced, and **every call of it asks** until the user
-> repairs it, which is ADR-0254 §12's own stated cost for its rung 3, *"every call of that goal
-> asks"*, reached by one further route. **The repair is the user's own two acts and no
-> mechanism**: abandoning the goal fences what is fenced, ends nothing already ended and closes
-> it truthfully; reopening it then ends any survivor and clears the fence (§2). **No lane adds a
-> sweep, a repair pass, a start-up scan, a timer or a durable act identity for either failure.**
+> happened — the goal is left open and fenced, and **every call of it asks** until the user repairs
+> it, which is ADR-0254 §12's own stated cost for its rung 3, *"every call of that goal asks"*,
+> reached by one further route. **The repair is the user's own two acts and no mechanism**: abandoning
+> the goal fences what is fenced, ends nothing already ended and closes it truthfully; reopening it
+> then ends any survivor and clears the fence (§2). **No lane adds a sweep, a repair pass, a start-up
+> scan, a timer or a durable act identity for either failure.**
 
 > **Normative — why the act does not compensate, stated because the obvious design is the one
-> refused.** A `clear_closure` on a failed closing write **cannot tell its own orphaned fence
-> from one a concurrent act is relying on**, and the version does not separate them: two acts
-> whose first reads both found the goal open at version *v* fence at *v* alike, so a compensation
-> carrying *v* clears the record the act that actually closed the goal stands on, leaving a closed
-> goal unfenced and a stale turn able to record under it. **That is the state this decision exists
-> to close, and the compensation would reach it on the ordinary closing path** — not in a booked
-> residual (§8, §9) but every time a closing write failed — so the compensation goes, not the
-> fence. **The cost is asymmetric in the safe direction**: compensating risks an authority under
-> a closed goal, not compensating costs questions under an open one. **No lane restores it under
-> any name**, a repair call, a best-effort clear or a retry included.
+> refused.** A `clear_closure` on a failed closing write **cannot tell its own orphaned fence from one
+> a concurrent act is relying on**, and the version does not separate them: two acts whose first reads
+> both found the goal open at version *v* fence at *v* alike, so a compensation carrying *v* clears
+> the record the act that actually closed the goal stands on, leaving a closed goal unfenced and a
+> stale turn able to record under it. **That is the state this decision exists to close, and the
+> compensation would reach it on the ordinary closing path** — not in a booked residual (§8, §9) but
+> every time a closing write failed — so the compensation goes, not the fence. **The cost is
+> asymmetric in the safe direction**: compensating risks an authority under a closed goal, not
+> compensating costs questions under an open one. **No lane restores it under any name**, a repair
+> call, a best-effort clear or a retry included.
 
-> **Normative — the ending is taken once per closing-write attempt, ADR-0261 §2's retry
-> included.** That section retries a `StaleExecutionError` from `close_goal_abandoned` **once**,
-> re-reading and re-taking the act's own first-read decision, and **only where the re-read finds
-> the goal still open does it call the closing write again, under the version it has just read** —
-> so **that attempt takes its own `end_for_goal` first, carrying that same version**. **Without it
-> the retry closes a goal whose rows have moved under it**: between the two attempts another act
-> can close the goal and a reopen can lift the fence and admit a fresh row, which a retried
-> closure taking no ending would leave `ESTABLISHED` under the goal it has just closed — §1's
-> universal broken on a path the act itself reaches. Where nothing touched the rows it answers `0`
-> and costs nothing. **An attempt that is never made takes no ending** — an act answering
-> `NO_SUCH_GOAL` or `ALREADY_CLOSED` from its **first** read calls `end_for_goal` not at all, and
-> one answering either from its **re-read** called it once, for the attempt it did make, leaving
-> that fence **standing**: the state the act that closed the goal left. **A stale loss is not a
-> failed closing write and takes neither branch of the clause above**: the act retries as ADR-0261
-> §2 directs, and whichever way the re-read goes no fence is lifted. **No act calls
-> `clear_closure` at all** — that member has exactly one caller, §2's reopen.
+> **Normative — the ending is taken once per closing-write attempt, ADR-0261 §2's retry included.**
+> That section retries a `StaleExecutionError` from `close_goal_abandoned` **once**, re-reading and
+> re-taking the act's own first-read decision, and **only where the re-read finds the goal still open
+> does it call the closing write again, under the version it has just read** — so **that attempt takes
+> its own `end_for_goal` first, carrying that same version**. **Without it the retry closes a goal
+> whose rows have moved under it**: between the two attempts another act can close the goal and a
+> reopen can lift the fence and admit a fresh row, which a retried closure taking no ending would
+> leave `ESTABLISHED` under the goal it has just closed — §1's universal broken on a path the act
+> itself reaches. Where nothing touched the rows it answers `0` and costs nothing. **An attempt that
+> is never made takes no ending** — an act answering `NO_SUCH_GOAL` or `ALREADY_CLOSED` from its
+> **first** read calls `end_for_goal` not at all, and one answering either from its **re-read** called
+> it once, for the attempt it did make, leaving that fence **standing**: the state the act that closed
+> the goal left. **A stale loss is not a failed closing write and takes neither branch of the clause
+> above**: the act retries as ADR-0261 §2 directs, and whichever way the re-read goes no fence is
+> lifted. **No act calls `clear_closure` at all** — that member has exactly one caller, §2's reopen.
 
 > **Normative — a `PROPOSED` row is ended with the rest, and ADR-0254 §1's no-sweep clause is
-> untouched.** That clause reads *"**No sweep, no timer, no reclaim and no start-up scan**
-> settles it"*, and the closing act is none of the four: it is a **user act's own write**, taken
-> once, on the goal the user closed. **ADR-0250 §12 already settles the goal's open
-> `GoalQuestion` `WITHDRAWN` in that same act**, so a closing act reaching a durable question of
-> the goal is the corpus's own shape and not a mechanism minted here. **Ending it is what makes
-> the ending total**: a proposal left standing could be answered after a later reopen and would
-> then cover calls of the reopened request under a bound the user stated for the request that
-> ended, which is the failure this decision exists to prevent reached one disposition over.
+> untouched.** That clause reads *"**No sweep, no timer, no reclaim and no start-up scan** settles
+> it"*, and the closing act is none of the four: it is a **user act's own write**, taken once, on the
+> goal the user closed. **ADR-0250 §12 already settles the goal's open `GoalQuestion` `WITHDRAWN` in
+> that same act**, so a closing act reaching a durable question of the goal is the corpus's own shape
+> and not a mechanism minted here. **Ending it is what makes the ending total**: a proposal left
+> standing could be answered after a later reopen and would then cover calls of the reopened request
+> under a bound the user stated for the request that ended, which is the failure this decision exists
+> to prevent reached one disposition over.
 
 ### 2. `GOAL_CLOSED`: a seventh member, retired, and the ended row never revives
 
 > **Normative.** **`AuthorizationDisposition` gains one member and closes at seven**:
-> **`GOAL_CLOSED`**, valued by lower-cased member name like the other six, meaning **this row
-> was ended by a closing act of its goal**. **The meaning is stated over the act and not over
-> the goal's resulting status, and that is deliberate**: the ending and the `GoalStatus` write
-> are two writes in two stores (§1), the ending is taken first, and a closing write that then
-> fails leaves rows this member describes truthfully — they *were* ended by an act that was
-> closing their goal — where a member meaning *its goal closed* would assert an event that did
-> not occur. **What the member never means is that the row lapsed, that the user withdrew it or
-> that a later row replaced it**, which is what distinguishes it from the three §2 refuses
-> below. The vocabulary is *added to and never renamed*, which is
-> ADR-0254 §1's own rule and the licence for this member. **`GOAL_CLOSED` is *retired*: no edge
-> leaves it**, so it joins `DECLINED`, `EXPIRED`, `REVOKED` and `SUPERSEDED` as the **fifth**
-> member `settle` refuses a move out of, and **it is never live**, §1's liveness predicate being
-> stated over `ESTABLISHED` alone.
+> **`GOAL_CLOSED`**, valued by lower-cased member name like the other six, meaning **this row was
+> ended by a closing act of its goal**. **The meaning is stated over the act and not over the goal's
+> resulting status, and that is deliberate**: the ending and the `GoalStatus` write are two writes in
+> two stores (§1), the ending is taken first, and a closing write that then fails leaves rows this
+> member describes truthfully — they *were* ended by an act that was closing their goal — where a
+> member meaning *its goal closed* would assert an event that did not occur. **What the member never
+> means is that the row lapsed, that the user withdrew it or that a later row replaced it**, which is
+> what distinguishes it from the three §2 refuses below. The vocabulary is *added to and never
+> renamed*, which is ADR-0254 §1's own rule and the licence for this member. **`GOAL_CLOSED` is
+> *retired*: no edge leaves it**, so it joins `DECLINED`, `EXPIRED`, `REVOKED` and `SUPERSEDED` as the
+> **fifth** member `settle` refuses a move out of, and **it is never live**, §1's liveness predicate
+> being stated over `ESTABLISHED` alone.
 
-> **Normative — the graph gains two edges and `settle` admits both, the graph staying stated
-> once.** ADR-0254 §1's transition graph gains **`PROPOSED → GOAL_CLOSED`** and
-> **`ESTABLISHED → GOAL_CLOSED`** and closes at **seven** edges. `PROPOSED` and `ESTABLISHED`
-> stay **the two members an edge leaves** and no other edge exists. **`settle` admits both like
-> any other edge** and answers `AuthorizationSettlement` unchanged — `SETTLED`, or
-> `NOT_AT_SOURCE` for a row standing anywhere else; **`WOULD_DUPLICATE` is unreachable on
-> either**, that member being reachable only on a settlement to `ESTABLISHED`. **A store that
-> refused the member would be a second place the vocabulary is decided** (ADR-0250 §9's own
-> sentence, one store over), and a `settle` carve-out would need a fifth
-> `AuthorizationSettlement` member to refuse with, which §6's writer clause buys at no cost
-> instead.
+> **Normative — the graph gains two edges and `settle` admits both, the graph staying stated once.**
+> ADR-0254 §1's transition graph gains **`PROPOSED → GOAL_CLOSED`** and **`ESTABLISHED →
+> GOAL_CLOSED`** and closes at **seven** edges. `PROPOSED` and `ESTABLISHED` stay **the two members an
+> edge leaves** and no other edge exists. **`settle` admits both like any other edge** and answers
+> `AuthorizationSettlement` unchanged — `SETTLED`, or `NOT_AT_SOURCE` for a row standing anywhere
+> else; **`WOULD_DUPLICATE` is unreachable on either**, that member being reachable only on a
+> settlement to `ESTABLISHED`. **A store that refused the member would be a second place the
+> vocabulary is decided** (ADR-0250 §9's own sentence, one store over), and a `settle` carve-out would
+> need a fifth `AuthorizationSettlement` member to refuse with, which §6's writer clause buys at no
+> cost instead.
 
 > **Normative — why a seventh member and not one of the six, stated because ADR-0254 §1 already
-> answers the same question once.** **`EXPIRED` is refused** for that section's own reason, read
-> one ending over: it *"is the answer a question never got, and re-using it for a lapsed
-> authority would make the two indistinguishable in a listing"* — and a row that ended with its
-> goal is a third thing again. **`REVOKED` is refused** because it records the **user's**
-> withdrawal, and a surface that showed a system act as one would attribute to the user an act
-> they did not take. **`SUPERSEDED` is refused** because it names a later row that replaced this
-> one, and there is none. **A `bool`, a flag or a second field on the row is refused** because
-> ADR-0254 §1's field list is closed and *"a lane adding a member is changing this decision
-> rather than implementing it"*, which ADR-0256 §4 has already declined to reopen once.
+> answers the same question once.** **`EXPIRED` is refused** for that section's own reason, read one
+> ending over: it *"is the answer a question never got, and re-using it for a lapsed authority would
+> make the two indistinguishable in a listing"* — and a row that ended with its goal is a third thing
+> again. **`REVOKED` is refused** because it records the **user's** withdrawal, and a surface that
+> showed a system act as one would attribute to the user an act they did not take. **`SUPERSEDED` is
+> refused** because it names a later row that replaced this one, and there is none. **A `bool`, a flag
+> or a second field on the row is refused** because ADR-0254 §1's field list is closed and *"a lane
+> adding a member is changing this decision rather than implementing it"*, which ADR-0256 §4 has
+> already declined to reopen once.
 
-> **Normative — one member for both edges, and the ambiguity ADR-0254 §1 warns of does not
-> arise.** A row reached from `PROPOSED` and one reached from `ESTABLISHED` record **one fact**
-> — this row was ended by a closing act of its goal — and the two are not confused on any
-> surface,
-> because **neither is rendered on one**: `standing` returns `ESTABLISHED` rows alone (ADR-0254
-> §16), so it never offered a `PROPOSED` row and no longer offers an ended one. **Where they are
-> told apart is `recent` and `export`**, which carry the row whole — its `confirmation`, its
-> `coverage`, its `origin` and its basis — and that is where an auditor reads. **No lane mints a
-> second member, a field or a flag to distinguish them.**
+> **Normative — one member for both edges, and the ambiguity ADR-0254 §1 warns of does not arise.** A
+> row reached from `PROPOSED` and one reached from `ESTABLISHED` record **one fact** — this row was
+> ended by a closing act of its goal — and the two are not confused on any surface, because **neither
+> is rendered on one**: `standing` returns `ESTABLISHED` rows alone (ADR-0254 §16), so it never
+> offered a `PROPOSED` row and no longer offers an ended one. **Where they are told apart is `recent`
+> and `export`**, which carry the row whole — its `confirmation`, its `coverage`, its `origin` and its
+> basis — and that is where an auditor reads. **No lane mints a second member, a field or a flag to
+> distinguish them.**
 
-> **Normative — a reopen ends, then clears, and both are taken after the `ACTIVE` write and only
-> on a successful one.** **`orchestration` calls `end_for_goal` and then `clear_closure`
-> immediately after ADR-0250 §13's `GoalStatus.ACTIVE` write succeeds**, both carrying that
-> write's own `expected_version` (§1), and neither before it and neither on a write that was
-> refused. **The ending is taken first and it is what makes the reopen total rather than
-> dependent on the closure having run**: on a goal this store was told about it answers `0`, and
-> on one it was not — a database predating this decision (§9) — it ends the rows the closure
-> never reached, the only route by which a row written before a closure otherwise reaches a call
-> of the reopened goal. **It settles them `GOAL_CLOSED` truthfully**: their goal *was* closed, by
-> an act this store was never told of, and the reopen's ending completes that act rather than
-> asserting a closure of its own — which is why §2's member is stated over the closing act and
-> not over the status the goal now holds. **The clear is taken second and lifts the fence the
-> ending just wrote**, the record staying at that version with the fence down.
-> **The compare-and-swap is what serialises two reopens**: `set_goal_status` advances
-> `Goal.version` and refuses a stale `expected_version` (ADR-0250 §9), so of two acts reopening
-> one goal exactly one writes `ACTIVE`, exactly one takes the pair, and the loser re-reads and
-> finds a goal that is open — which ADR-0250 §13 does not reopen. **Between the `ACTIVE` write
-> and the clear the goal is fenced**, so a turn reading it open in that instant is refused a row
-> and **asks**, which is the fail-closed direction. **No lane clears a fence anywhere else or on
-> any other act**, `clear_closure` having exactly this one caller (§1).
+> **Normative — a reopen ends, then clears, and both are taken after the `ACTIVE` write and only on a
+> successful one.** **`orchestration` calls `end_for_goal` and then `clear_closure` immediately after
+> ADR-0250 §13's `GoalStatus.ACTIVE` write succeeds**, both carrying that write's own
+> `expected_version` (§1), and neither before it and neither on a write that was refused. **The ending
+> is taken first and it is what makes the reopen total rather than dependent on the closure having
+> run**: on a goal this store was told about it answers `0`, and on one it was not — a database
+> predating this decision (§9) — it ends the rows the closure never reached, the only route by which a
+> row written before a closure otherwise reaches a call of the reopened goal. **It settles them
+> `GOAL_CLOSED` truthfully**: their goal *was* closed, by an act this store was never told of, and the
+> reopen's ending completes that act rather than asserting a closure of its own — which is why §2's
+> member is stated over the closing act and not over the status the goal now holds. **The clear is
+> taken second and lifts the fence the ending just wrote**, the record staying at that version with
+> the fence down. **The compare-and-swap is what serialises two reopens**: `set_goal_status` advances
+> `Goal.version` and refuses a stale `expected_version` (ADR-0250 §9), so of two acts reopening one
+> goal exactly one writes `ACTIVE`, exactly one takes the pair, and the loser re-reads and finds a
+> goal that is open — which ADR-0250 §13 does not reopen. **Between the `ACTIVE` write and the clear
+> the goal is fenced**, so a turn reading it open in that instant is refused a row and **asks**, which
+> is the fail-closed direction. **No lane clears a fence anywhere else or on any other act**,
+> `clear_closure` having exactly this one caller (§1).
 
-> **Normative — a failure of either reopen call leaves whatever the closure left, and the two
-> cases differ.** **Where either raises after a successful `ACTIVE` write the act propagates**,
-> and no later turn reaches this call site, a turn finding the goal open being a continuation and
-> not a reopen (ADR-0250 §13). **Where a closure under this decision had run a fence stands**:
-> the goal is left `ACTIVE` and fenced, **every call of it asks**, and that is §1's
-> failed-closing-write state from the other side at the same cost. **Where it had not — §9's
-> pre-decision database, whose closure wrote no fence — an `end_for_goal` that raises writes none
-> either**, its step being all-or-nothing, so the goal is left `ACTIVE`, **unfenced**, its legacy
-> row still `ESTABLISHED` and still covering a call **until its own `expires_at`**. **That is
-> §9's prospectivity bound exactly, no worse than the pre-decision behaviour and the state the
-> reopen exists to improve on rather than one this decision creates**; **no clause claims every
-> call of such a goal asks.** **The repair is the user's own two acts in both cases**: abandoning
-> closes the goal truthfully and, on the legacy path, fences it and ends the row for the first
-> time; reopening then ends any survivor and clears the fence. **So no goal is permanently unable
-> to authorize and no legacy row outlives its own expiry**, and **no lane adds a sweep, a
-> start-up scan, a retry loop, a repair pass or a two-phase reopen for either.**
+> **Normative — a failure of either reopen call leaves whatever the closure left, and the two cases
+> differ.** **Where either raises after a successful `ACTIVE` write the act propagates**, and no later
+> turn reaches this call site, a turn finding the goal open being a continuation and not a reopen
+> (ADR-0250 §13). **Where a closure under this decision had run a fence stands**: the goal is left
+> `ACTIVE` and fenced, **every call of it asks**, and that is §1's failed-closing-write state from the
+> other side at the same cost. **Where it had not — §9's pre-decision database, whose closure wrote no
+> fence — an `end_for_goal` that raises writes none either**, its step being all-or-nothing, so the
+> goal is left `ACTIVE`, **unfenced**, its legacy row still `ESTABLISHED` and still covering a call
+> **until its own `expires_at`**. **That is §9's prospectivity bound exactly, no worse than the
+> pre-decision behaviour and the state the reopen exists to improve on rather than one this decision
+> creates**; **no clause claims every call of such a goal asks.** **The repair is the user's own two
+> acts in both cases**: abandoning closes the goal truthfully and, on the legacy path, fences it and
+> ends the row for the first time; reopening then ends any survivor and clears the fence. **So no goal
+> is permanently unable to authorize and no legacy row outlives its own expiry**, and **no lane adds a
+> sweep, a start-up scan, a retry loop, a repair pass or a two-phase reopen for either.**
 
-> **Normative — a reopened goal is a new attempt and a new act, and no ended row revives.**
-> ADR-0250 §13's reopen writes `GoalStatus.ACTIVE` and opens a new attempt at `UNDERSTAND`.
-> **No row settled `GOAL_CLOSED` is restored, re-opened, re-established or read as an authority
-> by it**: the member is retired, no edge leaves it, and ADR-0254 §1's posture for the same
-> question binds — *"`SUPERSEDED` is retired and no edge leaves it, so nothing un-supersedes
-> one"*. **And no row of the closed request survives in any other disposition either**, §1
-> having ended the goal's `PROPOSED` rows with its established ones, so **no row written before
-> the closure can ever cover a call of the reopened goal.** **That claim is stated over the
-> instant of the *write* and is not a claim about the act the write is grounded in**: a turn that
-> read the goal open before the closure and is still holding its `record` when the reopen clears
-> the fence writes **after** the closure and is admitted, carrying an authority the user gave for
-> the request that ended (§8, the residual it books). The reopened goal's authority is otherwise
-> established afresh, by a path-(i) proposal the user answers or by a path-(iii) opening act,
-> exactly as a first attempt's is, and ADR-0254 §1's uniqueness is satisfied by construction.
+> **Normative — a reopened goal is a new attempt and a new act, and no ended row revives.** ADR-0250
+> §13's reopen writes `GoalStatus.ACTIVE` and opens a new attempt at `UNDERSTAND`. **No row settled
+> `GOAL_CLOSED` is restored, re-opened, re-established or read as an authority by it**: the member is
+> retired, no edge leaves it, and ADR-0254 §1's posture for the same question binds — *"`SUPERSEDED`
+> is retired and no edge leaves it, so nothing un-supersedes one"*. **And no row of the closed request
+> survives in any other disposition either**, §1 having ended the goal's `PROPOSED` rows with its
+> established ones, so **no row written before the closure can ever cover a call of the reopened
+> goal.** **That claim is stated over the instant of the *write* and is not a claim about the act the
+> write is grounded in**: a turn that read the goal open before the closure and is still holding its
+> `record` when the reopen clears the fence writes **after** the closure and is admitted, carrying an
+> authority the user gave for the request that ended (§8, the residual it books). The reopened goal's
+> authority is otherwise established afresh, by a path-(i) proposal the user answers or by a
+> path-(iii) opening act, exactly as a first attempt's is, and ADR-0254 §1's uniqueness is satisfied
+> by construction.
 
 > **Normative — the ending ends the authority and never the interpretation.** ADR-0250 §13's
-> *"Reopening preserves everything the goal holds"* and ADR-0249 §1's append-only chain bind
-> entire, so a `USER_STATED` constraint of the goal — the money ceiling among them (ADR-0266 §1)
-> — **survives its goal's closure and its reopening unchanged**. What a later request
-> re-establishes is the **row**, minted from *"the user's own recorded words of this goal"*
-> (ADR-0254 §1), any turn of the goal and not only the latest. **No clause of this decision
-> edits, retracts, elides or re-grounds an interpretation revision, and no lane reads a closure
-> as licence to ask the user to restate a bound.**
+> *"Reopening preserves everything the goal holds"* and ADR-0249 §1's append-only chain bind entire,
+> so a `USER_STATED` constraint of the goal — the money ceiling among them (ADR-0266 §1) — **survives
+> its goal's closure and its reopening unchanged**. What a later request re-establishes is the
+> **row**, minted from *"the user's own recorded words of this goal"* (ADR-0254 §1), any turn of the
+> goal and not only the latest. **No clause of this decision edits, retracts, elides or re-grounds an
+> interpretation revision, and no lane reads a closure as licence to ask the user to restate a
+> bound.**
 
-> **Normative — what leaves the listing, stated rather than discovered.** `standing(goal)`
-> returns the `ESTABLISHED` rows and nothing else (ADR-0254 §16), so **a row ended `GOAL_CLOSED`
-> appears in `standing_authorizations` not at all**, exactly as a revoked or superseded one does
-> not. **It is not revocable**, there being nothing left to withdraw and no edge out. **It is
-> deleted by nothing**: ADR-0254 §12's no-deletion rule binds entire, `recent` and `export`
-> carry it whatever its disposition, and a user reading the record of a finished request still
-> finds what they authorised, what it covered and when it ended. **No lane adds a surface, a
-> carrier, a member or a second rendering for it**, and the listing renders exactly what
-> ADR-0254 §11 fixes.
+> **Normative — what leaves the listing, stated rather than discovered.** `standing(goal)` returns the
+> `ESTABLISHED` rows and nothing else (ADR-0254 §16), so **a row ended `GOAL_CLOSED` appears in
+> `standing_authorizations` not at all**, exactly as a revoked or superseded one does not. **It is not
+> revocable**, there being nothing left to withdraw and no edge out. **It is deleted by nothing**:
+> ADR-0254 §12's no-deletion rule binds entire, `recent` and `export` carry it whatever its
+> disposition, and a user reading the record of a finished request still finds what they authorised,
+> what it covered and when it ended. **No lane adds a surface, a carrier, a member or a second
+> rendering for it**, and the listing renders exactly what ADR-0254 §11 fixes.
 
 ### 3. The retention window is the backstop, and no instant is moved
 
-> **Normative.** **ADR-0256 §1's rung is the expiry of a row no closing act of its goal ends, and
-> of no other**, which is a wider set than *a row whose goal never closes* and deliberately so.
-> Every clause of that decision binds unchanged: the rung is taken on ADR-0254 §12's paths (i) and
-> (iii) at the instant the row is written, from `Settings.episode_retention` and `proposed_at`;
-> `Settings` gains nothing; a correction takes no rung of the ladder; §3's `None` case still writes
-> no row at all; and §5's narrowing correction is untouched. **What is subordinated is only the
-> claim that the window is the horizon**: a row standing when a closing act of its goal runs is
-> ended by that act, so its own `expires_at` is an **upper** bound and not the horizon. **The bound
-> is stated over the act and not over the two instants**, which is §2's meaning read one section
-> on: a row the closing act never reached — written after it, or under a closure that predates this
-> decision (§9) — is **not** ended by it and lapses on its own `expires_at` exactly as ADR-0256
-> ratifies, which is §8's booked residual and §9's prospectivity bound respectively. **A lane
-> reading this as "the earlier of two instants" has read a rule this decision does not state**, and
-> would owe a sweep no clause here licenses.
+> **Normative.** **ADR-0256 §1's rung is the expiry of a row no closing act of its goal ends, and of
+> no other**, which is a wider set than *a row whose goal never closes* and deliberately so. Every
+> clause of that decision binds unchanged: the rung is taken on ADR-0254 §12's paths (i) and (iii) at
+> the instant the row is written, from `Settings.episode_retention` and `proposed_at`; `Settings`
+> gains nothing; a correction takes no rung of the ladder; §3's `None` case still writes no row at
+> all; and §5's narrowing correction is untouched. **What is subordinated is only the claim that the
+> window is the horizon**: a row standing when a closing act of its goal runs is ended by that act, so
+> its own `expires_at` is an **upper** bound and not the horizon. **The bound is stated over the act
+> and not over the two instants**, which is §2's meaning read one section on: a row the closing act
+> never reached — written after it, or under a closure that predates this decision (§9) — is **not**
+> ended by it and lapses on its own `expires_at` exactly as ADR-0256 ratifies, which is §8's booked
+> residual and §9's prospectivity bound respectively. **A lane reading this as "the earlier of two
+> instants" has read a rule this decision does not state**, and would owe a sweep no clause here
+> licenses.
 
 > **Normative — no instant is moved, shortened, recomputed or re-read, and the row ends by a
-> disposition alone.** ADR-0254 §12's *"the expiry is taken once, when the row is written, and
-> is never recomputed"* binds **entire**. **This decision moves no `expires_at`**, on any path,
-> for any reason: `end_for_goal` writes the disposition and its instant and nothing else, so a
-> row ended `GOAL_CLOSED` still carries, and `export` still renders, the horizon the act was
-> granted under. **A lane that shortened an expiry to express this ending has breached this
-> clause**, and would have made the instant the user was shown at the act untrue.
+> disposition alone.** ADR-0254 §12's *"the expiry is taken once, when the row is written, and is
+> never recomputed"* binds **entire**. **This decision moves no `expires_at`**, on any path, for any
+> reason: `end_for_goal` writes the disposition and its instant and nothing else, so a row ended
+> `GOAL_CLOSED` still carries, and `export` still renders, the horizon the act was granted under. **A
+> lane that shortened an expiry to express this ending has breached this clause**, and would have made
+> the instant the user was shown at the act untrue.
 
-> **Normative — the window keeps the one job it had, and it is the one ADR-0256 §1 argued for.**
-> A goal that never closes — the user stops engaging it, no act abandons it, A10 never verifies
-> it — has no closing write for §1 to hang an ending on, and its rows lapse on the window
-> exactly as ratified. **So do the rows a closing act ran but never reached**: a row written
-> after the closure and admitted at a reopen (§8), and a row under a closure predating this
-> decision (§9). **Those three cases are the whole of the backstop**, and ADR-0256 §1's ground for the
-> figure is undisturbed: *"an authority takes the window the deployment keeps the record of its
-> act for, and never a window minted for it"*. **No lane reads this decision as a reason to
-> lengthen, cap, default or re-derive that window**, and ADR-0256 §6's exclusions —
-> `RecipientGrant.expires_at` and ADR-0247's configured-provider authority — bind entire and are
-> reached by no clause here.
+> **Normative — the window keeps the one job it had, and it is the one ADR-0256 §1 argued for.** A
+> goal that never closes — the user stops engaging it, no act abandons it, A10 never verifies it — has
+> no closing write for §1 to hang an ending on, and its rows lapse on the window exactly as ratified.
+> **So do the rows a closing act ran but never reached**: a row written after the closure and admitted
+> at a reopen (§8), and a row under a closure predating this decision (§9). **Those three cases are
+> the whole of the backstop**, and ADR-0256 §1's ground for the figure is undisturbed: *"an authority
+> takes the window the deployment keeps the record of its act for, and never a window minted for it"*.
+> **No lane reads this decision as a reason to lengthen, cap, default or re-derive that window**, and
+> ADR-0256 §6's exclusions — `RecipientGrant.expires_at` and ADR-0247's configured-provider authority
+> — bind entire and are reached by no clause here.
 
 ### 4. The uncertain outcome is not an exception, because nothing closes the goal under one
 
-> **Normative.** **This decision adds no exception for an uncertain outcome, and needs none,
-> because it writes no `GoalStatus` and adds no producer of one.** While a step of the goal
-> stands `INDETERMINATE` the attempt stands `EFFECT_UNRESOLVED`, which ADR-0255 §6 makes
-> *"neither a terminal member nor one of the three ADR-0249 §5 derives paused from"*; ADR-0249
-> §4 rules that *"An attempt reaching a terminal state **does not** move the goal's status"*;
-> and `ACHIEVED` has one producer, **A10's verification against the goal's criteria**, which an
-> unresolved effect has not supplied. **So the goal is not closed, no ending fires, and the
-> established row stands** — which is the owner's uncertain-outcome case satisfied by the
-> ratified route rather than by a clause of this decision.
+> **Normative.** **This decision adds no exception for an uncertain outcome, and needs none, because
+> it writes no `GoalStatus` and adds no producer of one.** While a step of the goal stands
+> `INDETERMINATE` the attempt stands `EFFECT_UNRESOLVED`, which ADR-0255 §6 makes *"neither a terminal
+> member nor one of the three ADR-0249 §5 derives paused from"*; ADR-0249 §4 rules that *"An attempt
+> reaching a terminal state **does not** move the goal's status"*; and `ACHIEVED` has one producer,
+> **A10's verification against the goal's criteria**, which an unresolved effect has not supplied.
+> **So the goal is not closed, no ending fires, and the established row stands** — which is the
+> owner's uncertain-outcome case satisfied by the ratified route rather than by a clause of this
+> decision.
 
-> **Normative — reconciliation resolves the step and closes nothing.** ADR-0259 §4's pass
-> *"writes **no `GoalStatus`**"* and its act 4 returns the attempt to `RUNNING` where no step of
-> it stands `INDETERMINATE` or `RUNNING`. **Whether the goal then closes is A10's, by the
-> ratified route and by no shortcut this decision offers**: a resolution is a repair of a record
-> and is not a verification. **No lane reads a resolved effect, a released attempt or a
-> reconciliation pass as a closing act**, and the pass calls `end_for_goal` in no case.
+> **Normative — reconciliation resolves the step and closes nothing.** ADR-0259 §4's pass *"writes
+> **no `GoalStatus`**"* and its act 4 returns the attempt to `RUNNING` where no step of it stands
+> `INDETERMINATE` or `RUNNING`. **Whether the goal then closes is A10's, by the ratified route and by
+> no shortcut this decision offers**: a resolution is a repair of a record and is not a verification.
+> **No lane reads a resolved effect, a released attempt or a reconciliation pass as a closing act**,
+> and the pass calls `end_for_goal` in no case.
 
-> **Normative — the user's cancellation closes such a goal and ends its authority with it, and
-> that is the ruling working rather than an exception to it.** ADR-0261 §2's act closes a goal
-> holding an outstanding effect and reports it, answering `ABANDONED_EFFECT_IN_FLIGHT` (§6).
-> **The ending fires there like any other `ABANDONED` write** — the user ended the request, and
-> an authority for a request the user ended is what this decision exists to retire. **What was
-> already dispatched is unaffected**: ADR-0261 §5 binds entire, the effect row is released by
-> nothing, and *"no lane reads a reopened goal or a fresh plan as licence to repeat an act"*.
+> **Normative — the user's cancellation closes such a goal and ends its authority with it, and that is
+> the ruling working rather than an exception to it.** ADR-0261 §2's act closes a goal holding an
+> outstanding effect and reports it, answering `ABANDONED_EFFECT_IN_FLIGHT` (§6). **The ending fires
+> there like any other `ABANDONED` write** — the user ended the request, and an authority for a
+> request the user ended is what this decision exists to retire. **What was already dispatched is
+> unaffected**: ADR-0261 §5 binds entire, the effect row is released by nothing, and *"no lane reads a
+> reopened goal or a fresh plan as licence to repeat an act"*.
 
 ### 5. The offer carries the price, and the acceptance is the authorisation act
 
-> **Normative — an offered change is a path-(i) proposal and the acceptance is its answer.**
-> Where the assistant offers a change — *"move it to Sunday — that is 135 euros"* — the offer is
-> put as the `CONFIRM` ADR-0254 §1's **path (i)** proposes a row against, and the user's
-> acceptance settles that row on §1's **`PROPOSED → ESTABLISHED`** edge. **That is the whole
-> mechanism and this decision mints none of it**: no surface, no carrier, no member, no edge and
-> no second question. **"A new request each time" is not "a separate money prompt each time"**,
-> because the request and the money are one question and the acceptance is one answer.
+> **Normative — an offered change is a path-(i) proposal and the acceptance is its answer.** Where the
+> assistant offers a change — *"move it to Sunday — that is 135 euros"* — the offer is put as the
+> `CONFIRM` ADR-0254 §1's **path (i)** proposes a row against, and the user's acceptance settles that
+> row on §1's **`PROPOSED → ESTABLISHED`** edge. **That is the whole mechanism and this decision mints
+> none of it**: no surface, no carrier, no member, no edge and no second question. **"A new request
+> each time" is not "a separate money prompt each time"**, because the request and the money are one
+> question and the acceptance is one answer.
 
 > **Normative — the amount is rendered by the machinery that already renders it, and a lane adds
-> nothing to make that true.** `Confirmation.authorization` carries an
-> `AuthorizationProjection` (ADR-0254 §11) whose `coverage` and `expires_at` that section
-> requires and whose `quote` ADR-0267 §7 transcribes from the proposed row's `quoted` — the
-> governing quote for the request's intended action, read from the goal the row was built from.
-> **So the figure the acceptance is taken over is on the screen the user answers**, which is
-> ADR-0254 §11's own test — *"A confirmation that establishes a bound without naming it is not a
-> confirmation of that bound"* — met by a value the ratified projection already carries. **No
-> lane re-selects a quote to render one** (ADR-0267 §7), and **no lane reads this clause as
-> widening what a confirmation names.**
+> nothing to make that true.** `Confirmation.authorization` carries an `AuthorizationProjection`
+> (ADR-0254 §11) whose `coverage` and `expires_at` that section requires and whose `quote` ADR-0267 §7
+> transcribes from the proposed row's `quoted` — the governing quote for the request's intended
+> action, read from the goal the row was built from. **So the figure the acceptance is taken over is
+> on the screen the user answers**, which is ADR-0254 §11's own test — *"A confirmation that
+> establishes a bound without naming it is not a confirmation of that bound"* — met by a value the
+> ratified projection already carries. **No lane re-selects a quote to render one** (ADR-0267 §7), and
+> **no lane reads this clause as widening what a confirmation names.**
 
 **The ruling's two "make it Sunday" cases are one rule read at two instants, and ADR-0266 §7 is
 reached and superseded in nothing.** That section's worked case — *"'Make it Sunday' replans and the
@@ -583,49 +593,45 @@ and not the words the user used.
 
 ### 6. Writer clauses, and what this decision leaves exactly as it stands
 
-> **Normative — one writer, and the call sites are named exhaustively.** **`orchestration`
-> calls `end_for_goal` and `clear_closure`, and nothing else does.** `end_for_goal` is called at
-> exactly three places and no fourth: before each closing-write attempt of ADR-0250 §12's
-> `ABANDONED` act (§1), before A10's `ACHIEVED` write (§1, §9), and after a **successful**
-> `ACTIVE` write on ADR-0250 §13's reopen (§2). `clear_closure` is called at exactly **one** and no second: after that same
-> reopen's `end_for_goal`, in that order (§2). **No act compensates a failed closing write**,
-> which §1 states and grounds. **No other act,
-> pass, sweep, scheduler or start-up scan calls either**, and ADR-0259 §4's reconciliation pass
-> calls neither (§4). That is ADR-0254 §15's clause reaching two members — an `Authorization` is
-> *"written and settled by `orchestration` and by nothing else"*. **No store, no `ActionPolicy`,
-> no `AuditTrail`, no interface adapter, no reader, no tool and no model output calls either,
-> and no model output decides that a goal has closed.** `GoalAuthorizations` and
-> `AuthorizationResolution` gain **nothing**: the policy's face still carries `live_for` alone
-> and the trail's `resolve` alone, so neither can reach either member (ADR-0254 §16's three
-> faces, unchanged).
+> **Normative — one writer, and the call sites are named exhaustively.** **`orchestration` calls
+> `end_for_goal` and `clear_closure`, and nothing else does.** `end_for_goal` is called at exactly
+> three places and no fourth: before each closing-write attempt of ADR-0250 §12's `ABANDONED` act
+> (§1), before A10's `ACHIEVED` write (§1, §9), and after a **successful** `ACTIVE` write on ADR-0250
+> §13's reopen (§2). `clear_closure` is called at exactly **one** and no second: after that same
+> reopen's `end_for_goal`, in that order (§2). **No act compensates a failed closing write**, which §1
+> states and grounds. **No other act, pass, sweep, scheduler or start-up scan calls either**, and
+> ADR-0259 §4's reconciliation pass calls neither (§4). That is ADR-0254 §15's clause reaching two
+> members — an `Authorization` is *"written and settled by `orchestration` and by nothing else"*. **No
+> store, no `ActionPolicy`, no `AuditTrail`, no interface adapter, no reader, no tool and no model
+> output calls either, and no model output decides that a goal has closed.** `GoalAuthorizations` and
+> `AuthorizationResolution` gain **nothing**: the policy's face still carries `live_for` alone and the
+> trail's `resolve` alone, so neither can reach either member (ADR-0254 §16's three faces, unchanged).
 
-> **Normative — `GOAL_CLOSED` is written through `end_for_goal` alone.** **No act settles a
-> single row to it through `settle`**, though §2 leaves both moves admissible: a row ended on its
-> own would assert that a goal closed when none did, and the fact this member records is a fact
-> about the **goal**. **A lane that wrote `GOAL_CLOSED` from anywhere but the closing act has
-> breached this clause.**
+> **Normative — `GOAL_CLOSED` is written through `end_for_goal` alone.** **No act settles a single row
+> to it through `settle`**, though §2 leaves both moves admissible: a row ended on its own would
+> assert that a goal closed when none did, and the fact this member records is a fact about the
+> **goal**. **A lane that wrote `GOAL_CLOSED` from anywhere but the closing act has breached this
+> clause.**
 
-> **Normative — §13's recheck and §7's trail invariant bind entire, and this decision adds no
-> residual to either.** ADR-0254 §7's route-(d) refusal reads the resolved row's `disposition`
-> and requires **`ESTABLISHED`** — *"the existence, the kind, the unrevoked, the unsuperseded and
-> the answered check at once, since every other disposition is retired and none of them is
-> live"* — and that reason is true of `GOAL_CLOSED` as it is of the other four, so the check is
-> unchanged and needs no conjunct. **A goal closing between `live_for` and `AuditTrail.record`
-> refuses the write**, exactly as ADR-0254 §20's arm 4 records for a revocation landing in the
-> same window. **A goal closing between the ruling and a claim already taken is ADR-0254 §13's
-> stated residual and §19's A9 booking, unnarrowed and unwidened**: a settlement is a settlement,
-> and this decision claims nothing stronger about its own than that section claims about a
-> revocation.
+> **Normative — §13's recheck and §7's trail invariant bind entire, and this decision adds no residual
+> to either.** ADR-0254 §7's route-(d) refusal reads the resolved row's `disposition` and requires
+> **`ESTABLISHED`** — *"the existence, the kind, the unrevoked, the unsuperseded and the answered
+> check at once, since every other disposition is retired and none of them is live"* — and that reason
+> is true of `GOAL_CLOSED` as it is of the other four, so the check is unchanged and needs no
+> conjunct. **A goal closing between `live_for` and `AuditTrail.record` refuses the write**, exactly
+> as ADR-0254 §20's arm 4 records for a revocation landing in the same window. **A goal closing
+> between the ruling and a claim already taken is ADR-0254 §13's stated residual and §19's A9 booking,
+> unnarrowed and unwidened**: a settlement is a settlement, and this decision claims nothing stronger
+> about its own than that section claims about a revocation.
 
-> **Normative — what is untouched, named so a lane cannot read silence as licence.**
-> `Authorization`'s **field list stays closed** and gains nothing. `CoverageMember`,
-> `ValueBound`, `BoundedArgument`, `ActionQuote` and every reading over them are untouched, and
-> **condition 6 is not reached in any limb** (ADR-0266 §7, ADR-0267). `AuthorizationSettlement`
-> stays closed at four, `AuthorizationOrigin` at two, `AuthorizationProjection`,
-> `AuthorizationView` and `CoverageView` gain no member, and `core/errors.py` gains no class.
-> `core.config.Settings` gains **nothing at all**. `GoalStatus`, `AttemptState`,
-> `AttemptOutcome`, `GoalAbandonment` and `AttemptPhase` gain **no member**, and no writer of any
-> of them is added, removed or re-attributed.
+> **Normative — what is untouched, named so a lane cannot read silence as licence.** `Authorization`'s
+> **field list stays closed** and gains nothing. `CoverageMember`, `ValueBound`, `BoundedArgument`,
+> `ActionQuote` and every reading over them are untouched, and **condition 6 is not reached in any
+> limb** (ADR-0266 §7, ADR-0267). `AuthorizationSettlement` stays closed at four,
+> `AuthorizationOrigin` at two, `AuthorizationProjection`, `AuthorizationView` and `CoverageView` gain
+> no member, and `core/errors.py` gains no class. `core.config.Settings` gains **nothing at all**.
+> `GoalStatus`, `AttemptState`, `AttemptOutcome`, `GoalAbandonment` and `AttemptPhase` gain **no
+> member**, and no writer of any of them is added, removed or re-attributed.
 
 ### 7. What this records against earlier ADRs, clause by clause, under ADR-0082 §1
 
@@ -742,8 +748,8 @@ producer here.
 
 ### 8. What this decision does not decide, by name, each with what fires it
 
-> **Normative.** This decision settles nothing about the following, and no lane cites it toward
-> any of them.
+> **Normative.** This decision settles nothing about the following, and no lane cites it toward any of
+> them.
 
 - **A standing grant across requests** — *"never ask under 20 euros"*. The owner's addendum rules
   it a **policy and not a request**, outside this rule and deferred. It would be its own
@@ -792,65 +798,60 @@ producer here.
 
 ### 9. The lane cut, the wire, the stored shape, and the arms this decision owes
 
-> **Normative — one lane, and the ground is that the two members have one caller between
-> them.** **`core/types.py`'s `GOAL_CLOSED`, `core/protocols.py`'s `end_for_goal` and
-> `clear_closure` and `record`'s further refusal, the `GoalAuthorizationStore` conformance
-> suite's arms for each, the canonical fake in `ai_assistant.testing`,
-> `SqliteGoalAuthorizationStore`'s implementation in `permissions/`, and `orchestration`'s three
-> call sites — `end_for_goal` before each `ABANDONED` closing-write attempt, and `end_for_goal`
-> then
-> `clear_closure` after ADR-0250 §13's `ACTIVE` write — are one change.** ADR-0137 §2's
-> construction is what makes it one — the contract rides with the primary production consumer
-> whose demands shape it — and the demand here is total: a lane landing `end_for_goal` without
-> its caller leaves a tree in which an authority never ends, and one landing it without
-> `clear_closure` leaves every reopened goal unable to authorise anything. **It is a BREAKING
-> contract change under golden rule 5 and is flagged as one**, and this ADR merges, ratified,
-> before it (ADR-0015).
+> **Normative — one lane, and the ground is that the two members have one caller between them.**
+> **`core/types.py`'s `GOAL_CLOSED`, `core/protocols.py`'s `end_for_goal` and `clear_closure` and
+> `record`'s further refusal, the `GoalAuthorizationStore` conformance suite's arms for each, the
+> canonical fake in `ai_assistant.testing`, `SqliteGoalAuthorizationStore`'s implementation in
+> `permissions/`, and `orchestration`'s three call sites — `end_for_goal` before each `ABANDONED`
+> closing-write attempt, and `end_for_goal` then `clear_closure` after ADR-0250 §13's `ACTIVE` write —
+> are one change.** ADR-0137 §2's construction is what makes it one — the contract rides with the
+> primary production consumer whose demands shape it — and the demand here is total: a lane landing
+> `end_for_goal` without its caller leaves a tree in which an authority never ends, and one landing it
+> without `clear_closure` leaves every reopened goal unable to authorise anything. **It is a BREAKING
+> contract change under golden rule 5 and is flagged as one**, and this ADR merges, ratified, before
+> it (ADR-0015).
 
-> **Normative — the `ACHIEVED` call site is A10's and is not this lane's.** `ACHIEVED` has no
-> producer in the tree (ADR-0249 §4), so **the lane above wires `end_for_goal` on the
-> `ABANDONED` close alone**, that being the one closing write that exists. **A10's lane calls it
-> before its own `set_goal_status(…, ACHIEVED)` write, on §1's order and passing that write's
-> own `expected_version`**, and **no lane ships a producer of a closed `GoalStatus` without
-> it**.
+> **Normative — the `ACHIEVED` call site is A10's and is not this lane's.** `ACHIEVED` has no producer
+> in the tree (ADR-0249 §4), so **the lane above wires `end_for_goal` on the `ABANDONED` close
+> alone**, that being the one closing write that exists. **A10's lane calls it before its own
+> `set_goal_status(…, ACHIEVED)` write, on §1's order and passing that write's own
+> `expected_version`**, and **no lane ships a producer of a closed `GoalStatus` without it**.
 
-> **Normative — `PROTOCOL_VERSION` does not move, and the ground is read off the tree rather
-> than assumed.** ADR-0124 §9's test is *"a change to a wire-carried `core` type that makes a
-> value one peer emits invalid for the other"*, and **no wire-carried value changes**: ADR-0254
-> §16 rules that *"**No `Authorization` crosses whole and no member of `GoalAuthorizations`,
-> `AuthorizationResolution` or `GoalAuthorizationStore` is promoted**"*, the four carriages that
-> do cross are projections, `AuthorizationView` carries `live`, a `bool`, and **not** a
-> disposition, and `AuthorizationSettlement` — which does cross, through `revoke_authorization`
-> — gains no member. **Neither `end_for_goal` nor `clear_closure` is promoted by anything.** **A lane that finds the tree
+> **Normative — `PROTOCOL_VERSION` does not move, and the ground is read off the tree rather than
+> assumed.** ADR-0124 §9's test is *"a change to a wire-carried `core` type that makes a value one
+> peer emits invalid for the other"*, and **no wire-carried value changes**: ADR-0254 §16 rules that
+> *"**No `Authorization` crosses whole and no member of `GoalAuthorizations`,
+> `AuthorizationResolution` or `GoalAuthorizationStore` is promoted**"*, the four carriages that do
+> cross are projections, `AuthorizationView` carries `live`, a `bool`, and **not** a disposition, and
+> `AuthorizationSettlement` — which does cross, through `revoke_authorization` — gains no member.
+> **Neither `end_for_goal` nor `clear_closure` is promoted by anything.** **A lane that finds the tree
 > disagrees takes the bump and records the correction in `wire/envelope.py`'s log**, rather than
 > reading this clause as permission to skip one.
 
-> **Normative — the authorization store's `schema_version` moves by exactly one and no migration
-> is owed.** A file written after this decision may carry a `disposition` an earlier reader
-> refuses, and carries a closure record earlier code does not know, which is ADR-0039 §10's
-> mechanism as ADR-0261 §10 applies it one store over. **No row is rewritten, re-dispositioned
-> or back-filled and no goal is recorded closed by the upgrade** — so the migration is the
-> version marker and the new storage, and nothing else. The tree holds **1**
-> as a dated observation at `61f40e9f`. **No compatibility shim, lenient decode or
-> tolerated-unknown entry is added.**
+> **Normative — the authorization store's `schema_version` moves by exactly one and no migration is
+> owed.** A file written after this decision may carry a `disposition` an earlier reader refuses, and
+> carries a closure record earlier code does not know, which is ADR-0039 §10's mechanism as ADR-0261
+> §10 applies it one store over. **No row is rewritten, re-dispositioned or back-filled and no goal is
+> recorded closed by the upgrade** — so the migration is the version marker and the new storage, and
+> nothing else. The tree holds **1** as a dated observation at `61f40e9f`. **No compatibility shim,
+> lenient decode or tolerated-unknown entry is added.**
 
-> **Normative — the ending is prospective, and the bound on what the upgrade leaves behind is
-> stated rather than implied.** **This decision governs closing acts taken after it ships and
-> retrofits nothing**, which is ADR-0247 §8(b)'s prospectivity — the shape ADR-0254 §12 already
-> reads onto this very store, *"a later edit to the goal's `deadline` moves no row already
-> written"*. **What that leaves is stated exactly**: a database written before this decision may
-> hold an `ESTABLISHED` row whose goal was **already closed**, the closing act having run before
-> `end_for_goal` existed, and **no upgrade ends it and no sweep finds it** — it stands in
-> `standing_authorizations` and can cover a call of that goal **until its own `expires_at`**,
-> which ADR-0256 §1 bounds by the turn-retention window in force at its write. **That is the
-> pre-decision behaviour and is no worse**: the defect this ADR names, persisting for rows
-> written before the fix and bounded by the backstop that was their only bound. **The one path
-> by which it could outlive that bound is closed**: §2's reopen ends it before clearing the fence.
-> **A cross-store migration read is refused**: `permissions` reading `PlanStore` at upgrade to
-> find which goals are closed is the subsystem-boundary crossing §1 declines at the write, and
-> declining it at the write while taking it at the upgrade would put the same read in the same
-> place by another door. **No lane adds a back-fill, a reconciliation pass or a start-up scan
-> for these rows.**
+> **Normative — the ending is prospective, and the bound on what the upgrade leaves behind is stated
+> rather than implied.** **This decision governs closing acts taken after it ships and retrofits
+> nothing**, which is ADR-0247 §8(b)'s prospectivity — the shape ADR-0254 §12 already reads onto this
+> very store, *"a later edit to the goal's `deadline` moves no row already written"*. **What that
+> leaves is stated exactly**: a database written before this decision may hold an `ESTABLISHED` row
+> whose goal was **already closed**, the closing act having run before `end_for_goal` existed, and
+> **no upgrade ends it and no sweep finds it** — it stands in `standing_authorizations` and can cover
+> a call of that goal **until its own `expires_at`**, which ADR-0256 §1 bounds by the turn-retention
+> window in force at its write. **That is the pre-decision behaviour and is no worse**: the defect
+> this ADR names, persisting for rows written before the fix and bounded by the backstop that was
+> their only bound. **The one path by which it could outlive that bound is closed**: §2's reopen ends
+> it before clearing the fence. **A cross-store migration read is refused**: `permissions` reading
+> `PlanStore` at upgrade to find which goals are closed is the subsystem-boundary crossing §1 declines
+> at the write, and declining it at the write while taking it at the upgrade would put the same read
+> in the same place by another door. **No lane adds a back-fill, a reconciliation pass or a start-up
+> scan for these rows.**
 
 > **Normative — the arms the lane owes, and they are ten.**
 >
