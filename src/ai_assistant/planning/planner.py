@@ -2772,10 +2772,21 @@ def _optional_actions(envelope: dict[str, object]) -> tuple[ProposedAction, ...]
     ``A`` labels index into.
 
     **Read key by key into an explicit payload, never handed the model's object**
-    (§2). Two members are read and everything else is stepped over, so an ``id`` of any
-    spelling reaches nothing — ``ProposedAction``'s ``extra="forbid"`` would refuse one
-    and this never offers it the chance, which is :func:`_optional_understanding`'s own
-    construction over a smaller value.
+    (§2). Two members are read and everything else is stepped over, which is
+    :func:`_optional_understanding`'s own construction over a smaller value: a key this
+    function does not read reaches nothing, structurally rather than by a rule someone
+    remembered to write.
+
+    **An ``id`` is the one exception, and it is refused rather than stepped over**
+    (§2). "A planner names no identifier and mints none, which is ADR-0228 §8's namer
+    rule binding this field as it binds every other" — and the *other* field this seam
+    binds it over, a step's own ``id``, is refused here too and for a reason that
+    transfers exactly (:meth:`ModelBackedPlanner._step_payload`). A reply that minted an
+    identity has misunderstood which side owns it, and the misunderstanding does not
+    stop at this member: a step of the same reply is liable to carry that invented value
+    as its ``action`` in place of the ``A`` label §4 asks for, which the loop then
+    refuses with the whole plan. Discarding the ``id`` silently would leave the model no
+    signal at the one moment a bounded repair round can still fix both.
 
     **This read is strict, like that one and for a sharper version of its reason.** A
     dropped or half-read ``actions`` is not the "one further read" a dropped
@@ -2807,7 +2818,8 @@ def _optional_actions(envelope: dict[str, object]) -> tuple[ProposedAction, ...]
         model wrote them, empty where the envelope proposed none.
 
     Raises:
-        _ExtractionError: If ``actions`` is present and cannot be read.
+        _ExtractionError: If ``actions`` is present and cannot be read, or an entry of
+            it carries an ``id``.
     """
     if "actions" not in envelope:
         return ()
@@ -2819,6 +2831,12 @@ def _optional_actions(envelope: dict[str, object]) -> tuple[ProposedAction, ...]
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
             msg = f"'actions[{index}]' is not a JSON object"
+            raise _ExtractionError(msg, actions=True)
+        if "id" in entry:
+            msg = (
+                f"'actions[{index}]' carries an 'id'; intended actions are identified "
+                f"downstream and a step names one by its printed label, such as 'A1'"
+            )
             raise _ExtractionError(msg, actions=True)
         # An absent `serves` is the field's own default and a `null` is refused by
         # `ProposedAction`, which is :func:`_proposed_axis`' rule one member over: the
