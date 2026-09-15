@@ -97,17 +97,18 @@ backstop, and an offered change carries the price its acceptance authorises
   open/closed division, which the superseding decision takes as its trigger, and §12's abandonment
   sequence, which gains nothing there
 - **Partially supersedes** [ADR-0004](0004-privacy-and-data-handling.md)
-  — **one scope. §6's export limb, in the single respect that this store retains one datum outside
-  it.** *"The user can **view, export, and delete** their data"* stays true of every row of every
-  store and of the **deletion** of this one: §1's per-goal **closure record** — a goal identifier, a
-  `goal_version` and whether the write fence stands — is erased by `clear` with the rows and is
-  reached by no `export` and no surface. **What stands in for the export limb here is §1's own
-  grounding**: the record carries no content, its identifier is the goal's and `PlanStore.export`
-  carries it, and it accumulates behind the rows ADR-0254 §16 already keeps for good. **§6's
-  deletion limb binds entire**, its Tier-0-and-Tier-1 purge clause included, as do §§1-5 and §§7
-  onward, and **no other store and no other datum takes this scope**. A reader holding only §6 reads
-  the record's absence from an export as a defect rather than as this decision's stated and bounded
-  cost (#2410)
+  — **one scope, in two limbs of one clause. §6's view limb and its export limb, each only as they
+  reach one datum.** *"The user can **view, export, and delete** their data"* stays true of every
+  row of every store and of the **deletion** of this one: §1's per-goal **closure record** — a goal
+  identifier, a `goal_version` and whether the write fence stands — is erased by `clear` with the
+  rows and is reached by **no `export` and no viewing surface**, the sharpest case being a goal
+  fenced while the store holds no row of it. **What stands in for both limbs over this one class is
+  §1's own grounding**: the record carries no content, its identifier is the goal's and
+  `PlanStore.export` carries it, and it accumulates behind the rows ADR-0254 §16 already keeps for
+  good. **§6's deletion limb binds entire**, its Tier-0-and-Tier-1 purge clause included, as do
+  §§1-5 and §7, and **no other store and no other datum takes this scope**. A reader holding only §6
+  looks for the record in an export or on a surface, finds it on neither, and reads its absence as a
+  defect rather than as this decision's stated and bounded cost (#2410)
 - Date: 2026-09-15
 
 ## Context
@@ -745,9 +746,9 @@ places, in four documents.**
    changed: §1's open/closed division, which §1 of this decision takes as its trigger, and §12's
    abandonment sequence, which gains nothing here.
 
-7. **ADR-0004 §6's export limb**, in the single respect above: *"The user can view, export, and
-   delete their data"* reads as reaching every retained datum, and §1's closure record is exported
-   by nothing — a goal fenced with no row of it being the case where no row of this store carries
+7. **ADR-0004 §6's view and export limbs**, in the single respect above: *"The user can view, export, and
+   delete their data"* reads as reaching every retained datum, and §1's closure record is reached by
+   neither an export nor a surface — a goal fenced with no row of it being the case where no row of this store carries
    its identifier either. **Its deletion limb is untouched**, the record going with the rows under
    `clear`. A reader holding only §6 reads the record's absence from `export` as a defect rather
    than as the bounded cost §1 states, and would author the projection #2410 books.
@@ -978,11 +979,14 @@ producer here.
 **A reader acts differently, so this is a decision and not a clarification.** A reader holding the
 corpus without it ships an authority that outlives the request it was granted for by up to a
 deployment's whole retention window, and a listing that offers the user a live authority over a
-finished booking. **It is a partial supersession of exactly three documents** (ADR-0070 §3) —
-ADR-0254 in four scopes, ADR-0256 in one and ADR-0250 in one — and the `Status` line of each names
-its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
-invariant holds. **The records land in the same change as this document** (ADR-0082 §7), and nothing
-else in any of the three is edited — no Decision text is rewritten, which ADR-0070 §1 forbids.
+finished booking. **It is a partial supersession of exactly four documents** (ADR-0070 §3) —
+ADR-0254 in four scopes, ADR-0256 in one, ADR-0250 in one and ADR-0004 in one — and the `Status`
+line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070
+§4's extraction invariant holds. **ADR-0004 carries the grandfathered accumulated form and takes
+both halves ADR-0082 §§1-2 owe it** — the scope appended to its `Status` qualifier and a dated
+`Partially superseded:` note beside its others. **The records land in the same change as this
+document** (ADR-0082 §7), and nothing else in any of the four is edited — no Decision text is
+rewritten, which ADR-0070 §1 forbids.
 
 **This ADR is marked** under ADR-0089 as ADR-0257 §1 widens the token: every obligation is a
 normative blockquote at column 0 stating its own scope, unmarked text beside a mark supplies no
