@@ -1077,17 +1077,19 @@ async def _recipient_grant_operations(now: Clock) -> None:
 async def _authorization_operations(now: Clock) -> None:
     """The operations read the clock to judge a row's liveness (ADR-0254 §11, §16).
 
-    Driven through the **listing**, which is the cheaper of the two reads and the one a
-    surface reaches first: §16 has ``standing`` evaluate no liveness and report none, so
-    the caller compares — and takes **one** reading for the whole listing (ADR-0193 §9),
-    which happens whether or not the goal holds a row. The other read is the instant a
-    revocation stamps, behind the same guard.
+    Driven through the **revocation**, which is the one of the two reads that is
+    unconditional: the listing takes its single reading (ADR-0193 §9) **after** the
+    snapshot, so that a row settled while ``standing`` was suspended cannot come back
+    with an instant after it — which means the listing over a goal nothing holds reads no
+    clock at all, and §11 makes that empty answer *"rather than a raise"*. A withdrawal
+    stamps its instant whatever the store then finds, so it reaches the guard on an empty
+    store too. Both reads are behind the one wrapper.
     """
     await AuthorizationOperations(
         authorizations=FakeGoalAuthorizationStore(),
         plans=FakePlanStore(now=lambda: _AWARE),
         now=now,
-    ).standing_authorizations("goal-1")
+    ).revoke_authorization("auth-1")
 
 
 async def _parked_read_operations(now: Clock) -> None:

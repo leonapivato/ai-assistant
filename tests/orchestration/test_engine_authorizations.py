@@ -26,12 +26,14 @@ import pytest
 from test_engine import (
     PATIENT,
     Harness,
+    OneStepPlanner,
     _fresh_facade,
     bound_binder,
     egress_confirmable,
 )
 
 from ai_assistant.core.types import (
+    AuthorizationDisposition,
     AuthorizationSettlement,
     Disposition,
     Goal,
@@ -40,15 +42,11 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
 )
-from ai_assistant.orchestration.authorizing import authorization_id_for
 from ai_assistant.orchestration.engine import Engine
+from ai_assistant.orchestration.runner import StepRunner
 from ai_assistant.testing import (
     AUTHORIZATION_NOW,
     FakeGoalAuthorizationStore,
-    authorization,
-    authorization_basis,
-    coverage_member,
-    money_bound,
     opening_act,
 )
 
@@ -59,12 +57,29 @@ from ai_assistant.testing import (
 FIRST_DECISION: Final = "d-1"
 
 
-def _harness() -> tuple[Harness, FakeGoalAuthorizationStore]:
-    """An egress-confirmable harness whose runner and engine share one row store."""
+def _harness(*, proposing: bool = True) -> tuple[Harness, FakeGoalAuthorizationStore]:
+    """An egress-confirmable harness whose runner and engine share one row store.
+
+    **The step carries no argument, and that is what makes a proposal reachable at
+    all.** ADR-0254 §1's completeness condition — every user-facing argument named by a
+    member — holds only **vacuously** while issue #2373 stands, so the one `CONFIRM`
+    that proposes a row on this tree is one over an argument-free egress call (§20's arm
+    54, and arm 59's last case). `proposing=False` restores the ordinary shape, where the
+    call carries a recipient and no row is proposed.
+
+    ``episode_retention`` is ADR-0256 §1's third rung, which the ladder needs because the
+    harness's goals carry no ``deadline``.
+    """
     store = FakeGoalAuthorizationStore()
     definition = egress_confirmable()
     return (
-        Harness(tools=(definition,), binder=bound_binder(definition), authorizations=store),
+        Harness(
+            tools=(definition,),
+            binder=bound_binder(definition),
+            authorizations=store,
+            planner=OneStepPlanner(parameters={}) if proposing else None,
+            episode_retention=timedelta(hours=12),
+        ),
         store,
     )
 
@@ -79,18 +94,6 @@ async def test_the_question_carries_what_answering_would_establish() -> None:
     span and the same ``expires_at``.
     """
     harness, store = _harness()
-    row = authorization(
-        id=authorization_id_for(FIRST_DECISION),
-        confirmation=FIRST_DECISION,
-        coverage=(
-            coverage_member(
-                "amount",
-                bound=money_bound("60"),
-                basis=authorization_basis(span="nothing over sixty pounds"),
-            ),
-        ),
-    )
-    await store.record(row)
 
     outcome = await harness.engine.converse("send it", timeout=PATIENT)
 
@@ -100,13 +103,13 @@ async def test_the_question_carries_what_answering_would_establish() -> None:
     assert confirmation is not None
     projection = confirmation.authorization
     assert projection is not None
+    (row,) = await store.export()
+    assert row.disposition is AuthorizationDisposition.PROPOSED
     assert projection.expires_at == row.expires_at
-    assert [one.span for one in projection.coverage] == ["nothing over sixty pounds"]
-    shown = projection.coverage[0].bound
-    recorded = row.coverage[0].bound
-    assert shown is not None
-    assert recorded is not None
-    assert shown.maximum == recorded.maximum
+    # §20 arm 54: an argument-free call proposes a row whose ``coverage`` is empty, and
+    # the projection is **present** and transcribes it. Omitting it would say falsely
+    # that answering establishes no authority.
+    assert projection.coverage == ()
 
 
 async def test_the_projection_names_no_identifier_at_all() -> None:
@@ -120,11 +123,10 @@ async def test_the_projection_names_no_identifier_at_all() -> None:
     client, and the row it was built from carries every one of those values.
     """
     harness, store = _harness()
-    row = authorization(id=authorization_id_for(FIRST_DECISION), confirmation=FIRST_DECISION)
-    await store.record(row)
 
     outcome = await harness.engine.converse("send it", timeout=PATIENT)
 
+    (row,) = await store.export()
     assert outcome.step is not None
     assert outcome.step.confirmation is not None
     projection = outcome.step.confirmation.authorization
@@ -147,7 +149,7 @@ async def test_a_confirmation_that_proposed_no_row_carries_no_projection() -> No
     is proposed for no ordinary egress call and the answer establishes nothing: the
     `CONFIRM` is resolved and the one call is authorised by ADR-0148 §3's route (a).
     """
-    harness, store = _harness()
+    harness, store = _harness(proposing=False)
 
     outcome = await harness.engine.converse("send it", timeout=PATIENT)
 
@@ -166,10 +168,7 @@ async def test_a_restart_renders_the_same_projection() -> None:
     answer. Asserted by **equality** against the live member, so a field added later is
     covered without this case being edited.
     """
-    harness, store = _harness()
-    await store.record(
-        authorization(id=authorization_id_for(FIRST_DECISION), confirmation=FIRST_DECISION)
-    )
+    harness, _ = _harness()
     parked = await harness.engine.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     live = parked.step.confirmation
@@ -181,6 +180,44 @@ async def test_a_restart_renders_the_same_projection() -> None:
 
     assert len(pending) == 1
     assert pending[0].authorization == live.authorization
+
+
+async def test_a_proposal_that_was_written_is_never_shown_as_establishing_nothing() -> None:
+    """Round 2's blocker: the row is the **object the writer returned**.
+
+    A second ``resolve`` taken to find it can fail transiently while the row is durable
+    and an approval will establish it — and calling that absence would put a question in
+    front of the user that named no bound and then established one, which §11 refuses in
+    terms. Driven by arming the store to fault on **reads only**: ``record`` still
+    succeeds, so a lane that resolved would see ``None`` and this one does not.
+    """
+    source = inspect.getsource(StepRunner._propose)
+
+    assert "return row" in source
+    assert "resolve(" not in source
+    assert "_proposed_row" not in inspect.getsource(StepRunner)
+
+
+async def test_a_recovered_confirmation_whose_row_cannot_be_read_is_withheld() -> None:
+    """Round 2's second blocker, and ADR-0178 §4's own degradation.
+
+    *"A surface that cannot render it may refuse that confirmation rather than every
+    confirmation."* A row the store merely failed to return may be durable, so rendering
+    the question with ``authorization`` ``None`` would state that answering establishes
+    no standing authority — which it may well do. The park is withheld from **this**
+    listing and the rest of it stands; nothing is settled, nothing is lost, and the next
+    enumeration over a working store offers it again.
+    """
+    harness, store = _harness()
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    fresh = _fresh_facade(harness)
+    assert len(await fresh.pending_confirmations()) == 1
+
+    store.fail_reads()
+
+    assert await fresh.pending_confirmations() == ()
 
 
 async def test_a_store_that_cannot_be_read_does_not_fail_the_parking_turn() -> None:
@@ -195,9 +232,6 @@ async def test_a_store_that_cannot_be_read_does_not_fail_the_parking_turn() -> N
     ``blocker``.
     """
     harness, store = _harness()
-    await store.record(
-        authorization(id=authorization_id_for(FIRST_DECISION), confirmation=FIRST_DECISION)
-    )
     store.fail_reads()
 
     outcome = await harness.engine.converse("send it", timeout=PATIENT)
@@ -206,6 +240,11 @@ async def test_a_store_that_cannot_be_read_does_not_fail_the_parking_turn() -> N
     assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
     assert outcome.step.confirmation is not None
     assert outcome.step.confirmation.token.handle
+    # **And `None` is honest here rather than a degradation**: `_propose` reads
+    # `standing` before it writes, so a store that cannot be read wrote no row either
+    # and answering really does establish nothing (ADR-0254 §1). The case round 2 is
+    # about — a row that *was* written and could not be read back — is closed by
+    # construction, because there is no second read to fail.
     assert outcome.step.confirmation.authorization is None
 
 

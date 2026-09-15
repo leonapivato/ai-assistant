@@ -323,6 +323,9 @@ async def test_a_non_conforming_clock_reading_is_the_stages_own_error(reading: o
         await operations.standing_authorizations(AUTHORIZATION_GOAL)
     with pytest.raises(PlanningError, match="non-conforming"):
         await operations.revoke_authorization("auth-1")
+    # And the listing reaches the guard only where there is a listing to judge, which
+    # is what keeps §11's empty answer an answer.
+    assert await operations.standing_authorizations("goal-nobody") == ()
 
 
 async def test_a_non_conforming_clock_writes_nothing() -> None:
@@ -464,17 +467,54 @@ async def test_the_listing_never_renders_another_goals_row() -> None:
     assert [one.id for one in listed] == ["auth-mine"]
 
 
-async def test_the_liveness_reading_is_taken_even_where_the_listing_is_empty() -> None:
-    """The guard is unconditional, which is ``grantable_decisions``' shape one seam over.
+async def test_the_liveness_reading_is_taken_after_the_snapshot_and_never_before() -> None:
+    """A reading taken first is one the snapshot can outrun (round 2, ``blocker``).
 
-    A reading reached only on the populated branch is one a non-conforming clock slips
-    past on every empty answer, and ADR-0026 §4's translation would then be true of some
-    calls and not others.
+    A row settled ``ESTABLISHED`` while ``standing`` is suspended comes back carrying a
+    ``settled_at`` **after** a reading taken before that call, and §1's predicate then
+    reports a live row as not live — a listing true at no real instant, which is what
+    ADR-0193 §9's one-reading rule exists to prevent, reached from the other side.
+
+    Driven by settling the row **from inside the store read**, which is where a
+    concurrent answer lands.
     """
-    operations, _, clock = await _over()
+    store = FakeGoalAuthorizationStore()
+    plans = FakePlanStore()
+    await plans.save_goal(_goal())
+    row = authorization(id="auth-1", confirmation="d-1")
+    await store.record(row)
+    settled_at = AUTHORIZATION_NOW
+    clock = _Clock(settled_at)
+    standing = store.standing
 
-    assert await operations.standing_authorizations(AUTHORIZATION_GOAL) == ()
-    assert clock.readings == 1
+    async def settling(goal: str) -> tuple[Authorization, ...]:
+        """Answer the question between the caller's snapshot and its comparison."""
+        await store.settle("auth-1", to=AuthorizationDisposition.ESTABLISHED, settled_at=settled_at)
+        return await standing(goal)
+
+    store.standing = settling  # type: ignore[method-assign]
+    operations = AuthorizationOperations(authorizations=store, plans=plans, now=clock)
+
+    (view,) = await operations.standing_authorizations(AUTHORIZATION_GOAL)
+
+    assert view.live is True, "the row was established at the instant the listing reads"
+
+
+async def test_an_unknown_goal_is_an_empty_answer_even_with_an_unusable_clock() -> None:
+    """§11's *"empty answer rather than a raise"* survives a broken clock.
+
+    The reading is taken after the goal lookup, so a goal this system does not hold is
+    answered before the clock is reached at all — which is what keeps that clause true of
+    a deployment whose clock is non-conforming (round 2, ``blocker``).
+    """
+    plans = FakePlanStore()
+    operations = AuthorizationOperations(
+        authorizations=FakeGoalAuthorizationStore(),
+        plans=plans,
+        now=lambda: datetime(2026, 9, 13, 10, 0),  # noqa: DTZ001 — naive is the subject
+    )
+
+    assert await operations.standing_authorizations("goal-nobody") == ()
 
 
 async def test_a_goal_the_plan_store_does_not_hold_is_an_empty_answer() -> None:

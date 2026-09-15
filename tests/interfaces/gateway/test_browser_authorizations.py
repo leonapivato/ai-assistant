@@ -48,7 +48,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, ConsoleMessage, Dialog, ViewportSize
+    from playwright.async_api import (
+        Browser,
+        ConsoleMessage,
+        Dialog,
+        Response,
+        Route,
+        ViewportSize,
+    )
 
 pytestmark = [
     pytest.mark.integration,
@@ -59,6 +66,10 @@ pytestmark = [
 
 GOAL_ID: Final = "goal-zzqq-7741"
 OUTCOME: Final = "Book the usual campsite for the last weekend of August."
+
+#: A second goal, so the panel can be opened twice in quick succession.
+OTHER_ID: Final = "goal-wwvv-3320"
+OTHER: Final = "Find somewhere to leave the dog."
 STATEMENT: Final = OUTCOME
 ENGAGED: Final = datetime(2026, 1, 1, 11, tzinfo=UTC)
 
@@ -83,11 +94,11 @@ def _view(row_id: str, tool: ToolDefinition, bound: ValueBound) -> Authorization
     )
 
 
-def _summary() -> GoalSummary:
-    """The goal row the authorities panel is opened from."""
+def _summary(*, goal_id: str = GOAL_ID, outcome: str = OUTCOME) -> GoalSummary:
+    """One goal row the authorities panel can be opened from."""
     return GoalSummary(
-        id=GOAL_ID,
-        outcome=OUTCOME,
+        id=goal_id,
+        outcome=outcome,
         status=GoalStatus.ACTIVE,
         paused=False,
         last_engaged_at=ENGAGED,
@@ -347,6 +358,71 @@ async def test_a_withdrawal_that_moves_nothing_reports_what_the_store_found(
         await expect(said).to_contain_text("nothing was withdrawn")
         await expect(said).to_contain_text("declining it")
         assert await said.evaluate("(node) => node.className") == "notice"
+
+
+async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Two rows pressed in quick succession are two requests that can land in either
+    order, and the one that is not the latest is dropped whole.
+
+    Without it the rows on screen and the goal the panel believes it is showing can name
+    **different** goals: a slow request for A landing after a fast one for B leaves B's
+    statement recorded and A's rows drawn, and a withdrawal taken from an A row then
+    re-reads B and writes *"Withdrawn"* above it — an act reported against work it was
+    not taken on. Adversarial review, round 2, ``major``.
+
+    Driven by holding the **first** request at the socket until the second has finished,
+    which is the interleaving the defect needs and which no sequential case reaches.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+    landed: asyncio.Future[None] = loop.create_future()
+    seen = 0
+    answered = 0
+
+    async def route(one: Route) -> None:
+        nonlocal seen
+        seen += 1
+        if seen == 1:
+            await held
+        await one.fallback()
+
+    def arrived(response: Response) -> None:
+        """Resolve once the **overtaken** response has reached the page.
+
+        The case's synchronisation (ADR-0216 §7): what the assertions below need is
+        that the late answer has been handled and changed nothing — a condition the
+        page reached, not a duration the test guessed.
+        """
+        nonlocal answered
+        if not response.url.endswith("/authorizations"):
+            return
+        answered += 1
+        if answered == 2 and not landed.done():
+            landed.set_result(None)
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        drive.engine.goal_summaries = [_summary(), _summary(goal_id=OTHER_ID, outcome=OTHER)]
+        drive.engine.goal_statements[OTHER_ID] = OTHER
+        drive.page.on("response", arrived)
+        await drive.page.route("**/authorizations", route)
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        rows = drive.page.locator("#goal-list button:has-text('What this authorises')")
+
+        await rows.nth(0).click()
+        await rows.nth(1).click()
+        await drive.page.wait_for_selector("#authorizations:not([hidden])")
+        await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
+        held.set_result(None)
+        await asyncio.wait_for(landed, timeout=10)
+
+        # The overtaken response has arrived and must have changed nothing at all.
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("Nothing standing")
+        assert STATEMENT not in await panel.inner_text()
 
 
 async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
