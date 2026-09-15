@@ -11,12 +11,23 @@
   declarations and authors no predicate of its own, so a reader holding only §1 authors a
   definition against which nothing can be held and every criterion resting on that tool is
   unestablished for want of an operand. **The required-field clause takes a fourth recorded
-  exception, on its own ground**: *"Every field that a permission decision depends on is
-  required"* is unconditional and this field is not one a permission decision depends on at all —
-  it is read **after** the act, by the verification phase alone — so the clause's own subject does
-  not reach it, and the empty tuple is the **fail-closed** value besides. **The exception is this
-  one further field on this one argument**, and no lane reads the four records together as licence
-  to default a safety field. Every other clause of §1 binds entire, §2's ordering of the
+  exception, on the *same* ground as the three beside it and not on a ground of its own**: *"Every
+  field that a permission decision depends on is required"* is unconditional and **this field is
+  one such** — ADR-0254 §3's condition 3 compares the request's declaration with the row's **by
+  value**, so a `postconditions` edit moves a route-(d) coverage answer exactly as a severity or
+  schema edit does. The default is an exception because the empty tuple makes the **opposite**
+  claim to the one §1 refuses: it declares nothing, so **nothing is verified**, no criterion
+  resting on that tool is ever met and no goal of it reaches `ACHIEVED` — a value that can only
+  **refuse** to establish and never establish, which is the direction §1 exists to protect.
+  **And the coupling is stated rather than left to be found**: an author who adds or edits a
+  postcondition changes the declaration's value, so a row established over the earlier declaration
+  stops covering a call built under the new one and that call **asks** — the consequence every
+  declaration edit already carries under §3's condition 3, and the fail-closed direction. **No row
+  changes coverage when this field lands**: LA's migration decodes stored declarations with the
+  empty tuple and a registry definition declaring none carries the same value, so the comparison
+  is between two empty tuples until an author writes one. **The exception is this one further
+  field on this one argument**, and no lane reads the four records together as licence to default
+  a safety field. Every other clause of §1 binds entire, §2's ordering of the
   declarations is read by §3 and moved by nothing, and §§3-7 are untouched — §4's
   `parameters_schema` included, the new declaration being a field **beside** that schema and never
   a keyword inside it.
@@ -391,10 +402,13 @@ honest one."*
 > the planner's, and a group that does not agree with itself establishes nothing.** Two bound steps
 > are of **one call** where their pinned decisions carry the same
 > **`ActionRequest.parameters_digest`** (ADR-0021 §1's embedded value, computed by the policy over
-> the concrete request and written by no model), and of **different calls** otherwise. A call is
-> **satisfying** where it has a decisive step and **every** one of its decisive steps is
-> satisfying, **contradicting** where it has one and every one is contradicting, and
-> **ambiguous** where it has both — **no order breaks the tie, and the last step does not govern**.
+> the concrete request and written by no model), and of **different calls** otherwise. Call a bound
+> step **decisive** where it is satisfying or contradicting, and every other one — `PENDING`,
+> `SKIPPED`, `RUNNING`, `INDETERMINATE`, a `SUCCEEDED` step under a definition declaring nothing,
+> and the `FAILED` step of a `NATURAL` tool above — is not. A call is then **satisfying** where it
+> has a decisive step and **every** one of its decisive steps is satisfying, **contradicting**
+> where it has one and every one is contradicting, and **ambiguous** where it has both — **no order
+> breaks the tie, and the last step does not govern**.
 >
 > - **Unmet** — **some** call is contradicting.
 > - **Met** — no call is contradicting, **no call is ambiguous**, and **some** call is satisfying.
@@ -405,21 +419,17 @@ honest one."*
 >   can read.
 
 **The digest groups the steps and cannot tell a retry from a second identical act, so a group
-carrying both answers is refused rather than resolved.** A **retry** re-dispatches the *same*
-concrete call, so its steps share a `parameters_digest`; but **two identical acts share one too** —
-the second of two identical rooms carries equal arguments and therefore an equal digest — so a
-failure followed by a success within one group is *either* a retry that resolved the failure *or* a
-second act that left the first undone, and **the record does not say which**. **Reading it as a
-retry would report `met` where one of the two acts provably did not happen**, which is R50 read at
-the operand, so such a group is **ambiguous** and its criterion is `unestablished`: fail-closed,
-needing no identity the corpus does not have. **A second, *different* act** — two rooms on
-different dates — is a different call with a different digest, so its success clears nothing and a
-first booking that failed keeps the criterion `unmet`. **The cost is A8's retry case**, which now
-reads `unestablished` rather than `met` until a dispatch carries an identity distinguishing a retry
-from a second act (§9, the idempotency-key entry); an `UNCERTAIN` attempt over a resolved retry is
-the honest reading of a record that does not record the difference. **`PlanStep.intended_action`
-would answer the same question and is refused**: a planner writes it, and a verdict turning on it
-is the allow ADR-0249 §7 forbids (§2a).
+carrying both answers is refused rather than resolved.** A retry re-dispatches the *same* call and
+**two identical acts are also one call** — the second of two identical rooms carries equal
+arguments and an equal digest — so a failure followed by a success in one group is either a retry
+that resolved it or a second act that left the first undone, and **the record does not say which**;
+reading it as a retry would report `met` where one act provably did not happen, which is R50 at the
+operand. **A second, *different* act** — two rooms on different dates — is a different call whose
+success clears nothing. **The cost is A8's retry case**, `unestablished` until a dispatch carries a
+per-call identity (§9): an `UNCERTAIN` attempt is the honest reading of a record that does not
+record the difference. **`PlanStep.intended_action` would answer the same question and is
+refused**: a planner writes it, and a verdict turning on it is the allow ADR-0249 §7 forbids
+(§2a).
 
 > **Normative — a criterion whose confirmed member is a `MONEY` one is `unestablished`, and this
 > decision states it as a rule rather than as a caveat.** What such a member states is a **ceiling
@@ -462,9 +472,27 @@ is the allow ADR-0249 §7 forbids (§2a).
 > goal was achieved is the `ACHIEVED` write's prerequisite. **The user** confirmed the typed value
 > (ADR-0254 §1's path (i), ADR-0254 §11's rendered values and the answer that settles the row);
 > **the policy and the trail** proved the concrete call against it (ADR-0254 §13, §7); **the tool's
-> author** declared what a success establishes (ADR-0016 §1). **A planner that wrote every field it
-> can write cannot move any criterion of any goal from `unestablished` to `met`** — the property
-> the earlier drafts argued for and did not have (Alternatives).
+> author** declared what a success establishes (ADR-0016 §1). **So no model authors the association
+> between a criterion and the act that establishes it, and nothing a planner writes about a plan,
+> a step or an act moves any criterion from `unestablished` to `met`** — not a label, an index, a
+> predicate, an `intended_action` or a `serves` entry — which is the property the earlier drafts
+> argued for and did not have (Alternatives).
+
+> **Normative — what that guarantee does *not* reach is the interpretation itself, and this
+> decision states the limit rather than overclaiming past it.** §1 fixes that a goal's criteria
+> **are** its current `GoalInterpretation.criteria`, and ADR-0249 §7 gives the model the
+> interpretation: a `USER_STATED` criterion's **text and its `span` are both the planner's**, and
+> §7 validates only that the span occurs in the user's own words. So a planner may pair a span the
+> user really spoke — *"Sunday"* — with a criterion text about **another fact**, and §2 will find
+> the confirmed member on that span and report the criterion **met** though its text was never
+> compared to anything. **That is a misinterpretation of the goal, not a verification of an act
+> that did not happen**: everything §2 establishes about the act — the user's confirmed value, the
+> proof of the call against it, the tool's own declaration — remains true, and what is wrong is
+> *which criterion the goal was taken to have*, which is ADR-0249 §7's own asymmetry and ADR-0250
+> §5's announcement and revision path, never this comparison's. **No lane closes it here by reading
+> a criterion's text**, which would be the prose comparison §2 refuses, **and no lane reads §2a as
+> a claim that a planner cannot affect a verdict at all**: it cannot affect *this* one, given the
+> criteria; the criteria are the model's own reading, and §9 books what would put them beyond it.
 
 > **Normative — `IntendedAction.serves` is read by nothing here, and ADR-0265 §3 is left entire.**
 > That section rules that *"`serves` gates nothing"*, that **no lane** *"derives an intended action
@@ -633,9 +661,10 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 
 > **Normative — a step is not a criterion, and `failed` decides nothing where the criteria decide
 > it.** Limbs 4 and 5 read the criteria alone. **A `FAILED` step that contradicts a criterion has
-> already made that criterion `unmet`** (§2) — or, where its own call also carries a satisfying
-> step and is therefore **ambiguous**, `unestablished` — **which limb 1 reports as `FAILED` and
-> limb 4 as `PARTIAL`, and which limb 3 reports as `UNCERTAIN` at rung 2**; a `FAILED` step **no
+> already made that criterion `unmet`** (§2) — **or left it `unestablished`**, where its own call
+> also carries a satisfying step, or where its tool is `side_effecting` and `NATURAL` so that the
+> failure may have acted — **the first reported by limb 1 as `FAILED` and by limb 4 as `PARTIAL`,
+> the second by limb 3 as `UNCERTAIN` at rung 2**; a `FAILED` step **no
 > criterion is about** says that a step of the *plan* did not
 > complete, and §1 fixes that a goal's criteria *"and nothing else"* are what success means. **So
 > an attempt whose every criterion is met is `VERIFIED` though a step failed beside it** — the
@@ -721,40 +750,50 @@ reachable.**
 > against, which is what closes the window the status set only narrows.** **`AttemptTransition`
 > gains `execution_versions`**, a possibly-empty `tuple[tuple[Identifier, int], ...]` defaulting to
 > the empty tuple, each pair an execution id and the **`ExecutionState.version` the caller read**
-> when it computed the comparison. **`PlanStore.commit_attempt` refuses a `to_state` of `ENDED`
-> with `StaleExecutionError`, in the same indivisible step as the write, where the pairs' ids are
-> not *exactly* the attempt's `execution_ids`** — a missing id, an extra id or a duplicate each
-> refuse — **or where any pair's `version` is not the one stored**. **The completeness half is the
-> load-bearing one**: a subset would leave the omitted execution free to move between the
-> comparison and the commit, which is the whole of the race, so the field is a **snapshot of the
-> set the comparison read** rather than a list of the ones the caller chose to protect. An attempt
-> naming no execution therefore takes an empty tuple and nothing else. **It is the `ENDED` limb
+> when it computed the comparison. **`PlanStore.commit_attempt` refuses a `to_state` of `ENDED`,
+> in the same indivisible step as the write, where the pairs' ids are not *exactly* the attempt's
+> `execution_ids`** — a missing id, an extra id or a duplicate each refuse — **or where any pair's
+> `version` is not the one stored**. **The two refusals raise different classes, and the
+> difference is which of them the caller could have avoided.** A pair whose `version` is not the
+> stored one is the **race** the field exists for, and it refuses with **`StaleExecutionError`**,
+> whose documented meaning — *"the stored execution has advanced since the caller read it … the
+> caller should re-read and retry"* — is exactly what happened. **An id set that is not the
+> attempt's is a malformed command and refuses with `ValueError`**, no write taken: nothing
+> advanced, so a class promising a fruitful retry would be a false statement about the store. **The
+> order is fixed and is what keeps the two apart**: the attempt's own `expected_version`
+> compare-and-swap is decided **first**, so an execution appended after the caller's read is
+> reported as the race it is and never as a malformed set — the set can only be wrong because the
+> caller built it wrongly. **The completeness half is the load-bearing one**: a subset would leave
+> the omitted execution free to move between the comparison and the commit, which is the whole of
+> the race, so the field is a **snapshot of the set the comparison read** rather than a list of the
+> ones the caller chose to protect. An attempt naming no execution therefore takes an empty tuple
+> and nothing else. **It is the `ENDED` limb
 > alone that reads the field**: every other transition ignores it, `→ CANCELLED` included — so
 > ADR-0261 §2's act is unaffected whatever it passes, and every caller this decision does not
 > touch, a phase stamp, an effort counter, an append, writes exactly as it does today. **No lane
-> reads the field as a claim check, a general optimistic lock, or a licence to re-read and retry**:
-> the engine's answer to a refusal is §4's no-second-bite rule.
+> reads the field as a claim check, a general optimistic lock, or a licence to re-read and retry
+> *within this turn***: the engine's answer to a refusal is §4's no-second-bite rule, which defers
+> the re-read the error class asks for to the **next** turn's own comparison rather than declining
+> it — a turn that re-reads everything and recomputes from the then-current criteria (§5, §6).
 
 **Two conjuncts because the race has two halves, and neither is redundant.** A
 `commit_transition` **does not advance `GoalAttempt.version`**, so the attempt's own
-compare-and-swap cannot see a claim land: an engine that read a step `PENDING`, compared the
-criteria and then committed would record a terminal — possibly `VERIFIED` — attempt over a step a
-concurrent driver had taken `PENDING → RUNNING → SUCCEEDED`, whose answer the comparison never saw
-and which could have made a criterion **unmet**. **The status set refuses that on sight**, and
-reaches `PENDING` and `AWAITING_APPROVAL` because a set testing only `RUNNING` and `INDETERMINATE`
-is silent by the time it runs. **What it alone would not close is the retry**: `FAILED` is outside
-`TERMINAL_STEP_STATUSES` *"(it may still be retried)"*, so a `FAILED → RUNNING → SUCCEEDED` retry
-landing between the comparison and the commit leaves every step terminal at both instants — **the
-version pairs close it**, that retry having advanced the `ExecutionState.version` the caller
-passed. **Neither conjunct subsumes the other**: the versions say nothing about a step nobody has
-moved yet, and the statuses say nothing about a step moved twice.
+compare-and-swap cannot see a claim land: an engine that read a step `PENDING` and then committed
+would record a terminal — possibly `VERIFIED` — attempt over a step a concurrent driver had taken
+`PENDING → RUNNING → SUCCEEDED`, whose answer the comparison never saw. **The status set refuses
+that on sight**, reaching `PENDING` and `AWAITING_APPROVAL` because a set testing only `RUNNING`
+and `INDETERMINATE` is silent by the time it runs. **What it alone would not close is the retry**:
+`FAILED` is outside `TERMINAL_STEP_STATUSES` *"(it may still be retried)"*, so a
+`FAILED → RUNNING → SUCCEEDED` retry landing between the comparison and the commit leaves every
+step terminal at both instants — **the version pairs close it**. **Neither conjunct subsumes the
+other**: the versions say nothing about a step nobody has moved yet, the statuses nothing about a
+step moved twice.
 
 **The cost is one turn and is bounded by an act that already runs.** An attempt whose walk stopped
-leaving a step `PENDING` — ADR-0255 §2's `AMBIGUOUS_CAPABILITY`, `INVALID_PARAMETERS` and
-`EGRESS_UNBINDABLE` triggers — does not end on that turn; the next turn runs ADR-0259 §4's
-reconciliation **before planning**, whose act 1 disposes of exactly those steps. **No lane adds a
-sweep, a timer or a repair pass**, and a goal the user never returns to keeps a live attempt —
-which is what `abandon_goal` is for (ADR-0261 §2).
+leaving a step `PENDING` — ADR-0255 §2's three triggers — does not end on that turn; the next turn
+runs ADR-0259 §4's reconciliation **before planning**, whose act 1 disposes of exactly those steps.
+**No lane adds a sweep, a timer or a repair pass**, and a goal the user never returns to keeps a
+live attempt — which is what `abandon_goal` is for (ADR-0261 §2).
 
 > **Normative — the write is one `AttemptTransition` and the phase takes no second bite.** A
 > refusal from that commit means the ground moved under the comparison. The phase **writes nothing
@@ -906,9 +945,13 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > `assistant goals` as where the goal's state is read; for **`ANSWERED`**,
 > that an answer was produced and **nothing was verified** — never that it is correct; for
 > **`PARTIAL`**, that part of what was asked was established and part was **not established**; for
-> **`FAILED`**, that the work **failed and nothing was established as done** — which limb 1's *"no
-> criterion is met"* conjunct makes true of both of its arms, the established contradiction and
-> the failed step, without claiming that a criterion nothing compared was disproved; for **`UNCERTAIN`**, that an action was taken and
+> **`FAILED`**, that the work failed and **no criterion of this goal was established** — which
+> limb 1's *"no criterion is met"* conjunct makes true of both of its arms, the established
+> contradiction and the failed step, without claiming that a criterion nothing compared was
+> disproved. **It speaks of the criteria and never of the acts**: where one call satisfied and
+> another contradicted, the criterion is `unmet` and the member is `FAILED` though an act did take
+> effect, so a statement saying *nothing was done* would be false of the record and this one is
+> not; for **`UNCERTAIN`**, that an action was taken and
 > **its outcome is not established**, naming `assistant goals`; and for **`CONDITION_PREVENTED`**,
 > that the action was **prevented before it ran** — which covers both of `blocked`'s sources (§4)
 > without asserting either, since `SkipReason.UNMET_DEPENDENCY` is a stated condition that did not
@@ -975,11 +1018,11 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > drafted. **This decision adds no condition to that count and removes none**, and **no lane reads
 > this ADR's ratification, or the merging of its L1, as the gate being met.**
 
-**The gate is nearest to being met here and that is exactly when it is most worth restating.** All
-three named guarantees are *designed* once this document ratifies, so the natural reading is *one
-more merge and the gate is open* — and it is wrong twice over: **ratification is not
-implementation**, and **four of the seven** conditions — (4) through (7) — are held by decisions
-and lanes this document does not touch, **none of which has landed**.
+**The gate is nearest to being met here and that is exactly when it is most worth restating.** The
+natural reading once this document ratifies is *one more merge and the gate is open*, and it is
+wrong twice over: **ratification is not implementation**, and **four of the seven** conditions —
+(4) through (7) — are held by decisions and lanes this document does not touch, **none of which has
+landed**.
 ADR-0255 §13 anticipated this arithmetic — *"a deployment reading the three could wire a
 booking"*.
 
@@ -1143,6 +1186,14 @@ booking"*.
   outcome and not a work list, and R48 asks for the comparison against the criteria — and §4's
   other limbs still report an incomplete walk. Fired by a decision that gives a criterion a
   machine-readable arity.
+- **Whether a criterion's own text is what it is verified *against*.** **Not decided, and §2a
+  states the limit**: the join is the criterion's `span`, both the span and the text are the
+  planner's (ADR-0249 §7), and a criterion whose text describes one fact while its span is another
+  of the user's own words is verified against the **span**. **No lane compares the text**, which is
+  the prose comparison §2 refuses. Fired by a decision that puts a goal's **criteria** to the user
+  the way ADR-0254 §11 puts a row's values — an assent to the rendered criterion, after which the
+  text is the user's and not a reading of it — or by one that binds a criterion's span to its own
+  text by an authority that is not a model.
 - **Establishing a criterion from a `GoalEvidence` row.** **Not decided**: the corpus carries **no
   association from a criterion to an evidence row** (Alternatives), so a criterion only an
   interpretation over a read's output could settle is **unestablished**. Fired by a decision that
@@ -1216,7 +1267,10 @@ says and acts identically.
   here has no operand for any act at all.
   **Nothing else of §1 fails the test**: every other field stays required, `frozen=True` and its
   audit-record argument, `description`'s non-blank refusal and the registry's detached-snapshot
-  discipline each stay true word for word.
+  discipline each stay true word for word. **And the required-field clause's own subject does
+  reach this field**, which the header states: ADR-0254 §3's condition 3 compares the declaration
+  **by value**, so the exception rests on the empty tuple's claim being the fail-closed one and
+  never on the field being outside a permission decision's reach.
 
 **Every other ADR this decision reaches owes no record**, and the entries below are the whole of
 them, each decided by the same test.
@@ -1491,8 +1545,11 @@ are ordered only by each other.
    return changes no result**: the same goal replanned with different `serves` links, with the
    step's `intended_action` **changed and then removed entirely**, and with the criterion's text
    restated yields the **same** three results — the second half being the arm that fails against a
-   satisfaction test reading a planner-supplied action at all —
-   the arm that fails against any model-authored binding.
+   satisfaction test reading a planner-supplied action at all — the arm that fails against any
+   model-authored binding. **And the one planner-written value that does change a result is
+   asserted as §9's residual rather than as a guarantee**: the same goal whose criterion text
+   describes an unrelated fact while its `span` stays the one the row's member rests on reads
+   **met**, and the arm records that §2 compared the span and never the text.
 5. **The ladder, asserted over the declarations and over the ordering (L4).** Rung 0, rung 1 and
    rung 2 each produced by the declaration that names it, over a claimed step; **and a step a plan
    declared and no walk claimed leaves the rung where it was**. **And the ordering trap
@@ -1555,13 +1612,16 @@ are ordered only by each other.
    **appended** to the attempt after the caller read it advances `GoalAttempt.version`, so the
    transition is refused on its `expected_version`; and a step **`FAILED`** when the caller read
    it, taken `RUNNING` and `SUCCEEDED` before the commit — every step terminal at both instants
-   and the status conjunct silent — refused on `execution_versions`, the arm that fails against an
-   implementation carrying the field and not comparing it. **And the field's own limbs**: a pair
-   naming an execution the attempt does not name, a **missing** id, a **duplicate** id and a
-   **partial** snapshot are each refused — the arm that fails against a subset the omitted
-   execution could move under — an **empty** tuple is accepted for an attempt naming no execution
-   and refused for one that does, and a `→ CANCELLED` transition carrying a stale pair still
-   commits.
+   and the status conjunct silent — refused with **`StaleExecutionError`** on
+   `execution_versions`, the arm that fails against an implementation carrying the field and not
+   comparing it. **And the field's own limbs, each refused with `ValueError` and not with
+   `StaleExecutionError`**: a pair naming an execution the attempt does not name, a **missing**
+   id, a **duplicate** id and a **partial** snapshot — the arm that fails against a subset the
+   omitted execution could move under, and the one that pins a malformed command apart from a lost
+   race; an **empty** tuple is accepted for an attempt naming no execution and refused for one
+   that does; **an execution appended after the caller's read is refused on `expected_version`**,
+   not as a malformed set, the arm that pins the order of the two tests; and a `→ CANCELLED`
+   transition carrying a stale pair still commits.
    **`→ CANCELLED` and every other `AttemptTransition` are unaffected**, ADR-0261 §3's own
    `(CANCELLED, UNCERTAIN)` case asserted to still commit over an `INDETERMINATE` step.
    ***`set_goal_status`***: an `→ ACHIEVED` write is refused with `StaleExecutionError` and **writes
@@ -1597,7 +1657,10 @@ are ordered only by each other.
     compared**, `CONDITION_PREVENTED`'s is asserted true of **both** of `blocked`'s sources — an
     `UNMET_DEPENDENCY` skip, and an `APPROVAL_DENIED` one after a read that succeeded — and
     `FAILED`'s true of **both** of limb 1's arms, an unmet criterion and an unrelated failed step
-    with every criterion unestablished, — and **no arm fixes the wording**, which is the lane's (§6).
+    with every criterion unestablished, **and true of a criterion made `unmet` by one call while
+    another call of the same criterion satisfied** — the arm that fails against a statement
+    denying work the same comparison established — and **no arm fixes the wording**, which is the
+    lane's (§6).
 
 **No arm demonstrates a real consequential integration** (§7's gate); M33's walkthrough runs
 against a simulated booking service.
