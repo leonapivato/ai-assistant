@@ -360,8 +360,12 @@ guard to a window this member does not have.**
 > being deliberate, because a writer that raced the act once can race it again and an unbounded act
 > would spin against it.
 
-> **Normative — that a closed goal never carries a live attempt is the *store's* invariant and not
-> one member's, so it is stated over both writers of `ABANDONED` and over the opener.**
+> **Normative — that an *`ABANDONED`* goal never carries a live attempt is the *store's* invariant
+> and not one member's, so it is stated over both writers of that member and over the opener. It is
+> **not** stated over `ACHIEVED`**, which A10 owns and which §11 books with what fires it: a
+> `set_goal_status(…, ACHIEVED)` over a live attempt is admitted here exactly as it is today, and
+> `open_attempt`'s closed-goal limb — which *is* stated over ADR-0250 §1's whole division — is the
+> only clause of this decision an `ACHIEVED` goal meets.**
 > **`open_attempt` advances no `Goal.version`** (ADR-0249 §12), so a concurrent turn opening a
 > **new** attempt is invisible to any goal-level compare-and-swap and could otherwise leave an
 > `ABANDONED` goal carrying a live, claimable attempt — R78 broken by a second writer. **The
@@ -801,8 +805,16 @@ precedent, a derived fact the engine computes so no two adapters render it diffe
 > refusal. That adds a value to ADR-0198 §2's enumeration **without changing any value it fixes**.
 
 > **Normative — the field names the state the goal is in, and never the reason the store refused.**
-> After the refusal the engine takes **one** read — of the goal and the attempt the claim named, and
-> of the plan the execution runs — and answers: **`GOAL_CANCELLED`** where the goal's `status` is
+> After the refusal the engine reads the attempt the claim named, the plan the execution runs, and
+> **the goal last** — **the order is normative, and it is the one that cannot compose a false
+> report**. §2's act moves an attempt to `CANCELLED` and its goal to `ABANDONED` in **one** store
+> step, so an abandonment landing between two of these reads is seen by the **later** one; reading
+> the goal last makes the goal fact at least as fresh as the attempt fact, and the goal tests below
+> take priority, so a goal that has since closed answers `GOAL_CANCELLED` rather than an attempt
+> member asserting the goal is still open. **The reverse order is what a false report is composed
+> from, and no lane takes it**; a goal *reopened* between the reads is the case
+> `ATTEMPT_CANCELLED` is for (below) and is answered correctly by the same order. The read
+> answers: **`GOAL_CANCELLED`** where the goal's `status` is
 > `ABANDONED`; **`GOAL_ACHIEVED`** where it is `ACHIEVED`; **`GOAL_BLOCKED`** where it is `BLOCKED`;
 > **`ATTEMPT_CANCELLED`** where the attempt's `state` is `CANCELLED` — **reached on a goal ADR-0250
 > §13 has reopened**, which writes `ACTIVE` and leaves the cancelled attempts of the abandonment
@@ -965,12 +977,19 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > member, no argument on any existing one, and no conjunct on `commit_transition` (§4).
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is breaking for the
-> wire rather than for a constructor.** Every field added defaults, and both enumerations are *added
-> to*, so **no existing construction stops validating** and no caller's code is invalidated. What
-> breaks is the peer contract, **on the two model fields and not on either enumeration member**.
-> `GoalSummary` and `TurnOutcome` are both returned by promoted-surface methods, both set
-> `extra="forbid"`, and `wire/codec.py` renders a model by `model_dump()` — so a newer hub emits an
-> `effect_in_flight` member and a `drive_withheld` member an older client refuses. That is
+> wire rather than for a constructor.** Every field added defaults and both enumerations are *added
+> to*, so **no existing construction stops validating** — but **a caller that enumerates a
+> vocabulary exhaustively is invalidated, and one does**: `GoalAbandonment` is returned by the
+> promoted `abandon_goal`, and the CLI's abandon command answers a non-zero exit code for every
+> member but `ABANDONED`, so an unchanged L3 would report a successful cancellation as a failure.
+> **L3 owes that handling** (§13). **The two enumeration additions are therefore not alike**:
+> `AttemptOutcome.CANCELLED` rides `GoalAttempt`, which no peer emits (below), so its ground is the
+> **export** alone and it invalidates no caller; `GoalAbandonment.ABANDONED_EFFECT_IN_FLIGHT`
+> crosses a frame from a promoted method and is **a wire ground and a caller-facing widening on its
+> own**. The two model fields break the peer contract the same way: `GoalSummary` and `TurnOutcome`
+> are both returned by promoted-surface methods, both set `extra="forbid"`, and `wire/codec.py`
+> renders a model by `model_dump()` — so a newer hub emits an `effect_in_flight` member and a
+> `drive_withheld` member an older client refuses. That is
 > **ADR-0124 §9's second limb** — *"a change to a wire-carried `core` type that makes a value one
 > peer emits invalid for the other"* — and **ADR-0178 §6 is the precedent for stating the bump in
 > the deciding ADR**. **`PROTOCOL_VERSION` therefore moves by exactly one, in the lane that lands
@@ -986,7 +1005,7 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > but in two prose comments; `PlanStore` is **not** promoted (ADR-0255 §11). **So no peer emits a
 > `GoalAttempt`**, the new outcome member reaches no client, and its version ground is the
 > **export** alone. `GoalAbandonment` is returned by the promoted `abandon_goal`, so its new member
-> is a wire ground on its own — covered by the bump already owed, and no second is taken. **A lane
+> is a wire ground on its own (above) — covered by the bump already owed, and no second is taken. **A lane
 > that finds the tree disagrees changes nothing about the bump and records the correction in
 > `wire/envelope.py`'s entry**; that file's stale ADR-0251-era sentence saying `GoalAttempt` *"is
 > what the promoted surface's attempt-facing methods return"* is **not** true at `28eb9e82`.
@@ -1316,7 +1335,9 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   remove; the listing's call is a different path and is untouched by that prohibition. **It moves no contract**:
   `StepRunner` and `StepExecutor` are concrete classes, not Protocols.
 - **L3 — `interfaces`.** The fixed statements §6 and §7 name, on the CLI's abandon and goals
-  surfaces and on the reply. **Thin, by golden rule 3**: it renders values L2 computed and derives
+  surfaces and on the reply — **including the abandon command's exit code**, which today answers
+  non-zero for every `GoalAbandonment` member but `ABANDONED` and would otherwise report a
+  successful cancellation as a failure (§10). **Thin, by golden rule 3**: it renders values L2 computed and derives
   none.
 
 **Merge order is L1 → L2 → L3**, and each is one PR (the owner's *one lane, one PR* rule).
@@ -1402,7 +1423,10 @@ it.
    member is the **listing's** arm. **And the concurrent closer**: where a second caller closes the
    goal between the act's first read and its call, the act's `StaleExecutionError` retry re-reads,
    finds the goal closed and answers **`ALREADY_CLOSED`** — never a second `ABANDONED` write, and
-   never an `ABANDONED` write over a goal another act reached `ACHIEVED`. **And the three
+   never an `ABANDONED` write over a goal another act reached `ACHIEVED`. **And the concurrent
+   deleter**: where the goal is deleted between the stale refusal and the re-read, the act answers
+   **`NO_SUCH_GOAL`** and **makes no second call at all**, the arm that pins the retry to re-taking
+   the act's first-read decision rather than the call. **And the three
    interleavings that defeat a two-write act, each
    asserted to answer correctly here**: an opener that claims a step, takes it to `INDETERMINATE`
    and **terminalizes its own attempt** before the act — none of it advancing `Goal.version` —
@@ -1437,7 +1461,12 @@ it.
    **two** attempts owning one execution, one of a step ADR-0014 §4's graph admits no `→ RUNNING`
    move from, and one carrying a tool the step is not bound to. **Each is stated over a goal whose
    own state would otherwise have answered for it** — `BLOCKED`, paused, `ABANDONED` — which is
-   the assertion that no report stands in for a defect. **And a `ClaimRefused` whose state the read
+   the assertion that no report stands in for a defect. **And the read's order is forced, not
+   assumed**: with a `ClaimRefused` raised over a live attempt of an `ACTIVE` goal, §2's act is
+   committed **between the attempt read and the goal read**, and the turn answers
+   **`GOAL_CANCELLED`** — the arm that fails against an engine reading the goal first, which would
+   answer `ATTEMPT_CANCELLED` and tell the user the goal is still open. **And a `ClaimRefused` whose
+   state the read
    cannot see propagates too** (§7).
 9. **The outstanding-effect predicate, under both members (L1, shared suite).** Every assertion
    below is made of `has_outstanding_effect` **and of `close_goal_abandoned`'s answer**, over the
