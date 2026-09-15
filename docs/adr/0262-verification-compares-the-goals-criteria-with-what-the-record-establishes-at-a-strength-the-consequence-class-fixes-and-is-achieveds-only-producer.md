@@ -451,14 +451,12 @@ says so.
 > The owner ruled on 2026-09-14 that *"The actual charge is confirmed by the verification phase
 > afterward; a quote/charge mismatch is a reported finding."* **The mismatch is a finding in this
 > decision's own vocabulary and not a new one**: the criterion is **unmet**, §4's function yields
-> `FAILED` or `PARTIAL`, and §6's statement is what reports it. **What this decision does not have
-> is the comparison and the operand.** A stated ceiling is an **inequality**, which ADR-0253 §4's
-> three kinds do not express, and the charge it would be proved against is the quote whose **whole
-> carrier** ADR-0266 §10 books to [#2387](https://github.com/leonapivato/ai-assistant/issues/2387)
-> — *"until it lands §7's evidence route has no operand"*. **So a criterion about what an act cost
-> is `unestablished` under this decision**, §3 states what that costs, and §9 books both halves
-> with what fires each. **No lane invents an inequality kind, a currency comparison or a quote
-> record on this decision's authority.**
+> `FAILED` or `PARTIAL`, and §6's statement reports it. **What this decision does not have is the
+> comparison and the operand**: a stated ceiling is an **inequality**, which ADR-0253 §4's three
+> kinds do not express, and the charge it would be proved against is the quote whose carrier
+> ADR-0266 §10 books to [#2387](https://github.com/leonapivato/ai-assistant/issues/2387). **So a
+> criterion about what an act cost is `unestablished` here**, and **no lane invents an inequality
+> kind, a currency comparison or a quote record on this decision's authority.**
 
 ### 3. Strength proportional to consequence: three rungs off the declarations, and the phase calls nothing
 
@@ -871,7 +869,9 @@ done** and the surface says **what would enable it**"*, one fact over.
 > **Normative — this decision is the gate's **verification** guarantee and meets that condition for
 > a class exactly as §3 states it.** §2's operands and §4's function are the mechanism; §3's rungs
 > are the strength; and the guarantee covers a class whose criteria have operands, which today
-> excludes a criterion about a charge (§3, ADR-0266 §10, #2387).
+> excludes a criterion about a charge (§3, ADR-0266 §10, #2387). **A deployment wiring a capability
+> of that class therefore declares its tools' `postconditions` as part of wiring it** (§2): a tool
+> declaring none satisfies this guarantee for no criterion at all.
 
 > **Normative — the count is ADR-0255 §15 item 19's as ADR-0265 §8 made it, it is **six**, and
 > **all six still stand** on the day this decision is ratified.** Named by ADR and by issue so that
@@ -1383,15 +1383,18 @@ that the arithmetic is on the record.
 **What becomes harder.** A peer at the old `PROTOCOL_VERSION` refuses a peer at the new one, and an
 export reader at the old schema refuses a document written after L1 — both intended and both loud.
 A goal that reaches `ACHIEVED` can no longer open an attempt at all (ADR-0261 §2), so a caller must
-reopen it first (ADR-0250 §13). A planner now has one more thing it may get wrong; a goal whose
-criteria carry no check never reaches `VERIFIED`, and one about an amount is unverifiable until
+reopen it first (ADR-0250 §13). An integration author now has one more thing to declare, and a tool that
+declares nothing verifies nothing: a goal whose criteria carry no check, or whose bound tool
+declares no postcondition, never reaches `VERIFIED`, and one about an amount is unverifiable until
 #2387 lands. And a goal with an unresolved effect now deliberately **does not** end its attempt, so
 it stays open until A8's reconciliation reaches it — the owner's ruling, and a state a user sees on
 `assistant goals` rather than one the system quietly closes.
 
-**What would trigger revisiting this.** A measured case of a planner verifying a goal that was not
-reached fires §9's first entry, whose resolution would reshape §2 entire. The quote decision
-(#2387) landing would give an amount criterion its operand. And a deployment in which `UNCERTAIN`
+**What would trigger revisiting this.** A measured case of a goal verified against a declaration
+whose act was made on the wrong arguments fires §9's argument-identity entry, whose resolution
+would reshape §2's binding. A corpus of integrations that decline to declare any postcondition
+would say the declaration is in the wrong place. The quote decision (#2387) landing would give an
+amount criterion its operand. And a deployment in which `UNCERTAIN`
 is the effective terminal member for every consequential goal would say the checks, and not this
 comparison, are where the work is missing.
 
