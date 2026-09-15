@@ -896,29 +896,39 @@ class FakePlanStore:
         compare-and-swap in one call, so every later change goes through
         :meth:`record_interpretation`.
 
-        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2).
-        "The goal's opening write mints none", and "the only route to a new
-        ``IntendedAction`` is a ``ProposedAction`` recorded by the member §5 adds" — so
-        a seeded tuple would take at the door what ``MAX_INTENDED_ACTIONS`` forbids and
-        leave the bound enforced on nothing. Stated here rather than imported, for the
-        reason this module's own docstring gives.
+        **The goal is revalidated on the first executed line** (ADR-0023 §2), which is
+        both that section's obligation and this method's ADR-0065 snapshot:
+        ``model_copy(update=...)`` skips validators, so ``interpretation`` or
+        ``intended_actions`` can arrive as ``None`` or as a string, and a store that
+        kept one would persist a record its own next read cannot use.
+
+        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2),
+        on the revalidated snapshot rather than on the caller's instance — which is what
+        makes it a refusal rather than a truthiness test. "The goal's opening write
+        mints none", and "the only route to a new ``IntendedAction`` is a
+        ``ProposedAction`` recorded by the member §5 adds", so a seeded tuple would take
+        at the door what ``MAX_INTENDED_ACTIONS`` forbids and leave the bound enforced
+        on nothing. Stated here rather than imported, for the reason this module's own
+        docstring gives.
 
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``, or if
-                the goal is opened carrying an intended action.
+            PlanningError: If the goal is not one ``Goal`` admits, if the store already
+                holds a goal under this ``id``, or if the goal is opened carrying an
+                intended action.
         """
-        if goal.intended_actions:
-            named = ", ".join(action.id for action in goal.intended_actions)
+        snapshot = _revalidated_goal(goal, what="the opening write")
+        if snapshot.intended_actions:
+            named = ", ".join(action.id for action in snapshot.intended_actions)
             msg = (
-                f"goal {goal.id} is opened carrying intended action {named}: a goal's "
-                f"opening write mints none, and the only route to an intended action "
-                f"is record_intended_actions (ADR-0265 §1, §2)"
+                f"goal {snapshot.id} is opened carrying intended action {named}: a "
+                f"goal's opening write mints none, and the only route to an intended "
+                f"action is record_intended_actions (ADR-0265 §1, §2)"
             )
             raise PlanningError(msg)
         async with self._resource.held():
-            if goal.id in self._goals:
+            if snapshot.id in self._goals:
                 msg = (
-                    f"goal {goal.id} already exists: save_goal is the opening write "
+                    f"goal {snapshot.id} already exists: save_goal is the opening write "
                     "alone, and a later change to a goal is a record_interpretation "
                     "(ADR-0249 §12)"
                 )
@@ -926,14 +936,17 @@ class FakePlanStore:
             # ADR-0249 §2's bound is stated over **the write**, so the opening write
             # takes it too: a goal handed in with more revisions than the ceiling
             # admits is stored trimmed, with the count saying how many went.
-            dropped = max(0, len(goal.interpretation) - MAX_GOAL_INTERPRETATIONS)
-            stored = goal.model_copy(
-                update={
-                    "interpretation": goal.interpretation[dropped:],
-                    "interpretation_elided": goal.interpretation_elided + dropped,
-                }
+            dropped = max(0, len(snapshot.interpretation) - MAX_GOAL_INTERPRETATIONS)
+            stored = _revalidated_goal(
+                snapshot.model_copy(
+                    update={
+                        "interpretation": snapshot.interpretation[dropped:],
+                        "interpretation_elided": snapshot.interpretation_elided + dropped,
+                    }
+                ),
+                what="the opening write",
             )
-            self._goals[stored.id] = stored.model_copy(deep=True)
+            self._goals[stored.id] = stored
         return stored.id
 
     async def record_interpretation(self, revision: GoalRevision) -> Goal:

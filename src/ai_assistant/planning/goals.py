@@ -59,6 +59,42 @@ _PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
 }
 
 
+def revalidated_goal(goal: Goal) -> Goal:
+    """Rebuild ``goal`` as a validated, detached :class:`Goal`, or refuse it.
+
+    ``SqlitePlanStore`` has revalidated at its own ``save_goal`` since ADR-0049 §1;
+    this is that check stated for the other conforming store, so the two cannot
+    disagree about which goals are written. ADR-0023 §2 is why it is owed at all:
+    "``model_copy(update=...)`` skips validators (a pydantic property no type can
+    close) … and **a write that reaches past it must re-validate**".
+
+    **It runs before** :func:`refuse_a_seeded_minting`, and the order is what makes
+    that refusal exact rather than a truthiness test. A caller can put ``None`` in
+    ``intended_actions``, or a **string** whose ``tuple()`` is its characters, and a
+    falsey or wrongly-typed value would pass an ``if goal.intended_actions:`` guard
+    into the store — where ``None`` is persisted and the next
+    ``record_intended_actions`` raises a bare ``TypeError`` out of a Protocol member
+    that contracts ``PlanningError``. Revalidating turns every such shape into a
+    ``PlanningError`` at the write, before anything is stored.
+
+    **The validated snapshot is also the detachment**, which is ``save_plan``'s own
+    note read one record over: "it is built from the caller's dump, so no node of the
+    caller's graph survives in it — which is why it replaces the deep copy rather than
+    sitting beside one". ``frozen=True`` stops ``goal.status = ...`` but not
+    ``goal.__dict__["status"] = ...``.
+
+    Args:
+        goal: The goal as the caller handed it in.
+
+    Returns:
+        The goal, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    return _revalidated(goal, what="the opening write")
+
+
 def refuse_a_seeded_minting(goal: Goal) -> None:
     """Refuse an opening write carrying intended actions (ADR-0265 §1, §2).
 

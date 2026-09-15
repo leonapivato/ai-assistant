@@ -45,6 +45,7 @@ from ai_assistant.planning.goals import (
     refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
+    revalidated_goal,
     revalidated_minting,
     revalidated_plan,
     revalidated_revision,
@@ -150,8 +151,16 @@ class InMemoryPlanStore:
         :meth:`record_interpretation`, which is the only route that advances
         ``version`` and the only one that can append a revision.
 
-        Stored as a copy for the reason plans and executions are: ``frozen=True``
-        stops ``goal.status = ...`` but not ``goal.__dict__["status"] = ...``.
+        **The goal is revalidated before it is kept, not merely copied** (ADR-0023 §2),
+        which is what ``SqlitePlanStore`` has done at its own ``save_goal`` since
+        ADR-0049 §1 and what ``save_plan`` below does for a plan.
+        ``model_copy(update=...)`` skips validators, so a caller can hand in a goal
+        whose ``intended_actions`` is ``None`` or a string — values a truthiness test
+        would wave past and the store would then persist, leaving the next
+        ``record_intended_actions`` to raise a bare ``TypeError`` out of a member that
+        contracts ``PlanningError``. The revalidated snapshot **is** the detachment
+        ``frozen=True`` does not give — ``goal.__dict__["status"] = ...`` reaches past
+        it — so it replaces the deep copy rather than sitting beside one.
 
         **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2):
         the opening write mints none, and ``record_intended_actions`` is the only route
@@ -159,21 +168,24 @@ class InMemoryPlanStore:
         goal rather than over one member.
 
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``, or if
-                the goal is opened carrying an intended action.
+            PlanningError: If the goal is not one ``Goal`` admits, if the store already
+                holds a goal under this ``id``, or if the goal is opened carrying an
+                intended action.
         """
-        refuse_a_seeded_minting(goal)
-        if goal.id in self._goals:
+        snapshot = revalidated_goal(goal)
+        refuse_a_seeded_minting(snapshot)
+        if snapshot.id in self._goals:
             msg = (
-                f"goal {goal.id} already exists: save_goal is the opening write alone, "
-                "and a later change to a goal is a record_interpretation (ADR-0249 §12)"
+                f"goal {snapshot.id} already exists: save_goal is the opening write "
+                "alone, and a later change to a goal is a record_interpretation "
+                "(ADR-0249 §12)"
             )
             raise PlanningError(msg)
         # ADR-0249 §2's bound is stated over **the write**, so the opening write takes
         # it too: a goal handed in with more revisions than the ceiling admits is
         # stored trimmed, with the count saying how many went.
-        stored = bounded(goal)
-        self._goals[stored.id] = stored.model_copy(deep=True)
+        stored = bounded(snapshot)
+        self._goals[stored.id] = stored
         return stored.id
 
     async def get_goal(self, goal_id: str) -> Goal | None:
