@@ -607,12 +607,12 @@ producer, no freshness rule and no coverage condition.
    is driven on its own**: against a member bounded at `110`-`150`/EUR and a pin at `"120"`, a charge
    of `"100"` **fails** the test though it agrees with the quote and is under the ceiling — the arm
    failing an implementation testing currency and *not greater than the quote* only.
-5. **The finding is reported and prevents nothing.** Over a **single, non-ambiguous contradicting
-   call** — one call, its charge disagreeing, so §2's ambiguity rule does not fire — the criterion is
-   `unmet`, and the outcome is ADR-0262 §4's limbs over a **stated** criterion set carrying no
-   unestablished member: **`PARTIAL`** (limb 4) with one further criterion met, **`FAILED`** (limb 1)
-   with that criterion alone. The `AttemptReport` carries **exactly two fields** and no figure, and
-   **no `Authorization` is written, settled or revoked, no decision is recorded, no dispatch is refused and no store is written**.
+5. **The finding is reported and prevents nothing.** Over a **single, non-ambiguous contradicting call** — one call, its charge
+   disagreeing, so §2's ambiguity rule does not fire — the criterion is `unmet`, and the outcome is ADR-0262 §4's limbs over a
+   **stated** criterion set carrying no unestablished member: **`PARTIAL`** (limb 4) with one further criterion met, **`FAILED`**
+   (limb 1) with that criterion alone. The `AttemptReport` carries **exactly two fields** and no figure, and **no `Authorization` is
+   written, settled or revoked, no decision is recorded, no dispatch is refused, and the comparison writes nothing of its own** —
+   ADR-0262 §4's `commit_attempt` ending the attempt is the arm's expected write, which this decision neither adds to nor changes.
 
 ### 9. This ADR classified, marked, and how it is ratified
 
