@@ -397,8 +397,8 @@ def _met_on_argument_route(
     return _satisfies(member.bound, value, declared, subject)
 
 
-def _member_defect(member: CoverageMember, subject: CoverageSubject) -> CoverageDefect | None:
-    """Why ``member`` is not met over this request — or ``None`` where it is.
+def _member_defects(member: CoverageMember, subject: CoverageSubject) -> tuple[CoverageDefect, ...]:
+    """Every way ``member`` is not met over this request — empty where it is.
 
     ADR-0266 §7's first conjunct, **and the account of its failure in the same
     computation**, so the predicate and the reason cannot disagree.
@@ -408,29 +408,44 @@ def _member_defect(member: CoverageMember, subject: CoverageSubject) -> Coverage
       ``MONEY`` — both holding, because *"a ``max_price`` constrains what a search
       returns and a transfer amount is one leg of a call"*.
     * A ``PERIOD`` or a ``TERMS`` member is met by the argument route alone.
+
+    **Both routes are examined, and neither failure hides the other.** An earlier
+    shape returned at the first failure, so a call omitting the declared amount
+    while carrying its currency was told only that the price was proved by nothing
+    — never that it had dropped an argument the user's act covers. Those are
+    *"different facts about what the user authorised"* (ADR-0254 §4), and §7 asks
+    for **both** routes to hold rather than for one answer about them; a reason that
+    folds them tells the user the wrong one. Adversarial review, round 4,
+    ``blocker``.
+
+    Args:
+        member: The row's member.
+        subject: The one observation of the request this ruling is decided over.
+
+    Returns:
+        The defects this member met, ordered as the routes are read.
     """
+    found: list[CoverageDefect] = []
     declared = declared_at(subject.tool, member.kind)
     if member.kind is BoundKind.MONEY and not _met_through_evidence(member, subject):
-        # **The quote is the primary proof and a declared argument never stands in for
-        # it** (ADR-0266 §7). Reported as ``UNPROVED`` even where a declared amount
-        # sits inside the ceiling, because that is what happened: the price the act
-        # will make was compared against nothing.
-        return CoverageDefect(member.kind.value, CoverageFailure.UNPROVED)
+        # **The quote is the primary proof and a declared argument never stands in
+        # for it** (ADR-0266 §7). Reported even where a declared amount sits inside
+        # the ceiling, because that is what happened: the price the act will make was
+        # compared against nothing.
+        found.append(CoverageDefect(member.kind.value, CoverageFailure.UNPROVED))
     if declared is None:
-        if member.kind is BoundKind.MONEY:  # pragma: no cover — no quote reaches here
-            # **§7 admits this**: the quote is the primary proof and the argument
-            # route an additional safeguard, so a declaration declaring no amount
-            # keeps its ceiling proved against the quote. Unreachable while no quote
-            # exists (ADR-0266 §11); it is the branch ADR-0267's Q1 turns on.
-            return None
-        # A ``PERIOD`` or ``TERMS`` member is met by the argument route alone, and
-        # this declaration declares no argument at its kind, or declares two.
-        return CoverageDefect(member.kind.value, CoverageFailure.UNPROVED)
-    if declared.argument not in subject.parameters:
-        return CoverageDefect(declared.argument, CoverageFailure.OMITTED)
-    if not _met_on_argument_route(member, declared, subject):
-        return CoverageDefect(declared.argument, CoverageFailure.REFUSED)
-    return None
+        if member.kind is not BoundKind.MONEY:
+            # A ``PERIOD`` or ``TERMS`` member is met by the argument route alone,
+            # and this declaration declares no argument at its kind, or declares two.
+            found.append(CoverageDefect(member.kind.value, CoverageFailure.UNPROVED))
+        # **A ``MONEY`` member reaching here is the case §7 admits**: the quote is
+        # the primary proof and the argument route an additional safeguard, so a
+        # declaration declaring no amount keeps its ceiling proved against the quote.
+    elif declared.argument not in subject.parameters:
+        found.append(CoverageDefect(declared.argument, CoverageFailure.OMITTED))
+    elif not _met_on_argument_route(member, declared, subject):
+        found.append(CoverageDefect(declared.argument, CoverageFailure.REFUSED))
+    return tuple(found)
 
 
 def _examined_currency_keys(row: Authorization, subject: CoverageSubject) -> frozenset[str]:
@@ -499,12 +514,10 @@ def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDef
     """
     found: set[CoverageDefect] = set()
     kinds = {member.kind: member for member in row.coverage}
-    # **The first conjunct** — every member of the row is met, by the two routes.
-    found.update(
-        defect
-        for defect in (_member_defect(member, subject) for member in row.coverage)
-        if defect is not None
-    )
+    # **The first conjunct** — every member of the row is met, by the two routes,
+    # and a member met by neither reports both failures rather than the first.
+    for member in row.coverage:
+        found.update(_member_defects(member, subject))
     carried = user_facing(subject)
     declared = {one.argument: one for one in subject.tool.bounded_arguments}
     # **The second** — every user-facing argument the declaration declares is covered

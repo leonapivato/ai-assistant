@@ -955,6 +955,39 @@ class TestTheTwoRoutesAndConditionSixsThreeConjuncts:
         with_undeclared = booking(body="anything at all")
         assert ("body", CoverageFailure.UNNAMED) in defects(row, with_undeclared)
 
+    async def test_a_call_dropping_the_declared_amount_is_told_so_as_well(self) -> None:
+        """ADR-0254 §4's *"the three failures are told apart"*, over §7's two routes.
+
+        **Neither route's failure hides the other.** A call that omits the declared
+        amount while carrying its currency fails the evidence route — the price is
+        proved by nothing — **and** the argument route, because an act that bounded
+        an amount authorised a call *carrying* one. An implementation answering at
+        the first failure told the user only the former, which is the wrong one of
+        *"different facts about what the user authorised"*: they would read that the
+        price could not be proved, and never that their call had dropped the
+        argument their own act covers. Adversarial review, round 4, ``blocker``.
+        """
+        row = live(coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60")),))
+        dropped = request(binding(SITE), currency="GBP")
+        assert defects(row, dropped) == {
+            ("amount", CoverageFailure.OMITTED),
+            ("currency", CoverageFailure.UNNAMED),
+            ("money", CoverageFailure.UNPROVED),
+        }
+        gate, _, _ = policy(
+            live(site=False, tool=DECLARED_TOOL, coverage=row.coverage), recipients=grants()
+        )
+        ruling = await gate.decide(request(binding(SITE), tool=DECLARED_TOOL, currency="GBP"))
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert "omits an argument the user's own recorded act covers: 'amount'" in ruling.reason
+        assert "states a limit nothing about this call proves: money" in ruling.reason
+
+    async def test_a_call_carrying_the_declared_amount_reports_no_omission(self) -> None:
+        """The control beside the arm above: with the amount carried, the only
+        failure left is the one this tree always has — nothing proves the price."""
+        row = live(coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60")),))
+        assert defects(row, priced(amount="50")) == {("money", CoverageFailure.UNPROVED)}
+
     async def test_the_currency_keys_exemption_is_conditional_and_not_unconditional(
         self,
     ) -> None:
