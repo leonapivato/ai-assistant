@@ -756,6 +756,31 @@ class _RecordEvidenceOp:
         assert stored.goal_id == "gB"
 
 
+class _RecordIntendedActionsOp:
+    """The ``record_intended_actions`` write, on two independent goals (ADR-0265 §5)."""
+
+    name = "record_intended_actions"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Two goals, so both mintings have somewhere to land and neither races."""
+        await store.save_goal(_goal("gA"))
+        await store.save_goal(_goal("gB"))
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Mint on goal A — the write that is cancelled."""
+        return store.record_intended_actions(_minting(_intended("iaA"), goal_id="gA"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Mint on goal B concurrently."""
+        return store.record_intended_actions(_minting(_intended("iaB"), goal_id="gB"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """Goal B's minting landed whole; the store still serves reads."""
+        stored = await store.get_goal("gB")
+        assert stored is not None
+        assert [action.id for action in stored.intended_actions] == ["iaB"]
+
+
 class _EvidenceReadOp(_ReadOp):
     """A locked evidence **read**, over two independent goals' histories (#397).
 
@@ -831,6 +856,10 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _RecordEvidenceOp,
     _GetEvidenceOp,
     _EvidenceOfOp,
+    # ADR-0265 §5's member is one more lock site, and a compare-and-swap one: a
+    # regression that released the resource before its own work finished would let a
+    # second caller decide against a version this one was about to advance.
+    _RecordIntendedActionsOp,
 )
 
 
@@ -2269,6 +2298,21 @@ class PlanStoreContract:
             await store.save_goal(opened)
         assert await store.get_goal("g1") is None
 
+    async def test_save_goal_refuses_a_goal_that_has_no_fields_at_all(
+        self, store: PlanStore
+    ) -> None:
+        """The refusal reaches the emptiest object ``Goal`` can be made into.
+
+        ``Goal.model_construct()`` is ADR-0023 §2's hazard at its limit: it carries **no
+        ``id``**, so a store composing its refusal out of ``goal.id`` raises
+        ``AttributeError`` — not the ``PlanningError`` this contract names — at exactly
+        the input the revalidation exists for. The subject is read with ``getattr``
+        instead, which is ``revalidated_revision``'s own construction for the same
+        hazard one command over.
+        """
+        with pytest.raises(PlanningError):
+            await store.save_goal(Goal.model_construct())
+
     async def test_record_intended_actions_refuses_an_unknown_goal(self, store: PlanStore) -> None:
         """§5: the member refuses a goal the store does not hold, as every other goal
         write does and with the class ADR-0249 §12 gives ``save_goal``."""
@@ -2293,6 +2337,37 @@ class PlanStoreContract:
         assert held is not None
         assert [action.id for action in held.intended_actions] == ["ia1"]
         assert held.version == 1
+
+    async def test_two_mintings_dispatched_together_leave_one_loser(self, store: PlanStore) -> None:
+        """§5's compare-and-swap, driven **concurrently** rather than in sequence.
+
+        ``record_interpretation``'s own arm one member over, and for its reason: a
+        sequential pair establishes that the second caller reads an advanced version,
+        while only a concurrent pair establishes that "the read, the comparison and the
+        write are **one indivisible step** with no separate read on which a decision is
+        taken". Two mintings dispatched together against one version leave **one**
+        winner and one ``StaleExecutionError``, and the goal holds the winner's action
+        alone — never both, which is what a store that read, decided and then wrote
+        would leave behind.
+        """
+        await store.save_goal(_goal())
+
+        results = await asyncio.gather(
+            store.record_intended_actions(_minting(_intended("ia1"))),
+            store.record_intended_actions(_minting(_intended("ia2"))),
+            return_exceptions=True,
+        )
+
+        winners = [one for one in results if isinstance(one, Goal)]
+        losers = [one for one in results if isinstance(one, StaleExecutionError)]
+        assert len(winners) == 1, f"expected exactly one winner, got {results}"
+        assert len(losers) == 1, f"expected exactly one stale loser, got {results}"
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert len(held.intended_actions) == 1, "the loser appended nothing"
+        assert held.version == 1
+        assert held.intended_actions == winners[0].intended_actions
 
     async def test_record_intended_actions_refuses_an_id_the_goal_already_holds(
         self, store: PlanStore

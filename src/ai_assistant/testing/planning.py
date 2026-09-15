@@ -114,7 +114,14 @@ def _revalidated_goal(goal: Goal, *, what: str) -> Goal:
     try:
         return Goal.model_validate(goal.model_dump())
     except ValidationError as exc:
-        msg = f"{what} would leave goal {goal.id} in a shape Goal refuses: {exc}"
+        # `getattr` and not `goal.id`, which is `revalidated_revision`'s own
+        # construction for the same hazard: the values this guard exists to catch are
+        # ones that reached **past** the validators, and `Goal.model_construct()`
+        # carries no `id` at all — so reading the attribute while composing the refusal
+        # would raise `AttributeError` out of a member that contracts `PlanningError`,
+        # at exactly the input the guard was written for.
+        subject = getattr(goal, "id", "<no id>")
+        msg = f"{what} would leave goal {subject} in a shape Goal refuses: {exc}"
         raise PlanningError(msg) from exc
 
 
