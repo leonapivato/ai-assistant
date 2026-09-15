@@ -10049,11 +10049,20 @@ function boundSentence(bound) {
 //
 // **Each kind is tested as the shape it is, not as a bag of optional fields.** §2 gives
 // every kind a required set — `MONEY` an amount, its currency and the key that carries
-// it; `PERIOD` both ends of its half-open interval; `TERMS` a non-empty set of strings —
+// it; `PERIOD` both ends of its half-open interval **and its zone**; `TERMS` a non-empty
+// set of strings —
 // and a bag test passed a money bound with all three `null`, which rendered as
 // `up to null`, and a terms bound with an empty set, which rendered as `one of:`. Those
 // are states `ValueBound` itself refuses, so a page presenting them would be showing a
 // limit the record does not carry. Adversarial review, round 5, `major`.
+//
+// **`minimum` is the one optional argument in the three shapes, and the only one.**
+// `ValueBound._the_kind_carries_its_own_arguments_and_no_others` builds its `missing`
+// list from every field the kind takes *except* `minimum`, so a `PERIOD` states its
+// `timezone` and no conforming hub sends one without it. A page admitting a null zone
+// renders an interval without saying which day it is an interval of — which is a
+// different interval in every zone the owner might be in. Adversarial review, round 7,
+// `major`.
 //
 // **An unknown kind still reports rather than failing the whole view**, which is
 // `boundSentence`'s own arrangement: a member from a hub at another version is said to be
@@ -10075,7 +10084,7 @@ function readBound(bound) {
     return (
       isText(bound.starts_at) &&
       isText(bound.ends_at) &&
-      (bound.timezone === null || isText(bound.timezone)) &&
+      isText(bound.timezone) &&
       absent(bound, ["maximum", "minimum", "currency", "currency_argument", "terms"])
     );
   }
