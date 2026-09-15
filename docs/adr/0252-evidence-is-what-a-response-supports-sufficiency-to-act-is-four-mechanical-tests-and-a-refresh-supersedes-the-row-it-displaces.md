@@ -129,6 +129,29 @@
   dated note per ADR-0070 §1; no ratified text is rewritten, no decision of this or any
   other ADR moves, and no mark is added (ADR-0089 §5). Refs #2302.
 
+
+- Amended: 2026-09-15 by ADR-0260 — **§1's second axis, in its ephemeral-kind list alone.**
+  That axis reads *"On one whose `read_kind` is `WEB_SEARCH` or `LOCAL_FILE`, `records` is
+  **empty** and the count stands alone"*, and [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md) §9 puts a third kind on that side —
+  `FORECAST_READ`, whose minted records are ephemeral for the very reason the axis states,
+  *"the split is by where the record lives and not by which ADR minted it"*. A reader
+  holding only this ADR would validate such a row under the **durable** arm and require
+  `len(records)` to equal `returned`, which is ADR-0082 §1's test met on that clause.
+
+  **§3 is *not* amended, and the working is stated rather than left to be checked.** Its
+  `requested` clause is scoped in terms to *"the vocabulary ADR-0226 §2, ADR-0230 §1,
+  ADR-0231 §1 and ADR-0240 §1 leave closed"*, so a sixth member lies outside what it
+  enumerates and no sentence of it becomes false or over-wide; ADR-0260 §9's entry — a
+  forecast ask has no typed part, so `requested` is **absent** — is ADR-0082 §1's *stacked
+  addition*, recorded in the ADR that makes it and nowhere else. **§3's window-axis clause
+  and its `Validity` prohibition are relied upon entire and are the ground ADR-0260 §5
+  mints a `ReportedExtent` on**, and §15's naming of what a reader's evidence row needs is
+  discharged rather than superseded. §2's algebra, §§4-14 and §§16-19 are unmoved.
+
+  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
+  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
+  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2255.
+
 ## Context
 
 ### Where this comes from

@@ -43,6 +43,14 @@
   onto it, and §8 below adds this decision's two vocabularies to them. §2's seven
   members, its closure, its classifier, its four facts, its total precedence and its
   no-message clause all bind entire and none moves.
+- **Amends** [ADR-0252](0252-evidence-is-what-a-response-supports-sufficiency-to-act-is-four-mechanical-tests-and-a-refresh-supersedes-the-row-it-displaces.md)
+  **§1's second axis, in its ephemeral-kind list alone.** That axis puts `WEB_SEARCH` and
+  `LOCAL_FILE` on the side where `records` is empty and the count stands alone; §9 below
+  puts a third kind there, for the axis's own stated reason that *"the split is by where
+  the record lives and not by which ADR minted it"*. **§3 is not amended** — its
+  `requested` enumeration is scoped in terms to a vocabulary a sixth member lies outside,
+  so §9's entry is ADR-0082 §1's *stacked addition* — and §2's algebra, §3's window axis
+  and prohibition list, and §§4-19 bind entire.
 - **Amends** [ADR-0264](0264-a-turn-that-reached-outside-this-system-says-so-and-a-reply-cannot-deny-a-contact-the-trail-recorded.md)
   **§3's first clause and §5's closure at one member**, in one respect each.
   `OutboundDestination` gains a second member, and a **second seam establishes a contact**
@@ -368,16 +376,18 @@ which §14 defers with what fires it.
 > **Normative.** A record's `content` is a **transcription** of the fields the provider's
 > documented format names for that day, in a fixed order, each rendered **as the
 > provider's own response spelled it** — the octets of the value the response carried, and
-> never a re-rendering of a parsed number. **The field selection, their order, the
-> separators and the omission rule are fixed by L1 and pinned by a test, and that pinned
-> form is this kind's canonical one**: a later implementation conforms by matching it, and
-> conformance is decided against the pinned form rather than against another
-> implementation's output. What this clause fixes is that the form is *fixed somewhere a
-> test asserts* and that nothing between the response and the record re-renders a value —
-> **not** a canonical field list this ADR would have to invent for a provider it names in
-> no normative clause. This is ADR-0231 §10's
-> transcription-not-rendering rule and ADR-0230 §5's decoding-not-rendering rule at a
-> third producer, and neither is relaxed: **no word of this system's is added.**
+> never a re-rendering of a parsed number. **The form is the provider's, and each
+> implementation pins its own**: the field selection, their order, the separators and the
+> omission rule are fixed by the implementation that reads that provider's documented
+> format, and are pinned by a test of its own. **There is no cross-implementation form, and
+> no implementation conforms by matching another's output** — a second provider's format
+> names different fields, so a matching requirement would have nothing to match against.
+> What this clause fixes is that the form is *fixed somewhere a test asserts*, and that
+> nothing between the response and the record re-renders a value; **which fields those are
+> is the implementing lane's, read off the provider §12 names**, and not a list this ADR
+> states. This is ADR-0231 §10's transcription-not-rendering rule and ADR-0230 §5's
+> decoding-not-rendering rule at a third producer, and neither is relaxed: **no word of
+> this system's is added.**
 
 > **Normative.** **A day the response does not describe completely is dropped whole**, and
 > the remaining days are minted: a day for which the provider omitted a documented field,
@@ -417,8 +427,8 @@ which §14 defers with what fires it.
 > the request, not the instant we received the response, and not a clock this system read.
 > A response declaring **no** instant, or carrying in that position a value that cannot be
 > read as one, mints **no record**: the refusal is `UNATTESTED`, whose class §8's
-> disposition carries into §7's audit. **No implementation reads an unparseable field as licence to fall back to a clock
-> it read.**
+> disposition carries into §7's audit. **No implementation reads an unparseable field as
+> licence to fall back to a clock it read.**
 
 > **Normative.** **The `Attestation` carries a `ReportedExtent` equal to the day that
 > record is about, and this is the field the whole decision is bought for.** Its ends are
@@ -977,11 +987,17 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 
 ### 13. The arms this decision owes
 
-> **Normative.** Each arm is a test the owning lane owes, over the **production** type or
-> component and never over a fake standing in for it, and each is **deterministic, offline
-> and in the ordinary gate**. **They are grouped below by owning lane, and the grouping
-> carries no obligation of its own**: every lettered arm is owed separately and in full, and
-> a lane discharges the arms under its own heading.
+> **Normative.** Each arm is a test the owning lane owes, **deterministic, offline and in
+> the ordinary gate**. **The subject is the production type or component, and the rule is
+> stated per assertion rather than per arm**: every assertion below is owed over the
+> production subject unless the arm names the canonical fake for it, and **exactly one
+> assertion does — (c)'s `request` limb**, admitted there because §4 lets a `request` answer
+> from held configuration with no await, so the contract does not oblige that member to
+> suspend and a production arm would be asserting a suspension point no implementation owes.
+> **No other assertion stands over a fake**, and no lane reads this one allowance more
+> widely. **They are grouped below by owning lane, and the grouping carries no obligation of
+> its own**: every lettered arm is owed separately and in full, and a lane discharges the
+> arms under its own heading.
 
 > **Normative — L1: the contract, what it mints, and the model.**
 >
@@ -1026,13 +1042,12 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   **`read`**, cancelled from outside while suspended, re-raises `CancelledError` over the
 >   **production** forecaster: it yields no `ForecastOutcome`, no `ForecastRefusal`, and in
 >   particular no `DEADLINE_EXPIRED`, which is `read`'s **own** expiry and never an outer
->   one (ADR-0241 §4). **`request` is asserted over the canonical fake**, and only where an
->   implementation suspends in it: §4 lets a `request` answer from held configuration with
->   no await at all, so a production arm here would either hang or force a needless
->   suspension point into production to be testable — `WebSearcher`'s own shape, which
->   tests cancellation on the suspendable member and models the rest on its fake. And `read`'s `timeout` is **required with no
->   default**, so omitting it is a `TypeError`; a value that is not a `timedelta`, a zero
->   and a negative each raise `ValueError` **before** the call is revalidated, before any
+>   one (ADR-0241 §4). **`request` is asserted over the canonical fake**, under the
+>   preamble's one allowance and only where an implementation suspends in it —
+>   `WebSearcher`'s own shape, which tests cancellation on the suspendable member and
+>   models the rest on its fake. And `read`'s `timeout` is **required with no default**, so
+>   omitting it is a `TypeError`; a value that is not a `timedelta`, a zero and a negative
+>   each raise `ValueError` **before** the call is revalidated, before any
 >   credential is read and before any channel is opened, asserted over those three
 >   orderings so that zero cannot pass as an instant expiry.
 > - **(i) The deadline that actually expires.** A production forecaster whose exchange is
@@ -1159,18 +1174,16 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 **The six records are declared here, each with ADR-0070 §1's test applied to the earlier
 ADR's text — what ADR-0082 §1 asks of an author.**
 
-> **Normative.** **The six header edits are written in this PR's own ratification commit
-> and not before**, in ADR-0165 §9's own form and for its own reason: a qualified `Status`
-> line plus a dated header note, with no ratified text rewritten, waiting because *"writing
-> them while this ADR is `Proposed` is ADR-0019's state claim"*. A reader of ADR-0247 today
-> would otherwise be told, by ADR-0247's own header, that a decision which has not landed
-> has superseded a clause of it. **They are not deferred to an implementing lane either** —
-> a record is decision bookkeeping and travels with the decision.
->
-> **That commit therefore carries more than one line, and is not ADR-0165 §2's exempt
-> shape.** It costs its own round of both required lenses over the flipped tree, which this
-> section states so that the lane does not read the refusal as a fault: ADR-0165's own
-> ratification commit did exactly this, and ADR-0026 §6 and ADR-0027 §7 set the form.
+> **Normative.** **The six header edits ride in this PR, while this ADR is `Proposed`, and
+> are not held back for the ratification commit.** ADR-0082 §7 states the condition in
+> terms, and names the contrary reading as a recurring reviewer failure rather than a
+> governance gap: *"§1's condition is that the superseding ADR **exists**, not that it is
+> ratified — the hazard §1 names is a `Status` line pointing at nothing, and an atomic pair
+> makes that unreachable."* The pair is atomic here — the six records and the ADR they name
+> land in one merge — so no reader ever meets a qualifier resolving to nothing. **They are
+> not deferred to an implementing lane either**: a record is decision bookkeeping and
+> travels with the decision. The ratification commit therefore flips one `Status` line and
+> changes no other byte, which is ADR-0165 §2's exempt shape.
 
 > **Normative.** **ADR-0155 §3's second clause, ADR-0233 §7 and ADR-0233 §9's four
 > conditions are untouched and are not reachable from here.** A span carrying covered
