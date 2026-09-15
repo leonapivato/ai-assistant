@@ -1105,12 +1105,21 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   with `FORECAST_PROVIDER` `REACHED`**, asserted separately too, because §10 classes all
 >   three as reached from octets this system took off the channel and any of them folded to
 >   `INDETERMINATE` would deny a contact the trail recorded.
-> - **(k) The classifier, total over both vocabularies.** Every member of `ForecastRefusal`
->   and every member of `ForecastDisposition` is asserted against the `ReadOutcomeKind`
->   member §8 gives it, **enumerated exhaustively over both types** so that a member added
->   without a mapping fails the arm rather than passing silently; `NO_BUDGET` produces **no
->   outcome entry at all**; and `TRUNCATED` displaces `EMPTY`, `DUPLICATE` and
->   `RETURNED_RECORDS` where ADR-0226 §6's budget cut this kind's yield.
+> - **(k) The classifier and the fold, each total over its own domain.** Every member of
+>   `ForecastRefusal`, and every member of `ForecastDisposition` **§8 maps**, is asserted
+>   against the `ReadOutcomeKind` member §8 gives it, **enumerated exhaustively over both
+>   types** so that a member added without a mapping fails the arm rather than passing
+>   silently. **`ForecastDisposition.NO_BUDGET` is §8's one stated exception and is asserted
+>   as itself** — it names a read the servicing did not reach, so the arm asserts **no
+>   outcome entry at all** for it and asserts no `ReadOutcomeKind`, an assertion demanding
+>   one being unsatisfiable against §8 as written. And `TRUNCATED` displaces `EMPTY`,
+>   `DUPLICATE` and `RETURNED_RECORDS` where ADR-0226 §6's budget cut this kind's yield.
+>   **§10's fold is walked the same way, over all twelve dispositions**, each asserted
+>   against the `ForecastNotRead` member §10 declares for it and the seven that fold onto
+>   `UNAVAILABLE` named individually, so that an omitted member cannot pass as a default;
+>   §10's precedence over a revising turn's two servicings is (h)'s and is not repeated
+>   here. A fold stated totally and tested selectively is one an implementation can leave
+>   partial while passing every other arm.
 > - **(l) Two seams, one statement.** A turn that reached the configured **search**
 >   provider and the configured **forecast** provider carries **one** outbound statement
 >   naming **both** destination classes, in §10's stated order, neither displacing the
@@ -1123,6 +1132,18 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   itself, because §7 computes it over the pre-servicing supply **and** over every record
 >   this servicing has already contributed, and an implementation inspecting only the first
 >   passes every other arm while writing `False`.
+> - **(n) The contact that outlives the servicing.** A servicing whose forecast read was
+>   **answered** and whose **later** read of another kind then raises carries
+>   `FORECAST_PROVIDER` `REACHED` with `records` `0` and `forecast_not_read` `None` —
+>   ADR-0226 §5 discarded the servicing's records, and §10's quoted clause, *"nothing that
+>   happens to the enclosing servicing afterwards unmakes it"*, is what survives them. The
+>   same servicing having recorded `UNATTESTED` **before** that later failure carries the
+>   contact **and** `UNAVAILABLE`; and one that raised **before** the forecast was
+>   serviced, having opened no channel, carries **no** contact and `None`. An
+>   implementation computing the fact off the ended servicing rather than at the performing
+>   site passes every other arm here and fails all three, which is why §10 fixes the site
+>   and forbids any other to recompute it — ADR-0264 §13's own arm 7 arriving at a second
+>   seam.
 
 ### 14. Deferred, by name, each with what fires it
 
