@@ -22,11 +22,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import IllegalTransitionError, PlanningError
 from ai_assistant.core.types import (
+    MAX_ACTION_QUOTES,
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
     MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    ActionQuoteMinting,
     AttemptPhase,
     AttemptState,
     EvidenceStanding,
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from ai_assistant.core.types import (
+        ActionQuote,
         AttemptTransition,
         GoalInterpretation,
         GoalStatus,
@@ -876,6 +879,96 @@ def minted(goal: Goal, actions: Sequence[IntendedAction]) -> Goal:
             }
         ),
         what="minting an intended action",
+    )
+
+
+def revalidated_quote_minting(minting: ActionQuoteMinting) -> ActionQuoteMinting:
+    """Rebuild ``minting`` as a validated, detached command, or refuse it (ADR-0267 §2).
+
+    :func:`revalidated_minting`'s reason, one command over: ``model_copy(update=...)``
+    **skips validators** (ADR-0023 §2, "a pydantic property no type can close"), so a
+    caller can hand in a command whose ``quote`` carries a non-finite amount, a
+    lowercase currency or a digest that is not lowercase 64-character hex — every one of
+    which the record's own model refuses at construction and none of which a store that
+    trusted the object would see. **It is also this member's detachment**: the command is
+    rebuilt from the caller's dump, so no node of the caller's graph survives into the
+    stored goal.
+
+    Args:
+        minting: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return ActionQuoteMinting.model_validate(minting.model_dump())
+    except ValidationError as exc:
+        subject = getattr(minting, "goal_id", "<no goal>")
+        msg = f"the quote minting for goal {subject!r} is not a valid command: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def quoted(goal: Goal, quote: ActionQuote) -> Goal:
+    """Append ``quote`` to ``goal``, elide if it must, and advance its version (§2).
+
+    **One refusal, and it runs before anything is appended** (ADR-0267 §2): the quote's
+    ``intended_action`` is the ``id`` of a member of this goal's ``intended_actions``
+    **at the instant of the append**. It takes ``PlanningError`` and not the stale-write
+    class, because it is an invariant breach at the current version rather than a lost
+    race — "a caller that re-read and retried would re-raise for ever" — which is
+    :func:`minted`'s own ground one record over.
+
+    **Nothing else is validated.** Not the amount, not the currency, not the digest, not
+    the provenance, and **no test of whether this quote refreshes an earlier one**: a
+    refresh is position in the tuple and not a predicate, so there is nothing here to
+    evaluate and no second place the rule could live. **No instant is compared and
+    nothing is ordered by ``read_at``**; what keeps position and reading in step is
+    ADR-0267 §4's rule that an append is made in the step that took its read.
+
+    **The bound is an elision and not a refusal**, which is the opposite remedy to
+    :func:`minted`'s and ADR-0267 §2 gives the reason: members are dropped from the
+    **front** alone, so within any action the last quote is the last to go — an elision
+    either leaves the governing quote where it was or leaves that action with no quote
+    at all, in which case the act **asks**. A dropped quote costs a question, where a
+    dropped identity would be a duplicate booking nobody could detect afterwards.
+    Silent truncation is not available (ADR-0086 §4): a write that drops *k* members
+    advances ``quotes_elided`` by *k*.
+
+    Stated here rather than in each store so the conforming implementations cannot
+    disagree about which appends are refused or what an elision does.
+
+    Args:
+        goal: The goal as stored, read under the same lock or transaction as the write.
+        quote: The quote to append, already revalidated.
+
+    Returns:
+        The goal as it stands after the append.
+
+    Raises:
+        PlanningError: If the quote's ``intended_action`` is not the ``id`` of a member
+            of this goal's ``intended_actions``.
+    """
+    if quote.intended_action not in {action.id for action in goal.intended_actions}:
+        msg = (
+            f"goal {goal.id} holds no intended action {quote.intended_action}: a quote "
+            f"is keyed by the act it was read for, and the store refuses one naming an "
+            f"action the goal does not hold, writing nothing (ADR-0267 §2)"
+        )
+        raise PlanningError(msg)
+    appended_quotes = (*goal.quotes, quote)
+    dropped = max(0, len(appended_quotes) - MAX_ACTION_QUOTES)
+    return _revalidated(
+        goal.model_copy(
+            update={
+                "quotes": appended_quotes[dropped:],
+                "quotes_elided": goal.quotes_elided + dropped,
+                "version": goal.version + 1,
+            }
+        ),
+        what="recording a quote",
     )
 
 

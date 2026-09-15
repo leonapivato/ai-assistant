@@ -782,6 +782,17 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     the brief's own ``C``/``S``/``D`` labels, which are ordinals into the current
     revision, minted per call and persisted nowhere. Neither field admits a
     ``SecretStr``, and the model sets ``extra="forbid"``.
+
+    **``QuoteView`` joined it with ADR-0267 §7**, because ``AuthorizationProjection``
+    gained ``quote`` and the projection already rides inside a ``Confirmation`` here.
+    The same judgement, made rather than inherited: §7 closes the model at three fields
+    and states the bar over them in terms — no digest, no intended action, no plan, no
+    step, no goal id and no authorization id. What is left is a ``Decimal`` the
+    provider's own output carried, a three-letter currency code and one instant. None
+    admits a ``SecretStr``, and the model sets ``extra="forbid"``. **It is ``None`` on
+    every projection this tree renders**, its producer being ADR-0254 §20's Lane 2
+    (ADR-0267 §11) — the field is in the graph as a shape, and the judgement is made
+    now rather than left to the lane that fills it.
     """
     reachable = _reachable_from_the_composing_stage()
 
@@ -790,6 +801,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "Attestation",
         "AuthorizationProjection",
         "CoverageView",
+        "QuoteView",
         "ValueBound",
         "CalendarFacet",
         "Capture",

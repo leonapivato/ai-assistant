@@ -73,6 +73,7 @@ from ai_assistant.testing.goal_authorizations import (
     period_bound,
     terms_bound,
 )
+from ai_assistant.testing.goal_quotes import FakeGoalQuotes
 from ai_assistant.testing.grants import (
     DEFAULT_DECIDED_AT,
     DEFAULT_GRANTED_SOURCE,
@@ -294,6 +295,7 @@ __all__ = [
     "FakeGoalAssociator",
     "FakeGoalAuthorizationStore",
     "FakeGoalAuthorizations",
+    "FakeGoalQuotes",
     "FakeIdentifierSpace",
     "FakeIdentifiers",
     "FakeInvocationCompleter",

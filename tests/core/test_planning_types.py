@@ -1358,15 +1358,17 @@ def test_export_is_versioned_and_defaults_to_empty() -> None:
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_thirteen() -> None:
+def test_export_pins_the_schema_version_to_exactly_fourteen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[13]`` refuses an explicit ``12`` — a document of the shape this export
-    had before ``Goal`` gained ``intended_actions`` and ``PlanStep`` gained
-    ``intended_action`` does not validate against this contract at all (ADR-0265 §5),
-    exactly as an ``11`` stopped validating when ``ActionPlan`` and ``PlanStep`` gained
-    the plan's graph, ``GoalElement`` gained an identity and an applicability and
-    ``GoalEvidence`` gained ``interpreted_output`` (ADR-0253 §10), a ``10`` when this
+    ``Literal[14]`` refuses an explicit ``13`` — a document of the shape this export
+    had before ``Goal`` gained ``quotes`` and ``quotes_elided`` does not validate
+    against this contract at all (ADR-0267 §11), exactly as a ``12`` stopped
+    validating when ``Goal`` gained ``intended_actions`` and ``PlanStep`` gained
+    ``intended_action`` (ADR-0265 §5), an ``11`` stopped validating when
+    ``ActionPlan`` and ``PlanStep`` gained the plan's graph, ``GoalElement`` gained
+    an identity and an applicability and ``GoalEvidence`` gained
+    ``interpreted_output`` (ADR-0253 §10), a ``10`` when this
     document gained
     ``evidence``, a ``9`` when it gained ``questions``, an ``8`` when
     ``AttemptEffort`` gained ``kind``, a ``7`` when this document gained ``attempts``
@@ -1377,13 +1379,13 @@ def test_export_pins_the_schema_version_to_exactly_thirteen() -> None:
     value, so the advertised version cannot be mislabelled. The positive default is
     what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``12`` is
-    the shape this contract had one decision ago and ``14`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``13`` is
+    the shape this contract had one decision ago and ``15`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
     assert PlanExport(exported_at=_WHEN, schema_version=14).schema_version == 14
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14):
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 

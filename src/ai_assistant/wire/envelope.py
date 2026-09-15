@@ -2079,7 +2079,55 @@ from ai_assistant.wire.errors import (
 #: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
 #: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
 #: registered, and the error mapping is untouched — this lane mints no error class.
-PROTOCOL_VERSION: Final[int] = 47
+#:
+#: **48 since ADR-0267 §11**, and the ground is stated rather than weighed: *"``
+#: PROTOCOL_VERSION`` moves by exactly one, in Q1"*. **Two grounds, one bump, and there
+#: is no third.**
+#:
+#: **The first.** :class:`~ai_assistant.core.types.ToolDefinition` gains
+#: ``quoted_output``, defaulting to ``None``, and a declaration crosses the promoted
+#: surface **inside a** :class:`~ai_assistant.core.types.PermissionDecision`. That model
+#: sets ``extra="forbid"`` and ``wire/codec.py`` renders a model by ``model_dump()``, so
+#: a hub at 48 emits ``"quoted_output": null`` on every declaration it sends and a client
+#: at 47 fails it with ``extra_forbidden``. **A defaulted member is still a shape
+#: change**, exactly as the entries at 39, 40, 42, 43, 44, 45 and 47 state of their own.
+#:
+#: **The second.** :class:`~ai_assistant.core.types.AuthorizationProjection` gains
+#: ``quote``, **required with no default** (ADR-0267 §7), and crosses a frame **inside a**
+#: :class:`~ai_assistant.core.types.Confirmation` — which the entry at 45 landed. Every
+#: projection this tree renders carries ``null`` there, the row's ``quoted`` being
+#: populated by no lane of this decision, and a client at 47 refuses the member all the
+#: same.
+#:
+#: **What earns no ground of its own, said rather than left to inference.**
+#: :class:`~ai_assistant.core.types.QuoteView` is minted, and reaches a frame only
+#: **inside** the projection above, so it rides this one bump rather than adding to it.
+#: :class:`~ai_assistant.core.types.Goal` **is not one of them** (§11):
+#: ``TurnResult.goal`` is a :class:`~ai_assistant.core.types.GoalBrief` (ADR-0249 §11,
+#: which ADR-0267 leaves entire) and ``PlanExport`` crosses no frame, so ``Goal.quotes``
+#: and ``Goal.quotes_elided`` are a **stored-record** change alone.
+#: :class:`~ai_assistant.core.types.Authorization` **crosses whole in no frame either**,
+#: so ``quoted`` adds no wire ground, and :class:`~ai_assistant.core.types.ActionQuote`
+#: and :class:`~ai_assistant.core.types.ActionQuoteMinting` reach a frame through nothing
+#: at all.
+#:
+#: **No integer is fixed in the ADR** (§11). It is whatever the tree holds when this lane
+#: lands plus one: this lane branched at 47 and was written **48**, and a lane that lands
+#: after this one re-bumps rather than reusing it.
+#:
+#: **One stored-record version moves and one does not.**
+#: ``PlanExport.schema_version`` advances to **14**, on ADR-0039 §10's mechanism, because
+#: ``Goal`` is inside that document; the plan store's own on-disk schema advances to
+#: **6**, a migration that rewrites no row and creates no table. **The goal-authorization
+#: store's stays at 1**, every new field being defaulted: an ``Authorization`` written
+#: earlier decodes with ``quoted`` ``None``, which ADR-0267 §7 makes a conforming row
+#: rather than one to repair. **And no ``AuthorizationProjection`` is stored at all**, it
+#: riding inside a ``Confirmation`` that crosses a frame.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
+#: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
+#: registered, and the error mapping is untouched — this lane mints no error class.
+PROTOCOL_VERSION: Final[int] = 48
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

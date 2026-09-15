@@ -39,6 +39,7 @@ import structlog
 from ai_assistant.core.errors import AuthorizationError, RecipientGrantError
 from ai_assistant.core.types import (
     AuthorizationOrigin,
+    BoundKind,
     CostBasis,
     CoverageUnrecordedBinding,
     OriginUnrecordedBinding,
@@ -59,8 +60,9 @@ from ai_assistant.permissions._coverage import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.protocols import GoalAuthorizations, RecipientGrants
+    from ai_assistant.core.protocols import GoalAuthorizations, GoalQuotes, RecipientGrants
     from ai_assistant.core.types import (
+        ActionQuote,
         ActionRequest,
         Authorization,
         CanonicalDestination,
@@ -216,6 +218,17 @@ _AUTHORIZATION_SEAM_UNREADABLE = (
     "a policy that cannot check a standing authorization takes no standing route at all"
 )
 
+#: Reported to an operator when the quote seam could not answer (ADR-0267 §5).
+#: **A fault is never an absence**: no implementation converts one into an empty tuple,
+#: so ADR-0254 §6's bar is taken, no standing route is taken at all, and the ruling is
+#: the ``CONFIRM`` the request would have drawn had the user authorised nothing. An
+#: empty tuple would have let a declaration declaring a money argument fall through to
+#: the argument route and prove a **charge** against a **filter**, which ADR-0266 §7
+#: refuses in terms — *"a filter is not a charge"*.
+_QUOTE_SEAM_UNREADABLE = (
+    "a policy that cannot read the price an act was quoted at takes no standing route at all"
+)
+
 #: ADR-0181 §5's ground, worded at the strength the recorded predicate carries
 #: (§2's second clause, §6's second and sixth): a statement about the **selection
 #: this system made**, naming no source and no kind of source, and never a
@@ -261,7 +274,10 @@ class _Authority(NamedTuple):
     Three values because §6 asks three questions of one read and a ``bool`` answers
     only the first: whether a standing route may be taken at all, which row route
     (d) would then be decided from, and — where the bar fired on **coverage** rather
-    than on a fault — §4's account of which of its three failures it was.
+    than on a fault — §4's account of which of its three failures it was. **And a
+    fourth carries the quotes the same step read** (ADR-0267 §5), so route (d)'s own
+    comparison below is decided over the answer the bar was decided over rather than
+    over a second read of a seam.
     """
 
     barred: bool
@@ -279,6 +295,14 @@ class _Authority(NamedTuple):
     ``None`` on a **fault**, because there is no coverage failure to describe and
     *"a store fault is an operator's fact and not something to put in front of
     someone deciding about a call"*."""
+
+    quotes: tuple[ActionQuote, ...] = ()
+    """The goal's quotes naming the request's intended action, oldest first.
+
+    Empty where the seam was not read at all — no goal, no act, no ``GoalQuotes``, or
+    a row carrying no ``MONEY`` member — and where the goal holds none. **Never a
+    fault's answer**: a fault takes the bar, and a barred ruling reaches no comparison
+    this would be read by (ADR-0267 §5)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +468,7 @@ class ThresholdActionPolicy:
         grants: RecipientGrants | None = None,
         configured_search: ConfiguredSearchDestination | None = None,
         authorizations: GoalAuthorizations | None = None,
+        quotes: GoalQuotes | None = None,
     ) -> None:
         """Create the policy.
 
@@ -493,6 +518,18 @@ class ThresholdActionPolicy:
                 ``closed_loop``, and in no other"*. Such a policy also **never
                 fires ADR-0254 §6's bar** and reads this seam **zero** times, on
                 every request.
+            quotes: The goal quotes this policy may consult (ADR-0267 §5).
+                **The keyed face and never the store**: a policy handed
+                ``PlanStore`` is one ``record_quote`` call away from minting the
+                price it is about to prove a ceiling against, and the annotation is
+                what removes the capability rather than a rule this class is trusted
+                to keep. ``None`` — the default — leaves **every ``MONEY`` member
+                unmet**, so every act carrying a stated ceiling asks and this seam is
+                read **zero** times on every request, which is ADR-0266 §7's
+                fail-closed direction and the arithmetic the tree had before
+                ADR-0267's Q1. It is **not** what route (d) rests on in general: a
+                policy given none still reaches route (d) for a row carrying no
+                ``MONEY`` member.
 
         A ``deny`` threshold below its matching ``confirm`` threshold is
         accepted rather than rejected: the combination is still a maximum, so
@@ -503,6 +540,7 @@ class ThresholdActionPolicy:
         self._grants = grants
         self._configured_search = configured_search
         self._authorizations = authorizations
+        self._quotes = quotes
         rules = list(_FLOORS)
         if confirm_at_risk is not None:
             rules.append(_risk_rule(confirm_at_risk, PermissionOutcome.CONFIRM))
@@ -733,10 +771,15 @@ class ThresholdActionPolicy:
             # ``egress_binding.account`` would otherwise put a reference this ruling
             # never checked into the ``ALLOW`` the trail then compares.
             configured = None if at_configured is None else at_configured.account.reference
-            barred, record, account = await self._authority(subject)
+            barred, record, account, quotes = await self._authority(subject)
             if not barred:
                 standing = await self._standing_allow(
-                    request, record, subject=subject, configured=configured, external=external
+                    request,
+                    record,
+                    subject=subject,
+                    configured=configured,
+                    external=external,
+                    quotes=quotes,
                 )
                 if standing is not None:
                     return standing
@@ -755,7 +798,7 @@ class ThresholdActionPolicy:
         reasons = [reason for ruled, reason in grounds if ruled is outcome]
         return PermissionRuling(outcome=outcome, reason="; ".join(reasons))
 
-    async def _standing_allow(
+    async def _standing_allow(  # noqa: PLR0913 — one keyword per value the one pre-suspension observation carries forward; each is a fact ADR-0254 §6 decides a different step on
         self,
         request: ActionRequest,
         record: Authorization | None,
@@ -763,6 +806,7 @@ class ThresholdActionPolicy:
         subject: CoverageSubject,
         configured: str | None,
         external: bool,
+        quotes: tuple[ActionQuote, ...],
     ) -> PermissionRuling | None:
         """The standing ``ALLOW`` this request earns, or ``None`` for none.
 
@@ -810,6 +854,8 @@ class ThresholdActionPolicy:
                 other value here — and ``None`` otherwise.
             external: Whether the binding records that the call was planned over
                 external content.
+            quotes: The goal's quotes naming this request's act, as the **same** step
+                that decided the bar read them (ADR-0267 §5).
 
         Returns:
             The ``ALLOW`` a standing route earned, or ``None`` where none did.
@@ -836,7 +882,7 @@ class ThresholdActionPolicy:
             )
         recipient: RecipientGrant | None = None
         consulted = False
-        if self._covers_in_full(subject, record, external=external):
+        if self._covers_in_full(subject, record, external=external, quotes=quotes):
             assert record is not None  # noqa: S101 — narrowing; the test is stated over it
             if record.origin is AuthorizationOrigin.OPENING_ACT:
                 # **The one exception to "route (d) answers with the grant seam
@@ -948,11 +994,31 @@ class ThresholdActionPolicy:
         added to it — there is no coverage failure to describe, and describing the
         fault would put an operator's fact in the prompt.
 
+        **The quotes are read on this same step, at most once, and only where a
+        ceiling could be proved by one** (ADR-0267 §5). ``for_action`` is consulted
+        **zero** times on a request carrying no ``goal`` or no ``intended_action``, on
+        a policy holding no ``GoalQuotes``, where ``live_for`` answered ``None`` or
+        faulted, and on a row carrying **no ``MONEY`` member** — the last because the
+        evidence route meets a member of no other kind in any case, so a read there
+        could change no answer. ``_DISCLOSURE_FLOOR``'s *"at most one durable read per
+        seam per ruling and never a cached answer"* is kept: the tuple the bar was
+        decided over is the tuple route (d) is decided over.
+
+        **A ``for_action`` this policy could not read takes the bar, exactly as
+        ``live_for``'s fault does** (ADR-0267 §5, ADR-0266 §7). *"A fault is never an
+        absence"*: no implementation converts one into an empty tuple, so the request
+        is **not covered**, no standing route is taken at all, and the ruling is the
+        ``CONFIRM`` the request would have drawn had the user authorised nothing. It
+        **never falls through to the argument route**, which is what an empty tuple
+        would have let it do for a declaration declaring an amount. The log line names
+        the class and no value, and the id it names was read before the await.
+
         Returns:
             Whether the bar fires; the live row the seam returned — ``None`` where
             the seam was not read at all, where it answered ``None``, or where it
-            faulted; and ADR-0254 §4's account of the coverage failure where the bar
-            fired on one.
+            faulted; ADR-0254 §4's account of the coverage failure where the bar
+            fired on one; and the quotes naming this request's act, empty where the
+            quote seam was not read.
         """
         goal = subject.goal
         if goal is None or self._authorizations is None:
@@ -971,14 +1037,41 @@ class ThresholdActionPolicy:
             return _Authority(barred=True, record=None, account=None)
         if record is None:
             return _Authority(barred=False, record=None, account=None)
-        defects = uncovered(record, subject)
+        act = subject.intended_action
+        quotes: tuple[ActionQuote, ...] = ()
+        if (
+            self._quotes is not None
+            and act is not None
+            and any(member.kind is BoundKind.MONEY for member in record.coverage)
+        ):
+            try:
+                quotes = await self._quotes.for_action(goal, act)
+            except AuthorizationError as exc:
+                _log.warning(
+                    "quote_seam_unreadable",
+                    tool_id=tool_id,
+                    outcome="confirm",
+                    refused_by=type(exc).__name__,
+                    reason=_QUOTE_SEAM_UNREADABLE,
+                )
+                return _Authority(barred=True, record=None, account=None)
+        defects = uncovered(record, subject, quotes)
         if defects:
-            return _Authority(barred=True, record=record, account=account_of(defects, subject.tool))
-        return _Authority(barred=False, record=record, account=None)
+            return _Authority(
+                barred=True,
+                record=record,
+                account=account_of(defects, subject.tool),
+                quotes=quotes,
+            )
+        return _Authority(barred=False, record=record, account=None, quotes=quotes)
 
     @staticmethod
     def _covers_in_full(
-        subject: CoverageSubject, record: Authorization | None, *, external: bool
+        subject: CoverageSubject,
+        record: Authorization | None,
+        *,
+        external: bool,
+        quotes: tuple[ActionQuote, ...],
     ) -> bool:
         """Whether route (d) covers this request but for the opening-act recheck.
 
@@ -1022,6 +1115,9 @@ class ThresholdActionPolicy:
             external: Whether the binding carries ``planned_with_external_content``,
                 read before this ruling suspended, on which ADR-0266 §7's narrowing
                 of the lineage discharge turns.
+            quotes: The goal's quotes naming this request's act, as the **same** step
+                that decided the bar read them (ADR-0267 §5) — never a second read,
+                so condition 6 cannot answer one way for the bar and another here.
 
         Returns:
             Whether §3's six conditions hold over that pair, condition 4 holds over
@@ -1030,7 +1126,7 @@ class ThresholdActionPolicy:
         """
         if record is None or subject.coverage is not SpanCoverage.NOT_COVERED:
             return False
-        if not covers(record, subject):
+        if not covers(record, subject, quotes):
             return False
         return not external or covers_on_argument_route(record, subject)
 

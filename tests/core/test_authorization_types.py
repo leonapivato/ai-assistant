@@ -96,7 +96,13 @@ def test_the_four_vocabularies_are_closed_at_the_membership_the_adr_fixes() -> N
 
 
 def test_the_field_list_is_closed_and_a_lane_adding_a_member_is_changing_the_decision() -> None:
-    """§1: *"The field list is **closed**"*, so a thirteenth field is a red test."""
+    """§1: *"The field list is **closed**"*, so a fifteenth field is a red test.
+
+    **Fourteen since ADR-0267 §7**, which partially supersedes §1's field list in that
+    limb alone: the row gains ``quoted``, the governing quote for the request's
+    intended action in the goal the row was built from. Its producer is ADR-0254 §20's
+    Lane 2 (ADR-0267 §11), so every row this tree writes carries ``None``.
+    """
     assert set(Authorization.model_fields) == {
         "id",
         "goal",
@@ -111,6 +117,7 @@ def test_the_field_list_is_closed_and_a_lane_adding_a_member_is_changing_the_dec
         "supersedes",
         "disposition",
         "settled_at",
+        "quoted",
     }
 
 
@@ -785,6 +792,10 @@ def test_the_subject_digest_is_taken_over_exactly_the_five_fields_section_7_name
         "supersedes",
         "disposition",
         "settled_at",
+        # ADR-0267 §7 puts ``quoted`` **outside** the subject deliberately: it is
+        # provenance, *"no comparison of any decision reads it"*, and leaving it in
+        # would move the digest of a row whose subject had not changed.
+        "quoted",
     }
     row = authorization(id="a1")
     for name, value in (

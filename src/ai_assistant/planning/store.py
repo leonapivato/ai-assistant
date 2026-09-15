@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
+from ai_assistant.core.errors import (
+    ActiveExecutionError,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     EvidenceHistory,
@@ -38,6 +42,7 @@ from ai_assistant.planning.goals import (
     engaged,
     invalidated,
     minted,
+    quoted,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
     refuse_a_superseded_plan,
@@ -48,6 +53,7 @@ from ai_assistant.planning.goals import (
     revalidated_goal,
     revalidated_minting,
     revalidated_plan,
+    revalidated_quote_minting,
     revalidated_revision,
     revalidated_row_ids,
     settled,
@@ -61,6 +67,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
         ActionPlan,
+        ActionQuote,
+        ActionQuoteMinting,
         AttemptTransition,
         ExecutionState,
         Goal,
@@ -275,6 +283,67 @@ class InMemoryPlanStore:
         updated = minted(stored, command.actions)
         self._goals[updated.id] = updated
         return updated.model_copy(deep=True)
+
+    async def record_quote(self, minting: ActionQuoteMinting) -> Goal:
+        """Append one quote to a goal, compare-and-swap (ADR-0267 §2).
+
+        The read, the comparison and the write are one step: there is no ``await``
+        between reading the stored version and writing the appended goal, so nothing can
+        interleave and no decision is taken on a separate read.
+
+        **The refusal runs before the append** and
+        :func:`~ai_assistant.planning.goals.quoted` states it — and the elision — once
+        for both conforming stores. **Nothing else is tested**: not the amount, not the
+        currency, not the digest, and **no test of whether this quote refreshes an
+        earlier one**, which is position in the tuple and not a predicate.
+
+        **The command is revalidated on the first executed line**, and everything after
+        reads the validated value rather than the caller's: ``model_copy(update=...)``
+        skips validators (ADR-0023 §2), so a ``quote`` can arrive carrying a non-finite
+        amount, a lowercase currency or a digest that is not lowercase hex.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, or if the quote's ``intended_action`` is not the ``id``
+                of a member of that goal's ``intended_actions``.
+        """
+        command = revalidated_quote_minting(minting)
+        stored = self._goal_for_write(command.goal_id, command.expected_version, "quote against")
+        updated = quoted(stored, command.quote)
+        self._goals[updated.id] = updated
+        return updated.model_copy(deep=True)
+
+    async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
+        """That goal's quotes naming that action, in the goal's own order (§5).
+
+        This store satisfies :class:`~ai_assistant.core.protocols.GoalQuotes`
+        **structurally**, so the composition root may hand one object to both seams
+        while a policy annotated with the narrow face cannot name ``record_quote``.
+
+        **It selects nothing and compares nothing** (ADR-0267 §5): the filter is the two
+        identifiers, the order is ``Goal.quotes``' own, and the caller takes the last
+        member. A goal this store does not hold answers an **empty** tuple, which is the
+        same answer a goal holding no quote for that action gives — both mean the policy
+        has no quote, and ADR-0266 §7 leaves the request uncovered either way.
+
+        Args:
+            goal: The goal the request being ruled on belongs to.
+            intended_action: The act the request is an attempt at.
+
+        Returns:
+            That action's quotes, oldest first, possibly empty — detached, because a
+            caller holding this store's own records could rewrite a stored amount
+            through ``__dict__``.
+        """
+        stored = self._goals.get(goal)
+        if stored is None:
+            return ()
+        return tuple(
+            quote.model_copy(deep=True)
+            for quote in stored.quotes
+            if quote.intended_action == intended_action
+        )
 
     def _goal_for_write(self, goal_id: str, expected_version: int, what: str) -> Goal:
         """Read a goal for a compare-and-swap write, or refuse (ADR-0250 §9).

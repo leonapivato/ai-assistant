@@ -81,8 +81,11 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.core.types import (
+        ActionQuote,
         ActionRequest,
         Authorization,
         CanonicalDestination,
@@ -293,7 +296,9 @@ _ROUTE_ACCEPTS: Final[dict[BoundKind, frozenset[str]]] = {
 }
 
 
-def defects(row: Authorization, call: ActionRequest) -> set[tuple[str, CoverageFailure]]:
+def defects(
+    row: Authorization, call: ActionRequest, quotes: Sequence[ActionQuote] = ()
+) -> set[tuple[str, CoverageFailure]]:
     """Every way ADR-0266 §7's condition 6 fails over this pair, as a set.
 
     **The comparison read at the level the arm is about.** §7 meets a ``MONEY``
@@ -306,7 +311,7 @@ def defects(row: Authorization, call: ActionRequest) -> set[tuple[str, CoverageF
     the property arm 3(b) states, kept whole while its covered limb rides with the
     quote decision (ADR-0266 §11).
     """
-    return {(one.subject, one.failure) for one in uncovered(row, coverage_subject(call))}
+    return {(one.subject, one.failure) for one in uncovered(row, coverage_subject(call), quotes)}
 
 
 def refuses(row: Authorization, call: ActionRequest, argument: str) -> bool:

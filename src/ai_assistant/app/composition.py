@@ -1509,6 +1509,27 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             grants=recipient_grants,
             # ADR-0254 §6's route (d) and its bar, on the one ``live_for`` read.
             authorizations=goal_authorizations,
+            # **ADR-0266 §7's evidence route is unreachable without this line**
+            # (ADR-0267 §5, §11). The quotes live inside the `Goal`, so `planning`'s
+            # own store answers `GoalQuotes.for_action`, and this root passes the
+            # concrete exactly as it passes `goal_authorizations` above — golden rule
+            # 1 rather than an exception to it, since `permissions` names only the
+            # `core` Protocol and a conforming store satisfies the narrow face
+            # **structurally**. A policy handed the whole `PlanStore` would be one
+            # `record_quote` call away from minting the price it is about to prove a
+            # ceiling against; the annotation on its constructor is what removes that
+            # capability, and `mypy --strict` is what enforces it.
+            #
+            # **One object, passed twice**, as `plans` already is below: two handles
+            # over one file would still hold the store's invariants, but a policy
+            # reading quotes through a second instance would be proving a ceiling
+            # against a tuple the writer never appended to.
+            #
+            # **Left unwired, every `MONEY` member is unmet** and every act carrying a
+            # stated ceiling asks — fail-closed and conforming (ADR-0084 §3), and the
+            # arithmetic the tree had before this decision, which is exactly why the
+            # provider "cannot be deferred to a later lane" (ADR-0267 §11).
+            quotes=plans,
             # **The configured search destination, which makes route (c) reachable**
             # (ADR-0247 §2, §11's lane 1): the connection reference and the canonical
             # destination set, as two values and never a `Settings` object — a policy
