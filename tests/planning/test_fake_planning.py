@@ -42,7 +42,8 @@ from ai_assistant.testing import FakePlanner, FakePlanStore
 from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
+    from contextlib import AbstractContextManager
 
     from ai_assistant.core.protocols import Planner, PlanStore
     from ai_assistant.core.types import UtcInstant
@@ -83,6 +84,10 @@ class TestFakePlanStoreContract(PlanStoreContract):
         assert isinstance(store, FakePlanStore)
         # A pre-decision row, by construction: the public members refuse it now.
         store._attempts[attempt.id] = attempt
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh subject on ``now``; nothing to dispose of, so a null context."""
+        return contextlib.nullcontext(FakePlanStore(now=now))
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(

@@ -13949,12 +13949,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[15] = Field(
-        default=15,
+    schema_version: Literal[16] = Field(
+        default=16,
         description=(
             "Shape of this export, pinned to exactly 16 (ADR-0039 §10, ADR-0259 §9): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[15]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[16]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

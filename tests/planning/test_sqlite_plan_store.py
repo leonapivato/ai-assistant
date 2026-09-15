@@ -22,10 +22,14 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from plan_store_contract import (
     InjectedFaultError,
+    _KEY,
     PlanStoreContract,
     _attempt,
     _claim,
+    _effect_plan,
     _goal,
+    _intended,
+    _minting,
     _plan,
     _quote,
     _revision,
@@ -41,6 +45,7 @@ from ai_assistant.core.types import (
     AttemptOutcome,
     AttemptState,
     AttemptTransition,
+    EffectClaim,
     EvidenceApplicability,
     EvidenceBasis,
     EvidenceHistory,
@@ -202,6 +207,8 @@ _SYNC_METHODS = {
     # *fixture* to supply, never a member of `PlanStore`.
     "close_goal_abandoned": "_close_goal_abandoned_sync",
     "has_outstanding_effect": "_has_outstanding_effect_sync",
+    # ADR-0259 §2's member, and a compare-and-swap for the same reason.
+    "claim_effect": "_claim_effect_sync",
 }
 
 
@@ -235,6 +242,19 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             yield realised
         finally:
             realised.close()
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh in-memory database on ``now``, closed when the ``with`` ends."""
+
+        @contextlib.contextmanager
+        def opened() -> Iterator[PlanStore]:
+            realised = SqlitePlanStore(path=":memory:", now=now)
+            try:
+                yield realised
+            finally:
+                realised.close()
+
+        return opened()
 
     @contextlib.asynccontextmanager
     async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
@@ -3861,7 +3881,6 @@ async def test_the_upgrade_repairs_every_live_attempt_of_an_abandoned_goal(
 def _version_6_database(path: Path) -> None:
     """Build the database this store shipped **after** ADR-0267 and before ADR-0261.
 
-    The **previous** version, which is the one ADR-0261 §10's migration is stated over.
     ADR-0267 §11 added no column and no table — its marker moved for the *downgrade*
     reading alone — so a version 6 file is a version 5 one wearing the next label, and
     saying that here is what keeps the ladder honest rather than inventing a shape that
@@ -3897,7 +3916,87 @@ async def test_a_version_6_plan_store_upgrades_and_repairs_nothing_it_need_not(
         assert goal.status is GoalStatus.ACTIVE
         assert await store.attempts_of("g1") == ()
         export = await store.export()
+        assert export.schema_version == 16
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "8",
+        )
+
+
+def _version_7_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0261 and before ADR-0259.
+
+    The **previous** version, which is the one ADR-0259 §9's migration is stated over.
+    ADR-0261 §10 added no table and no column either — its marker moved for the
+    *downgrade* reading and its migration repairs rows rather than reshaping them — so a
+    version 7 file is the version 6 file with the marker moved, and one holding no
+    ``ABANDONED`` goal has nothing for that repair to have written. Built from the rung
+    below rather than from scratch, which is what keeps the two statements one.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_6_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(_version_5_database, id="from-version-5"),
+        pytest.param(_version_6_database, id="from-version-6"),
+        pytest.param(_version_7_database, id="from-version-7"),
+    ],
+)
+async def test_an_earlier_plan_store_opens_with_an_empty_effects_table(
+    tmp_path: Path, build: Callable[[Path], None]
+) -> None:
+    """ADR-0259 §9's migration, and the guarantee it delimits rather than closes.
+
+    "The migration creates the table empty" — **no lane reconstructs a row for an
+    execution that predates it**, because doing so would need the tool, digest and
+    binding of a decision the *audit trail* holds, and ``planning`` reaching into
+    ``permissions`` to build its own rows is what golden rule 1 forbids. So an effect
+    performed before the migration "is not claimed, is not recognised, and a later plan
+    repeating it answers ``CLAIMED`` and dispatches" — asserted here rather than left as
+    prose, because it is the one window the migration opens. What bounds it is ADR-0255
+    §13's Q4 rule: no consequential capability has been wired, so there is no legacy
+    real effect for the gap to expose.
+
+    **Driven from versions 5, 6 and 7, because the migrations compose.** A file three
+    versions behind must arrive at the current shape having been taken through **every**
+    pass between, not parked at an intermediate marker: the version 5 case is ADR-0267
+    §11's relabel, ADR-0261 §10's repair and this decision's new table applied in the one
+    setup transaction, and it asserts every half — an empty ``quotes`` on the stored
+    goal, no attempt invented for an open goal, and an empty ``goal_effects`` beside
+    them — so a pass that ran only the nearest one fails here.
+    """
+    path = tmp_path / "plans.db"
+    build(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        export = await store.export()
         assert export.schema_version == 15
+        assert export.effects == (), "the table is created empty rather than reconstructed"
+        assert export.goals[0].quotes == (), "and every earlier pass ran, not just the last"
+
+        # A plan written **after** the upgrade, naming an action minted after it: the
+        # only shape a claim can be scoped to at all (ADR-0265 §5).
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.save_plan(_effect_plan("p1"))
+        state = await store.start_execution("p1")
+        answer = await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+
+        assert answer.claim is EffectClaim.CLAIMED, (
+            "a legacy act is not recognised, so the repeat is claimed and dispatches"
+        )
+        assert (await store.delete_goal("g1")).deleted, "and the upgraded store still erases"
+        assert (await store.export()).effects == ()
     finally:
         store.close()
 
