@@ -24,7 +24,10 @@ disagrees with it is a reported finding
   to **`charged_output`** alone — a `ChargedOutput | None` defaulting to `None`, naming at depth one
   the key of an invocation's output carrying **the whole amount it charged** and the key carrying
   that amount's ISO-4217 code. A reader holding only §1 authors a definition whose acts report no
-  charge, so every `MONEY` criterion resting on that tool is `unestablished` for want of an operand.
+  charge, so **no `MONEY` criterion resting on that tool is ever `met` and no goal resting on one
+  reaches `ACHIEVED`** — the charge test being not taken, which is §3's third limb, leaving such a
+  criterion `unestablished` **unless** its own postconditions independently contradict, in which case
+  §3's first limb stands and it is `unmet`.
   **The required-field clause takes a fifth recorded exception, on its own fail-closed ground and
   not on the field being outside a permission decision's reach**: ADR-0254 §3's condition 3 compares
   the request's declaration with the row's **by value**, so this field moves a route-(d) coverage
@@ -41,9 +44,10 @@ disagrees with it is a reported finding
   — a booking discharged and not a clause made false — and §1 stays true read whole. **§3 is
   likewise untouched**: its `QuotedOutput` states a key *"whose value is the **whole charge the act
   will make**"*, so this decision mints `ChargedOutput` for the retrospective fact rather than
-  reusing a type whose accepted meaning is prospective (§2). **ADR-0254,
-  ADR-0192, ADR-0266, ADR-0270, ADR-0249 and ADR-0016 are each reached and none is moved.** §7 states
-  the test for every ADR this decision reaches and shows the working at each.
+  reusing a type whose accepted meaning is prospective (§2). **ADR-0254, ADR-0192, ADR-0266,
+  ADR-0270 and ADR-0249 are each reached and none is moved** — and of ADR-0016, only the one scope
+  above is, every other clause of that ADR binding entire. §7 states the test for every ADR this
+  decision reaches and shows the working at each.
 
 ## Context
 
@@ -122,7 +126,10 @@ producer, no freshness rule and no coverage condition.
 > `GoalQuotes.for_action` returned, the last of them (ADR-0267 §5), and no other. It is **absent in
 > every other case** — every ruling that is not a route-(d) `ALLOW`, a coverage carrying no `MONEY`
 > member, a request carrying no `intended_action`, a goal no quote of which names that action. **A
-> model validator refuses it set where `authorised_by` is unset.** No implementation sets it on any
+> model validator refuses it set where `authorised_goal` is unset**, which is ADR-0254 §7's own
+> route-(d) discriminating field and that field's own refusal one field over — a quote proved for a
+> goal-scoped authority the row names no goal for is incoherent, and a validator gating on
+> `authorised_by` alone would admit one on a route-(b) or route-(c) `ALLOW`. No implementation sets it on any
 > other ground, invents a quote, or records one it did not compare.
 
 > **Normative — it is the operand a comparison was taken over and never the verdict of one, and
@@ -427,19 +434,33 @@ producer, no freshness rule and no coverage condition.
 > permission decision depends on, ADR-0254 §3's condition 3 comparing the request's declaration with
 > the row's **by value**, so an edit to it moves a route-(d) coverage answer as a severity edit does;
 > and the default is admissible because **absent makes the opposite claim to the one §1 refuses** —
-> a declaration naming no charged output reports none and establishes nothing, which is
-> `quoted_output`'s and `postconditions`' own ground. **`ChargedOutput` itself is a new type and
+> a declaration naming no charged output reports none, so the charge test is never taken and no
+> `MONEY` criterion resting on that tool is ever `met` — which is `quoted_output`'s and
+> `postconditions`' own ground, and which is a refusal to establish rather than a claim that nothing
+> is established, §3's first limb still reaching a step its own postconditions contradict. **`ChargedOutput` itself is a new type and
 > reaches §1's list in no way.** ADR-0016 §1's `frozen=True` rule, its no-inference rule and §5's
 > re-registration rule bind entire.
 
 > **Normative — the header records this change writes, and they are the whole of it.** **ADR-0262's
-> and ADR-0016's `Status` lines, and no other's**, take ADR-0070 §4's canonical partial form on **one
-> physical line**, this decision's pair added beside any already there rather than replacing it and
-> carrying that ADR's scopes, the scope text naming clauses and carrying **no `ADR-NNNN` token** so
-> that §4's *"every `ADR-NNNN` after the leading `Partially superseded by` is a target"* reads true;
-> and each gains the **appended dated note** ADR-0070 §1 requires, stating its scopes in full.
-> **No other ADR's header is edited — ADR-0267's conspicuously not** — and no file under `src/` or
-> `tests/` is touched by the lane that lands this document.
+> and ADR-0016's `Status` lines, and no other's**, gain this decision's `ADR-0271 (<scope>)` pair
+> **beside any already there and never replacing one**, on **one physical line**, each scope naming
+> clauses and carrying **no `ADR-NNNN` token** so that ADR-0070 §4's *"every `ADR-NNNN` after the
+> leading `Partially superseded by` is a target"* reads true; and each gains the **appended dated
+> note** ADR-0070 §1 requires, stating its scopes in full. **No other ADR's header is edited —
+> ADR-0267's conspicuously not** — and no file under `src/` or `tests/` is touched by the lane that
+> lands this document.
+> **ADR-0262's line is §4's canonical form and ADR-0016's is the grandfathered one, and this decision
+> accumulates on each rather than retrofitting either.** ADR-0070 §4's leading-token
+> rule is a **going-forward requirement** whose stated exception is the lines several ADRs *"already
+> carry"*, *"not a licence to write new ones"*; ADR-0016's value leads `Accepted, partially superseded
+> by` and already carries **four** decisions' pairs, each accumulated there the same way (§4's
+> *"Independent partial supersessions accumulate on the one line"*). **Retrofitting that line is
+> refused here and is not a record this decision may write**: converting it would oblige a scope text
+> for **ADR-0018**, which that line carries none for, and inventing one would state another decision's
+> record — so the repair is filed at
+> [#2430](https://github.com/leonapivato/ai-assistant/issues/2430) and left to a lane that owns it,
+> exactly as ADR-0270 §7 made ADR-0267's leading-`Accepted,` repair its own recorded act. **No lane
+> reads this as licence to write a new legacy line.**
 
 ### 8. The lane cut, and the arms this decision owes
 
@@ -494,8 +515,10 @@ producer, no freshness rule and no coverage condition.
 3. **The charge reading is total and fail-closed, and nothing in it raises.** Over one stored
    output, `charged_output` naming `amount` and `currency`: a JSON string, a JSON integer, a JSON
    **float**, a JSON **boolean**, a negative value, a missing key, a non-object output, `"usd"` and
-   `"EURO"` — the first two yield a charge and the rest yield **none**, and a declaration carrying
-   **no** `charged_output` yields none. **A `bool` is not an `int` here**, the arm failing an
+   `"EURO"`, and a currency that is **not a JSON string at all** — an integer, a boolean, `null` —
+   the first two yield a charge and the rest yield **none and raise nothing**, the non-string
+   currencies being what an implementation applying a string operation before a type test reaches by
+   accident; and a declaration carrying **no** `charged_output` yields none. **A `bool` is not an `int` here**, the arm failing an
    implementation written as an `int` instance test. **And `ChargedOutput` refuses construction with
    `amount` equal to `currency`**, the arm that fails an implementation omitting the validator — one
    key cannot carry both a number and an ISO-4217 code, so such a declaration would silently report
@@ -526,8 +549,8 @@ producer, no freshness rule and no coverage condition.
 > **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment** for
 > **exactly two documents** (ADR-0070 §3): **ADR-0262**, in two scopes, a reader holding only its §2
 > or its §7 acting differently; and **ADR-0016**, in one, a reader holding only its §1 authoring a
-> declaration whose acts report no charge. Their `Status` lines take ADR-0070 §3's and §4's partial
-> form. **Every other reach of this decision is a stacked addition**, ADR-0267's conspicuously,
+> declaration whose acts report no charge and no `MONEY` criterion resting on it ever `met`. Each
+> takes ADR-0070 §3's partial form on its `Status` line. **Every other reach of this decision is a stacked addition**, ADR-0267's conspicuously,
 > recorded in this document and nowhere else (ADR-0082 §1, §7).
 
 > **Normative.** It is a **contract** decision — it widens `core/types.py` — so under ADR-0015 §1 it
