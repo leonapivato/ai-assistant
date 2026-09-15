@@ -48,7 +48,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 from pydantic import ValidationError
@@ -589,6 +589,24 @@ class StepDisposition:
     proposed: Authorization | None = None
 
 
+class _Ruled(NamedTuple):
+    """What :meth:`StepRunner._record` produced: the trail's copy, and the row it wrote.
+
+    **A pair rather than a second call**, because the two facts are made in one
+    indivisible stretch and separating them is what rounds 1 to 3 kept finding. ADR-0254
+    §1 writes the proposal *before the question is put*, and the caller then needs the
+    very row that was written: resolving it again could fail over a durable row, and
+    reading it later could fail after the park is committed.
+
+    Attributes:
+        decision: The trail's own copy of the appended decision.
+        proposed: The `Authorization` this `CONFIRM` proposed, or ``None``.
+    """
+
+    decision: PermissionDecision
+    proposed: Authorization | None
+
+
 type Ruled = Callable[[PermissionDecision], Awaitable[None]]
 """Called at the instant a ruling is **recorded** and before anything has acted on it.
 
@@ -912,7 +930,7 @@ class StepRunner:
         # The policy rules on its *own* copy, and never on the object that is
         # then bound and executed (`_detached_request`).
         ruling = await self._policy.decide(_detached_request(request))
-        decision = await self._record(request, ruling)
+        decision, proposed = await self._record(request, ruling)
 
         # Branch on the *recorded* ruling, never the policy's own object. The
         # decision deep-copied it (ADR-0021 §1) and the trail then round-tripped
@@ -933,19 +951,12 @@ class StepRunner:
             # A `CONFIRM` is the one outcome that parks the step: it is committed
             # `PENDING → AWAITING_APPROVAL` with `bound_tool`, durably, and
             # `resume` takes the human's answer when it arrives (ADR-0037 §4).
-            # ADR-0254 §1: the row is written **before the question is put**, which is
-            # here — the decision is recorded, nothing has acted on it, and the park
-            # below is not yet committed. It is taken against the **trail's own copy**,
-            # so the row's `confirmation` and `proposed_at` name a decision that
-            # demonstrably exists and carries those instants.
-            #
-            # **And the row it wrote is what the rendering transcribes** (§11), carried
-            # on the disposition rather than resolved a second time: a read taken at the
-            # rendering would sit on the wrong side of the park (see
+            # **The row `_record` wrote is what the rendering transcribes** (§11),
+            # carried on the disposition rather than resolved a second time: a read
+            # taken at the rendering would sit on the wrong side of the park (see
             # `StepDisposition.proposed`), and one taken here would still be able to
             # fail transiently and turn a durable proposal into a question that named no
-            # bound. Adversarial and architecture review, rounds 1 and 2, ``blocker``.
-            proposed = await self._propose(request, decision)
+            # bound. Adversarial and architecture review, rounds 1 and 2, `blocker`.
             queued = await self._queue_for_approval(state, step, tool.id)
             return StepDisposition(
                 Disposition.AWAITING_CONFIRMATION,
@@ -1165,7 +1176,9 @@ class StepRunner:
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
-        decision = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
+        # ``proposed`` is always ``None`` here: a `CONFIRM` carrying ``resolves`` is the
+        # *resolution* of a question and proposes nothing (:meth:`_propose`).
+        decision, _ = await self._record(request, ruling, resolves=confirmed.id, at=establishing_at)
         # ADR-0254 §1: the answer settles the row the question was proposed with.
         # It runs after the resolving decision is recorded, so ``settled_at`` is that
         # decision's own instant and the two records agree; and before the claim, so
@@ -1594,7 +1607,7 @@ class StepRunner:
         *,
         resolves: str | None = None,
         at: datetime | None = None,
-    ) -> PermissionDecision:
+    ) -> _Ruled:
         """Bind ``ruling`` to ``request``, append it, and return the trail's copy.
 
         The id and the clock are supplied here because ADR-0021 §3 withholds both
@@ -1696,7 +1709,15 @@ class StepRunner:
                 "recorded, so it is not a record of what happened"
             )
             raise AuditError(msg)
-        return recorded
+        # ADR-0254 §1: the row is written **before the question is put** — and before
+        # `on_ruled` is called, which is where it was until round 3 showed why that
+        # matters. `on_ruled` is a caller's callback and it can raise: a `CONFIRM`
+        # recorded with its proposal not yet written would leave the trail holding a
+        # question §1 and §20's arm 59 say establishes an authority, and no row for the
+        # answer to settle. It is taken against the **trail's own copy**, so the row's
+        # `confirmation` and `proposed_at` name a decision that demonstrably exists and
+        # carries those instants. Architecture review, round 3, `blocker`.
+        return _Ruled(recorded, await self._propose(request, recorded))
 
     async def _phase_four(self, planned: _Planned, opened: ExecutionState) -> PhaseFour:
         """Run ADR-0254 §14's checks over the whole plan this step belongs to.

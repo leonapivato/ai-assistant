@@ -425,6 +425,49 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
         assert STATEMENT not in await panel.inner_text()
 
 
+async def test_a_withdrawal_reports_nothing_where_the_panel_has_moved_on(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A settlement is attributed to the work it was taken on, or to nothing.
+
+    Start withdrawing a row of goal A, then open goal B before the revocation returns:
+    writing *"Withdrawn"* above B's rows would say the act was done to B's work, and
+    re-reading A would discard the listing the owner just asked for. The act still
+    happens and is recorded — what is dropped is the sentence, because there is nowhere
+    honest to put it. Adversarial review, round 3, ``major``.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+
+    async def route(one: Route) -> None:
+        await held
+        await one.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        drive.engine.goal_summaries = [_summary(), _summary(goal_id=OTHER_ID, outcome=OTHER)]
+        drive.engine.goal_statements[OTHER_ID] = OTHER
+        await _open_authorities(drive)
+        await drive.page.route("**/authorization/revoke", route)
+        asked = _answering(drive, accept=True)
+
+        await drive.page.click("#authorization-list button:has-text('Withdraw this')")
+        await asyncio.wait_for(asked, timeout=10)
+        # The owner re-points the panel while the withdrawal is still out.
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await (
+            drive.page.locator("#goal-list button:has-text('What this authorises')").nth(1).click()
+        )
+        await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
+        held.set_result(None)
+
+        await expect(drive.page.locator("#authorization-said")).to_be_hidden()
+        await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
+        assert STATEMENT not in await drive.page.locator("#authorizations").inner_text()
+        assert "revoke_authorization" in [name for name, _ in drive.engine.calls]
+
+
 async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

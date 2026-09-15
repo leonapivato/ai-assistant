@@ -10394,6 +10394,14 @@ async function revokeAuthorization(view) {
   }
   fault(null, "authorizations");
   sayAuthorizationAct(null);
+  // **Which listing this act was taken on**, captured before the request goes out. The
+  // panel can be re-pointed at another goal while a withdrawal is in flight, and an act
+  // that then reported into it — or re-read it — would attribute a settlement to work it
+  // was not taken on, or discard the newer request the owner asked for. So the act
+  // reports and refreshes only while the panel is still showing the listing it acted on.
+  // Adversarial review, round 3, `major`.
+  const owner = authorizedGoal;
+  const run = authorizationRuns;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -10409,9 +10417,15 @@ async function revokeAuthorization(view) {
     if (done === null) {
       return;
     }
+    if (run !== authorizationRuns) {
+      // The panel moved on while this was out. The act happened and is recorded; what
+      // is dropped is the sentence about it, because there is nowhere honest to put it:
+      // writing it above another goal's rows would say this was done to that work.
+      return;
+    }
     sayAuthorizationAct(goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement));
-    if (authorizedGoal !== null) {
-      await listAuthorizations(authorizedGoal, true);
+    if (owner !== null) {
+      await listAuthorizations(owner, true);
     }
   } catch (_) {
     fault(GATEWAY_GONE, "authorizations");

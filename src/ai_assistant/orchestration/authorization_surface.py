@@ -317,44 +317,45 @@ class AuthorizationOperations:
             settled_at=self._now(),
         )
 
-    async def announced(self, opened: Sequence[Authorization], /) -> tuple[AuthorizationView, ...]:
+    def announced(
+        self, opened: Sequence[Authorization], /, *, goal_statement: str, reading: datetime
+    ) -> tuple[AuthorizationView, ...]:
         """ADR-0254 §11's announcement, for the rows one turn opened without a question.
 
-        **The trigger is that the row was written, and the row is what the view is
-        transcribed from** — so the value the announcement needs always exists at the
-        instant it is emitted, and there is no act-time projection to keep in step with
-        a row written later. There is **no materiality judgement anywhere in it**.
+        **One view per row written, and no row is ever dropped.** §11 states the trigger
+        in terms — *"The trigger is that the row was written, and the row is what the
+        view is transcribed from"* — with no materiality judgement anywhere in it, so an
+        authority that came into being and was **not** announced would be one the user
+        holds and was never shown the handle to. An earlier draft read the goal per row
+        and skipped one the plan store could not return; a concurrent deletion would then
+        have left a standing authority silent. Adversarial review, round 3, ``blocker``.
 
-        **``live`` is true by construction and is still read from the row.** A
-        path-(iii) row is written ``ESTABLISHED`` with ``settled_at`` equal to
-        ``proposed_at`` equal to the act's instant, and §12's ladder puts ``expires_at``
-        strictly after it — but the clock is read and :func:`is_live` applied all the
-        same, so an announcement cannot say *live* about a row this engine's own clock
-        says has lapsed (§20 arm 71).
+        **The statement is the turn's own and is not read back.** A path-(iii) row is
+        opened for the request this turn is dispatching, and ADR-0250 §3 gives a turn one
+        goal — *"every turn resolves its goal before it plans"* — so every row this can
+        be handed is of that goal, and the statement the caller already holds is the one
+        §11 renders it by. That removes a store read from the announcement entirely,
+        which is what makes *"no row is dropped"* a property of the code rather than of
+        the store being up.
 
-        **The goal's statement is read per row** and a goal the plan store does not hold
-        drops that row from the announcement rather than rendering it by id (§11): one
-        act can open two authorities, so the rows are not necessarily of one goal.
+        **``live`` is read from the row all the same.** A path-(iii) row is written
+        ``ESTABLISHED`` with ``settled_at`` equal to ``proposed_at`` and §12's ladder
+        puts ``expires_at`` strictly after it, so it is live by construction — but the
+        predicate is applied anyway, so an announcement cannot say *live* about a row
+        this engine's own clock says has lapsed (§20 arm 71).
 
         Args:
             opened: The rows this turn opened, in the order they were written.
+            goal_statement: The goal's current outcome statement, as the turn holds it.
+            reading: The caller's clock reading for this pass.
 
         Returns:
             One view per row, in that order, and empty where the turn opened none.
-
-        Raises:
-            PlanningError: If the plan store could not be read.
         """
-        if not opened:
-            return ()
-        reading = self._now()
-        views: list[AuthorizationView] = []
-        for row in opened:
-            goal = await self._plans.get_goal(row.goal)
-            if goal is None:
-                continue
-            views.append(view_of(row, goal_statement=goal.statement, live=is_live(row, reading)))
-        return tuple(views)
+        return tuple(
+            view_of(row, goal_statement=goal_statement, live=is_live(row, reading))
+            for row in opened
+        )
 
 
 __all__ = [

@@ -58,6 +58,9 @@ STATEMENT: Final = "book the campsite"
 #: covers no request of goal B, however adjacent" (§1).
 OTHER_GOAL: Final = "goal-0002"
 
+#: A second declaration, so one act can open two authorities that are not the same.
+OTHER_TOOL: Final = AUTHORIZATION_TOOL.model_copy(update={"id": "rail"})
+
 
 def _goal(goal_id: str = AUTHORIZATION_GOAL, *, statement: str = STATEMENT) -> Goal:
     """One durable goal, carrying the statement a listing renders it by."""
@@ -660,15 +663,17 @@ async def test_an_act_that_opened_two_authorities_announces_two() -> None:
         tool=AUTHORIZATION_TOOL.model_copy(update={"id": "hotels"}),
         coverage=(coverage_member("amount", bound=money_bound("100")),),
     )
-    operations, _, clock = await _over()
+    operations, _, _ = await _over()
 
-    announced = await operations.announced((train, hotel))
+    announced = operations.announced(
+        (train, hotel), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW
+    )
 
     assert [one.id for one in announced] == ["auth-train", "auth-hotel"]
     assert [one.tool.id for one in announced] == ["rail", "hotels"]
+    assert [one.goal_statement for one in announced] == [STATEMENT, STATEMENT]
     bounds = [one.coverage[0].bound for one in announced]
     assert [one.maximum for one in bounds if one is not None] == [Decimal(50), Decimal(100)]
-    assert clock.readings == 1
 
 
 async def test_a_turn_that_opened_none_announces_nothing_and_reads_no_clock() -> None:
@@ -678,7 +683,7 @@ async def test_a_turn_that_opened_none_announces_nothing_and_reads_no_clock() ->
     """
     operations, _, clock = await _over()
 
-    assert await operations.announced(()) == ()
+    assert operations.announced((), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW) == ()
     assert clock.readings == 0
 
 
@@ -691,25 +696,33 @@ async def test_an_announcement_reports_the_rows_own_liveness_and_not_a_presumpti
     row = opening_act(id="auth-1", expires_at=AUTHORIZATION_NOW - timedelta(minutes=1))
     operations, _, _ = await _over()
 
-    (view,) = await operations.announced((row,))
+    (view,) = operations.announced((row,), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW)
 
     assert view.live is False
 
 
-async def test_an_announcement_drops_a_row_whose_goal_the_plan_store_does_not_hold() -> None:
-    """§11 renders a goal by its **statement** and never by its id, so a row whose goal
-    is unreadable is dropped rather than rendered with an id in the statement's place.
+def test_an_announcement_never_drops_a_row_and_reads_no_store() -> None:
+    """§11's trigger is that the row was **written**, with no materiality judgement.
 
-    One act can open two authorities, so the rows are not necessarily of one goal and the
-    read is per row.
+    An authority that came into being and was not announced is one the user holds and
+    was never shown the handle to — so no row is dropped, on any ground. An earlier draft
+    read the goal per row and skipped one the plan store could not return; a concurrent
+    deletion would then have silenced a standing authority. Adversarial review, round 3,
+    ``blocker``.
+
+    **There is no store read left to fail**: ADR-0250 §3 gives a turn one goal and a
+    path-(iii) row is opened for the request it is dispatching, so the statement the
+    caller already holds is the one §11 renders every such row by.
     """
-    mine = opening_act(id="auth-mine")
-    theirs = opening_act(id="auth-theirs", goal=OTHER_GOAL)
-    operations, _, _ = await _over()
+    store = FakeGoalAuthorizationStore()
+    plans = FakePlanStore()
+    operations = AuthorizationOperations(authorizations=store, plans=plans, now=_Clock())
+    rows = (opening_act(id="auth-1"), opening_act(id="auth-2", tool=OTHER_TOOL))
 
-    announced = await operations.announced((mine, theirs))
+    announced = operations.announced(rows, goal_statement=STATEMENT, reading=AUTHORIZATION_NOW)
 
-    assert [one.id for one in announced] == ["auth-mine"]
+    assert [one.id for one in announced] == ["auth-1", "auth-2"]
+    assert [one.goal_statement for one in announced] == [STATEMENT, STATEMENT]
 
 
 async def test_the_liveness_reading_is_taken_once_for_a_whole_listing() -> None:

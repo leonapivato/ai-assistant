@@ -3069,9 +3069,18 @@ class FakeAssistantEngine:
         ``REVOKED`` or ``SUPERSEDED`` one, because ``standing`` does not offer them.
 
         **One clock reading for the whole listing** (§16), taken here because
-        ``standing`` evaluates no liveness and reports none. **A goal this fake holds no
-        statement for is an empty answer and not a raise**, which is what the concrete
-        engine does where ``PlanStore.get_goal`` answers ``None``.
+        ``standing`` evaluates no liveness and reports none — and taken **after** the
+        snapshot, which is where the concrete engine takes it and for its reason: a row
+        settled while ``standing`` is suspended comes back carrying a ``settled_at``
+        after a reading taken first, and §1's predicate would then report a live row as
+        lapsed. A fake that judged over a different boundary would let a consumer's test
+        pass here and fail against a hub, which is the looseness ADR-0026 §7 forbids.
+        Adversarial and architecture review, round 3.
+
+        **A goal this fake holds no statement for is an empty answer and not a raise**,
+        which is what the concrete engine does where ``PlanStore.get_goal`` answers
+        ``None`` — and, as there, it is answered **before** the clock is read, so the
+        clause holds on a deployment whose clock is non-conforming.
         """
         named = identifier(goal_id, name="goal_id")
         check_arguments("standing_authorizations", max_bytes=self._max_payload_bytes, goal_id=named)
@@ -3080,8 +3089,8 @@ class FakeAssistantEngine:
         statement = self.goal_statements.get(named)
         if statement is None:
             return self._checked((), "standing_authorizations")
-        reading = self._authorization_now()
         rows = await self.goal_authorizations.standing(named)
+        reading = self._authorization_now()
         return self._checked(
             tuple(
                 view_of(row, goal_statement=statement, live=is_live(row, reading)) for row in rows
