@@ -400,6 +400,15 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
    answers false, the currency conjunct being read at the quote's own currency; with **no** quote
    naming that action it answers false; and an implementation holding no `GoalQuotes` answers false
    for that same pair. **`CoverageAnswer` refuses construction with `quoted` set and `met` false.**
+   **The selection is driven ahead of the digest, and the arm fails an implementation that reverses
+   them**: over a goal holding two quotes naming that action where the **later** was taken over
+   different arguments and the **earlier** over this request's, the answer is `met` false and
+   carries no quote — ADR-0266 §7's *"An earlier quote is consulted in no case"*, which a filter
+   applied before the position is taken would revive. **And no quote rides back on an answer the
+   evidence route did not decide**: a `coverage` carrying one `PERIOD` member met on the argument
+   route, over a goal that **does** hold a governing quote naming that action, answers `met` true
+   with `quoted` **absent** — §2's presence rule, which the answer's own model cannot enforce,
+   carrying no coverage to test it against.
 3. **It rules nothing, records nothing and caches nothing.** The member returns no
    `PermissionRuling`, writes no `Authorization` and appends to no store; two calls with equal
    arguments each read the seam, no answer being memoised between them or carried to a later
