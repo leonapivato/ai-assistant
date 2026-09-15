@@ -39,8 +39,8 @@ from ai_assistant.core.types import (
     SpanCoverage,
 )
 from ai_assistant.orchestration.authorizing import (
+    authorization_id_for,
     horizon,
-    proposal_of,
     proposed_authorization,
     user_facing_arguments,
 )
@@ -157,7 +157,6 @@ def _proposed(
         goal=a_goal(deadline=AT + timedelta(hours=12)) if goal is None else goal,
         retention=retention,
         standing=standing,
-        id_factory=lambda: "auth-1",
     )
 
 
@@ -171,7 +170,7 @@ def test_a_confirm_meeting_all_four_conditions_proposes_a_row() -> None:
     row = _proposed()
 
     assert row is not None
-    assert row.id == "auth-1"
+    assert row.id == authorization_id_for("d-1")
     assert row.goal == GOAL
     assert row.coverage == ()
     assert row.origin is AuthorizationOrigin.CONFIRMED
@@ -284,26 +283,38 @@ def test_a_proposal_names_a_lapsed_row_of_that_pair() -> None:
 # --- finding the proposal an answer names --------------------------------
 
 
-def test_the_proposal_is_found_by_the_confirmation_it_names() -> None:
-    """ADR-0254 §16 carries no lookup by `confirmation`, so `recent` is read back."""
-    mine = _proposed()
-    assert mine is not None
-    other = mine.model_copy(update={"id": "auth-2", "confirmation": "d-9"})
+def test_the_proposals_id_is_derived_from_the_confirmation_it_names() -> None:
+    """ADR-0254 §16 carries no lookup by `confirmation`, so the id **is** the lookup.
 
-    assert proposal_of((other, mine), "d-1") is mine
+    Issue #2375: reading back over a bounded `recent` page lost a proposal that
+    newer rows of other goals had displaced. An id derived from the confirmation
+    makes §16's keyed `resolve` an exact lookup at any age, and adds no ninth
+    store signature to do it.
+    """
+    row = _proposed()
+
+    assert row is not None
+    assert row.confirmation == "d-1"
+    assert row.id == authorization_id_for("d-1")
 
 
-def test_an_unfound_proposal_is_none_and_never_a_raise() -> None:
-    """Not finding it settles nothing, which loses an authority and grants none."""
-    assert proposal_of((), "d-1") is None
+def test_the_derivation_is_a_total_function_of_the_confirmation_id() -> None:
+    """Deterministic and injective: the writer and the reader agree without a search."""
+    assert authorization_id_for("d-1") == authorization_id_for("d-1")
+    assert authorization_id_for("d-1") != authorization_id_for("d-9")
 
 
-def test_the_lookup_never_answers_with_another_confirmations_row() -> None:
-    """One answer settles one question."""
-    mine = _proposed()
-    assert mine is not None
+def test_a_derived_id_is_namespaced_away_from_the_id_it_is_derived_from() -> None:
+    """The prefix is what keeps derived names disjoint from drawn ones.
 
-    assert proposal_of((mine,), "d-9") is None
+    An `Authorization` id is a `DurableIdentifier` — non-blank encodable text and
+    nothing narrower — so a row minted by any other route could carry any string.
+    Namespacing removes the collision by construction rather than by probability.
+    """
+    derived = authorization_id_for("d-1")
+
+    assert derived != "d-1"
+    assert derived.endswith("d-1")
 
 
 # --- what a proposal deliberately does not read (ADR-0254 §1) ------------
@@ -347,7 +358,6 @@ def test_the_outcome_test_is_the_writers_and_not_this_functions() -> None:
         goal=a_goal(deadline=AT + timedelta(hours=12)),
         retention=RETENTION,
         standing=(),
-        id_factory=lambda: "auth-1",
     )
 
     assert row is not None

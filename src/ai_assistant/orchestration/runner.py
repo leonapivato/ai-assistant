@@ -79,7 +79,7 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolCall,
 )
-from ai_assistant.orchestration.authorizing import proposal_of, proposed_authorization
+from ai_assistant.orchestration.authorizing import authorization_id_for, proposed_authorization
 from ai_assistant.orchestration.capability_alias import resolve_capability
 from ai_assistant.orchestration.selection import (
     Preference,
@@ -285,16 +285,6 @@ def _detached_state(state: ExecutionState) -> ExecutionState:
 
 #: How far back :meth:`StepRunner._settle` reads for the proposal an answer names.
 #:
-#: ADR-0254 §16 closes the store at eight signatures and none of them is keyed on
-#: `confirmation`, so the row a `CONFIRM` proposed is found by reading `recent`,
-#: which is newest-first. A proposal is by construction recent relative to the
-#: answer it waits for — a `CONFIRM` carries its own `expires_at` and a stale one is
-#: refused before the settlement is reached — and **not finding it establishes
-#: nothing and retracts nothing** (:meth:`StepRunner._settle`), so the figure bounds
-#: a read rather than an authority.
-_PROPOSAL_LOOKBACK = 200
-
-
 @dataclass(frozen=True, slots=True)
 class _Planned:
     """One stored step and the stored plan it belongs to.
@@ -1664,7 +1654,6 @@ class StepRunner:
                 goal=goal,
                 retention=self._episode_retention,
                 standing=standing,
-                id_factory=self._id_factory,
             )
             if row is None:
                 return
@@ -1706,12 +1695,24 @@ class StepRunner:
         the two out of step for no gain.
 
         **The store carries no lookup by `confirmation`** (ADR-0254 §16's eight
-        signatures), so the row is found by reading back over `recent`; not finding
-        it settles nothing, which loses the standing authority and leaves the
-        answered call authorised by route (a) exactly as §12 rules for an answer that
-        establishes nothing. That is the safe direction in both halves: nothing is
-        established that the user did not answer, and nothing already recorded is
-        retracted.
+        signatures), so the row is found by the id the proposal **derived** from that
+        confirmation (:func:`~ai_assistant.orchestration.authorizing.
+        authorization_id_for`) and read back through §16's keyed ``resolve``. That is
+        an exact lookup at any age: it carries no page, no limit and no assumption
+        that the proposal is recent, which is what closes issue #2375 — a proposal
+        displaced past a bounded `recent` page by newer rows of *other* goals was
+        never settled, and the authority the user granted was lost.
+
+        **The id is a key and never the evidence.** The resolved row's own
+        ``confirmation`` is compared against the answered decision before anything is
+        settled, so a row that arrived under that id by any other route settles
+        nothing rather than being settled as this question's answer.
+
+        **Not finding it settles nothing**, which loses the standing authority and
+        leaves the answered call authorised by route (a) exactly as §12 rules for an
+        answer that establishes nothing. That is the safe direction in both halves:
+        nothing is established that the user did not answer, and nothing already
+        recorded is retracted.
         """
         if self._authorizations is None:
             return
@@ -1719,9 +1720,8 @@ class StepRunner:
             AuthorizationDisposition.ESTABLISHED if approved else AuthorizationDisposition.DECLINED
         )
         try:
-            rows = await self._authorizations.recent(limit=_PROPOSAL_LOOKBACK)
-            row = proposal_of(rows, confirmed.id)
-            if row is None:
+            row = await self._authorizations.resolve(authorization_id_for(confirmed.id))
+            if row is None or row.confirmation != confirmed.id:
                 return
             settlement = await self._authorizations.settle(
                 row.id, to=settled_to, settled_at=resolving.decided_at
