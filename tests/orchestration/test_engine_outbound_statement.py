@@ -92,6 +92,10 @@ _REACHED_FRAGMENT: Final = "this assistant reached outside this system, and it t
 _NOT_REACHED_FRAGMENT: Final = "this assistant reached nothing outside this system"
 _INDETERMINATE_FRAGMENT: Final = "this system cannot say whether it reached outside itself"
 
+#: The opening clause of ``composing._PLAN_IS_ABOUT_ACTING``, whose **absence** is what
+#: keeps ADR-0197 §6's "exactly two" closure true on every routed composer (ADR-0264 §14).
+_PLAN_SCOPE_LEAD: Final = "All of that is about acting"
+
 #: The sentence #2365 records a reply making on a turn that asked for no search.
 _FALSE_CLAIM: Final = "already in front of me from this turn's searches"
 
@@ -450,7 +454,7 @@ async def test_a_routed_pass_that_is_not_a_park_carries_not_reached() -> None:
     assert statement.records == 0
     prompt = _system_prompt(model)
     assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
-    assert "All of that is about acting" not in prompt, "a routed pass renders no plan block"
+    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
 
 
 async def test_a_routed_park_carries_no_statement_at_all() -> None:
@@ -491,14 +495,12 @@ async def test_the_streaming_routed_pass_carries_it_on_the_terminal_outcome() ->
     the whole-reply one does, and the streaming routed composer is given neither of §6's
     two additions — ADR-0197 §6's "exactly two" inputs, unnarrowed.
     """
+    streaming = FakeStreamingCompleter(
+        script=(StreamAttempt(deltas=("I looked", " at the trail.")),)
+    )
     harness = _routed_harness(
         router=_names(RoutableOperation.RECENT_READS),
-        composing=ComposingStage(
-            model=FakeModelProvider(),
-            streaming=FakeStreamingCompleter(
-                script=(StreamAttempt(deltas=("I looked", " at the trail.")),)
-            ),
-        ),
+        composing=ComposingStage(model=FakeModelProvider(), streaming=streaming),
         memory=FakeMemoryStore(now=lambda: AT),
     )
 
@@ -516,6 +518,9 @@ async def test_the_streaming_routed_pass_carries_it_on_the_terminal_outcome() ->
     assert statement.reach is OutboundReach.NOT_REACHED
     assert statement.destinations == ()
     assert statement.records == 0
+    prompt = _streamed_prompt(streaming)
+    assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
+    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
 
 
 # --- §13 item 8 through the engine: the drive's fact, forwarded ---------------
@@ -722,9 +727,10 @@ async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> N
     (§12) … **This decision's title is bounded by that**: a reply cannot deny a contact
     **on a surface that renders the statement**, and the spoken one does not."
     """
+    model = FakeModelProvider("I looked at what has been read.")
     harness = _routed_harness(
         router=_names(RoutableOperation.RECENT_READS),
-        composing=_composing(FakeModelProvider("I looked at what has been read.")),
+        composing=_composing(model),
         memory=FakeMemoryStore(now=lambda: AT),
         transcriber=FakeSpeechTranscriber(transcripts=["what have you read lately"]),
     )
@@ -738,6 +744,9 @@ async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> N
     assert not any(field.startswith("outbound") for field in type(spoken).model_fields), (
         "ADR-0200 §4: SpokenTurn gains nothing, so the guarantee does not reach the ear"
     )
+    prompt = _system_prompt(model)
+    assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
+    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
 
 
 # --- §13 item 11's unrouted halves: the two composers the routed arms leave behind ---
@@ -942,3 +951,58 @@ async def test_a_settled_token_restated_reaches_nothing_and_says_so() -> None:
     assert statement.reach is OutboundReach.NOT_REACHED
     assert statement.destinations == ()
     assert statement.records == 0
+
+
+# --- §7's "composed once per turn": one value per pass, not one shared value ---
+
+
+async def test_mutating_one_turns_statement_cannot_reach_another_turns() -> None:
+    """§7's carrier is minted per pass, so no outcome can be rewritten through another.
+
+    ``frozen=True`` stops ``statement.reach = ...`` but not
+    ``statement.__dict__["reach"] = ...`` — the bypass ADR-0018 §3 and §4 name, and the
+    one the plan store details at its own detachment ("sharing the instance would let a
+    caller rewrite the store's own audit record"). A single module-level
+    ``NOT_REACHED`` handed out on every routed, restatement and ``UNDECIDED`` outcome
+    would put every one of them behind that bypass at once: a caller holding any single
+    outcome could make every **other** outcome, including every later one, say this
+    system reached outside itself when it did not.
+
+    That is #2365's shape arrived at from the other side, and it is what §7's "composed
+    once **per turn**" and "by value" forbid. **Two different producers are crossed
+    here** — a routed pass and an ``UNDECIDED`` turn — because a per-site literal that
+    was still one shared object would pass an arm that stayed inside one of them.
+    """
+    routed = _routed_harness(
+        router=_names(RoutableOperation.RECENT_READS),
+        composing=_composing(FakeModelProvider("I looked at what has been read.")),
+        memory=FakeMemoryStore(now=lambda: AT),
+    )
+
+    first = await routed.engine.converse("what have you read lately", timeout=PATIENT)
+    _statement(first).__dict__["reach"] = OutboundReach.INDETERMINATE
+
+    second = await routed.engine.converse("what have you read lately", timeout=PATIENT)
+    undecided = Harness(
+        planner=NoStepPlanner(),
+        associator=_associating(AssociationVerdict.UNDECIDED, "G1", "G2"),
+    )
+    conversation = (await undecided.conversations.begin(None)).id
+    for goal_id, outcome_text in (("goal-one", "book a campsite"), ("goal-two", "book a flight")):
+        await _seed(
+            undecided.plans,
+            _goal(goal_id, outcome_text, conversation=conversation),
+            engaged_in=conversation,
+        )
+    asked = await undecided.engine.converse(
+        "make it Sunday", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert _statement(second).reach is OutboundReach.NOT_REACHED, (
+        "a later pass of the same producer says what its own turn did"
+    )
+    assert _statement(asked).reach is OutboundReach.NOT_REACHED, (
+        "and so does a different producer's, which one shared object would not"
+    )
+    assert _statement(second) is not _statement(first)
+    assert _statement(asked) is not _statement(first)
