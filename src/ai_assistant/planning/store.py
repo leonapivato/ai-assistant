@@ -39,6 +39,7 @@ from ai_assistant.planning.goals import (
     invalidated,
     minted,
     refuse_a_second_owner,
+    refuse_a_seeded_minting,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
@@ -152,9 +153,16 @@ class InMemoryPlanStore:
         Stored as a copy for the reason plans and executions are: ``frozen=True``
         stops ``goal.status = ...`` but not ``goal.__dict__["status"] = ...``.
 
+        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2):
+        the opening write mints none, and ``record_intended_actions`` is the only route
+        to one — which is also what holds ``MAX_INTENDED_ACTIONS`` over every stored
+        goal rather than over one member.
+
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``.
+            PlanningError: If the store already holds a goal under this ``id``, or if
+                the goal is opened carrying an intended action.
         """
+        refuse_a_seeded_minting(goal)
         if goal.id in self._goals:
             msg = (
                 f"goal {goal.id} already exists: save_goal is the opening write alone, "

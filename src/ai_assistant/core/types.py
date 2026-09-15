@@ -7679,7 +7679,10 @@ class GoalBrief(BaseModel):
             per member of** :attr:`Goal.intended_actions` **in that tuple's own
             order** (ADR-0265 §4), so ``A1`` names the first-minted action on both
             sides of the seam. Bounded by construction at
-            :data:`MAX_INTENDED_ACTIONS`, so no lane truncates it here.
+            :data:`MAX_INTENDED_ACTIONS`, so no lane truncates it here. **Empty on
+            every brief :meth:`of` projects**: the projection that fills it is L2's
+            (ADR-0265 §9), and an action-free brief is well-formed rather than
+            degraded.
         status: The goal's overall disposition.
         deadline: Its optional target date.
         open_questions: The **texts** of the goal's open questions — all a planner
@@ -7724,18 +7727,15 @@ class GoalBrief(BaseModel):
         :class:`ProposedUnderstanding`'s ``questions`` and no lane of that decision
         reads them, and what a raised question becomes is A2's.
 
-        **:attr:`actions` is projected here, and the stale links are dropped here**
-        (ADR-0265 §4). One entry per member of :attr:`Goal.intended_actions` in that
-        tuple's own order, each carrying the action's ``intent`` and the ``C``/``S``/``D``
-        **labels** of the elements of the **current** revision its ``serves`` names —
-        an entry naming an element this revision does not carry is omitted from the
-        rendering, and an action all of whose links have gone stale renders with
-        ``serves`` empty. It is projected **here** rather than at a caller for the
-        reason the elements are: this is "the one projection site in the system", so
-        "no lane projects a brief from an elided revision, from a superseded one, or
-        from a union of several" stays a property of there being one implementation.
-        **No** :attr:`IntendedAction.id` **crosses**: what a label indexes is this
-        tuple, and both sides derive it from the value they hold.
+        **:attr:`actions` is empty here, and filling it is L2's** (ADR-0265 §9). That
+        section assigns "the ``GoalBrief.actions`` projection with its live-link
+        rendering" to "L2 — the loop, in ``orchestration`` alone", on ADR-0252 §11's
+        *"projected by ``orchestration`` alone"*, and names this lane's list without it.
+        So the field lands here with its shape and its bound (§4) and this projection
+        renders none, exactly as :attr:`open_questions` renders none for the reason
+        above. **A brief carrying no actions is well-formed rather than degraded** —
+        every goal that intends nothing projects one, and §1 makes that every goal at
+        the moment it is opened.
 
         Args:
             goal: The goal to project.
@@ -7748,16 +7748,6 @@ class GoalBrief(BaseModel):
             tuple(BriefElement(text=element.text, ground=element.ground) for element in group)
             for group in (current.constraints, current.criteria, current.conditions)
         )
-        labels = {
-            element.id: f"{letter}{ordinal}"
-            for letter, group in (
-                ("C", current.constraints),
-                ("S", current.criteria),
-                ("D", current.conditions),
-            )
-            for ordinal, element in enumerate(group, start=1)
-            if element.id is not None
-        }
         return cls(
             goal_id=goal.id,
             outcome=current.outcome,
@@ -7765,13 +7755,6 @@ class GoalBrief(BaseModel):
             constraints=shown[0],
             criteria=shown[1],
             conditions=shown[2],
-            actions=tuple(
-                BriefAction(
-                    intent=action.intent,
-                    serves=tuple(labels[served] for served in action.serves if served in labels),
-                )
-                for action in goal.intended_actions
-            ),
             status=goal.status,
             deadline=goal.deadline,
         )

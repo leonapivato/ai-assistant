@@ -2203,6 +2203,37 @@ class PlanStoreContract:
         assert (first.capability, first.parameters) == (second.capability, second.parameters)
         assert (first.intended_action, second.intended_action) == ("ia1", "ia2")
 
+    async def test_save_goal_refuses_a_goal_opened_carrying_an_intended_action(
+        self, store: PlanStore
+    ) -> None:
+        """§1 and §2, and it is what makes §1's bound a bound.
+
+        "The goal's opening write mints none: a goal is opened carrying revision 1
+        alone (ADR-0249 §3) … so ``intended_actions`` is empty on every goal at the
+        moment it is opened", and "**the only route to a new ``IntendedAction`` is a
+        ``ProposedAction`` recorded by the member §5 adds**".
+
+        **Driven with one seeded action and with an over-bound tuple**, because the two
+        fail differently if only the second is closed: a store that checked the bound
+        alone would admit a seeded action nobody minted, and one that checked neither
+        would "take at the door what the ceiling forbids and enforce it on nothing" —
+        ``save_goal``'s own sentence for ADR-0249 §2's ceiling. **The remedy is a
+        refusal and never an elision** (§1), so nothing is stored trimmed either.
+        """
+        seeded = _goal().model_copy(update={"intended_actions": (_intended("ia1"),)})
+        over = _goal().model_copy(
+            update={
+                "intended_actions": tuple(
+                    _intended(f"ia{index}") for index in range(MAX_INTENDED_ACTIONS + 1)
+                )
+            }
+        )
+
+        for opened in (seeded, over):
+            with pytest.raises(PlanningError):
+                await store.save_goal(opened)
+            assert await store.get_goal("g1") is None, "and nothing is stored trimmed"
+
     async def test_record_intended_actions_refuses_an_unknown_goal(self, store: PlanStore) -> None:
         """§5: the member refuses a goal the store does not hold, as every other goal
         write does and with the class ADR-0249 §12 gives ``save_goal``."""

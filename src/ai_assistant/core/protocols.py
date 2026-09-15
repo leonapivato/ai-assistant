@@ -4511,8 +4511,21 @@ class PlanStore(Protocol):
         only through :meth:`record_interpretation` would take at the door what the
         ceiling forbids and enforce it on nothing.
 
+        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2),
+        with the same error class. "The goal's opening write mints none" — a goal is
+        opened carrying revision 1 alone — and "the only route to a new
+        ``IntendedAction`` is a ``ProposedAction`` recorded by"
+        :meth:`record_intended_actions`. It is the clause above read over ADR-0265 §1's
+        bound: a ``save_goal`` that accepted a seeded tuple would take at the door what
+        ``MAX_INTENDED_ACTIONS`` forbids, and §1's "``GoalBrief.actions`` is therefore
+        bounded by construction" would be false of every stored goal. **The remedy is a
+        refusal and never an elision**, which is where this parts company with the
+        clause above: §1 forbids eliding an intended action at any age, because "an
+        identity that can vanish is not an identity".
+
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``.
+            PlanningError: If the store already holds a goal under this ``id``, or if
+                the goal is opened carrying an intended action.
         """
         ...
 

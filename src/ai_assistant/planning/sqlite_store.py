@@ -68,6 +68,7 @@ from ai_assistant.planning.goals import (
     invalidated,
     minted,
     refuse_a_second_owner,
+    refuse_a_seeded_minting,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
@@ -1464,11 +1465,18 @@ class SqlitePlanStore:
         caller that mutates ``goal.id`` while the write is in flight would
         otherwise be handed an id that names no row.
 
+        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2),
+        on the revalidated snapshot rather than on the caller's instance: the opening
+        write mints none, ``record_intended_actions`` is the only route to one, and that
+        is what holds ``MAX_INTENDED_ACTIONS`` over every stored goal.
+
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``, or
-                the goal does not revalidate.
+            PlanningError: If the store already holds a goal under this ``id``, if the
+                goal is opened carrying an intended action, or if it does not
+                revalidate.
         """
         snapshot = _revalidated_goal(goal)
+        refuse_a_seeded_minting(snapshot)
         async with self._lock:
             await _run_to_completion(self._save_goal_sync, snapshot)
         return snapshot.id
