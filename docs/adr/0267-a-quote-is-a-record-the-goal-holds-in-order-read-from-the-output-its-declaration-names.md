@@ -3,30 +3,34 @@ and no local check proves it still true
 
 - Status: Proposed
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
-  — **two narrowly stated scopes, and §9 shows the working for both. §11's
-  `AuthorizationProjection`, in its field list and in one limb of its restart clause**: that model
-  is declared as carrying *"exactly `coverage` … and `expires_at`"*, and it gains **`quote`**, a
-  `QuoteView | None` required with no default, carrying the figure the act was quoted at beside the
-  ceiling the answer would establish — without which §11's own construction, *"A confirmation that
-  establishes a bound without naming it is not a confirmation of that bound"*, is unmet for the one
-  bound whose proof is a price the user was never shown. **And its restart clause's *"renders the
-  same projection"*** is true of the three facts the row carries and false of the fourth, which is
-  re-read: where a refresh landed between the question and the restart, the refreshed figure is
-  rendered — the fail-closed direction, since ADR-0254 §13's recheck compares the act against that
-  same later quote. §11's rendered-from-the-proposed-row rule, its `CoverageView` as ADR-0266 §9
-  leaves it, its possibly-empty coverage, its one-carrier argument, its renders-no-internal-value
-  bar, its listing, its revocation surface and `TurnOutcome.authorizations` bind entire. **§16's
+  — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
+  list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
+  governing quote for the request's intended action **at the instant the row was proposed** — the
+  figure the user's answer was taken over. Without it §11's *"A restart between the question and
+  the answer recovers the row and renders the same projection"* is unsatisfiable for the one value
+  a `MONEY` ceiling rests on, since the figure would have to be re-selected at every recovery and
+  could be a different number by then. It is **provenance**: no comparison of any decision reads
+  it, and it sits **outside** `_AUTHORIZATION_SUBJECT`, so `subject_digest` and §7's recompute
+  parity are unmoved. **§11's `AuthorizationProjection` field list**: that model is declared as
+  carrying *"exactly `coverage` … and `expires_at`"* and gains `quote`, a `QuoteView | None`
+  required with no default and **transcribed from the row's `quoted`** — without which §11's own
+  *"A confirmation that establishes a bound without naming it is not a confirmation of that bound"*
+  is unmet for the one bound whose proof is a price, and §11's concrete list already requires the
+  question to name *"the price as a figure or as a bounded limit with its currency"*. **§11's
+  restart clause takes no scope and binds entire**, the quote being on the row. **And §16's
   `core`-surface roster, in two limbs**: `core/types.py` gains a **fifteenth**, **sixteenth**,
   **seventeenth** and **eighteenth** type — `ActionQuote`, `QuotedOutput`, `ActionQuoteMinting` and
-  `QuoteView`; and an **eighth**,
-  **ninth**, **tenth** and **eleventh** field — `ToolDefinition.quoted_output`, `Goal.quotes`,
-  `Goal.quotes_elided` and `AuthorizationProjection.quote` — counting from where ADR-0266 §9 left
+  `QuoteView` — and an **eighth** through **twelfth** field, counting from where ADR-0266 §9 left
   the roster at fourteen types and seven fields. A reader holding only §16 implements a roster test
-  that fails on this decision's own surface. **§16's `PermissionDecision` clause is untouched**:
-  that record gains nothing here. Every other clause of §16 binds entire — the lane attribution of
-  every roster entry, the `core/errors.py` roster, *"`core/config.py` gains nothing at all"*, the
-  `PROTOCOL_VERSION` clause and the transcribe-the-ruling-whole rule. **`core/protocols.py`'s
-  roster is a widening §16 does not close**, and §9 says why it takes no scope.
+  that fails on this decision's own surface. **§16's `PermissionDecision` clause is untouched**,
+  that record gaining nothing here, and so is its `core/errors.py` roster, §5 minting no error
+  class. Every other clause of §§1, 11 and 16 binds entire — §1's three write paths, its
+  row-before-the-question rule, its never-edited coverage and its conditional supersession; §11's
+  rendered-from-the-proposed-row and transcription rules, its `CoverageView`, its possibly-empty
+  coverage, its renders-no-internal-value bar, its listing, its revocation surface and
+  `TurnOutcome.authorizations`; and §16's lane attribution and transcribe-the-ruling-whole rule.
+  **`core/protocols.py`'s roster is a widening §16 does not close**, and §9 says why it takes no
+  scope.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope ADR-0254 §18 and ADR-0266 §9 have each already taken
   there, reaching one further field**: the `ToolDefinition` model declaration and the required-field
@@ -107,8 +111,8 @@ when the call was made authorises an over-bound charge that no local mechanism d
 `CoverageMember.kind`, `ToolDefinition.bounded_arguments` and `ActionRequest.intended_action` are
 ADR-0266's and are ratified and unwritten; `CoverageView` and `AuthorizationProjection` are
 ADR-0254 §11's and are in flight on PR #2393. A grep over `src/` for `IntendedAction`,
-`BoundedArgument` and `ActionQuote` returns nothing. What **is** in the tree and is relied on: `ToolDefinition`
-with `system_supplied` and its required-field exception; `ActionRequest.parameters_digest`, a
+`BoundedArgument` and `ActionQuote` returns nothing. What **is** in the tree and is relied on:
+`ToolDefinition` with `system_supplied` and its required-field exception; `ActionRequest.parameters_digest`, a
 `property` computing `sha256` over the canonical encoding, and `Sha256Hex`, the validated type
 `PermissionDecision.parameters_digest` already carries; `StepOutputRef`, ADR-0253 §6's one spelling
 of a place in a step's output; `ValueBound` with `currency: EncodableText | None`; `Goal` with its
@@ -170,6 +174,20 @@ quote/charge mismatch is *"a reported finding"*.
 > quote, and ask. That is the owner's *"re-quote or ask"* read at the one place it can be enforced
 > mechanically.
 
+> **Normative — a quote is bound to the act and to the arguments, and never to the declaration
+> that produced it.** §5's seam is keyed on the goal and the intended action alone, and **no clause
+> of this decision or of ADR-0266 compares the declaration a quote was read from against the
+> declaration of the request it covers.** That is required rather than tolerated: the owner's own
+> case reads a price from an availability tool and performs the act at a **booking** tool, so a
+> same-declaration rule would refuse every act this mechanism exists to authorise. **What binds the
+> number to the act is the totality obligation above** — the amount is the whole charge *the act*
+> will make — **together with the digest**, which pins the arguments. **The residual is stated
+> rather than assumed away and §10 books it**: a declaration whose quoted output names a number
+> that is not the act's total charge yields a quote nothing here detects, and a second declaration
+> quoting the same act over the same arguments is the sharpest form of it. **The declaration that
+> produced a quote is recoverable from `plan` and `read_from`** for an audit, and is carried in no
+> field of its own, because a field nothing compares is a field a later lane compares.
+
 **`plan` is carried because a step id alone names no place.** ADR-0266 §10 refuses `PlanStep.id` as
 a durable client reference on the ground that `_step_ids_are_unique` guarantees uniqueness *"within
 a plan"* alone, and the same fact reaches provenance: a goal that has replanned holds two plans
@@ -211,7 +229,9 @@ addressable. §10 books the case that would need one with what fires it.
 > duplicate booking *"nobody could detect afterwards"*. A dropped quote costs a question.
 
 > **Normative — `PlanStore` gains one member, and this is a **BREAKING** contract change under
-> golden rule 5: `record_quote(minting: ActionQuoteMinting) -> Goal`** — appends one `ActionQuote`
+> golden rule 5: `async def record_quote(self, minting: ActionQuoteMinting) -> Goal`** — it is
+> durable-store I/O and is `async` on `CLAUDE.md`'s own rule, as every member beside it is. It
+> appends one `ActionQuote`
 > to the named goal's `quotes`, applies the elision above, advances `version`, and returns the
 > stored goal. `core/types.py` gains no command type for it beyond what §1 lands: **`minting` is
 > `ActionQuoteMinting`, a frozen model with `extra="forbid"` carrying exactly `goal_id`, `quote`
@@ -317,13 +337,27 @@ record of the same durability.
 > case"*. ADR-0252 §7's *"a refresh supersedes the row it displaces"* is honoured by position
 > rather than by a mark, which is the whole reason §2 puts the record in an ordered tuple.
 
+> **Normative — the mint is not atomic with the transition that recorded the output, and both
+> residuals are fail-closed.** A process that stops between the two writes leaves the step
+> `SUCCEEDED` with its output and the goal with **no** quote for that act, so the act asks; **no
+> lane reconciles a missing quote from a stored output**, because re-reading a price is a fresh
+> read appended like any other (above) and minting one from an output recorded earlier would state
+> a reading nobody took at an instant nobody observed. A retry whose predecessor committed appends
+> a **second quote equal to the first**, which then governs and carries the same number, so **an
+> append is idempotent in effect though not in storage**; its only cost is a slot against
+> `MAX_ACTION_QUOTES`, whose elision is itself fail-closed (§2). **No lane adds a duplicate test, a
+> reconciliation key or a recovery pass** ahead of the decision §10 books.
+
 ### 5. How the policy obtains one: a new Protocol, keyed and never asked, failing closed
 
 > **Normative.** `core/protocols.py` gains **`GoalQuotes`**, a Protocol with **one** member and no
-> lane adds a second: **`for_action(goal: Identifier, intended_action: Identifier) ->
-> tuple[ActionQuote, ...]`**, returning that goal's quotes naming that action **in the order the
-> goal holds them**, possibly empty. This is a new Protocol, so **the triad is owed in one change**
-> — the Protocol, its shared conformance suite, and a canonical fake in `ai_assistant.testing`
+> lane adds a second: **`async def for_action(self, goal: Identifier, intended_action: Identifier)
+> -> tuple[ActionQuote, ...]`**, returning that goal's quotes naming that action **in the order the
+> goal holds them**, possibly empty. **It is durable-store I/O and is `async`** on `CLAUDE.md`'s own
+> rule, as `GoalAuthorizations.live_for` is. **Cancelling it is governed by `core/protocols.py`'s
+> cancellation clause** (ADR-0060), like every member of that module. **This is a new Protocol, so
+> the triad is owed in one change** — the Protocol, its shared conformance suite, and a canonical
+> fake in `ai_assistant.testing`
 > (`CONTRIBUTING.md` → "Adding a Protocol"). It is a **BREAKING** contract change to
 > `core/protocols.py` under golden rule 5 and is flagged as one.
 
@@ -402,7 +436,34 @@ The alternative designs all put a check where the fact is not: a shorter Δ, a r
 before the call, a hash of the provider's page. Each narrows the window and none closes it, and a
 narrowed window is the failure mode that arrives rarely enough to be attributed to something else.
 
-### 7. The rendering: the figure the act was quoted at, beside the ceiling the answer establishes
+### 7. The rendering: the row records the figure it was proposed against, and the projection transcribes it
+
+> **Normative.** **`Authorization` gains one field, `quoted: ActionQuote | None` defaulting to
+> `None`** — **the governing quote for the request's intended action at the instant the row was
+> proposed**, selected by §2's order alone, and **absent** where the row carries no `MONEY` member,
+> where the request carries no `intended_action`, or where no quote named that action. It is
+> written once, by the same `orchestration` code that builds the row and before the question is
+> put, and **is never edited afterwards** — ADR-0254 §1's never-edited-coverage discipline reaching
+> the field beside it.
+
+> **Normative — `quoted` is provenance and no comparison of any decision reads it.** ADR-0254 §13's
+> recheck at dispatch and ADR-0266 §7's evidence route each read the **current** governing quote
+> through §5's seam, never this field; **no lane covers a request against it, refreshes it, compares
+> it to a later quote, or reads its absence as a statement about coverage.** It is **outside**
+> `_AUTHORIZATION_SUBJECT`, so `Authorization.subject_digest` is unmoved and ADR-0254 §7's
+> recompute-on-the-row parity is untouched. **A stored row decodes with it `None`.**
+
+**It is on the row because it is part of what the user answered, and that is ADR-0254 §1's own
+reason for writing the row first.** §1 writes the record before the question so that *"what the user
+is shown is a rendering of a durable row"* and so that a restart *"renders the same projection"*; a
+figure the answer was taken over that lived only on the goal would be re-selected at every
+recovery and could be a different number by then. **It is not two shapes of one fact**: the goal's
+tuple holds what the act costs **now**, this field holds what it cost **when the user said yes**,
+and neither is derivable from the other once a refresh has landed — ADR-0254 §8's *"Both halves
+survive, and neither is derivable from the other"*, taken about the span and true here for the same
+reason. **And it is what keeps the two lanes independent**: the engine performs a record lookup by
+position over a goal it already holds, so no coverage comparison crosses a subsystem boundary and
+`permissions` is asked for nothing at proposal time.
 
 > **Normative.** `core/types.py` gains **`QuoteView`**, a frozen model with `extra="forbid"` whose
 > fields are exactly three: **`amount`**, a `Decimal`; **`currency`**, an `EncodableText`; and
@@ -410,27 +471,22 @@ narrowed window is the failure mode that arrives rarely enough to be attributed 
 > goal id and no authorization id — ADR-0254 §11's renders-no-internal-value bar, unrelaxed.
 
 > **Normative.** **`AuthorizationProjection` gains one member, `quote: QuoteView | None`, required
-> with no default.** It carries the **governing quote through which the proposed row's `MONEY`
-> member was met**, and is **absent** — not defaulted — where the row carries no `MONEY` member or
-> where the member was met on ADR-0266 §7's argument route alone. **A confirmation that renders a
-> ceiling without the figure the act was quoted at is not a confirmation of that charge**, which is
-> ADR-0254 §11's own construction — *"A confirmation that establishes a bound without naming it is
-> not a confirmation of that bound"* — read onto the value the bound is proved against.
+> with no default**, **transcribed from the proposed row's `quoted`** — its three values, and
+> absent exactly where that field is absent. **A confirmation that renders a ceiling without the
+> figure the act was quoted at is not a confirmation of that charge**, which is ADR-0254 §11's own
+> construction — *"A confirmation that establishes a bound without naming it is not a confirmation
+> of that bound"* — read onto the value the bound is proved against, and it is why §11's concrete
+> list already requires the question to name *"the price as a figure or as a bounded limit with its
+> currency"*.
 
-> **Normative — it is transcribed and never re-derived, and the engine transcribes it.** ADR-0254
-> §1's completeness condition is evaluated before the row is proposed, and evaluating it selected
-> the governing quote; **the engine puts that quote's three values on the projection and no surface
-> re-selects one**. ADR-0254 §11's *"the recorded values by transcription and not a second
-> derivation of them"* binds this member as it binds the coverage, and an adapter reads neither the
-> trail nor a `PermissionDecision` (ADR-0042 §6).
-
-> **Normative — a restart re-reads the quote, and where a refresh landed the refreshed figure is
-> rendered.** ADR-0254 §11's restart clause recovers the durable row and renders the same coverage,
-> the same bounds and the same `expires_at`; the quote is on the goal and not on the row, so it is
-> re-selected under §2's order. **This is the fail-closed direction and is stated rather than
-> engineered around**: ADR-0254 §13's recheck compares the act against that same later quote at
-> dispatch, so rendering the older figure would show the user a number the ruling would not use.
-> **The listing renders no quote**, and §10 books that with what fires it.
+> **Normative — ADR-0254 §11 binds entire, its restart clause included, and nothing re-selects at
+> render time.** The projection is rendered from the proposed row and is not recomputed; a restart
+> between the question and the answer recovers the row and renders **the same projection**, the
+> quote among the values it carries. **No surface, no adapter and no engine re-selects a governing
+> quote in order to render one**, and a refresh landing in between changes the rendering in no way
+> — what it changes is the **ruling**, ADR-0254 §13's recheck reading the later quote at dispatch,
+> so an act whose price has moved above the ceiling is uncovered and asked about however the
+> confirmation read. **The listing renders no quote**, and §10 books that with what fires it.
 
 ### 8. Writer clauses, and what no model does
 
@@ -442,8 +498,8 @@ narrowed window is the failure mode that arrives rarely enough to be attributed 
 > component of this system writes, edits, infers or repairs one at run time.
 
 > **Normative — no durable value of this decision is ever taken from a model, and the list is
-> exact.** A planner envelope carrying an **`ActionQuote`**, a **`QuotedOutput`**, a **`QuoteView`**,
-> an amount, a currency, an output key or an arguments digest has those values **discarded
+> exact.** A planner envelope carrying an **`ActionQuote`**, a **`QuotedOutput`**, a
+> **`QuoteView`**, an amount, a currency, an output key or an arguments digest has those values **discarded
 > silently** — not an error, not a park, not a degradation of the turn — which is ADR-0254 §9's
 > posture and ADR-0266 §8's list extended by this decision's own values.
 
@@ -458,34 +514,44 @@ narrowed window is the failure mode that arrives rarely enough to be attributed 
 
 ADR-0082 §1's test is applied to the earlier ADR's **text** and is shown rather than asserted:
 *"Would a reader holding only the earlier ADR now act differently, or read one of its clauses more
-widely than it now holds?"* **Four documents come out yes** — ADR-0254 in two scopes, and ADR-0016,
-ADR-0255 and ADR-0249 in one each. Every other ADR cited comes out **no** and takes none, which
-ADR-0082 §1 requires as firmly.
+widely than it now holds?"* **Four documents come out yes** — ADR-0254 in three scopes, and
+ADR-0016, ADR-0255 and ADR-0249 in one each. Every other ADR cited comes out **no** and takes
+none, which ADR-0082 §1 requires as firmly.
 
-**ADR-0254 §11 — in `AuthorizationProjection`'s field list and in one limb of its restart clause.**
-§11 declares that model as *"a frozen model with `extra="forbid"` carrying exactly `coverage` …
-and `expires_at`"*. §7 above adds `quote`, so a reader holding only §11 builds a projection that
-cannot carry the figure the `MONEY` member was met against, and puts to the user a ceiling whose
-proof they never see — which §11's own fourth-clause construction makes not a confirmation of that
-charge, since §11's concrete list already requires the question to name *"the price as a figure or
-as a bounded limit with its currency"* and nothing before this decision could supply the figure.
-**And its restart clause** rules that *"A restart between the question and the answer recovers the
-row and renders the same projection"*. Its three named facts — the coverage, the bounds, the
-expiry — are on the row and are unchanged; the quote is on the **goal**, so a refresh between the
-question and the restart renders the refreshed figure. A reader holding only §11 builds a surface
-that caches the first rendering and shows a figure ADR-0254 §13's recheck would not use. **Every
-other clause of §11 binds entire**: the rendered-from-the-proposed-row rule itself, `CoverageView`
-as ADR-0266 §9 leaves it, the possibly-empty coverage and both directions of its argument, the
-one-carrier-for-both argument, the engine-assembles-it and transcription rules, the
+**ADR-0254 §1 — in `Authorization`'s field list alone.** §1 declares that row *"a frozen model with
+`extra="forbid"` whose fields are exactly"* the eleven it lists, and §7 above adds `quoted`, an
+`ActionQuote | None` defaulting to `None`, carrying the governing quote the row was proposed
+against. A reader holding only §1 builds a row that cannot say what the user was shown, so §11's
+*"A restart between the question and the answer recovers the row and renders the same projection"*
+becomes unsatisfiable for the one value a `MONEY` ceiling rests on — the figure would have to be
+re-selected at every recovery and could be a different number by then. **Every other clause of §1
+binds entire**: the three write paths, the row written before the question, the never-edited
+coverage — which the new field is written under rather than against — the conditional supersession,
+the proposal conditions as ADR-0266 §9 leaves them, the empty-coverage refusals and the
+`subject_digest` parity, `quoted` sitting **outside** `_AUTHORIZATION_SUBJECT` so that §7's
+recompute compares exactly what it compared before.
+
+**ADR-0254 §11 — in `AuthorizationProjection`'s field list alone, and in nothing else.** §11
+declares that model as *"a frozen model with `extra="forbid"` carrying exactly `coverage` … and
+`expires_at`"*. §7 above adds `quote`, a `QuoteView | None` required with no default, so a reader
+holding only §11 builds a projection that cannot carry the figure the `MONEY` member was met
+against and puts to the user a ceiling whose proof they never see — which §11's own fourth-clause
+construction makes not a confirmation of that charge, and which §11's concrete list already asks
+for in requiring the question to name *"the price as a figure or as a bounded limit with its
+currency"*. **Its restart clause takes no scope and binds entire**, because §7 puts the quote on
+the **row**: the projection is rendered from the proposed row and is not recomputed, and a recovery
+renders the same projection value for value. **Every other clause of §11 binds entire**: the
+transcription rule, `CoverageView` as ADR-0266 §9 leaves it, the possibly-empty coverage and both
+directions of that argument, the one-carrier-for-both argument, the engine-assembles-it rule, the
 renders-no-internal-value bar, `ConfirmationEgress`'s untouched roster, the listing as ADR-0266 §9
 leaves it, the revocation surface and `TurnOutcome.authorizations`.
 
 **ADR-0254 §16 — in its `core`-surface roster, in two limbs, and in neither of the other two.** §16
 states what `core/types.py` gains, and ADR-0266 §9 left that at **fourteen** types and **seven**
 fields. §§1, 3 and 7 above add `ActionQuote`, `QuotedOutput`, `ActionQuoteMinting` and `QuoteView`
-— **four** further types — and `ToolDefinition.quoted_output`, `Goal.quotes`, `Goal.quotes_elided`
-and `AuthorizationProjection.quote` — **four** further fields. A reader holding only §16 implements
-a roster test that fails on this decision's own surface. **Its `PermissionDecision` clause is
+— **four** further types — and `ToolDefinition.quoted_output`, `Goal.quotes`, `Goal.quotes_elided`,
+`Authorization.quoted` and `AuthorizationProjection.quote` — **five** further fields. A reader
+holding only §16 implements a roster test that fails on this decision's own surface. **Its `PermissionDecision` clause is
 untouched**, that record gaining nothing here, and **its `core/errors.py` roster is untouched**, §5
 minting no error class. **Every other clause of §16 binds entire**, the lane attribution of every
 roster entry, *"`core/config.py` gains nothing at all"* and the transcribe-the-ruling-whole rule
@@ -549,13 +615,28 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 > of them. Each is named so that a reader cannot mistake this ADR's silence for a ruling, and each
 > carries the condition that fires it.
 
-- **Whether the key a declaration names carries the *whole* charge.** §1 states the obligation and
-  §3 puts it on the declaration; **nothing in code checks it**, and a declaration naming a booking
-  fee where the total is produces a quote satisfying a ceiling the act breaches. What is available
-  today is the **optional** safeguard — declaring the argument at `MONEY` (ADR-0266 §7) where the
-  call carries one — and A10's verification of the charge afterwards, which is a finding rather
-  than a prevention. Fired by the decision that gives a declaration a machine-checkable statement
-  of totality, and by the one that rules what a verification finding does.
+- **Whether the number a declaration names is the *whole charge of the act it is quoted for*.** §1
+  states the obligation and §3 puts it on the declaration; **nothing in code checks either half**.
+  A declaration naming a booking fee where the total is produces a quote satisfying a ceiling the
+  act breaches. **And because a quote is bound to the act and never to the declaration** (§1) —
+  which the owner's own case requires, the price being read at an availability tool and the act
+  performed at a booking tool — **a second declaration quoting the same intended action over the
+  same arguments produces a quote that covers the act at the first**: tool X's 100 EUR for action
+  `A` covers tool Y's 200 EUR charge for `A` under a 150 EUR ceiling where the two calls' arguments
+  agree. That is the same defect read at its sharpest and not a second one, and **binding a quote
+  to its declaration is refused rather than deferred**, since it would refuse every act this
+  mechanism exists to authorise. What is available today is the **optional** safeguard — declaring
+  the argument at `MONEY` (ADR-0266 §7) where the call carries one — and A10's verification of the
+  charge afterwards, which is a finding rather than a prevention. Fired by the decision that gives
+  a declaration a machine-checkable statement of totality, by the one that gives an intended action
+  a parameter or capability identity — which ADR-0266 §10 books and ADR-0265 §1's *"no fourth
+  field"* closes today — and by the one that rules what a verification finding does.
+- **Reconciling a mint that did not complete.** §4 rules the mint non-atomic with the transition
+  that recorded the output and states both residuals as fail-closed: a lost mint costs a question,
+  a repeated one costs a slot. **Nothing here reconciles either**, and no lane writes a duplicate
+  test, an idempotency key for a quote or a recovery pass over stored outputs. Fired by the
+  decision that reconciles an attempt's unfinished work at a turn-start pass, which is where
+  ADR-0259 §1 already puts that shape of question.
 - **A quote read from anywhere but one key of one object.** §3 fixes depth one and one key pair, so
   a tool returning a **list** of priced options, a nested price, a price split across two keys, or
   two currencies in one output yields **no** quote and its acts ask. Fired by the decision stating
@@ -627,7 +708,8 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 - **Q1 — the contract, the seam, the fakes and the store** (`core/types.py`, `core/protocols.py`,
   `ai_assistant.testing`, `planning`). `ActionQuote`, `QuotedOutput`, `ActionQuoteMinting` and
   `QuoteView`; `MAX_ACTION_QUOTES`; `Goal.quotes` and `Goal.quotes_elided` with §2's append-only,
-  order and elision rules; `ToolDefinition.quoted_output`; `AuthorizationProjection.quote`;
+  order and elision rules; `ToolDefinition.quoted_output`; `Authorization.quoted` and
+  `AuthorizationProjection.quote`;
   `GoalQuotes` with its conformance suite and its canonical fake; `PlanStore.record_quote` with its
   compare-and-swap, its elision and its one refusal, in the Protocol, the conformance suite,
   `InMemoryPlanStore` and `planning`'s durable store; `PROTOCOL_VERSION` with `wire/envelope.py`'s
@@ -635,8 +717,10 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
   and 8.
 - **Q2 — the mint and the projection, in `orchestration` alone.** §4's mint on every path a step's
   output is recorded, its five conditions and its refusals; the `record_quote` write; §7's
-  transcription of the governing quote onto `AuthorizationProjection.quote`, absent where no
-  `MONEY` member was met through a quote; and §8's discard of every value this decision adds.
+  selection of the governing quote onto `Authorization.quoted` where `orchestration` builds the
+  row, and the projection's transcription of that field — **a record lookup by §2's order over a
+  goal the builder already holds, and no coverage comparison**, which is what makes Q2 independent
+  of Q3; and §8's discard of every value this decision adds.
   **Q2 waits on ADR-0266's L2**, which sets `ActionRequest.intended_action` from the plan step the
   request serves — without it the mint has no digest to pair with an act. Arms 4 and 7.
 - **Q3 — the read, in `permissions` alone.** `GoalQuotes.for_action` wired into ADR-0266 §7's
@@ -679,7 +763,9 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    the elision: appending to a goal already holding `MAX_ACTION_QUOTES` drops **exactly one** from
    the front and advances `quotes_elided` by one; **an elision that drops an action's only quote
    leaves that action with none** and an elision that drops its **oldest of two** leaves the
-   governing one where it was — the assertion that no elision revives an earlier reading.
+   governing one where it was — the assertion that no elision revives an earlier reading. **And an
+   append of a quote equal to the one already last** is accepted, leaves two members, and leaves
+   the governing quote carrying the same amount and currency as before (§4's retry residual).
 3. **The declaration.** A `QuotedOutput` is not constructible where `amount` equals `currency`, or
    where either names a key below depth one; a `ToolDefinition` is constructible carrying one, and
    constructible carrying **none**, decoding from a dump written without the field as `None`.
@@ -693,7 +779,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    missing `price` key; a missing `currency` key; a **JSON float** `120.0`; a negative amount; a
    non-numeric string; and a currency that is not a JSON string. **And the mint reads its own step
    alone**: a second step's output carrying a different price in the same walk changes nothing
-   about the quote minted from the first.
+   about the quote minted from the first. **And the two interruption boundaries** (§4): a walk
+   stopped after the output transition committed and **before** `record_quote` leaves the step
+   `SUCCEEDED` with its output, the goal's `quotes` **unchanged**, and no reconciliation on a later
+   read — the act asks; and a mint driven twice over one output appends **two** equal quotes and
+   nothing raises.
 5. **The comparison, end to end, and it is ADR-0266's own.** Against a quote for the request's
    `intended_action` at `"120"`/`"EUR"` over the request's own arguments the request is **covered**
    against a `150` `EUR` ceiling; at `"170"` it is not; at `"120"`/`"USD"` it is not; with **no**
@@ -702,21 +792,30 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    extra argument, one missing, and one whose value differs are each not covered though the price
    is unchanged. **The Sunday re-quote governs**: with a Saturday quote at `120` and a later Sunday
    quote at `135` for one action, the Sunday arguments are covered and a request returning to the
-   **Saturday** arguments is **not** — the earlier quote never reviving. And a `TERMS` member is
-   met by no quote whatever it carries.
+   **Saturday** arguments is **not** — the earlier quote never reviving. **And the quote is bound
+   to the act and not to the declaration, asserted rather than left to chance** (§1): a quote read
+   from declaration **X**'s output for action `A` covers a request at declaration **Y** carrying the
+   same arguments and the same `intended_action`, which is the owner's check-then-book case and is
+   §10's recorded residual read as the arm that pins it. And a `TERMS` member is met by no quote
+   whatever it carries.
 6. **The seam, and a fault is not an absence.** `GoalQuotes.for_action` returns that action's
    quotes in the goal's order and an **empty** tuple for an action the goal has none for; the
    canonical fake satisfies the conformance suite; and a `for_action` that **raises** leaves the
    request **not covered with the fault reported**, never as an absence of quotes and never falling
    through to the argument route — against a control returning empty, which is uncovered for the
    other reason.
-7. **The projection.** A `CONFIRM` whose proposed row carries a `MONEY` member met through a quote
-   at `120`/`EUR` renders an `AuthorizationProjection` whose `quote` carries `120`, `EUR` and the
-   quote's own `read_at`, **beside** the `CoverageView` carrying the `150` bound and the user's own
-   span; a row carrying no `MONEY` member renders `quote` **absent**, as does one whose member was
-   met on the argument route alone; the three values are **transcribed** from the goal's own record
-   and equal it byte for byte; and **a re-render after a refresh landed renders the refreshed
-   figure** while the coverage, the bounds and the `expires_at` are unchanged.
+7. **The row's record of the figure, and the projection.** A row proposed for a request whose
+   intended action has a governing quote at `120`/`EUR` is written carrying `quoted` equal to that
+   quote **field for field**; a row whose request carries no `intended_action`, one for an action
+   no quote names, and one carrying no `MONEY` member each carry `quoted` **absent**; and
+   `Authorization.subject_digest` is **unchanged** across two rows differing only in `quoted`,
+   which is what keeps ADR-0254 §7's recompute parity. **The projection is then a transcription**:
+   the `AuthorizationProjection` carries a `QuoteView` of `120`, `EUR` and that quote's `read_at`,
+   **beside** the `CoverageView` carrying the `150` bound and the user's own span, and carries
+   `quote` absent exactly where `quoted` is absent. **And a re-render after a refresh to `170`
+   landed on the goal renders the same projection value for value**, the row being the source and
+   nothing re-selecting — while a ruling taken at dispatch over that later quote is **uncovered**,
+   which is the arm that shows the rendering and the ruling are two different reads.
 8. **The writer clause, the discard, the wire and the stored shapes.** A `PlannerOutput` whose
    envelope carries every value §8 names — an `ActionQuote`, a `QuotedOutput`, a `QuoteView`, an
    amount, a currency, an output key and a digest — leaves the recorded revision and the goal's
@@ -733,8 +832,8 @@ corpus without it can prove no `MONEY` ceiling at all — ADR-0266 §7's evidenc
 — and would either leave #2373 stopped where it stopped or invent a carrier, a producer and a
 selector no clause authorises, which is the `stars`-in-the-`price`-slot failure §3 exists to
 prevent (ADR-0070 §1). **It is a partial supersession of exactly four documents** (ADR-0070 §3) —
-ADR-0254 in two scopes, ADR-0016, ADR-0255 and ADR-0249 in one each — and the `Status` line of each
-names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
+ADR-0254 in three scopes, ADR-0016, ADR-0255 and ADR-0249 in one each — and the `Status` line of
+each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
 invariant holds. **The records land in the same change as this document** (ADR-0082 §7), and
 nothing else in any of the four is edited — no Decision text is rewritten, which ADR-0070 §1
 forbids.
@@ -746,7 +845,7 @@ from other ADRs appear inside quotation marks in running prose. §11's lane bull
 that unmarked content, read under marks stating the lane count, the one-change rule and the
 no-lane-is-complete rule.
 
-**It is a contract-surface change** — `core/types.py` gains four types and four fields, and
+**It is a contract-surface change** — `core/types.py` gains four types and five fields, and
 **`core/protocols.py` gains a Protocol and a `PlanStore` member** — so it owes **both** review
 lenses on one tree, which ADR-0015 §1 makes true of a prose-only PR. **`GoalQuotes` is a new
 Protocol, so the triad is owed** and §11 puts it in Q1. **It merges as its own PR, ratified, before
