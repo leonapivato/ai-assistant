@@ -150,7 +150,7 @@ pre-invocation window and ADR-0244 §11's `cancel_read` bind unchanged**, and no
 clause to any of them. And *"checkpoints for future steering are left, not built"* — §11 names
 where a live cancellation would enter and states nothing more.
 
-### What the tree holds today, read rather than assumed, at `origin/main` `8dbfddf0`
+### What the tree holds today, read rather than assumed, at `origin/main` `28eb9e82`
 
 - **`AttemptState`** is the seven members ADR-0249 §5 fixed, with `TERMINAL_ATTEMPT_STATES` the
   frozen set `{CANCELLED, ENDED}`. **`GoalAttempt`'s validator** admits exactly two shapes: a
@@ -878,7 +878,7 @@ revision 1 §H.1 identified.
 
 > **Normative — neither new enumeration member is a wire ground, and that is read off the tree
 > rather than assumed.** `AttemptOutcome` rides `GoalAttempt`, and as a dated observation at
-> `8dbfddf0` **`GoalAttempt` is named in the `PlanStore` Protocol alone** — `open_attempt`,
+> `28eb9e82` **`GoalAttempt` is named in the `PlanStore` Protocol alone** — `open_attempt`,
 > `get_attempt`, `attempts_of`, `commit_attempt` — and nowhere in the `AssistantEngine` Protocol
 > or under `wire/` but in two prose comments; `PlanStore` is **not** on the promoted surface
 > (ADR-0255 §11). **So no peer emits a `GoalAttempt` and the new value reaches no client**, and its
@@ -888,11 +888,11 @@ revision 1 §H.1 identified.
 > method that returns a `GoalAttempt` — changes nothing about the bump, which is already owed, and
 > records the correction in `wire/envelope.py`'s entry.** The stale ADR-0251-era entry in that file
 > saying `GoalAttempt` *"is what the promoted surface's attempt-facing methods return"* is **not**
-> true of the tree at `8dbfddf0` and no lane of this decision relies on it.
+> true of the tree at `28eb9e82` and no lane of this decision relies on it.
 
 > **Normative — `PROTOCOL_VERSION` moves by exactly one, in the lane that lands the `core` change,
 > together with `wire/envelope.py`'s log entry naming this ADR.** **No integer is fixed here**: the
-> figure is the tree's, and as a dated observation at `8dbfddf0` it reads **43**. **No
+> figure is the tree's, and as a dated observation at `28eb9e82` it reads **43**. **No
 > compatibility shim, negotiation or lenient decode is added** — ADR-0084 §3's exact-match
 > handshake is the mechanism and the refusal naming both versions is the intended outcome.
 
@@ -1161,7 +1161,7 @@ it.
    raise** for an unknown goal, and **true for an `INDETERMINATE` step of an attempt that is not
    the current one** — the reopen-then-abandon case, which is the arm that pins the predicate
    goal-wide. **Asserted against every conforming `PlanStore`**, and over store states constructed
-   directly: as a dated observation at `8dbfddf0` `AttemptState.EFFECT_UNRESOLVED` has **no
+   directly: as a dated observation at `28eb9e82` `AttemptState.EFFECT_UNRESOLVED` has **no
    producer in `src/`** — ADR-0259 §4's act 3 and ADR-0255 §6 are its two, on their own lanes —
    and an arm that waited for one would be an arm this decision's lanes could not run.
    **And the indivisibility is asserted rather than assumed**, because every case above is
