@@ -41,6 +41,7 @@ from web_search_harness import (
     StallingTransport,
     SuspendableKeyring,
     elsewhere_account,
+    suspendable,
 )
 
 from ai_assistant.core.types import (
@@ -98,6 +99,7 @@ __all__ = [
     "far_end",
     "request",
     "response",
+    "suspendable",
 ]
 
 #: The configured provider's origin. ``.invalid`` (RFC 6761 §6.4), so a case that reached
