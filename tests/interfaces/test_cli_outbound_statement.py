@@ -18,7 +18,7 @@ notice are asserted as a screen and not as a call this module made itself.
 from __future__ import annotations
 
 from contextlib import redirect_stdout
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from typing import Final
 
@@ -28,9 +28,15 @@ from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.types import (
+    Belief,
+    BeliefBand,
+    MemoryKind,
     OutboundDestination,
     OutboundReach,
     OutboundStatement,
+    RoutableOperation,
+    RoutedOperation,
+    RouteOutcome,
     SearchNotServiced,
     TurnOutcome,
 )
@@ -410,34 +416,115 @@ async def test_the_statement_stands_beside_the_reply_and_never_in_place_of_it(
     )
 
 
-# --- §13 arm 11's two composers this surface has -----------------------------
+# --- §13 arm 11: the routed pass, and the two composers this surface has ------
 
 
-async def test_a_whole_reply_pass_and_a_streamed_one_both_render_the_statement(
+def _both_ways(outcome: TurnOutcome, output: StringIO) -> tuple[str, str]:
+    """Render one outcome as a whole reply and as a settled stream, and return both.
+
+    ADR-0173 §10's third clause is why the streamed half is never assumed from the
+    first: "the step account is rendered whether or not chunks were rendered", and a
+    renderer reached only on the one-result path would leave every streamed turn
+    silent — which is the path ``assistant ask`` actually takes.
+    """
+    cli._render_turn(outcome)
+    one_result = _flat(output.getvalue())
+    output.truncate(0)
+    output.seek(0)
+    cli._render_turn(outcome, streamed=cli._StreamedReply())
+    return one_result, _flat(output.getvalue())
+
+
+def test_a_routed_pass_that_is_not_a_park_renders_the_statement_both_ways(
     output: StringIO,
 ) -> None:
     """§13 arm 11: "The whole-reply and streaming passes **render** §7's statement."
 
-    Arm 11 names three composers; the terminal has two of them. ADR-0200 §4 makes
-    ``spoken`` the rendering of ``outcome.reply`` and of nothing else, and this module
-    exposes no spoken surface at all — so the spoken third is a carried member with no
-    rendering anywhere, which §7 books as this decision's stated cost rather than a
-    lane's omission.
+    The arm's subject is a **routed** pass, which is the path an implementation
+    updating only the conversational composer would leave behind: ADR-0197 §8 makes
+    ``routed`` and ``step`` mutually exclusive and gives such a pass no ``turn`` at
+    all, so it takes an early return out of :func:`cli._render_turn` and renders none
+    of the plan. §7 is explicit that it still carries a statement — "a routed pass
+    that is not a park carries ``NOT_REACHED``, because ADR-0197 §10 rules that on it
+    the composing stage runs on §6's two inputs and an answer is owed" — so a
+    regression returning before the statement would suppress it here and nowhere else.
 
-    ADR-0173 §10's third clause is why the streamed half is not assumed from the first:
-    "the step account is rendered whether or not chunks were rendered", and a renderer
-    reached only on the one-result path would leave the streamed turn silent.
+    Arm 11 names three composers and this surface has two of them. ADR-0200 §4 makes
+    ``spoken`` the rendering of ``outcome.reply`` and of nothing else, and this module
+    exposes no spoken command at all, so the spoken third is a carried member with no
+    rendering here — ADR-0264 §12's stated cost rather than this lane's omission.
+    """
+    routed = TurnOutcome(
+        turn=None,
+        conversation_id="c-1",
+        routed=RoutedOperation(operation=RoutableOperation.UNGUARD, outcome=RouteOutcome.PERFORMED),
+        reply="That belief can be spoken to anyone again.",
+        outbound_statement=_NOT_REACHED,
+    )
+
+    one_result, streamed = _both_ways(routed, output)
+
+    assert "this turn reached nothing outside this system" in one_result
+    assert "this turn reached nothing outside this system" in streamed
+
+
+def test_a_routed_park_renders_no_statement(output: StringIO) -> None:
+    """§7, §13 arm 11's last clause: "A **routed park** carries ``None`` and renders
+    nothing."
+
+    ADR-0197 §10 rules that on a routed park "the composing stage is not reached", so
+    it is one of exactly two shapes §7 leaves the member ``None`` on — and a surface
+    that invented a statement there would be asserting what no value establishes. The
+    card is parked through the canonical fake's own lever, because ADR-0197 §7 makes a
+    routed park unreachable from the surface by any other route.
+    """
+    engine = FakeAssistantEngine()
+    card = engine.park_routed(
+        "h-1",
+        operation=RoutableOperation.FORGET,
+        subject=(
+            Belief(
+                id="b-1",
+                band=BeliefBand.ASSERTED,
+                kind=MemoryKind.PREFERENCE,
+                content="you drink tea",
+                confidence=0.9,
+                last_updated=datetime(2026, 5, 1, 9, tzinfo=UTC),
+            ),
+        ),
+    )
+
+    cli._render_turn(
+        TurnOutcome(
+            turn=None,
+            conversation_id="c-1",
+            routed=RoutedOperation(
+                operation=RoutableOperation.FORGET,
+                outcome=RouteOutcome.AWAITING_CONFIRMATION,
+                confirmation=card,
+            ),
+            reply=None,
+        )
+    )
+    rendered = _flat(output.getvalue())
+
+    assert "reached" not in rendered
+    assert "cannot say whether" not in rendered
+
+
+async def test_a_conversational_pass_renders_the_statement_both_ways(
+    output: StringIO,
+) -> None:
+    """The same, on the composer the routed one is contrasted with.
+
+    The two paths leave :func:`cli._render_turn` by different returns, so a renderer
+    wired into one of them is green on half this surface's turns.
     """
     engine = FakeAssistantEngine()
     turn = await engine.converse("when does it open?", timeout=PATIENT)
     whole = TurnOutcome(turn=turn.turn, reply=turn.reply, outbound_statement=_NOT_REACHED)
 
-    cli._render_turn(whole)
-    one_result = _flat(output.getvalue())
-    output.truncate(0)
-    output.seek(0)
-    cli._render_turn(whole, streamed=cli._StreamedReply())
-    streamed = _flat(output.getvalue())
+    one_result, streamed = _both_ways(whole, output)
 
     assert "this turn reached nothing outside this system" in one_result
     assert "this turn reached nothing outside this system" in streamed
