@@ -175,7 +175,10 @@ from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
-from ai_assistant.testing.goal_authorizations import FakeGoalAuthorizationStore
+from ai_assistant.testing.goal_authorizations import (
+    AUTHORIZATION_NOW,
+    FakeGoalAuthorizationStore,
+)
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
@@ -624,6 +627,11 @@ class FakeAssistantEngine:
         #: makes the member empty "on every turn that opened none", so the default is
         #: the honest value and not a stand-in.
         self.authorizations: tuple[AuthorizationView, ...] = ()
+        #: What decides whether a listed row reads **live** or **lapsed** (ADR-0254 §16,
+        #: ADR-0193 §9: one reading for a whole listing), and what stamps a withdrawal's
+        #: ``settled_at``. Its own lever rather than :attr:`recipient_grant_clock`, and
+        #: defaulted to the instant the shipped row builders are arranged around.
+        self.authorization_clock: Callable[[], datetime] = lambda: AUTHORIZATION_NOW
         self._pending_authorizations: list[Authorization] = []
         #: The grantable sources this engine holds, by declared identity, each
         #: mapped to its configured location or to ``None`` where it has none
@@ -3120,10 +3128,26 @@ class FakeAssistantEngine:
     def _authorization_now(self) -> datetime:
         """This engine's one clock reading for an authorization operation.
 
-        The same seam :meth:`_recipient_now` is, and for its reason: a fake that read
-        the wall clock would make a lapsed row live again between two lines of one test.
+        **Its own lever and not :attr:`recipient_grant_clock`**, for that attribute's
+        own stated reason one store over: one clock over two vocabularies is the shape
+        that invites a test to reason about one and move the other. It defaults to
+        :data:`~ai_assistant.testing.AUTHORIZATION_NOW`, the instant the shipped row
+        builders are arranged around, so a row built with ``authorization(...)`` and a
+        listing taken from this engine sit on **one** timeline rather than two that
+        happen to agree.
+
+        Guarded at the read rather than at construction, exactly as
+        :meth:`_recipient_now` is and for its reason: the attribute is a public lever a
+        case replaces, so a wrapper installed in ``__init__`` would be thrown away by
+        the next assignment.
+
+        Raises:
+            PlanningError: If the clock's reading is not conforming.
         """
-        return self._recipient_now()
+        try:
+            return checked_clock(self.authorization_clock, owner="FakeAssistantEngine")()
+        except ClockReadingError as exc:
+            raise PlanningError(str(exc)) from exc
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 

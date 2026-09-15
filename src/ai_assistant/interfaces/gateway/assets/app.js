@@ -10177,11 +10177,22 @@ function readAuthorizationView(view) {
 // what the user authorised and is not a promise that the next call will be allowed", so
 // nothing here says the next call goes through — and a record resting on a recipient
 // authority that has since lapsed still reads as standing, because that is what it is.
-function renderAuthorization(list, view) {
+// **`withGoal` because the goal is named once and not once per row**, which is what
+// driving the page settled: §11's listing is *per goal*, so every row of one listing
+// carries the same statement and repeating it turns the fact that distinguishes the
+// rows — the declaration — into the third line of each. The panel names the goal in its
+// own subject line and the rows lead with the declaration; the **announcement** passes
+// `true`, because it has no subject line and a reader meeting it inside a reply needs to
+// know which piece of work it is about.
+function renderAuthorization(list, view, withGoal) {
   const item = document.createElement("div");
   item.className = "notification-row";
-  line(item, view.goal_statement, "reply");
-  line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
+  if (withGoal) {
+    line(item, view.goal_statement, "reply");
+    line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
+  } else {
+    line(item, `${view.tool_id} — ${view.tool_description}`, "reply");
+  }
   renderCoverage(item, view.coverage);
   const standing = view.live ? "still stands" : "has lapsed";
   line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
@@ -10219,7 +10230,7 @@ function renderOpenedAuthorizations(body, opened) {
     return;
   }
   line(body, "I have taken that as standing permission:", "notice");
-  opened.forEach((view) => renderAuthorization(body, view));
+  opened.forEach((view) => renderAuthorization(body, view, true));
 }
 
 // What the last act on the authorizations panel did, in the vocabulary's own words.
@@ -10277,7 +10288,7 @@ async function listAuthorizations(goal, keepSaid) {
         "hint"
       );
     } else {
-      body.authorizations.forEach((one) => renderAuthorization(list, one));
+      body.authorizations.forEach((one) => renderAuthorization(list, one, false));
       line(
         list,
         "These are records of what you authorised. They are not a promise that the next " +
