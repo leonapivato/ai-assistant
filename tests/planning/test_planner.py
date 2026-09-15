@@ -3522,6 +3522,19 @@ async def test_an_asked_for_search_is_read_back_as_a_web_search_ask() -> None:
     assert ask.entry is None
 
 
+#: The read kinds this planner's envelope can name today.
+#:
+#: **``FORECAST_READ`` is deliberately absent, and ADR-0260 §12 is why.** That section
+#: cuts three lanes — the contract and its ``tools/`` implementation, the authority in
+#: ``permissions/``, and the servicing in ``orchestration/`` — and names ``planning/``
+#: in none of them. So the member exists on :class:`ReadKind` and ``ReadAsk`` admits an
+#: ask of it (ADR-0260 §2, §3), while nothing yet emits one: a planner taught to ask
+#: before ADR-0260 §7's servicing site exists would emit a read no site services, which
+#: ADR-0226 §5 has no answer for. The lane that adds the envelope member edits this
+#: constant, which is what makes the omission a stated position rather than a gap.
+_PARSED_READ_KINDS: Final = frozenset(set(ReadKind) - {ReadKind.FORECAST_READ})
+
+
 async def test_one_envelope_may_ask_for_every_kind_the_enumeration_admits() -> None:
     """ADR-0226 §2's at-most-one-of-each rule, at its widest emission (§1, ADR-0240 §1).
 
@@ -3532,8 +3545,9 @@ async def test_one_envelope_may_ask_for_every_kind_the_enumeration_admits() -> N
     fails on a parser reading a later member as an alternative to the earlier ones
     rather than as one more.
 
-    **Asserted against ``set(ReadKind)``**, so the next additive member fails here
-    until this parser learns to read it.
+    **Asserted against :data:`_PARSED_READ_KINDS`**, so the next additive member fails
+    at that constant — a deliberate edit naming the lane that teaches this parser to
+    read it — rather than passing silently here.
     """
     plan = await _emitted(
         _envelope(
@@ -3547,7 +3561,7 @@ async def test_one_envelope_may_ask_for_every_kind_the_enumeration_admits() -> N
 
     request = plan.read_request
     assert request is not None
-    assert {ask.kind for ask in request.asks} == set(ReadKind)
+    assert {ask.kind for ask in request.asks} == _PARSED_READ_KINDS
 
 
 async def test_a_declined_search_beside_another_ask_is_no_ask_and_no_drop() -> None:
@@ -5452,7 +5466,10 @@ async def test_the_system_prompt_asks_for_the_plan_shape() -> None:
         *(one.value for one in VerificationKind),
         *(one.value for one in EvidenceBasis),
         *(one.value for one in InterpretationVerdict),
-        *(one.value for one in ReadKind),
+        # The kinds this prompt can name, which is :data:`_PARSED_READ_KINDS` and not
+        # the whole enumeration: a member the envelope cannot carry is one the prompt
+        # would be inviting a model to write with nowhere for it to land.
+        *sorted(one.value for one in _PARSED_READ_KINDS),
     ],
 )
 async def test_every_vocabulary_member_the_extraction_refuses_is_spelled_in_the_prompt(

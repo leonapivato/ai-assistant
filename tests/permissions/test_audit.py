@@ -1917,8 +1917,10 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
     # A row of either older epoch carries no ``closed_loop`` either: ADR-0238 §13
     # added that member after both, and every older shape forbids an extra key. The
     # ladder is in time order, so a rung is the current encoding minus every member
-    # added after it (ADR-0184 §2).
+    # added after it (ADR-0184 §2) — so ``forecast_reach`` goes with it, ADR-0260 §11
+    # having added the next such member on the leaf.
     del legacy["egress_binding"]["closed_loop"]
+    del legacy["egress_binding"]["forecast_reach"]
     _rewrite(trail, recorded.id, legacy)
 
 
@@ -1935,8 +1937,10 @@ async def _record_as_coverage_legacy(trail: SqliteAuditTrail, recorded: Permissi
     # A row of either older epoch carries no ``closed_loop`` either: ADR-0238 §13
     # added that member after both, and every older shape forbids an extra key. The
     # ladder is in time order, so a rung is the current encoding minus every member
-    # added after it (ADR-0184 §2).
+    # added after it (ADR-0184 §2) — so ``forecast_reach`` goes with it, ADR-0260 §11
+    # having added the next such member on the leaf.
     del legacy["egress_binding"]["closed_loop"]
+    del legacy["egress_binding"]["forecast_reach"]
     _rewrite(trail, recorded.id, legacy)
 
 
@@ -2242,9 +2246,11 @@ async def test_resolution_of_returns_a_legacy_resolution_by_its_binding(
     legacy = _stored(ephemeral, "d-answer")
     del legacy["egress_binding"]["planned_with_external_content"]
     del legacy["egress_binding"]["coverage"]
-    # And no ``closed_loop``: ADR-0238 §13 added that member after both, so a row of
-    # this epoch carries none and every older shape forbids an extra key.
+    # And no ``closed_loop`` and no ``forecast_reach``: ADR-0238 §13 and ADR-0260 §11
+    # each added their member after both, so a row of this epoch carries neither and
+    # every older shape forbids an extra key.
     del legacy["egress_binding"]["closed_loop"]
+    del legacy["egress_binding"]["forecast_reach"]
     _rewrite(ephemeral, "d-answer", legacy)
 
     resolution = await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
