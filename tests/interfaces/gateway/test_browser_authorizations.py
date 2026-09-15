@@ -458,10 +458,18 @@ async def test_a_listing_that_outlives_its_session_reveals_nothing(
     beside a form asking the owner to start a session. Adversarial review, round 9,
     ``major``.
 
-    **The settle is deliberate and is not synchronisation for a state the page reaches.**
-    What is asserted is a state the page must *not* reach, and for that the response
-    landing plus a bounded settle is the honest instrument — a bare retrying assertion
-    would pass the instant before the reveal it is looking for.
+    **Nothing here sleeps** (ADR-0216 §7). What is asserted is a state the page must
+    *not* reach, and a bare retrying assertion would pass the instant before the reveal
+    it is looking for — so the case needs an ordering rather than a duration. It takes
+    one: the stale response is awaited to its **last byte**, and then the owner
+    **re-enters** through the page's own form, which completes only once ``#console`` is
+    on screen at the end of a fresh bootstrap exchange. A resumed listing whose body has
+    fully arrived cannot still be pending across a whole network round trip, so by the
+    time the console is up the continuation has run — and it has run under a *different*
+    header half, which the guard refuses on the same terms. Re-entry reveals no control
+    panel of its own (``showConsole`` shows the console, notifications and the control
+    entry points and nothing else), so a panel visible at the end was revealed by the
+    stale response.
     """
     loop = asyncio.get_running_loop()
     held: asyncio.Future[None] = loop.create_future()
@@ -489,12 +497,12 @@ async def test_a_listing_that_outlives_its_session_reveals_nothing(
         await drive.page.click("#goals-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
-        async with drive.page.expect_response("**/authorizations"):
+        async with drive.page.expect_response("**/authorizations") as stale:
             held.set_result(None)
-        await drive.page.wait_for_timeout(300)
+        await (await stale.value).finished()
+        await drive.admit()
 
         await expect(drive.page.locator("#authorizations")).to_be_hidden()
-        await expect(drive.page.locator("#bootstrap")).to_be_visible()
         await expect(drive.page.locator("#authorization-list .notification-row")).to_have_count(0)
 
 
