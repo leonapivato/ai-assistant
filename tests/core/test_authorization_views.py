@@ -222,7 +222,27 @@ def test_a_coverage_view_requires_the_span() -> None:
     with pytest.raises(ValidationError):
         CoverageView(**_view(span=""))
     with pytest.raises(ValidationError):
-        CoverageView.model_validate({"argument": "amount", "bound": money_bound()})
+        CoverageView.model_validate({"kind": "money", "bound": money_bound().model_dump()})
+
+
+def test_a_coverage_view_requires_its_kind() -> None:
+    """ADR-0266 §11's arm 6(b): *"a ``CoverageView`` is constructible at each of the
+    three kinds and at **none without one**"*.
+
+    **Stated over an otherwise-valid payload missing only ``kind``**, and the error
+    is asserted to be about that field. An earlier version of this arm handed the
+    validator a payload that also carried the removed ``argument`` and no ``span``,
+    so it failed twice over for reasons that had nothing to do with ``kind`` — and
+    would have gone on passing if ``kind`` had quietly gained a default, which is
+    the regression it exists to catch. Adversarial review, round 7, ``blocker``.
+    """
+    payload = {"bound": money_bound().model_dump(), "span": "up to sixty pounds"}
+
+    with pytest.raises(ValidationError) as raised:
+        CoverageView.model_validate(payload)
+
+    assert [one["loc"] for one in raised.value.errors()] == [("kind",)]
+    assert CoverageView.model_validate({**payload, "kind": "money"}).kind is BoundKind.MONEY
 
 
 @pytest.mark.parametrize("model", [AuthorizationProjection, AuthorizationView])

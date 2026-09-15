@@ -1028,6 +1028,67 @@ async def test_a_fixed_period_naming_a_real_day_is_rendered(
         await expect(panel).to_contain_text("the dates: fixed at 2026-02-28")
 
 
+@pytest.mark.parametrize("stray", [None, "true", 1], ids=["null", "text", "one"])
+async def test_a_period_bound_whose_exclusivity_flag_is_not_false_is_reported(
+    gateway_browser: Browser, tmp_path: Path, stray: object
+) -> None:
+    """A field of the money shape is absent-as-``False`` on the other two (§2, §3).
+
+    ``maximum_exclusive`` is a ``bool`` with a default, so it crosses on **every**
+    bound of every kind and the page's ``absent`` test — which reads ``null`` and
+    ``undefined`` — cannot see it. A reader asking only that it is not ``true``
+    admitted ``null``, ``"true"`` and ``1``, each a shape ``ValueBound`` refuses and
+    no conforming hub sends, and each of which would then have rendered as a valid
+    authority. Adversarial review, round 7, ``major``.
+    """
+    body = {
+        "authorizations": [
+            {
+                "id": "auth-1",
+                "goal_statement": STATEMENT,
+                "tool_id": AUTHORIZATION_TOOL.id,
+                "tool_description": AUTHORIZATION_TOOL.description,
+                "coverage": [
+                    {
+                        "kind": "period",
+                        "fixed": None,
+                        "bound": {
+                            "kind": "period",
+                            "currency": None,
+                            "maximum_exclusive": stray,
+                            "maximum": None,
+                            "minimum": None,
+                            "starts_at": "2026-09-13T09:00:00+00:00",
+                            "ends_at": "2026-09-13T21:00:00+00:00",
+                            "timezone": "Europe/London",
+                            "terms": None,
+                        },
+                        "span": "that weekend",
+                    }
+                ],
+                "expires_at": "2026-09-13T21:00:00+00:00",
+                "live": True,
+            }
+        ]
+    }
+
+    async def route(one: Route) -> None:
+        await one.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.route("**/authorizations", route)
+
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+        await drive.page.wait_for_selector("#authorizations:not([hidden])")
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("no words for")
+        assert "the dates: from" not in await panel.inner_text()
+
+
 async def test_a_bound_carrying_another_kinds_field_is_reported(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

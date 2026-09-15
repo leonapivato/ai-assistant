@@ -10093,6 +10093,14 @@ function boundSentence(bound) {
 // are states `ValueBound` itself refuses, so a page presenting them would be showing a
 // limit the record does not carry. Adversarial review, round 5, `major`.
 //
+// **A field of the money shape is required to be *absent-as-`false`* on the other
+// two, not merely "not `true`".** `maximum_exclusive` is a `bool` with a default, so
+// the gateway emits it on every bound of every kind and the `absent` test below —
+// which reads `null`/`undefined` — cannot see it. An earlier `!== true` admitted
+// `null`, `"true"` and `1`, each of which `ValueBound` refuses and no conforming hub
+// sends, and each of which would then have rendered as a valid authority. Adversarial
+// review, round 7, `major`.
+//
 // **`minimum` is the one optional argument in the three shapes, and the only one.**
 // `ValueBound._the_kind_carries_its_own_arguments_and_no_others` builds its `missing`
 // list from every field the kind takes *except* `minimum`, so a `PERIOD` states its
@@ -10122,7 +10130,7 @@ function readBound(bound) {
       isText(bound.starts_at) &&
       isText(bound.ends_at) &&
       isText(bound.timezone) &&
-      bound.maximum_exclusive !== true &&
+      bound.maximum_exclusive === false &&
       absent(bound, ["maximum", "minimum", "currency", "terms"])
     );
   }
@@ -10131,7 +10139,7 @@ function readBound(bound) {
       Array.isArray(bound.terms) &&
       bound.terms.length > 0 &&
       bound.terms.every(isText) &&
-      bound.maximum_exclusive !== true &&
+      bound.maximum_exclusive === false &&
       absent(bound, ["maximum", "minimum", "currency", "starts_at", "ends_at", "timezone"])
     );
   }
