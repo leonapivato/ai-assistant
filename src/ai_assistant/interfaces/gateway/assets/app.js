@@ -9954,13 +9954,6 @@ async function abandonGoal(goal) {
   }
 }
 
-// The goal whose authorities the panel is showing, so a withdrawal can re-read the
-// listing it acted on rather than the one that happens to be open. `null` until the
-// panel has been opened once.
-//
-// **The goal is held rather than the goal's id**, because the panel renders the goal's
-// own outcome statement above the rows: ADR-0254 §11 renders a goal "never by its id",
-// and a re-read holding only an id would have nothing to render it by.
 // How many listings this page has started. The panel is opened from a goal row, and two
 // rows pressed in quick succession are two requests that can land in either order — so
 // the count is captured when a request starts and compared when it returns, and a
@@ -9971,9 +9964,32 @@ async function abandonGoal(goal) {
 // rows beneath it. This is `runs.goals`' own arrangement one panel over. Adversarial
 // review, round 2, `major`.
 //
-// **It bounds no act.** A withdrawal reports on the row it was taken on and re-reads
-// nothing, so it neither races a listing nor is lost to one (see `sayBeside`).
+// **It bounds no act.** A withdrawal reports on the record it was taken on and
+// re-reads nothing, so it neither races a listing nor is lost to one (see `actResult`).
 let authorizationRuns = 0;
+
+// What this page knows about a record beyond what the last listing said.
+//
+// **A row's state is a function of the record, not of a node captured when it was
+// drawn.** Six rounds chased one shape: the act reached into elements it had closed
+// over, so every listing that redrew those elements detached the act's own report from
+// the screen. The last variant was the worst, because the replacement was *wrong* and
+// not merely silent — re-open the same goal while a withdrawal is out and the rebuilt
+// row reads "still stands" beside an enabled control that can issue a second
+// revocation. Adversarial review, round 7, `blocker`.
+//
+// Keyed by authorization id, consulted by `showAuthorizationState` at **every** render,
+// these make the answer correct by construction rather than one node at a time: a row
+// drawn during the act is drawn out of reach, a row drawn after it is drawn withdrawn,
+// and it does not matter which listing drew it or whether the act's own row survived.
+//
+// **`withdrawn` records the hub's word and not the page's hope.** Only a `settled`
+// settlement puts an id here — the store's statement that the record is now `REVOKED` —
+// so a listing fetched before the act and rendered after it does not put an enabled
+// control back under a record that no longer stands. Every other settlement left the
+// record where it was, and so leaves the row where it was.
+const authorizationWithdrawn = new Set();
+const authorizationInFlight = new Set();
 
 // --- what an authorization says, on this page (ADR-0254 §11) ----------------
 //
@@ -10250,6 +10266,10 @@ function readAuthorizationView(view) {
 function renderAuthorization(list, view, withGoal) {
   const item = document.createElement("div");
   item.className = "notification-row";
+  // The record this row is about, so that the act can restate **every** row drawn for
+  // it — this listing's, a listing drawn after it, and an announcement of the same
+  // record sitting in a reply above — without holding a reference to any of them.
+  item.dataset.authorization = view.id;
   if (withGoal) {
     line(item, view.goal_statement, "reply");
     line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
@@ -10257,8 +10277,7 @@ function renderAuthorization(list, view, withGoal) {
     line(item, `${view.tool_id} — ${view.tool_description}`, "reply");
   }
   renderCoverage(item, view.coverage);
-  const standing = view.live ? "still stands" : "has lapsed";
-  const status = line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
+  line(item, "", "hint authorization-standing");
   line(item, `id: ${view.id}`, "hint");
   // **The act is offered where its outcome can be read, and nowhere else.** An
   // announcement sits in a reply the next turn replaces, so a withdrawal taken there
@@ -10270,13 +10289,11 @@ function renderAuthorization(list, view, withGoal) {
   // above is that.
   if (!withGoal) {
     const row = document.createElement("p");
-    row.className = "choice";
+    row.className = "choice authorization-act";
     const withdraw = document.createElement("button");
     withdraw.type = "button";
     withdraw.textContent = "Withdraw this";
-    withdraw.addEventListener("click", () =>
-      revokeAuthorization(view, { list, status, controls: row, withdraw })
-    );
+    withdraw.addEventListener("click", () => revokeAuthorization(view, list));
     row.appendChild(withdraw);
     item.appendChild(row);
   } else {
@@ -10284,10 +10301,51 @@ function renderAuthorization(list, view, withGoal) {
       item,
       "Withdraw it whenever you like, under What I am working on — this piece of work, " +
         "then What this authorises.",
-      "hint"
+      "hint authorization-act"
     );
   }
   list.appendChild(item);
+  showAuthorizationState(item, view);
+}
+
+// What one drawn row says about the record, given everything this page knows.
+//
+// **The single place a row's standing is written**, reached from `renderAuthorization`
+// as the row is built and from `restateAuthorization` when the act settles — so a row
+// drawn before, during or after a withdrawal says the same thing about it.
+//
+// **A withdrawn record loses the act rather than keeping it disabled**, because the act
+// is gone rather than momentarily unavailable: the announcement's "withdraw it under
+// What this authorises" is as wrong under a withdrawn record as an enabled button, and
+// both are the same `authorization-act` element.
+function showAuthorizationState(item, view) {
+  const standing = item.querySelector(".authorization-standing");
+  const act = item.querySelector(".authorization-act");
+  if (authorizationWithdrawn.has(view.id)) {
+    standing.textContent = "You withdrew this.";
+    if (act !== null) {
+      act.remove();
+    }
+    return;
+  }
+  const stands = view.live ? "still stands" : "has lapsed";
+  standing.textContent = `It ${stands}; the horizon is ${view.expires_at}.`;
+  const withdraw = item.querySelector(".authorization-act button");
+  if (withdraw !== null) {
+    withdraw.disabled = authorizationInFlight.has(view.id);
+  }
+}
+
+// Say again what every row drawn for this record says.
+//
+// **Found by the record and never held**, which is the whole of round 7's fix: the rows
+// on screen at the end of an act are not the rows that were on screen when it started,
+// and an act that writes into the ones it remembers writes into DOM the page has thrown
+// away.
+function restateAuthorization(view) {
+  document
+    .querySelectorAll(`[data-authorization="${CSS.escape(view.id)}"]`)
+    .forEach((item) => showAuthorizationState(item, view));
 }
 
 // Where the settlement of one act is written, and what it says.
@@ -10469,24 +10527,34 @@ function confirmWithdrawal(view) {
 // settled that, and `statedSettlement` for why the sentence carries the attribution.
 //
 // **It re-reads no listing.** A refresh here is one more request to race the owner's
-// next, and the row it acted on is updated in place instead.
+// next, and what the record now says is written into the page's own state instead.
 //
-// **The control is taken out of reach for the duration of the request.** Two accepted
-// presses race otherwise, and the loser's `NOT_AT_SOURCE` lands after the winner's
-// `SETTLED` and overwrites it — a row reading "You withdrew this" under a sentence
-// saying nothing was withdrawn. It is restored only where pressing again could do
-// something: on `SETTLED` the row is retired outright, and on a transport failure the
-// act may not have reached the hub at all. Adversarial review, round 5, `major`.
+// **It holds no element of the row it was taken on.** The listing can be cleared and
+// rebuilt while the request is out — the owner has only to re-open the same goal — and
+// an act writing into the elements it closed over then reports into detached DOM while
+// the rebuilt row on screen still offers the act. So the id goes into `inFlight` and,
+// where the hub settled it, into `withdrawn`, and every row drawn for the record is
+// restated from those. Adversarial review, round 7, `blocker`.
+//
+// **The control is out of reach for the duration of the request.** Two accepted presses
+// race otherwise, and the loser's `NOT_AT_SOURCE` lands after the winner's `SETTLED`
+// and overwrites it — a row reading "You withdrew this" under a sentence saying nothing
+// was withdrawn. `inFlight` is the guard and the rendering both, so it holds on a row
+// the listing redrew mid-act, which a `disabled` property on one button did not.
 //
 // **The row is retired on `settled` and on nothing else.** A record the store says is
 // now `REVOKED` must not go on reading "still stands" beside an enabled control. Every
 // other member left the record where it was, so the row is left where it was too.
-async function revokeAuthorization(view, row) {
-  if (row.withdraw.disabled || !confirmWithdrawal(view)) {
+async function revokeAuthorization(view, list) {
+  if (
+    authorizationInFlight.has(view.id) ||
+    authorizationWithdrawn.has(view.id) ||
+    !confirmWithdrawal(view)
+  ) {
     return;
   }
   fault(null, "authorizations");
-  const said = actResult(row.list, view);
+  const said = actResult(list, view);
   said.textContent = "";
   said.hidden = true;
   const half = headerHalf();
@@ -10494,7 +10562,8 @@ async function revokeAuthorization(view, row) {
     showBootstrap();
     return;
   }
-  row.withdraw.disabled = true;
+  authorizationInFlight.add(view.id);
+  restateAuthorization(view);
   try {
     const done = await relay(
       half,
@@ -10502,21 +10571,20 @@ async function revokeAuthorization(view, row) {
       { authorization_id: view.id },
       "authorizations"
     );
+    if (done !== null && done.settlement === "settled") {
+      authorizationWithdrawn.add(view.id);
+    }
+    authorizationInFlight.delete(view.id);
+    restateAuthorization(view);
     if (done === null) {
-      row.withdraw.disabled = false;
       return;
     }
     said.textContent = statedSettlement(view, done.settlement);
     said.hidden = false;
-    if (done.settlement === "settled") {
-      row.status.textContent = "You withdrew this.";
-      row.controls.remove();
-      return;
-    }
-    row.withdraw.disabled = false;
   } catch (_) {
+    authorizationInFlight.delete(view.id);
+    restateAuthorization(view);
     fault(GATEWAY_GONE, "authorizations");
-    row.withdraw.disabled = false;
   }
 }
 

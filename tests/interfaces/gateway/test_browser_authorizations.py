@@ -492,6 +492,69 @@ async def test_a_withdrawal_is_read_back_after_the_panel_moves_to_another_goal(
         await expect(drive.page.locator("#authorization-goal")).to_contain_text(OTHER)
 
 
+async def test_the_same_goal_re_opened_mid_withdrawal_still_shows_what_the_act_did(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The row on screen at the end of an act is not the row that started it.
+
+    The owner has only to press *What this authorises* on the **same** goal while a
+    withdrawal is out: the listing is cleared and rebuilt, and an act that writes into
+    the elements it closed over writes into DOM the page has already thrown away. What
+    is left on screen then is worse than silence — the rebuilt row reads *"still
+    stands"* beside an **enabled** control that can issue a second revocation against a
+    record the store has already settled. Adversarial review, round 7, ``blocker``.
+
+    What is asserted is the property that replaced the placement: a row's state is a
+    function of the **record**, so the rebuilt row is drawn out of reach while the act
+    is out and drawn withdrawn once it settles, and the record beside it — untouched by
+    the act — keeps its own control.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+
+    async def route(one: Route) -> None:
+        await held
+        await one.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await _open_authorities(drive)
+        await drive.page.route("**/authorization/revoke", route)
+        asked = _answering(drive, accept=True)
+
+        await drive.page.click("#authorization-list button:has-text('Withdraw this')")
+        await asyncio.wait_for(asked, timeout=10)
+        # A second record of the same goal, so re-opening it is a listing that really
+        # rebuilds the rows rather than one the case cannot tell apart from the first.
+        drive.engine.hold_authorization(
+            opening_act(id="auth-2", goal=GOAL_ID, tool=OTHER_TOOL), goal_statement=STATEMENT
+        )
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+        rows = drive.page.locator("#authorization-list .notification-row")
+        await expect(rows).to_have_count(2)
+
+        acted = rows.filter(has_text="id: auth-1")
+        untouched = rows.filter(has_text="id: auth-2")
+        # Drawn a second time, mid-act: the control must be out of reach on the row the
+        # page has a request out for, and only on that one.
+        await expect(acted.locator("button")).to_be_disabled()
+        await expect(untouched.locator("button")).to_be_enabled()
+        held.set_result(None)
+
+        await expect(acted).to_contain_text("You withdrew this.")
+        assert "still stands" not in await acted.inner_text()
+        await expect(acted.locator("button")).to_have_count(0)
+        await expect(untouched).to_contain_text("still stands")
+        await expect(untouched.locator("button")).to_be_enabled()
+        # And the act reported, naming the record it moved.
+        said = drive.page.locator("#authorizations .authorization-said")
+        await expect(said).to_contain_text("Withdrawn.")
+        await expect(said).to_contain_text(AUTHORIZATION_TOOL.id)
+        assert [name for name, _ in drive.engine.calls].count("revoke_authorization") == 1
+
+
 async def test_a_second_press_while_the_first_is_out_reaches_the_hub_once(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:

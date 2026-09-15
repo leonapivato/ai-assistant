@@ -8200,22 +8200,34 @@ def test_one_withdrawal_act_reports_where_no_listing_can_detach_it() -> None:
     ``actResult`` and ``statedSettlement``.
 
     **And it re-reads nothing.** A refresh here is one more request to race the owner's
-    next, and the row it acted on is updated in place instead — which is also what
-    retires a record the store says is now ``REVOKED``. **The control is out of reach for
-    the duration**, so two presses cannot produce two answers that contradict each other.
+    next, and what the record now says goes into the page's own state instead — which is
+    also what retires a record the store says is now ``REVOKED``. **The control is out of
+    reach for the duration**, so two presses cannot produce two answers that contradict
+    each other.
+
+    **And it holds no element of the row it was taken on**, which is round 7's
+    ``blocker``: re-open the same goal mid-act and the listing is rebuilt, so an act
+    writing into the elements it closed over reports into detached DOM while the row on
+    screen still reads *"still stands"* beside an enabled control. The id goes into the
+    two sets and every row drawn for the record is restated from them.
     """
     script = _code("app.js")
     act = _functions(script)["revokeAuthorization"]
     result = _functions(script)["actResult"]
 
     assert "confirmWithdrawal(view)" in act
-    assert "actResult(row.list, view)" in act
+    assert "actResult(list, view)" in act
     assert "statedSettlement(view, done.settlement)" in act
-    assert "row.withdraw.disabled = true" in act
+    assert "authorizationInFlight.add(view.id)" in act
     assert '"/authorization/revoke",' in act
     assert 'done.settlement === "settled"' in act
-    assert "row.controls.remove()" in act
+    assert "authorizationWithdrawn.add(view.id)" in act
+    assert "restateAuthorization(view)" in act
     assert "listAuthorizations" not in act, "an act does not re-read a listing"
+    # Nothing the listing can detach is reachable from here: the act names the record
+    # and the region, and no element of the row it was pressed on.
+    for held in ("row.status", "row.controls", "row.withdraw"):
+        assert held not in act, f"the act holds {held}, which a relist detaches"
     # One entry per record, in a region the listing does not own.
     assert "list.parentElement.insertBefore(region, list)" in result
     assert "node.dataset.record = key" in result
@@ -8231,11 +8243,22 @@ def test_the_act_is_offered_in_the_panel_and_named_in_a_reply() -> None:
     what keeps the two surfaces stating the same act in the same place. Adversarial
     review, round 6, ``blocker``.
     """
-    row = _functions(_code("app.js"))["renderAuthorization"]
+    script = _code("app.js")
+    row = _functions(script)["renderAuthorization"]
 
     assert "if (!withGoal) {" in row
     assert "Withdraw this" in row
     assert "What this authorises" in row
+    # Every row names the record it is about and takes its standing from the record,
+    # so a row drawn before, during or after an act says the same thing about it.
+    assert "item.dataset.authorization = view.id" in row
+    assert "showAuthorizationState(item, view)" in row
+
+    state = _functions(script)["showAuthorizationState"]
+    assert "authorizationWithdrawn.has(view.id)" in state
+    assert "authorizationInFlight.has(view.id)" in state
+    assert '"You withdrew this."' in state
+    assert "restateAuthorization" in script
 
 
 def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
