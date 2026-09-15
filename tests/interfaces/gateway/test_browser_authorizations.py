@@ -18,6 +18,7 @@ than left to two readings.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -70,6 +71,11 @@ OUTCOME: Final = "Book the usual campsite for the last weekend of August."
 #: A second goal, so the panel can be opened twice in quick succession.
 OTHER_ID: Final = "goal-wwvv-3320"
 OTHER: Final = "Find somewhere to leave the dog."
+
+#: A second declaration, so two rows of one goal can be withdrawn at once.
+OTHER_TOOL: Final = ToolDefinition.model_validate(
+    AUTHORIZATION_TOOL.model_dump() | {"id": "hotels"}
+)
 STATEMENT: Final = OUTCOME
 ENGAGED: Final = datetime(2026, 1, 1, 11, tzinfo=UTC)
 
@@ -483,7 +489,7 @@ async def test_a_withdrawal_is_read_back_after_the_panel_moves_to_another_goal(
         await expect(said).to_contain_text("Withdrawn.")
         await expect(said).to_contain_text(STATEMENT)
         await expect(said).to_contain_text(AUTHORIZATION_TOOL.id)
-        await expect(drive.page.locator("#authorization-list")).to_contain_text(OTHER)
+        await expect(drive.page.locator("#authorization-goal")).to_contain_text(OTHER)
 
 
 async def test_a_second_press_while_the_first_is_out_reaches_the_hub_once(
@@ -521,69 +527,212 @@ async def test_a_second_press_while_the_first_is_out_reaches_the_hub_once(
         assert [name for name, _ in drive.engine.calls].count("revoke_authorization") == 1
 
 
-async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
+async def test_two_rows_withdrawn_at_once_each_keep_their_own_answer(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """ADR-0254 §11's handle is put in front of the owner *at the act*, so the act taken
-    there has to report there.
+    """Every act reports in an entry of its own, keyed by the record it is about.
 
-    The panel's own slot is inside a section an owner who has never opened it cannot
-    see — and before this fix, pressing an announcement's control mutated the store and
-    wrote the settlement into that invisible node: the act working and the owner told
-    nothing, which is the opposite of §11's reason for carrying the handle at all.
-    Adversarial review, round 1, ``blocker``.
-
-    **The panel is never opened in this case**, deliberately: that is the state the
-    defect lived in.
+    One shared node is overwritten when two rows are withdrawn at once, and which of them
+    answered what is lost — particularly the difference between a withdrawal that moved a
+    record and one that found nothing to move. Driven with the **second** answer released
+    first, so a last-writer-wins node would show only it. Adversarial review, round 6,
+    ``major``.
     """
-    rail = ToolDefinition.model_validate(AUTHORIZATION_TOOL.model_dump() | {"id": "rail"})
+    loop = asyncio.get_running_loop()
+    gates: list[asyncio.Future[None]] = [loop.create_future(), loop.create_future()]
+    seen = 0
+
+    async def route(one: Route) -> None:
+        nonlocal seen
+        gate = gates[min(seen, 1)]
+        seen += 1
+        await gate
+        await one.fallback()
+
     async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        # A second record of the same goal, so both rows sit in one listing.
         drive.engine.hold_authorization(
-            opening_act(id="auth-train", goal=GOAL_ID, tool=rail), goal_statement=STATEMENT
+            opening_act(id="auth-2", goal=GOAL_ID, tool=OTHER_TOOL), goal_statement=STATEMENT
         )
-        drive.engine.authorizations = (_view("auth-train", rail, money_bound("50")),)
-        await drive.page.fill("#utterance", "up to fifty for the train")
-        await drive.page.click("#ask-button")
-        await drive.page.wait_for_selector("#answer:not([hidden])")
-        asked = _answering(drive, accept=True)
+        await _open_authorities(drive)
+        await drive.page.route("**/authorization/revoke", route)
+        controls = drive.page.locator("#authorization-list button:has-text('Withdraw this')")
 
-        await drive.page.click("#answer-body button:has-text('Withdraw this')")
-        await asyncio.wait_for(asked, timeout=10)
+        # One handler for both ceremonies: a second `page.on("dialog")` would try to
+        # answer a dialog the first had already answered.
+        answered = 0
 
-        beside = drive.page.locator("#answer-body .authorization-said")
-        await expect(beside).to_be_visible()
-        await expect(beside).to_contain_text("Withdrawn.")
-        # The announced row is retired in place too, on the same ground.
-        await expect(drive.page.locator("#answer-body")).to_contain_text("You withdrew this.")
-        await expect(
-            drive.page.locator("#answer-body").get_by_role("button", name="Withdraw this")
-        ).to_have_count(0)
-        await expect(drive.page.locator("#authorizations")).to_be_hidden()
-        assert [name for name, _ in drive.engine.calls if "authoriz" in name] == [
-            "revoke_authorization"
-        ]
+        async def accept(dialog: Dialog) -> None:
+            nonlocal answered
+            await dialog.accept()
+            answered += 1
+
+        running: list[asyncio.Task[None]] = []
+        drive.page.on("dialog", lambda one: running.append(loop.create_task(accept(one))))
+
+        await controls.nth(0).click()
+        await controls.nth(1).click()
+        while answered < 2:  # noqa: ASYNC110 — the condition is the page's, not a duration
+            await asyncio.sleep(0.05)
+        # The **second** answer is released first, so a last-writer-wins node would keep
+        # only it.
+        gates[1].set_result(None)
+        gates[0].set_result(None)
+
+        entries = drive.page.locator("#authorizations .authorization-said")
+        await expect(entries).to_have_count(2)
+        await expect(entries.nth(0)).to_contain_text("Withdrawn.")
+        await expect(entries.nth(1)).to_contain_text("Withdrawn.")
+        shown = await entries.all_inner_texts()
+        assert sum(AUTHORIZATION_TOOL.id in one for one in shown) == 1, shown
+        assert sum(OTHER_TOOL.id in one for one in shown) == 1, shown
 
 
-async def test_a_withdrawal_from_an_announcement_that_moves_nothing_reports_beside_it(
+async def test_a_malformed_bound_is_reported_rather_than_rendered(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """The same, on the refusal: a settlement that moved nothing is still a settlement
-    the owner is owed, and it is owed where they took the act.
+    """A limit the record does not carry is never presented as one (ADR-0254 §2).
+
+    Driven through the **payload** rather than over the source, which is what round 6
+    asked for: the listing's answer is rewritten on the wire to carry a money bound whose
+    amount, currency and currency key are all absent — a shape ``ValueBound`` refuses and
+    no conforming hub sends — and what the page must not do is render ``up to null``.
+    """
+    body = {
+        "authorizations": [
+            {
+                "id": "auth-1",
+                "goal_statement": STATEMENT,
+                "tool_id": AUTHORIZATION_TOOL.id,
+                "tool_description": AUTHORIZATION_TOOL.description,
+                "coverage": [
+                    {
+                        "argument": "amount",
+                        "fixed": None,
+                        "bound": {
+                            "kind": "money",
+                            "currency": None,
+                            "currency_argument": None,
+                            "maximum": None,
+                            "minimum": None,
+                            "starts_at": None,
+                            "ends_at": None,
+                            "timezone": None,
+                            "terms": None,
+                        },
+                        "span": "up to fifty pounds",
+                    }
+                ],
+                "expires_at": "2026-09-13T21:00:00+00:00",
+                "live": True,
+            }
+        ]
+    }
+
+    async def route(one: Route) -> None:
+        await one.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.route("**/authorizations", route)
+
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+        await drive.page.wait_for_selector("#authorizations:not([hidden])")
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("no words for")
+        shown = await panel.inner_text()
+        assert "up to null" not in shown
+        assert "undefined" not in shown
+
+
+async def test_a_bound_carrying_another_kinds_field_is_reported(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A mixed shape is refused, not rendered with the extra limit dropped.
+
+    ``boundSentence`` reads only the fields of the kind it branches on, so a money bound
+    carrying a ``terms`` set would show the ceiling and say nothing about the set — a
+    limit the record carries and the owner is not shown. ``ValueBound`` refuses the mixed
+    shape outright. Adversarial review, round 6, ``major``.
+    """
+    body = {
+        "authorizations": [
+            {
+                "id": "auth-1",
+                "goal_statement": STATEMENT,
+                "tool_id": AUTHORIZATION_TOOL.id,
+                "tool_description": AUTHORIZATION_TOOL.description,
+                "coverage": [
+                    {
+                        "argument": "amount",
+                        "fixed": None,
+                        "bound": {
+                            "kind": "money",
+                            "currency": "GBP",
+                            "currency_argument": "currency",
+                            "maximum": "50",
+                            "minimum": None,
+                            "starts_at": None,
+                            "ends_at": None,
+                            "timezone": None,
+                            "terms": ["refundable"],
+                        },
+                        "span": "up to fifty pounds",
+                    }
+                ],
+                "expires_at": "2026-09-13T21:00:00+00:00",
+                "live": True,
+            }
+        ]
+    }
+
+    async def route(one: Route) -> None:
+        await one.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.route("**/authorizations", route)
+
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+        await drive.page.wait_for_selector("#authorizations:not([hidden])")
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("no words for")
+        assert "up to 50 GBP" not in await panel.inner_text()
+
+
+async def test_an_announcement_names_the_handle_and_where_the_act_is_taken(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0254 §11 puts the **handle** in front of the owner at the act, and that is
+    what an announcement carries.
+
+    **It offers no control, and that is the decision rather than an omission.** An
+    announcement sits in a reply the next turn replaces, so a withdrawal taken there
+    reports into DOM the page has already thrown away — the fifth way a settlement could
+    be lost, and the one round 6 found. This is the command line's own shape: its
+    announcement prints ``assistant revoke-authorization <id>`` rather than performing
+    the withdrawal, so the two surfaces state the same act in the same place.
     """
     rail = ToolDefinition.model_validate(AUTHORIZATION_TOOL.model_dump() | {"id": "rail"})
     async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
-        drive.engine.authorizations = (_view("auth-nobody", rail, money_bound("50")),)
+        drive.engine.authorizations = (_view("auth-train", rail, money_bound("50")),)
+
         await drive.page.fill("#utterance", "up to fifty for the train")
         await drive.page.click("#ask-button")
         await drive.page.wait_for_selector("#answer:not([hidden])")
-        asked = _answering(drive, accept=True)
 
-        await drive.page.click("#answer-body button:has-text('Withdraw this')")
-        await asyncio.wait_for(asked, timeout=10)
-
-        beside = drive.page.locator("#answer-body .authorization-said")
-        await expect(beside).to_be_visible()
-        await expect(beside).to_contain_text("no record of that id")
+        body = drive.page.locator("#answer-body")
+        await expect(body).to_contain_text("I have taken that as standing permission")
+        await expect(body).to_contain_text("id: auth-train")
+        await expect(body).to_contain_text("What this authorises")
+        await expect(body.get_by_role("button", name="Withdraw this")).to_have_count(0)
 
 
 # --- §11 at the question -------------------------------------------------------

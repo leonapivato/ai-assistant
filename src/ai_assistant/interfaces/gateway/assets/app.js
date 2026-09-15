@@ -10067,20 +10067,47 @@ function readBound(bound) {
       isText(bound.maximum) &&
       isText(bound.currency) &&
       isText(bound.currency_argument) &&
-      (bound.minimum === null || isText(bound.minimum))
+      (bound.minimum === null || isText(bound.minimum)) &&
+      absent(bound, ["starts_at", "ends_at", "timezone", "terms"])
     );
   }
   if (bound.kind === "period") {
     return (
       isText(bound.starts_at) &&
       isText(bound.ends_at) &&
-      (bound.timezone === null || isText(bound.timezone))
+      (bound.timezone === null || isText(bound.timezone)) &&
+      absent(bound, ["maximum", "minimum", "currency", "currency_argument", "terms"])
     );
   }
   if (bound.kind === "terms") {
-    return Array.isArray(bound.terms) && bound.terms.length > 0 && bound.terms.every(isText);
+    return (
+      Array.isArray(bound.terms) &&
+      bound.terms.length > 0 &&
+      bound.terms.every(isText) &&
+      absent(bound, [
+        "maximum",
+        "minimum",
+        "currency",
+        "currency_argument",
+        "starts_at",
+        "ends_at",
+        "timezone",
+      ])
+    );
   }
   return true;
+}
+
+// Whether every one of ``names`` is absent from ``bound``.
+//
+// **A field belonging to another kind is a bound this page will not render**, because
+// `boundSentence` reads only the fields of the kind it branches on and would silently
+// drop the rest: a money bound carrying a `terms` set would show the ceiling and say
+// nothing about the set, which is a limit the record carries and the owner is not shown.
+// `ValueBound` refuses these mixed shapes outright (ADR-0254 §2), so no conforming hub
+// sends one. Adversarial review, round 6, `major`.
+function absent(bound, names) {
+  return names.every((name) => bound[name] === null || bound[name] === undefined);
 }
 
 // One coverage member, as it crosses (ADR-0254 §11).
@@ -10224,59 +10251,80 @@ function renderAuthorization(list, view, withGoal) {
   const standing = view.live ? "still stands" : "has lapsed";
   const status = line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
   line(item, `id: ${view.id}`, "hint");
-  const row = document.createElement("p");
-  row.className = "choice";
-  const withdraw = document.createElement("button");
-  withdraw.type = "button";
-  withdraw.textContent = "Withdraw this";
-  withdraw.addEventListener("click", () =>
-    revokeAuthorization(view, { item, list, status, controls: row, withdraw })
-  );
-  row.appendChild(withdraw);
-  item.appendChild(row);
+  // **The act is offered where its outcome can be read, and nowhere else.** An
+  // announcement sits in a reply the next turn replaces, so a withdrawal taken there
+  // would report into DOM the page has already thrown away — the fifth way a settlement
+  // could be lost (r6). So the announcement names the handle and says where the act is
+  // taken, which is exactly what the command line's announcement does: it prints
+  // `assistant revoke-authorization <id>` rather than performing the withdrawal.
+  // ADR-0254 §11 asks for the **handle** in front of the owner at the act, and the id
+  // above is that.
+  if (!withGoal) {
+    const row = document.createElement("p");
+    row.className = "choice";
+    const withdraw = document.createElement("button");
+    withdraw.type = "button";
+    withdraw.textContent = "Withdraw this";
+    withdraw.addEventListener("click", () =>
+      revokeAuthorization(view, { list, status, controls: row, withdraw })
+    );
+    row.appendChild(withdraw);
+    item.appendChild(row);
+  } else {
+    line(
+      item,
+      "Withdraw it whenever you like, under What I am working on — this piece of work, " +
+        "then What this authorises.",
+      "hint"
+    );
+  }
   list.appendChild(item);
 }
 
 // Where the settlement of one act is written, and what it says.
 //
-// **Outside anything a listing replaces, and naming the record it is about.** Four
-// rounds converged here and each ruled out one placement. A panel-wide slot with an
-// unattributed sentence says the act was done to whatever listing the panel holds by the
-// time the answer lands (round 3). Dropping the sentence when the panel has moved on is
-// silence about an act that happened (round 4). A node **inside** the row is detached
-// with it the moment the listing is cleared, and the owner reads nothing at all (round
-// 5). What is true under every order is a node the listing does not own, carrying a
-// sentence that names the goal and the declaration — so it cannot be detached, and it
-// cannot be read as being about work it does not name.
+// **Outside anything a surface replaces, and one entry per record.** Five rounds each
+// ruled out a placement. A panel-wide slot with an unattributed sentence is read as
+// being about whatever listing the panel holds when the answer lands (r3). Dropping the
+// sentence because the panel moved on is silence about an act that happened (r4). A node
+// **inside** the row is detached with the row the moment the listing is cleared (r5). And
+// **one** node shared by the panel is overwritten when two rows are withdrawn at once,
+// losing which of them answered what (r6).
 //
-// The panel's node is its own element beside the list, built once and reused. An
-// announcement's row is in a reply that nothing clears, so its node sits beside the row
-// and is equally safe there.
-function actResult(item, list) {
-  if (list.id !== "authorization-list") {
-    let beside = item.querySelector(".authorization-said");
-    if (beside === null) {
-      beside = document.createElement("p");
-      beside.className = "notice authorization-said";
-      item.appendChild(beside);
-    }
-    return beside;
+// What is true under all of them: an entry of its own, keyed by the record it is about,
+// in a region the listing does not own — so it cannot be detached, cannot be
+// mis-attributed, and cannot be overwritten by another record's act. A second press on
+// the same record replaces **its own** entry rather than stacking.
+//
+// The region is a sibling of the listing inside the panel, which is where an owner
+// taking an act in the panel is looking. **Nothing outside the panel takes this act**:
+// an announcement names the handle and says where the act is taken, exactly as the
+// command line's announcement prints the command rather than performing it.
+function actResult(list, view) {
+  let region = list.parentElement.querySelector(".authorization-results");
+  if (region === null) {
+    region = document.createElement("div");
+    region.className = "authorization-results";
+    list.parentElement.insertBefore(region, list);
   }
-  let node = list.parentElement.querySelector(".authorization-said");
+  const key = `said-${view.id}`;
+  let node = region.querySelector(`[data-record="${CSS.escape(key)}"]`);
   if (node === null) {
     node = document.createElement("p");
     node.className = "notice authorization-said";
-    list.parentElement.insertBefore(node, list);
+    node.dataset.record = key;
+    region.appendChild(node);
   }
   return node;
 }
 
 // One settlement, as a sentence that names the record it is about.
 //
-// **The attribution is what makes a node outside the list honest**: the listing under it
-// may by then be another goal's, and a bare "Withdrawn." there would read as being about
-// those rows. Naming the goal and the declaration says which record moved, whatever is
-// on screen beneath it.
+// **The attribution is what makes an entry outside the list honest**: the listing under
+// it may by then be another goal's, and a bare "Withdrawn." there would read as being
+// about those rows. Naming the goal and the declaration says which record moved,
+// whatever is on screen beneath it — and it is what tells two entries apart when two
+// records are withdrawn at once.
 function statedSettlement(view, settlement) {
   const said = goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, settlement);
   return `${view.goal_statement} — ${view.tool_id}: ${said}`;
@@ -10342,7 +10390,9 @@ async function listAuthorizations(goal) {
     const list = el("authorization-list");
     clearNode(list);
     if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {
-      line(list, goal.outcome, "reply");
+      const unreadable = el("authorization-goal");
+      unreadable.textContent = goal.outcome;
+      unreadable.hidden = false;
       line(list, GOAL_MEMBER_UNREADABLE, "notice");
       show("authorizations", true);
       return;
@@ -10354,11 +10404,14 @@ async function listAuthorizations(goal) {
     // panel labelling this goal's authorities with the goal's previous outcome. The
     // cached summary is used only where the listing came back empty and there is no
     // returned statement to use. Adversarial review, round 1, `blocker`.
-    line(
-      list,
-      body.authorizations.length === 0 ? goal.outcome : body.authorizations[0].goal_statement,
-      "reply"
-    );
+    //
+    // **It is written outside the list**, so that it sits above the settlements of acts
+    // taken on it rather than below them, and so that a re-read replaces it rather than
+    // appending a second one.
+    const named = el("authorization-goal");
+    named.textContent =
+      body.authorizations.length === 0 ? goal.outcome : body.authorizations[0].goal_statement;
+    named.hidden = false;
     if (body.authorizations.length === 0) {
       line(
         list,
@@ -10424,7 +10477,7 @@ async function revokeAuthorization(view, row) {
     return;
   }
   fault(null, "authorizations");
-  const said = actResult(row.item, row.list);
+  const said = actResult(row.list, view);
   said.textContent = "";
   said.hidden = true;
   const half = headerHalf();
