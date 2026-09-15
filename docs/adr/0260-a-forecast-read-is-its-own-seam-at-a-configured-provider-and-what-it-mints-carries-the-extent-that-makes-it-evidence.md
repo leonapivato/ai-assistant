@@ -368,9 +368,14 @@ which §14 defers with what fires it.
 > **Normative.** A record's `content` is a **transcription** of the fields the provider's
 > documented format names for that day, in a fixed order, each rendered **as the
 > provider's own response spelled it** — the octets of the value the response carried, and
-> never a re-rendering of a parsed number. The exact field order and line form are fixed
-> by the implementing lane and pinned by a test, so that **two conforming implementations
-> over one response mint byte-identical records**. This is ADR-0231 §10's
+> never a re-rendering of a parsed number. **The field selection, their order, the
+> separators and the omission rule are fixed by L1 and pinned by a test, and that pinned
+> form is this kind's canonical one**: a later implementation conforms by matching it, and
+> conformance is decided against the pinned form rather than against another
+> implementation's output. What this clause fixes is that the form is *fixed somewhere a
+> test asserts* and that nothing between the response and the record re-renders a value —
+> **not** a canonical field list this ADR would have to invent for a provider it names in
+> no normative clause. This is ADR-0231 §10's
 > transcription-not-rendering rule and ADR-0230 §5's decoding-not-rendering rule at a
 > third producer, and neither is relaxed: **no word of this system's is added.**
 
@@ -758,7 +763,8 @@ lies, never that the report is accurate.
 > `UNAVAILABLE`. **It is non-injective and that is the point** (ADR-0242 §8): seven
 > dispositions the user has no act for fold onto the one member that names none. **A
 > contact and an `UNAVAILABLE` ride together where both hold** — a `RESPONSE_TOO_LARGE`
-> or an `UNATTESTED` reached the provider and yielded nothing usable — which is ADR-0264
+> an `UNATTESTED` or a `PROVIDER_REFUSED` reached the provider and yielded nothing usable —
+> which is ADR-0264
 > §8's both-statements rule and not an exception to it.
 
 > **Normative.** A surface renders, **beside the reply and never in place of it**, one
@@ -785,21 +791,30 @@ lies, never that the report is accurate.
 > **Normative.** **A forecast read establishes an outbound contact where its call completed
 > and recorded no `ForecastDisposition`** — which is a read that reached the provider and
 > was answered, records or none — **or** where the disposition it recorded is
-> `RESPONSE_TOO_LARGE` or `UNATTESTED`, each of which this system reaches only from octets
-> the provider's channel had already returned. A call whose disposition is
-> `NOT_CONFIGURED`, `NO_BUDGET`, `BINDING_FAILED`, `RULING_CONFIRM`, `RULING_DENY`,
-> `RULING_UNAVAILABLE` or `SPEND_REFUSED` establishes **no** contact — every one of those
-> is a stage before the send. A call whose disposition is `TRANSPORT_FAILED`,
-> `DEADLINE_EXPIRED` or **`PROVIDER_REFUSED`** establishes **nothing either way** and
-> contributes `INDETERMINATE`: `PROVIDER_REFUSED` is recorded for **a response the provider
-> gave and this system refused** — a rate limit, a blocked origin, a body its documented
-> format does not admit — and the disposition carries no value saying which of those it was.
-> **No credential-change producer is recorded here.** ADR-0148 §6's account-changed limbs
-> *"discarded the credential and wrote nothing to any channel — none was opened"*, and §12's
-> provider is keyless and reads no credential at all, so this partition covers exactly what
-> a configured forecast provider can produce and no more; §14 defers that producer with what
-> fires it. A credentialed provider does not change this member's meaning — it adds a second
-> way to reach it, which is that lane's to record.
+> `RESPONSE_TOO_LARGE`, `UNATTESTED` or **`PROVIDER_REFUSED`**, each of which this system
+> reaches only from octets the provider's channel had already returned. ADR-0264 §2 decides
+> all three in one sentence — *"A contact is established the moment a response arrived, and
+> nothing that happens to the enclosing servicing afterwards unmakes it"* — and every
+> producer this ADR admits for `PROVIDER_REFUSED` is a **response the provider gave and this
+> system refused**: a rate limit, a blocked origin, a body its documented format does not
+> admit. The disposition carries no value saying which, and it does not need to: the contact
+> question is answered by the arrival, not by the cause.
+>
+> **No credential-change producer is recorded here, and that is why this member is
+> `REACHED` and not `INDETERMINATE`.** ADR-0148 §6's account-changed limbs *"discarded the
+> credential and wrote nothing to any channel — none was opened"*, so that producer alone
+> could have put a pre-send path under this member and forced the least-claiming direction;
+> §12's provider is keyless and reads no credential at all, so no such path exists here.
+> §14 defers it, and **the lane that adds a credentialed provider owes this partition its
+> round**: a pre-send producer under this member would make `REACHED` wrong, and that lane
+> either gives the path a disposition of its own or re-decides this clause.
+>
+> A call whose disposition is `NOT_CONFIGURED`, `NO_BUDGET`, `BINDING_FAILED`,
+> `RULING_CONFIRM`, `RULING_DENY`, `RULING_UNAVAILABLE` or `SPEND_REFUSED` establishes
+> **no** contact — every one of those is a stage before the send. A call whose disposition
+> is `TRANSPORT_FAILED` or `DEADLINE_EXPIRED` establishes **nothing either way** and
+> contributes `INDETERMINATE`, the least-claiming direction, because neither says whether
+> octets arrived.
 > **The partition is total over the twelve members and the absence of one is the
 > thirteenth case**, and the least-claiming direction is taken deliberately, which is
 > ADR-0264 §2's own reading of its own third group at a second performing site. It is
@@ -933,9 +948,15 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > **It lands before L3 and changes no live behaviour on its own**, because nothing yet
 > asks for a forecast read.
 
-> **Normative.** **L3 — the servicing, in `orchestration/` alone**: §7's servicing site and
-> its two audit fields, §8's `ForecastDisposition` and its classifier entries, §9's
-> evidence composition, and §10's fold and contact carrier.
+> **Normative.** **L3 — the servicing, in `orchestration/` plus the composition root**:
+> §7's servicing site and its two audit fields, §8's `ForecastDisposition` and its
+> classifier entries, §9's evidence composition, and §10's fold and contact carrier. **It
+> also takes `app/composition.py`'s injection of the forecaster into that site**, which is
+> the one file outside `orchestration/` this lane touches and is L2's own allowance for
+> the same reason: golden rule 1 makes the engine receive implementations by injection and
+> `app/` is the only place a concrete is wired, so the call site and its wiring cannot land
+> in different lanes. **L1 builds the forecaster and registers its `close`** (§4); L3 hands
+> it to the servicing it creates.
 
 > **Normative.** **Every lane corrects, in its own change, every docstring and comment
 > that cites a rule it moved** — `ReadKind`'s count sentence, `ReadAsk`'s arm docstrings,
@@ -1001,12 +1022,15 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   which §4's model already enforces and which a vendor string stamped consistently would
 >   satisfy. These are the §5 facts that are the producer's rather than
 >   `ForecastOutcome`'s, in `SearchOutcome`'s own division of labour.
-> - **(c) The cancellation that stays an exception, and the deadline's own shape.** Each
->   acting member — `request` and `read` — cancelled from outside while suspended re-raises
->   `CancelledError` and is asserted separately, so that neither can regress while the
->   other holds; neither yields a `ForecastOutcome`, neither yields a `ForecastRefusal`,
->   and in particular neither yields `DEADLINE_EXPIRED`, which is `read`'s **own** expiry
->   and never an outer one (ADR-0241 §4). And `read`'s `timeout` is **required with no
+> - **(c) The cancellation that stays an exception, and the deadline's own shape.**
+>   **`read`**, cancelled from outside while suspended, re-raises `CancelledError` over the
+>   **production** forecaster: it yields no `ForecastOutcome`, no `ForecastRefusal`, and in
+>   particular no `DEADLINE_EXPIRED`, which is `read`'s **own** expiry and never an outer
+>   one (ADR-0241 §4). **`request` is asserted over the canonical fake**, and only where an
+>   implementation suspends in it: §4 lets a `request` answer from held configuration with
+>   no await at all, so a production arm here would either hang or force a needless
+>   suspension point into production to be testable — `WebSearcher`'s own shape, which
+>   tests cancellation on the suspendable member and models the rest on its fake. And `read`'s `timeout` is **required with no
 >   default**, so omitting it is a `TypeError`; a value that is not a `timedelta`, a zero
 >   and a negative each raise `ValueError` **before** the call is revalidated, before any
 >   credential is read and before any channel is opened, asserted over those three
@@ -1056,15 +1080,15 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > - **(h) The statement and the contact.** A read the provider answered carries
 >   `forecast_not_read` `None` and an outbound statement naming `FORECAST_PROVIDER`; a read
 >   refused before the send carries the folded member, its fixed statement and **no**
->   destination class; a transport failure and a `PROVIDER_REFUSED` each carry
+>   destination class; a transport failure and a deadline expiry each carry
 >   `INDETERMINATE` with `destinations` empty, asserted separately so that neither can
 >   regress to `REACHED` or `NOT_REACHED` while the other holds; a **revising** turn whose
 >   two forecast servicings recorded `RULING_DENY` and `TRANSPORT_FAILED` reports
 >   `DECLINED` in **both** encounter orders, and one whose denied read is followed by an
 >   answered read still reports `DECLINED` and its statement rather than `None`; and
->   **`RESPONSE_TOO_LARGE` and `UNATTESTED` each carry `UNAVAILABLE` with
->   `FORECAST_PROVIDER` `REACHED`**, asserted separately too, because §10 classes both as
->   reached from octets this system took off the channel and either folded to
+>   **`RESPONSE_TOO_LARGE`, `UNATTESTED` and `PROVIDER_REFUSED` each carry `UNAVAILABLE`
+>   with `FORECAST_PROVIDER` `REACHED`**, asserted separately too, because §10 classes all
+>   three as reached from octets this system took off the channel and any of them folded to
 >   `INDETERMINATE` would deny a contact the trail recorded.
 > - **(k) The classifier, total over both vocabularies.** Every member of `ForecastRefusal`
 >   and every member of `ForecastDisposition` is asserted against the `ReadOutcomeKind`
@@ -1134,6 +1158,19 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 
 **The six records are declared here, each with ADR-0070 §1's test applied to the earlier
 ADR's text — what ADR-0082 §1 asks of an author.**
+
+> **Normative.** **The six header edits are written in this PR's own ratification commit
+> and not before**, in ADR-0165 §9's own form and for its own reason: a qualified `Status`
+> line plus a dated header note, with no ratified text rewritten, waiting because *"writing
+> them while this ADR is `Proposed` is ADR-0019's state claim"*. A reader of ADR-0247 today
+> would otherwise be told, by ADR-0247's own header, that a decision which has not landed
+> has superseded a clause of it. **They are not deferred to an implementing lane either** —
+> a record is decision bookkeeping and travels with the decision.
+>
+> **That commit therefore carries more than one line, and is not ADR-0165 §2's exempt
+> shape.** It costs its own round of both required lenses over the flipped tree, which this
+> section states so that the lane does not read the refusal as a fault: ADR-0165's own
+> ratification commit did exactly this, and ADR-0026 §6 and ADR-0027 §7 set the form.
 
 > **Normative.** **ADR-0155 §3's second clause, ADR-0233 §7 and ADR-0233 §9's four
 > conditions are untouched and are not reachable from here.** A span carrying covered
