@@ -152,6 +152,8 @@ if TYPE_CHECKING:
         DestinationTrust,
         DestinationTrustRecord,
         DurableIdentifier,
+        EffectKey,
+        EffectOutcome,
         EgressBinding,
         Embedding,
         EncodableText,
@@ -5634,6 +5636,122 @@ class PlanStore(Protocol):
         """
         ...
 
+    async def claim_effect(
+        self, *, execution_id: str, step_id: str, effect_key: EffectKey
+    ) -> EffectOutcome:
+        """Claim this goal's effect for one intended action, or say who holds it.
+
+        ADR-0259 §2's one indivisible write, taken by the stage that holds the
+        authorised :class:`~ai_assistant.core.types.ToolCall` immediately **before**
+        the ``PENDING → RUNNING`` (or ``AWAITING_APPROVAL → RUNNING``) commit. ``async``
+        because it is I/O-bound like every other member here.
+
+        **The store resolves both halves of the row's scope itself** — the goal from
+        the execution's plan's ``goal_id``, and the **intended action** from
+        ``PlanStep.intended_action`` of that plan's step (ADR-0265 §4) — so no entry
+        point of ``orchestration`` gains a ``goal_id`` argument for it and none gains
+        an intended-action one. It also reads ``targets_revision`` from the claiming
+        execution's plan: no caller threads it, nothing compares it, and it is
+        restamped with the row on every re-point.
+
+        **The row's identity is ADR-0265 §6's triple** — ``(goal_id,
+        intended_action_id, effect_key)`` — and the store keeps **at most one row per**
+        ``(goal_id, intended_action_id)``, not as a competing constraint but as an
+        invariant of the write rules below: the only writes are the first claim and a
+        re-point onto a dead holder, and a re-point **re-keys** the row rather than
+        leaving the dead key's row beside it. So the lookup is **by the pair**, with
+        the key compared *within* the row — "a completed effect claimed under **this**
+        intended action whose key is **not** this call's key" is a state a
+        triple-keyed lookup could not ask about, finding no row at all.
+
+        **The read, the comparison and the write are one indivisible step**, on
+        ADR-0014 §5's compare-and-swap discipline and for ADR-0255 §3's reason: two
+        turns of one conversation are not serialized, so there is no separate read on
+        which a decision is taken before the write. It is a **command, not a
+        snapshot**.
+
+        **What each answer means**, decided by the stored
+        :class:`~ai_assistant.core.types.StepStatus` of the step the row names, by
+        whether that step is this one, and by whether the row's key is this call's
+        key, in this order and over nothing else:
+
+        1. :attr:`~ai_assistant.core.types.EffectClaim.CLAIMED`, **writing the row**
+           with this call's key, where **no row exists** for the pair.
+        2. Otherwise, read the stored status of the step the row names:
+
+           * ``SUCCEEDED`` → ``COMPLETED`` where the row's key **equals** this call's
+             key, naming that holder; ``COMPLETED_OTHERWISE`` where it does not.
+             **Writing nothing in either.**
+           * ``RUNNING`` or ``INDETERMINATE`` → ``UNCERTAIN``, writing nothing,
+             **whether or not the keys are equal**: what is uncertain is whether this
+             intended action was performed at all.
+           * ``SKIPPED`` → ``CLAIMED``, re-pointing the row at this step **and
+             re-keying it**.
+           * ``FAILED`` on a step of a plan that a stored plan **supersedes** →
+             ``CLAIMED``, re-pointing and re-keying, **whichever step asks**. The
+             store decides the supersession itself, from the holder's execution's
+             plan and the plans it holds, inside the same indivisible step as the
+             write; ``orchestration`` neither computes it nor asks for it, and **no
+             member is added** for it.
+           * ``FAILED``, ``PENDING`` or ``AWAITING_APPROVAL`` → ``CLAIMED``, writing
+             nothing, where the row names **this same** ``(execution_id, step_id)``
+             **and** its key equals this call's key; ``HELD``, writing nothing, in
+             every other case.
+
+        **The second limb is total**: each of the seven statuses, crossed with whether
+        the row's key equals this call's key and with whether the row names this step,
+        has exactly one answer, and no input is left undecided. **No further answer
+        exists.**
+
+        **The same-step exemption is not widened to the intended action.** It would be
+        the natural reading once steps have a stable identity, and it is refused:
+        ``StepExecutor.execute`` commits ``RUNNING → FAILED`` and may then claim again,
+        so a ``FAILED`` holder's next act may be a second dispatch of the same call
+        inside the same turn, and a later plan's step that took the key on the ground
+        that it shares the intended action would dispatch beside it on an
+        ``ExecutionState`` record no compare-and-swap orders against the first. **The
+        intended action scopes the row; it does not license a second holder of it.**
+
+        **The references are checked before anything is written**, inside that same
+        indivisible step, so no row is written that :meth:`export`'s closure could not
+        satisfy and a later claim always finds a holder whose status it can read.
+
+        **``claimed_at`` is read from the store's own injected clock at each write
+        that lands**, on ADR-0026's discipline rather than from the wall: a first
+        claim stamps it, a re-point restamps it at the new holder's instant, and every
+        no-write outcome — including the same-step ``CLAIMED`` — leaves it exactly as
+        it stands.
+
+        **A migration creates the table empty and the guarantee is delimited to
+        effects claimed under ADR-0259.** No implementation reconstructs a row for an
+        execution that predates it: doing so would need the tool, digest and binding
+        of a decision the **audit trail** holds, and ``planning`` reaching into
+        ``permissions`` to build its own rows is what golden rule 1 forbids. So an
+        effect performed before the migration is not claimed, is not recognised, and a
+        later plan repeating it answers ``CLAIMED`` and dispatches — bounded by
+        ADR-0255 §13's Q4 rule, no consequential capability having been wired.
+
+        Args:
+            execution_id: The execution whose step is claiming.
+            step_id: The step of that execution.
+            effect_key: :attr:`~ai_assistant.core.types.ToolCall.effect_key` of the
+                authorised call about to be dispatched. A call whose key is ``None``
+                is not side-effecting and never reaches this member.
+
+        Returns:
+            An :class:`~ai_assistant.core.types.EffectOutcome`, and nothing else. **No**
+            :class:`~ai_assistant.core.types.EffectRecord` **is returned**, here or by
+            any other member: the row rides only in :attr:`PlanExport.effects`.
+
+        Raises:
+            PlanningError: If no execution with ``execution_id`` is stored, if
+                ``step_id`` is not the id of a step of **that** execution, or if that
+                step carries no ``intended_action`` — ADR-0265 §4's window closed at
+                the store rather than trusted to close itself. **Nothing is written**
+                in any of the three.
+        """
+        ...
+
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Apply one step transition and return the new state.
 
@@ -5712,6 +5830,37 @@ class PlanStore(Protocol):
         (:class:`~ai_assistant.core.types.StepTransition`), so no implementation is
         asked to refuse one — the boundary is in one place rather than two.
 
+        **And a ``→ SUCCEEDED`` transition carrying ADR-0259 §9's satisfaction trio
+        carries one further claim condition, decided in the store atomically with the
+        write, with five limbs.** It is accepted **only where** the named execution is
+        an execution of **this step's own goal**; the named step is a step **of that
+        execution** and stands ``SUCCEEDED``; the goal's **effect row for the target
+        step's intended action names that execution and step as its holder**; **that
+        row's ``key`` equals ``satisfied_by_key``**; and the **stored source status is
+        ``PENDING`` or ``AWAITING_APPROVAL``** — §2's two entry statuses and the two
+        rows ADR-0014 §4's table gains for this route, so a ``RUNNING`` or
+        ``INDETERMINATE`` source is refused and no row carries a spent authorisation
+        or a started run beside satisfaction marks. The fourth limb is what closes the
+        same-action, different-arguments case. It refuses on the **non-stale**
+        ``PlanningError`` ADR-0255 §3 fixes for its own conjuncts, and for that
+        section's reason: no re-read makes one goal's execution another's, one key
+        another, or a run that happened one that did not.
+
+        **``commit_transition`` persists the two identifiers exactly as given** onto
+        the committed :class:`~ai_assistant.core.types.StepExecution`, and
+        ``satisfied_by_key`` is **compared and not stored** — the row carries the key
+        already. **And the store writes ``output`` and ``finished_at`` itself**: it
+        copies ``output`` from the holder row it has just verified and stamps
+        ``finished_at`` from its own clock, the transition carrying neither and its own
+        validator refusing one that does. ``bound_tool`` it does not touch — ADR-0014
+        §3's selection record, kept as found. **A value the caller never supplies
+        cannot be mis-stated**, so every value a satisfaction lands is verified against
+        a store row or written by the store. **The satisfaction itself is never
+        derived**: that would need the store to know which commits are satisfactions
+        and to hold the ``ToolCall`` the key comes from, neither of which is its. These
+        are two **strengthenings** of an existing member in ADR-0255 §11's own sense of
+        that word, so ADR-0014 §5's enumeration is untouched by the pair.
+
         Raises:
             ClaimRefused: If a ``→ RUNNING`` claim names a plan that does not target
                 its goal's current revision (ADR-0249 §8), or names an attempt whose
@@ -5720,9 +5869,10 @@ class PlanStore(Protocol):
             StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from the step's
                 current status.
-            PlanningError: If the execution or step does not exist, or a
+            PlanningError: If the execution or step does not exist, a
                 ``→ RUNNING`` claim fails ADR-0255 §3's successor conjunct or any of
-                the attempt conjunct's other three limbs.
+                the attempt conjunct's other three limbs, or a satisfaction fails any
+                limb of ADR-0259 §9's claim condition.
         """
         ...
 
@@ -5749,6 +5899,13 @@ class PlanStore(Protocol):
         :class:`~ai_assistant.core.types.PlanExport` at all. **A settled question
         exports with its content already absent**, which is the retention rule
         (ADR-0250 §8) and not an omission from the export.
+
+        **And it carries the store's effect rows** (ADR-0259 §9), with ADR-0014 §5's
+        closure rule extended to them and stated over **one holder rather than three
+        ids**: an included row's ``execution_id`` resolves to an execution in the
+        document, its ``step_id`` names a step **of that execution**, and that
+        execution's plan carries the row's ``goal_id``. The same closure is owed of a
+        satisfied step's pair.
         """
         ...
 
@@ -5764,6 +5921,11 @@ class PlanStore(Protocol):
         store deletes what it is told to delete". :class:`GoalDeletion` reports the
         removed questions exactly as ADR-0249 §12 has it report attempts — which is to
         say the record gains no member for either, and both counts stay out of it.
+
+        **And it reaches that goal's effect rows** (ADR-0259 §9). They are the goal's
+        durable data and go with it; no row blocks a deletion, the live-step refusal
+        above being unchanged; and :class:`~ai_assistant.core.types.GoalDeletion` gains
+        no member for them either.
 
         Refused while any of the goal's executions has a **live** (``RUNNING``)
         step: erasing one would destroy the record its executor is about to
