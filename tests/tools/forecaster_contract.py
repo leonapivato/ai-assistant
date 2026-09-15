@@ -711,6 +711,52 @@ class ForecasterContract:
                 ToolCall(request=foreign, decision=decision), timeout=subject.timeout
             )
 
+    @pytest.mark.optional_obligation
+    async def test_a_separately_authorised_call_naming_another_place_is_refused(self) -> None:
+        """§3: "the place is the deployment's own configured place", over every
+        implementation.
+
+        **The call is entirely valid**: the subject's own proposal with its real-valued
+        arguments moved, carried by its **own** recorded ``ALLOW`` — so it survives
+        revalidation, carries the registered declaration, and its decision authorises it.
+        Every one of §6's three checks passes, and only a comparison against the
+        forecaster's own held configuration stands between it and a read about somewhere
+        the deployment did not choose. §3 is absolute that no caller widens, narrows or
+        offsets the read, on ADR-0093 §10's ground — "a caller able to widen the read is
+        a caller able to defeat the bound".
+
+        **A suite clause because the obligation is the contract's**, not one
+        implementation's: a fake answering a call production refuses is one a consumer's
+        test can pass against.
+
+        **Optional, because an implementation may carry no place in its request at all**
+        — §3 obliges the forecaster to read its own configured place and fixes no
+        argument for it, so one that composes the place entirely inside its own request
+        shape has nothing here to move and satisfies the clause by construction.
+        """
+        subject = await self.configured()
+        proposal = await subject.forecaster.request()
+        assert proposal is not None
+        moved = {
+            name: (value / 2 + 1.0 if isinstance(value, float) else value)
+            for name, value in proposal.parameters.items()
+        }
+        if moved == dict(proposal.parameters):
+            pytest.skip("this implementation's request carries no real-valued place")
+
+        elsewhere = ActionRequest(tool=proposal.tool, parameters=moved)
+        decision = PermissionDecision.from_request(
+            elsewhere,
+            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="somewhere else"),
+            id="d-another-place",
+            decided_at=_DECIDED_AT,
+        )
+
+        with pytest.raises(ToolBindingError):
+            await subject.forecaster.read(
+                ToolCall(request=elsewhere, decision=decision), timeout=A_BOUND
+            )
+
     async def test_a_cancelled_read_is_delivered_onward_unchanged(self) -> None:
         """ADR-0060 through this seam: a cancellation is never absorbed (§4).
 

@@ -318,6 +318,26 @@ def _check_bounds(max_days: int, max_day_chars: int) -> None:
             raise ValueError(msg)
 
 
+def _real(value: object) -> float | None:
+    """``value`` as a plain ``float``, or ``None`` where it is not a real number.
+
+    A ``bool`` is refused: it is an ``int`` by ``isinstance`` and means a flag rather
+    than a measurement. Written out rather than imported, for the reason the rest of
+    this module is — the fake may not import the subsystem it stands in for.
+
+    Args:
+        value: The value to read.
+
+    Returns:
+        The number, or ``None``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) or type(value) is int:
+        return float(value)
+    return None
+
+
 def _check_coordinate(label: str, value: float, *, maximum: float) -> None:
     """Refuse a coordinate outside ADR-0260 §11's stated domain for it.
 
@@ -720,6 +740,28 @@ class FakeForecaster:
                 f"that was authorised (ADR-0029 §2, ADR-0260 §6)"
             )
             raise ToolBindingError(msg)
+        named = (
+            checked.request.parameters.get("origin"),
+            _real(checked.request.parameters.get("latitude")),
+            _real(checked.request.parameters.get("longitude")),
+        )
+        if named != (self._origin, self._latitude, self._longitude):
+            # **§3's place clause, which is every forecaster's and not the production
+            # one's alone.** "The place is the deployment's own configured place, and the
+            # configuration is the naming act … held by the forecaster as its own
+            # configuration", and no caller widens, narrows or offsets the read
+            # (ADR-0093 §10). A call carrying this fake's declaration with another
+            # coordinate is *validly authorised* — its own decision was recorded over its
+            # own request — so the three checks above pass it, and only this comparison
+            # stands between it and a scripted answer about somewhere the deployment did
+            # not choose. A fake that answered it would let a consumer's test pass over an
+            # exchange no deployment can have.
+            msg = (
+                f"{self._declaration.id}: this call names a place this forecaster is not "
+                f"configured for, so the request would ask about somewhere the "
+                f"deployment did not choose (ADR-0260 §3, §6)"
+            )
+            raise ToolBindingError(msg)
 
     async def _answered(self) -> ForecastOutcome:
         """The scripted outcome, from inside the modelled resource.
@@ -734,14 +776,20 @@ class FakeForecaster:
         async with self._resource.held():
             if self._refusal is not None:
                 return ForecastOutcome(refusal=self._refusal)
-            minted = tuple(
-                self._mint(day)
-                for day in self._days[: self._max_days]
+            # **The drop first and the cap over what survived it**, which is §5's order
+            # and not an implementation detail: "Where more days survive the drop rule
+            # below than ``forecast_max_days`` admits, the records minted are the *first*
+            # that many". Slicing first would let an oversized early day consume a slot
+            # and yield ``NO_RESULT`` where the response described a usable later one.
+            surviving = [
+                day
+                for day in self._days
                 # ADR-0260 §5's drop, counted on the quoted rendering: the siblings are
                 # still minted, and where this takes the last one the read yielded
                 # nothing rather than failing.
                 if len(json.dumps(day.content)) <= self._max_day_chars
-            )
+            ]
+            minted = tuple(self._mint(day) for day in surviving[: self._max_days])
             if not minted:
                 return ForecastOutcome(refusal=ForecastRefusal.NO_RESULT)
             return ForecastOutcome(reported_at=self._reported_at, records=minted)
