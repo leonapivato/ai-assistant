@@ -19,7 +19,9 @@
   over argument **keys** and the per-argument rule that reads a member *"naming it"* are replaced
   by **two routes** — a member is met against the **quote recorded for the step's intended
   action**, or, where the declaration declares an argument at the member's kind, against that
-  argument; **a `MONEY` member is met through the quote alone**; the validator refusing a member
+  argument — and each endpoint names exactly one: a `MONEY` **`maximum`** needs the quote, and the
+  declared argument **as well** where one exists, while a `MONEY` **`minimum`** needs the declared
+  argument and is met by no quote; the validator refusing a member
   that names a system-supplied argument goes with the field it read, its rule preserved by a
   refusal on a new declaration field; and `ToolDefinition` gains **one** further field,
   `bounded_arguments`. **§4's `MONEY` reading, in two limbs**: the currency is read off the
@@ -300,15 +302,17 @@ written**.
 > narrowness is the fail-closed half — a bound guessed where the user stated no direction is a
 > standing authority they never gave.
 >
-> **And a span that is a truncation of a negated form mints nothing**, because a model chooses
-> the span and a proper substring can reverse the user's words: for *"not under 100 euros"* the
-> substring *"under 100 euros"* is a valid span of the utterance and would otherwise mint a
-> **ceiling** where the user stated a **floor**. So a `STATED_BOUND` reading is refused where the
-> act's own recorded utterance carries, immediately before the span, a `<not>` prefix of the
-> grammar above — one negation token, optionally followed by one spending token — which is the
-> same grammar read backwards and closes exactly the inversions this table can recognise. **It
-> closes no wider class**: a negation this vocabulary does not carry leaves the truncation
-> readable, which is the residual §10 books and ADR-0249 §7 already owns, its span check being a
+> **And a negation anywhere before the span refuses the reading**, because a model chooses the
+> span and a proper substring can reverse the user's words: *"not under 100 euros"* yields the
+> valid span *"under 100 euros"*, and *"under no circumstances spend over 100 euros"* the valid
+> span *"over 100 euros"*, each of which would otherwise mint the opposite of what the user said.
+> So a `STATED_BOUND` reading is refused where **any token of the negation vocabulary occurs in
+> the act's own recorded utterance before the span begins**, folded and tokenised as above. That
+> is deliberately blunt: it refuses *"I'm not fussy — spend under 100 euros"* as well, which costs
+> a question, where the reading it prevents would cost a standing authority in the opposite
+> direction from the one the user gave. The negated rows still read, because their own negation is
+> **inside** the span they match. **It closes no wider class**: an inversion built from words this
+> vocabulary does not carry is the residual §10 books and ADR-0249 §7 owns, its span check being a
 > containment test and never a check of what the model meant.
 
 > **Normative — a strict word mints a strict bound, and the endpoint is never widened.**
@@ -435,7 +439,9 @@ written**.
 > **It refuses a command naming a goal the store does not hold, one whose `intended_action` is
 > not the `id` of a member of that goal's own `intended_actions`, one whose `attempt_id` is not an
 > attempt of that goal, and one whose `read_from` does not resolve to a completed step execution
-> of that same goal** — the window ADR-0265 §4 closes at the store for a plan, closed here for
+> of the named `attempt_id` itself — `execution_id` a member of that attempt's own
+> `execution_ids` (ADR-0255 §3) and `step_id` a step of it, so a quote can never be read under one
+> attempt and offered under another** — the window ADR-0265 §4 closes at the store for a plan, closed here for
 > every reference the quote carries and with the same error class. **That is what makes the export
 > closure and the deletion cascade true rather than asserted**: every identifier on a quote
 > resolves inside the goal the quote rides in, so ADR-0014 §5's rule is satisfied by construction
@@ -832,11 +838,14 @@ relied on rather than superseded.
 > **Normative — this decision adds a seventh prerequisite to the production-deployment gate, so
 > that a reader does not take ADR-0255 §15 item 19's six for the whole.** **No consequential
 > capability whose authorisation can be reached through §7's evidence route is wired until two
-> things are implemented and demonstrated**: a quote's **freshness at the moment of dispatch** — a
-> provider-backed hold, a typed expiry checked there, or a re-quote taken immediately before it,
-> which also closes the quote-to-claim window §10 books — and a **classification telling a
-> per-call identity key from a system-supplied input a price depends on**, the latter bound into
-> §6's digest. **The gate's existing guarantees do not reach either**: verification reports a
+> things are implemented and demonstrated**: a quote's **validity at the moment the call is
+> claimed** — an **enforceable provider-side hold**, or a **revalidation of the selected quote
+> taken in the same indivisible step as the claim**, which is `PlanStore`'s own compare-and-swap
+> discipline and is what closes the quote-to-claim window §10 books. **Elapsed-time proximity is
+> not one of them**: a re-quote taken *"immediately before"* dispatch and an expiry no provider
+> enforces each leave the race open, so neither discharges this condition. And a
+> **classification telling a per-call identity key from a system-supplied input a price depends
+> on**, the latter bound into §6's digest. **The gate's existing guarantees do not reach either**: verification reports a
 > completed overcharge and cancellation compensates an attempt, and **neither makes the
 > pre-execution permission decision valid**, which is §13's own test.
 
@@ -887,7 +896,9 @@ relied on rather than superseded.
    euros"` mints it without; `"never spend over 100 euros"` mints an **inclusive** `maximum` of
    `100`; `"never notify me about charges over 100 euros"`, `"not exactly 100 euros"` and
    `"never spending over 100 euros"` each mint **nothing**; and the span `"under 100 euros"` taken
-   from the utterance `"not under 100 euros"` mints **nothing**, its truncation test firing.
+   from the utterance `"not under 100 euros"`, and the span `"over 100 euros"` taken from
+   `"under no circumstances spend over 100 euros"`, each mint **nothing**, a negation standing
+   before the span in both.
    **3(b):** against an exclusive `maximum` of `100` a value of exactly `"100"` does **not**
    satisfy and against an inclusive one
    it does, and the same both ways at a `minimum`; and a `MONEY` member carrying a `minimum` is
@@ -902,8 +913,9 @@ relied on rather than superseded.
    `value` is JSON `null` is not constructible. **5(b):** `record_quotes` appends, advances
    `version`, elides the oldest past `MAX_ACTION_QUOTES` while advancing `quotes_elided`, and
    **refuses whole** a stale `expected_version`, an unknown goal, a quote naming an action the
-   goal does not hold, one whose `attempt_id` is an attempt of another goal, and one whose
-   `read_from` names an execution or step that is not a completed one of that goal.
+   goal does not hold, one whose `attempt_id` is an attempt of another goal, one whose
+   `read_from` names an execution or step that is not a completed one, and one whose `read_from`
+   names a completed execution of **another attempt of the same goal**.
    **5(c):** after a quoting step completes, the minted quote carries the step's
    `intended_action`, the attempt it ran under, the value at the declared field of that step's
    stored output, the currency at `currency_field`, a `read_from` naming that execution and step,
@@ -951,12 +963,12 @@ the corpus without it can write no row carrying a non-empty `coverage` at all, a
 leave ADR-0254 §20's Lane 2 stopped where #2373 stopped it or invent an association no clause
 authorises — the standing authority §9 clause (ii) exists to prevent (ADR-0070 §1).
 
-**It is a partial supersession of exactly three documents** (ADR-0070 §3) — ADR-0254 in **seven**
-scopes, ADR-0016 in **one** and ADR-0249 in **one** — and the `Status` line of each names its
-scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
-invariant holds. Against every other ADR it cites it is a **stacked addition**. **The records land
-in the same change as this document** (ADR-0082 §7), and nothing else in any of the three is
-edited — no Decision text is rewritten, which ADR-0070 §1 forbids.
+**It is a partial supersession of exactly four documents** (ADR-0070 §3) — ADR-0254 in **seven**
+scopes, ADR-0016 in **one**, ADR-0249 in **one** and ADR-0255 in **one count** — and the `Status`
+line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070
+§4's extraction invariant holds. Against every other ADR it cites it is a **stacked addition**.
+**The records land in the same change as this document** (ADR-0082 §7), and nothing else in any of
+the four is edited — no Decision text is rewritten, which ADR-0070 §1 forbids.
 
 **This ADR is marked** under ADR-0089: every obligation it imposes is a `> **Normative.**`
 blockquote at column 0, unmarked text beside a mark supplies no obligation of its own, and quoted
