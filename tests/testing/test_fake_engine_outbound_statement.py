@@ -311,13 +311,16 @@ async def test_a_scripted_statement_is_copied_rather_than_shared() -> None:
     assert scripted.reach is OutboundReach.INDETERMINATE
 
 
-async def test_a_scripted_outcome_is_returned_as_the_caller_built_it() -> None:
-    """``turn_outcome`` is whole, that member included — no second pattern beside it.
+@pytest.mark.parametrize("call", ["converse", "streaming", "spoken"])
+async def test_a_scripted_reply_is_given_the_member_it_did_not_carry(call: str) -> None:
+    """#2381, one lever further along, on each of the three calls that take it.
 
-    The lever supplies the statement for an outcome this engine composed itself; an
-    outcome the caller built is returned as built, exactly as every other member of a
-    scripted outcome is. A consumer that means to drive the absent member on a shape §7
-    would give one to says so in the outcome it hands over.
+    ``turn_outcome`` is what every consumer drives a surface from, so an outcome
+    scripted through it reaching a renderer with prose and no statement is the same
+    failure the default closed: the renderer is written, tested green, and never reads
+    the field. §7 admits no such shape from an engine that established no contact, and
+    ADR-0026 §7 is what makes producing one worse than useless — "a fake looser than
+    the contract certifies consumers the real implementation will reject".
     """
     engine = FakeAssistantEngine()
     engine.outbound_statement = OutboundStatement(reach=OutboundReach.INDETERMINATE)
@@ -327,6 +330,86 @@ async def test_a_scripted_outcome_is_returned_as_the_caller_built_it() -> None:
         reply="scripted whole",
     )
 
+    if call == "converse":
+        outcome = await engine.converse("hello", timeout=PATIENT)
+    elif call == "streaming":
+        outcome = await _streamed(engine)
+    else:
+        spoken = await engine.converse_spoken(
+            RECORDING, plays=(SpokenAudioFormat.WEBM_OPUS,), timeout=PATIENT
+        )
+        assert spoken.outcome is not None
+        outcome = spoken.outcome
+
+    assert outcome.reply == "scripted whole"
+    assert outcome.outbound_statement == OutboundStatement(reach=OutboundReach.INDETERMINATE)
+
+
+async def test_a_statement_the_caller_scripted_onto_an_outcome_is_never_rewritten() -> None:
+    """The fill-in is for an **absent** member and rewrites no value a caller stated."""
+    engine = FakeAssistantEngine()
+    engine.outbound_statement = OutboundStatement(reach=OutboundReach.INDETERMINATE)
+    engine.turn_outcome = TurnOutcome(
+        turn=None,
+        routed=RoutedOperation(operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED),
+        reply="scripted whole",
+        outbound_statement=OutboundStatement(
+            reach=OutboundReach.REACHED,
+            destinations=(OutboundDestination.SEARCH_PROVIDER,),
+            records=2,
+        ),
+    )
+
     outcome = await engine.converse("hello", timeout=PATIENT)
 
+    assert outcome.outbound_statement == OutboundStatement(
+        reach=OutboundReach.REACHED, destinations=(OutboundDestination.SEARCH_PROVIDER,), records=2
+    )
+
+
+async def test_a_scripted_outcome_that_composed_nothing_is_given_no_statement() -> None:
+    """A reply-less outcome is left alone, because §7 admits both values on one shape.
+
+    A recovered park carries ``None`` and ADR-0198 §1's restatement carries
+    ``NOT_REACHED``, and nothing in an outcome's shape tells them apart — so filling one
+    in here would assert what the caller did not. A caller who means one states it.
+    """
+    engine = FakeAssistantEngine()
+    engine.outbound_statement = OutboundStatement(reach=OutboundReach.INDETERMINATE)
+    engine.turn_outcome = TurnOutcome(turn=None)
+
+    outcome = await engine.converse("hello", timeout=PATIENT)
+
+    assert outcome.reply is None
     assert outcome.outbound_statement is None
+
+
+async def test_a_scripted_statement_whose_copy_method_lies_is_rebuilt_anyway() -> None:
+    """``model_copy`` is the caller's to override, and this engine does not depend on it.
+
+    A subject whose override returned ``self`` would hand one instance to every outcome
+    and reopen the aliasing :meth:`FakeAssistantEngine._outbound` exists to close —
+    silently, and only for the consumer that subclassed. The statement is rebuilt from
+    its declared fields instead, so what every outcome carries is an exact
+    ``OutboundStatement`` of its own.
+    """
+
+    class _Sticky(OutboundStatement):
+        """An ``OutboundStatement`` that hands back itself instead of a copy."""
+
+        def model_copy(self, **kwargs: object) -> _Sticky:
+            """Return this very instance, as an unhelpful subclass might."""
+            return self
+
+    engine = FakeAssistantEngine()
+    engine.outbound_statement = _Sticky(reach=OutboundReach.INDETERMINATE)
+
+    first = await engine.converse("hello", timeout=PATIENT)
+    second = await engine.converse("hello again", timeout=PATIENT)
+
+    assert first.outbound_statement is not None
+    assert second.outbound_statement is not None
+    assert first.outbound_statement is not second.outbound_statement
+    assert type(first.outbound_statement) is OutboundStatement
+    first.outbound_statement.__dict__["reach"] = OutboundReach.REACHED
+    assert second.outbound_statement.reach is OutboundReach.INDETERMINATE
