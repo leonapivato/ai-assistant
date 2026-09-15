@@ -937,15 +937,15 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
   the same key**, at a version that goal never reached. **It fails both ways.** A **standing
   fence** of the dead goal refuses every row of the new one, so every call of it asks. And a
   **lifted record standing above the new goal's version** discards that goal's own `end_for_goal`
-  as stale — it answers `0` and moves no row — **leaving an `ESTABLISHED` row under a goal that
-  has just closed**, §1's universal broken on a second path with the closing write succeeding.
-  **This decision adds that residual rather than inheriting it**: ADR-0254's rows already outlive
-  their goal under the same key, so a **row** of the dead goal can already cover a call of the
-  recreated one — but **a goal that held no row carried no exposure at all** before this record
-  existed, and now carries one. **What closes it is an incarnation identity**, distinguishing one
-  life of an identifier from the next — a contract change no clause here has an ADR number for, and
-  **no lane mints one on this decision's strength**. Arm 1 pins the state. Fired by an incarnation
-  identity landing, or by a measured occurrence.
+  as stale — it answers `0` and moves no row — **leaving an `ESTABLISHED` row under a goal that has
+  just closed**, §1's universal broken on a second path with the closing write succeeding. **This
+  decision adds that residual rather than inheriting it**: ADR-0254's rows already outlive their
+  goal under the same key, so a **row** of the dead goal can already cover a call of the recreated
+  one — but **a goal that held no row carried no exposure at all** before this record existed, and
+  now carries one. **What closes it is an incarnation identity**, distinguishing one life of an
+  identifier from the next — a contract change no clause here has an ADR number for, and **no lane
+  mints one on this decision's strength**. Arm 1 pins the state. Fired by an incarnation identity
+  landing, or by a measured occurrence.
 - **A viewing or export surface for the closure record.** §1 states why this decision adds none —
   ADR-0254 §16's export is over rows, the record carries no content, the identifier is the goal's —
   and **a reader holding ADR-0004 §6 to reach every retained datum reads it the other way**. This
@@ -1204,7 +1204,7 @@ nothing here can hide.
 is what makes the first of them total rather than best-effort: from the instant `end_for_goal`
 returns, and for as long as the fence it raised stands, no row of that goal stands `PROPOSED` or
 `ESTABLISHED` and none can be recorded, so the closing write cannot be raced. **The residuals
-divide, and the division is the honest summary**: most cost a question, and three can leave an
+divide, and the division is the honest summary**: most cost a question, and four can leave an
 authority.
 
 **Those that cost a question.** A failure between the two writes leaves the goal open, its
