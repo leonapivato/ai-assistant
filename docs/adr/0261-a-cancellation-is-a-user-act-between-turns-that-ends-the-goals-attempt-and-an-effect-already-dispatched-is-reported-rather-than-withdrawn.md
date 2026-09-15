@@ -630,6 +630,14 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > outstanding*, which §6 exists to prevent. **What the surfaces assert is that a call was claimed
 > and may have been sent** (below), true of a read, and **no lane narrows either the field or §2's
 > answer to side-effecting steps**; ADR-0259 §1's key is about **at-most-once**.
+>
+> **And the word *effect* in both names is R78's and not ADR-0259 §1's, so neither name asserts
+> that an `EffectKey` exists.** R78 asks about an *in-flight effect* and this decision answers in
+> the requirement's own word. ADR-0259 §3's *"a read performs no effect"* stays **true and is
+> relied on**: nothing here asserts that a read *does* anything, only that **a call of this goal is
+> outstanding** — which is what a user needs before deciding whether a cancellation is safe to act
+> on, and is the same two statuses ADR-0259 §4 itself repairs an attempt over. §12 records that
+> ADR-0259 §1 and §3 are therefore **reached and superseded in nothing**.
 
 > **Normative — it is derived from the authoritative record and never from an `AttemptOutcome`,
 > which is what lets it clear.** ADR-0255 §6 makes the step's `INDETERMINATE` status *"the
@@ -692,6 +700,17 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > restated**: the **committed `→ RUNNING` claim** — ADR-0148 §9's *"There is no egress outside a
 > claimed step"* with ADR-0014 §4's ordering — **moved nowhere here**, the interval before `invoke`
 > staying ADR-0034 §1's and the interval after it ADR-0029 §4's.
+>
+> **And R78's *no later action begins* is read over that same boundary**, which revision 1 §H.4
+> test 2 fixes in terms: in the claim-first case it asserts the step reaches
+> `SUCCEEDED`/`FAILED`/`INDETERMINATE` — *"never `SKIPPED`"* — and that *"the cancellation reports
+> an in-flight effect"*. So what an acknowledged cancellation admits no later instance of is a
+> **claim**; a call whose claim committed first **may enter `ToolInvoker.invoke` afterwards**,
+> inside ADR-0034 §1's window, and this decision **reports** it rather than withdrawing it, which
+> is this ADR's own title. **No lane reads R78 as an arbitration against invoker entry** or builds
+> one: a cancellation that reaches a call already claimed is the live-cancellation decision §11
+> books, and serialising the act against `invoke` would put a check exactly where §4 rules there is
+> none.
 
 > **Normative — the outcome is stated once it is known, through the records that already carry
 > it, and no second record is minted.** An `INDETERMINATE` step's status stays *"the authoritative
@@ -715,8 +734,13 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > The requirement reads *"any completed or uncertain **in-flight** effect is reported accurately"*,
 > and the two adjectives are the two dispositions an in-flight effect reaches — ADR-0259 §3's
 > reconciliation takes an `INDETERMINATE` step to `SUCCEEDED`, *uncertain* becoming *completed*.
-> **Both are carried**: the act answers `ABANDONED_EFFECT_IN_FLIGHT` at the boundary and the
-> listing's field goes false when the reconciliation lands, which arm 10 asserts as a pair. **What
+> **Both are carried as dispositions of a reported fact, and not as two values of one field**: the
+> act answers `ABANDONED_EFFECT_IN_FLIGHT` at the boundary — that an effect **was** in flight, which
+> is the fact R78 asks be reported — and the listing's field goes false when the reconciliation
+> lands, which arm 10 asserts as a pair. **The cleared field says only that nothing is outstanding
+> now**, and is deliberately indistinguishable from a goal that claimed nothing: what the effect
+> *did* is held by the step's own status, ADR-0255 §6's authoritative record, and **naming it to the
+> user is #2397's and not this field's**. **What
 > is *not* owed here is naming that disposition to the user.** The act reports the fact it can
 > establish — an action was claimed and may have been sent — while **which** disposition it reached
 > is resolved by A8 (ADR-0259 §3, §11) and told by a decision owning the vocabulary for it. **This
@@ -1294,8 +1318,15 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   other** — an attempt reaching `ENDED` under any other act still moves no status (§1, §7).
 - **ADR-0244 §11 and §20** — *no*. `cancel_read` keeps its three members, its scope and its
   atomicity; §20's general-case deferral is left standing with its firing condition (§11).
-- **ADR-0259 §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes none of
-  the replay §5 declines; *"A parked `ALLOW` … is left standing"* stays true.
+- **ADR-0259 §1, §3, §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes
+  none of the replay §5 declines; *"A parked `ALLOW` … is left standing"* stays true. **§1 and §3
+  are relied on and widened in nothing**, which is stated because §6 borrows a word from them:
+  `EffectKey` gains no field and its scope stays *at-most-once*, and §3's *"a read performs no
+  effect"* stays true word for word, because §6's predicate asserts that **a call is outstanding**
+  and never that a read had an effect — the shared word being **R78's**, whose *"in-flight effect"*
+  this decision answers in the requirement's own terms. A reader holding only §1 or §3 builds the
+  key and the reconciliation this decision reads and acts **identically**, which is ADR-0070 §1's
+  test returning *no*.
 - **ADR-0249 §12, for the two conjuncts** — *no*, for §3's conjunct on `commit_attempt` **and
   §2's on `open_attempt`** (its sole-route sentence is a different matter and **does** owe a
   record, above). That section declares both members and their append-only discipline; it does not
@@ -1585,7 +1616,9 @@ clauses are the whole of what it obligates.
 
 **What becomes easier.** `AttemptState.CANCELLED` gains its producer, so ADR-0255 §3's claim
 conjunct — the mechanism the design rests on — becomes reachable rather than hypothetical. R78's
-*no later action begins* becomes a property of the store rather than a rule a driver keeps. A user
+*no later action begins* becomes a property of the store rather than a rule a driver keeps —
+**stated over the claim, which is R77's boundary**: a step whose `→ RUNNING` claim committed before
+the act may still enter `invoke` afterwards, which §4 rules and §6 reports rather than hides. A user
 is told, once at the act and thereafter on the listing, that
 an effect of a cancelled goal may have left. And #2380's eligibility question is answered in a form
 needing no new predicate.
