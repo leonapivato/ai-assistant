@@ -146,26 +146,6 @@
   *"A replan never resets an allowance"* is what makes it charge rather than refresh, and is
   relied on rather than touched.
 
-
-- Amended: 2026-09-15 by ADR-0260 — **§2's per-member source lists, in that one respect
-  and in no other.** Each of the seven members names the members of `SearchDisposition`,
-  `SearchRefusal`, `FetchRefusal` and `StructuredOutcome` that map onto it, and [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md)
-  §8 adds the members of two further vocabularies — `ForecastRefusal` and
-  `ForecastDisposition` — to those lists. A reader holding only this ADR would find a
-  forecast read's typed non-yield unclassified and would have no member to place it on,
-  which is ADR-0082 §1's test met on that clause and on no other.
-
-  **Nothing of §2 is replaced.** Its seven members, its closure at seven, its
-  *"added to and never renamed"* rule, the classifier's four facts, its total precedence
-  with no default branch, its one-entry-per-serviced-ask rule and its no-message clause
-  all bind entire, and ADR-0260 §8 states its additions **as entries on those lists**
-  rather than as a second classifier. §3's carrier, §4's conditions — which ADR-0260 §7
-  leaves untouched, none of them being about the kind — and §§1 and 5-18 are unmoved.
-
-  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
-  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
-  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2255.
-
 ## Context
 
 ### Where this comes from

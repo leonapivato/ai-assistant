@@ -389,34 +389,6 @@
   ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
   Appended note per ADR-0070 §1; no text below is rewritten. Refs #2133, #1908.
 
-
-- Amended: 2026-09-15 by ADR-0260 — **§2's membership sentence and §6's cross-kind
-  precedence sentence, in one respect each: the enumeration gains a sixth member, and a
-  read this ADR did not admit is serviced between the web search and the citation hop.**
-  §2 reads *"The enumeration's two members are `SIGHTED_QUERY` and `CITATION_HOP`"* —
-  already amended by ADR-0230 §1, ADR-0231 §1 and ADR-0240 §1 — and §6 reads *"**The
-  citation hop is serviced first, and the sighted query fills what remains.**"*
-  [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md) §2 adds `FORECAST_READ` — one read of a configured outside source about the
-  days ahead, whose ask carries no argument at all — and its §7 services it third of six,
-  so a reader holding only this ADR would read both sentences more widely than they now
-  hold. That is ADR-0082 §1's test met on each, and the record is owed.
-
-  **Neither ruling is replaced, and §1 is the licence the addition is taken under.** §1's
-  clause — *"A later kind is an **additive entry to this enumeration**, not a second
-  seam. An ADR admitting one adds a member and states that kind's namer, its servicing,
-  its share of §6's budget and its audit fields; it does not introduce a second request
-  object, a second servicing site, a second budget or a second audit"* — is what ADR-0260
-  does, and §4's rule that the vocabulary *"is **added to** and never renamed"* is
-  honoured rather than approached. §1's record-not-payload rule, §2's
-  at-most-one-ask-of-each-kind rule, §3's namer invariant, no-identifier rule and ordinal
-  scheme, §5's channel scoping and degradation posture, §6's budget of ten and its
-  capped-read-first rule, §7's fourth group and its deduplication, §8's trigger and §9's
-  counts-and-no-copy audit rule all bind as ratified and are load-bearing in ADR-0260.
-
-  This ADR's `Status` line carries the leading `Partially superseded by` token, so under
-  ADR-0082 §2 no amendment qualifier is written on it and this note is the whole record.
-  Appended note per ADR-0070 §1; no text below is rewritten. Refs #2255.
-
 ## Context
 
 ### Where this comes from
