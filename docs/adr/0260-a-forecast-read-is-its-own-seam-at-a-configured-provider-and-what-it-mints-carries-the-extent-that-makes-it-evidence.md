@@ -1167,8 +1167,11 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   *one ask is one read* is asserted over every terminal outcome that could invite a
 >   retry**, **enumerated exhaustively over `ForecastRefusal`** rather than over a chosen
 >   few — `NO_RESULT`, `UNATTESTED`, `RESPONSE_TOO_LARGE`, `PROVIDER_REFUSED`,
->   `TRANSPORT_FAILED` and `DEADLINE_EXPIRED` — each issuing **exactly one** provider
->   request and opening **exactly one** channel before returning. A member added without
+>   `TRANSPORT_FAILED` and `DEADLINE_EXPIRED` — each issuing **at most one** provider
+>   request and opening **at most one** channel before returning: **exactly one** wherever
+>   the outcome was read off the wire, and **none** for §6's ADR-0148 §6 refusal, which
+>   reaches `PROVIDER_REFUSED` **before any byte is transmitted** and is (c)'s. **The bound
+>   is §3's and the count is the producer's**; a member added without
 >   this assertion fails the arm, as it does in (k). Without it an implementation may
 >   retry after any of them, return the same outcome from the second exchange, and satisfy
 >   every disposition, contact and statement arm while contacting the provider twice
