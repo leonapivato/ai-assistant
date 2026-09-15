@@ -368,8 +368,13 @@ which §14 defers with what fires it.
 
 > **Normative.** A `Forecaster` mints the records; **nothing outside it stamps a
 > `Provenance` for a forecast**. A successful read mints **one `MemoryRecord` per day the
-> provider's answer covers**, in the order the provider returned them, of kind `SEMANTIC`,
-> at most `forecast_max_days` of them (§11). **No model is on that path**: nothing
+> provider's answer covers**, in the order the provider returned them, of kind `SEMANTIC`.
+> **Where more days survive the drop rule below than `forecast_max_days` (§11) admits, the
+> records minted are the *first* that many in the order the provider returned them and the
+> rest are not minted** — the cap is taken over the surviving days and taken from the
+> front, because a cap that did not say which days it kept would let two implementations
+> mint different evidence, and different goal outcomes, from one response.
+> **No model is on that path**: nothing
 > summarises, abridges, rewrites, re-ranks, annotates, deduplicates, interprets or
 > classifies a value between the provider's response and the record.
 
@@ -1030,7 +1035,11 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   `RESPONSE_TOO_LARGE` with no parse attempted; a day whose transcription is exactly
 >   `forecast_max_day_chars` is minted where one of that figure plus one is dropped; and a
 >   provider answer of fewer than, of exactly, and of more than `forecast_max_days` days
->   mints that many, that many, and exactly `forecast_max_days`. And over the
+>   mints that many, that many, and exactly `forecast_max_days`, **the last asserted over
+>   which days those are and over their extents rather than over the count alone** — taking
+>   the first and taking the last both satisfy a count while minting different evidence —
+>   and a response whose days exceed the figure only once an incomplete one has been
+>   dropped mints the **first** `forecast_max_days` of what survived. And over the
 >   **production** forecaster's own output, a minted record's `confidence` is `0.9`, its
 >   `derived_from_external` is `False`, its `placement` is the default that narrows
 >   nothing, and its `Attestation.reported_by` **equals that forecaster's own `name`** —
@@ -1050,12 +1059,18 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   each raise `ValueError` **before** the call is revalidated, before any
 >   credential is read and before any channel is opened, asserted over those three
 >   orderings so that zero cannot pass as an instant expiry.
-> - **(i) The deadline that actually expires.** A production forecaster whose exchange is
->   suspended past a **positive** `timeout` **returns** `DEADLINE_EXPIRED`, raises no
->   `CancelledError` outward, opens no second channel, and does not report
->   `TRANSPORT_FAILED`. This is the case that separates a seam enforcing its own deadline
->   from one that merely accepts the keyword, and (c) does not reach it: (c) asserts what
->   an invalid timeout refuses, this asserts what a valid one does.
+> - **(i) The deadline that actually expires, and the one request §3 allows.** A production
+>   forecaster whose exchange is suspended past a **positive** `timeout` **returns**
+>   `DEADLINE_EXPIRED`, raises no `CancelledError` outward, opens no second channel, and
+>   does not report `TRANSPORT_FAILED`. This is the case that separates a seam enforcing its
+>   own deadline from one that merely accepts the keyword, and (c) does not reach it: (c)
+>   asserts what an invalid timeout refuses, this asserts what a valid one does. **And §3's
+>   *one ask is one read* is asserted over the two shapes that invite a retry** — a
+>   production forecaster whose transport fails, and one whose provider refuses — each
+>   issuing **exactly one** provider request and opening **exactly one** channel before
+>   returning its disposition. Without them an implementation may open a second channel on
+>   a failure, report `TRANSPORT_FAILED` once the second fails too, and satisfy every
+>   disposition, contact and statement arm while breaching a clause §3 states absolutely.
 > - **(j) The outcome's exactly-one rule, and the instant that rides with it.** A
 >   `ForecastOutcome` carrying **both** a non-empty `records` and a non-`None` `refusal`,
 >   and one carrying **neither**, is refused at construction; so is one carrying records
@@ -1066,10 +1081,16 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 
 > **Normative — L2: the authority.**
 >
-> - **(d) The mismatched binding.** A forecast request whose account or origin is not the
->   configured pair, and a request of another kind bound to the configured forecast pair,
->   each take **no** route (c): both `_only_the_disclosure_floor` limbs bind in full and
->   the ruling is what it is today.
+> - **(d) The mismatched binding, over each of §6's three conjuncts.** A forecast request
+>   whose account or origin is not the configured pair; a request of another kind bound to
+>   the configured forecast pair; and **a forecast request whose kind, account and origin
+>   all match and whose `forecast_reach` is `False`** — each takes **no** route (c), both
+>   `_only_the_disclosure_floor` limbs bind in full and the ruling is what it is today.
+>   The third is asserted in its own right because `forecast_reach` is §6's **first**
+>   conjunct and a policy reading only the kind and the pair passes the other two shapes
+>   while granting route (c) where §6 refuses it; **it is also the value a composition site
+>   that never computed the fact leaves behind**, which is what §11 makes `False` the
+>   restrictive default for.
 > - **(e) No new question.** A turn on a goal whose supply already carries an external
 >   record asks for a forecast at the configured provider and is ruled `ALLOW` with **no**
 >   `CONFIRM`, **no** grant seam read and `authorised_subject` unset — and the same turn's
