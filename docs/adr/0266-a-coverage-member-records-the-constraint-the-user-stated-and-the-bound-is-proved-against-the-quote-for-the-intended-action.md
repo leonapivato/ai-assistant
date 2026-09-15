@@ -496,8 +496,14 @@ absolute again: **no model output reaches any input of a quote**.
 > is inside the goal. **Every stored row stays readable and the migration is an addition with a
 > total default**: a `Goal` written before this decision decodes with `quotes` empty and
 > `quotes_elided` `0`, and a `ToolDefinition` with `quoted_outputs` empty, which is a conforming
-> declaration rather than a degraded one. **No lane invents a quote for a stored goal**, because a price nothing read
-> is a price no record holds.
+> declaration rather than a degraded one. **A stored `Authorization` is the one case that is not
+> an addition, and it is stated here rather than left to the lane**: a row written before this
+> decision carries `CoverageMember.argument` and may carry `ValueBound.currency_argument`, both
+> now forbidden extras, so such a row **decodes with its `coverage` dropped to empty and is
+> retained** — readable as the audit record it is and covering nothing, which is the fail-closed
+> direction, since a stored member whose `kind` cannot be derived from what it holds must not be
+> guessed at. **No lane invents a quote for a stored goal**, because a price nothing read is a
+> price no record holds.
 
 **A quote is a record of its own rather than a field of a `GoalEvidence` row, and the reason is
 that decision's own text.** ADR-0252 §1 rules that *"A `GoalEvidence` carries no content"* and is
@@ -652,11 +658,13 @@ Sunday price is `170` is covered by nothing, and the user is asked about that co
 
 > **Normative.** **`orchestration` mints every coverage member and every quote, and nothing else
 > does.** No `ActionPolicy`, no `ToolRegistry`, no store, no reader, no interface adapter, no tool
-> and no model **mints, writes, repairs or supplies any part of** one. **No plan and no model
-> names the output field a quote is read at**: that is the declaration's, on
-> `ToolDefinition.quoted_outputs` (§6), and it is the whole of why this clause can be absolute
-> where an earlier draft's was not. This is ADR-0254 §15's writer clause reaching the values §5
-> and §6 add.
+> and no model **constructs, writes or repairs** one. **The distinction the clause turns on is
+> between construction and source.** `orchestration` alone **constructs and writes** a quote; the
+> **declaration** alone says which output field and which currency field it is read at; and the
+> **facts quoted** are the tool's own returned output and the concrete request's user-facing
+> arguments, which is what a quote is *for*. **No plan and no model names the field**, and no
+> component but `orchestration` writes the record. This is ADR-0254 §15's writer clause reaching
+> the values §5 and §6 add.
 
 > **Normative — no durable value of this decision is ever taken from a model, and the list is
 > exact.** A planner envelope carrying a **`CoverageMember`**, a **`ValueBound`**, an
@@ -674,8 +682,11 @@ Sunday price is `170` is covered by nothing, and the user is asked about that co
 > reading of §4 is taken at all where a negation stands before the span**, which is what stops
 > *"do not send to Alice"* from minting a `TERMS` member fixing `"Alice"`. Neither closes the
 > class whole, and §10 books what remains. **Nothing else a model produces reaches any input of
-> §4, §5, §6 or §7**: the field a quote is read at is the **declaration's** (§6), the argument a
-> member meets is the declaration's (§7), and the identifiers are the loop's. **A model names no
+> §4, §5, §6 or §7** as a **selector or a written value**: the field a quote is read at is the
+> **declaration's** (§6), the argument a member meets is the declaration's (§7), and the
+> identifiers are the loop's. A step's `parameters` are a planner's, and they reach a quote only
+> as the **subject** of its `arguments_digest` — the arguments the call was quoted over, which is
+> the fact the digest exists to pin rather than an input that chooses anything. **A model names no
 > argument key, no output field, no currency key and no identifier anywhere in this decision.**
 
 ### 9. What this records against earlier ADRs, clause by clause, under ADR-0082 §1
@@ -737,7 +748,8 @@ encoding §6 and §7 compare by.
 request carries, at the bound's `currency_argument`, a JSON string equal to the bound's
 `currency`"*, and the bound no longer carries that key; §7 takes it at the `BoundedArgument`'s
 `currency_argument` or at the quote's own `currency`, its force unchanged. And its **two
-inequalities** are read strictly where the bound's exclusivity flag is set, a reader holding only
+`maximum` inequality** is read strictly where `maximum_exclusive` is set — **its `minimum`
+conjunct is unmoved and binds entire** — a reader holding only
 §4 otherwise covering a call at exactly the endpoint the user excluded. **Every other clause binds
 entire**: the `MONEY` reading in every other conjunct, `PERIOD` and `TERMS` whole, the no-float
 and no-naive-instant rules, the totality-and-refusal clause, the `reason` discipline, and the
@@ -768,11 +780,13 @@ a further safety field. Every other clause of §1 binds entire.
 
 **ADR-0255 §15 item 19 — and it is a count.** That item enumerates what §13's rule requires before
 a consequential capability is wired and closes the enumeration in terms, at **six** since ADR-0265
-§6 added the sixth. §11 adds a **seventh** — an enforceable provider-side hold or a provider-side
-conditional execution that validates the quoted amount atomically with the act, together with the
-identity/price-affecting split of a system-supplied key — and a reader holding only item 19 wires
-an integration after six and is wrong: the residual is a **quote that was true when it was read
-and false when the act was performed**, so route (d) authorises an over-bound charge. **The gate's
+§6 added the sixth. §11 adds a **seventh**, in three limbs — a mechanical test of the polarity of the clause a span
+was taken from; an enforceable provider-side hold or a provider-side conditional execution that
+validates the quoted amount atomically with the act; and the identity/price-affecting split of a
+system-supplied key — and a reader holding only item 19 wires an integration after six and is
+wrong: the residuals are a **span whose polarity no rule can read** and a **quote that was true
+when it was read and false when the act was performed**, either of which lets route (d) authorise
+a call the user did not. **The gate's
 existing guarantees do not reach it** — verification reports the completed overcharge and
 cancellation compensates the attempt, and **neither makes the pre-execution permission decision
 valid**, which is §13's own test. §13's rule binds verbatim and its own contribution is unchanged;
@@ -882,8 +896,17 @@ relied on rather than superseded.
 
 > **Normative — this decision adds a seventh prerequisite to the production-deployment gate, so
 > that a reader does not take ADR-0255 §15 item 19's six for the whole.** **No consequential
-> capability whose authorisation can be reached through §7's evidence route is wired until two
-> things are implemented and demonstrated**: a quote's **validity at the moment the act is
+> capability whose authorisation can be reached through route (d) with a member this decision
+> minted is wired until three things are implemented and demonstrated**, and the first binds
+> whether or not the evidence route is involved: **a mechanical test of the polarity of the clause
+> a span was taken from**, or a span contract that makes a truncation unable to carry a different
+> polarity from its sentence. §4's negation bar and its ceiling-only table narrow that class and
+> close no part of it whole — *"avoid spending under 100 euros"* still yields the span *"under 100
+> euros"* and a ceiling of `100` — and the residue is a property of **ADR-0249 §7's containment
+> check and ADR-0254 §8's basis**, both ratified and both consumed here rather than created:
+> closing it is that decision's, not this one's, and until it is taken nothing consequential rides
+> on a member minted from a span. The other two bind a capability reached through the evidence
+> route: a quote's **validity at the moment the act is
 > performed** — an **enforceable provider-side hold**, or a **provider-side conditional execution
 > that validates the quoted amount atomically with the act itself**, and nothing weaker. **A local
 > compare-and-swap is not one of them**, and the distinction is what round 6 found: a store
@@ -893,8 +916,10 @@ relied on rather than superseded.
 > quote-to-claim race §10 books, and is worth taking for that, but it is **not** a proof of the
 > quote's current validity and no lane may offer it as one; elapsed-time proximity and an
 > unenforced expiry are neither. And a **classification telling a per-call identity key from a
-> system-supplied input a price depends on**, the latter bound into §6's digest. **The gate's existing guarantees do not reach either**: verification reports a
-> completed overcharge and cancellation compensates an attempt, and **neither makes the
+> system-supplied input a price depends on**, the latter bound into §6's digest.
+>
+> **The gate's existing guarantees reach none of the three**: verification reports a completed
+> overcharge and cancellation compensates an attempt, and **neither makes the
 > pre-execution permission decision valid**, which is §13's own test.
 
 - **L1 — the contract, in `core` alone**, and it is a **triad**: `CoverageMember`'s `kind` and
@@ -902,16 +927,18 @@ relied on rather than superseded.
   `currency_argument`; `ResolutionRule.STATED_BOUND`; `BoundedArgument` and
   `ToolDefinition.bounded_arguments`; `QuotedOutput` and `ToolDefinition.quoted_outputs`;
   `ActionQuote`, `Goal.quotes`, `Goal.quotes_elided`, `MAX_ACTION_QUOTES`, `ActionQuoteMinting`,
-  `ActionRequest.intended_action` and `ActionRequest.attempt`; the **`GoalQuotes` Protocol with
-  its shared conformance suite and its canonical fake in `ai_assistant.testing`**, which
-  `CONTRIBUTING.md` makes one unit of work; and **`PROTOCOL_VERSION`, `wire/envelope.py`'s log
-  entry and `PlanExport.schema_version`** (§6), this being the one lane that is that ground.
-  Arms 4(a), 5(a) and 7(b).
-- **L2 — the store, in the plan-store implementations and their conformance suites alone.**
-  `PlanStore.record_quotes`, its compare-and-swap, its four refusals and §6's elision; the
-  stored-shape migration; and the **production `GoalQuotes` implementation**, whose rows are the
-  `quotes` of the goal the store already holds, with its conformance suite run against it — so the
-  composition root has a concrete to inject and the policy names only the Protocol. Arm 5(b).
+  `ActionRequest.intended_action` and `ActionRequest.attempt`; **both Protocol changes with the
+  conformance work each obliges** — the new **`GoalQuotes`** with its shared conformance suite and
+  its canonical fake in `ai_assistant.testing`, and **`PlanStore.record_quotes`** with that
+  Protocol's existing suite and `InMemoryPlanStore` extended in the same change, which
+  `CONTRIBUTING.md` and golden rule 5 make one unit of work; and **`PROTOCOL_VERSION`,
+  `wire/envelope.py`'s log entry and `PlanExport.schema_version`** (§6), this being the one lane
+  that is that ground. Arms 4(a), 5(a), 5(b) and 7(b).
+- **L2 — the production stores, in the plan-store implementations alone.**
+  `record_quotes` in the durable store with its compare-and-swap, its four refusals and §6's
+  elision; the stored-shape migration §6 states, **reaching the `Authorization` rows as well**;
+  and the **production `GoalQuotes` implementation**, whose rows are the `quotes` of the goal the
+  store already holds, each run against the suites L1 landed. No arm of its own.
 - **L3 — the comparison, in `permissions` alone.** §7's two routes and its restatement of
   condition 6 in `permissions/_coverage.py`, with each currency conjunct read where §7 puts it.
   Arms 1(b), 2(b), 3(b), 6 and 7(a).
@@ -964,9 +991,9 @@ relied on rather than superseded.
    goal does not hold, one whose `attempt_id` is an attempt of another goal, one whose
    `read_from` names an execution or step that is not a completed one, and one whose `read_from`
    names a completed execution of **another attempt of the same goal**, of a step whose own
-   `intended_action` differs from the quote's, or of a field the step's declaration names in no
-   `QuotedOutput` at that kind; and it refuses a command whose `value`, `currency` or
-   `arguments_digest` differs from what it recomputes from that execution and that declaration.
+   `intended_action` differs from the quote's. **It checks no derived value**, having neither the
+   concrete request nor the declaration the call was made under (§6); the mismatch cases belong to
+   5(c).
    **5(c):** after a step whose declaration carries a `QuotedOutput` completes, the minted quote
    carries the step's `intended_action`, the attempt it ran under, the value at the **declared**
    field of that step's stored output, the currency at `currency_field`, a `read_from` naming that
@@ -974,7 +1001,10 @@ relied on rather than superseded.
    **No quote is minted** where the step names no `intended_action`, where the declaration carries
    no `quoted_outputs`, where the declared field is **absent** from the output, where its value is
    JSON `null`, where a `MONEY` quote's `currency_field` value is absent or not a JSON string, or
-   where the value at `field` is a shape §4's reading of that kind refuses.
+   where the value at `field` is a shape §4's reading of that kind refuses. And `orchestration`
+   writes **no** quote whose `value`, `currency` or `arguments_digest` differs from what it derives
+   from that execution and that declaration — the checks the store cannot make, demonstrated where
+   they are made.
 6. **The arguments are the ones quoted, and the worked case.** A request whose user-facing
    arguments equal the quoted ones is covered; one carrying **one extra** user-facing argument,
    one **missing** one, and one whose value differs are each **not** covered though the price is
@@ -1029,8 +1059,9 @@ the four is edited — no Decision text is rewritten, which ADR-0070 §1 forbids
 **This ADR is marked** under ADR-0089: every obligation it imposes is a `> **Normative.**`
 blockquote at column 0, unmarked text beside a mark supplies no obligation of its own, and quoted
 marks from other ADRs appear inside quotation marks in running prose. **It is a contract-surface
-change** — two `core` types change shape, an enumeration gains a member, four types are added and
-three Protocols move (`ToolDefinition` gains two fields, `Goal` two, `ActionRequest` two) — so it owes **both** review lenses on one tree, which ADR-0015 §1 makes true
+change** — `CoverageMember` and `ValueBound` change shape, `ResolutionRule` gains a member, four
+types are added, `ToolDefinition`, `Goal` and `ActionRequest` each gain two fields, `PlanStore`
+gains a member and `GoalQuotes` is a new Protocol — so it owes **both** review lenses on one tree, which ADR-0015 §1 makes true
 of a prose-only PR. **It merges as its own PR, ratified, before anything implements against it**
 (golden rule 5); §11's lanes are briefed after it merges, and the ratification flip is one line
 and no other byte (ADR-0165).

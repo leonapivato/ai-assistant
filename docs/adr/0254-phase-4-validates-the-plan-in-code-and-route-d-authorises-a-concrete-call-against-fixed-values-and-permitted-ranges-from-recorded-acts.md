@@ -37,7 +37,8 @@
   normative clause that this decision's own lane dispatches nothing and wires nothing.
 - **Partially superseded: 2026-09-15 by ADR-0266 — §1's proposal-completeness condition, §2's
   member shape, §3's condition 6 and field count, §4's `MONEY` currency conjunct and its two
-  inequalities, §9 clause (ii)'s test of *"bear on"*, and §8's and §10's resolution enumeration in
+  `maximum` inequality alone — its `minimum` conjunct is unmoved — §9 clause (ii)'s test of
+  *"bear on"*, and §8's and §10's resolution enumeration in
   its closure at three. Nothing else in this ADR.** No
   clause of this decision states **how a recorded span is associated with an argument key**, nor
   **how a member's shape is chosen** — §10's three resolutions turn a span into a value and name
