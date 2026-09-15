@@ -650,10 +650,13 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > predicate over this same scope** (§2), so **no lane gives the act a predicate of its own, a
 > per-attempt scope, or a second definition of *outstanding***.
 
-> **Normative — it is a query and never a second authority, and what is forbidden is a record a
-> consumer could read instead of the status.** **No field, flag or counter is added to any `core`
-> type, to `PlanExport` or to any row a consumer reads**, nothing a consumer treats as the answer is
-> written at claim time, and **no lane caches the answer across calls** — which is ADR-0259 §4's
+> **Normative — it is a query and never a second authority, and what is forbidden is a *stored*
+> record a consumer could read instead of the status.** **No **persisted** field, flag or counter is
+> added to any `core` type, to `PlanExport` or to any row a consumer reads**; nothing a consumer
+> treats as the answer is written at claim time; and **no lane caches the answer across calls**.
+> **`GoalSummary.effect_in_flight` is not such a record and is the permitted carrier** — computed
+> per read and never stored (above) — and `has_outstanding_effect` is the **query** that computes
+> it, which is the distinction this clause draws — which is ADR-0259 §4's
 > *"no lane writes a second record of a fact a status already carries"* binding one surface over,
 > the **authoritative record staying the step's own status** (ADR-0255 §6). **What is not forbidden
 > is how a conforming store finds the answer**: an index, a materialised set or any other structure
@@ -692,8 +695,9 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > it, and no second record is minted.** An `INDETERMINATE` step's status stays *"the authoritative
 > record of the uncertainty"* (ADR-0255 §6); resolving it is A8's (ADR-0259 §3), and where a
 > resolution lands the step becomes `SUCCEEDED` and `effect_in_flight` becomes false by the same
-> derivation. **No mark, field, flag or store member is added for an in-flight effect**, which is
-> ADR-0259 §4's clause binding one surface over.
+> derivation. **No mark, durable field, flag or *written* record is added for an in-flight
+> effect** — this decision's one field is computed and its two store members only read or decide
+> inside a write — which is ADR-0259 §4's clause binding one surface over.
 
 > **Owner's question, recorded and not taken, beside §6's other.** Whether a user who abandons a
 > goal on which an action **already completed** should be told so **at the act** — rather than the
@@ -1446,11 +1450,15 @@ it.
    limbs yield over its **own** executions, so the goal's reopen can open its new one — the two
    being what pins the migration to *every* non-terminal attempt rather than the newest, since
    repairing one would leave the other live and the reopen refused. **That arm is stated over every
-   source version `_UPGRADABLE_FROM` admits** — as a dated observation at `28eb9e82` the set is
-   `{1, 2, 3}`, each upgraded directly — because a repair run only for the newest source passes a
+   source version `_UPGRADABLE_FROM` admits after this decision's bump** — as a dated observation
+   at `28eb9e82` it reads `{1, 2, 3}` and gains the version the marker moves from — because a repair run only for the newest source passes a
    single unparameterised arm and leaves an older database with an `ABANDONED` goal and live
-   attempts. Each source asserts the same repair, the same outcomes, the same advanced attempt
-   versions and the same final `schema_version`. **And an open goal's attempts
+   attempts. **The repair-bearing sources are the versions whose schema can hold an attempt**:
+   `attempts` is created by ADR-0249 §12's own migration and a version 1 store holds none, so
+   version 1 takes a **no-attempt upgrade** assertion — it upgrades, writes no attempt row and
+   reaches the new marker — and every later source asserts the same repair, the same outcomes, the
+   same advanced attempt versions and the same final `schema_version`. **No arm seeds an `attempts`
+   table into a version 1 fixture**, which would test a schema the application never wrote. **And an open goal's attempts
    are left exactly as they were**, which pins the migration to the act a user actually performed
    (§10).
 7. **The post-cancellation prohibition (L2).** After a cancellation, a claim of a step of the
@@ -1527,8 +1535,12 @@ it.
     as well as for `ABANDONED`** — both are successful cancellations — and non-zero for
     `ALREADY_CLOSED` and `NO_SUCH_GOAL`. The tree's parameterised assertion reads
     `code == (0 if member is GoalAbandonment.ABANDONED else 1)`, which a new member joins on the
-    **failing** side while staying green, so **the arm is stated over the exit code and not over the
-    rendered text**.
+    **failing** side while staying green. **And the rendering is asserted by its facts rather than
+    its prose**, since a zero exit over the ordinary `ABANDONED` text would pass an exit-code arm
+    alone: the abandonment surface says that an action **was claimed and may have been sent** and
+    names **`assistant goals`**, and a listing row whose `effect_in_flight` is true says that an
+    action **is outstanding and its outcome unknown** (§6). **No arm fixes the wording**, which is
+    the lane's (§6).
 
 **No arm demands a duplicate dispatch be demonstrated**, which is A8's acceptance requirement on
 A8's lane (ADR-0255 §12), and **ADR-0255 §13's Q4 rule is what makes the interval safe**: no
