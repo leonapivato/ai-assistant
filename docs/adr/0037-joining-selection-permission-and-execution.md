@@ -1,20 +1,7 @@
 # 37. Joining selection, the permission check and execution
 
-- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal) and ADR-0259 (steps 4 and 5 of §4's resume sequence alone, and only where the binding already carries a recorded resolution. There `resume` takes neither step — it calls no `ActionPolicy.resolve` and records nothing — and proceeds to §4's step 6 with the decision the trail already holds, because a reader holding only §4 builds a `resume` that authors a second resolution the audit trail's single-resolution index refuses, leaving the stranded ruling permanently unrecoverable. Steps 1-3 and step 6 bind entire, as do §4's requirement that the step be `AWAITING_APPROVAL` in the stored execution and the reason it gives for it, its never-answers-on-the-user's-behalf rule, §2's decide, record, read back, claim order, and §6's "This object disposes of one step, once" and `PENDING`-only entry. §§1-3 and §§5-6 are untouched)
+- Status: Partially superseded by ADR-0144 (§1's several-candidates refusal)
 - Date: 2026-07-22
-- **Partially superseded: 2026-09-13 by ADR-0259 — steps 4 and 5 of §4's resume sequence
-  alone, and only where the binding already carries a recorded resolution. Nothing else in this
-  ADR.** Where `AuditTrail.resolution_of` answers for the binding, `resume` takes neither step — it
-  calls no `ActionPolicy.resolve` and records nothing — and proceeds to §4's **step 6** with the
-  decision the trail already holds: an `ALLOW` is read back and executed, a `DENY` commits
-  `AWAITING_APPROVAL → SKIPPED` with `skip_reason=APPROVAL_DENIED`. A reader holding only §4 builds
-  a `resume` that always authors a resolving decision, which the audit trail's single-resolution
-  index refuses on a binding already resolved — leaving the stranded ruling #257 describes
-  permanently unrecoverable. **Steps 1-3 and step 6 bind entire**, as do §4's requirement that the
-  step be `AWAITING_APPROVAL` in the *stored* execution and the reason it gives for it, its
-  *"the turn never answers on the user's behalf"* rule, §2's decide, record, read back, claim
-  order, and §6's *"This object disposes of one step, once"* and `PENDING`-only entry. §§1-3 and
-  §§5-6 are untouched.
 - **Partially superseded: 2026-08-13 by ADR-0144** — §1's several-candidates row
   only, and nothing else. A step is no longer refused whenever
   `ToolRegistry.find` returns more than one candidate: ADR-0144 §1 fixes the
