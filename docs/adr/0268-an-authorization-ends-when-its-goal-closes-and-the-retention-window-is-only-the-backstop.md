@@ -1028,12 +1028,15 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >
 > 1. **The ending over the set, the fence with it, and the record's version.** A goal holding
 >    established rows for two declarations, one live and one lapsed, an unexpired `PROPOSED` row,
->    and **one row at each of the five retired dispositions** — `DECLINED`, `EXPIRED`, `REVOKED`,
->    `SUPERSEDED` and `GOAL_CLOSED` itself: `end_for_goal` answers **3**, the three non-retired
->    rows stand `GOAL_CLOSED` carrying the call's own instant, and **each** retired row is
->    **byte-identical** to what it was and **excluded from the count** — one assertion per
->    disposition, so an implementation that excludes one retired member and not the rest fails
->    here. A **second** call answers **0** and leaves the fence set. A
+>    **a `PROPOSED` row already past its `expires_at` and unsettled**, and **one row at each of the
+>    five retired dispositions** — `DECLINED`, `EXPIRED`, `REVOKED`, `SUPERSEDED` and `GOAL_CLOSED`
+>    itself: `end_for_goal` answers **4**, the four non-retired rows stand `GOAL_CLOSED` carrying
+>    the call's own instant — **the lapsed proposal among them, `GOAL_CLOSED` and not `EXPIRED`**,
+>    which is this member's *evaluates no liveness* and the limb of ADR-0254's arm 37 this decision
+>    retires as false of it (§7) — and **each** retired row is **byte-identical** to what it was and
+>    **excluded from the count** — one assertion per disposition, so an implementation that excludes
+>    one retired member and not the rest fails here. A **second** call answers **0** and leaves the
+>    fence set. A
 >    goal the store holds no row of answers **0**, does not raise, **and is fenced all the same** —
 >    asserted by a `record` refused afterwards. **And the record keeps the higher version**: a
 >    second `end_for_goal` at a **higher** `goal_version` raises it — a `clear_closure` at the first
