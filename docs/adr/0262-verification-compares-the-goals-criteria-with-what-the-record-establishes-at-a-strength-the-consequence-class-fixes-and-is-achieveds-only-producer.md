@@ -353,28 +353,39 @@ honest one."*
 > `verifies`. **A step is satisfying or contradicting on what the tool's author declared and what
 > the provider returned, and on nothing else.**
 >
-> **The bound steps are grouped by *the call each made*, and the grouping is the policy's rather
-> than the planner's.** Two bound steps are of **one call** where their pinned decisions carry the
-> same **`ActionRequest.parameters_digest`** (ADR-0021 §1's embedded value, computed by the policy
-> over the concrete request and written by no model), and of **different calls** otherwise. Within
-> one call the **last** decisive step governs, last in the order `GoalAttempt.execution_ids` and
-> each execution's own step order fix; across calls **every** call must agree.
+> **The bound steps are grouped by *the call each made*, the grouping is the policy's rather than
+> the planner's, and a group that does not agree with itself establishes nothing.** Two bound steps
+> are of **one call** where their pinned decisions carry the same
+> **`ActionRequest.parameters_digest`** (ADR-0021 §1's embedded value, computed by the policy over
+> the concrete request and written by no model), and of **different calls** otherwise. A call is
+> **satisfying** where it has a decisive step and **every** one of its decisive steps is
+> satisfying, **contradicting** where it has one and every one is contradicting, and
+> **ambiguous** where it has both — **no order breaks the tie, and the last step does not govern**.
 >
-> - **Unmet** — the last decisive step of **some** call is contradicting.
-> - **Met** — no call's last decisive step is contradicting, and **some** call's is satisfying.
-> - **Unestablished** — otherwise: the criterion's kind is **`BoundKind.MONEY`** (below); it has no
->   confirmed member; it has no bound step; or no bound step is satisfying or contradicting — every
->   one `PENDING`, `SKIPPED`, `RUNNING` or `INDETERMINATE`, or `SUCCEEDED` under a definition
->   declaring **nothing** or none this decision can read.
+> - **Unmet** — **some** call is contradicting.
+> - **Met** — no call is contradicting, **no call is ambiguous**, and **some** call is satisfying.
+> - **Unestablished** — otherwise: **some call is ambiguous**; the criterion's kind is
+>   **`BoundKind.MONEY`** (below); it has no confirmed member; it has no bound step; or no bound
+>   step is satisfying or contradicting — every one `PENDING`, `SKIPPED`, `RUNNING` or
+>   `INDETERMINATE`, or `SUCCEEDED` under a definition declaring **nothing** or none this decision
+>   can read.
 
-**The digest is what tells a retry from a second act, and it is the only discriminator here that no
-model writes.** A **retry** re-dispatches the *same* concrete call, so its steps share a
-`parameters_digest` and the later success resolves the earlier no-effect failure — A8's case, and
-the one a *"some step contradicts"* rule would leave permanently `unmet`. A **second, different**
-act — the second of two rooms — is a different call with different arguments and therefore a
-different digest, so its success clears nothing, and a first booking that failed keeps the
-criterion `unmet`. **`PlanStep.intended_action` would answer the same question and is refused**:
-a planner writes it, and a verdict turning on it is the allow ADR-0249 §7 forbids (§2a).
+**The digest groups the steps and cannot tell a retry from a second identical act, so a group
+carrying both answers is refused rather than resolved.** A **retry** re-dispatches the *same*
+concrete call, so its steps share a `parameters_digest`; but **two identical acts share one too** —
+the second of two identical rooms carries equal arguments and therefore an equal digest — so a
+failure followed by a success within one group is *either* a retry that resolved the failure *or* a
+second act that left the first undone, and **the record does not say which**. **Reading it as a
+retry would report `met` where one of the two acts provably did not happen**, which is R50 read at
+the operand, so such a group is **ambiguous** and its criterion is `unestablished`: fail-closed,
+needing no identity the corpus does not have. **A second, *different* act** — two rooms on
+different dates — is a different call with a different digest, so its success clears nothing and a
+first booking that failed keeps the criterion `unmet`. **The cost is A8's retry case**, which now
+reads `unestablished` rather than `met` until a dispatch carries an identity distinguishing a retry
+from a second act (§9, the idempotency-key entry); an `UNCERTAIN` attempt over a resolved retry is
+the honest reading of a record that does not record the difference. **`PlanStep.intended_action`
+would answer the same question and is refused**: a planner writes it, and a verdict turning on it
+is the allow ADR-0249 §7 forbids (§2a).
 
 > **Normative — a criterion whose confirmed member is a `MONEY` one is `unestablished`, and this
 > decision states it as a rule rather than as a caveat.** What such a member states is a **ceiling
@@ -587,8 +598,10 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 
 > **Normative — a step is not a criterion, and `failed` decides nothing where the criteria decide
 > it.** Limbs 4 and 5 read the criteria alone. **A `FAILED` step that contradicts a criterion has
-> already made that criterion `unmet`** (§2), which limb 1 reports as `FAILED` and limb 4 as
-> `PARTIAL`; a `FAILED` step **no criterion is about** says that a step of the *plan* did not
+> already made that criterion `unmet`** (§2) — or, where its own call also carries a satisfying
+> step and is therefore **ambiguous**, `unestablished` — **which limb 1 reports as `FAILED` and
+> limb 4 as `PARTIAL`, and which limb 3 reports as `UNCERTAIN` at rung 2**; a `FAILED` step **no
+> criterion is about** says that a step of the *plan* did not
 > complete, and §1 fixes that a goal's criteria *"and nothing else"* are what success means. **So
 > an attempt whose every criterion is met is `VERIFIED` though a step failed beside it** — the
 > record is that the requested outcome was reached, which is what §6's statement for that member
@@ -1091,7 +1104,15 @@ booking"*.
   `ACHIEVED` write's prerequisite and ADR-0249 §7 forbids a model clearing one. Fired by a decision
   that lifts that bar.
 - **Retry across turns, reconciliation, idempotency keys, modify-before-replace, and how an
-  `INDETERMINATE` step is resolved.** **A8**, as ADR-0255 §12 and ADR-0259 §10 book them.
+  `INDETERMINATE` step is resolved.** **A8**, as ADR-0255 §12 and ADR-0259 §10 book them. **And
+  with them the identity that would tell a retry from a second identical act**: §2 groups a
+  criterion's bound steps by the call's own `parameters_digest`, two identical acts share one, and
+  a group carrying both answers is therefore `unestablished` rather than resolved — so a retry that
+  really did resolve its own failure reads `unestablished` too, and an `UNCERTAIN` attempt is what
+  this decision can honestly say about it. **No lane closes that by reading a step order, a
+  timestamp or a planner's label.** Fired by the decision that gives a dispatch a per-call
+  identity — which ADR-0266 §10 books as an opaque per-call reference — after which a retry is
+  distinguishable on the record rather than by inference.
 - **Distinguishing the four causes `SkipReason.UNMET_DEPENDENCY` carries.** ADR-0255 §2 gives all
   four one member, so §4's `blocked` fact cannot tell an unsatisfied `when` from an unresolvable
   `resolves`. **`SkipReason` gains no member here.** Fired by a surface that must tell a user
@@ -1332,11 +1353,14 @@ are ordered only by each other.
    members rest on, over one booking step → **both met**; the same goal where the row carries a
    `PERIOD` member alone → **met and unestablished** respectively, the arm that fails against any
    rule giving one verdict to every criterion of a goal. **And the grouping by
-   `parameters_digest` is asserted in both directions**: two bound steps of **one call** — the same
-   digest — the first `FAILED` and the later satisfying → **met**, the retry arm; two bound steps
-   of **different calls** — different digests, the two rooms — the first `FAILED` and the later
-   satisfying → **unmet**, and neither `VERIFIED` nor `ACHIEVED`; and within one call, an earlier
-   satisfying step beside a later contradicting one → **unmet**. **And a `MONEY` criterion is
+   `parameters_digest` is asserted in every direction**: two bound steps of **one call** — the same
+   digest — the first `FAILED` and the later satisfying → **unestablished**, the ambiguous-group
+   arm, and the same pair in the other order → **unestablished** likewise, the arm that fails
+   against any implementation letting a step order break the tie; two bound steps of **one call**
+   **both** satisfying → **met**, and both contradicting → **unmet**; two bound steps of
+   **different calls** — different digests, the two rooms — the first `FAILED` and the later
+   satisfying → **unmet**, and neither `VERIFIED` nor `ACHIEVED`; and an ambiguous call **beside**
+   a contradicting one → **unmet**, the arm that pins the order of the three results. **And a `MONEY` criterion is
    `unestablished` whatever else holds**: a confirmed `MONEY` member over a booking step every
    declaration holds over → **unestablished**, the attempt `UNCERTAIN` at rung 2 and the goal not
    `ACHIEVED`. **And
