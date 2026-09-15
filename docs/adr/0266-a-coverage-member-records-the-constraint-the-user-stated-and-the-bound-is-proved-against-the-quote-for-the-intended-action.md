@@ -955,10 +955,12 @@ superseded.
   **`PermissionDecision`'s transcription of it with `authorises`' sixth conjunct** (§7);
   `PROTOCOL_VERSION` with `wire/envelope.py`'s log entry; and §7's two routes, its condition 6 and
   its lineage narrowing in `permissions/_coverage.py`. **L1 and L2 between them restate every
-  ADR-0254 §20 arm §9's five mechanisms reach, each in the lane that owns it, dropping none.** **The
-  evidence route is implemented and is met by no quote**, this decision landing no carrier — so
-  every `MONEY` member is unmet and the act asks. **`core/protocols.py` is not touched**, so no
-  triad is owed. Arms 2(b), 3(b), 4(a), 6(a)'s no-quote limbs and 6(b).
+  ADR-0254 §20 arm §9's six mechanisms reach, each in the lane that owns it, dropping none — except
+  the covered limbs of mechanism (iv)'s arms, which ride with the quote decision because no lane
+  here can make a `MONEY` member met (§9).** **The evidence route is implemented and is met by no
+  quote**, this decision landing no carrier — so every `MONEY` member is unmet and the act asks.
+  **`core/protocols.py` is not touched**, so no triad is owed. Arms 2(b), 3(b), 4(a), 6(a)'s
+  no-quote limbs and 6(b).
 - **L2 — the mint and the request builder, in `orchestration` alone.** §1's candidate selection,
   §2's act and its four refusals, §4's reading, its refusals and its path-(i)-only rule, and §5's
   one-per-kind refusal and goal-only read; **and setting `ActionRequest.intended_action` from the
@@ -970,8 +972,9 @@ superseded.
   where that field is not yet in its base, L2 is not briefed. Arms 1(a), 2(a), 3(a), 4(b) and 7.
 - **And one lane this decision does not cut.** The **quote decision** (§10, #2387) lands the
   carrier, the producer and the read, and wires them into §7's evidence route. **Arms 1(b), 5 and
-  6(a)'s with-a-quote limbs are shipped there**, against that decision's carrier and never against
-  a double standing in for it.
+  6(a)'s with-a-quote limbs are shipped there**, against that decision's carrier and never against a
+  double standing in for it — **and with them the covered limbs of every ADR-0254 §20 arm §9's
+  mechanism (iv) reaches**, arm 45's GBP 50 `ALLOW` among them.
 
 > **Normative — L1 lands before L2, both are briefed on this decision alone, and ADR-0254 §20's
 > Lane 2 is briefed after the quote decision (§10) rather than after these two.** Neither lane
