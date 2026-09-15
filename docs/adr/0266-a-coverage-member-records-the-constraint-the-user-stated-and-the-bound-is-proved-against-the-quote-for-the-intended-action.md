@@ -46,7 +46,9 @@ the quote for the intended action
   `CoverageView`**, whose required `argument` field could be transcribed from nothing once a member
   carries none: it carries **`kind`** in its place, its required `span` — the user's own words
   beside the values — unchanged and load-bearing, since the user's assent to that rendering is where
-  a stated bound now gets its authority. **§16's roster, in three limbs**: `core/types.py` gains a
+  a stated bound now gets its authority; **and §11's listing, which names that same argument in the
+  words it renders a member with, renders it by its `kind` instead**. **§16's roster, in three
+  limbs**: `core/types.py` gains a
   **fourteenth** type, `BoundedArgument`, and a **sixth and seventh** field,
   `ToolDefinition.bounded_arguments` and `ActionRequest.intended_action`; and *"`PermissionDecision`
   gains no field"* gains one, `intended_action`, without which a decision recorded for one act
@@ -62,8 +64,8 @@ the quote for the intended action
   moves, and no arm is dropped; for the path-(iii) one it is a supersession outright**, arms 64 and
   65 losing their no-question limb for a member §4 mints while their whole structure stands for an
   act §10's three ratified resolutions mint. §9 also records the arms the sweep cleared with their
-  ground. **Every other clause of all twelve sections binds entire**, §9 naming them section by
-  section.
+  ground. **Every other clause of every section those twelve scopes touch binds entire**, §9 naming
+  them scope by scope.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -151,8 +153,9 @@ written on that reading and on nothing carried forward**, and nothing records a 
 
 It decides what a member **records**, how a span **becomes** one, **what settles it** and **what
 it is proved against** — and nothing beyond that. It leaves ADR-0254 §3's conditions 1-5, §7,
-§12's expiry as ADR-0256 §1 leaves it and every clause of §11 but `CoverageView`'s field list
-untouched, narrows §5 and §6 in one direction each and no other, and opens no route, relaxes no
+§12's expiry as ADR-0256 §1 leaves it and every clause of §11 but `CoverageView`'s field list and
+the listing's per-member phrasing untouched, narrows §5 and §6 in one direction each and no
+other, and opens no route, relaxes no
 floor, lowers no threshold and moves no ruling. **And it does not decide where a quote is
 carried, what records one, or how a policy obtains one**: §6 states the four facts and reads them
 from nowhere concrete, the carrier and the producer being the **quote decision**'s (§10).
@@ -739,8 +742,9 @@ untouched wherever that section already fires them — its no-memory-no-preferen
 normalisation-at-the-mint rules and its *"A resolution the loop cannot take is not taken, and no
 member is minted"*.
 
-**ADR-0254 §11 — in `CoverageView`'s field list alone, and it is the sweep's most consequential
-find.** §11 declares `CoverageView`'s fields *"exactly `argument`, an `EncodableText`; `fixed`;
+**ADR-0254 §11 — in `CoverageView`'s field list and in the listing's per-member phrasing, and it
+is the sweep's most consequential find.** §11 declares `CoverageView`'s fields *"exactly
+`argument`, an `EncodableText`; `fixed`;
 `bound`; and `span`"* and requires the projection to carry *"the recorded values by transcription
 and not a second derivation of them"*. A member carries no `argument` once §3 above lands, so a
 **required** field would have to be transcribed from nothing and **no projection would be
@@ -749,12 +753,27 @@ would not render. **`CoverageView` carries `kind`, a `BoundKind`, in its place**
 fields, its two-shape rule and its **required `span`** unchanged — and that span is what §4 rests
 on, §11's own *"a user reading "under sixty pounds" beside a bound of GBP 60 can check the working
 before they answer"* being exactly the mechanism this decision makes the authority.
-**`AuthorizationProjection` and `AuthorizationView` are unchanged.** **Every other clause of §11
-binds entire**: the rendered-from-the-proposed-row rule and its restart recovery, the
-possibly-empty coverage, the one-carrier-for-both argument, the rendering bar, and
-`TurnOutcome.authorizations` — whose *"two rows of one act may carry different bounds for an
-argument of the same name"* is stale as §1's illustration is and, being unmarked reason beside a
-mark (ADR-0089 §3), **takes no scope of its own**.
+**`AuthorizationProjection` and `AuthorizationView` are unchanged.** **And in one further normative
+limb, which the field list forces and which no other clause of §11 can absorb: the listing's
+per-member phrasing.** §11's surfaces clause obliges the listing to render *"each coverage member as
+*this argument is fixed at that value* or *this argument is bounded by that limit* together with the
+span the user said"* — wording that names a key no member carries once §3 above lands, so a reader
+holding it either invents an argument or renders nothing. **The listing renders each member by its
+`kind`**: *this kind of value is fixed at that value*, or *this kind of value is bounded by that
+limit*, the `BoundKind` naming what the act constrained where the argument key used to. **The span
+clause, and every other item that sentence lists** — the goal's statement, the declaration's
+`VisibleIdentifier` and description, the expiry, the live-or-lapsed flag, the `PROPOSED` exclusion
+and the renders-no-internal-value bar — **are untouched**, and so is the revocation surface.
+**Every other clause of §11 binds entire**: the rendered-from-the-proposed-row rule and its restart
+recovery, the possibly-empty coverage, the one-carrier-for-both argument, the rest of the rendering
+bar, and `TurnOutcome.authorizations`. **And every remaining sentence of §11 that words itself over
+an argument is unmarked reason beside a mark** (ADR-0089 §3) and **takes no scope of its own**,
+reading over the kind as §1's illustration does: `TurnOutcome.authorizations`' *"two rows of one act
+may carry different bounds for an argument of the same name"*, the one-carrier paragraph's *"three
+facts about a member — the argument, the fixed value or the bound, and the user's own words"*, the
+empty projection's *"fixing no argument because the call carries none"*, and the revocation
+paragraph's *"what the act fixed about the arguments"*. **None of them is the rule it sits beside,
+and this decision moves none of those rules.**
 
 **ADR-0254 §16 — in its `core`-surface roster, in three limbs.** It states that `core/types.py`
 gains *"**thirteen** types"* and *"**five** fields"*, and rules separately that
@@ -922,7 +941,8 @@ superseded.
   **no clause here verifies anything, compares a charge, or writes a finding**, and
   `AttemptPhase.VERIFY` is A10's by ADR-0255 §17's assignment. ADR-0254 §3's conditions 1-5, §7,
   §12's ladder as ADR-0256 §1 leaves it, and every clause of §11 but `CoverageView`'s field list
-  are likewise untouched. Fired by A10, and by the decisions those clauses already name.
+  and the listing's per-member phrasing are likewise untouched. Fired by A10, and by the
+  decisions those clauses already name.
 
 ### 11. The lane cut, and the arms this decision owes
 
