@@ -400,6 +400,7 @@ def _plain_confirmation() -> Confirmation:
         token=ContinuationToken(handle="plain-1"),
         egress=None,
         read=None,
+        authorization=None,
     )
 
 

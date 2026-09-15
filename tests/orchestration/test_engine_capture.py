@@ -748,12 +748,39 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     none of which admits a ``SecretStr``, and the model sets ``extra="forbid"`` so a
     fourth field is unconstructable rather than unnoticed. The carrier check below is
     what keeps that true rather than merely stated.
+
+    **``AuthorizationProjection``, ``CoverageView`` and ``ValueBound`` joined it with
+    ADR-0254 §11**, because ``Confirmation`` — already in this graph through
+    ``StepOutcome`` — gained ``authorization``. The judgement §7 asks of the lane that
+    grows the graph, made rather than assumed. ADR-0254 §11 closes each of the three
+    models at its stated fields with ``extra="forbid"``, and states the bar over them in
+    terms: the projection *"carries **no** goal id, no authorization id, no
+    ``BoundAccount``, no connection reference, no ``SecretName`` and no transport
+    endpoint"*, and names no identifier of any kind. What is left is an argument **key**
+    at depth one, a value the record already holds — which is a
+    :data:`~ai_assistant.core.types.FrozenJsonValue`, the same type ``PlanStep``'s own
+    ``parameters`` are built on and already in this graph — a bound of three closed
+    kinds carrying a currency code, two ``Decimal`` limits, two instants, an IANA zone
+    name and a tuple of terms, a span of the **user's own words**, and one instant. None
+    of those fields admits a ``SecretStr``, and the carrier check below is what keeps
+    that true rather than merely stated.
+
+    **The span is the one member worth naming explicitly**, because it is text a person
+    typed rather than text this system composed. It is Tier 1 and not Tier 0 — ADR-0004
+    §1 puts the user's own words there, and ADR-0254 §16 says so of this very store in
+    terms — and residency is what §7's reliance rests on: a Tier 0 secret lives in the
+    OS keyring, is read through ``SecretStore`` by ``models/`` and ``tools/`` alone, and
+    reaches an ``Authorization``'s basis by no route at all. A ``Confirmation``'s
+    ``parameters`` already put the user's own argument values in front of this stage.
     """
     reachable = _reachable_from_the_composing_stage()
 
     assert set(reachable) == {
         "ActionPlan",
         "Attestation",
+        "AuthorizationProjection",
+        "CoverageView",
+        "ValueBound",
         "CalendarFacet",
         "Capture",
         "Confirmation",

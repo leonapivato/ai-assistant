@@ -293,14 +293,19 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
     AnswerKind,
+    AuthorizationProjection,
+    AuthorizationSettlement,
+    AuthorizationView,
     Belief,
     BeliefBand,
+    BoundKind,
     Clarification,
     ClarificationWithdrawal,
     ClassReach,
     ContinuationToken,
     CostBasis,
     CoverageUnrecordedBinding,
+    CoverageView,
     DestinationTrustRecord,
     DiscloserProvenance,
     Disposition,
@@ -351,6 +356,7 @@ from ai_assistant.core.types import (
     StepStatus,
     ToolOutcome,
     TurnReference,
+    ValueBound,
     encodable_text,
     routed_listing_arm,
     secret_value,
@@ -2500,6 +2506,56 @@ def recipient_grant_log(
     raise typer.Exit(code)
 
 
+@app.command()
+def authorizations(
+    goal_id: str = typer.Argument(
+        ..., callback=_present_id, help="The piece of work to ask about."
+    ),
+) -> None:
+    """Show what one piece of work still authorises me to do without asking.
+
+    Each entry is one act of yours: what it fixed or bounded, in your own words, the
+    tool it is about, and when it runs out. Anything you authorised is here — including
+    what has already lapsed, so you can still withdraw it.
+
+    **This is a record of what you authorised and not a promise about the next call.**
+    I re-check every call against everything else at the moment I make it, so a listing
+    here does not mean the next one goes through without a question.
+
+    **It is per piece of work, deliberately.** There is no listing across all of them:
+    that answer would either be truncated or unbounded, and a truncated answer to "what
+    do I authorise" is a false answer rather than a partial one.
+    """
+    code = asyncio.run(_list_authorizations(goal_id))
+    raise typer.Exit(code)
+
+
+@app.command("revoke-authorization")
+def revoke_authorization(
+    authorization_id: str = typer.Argument(
+        ..., callback=_present_id, help="The authority to withdraw, from the listing."
+    ),
+) -> None:
+    """Withdraw one standing authority.
+
+    **No question is asked and nothing stands in the way**, deliberately: this is your
+    remedy, and a prompt between you and it is a prompt too many. It is never refused
+    for being "too many" — there is no ceiling here at all.
+
+    Withdrawal is whole: there is no partial withdrawal and no narrowing. Changing what
+    you authorise is a withdrawal followed by a fresh act, and a fresh act needs a call
+    you are asked about.
+
+    It rewrites nothing already decided and stops nothing already going out. What it
+    does is make the next such call a question again.
+
+    A question you have **not** answered is not withdrawn here: decline it, or leave it
+    to lapse.
+    """
+    code = asyncio.run(_revoke_authorization(authorization_id))
+    raise typer.Exit(code)
+
+
 @app.command("revoke-recipient-grant")
 def revoke_recipient_grant(
     grant_id: str = typer.Argument(
@@ -4189,6 +4245,28 @@ async def _revoke_recipient_grant(grant_id: str) -> int:
         return _EXIT_ERROR
 
     return await _drive_revoke_recipient_grant(engine, grant_id)
+
+
+async def _list_authorizations(goal_id: str) -> int:
+    """Obtain a client, read one goal's standing authorities, and render them (§11)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_authorizations(engine, goal_id)
+
+
+async def _revoke_authorization(authorization_id: str) -> int:
+    """Obtain a client and withdraw one standing authorization (§11)."""
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_revoke_authorization(engine, authorization_id)
 
 
 async def _establish_destination_trust(decision_id: str) -> int:
@@ -6249,6 +6327,41 @@ async def _drive_revoke_recipient_grant(engine: AssistantEngine, grant_id: str) 
     return _EXIT_OK
 
 
+async def _drive_authorizations(engine: AssistantEngine, goal_id: str) -> int:
+    """Ask what one goal's recorded acts still authorise and render it (ADR-0254 §11).
+
+    **One call and no second one.** It does not read the recipient grants to annotate
+    the set, does not compute liveness of its own — the engine took one clock reading
+    for the whole listing and this surface renders what it was told (§16) — and does
+    not merge in what ``assistant recipient-grants`` answers. Those are two
+    vocabularies, and a page answering one with the other is how someone comes to
+    believe that withdrawing one withdrew the other.
+    """
+    try:
+        standing = await engine.standing_authorizations(goal_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_standing_authorizations(standing, goal_id=goal_id)
+    return _EXIT_OK
+
+
+async def _drive_revoke_authorization(engine: AssistantEngine, authorization_id: str) -> int:
+    """Withdraw one standing authorization and say what the store found (§11, §16).
+
+    **No read-back afterwards**, for :func:`_render_recipient_grant_outcome`'s reason
+    one store over: the settlement already says exactly what happened, and a listing
+    taken after it could not tell "withdrawn" from "was already gone" apart.
+    """
+    try:
+        settlement = await engine.revoke_authorization(authorization_id)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_authorization_settlement(settlement, authorization_id)
+    return _EXIT_OK
+
+
 async def _state_after(engine: AssistantEngine, source: str) -> SourceGrant | None | _Unread:
     """Re-read what ``source`` is currently granted for, or report it unread.
 
@@ -7692,6 +7805,13 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     # ADR-0242 §9: **beside the reply and never in place of it**. The model said what
     # was not done; this says what would enable it.
     _render_search_not_serviced(outcome.search_not_serviced)
+    # ADR-0254 §11's announcement, in the same position and for the same reason as the
+    # statement above: an authority this turn opened **without putting a question** is a
+    # fact about what the turn did, composed by `orchestration` and not by a model, and
+    # a reply cannot be made to agree with it or to deny it. It carries the withdrawal
+    # handle, so the remedy is in front of the user at the instant the authority comes
+    # into being rather than only afterwards.
+    _render_opened_authorizations(outcome.authorizations)
     # ADR-0244 §9's two members, after the statement that introduces them and before
     # the plan: `read_answer` is what became of an answer to a question already put,
     # and `read_confirmation` is a question this turn has just raised. The type
@@ -12737,9 +12857,270 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
     if egress is not None:
         _render_confirmation_egress(egress, values)
     _print(f"  Why: {_safe(confirmation.reason)}")
+    # ADR-0254 §11, **after the call itself and before the answer**: the user reads
+    # what the one call would do and then what saying yes leaves standing. Putting it
+    # first would bury the concrete act under a policy statement; putting it after the
+    # prompt would be a disclosure the answer had already been given against.
+    _render_confirmation_authorization(confirmation.authorization)
     if confirmation.read is not None:
         _render_read_terms(confirmation)
     return True
+
+
+# --- what an authorization says, on this surface (ADR-0254 §11) --------------
+# **One renderer for a member, used by the question, the listing and the
+# announcement**, because §11 puts the same three facts in front of the user at all
+# three — the argument, the fixed value or the bound, and the user's own words — and
+# a second renderer would be the two shapes of one fact ADR-0150 is named after.
+#
+# **Every value goes through :func:`_safe`.** An argument key is caller-influenced
+# (ADR-0150 §13), a fixed value is whatever the record holds, and a span is the
+# user's own text; none of them is trusted with the terminal's control codes.
+
+
+def _bound_sentence(bound: ValueBound) -> str:
+    """One bound, as a sentence (ADR-0254 §2's three kinds and no fourth).
+
+    **A statement per kind, and the enumeration is closed by a ``match``** with no
+    catch-all: a fourth member would fail the type check here rather than render as
+    silence, which is ADR-0177 §7's rule for a vocabulary a surface renders.
+
+    **Nothing is normalised, re-cased, rounded or localised.** ADR-0254 §10 puts
+    whatever normalising an act needed at the moment the member was minted, and a
+    second normalisation at the rendering would be the second shape ADR-0150 names.
+
+    Args:
+        bound: The permitted range the act stated.
+
+    Returns:
+        The sentence, with every value already escaped.
+    """
+    match bound.kind:
+        case BoundKind.MONEY:
+            currency = _safe("" if bound.currency is None else bound.currency)
+            ceiling = f"up to {_safe(str(bound.maximum))} {currency}".rstrip()
+            if bound.minimum is None:
+                return ceiling
+            return f"from {_safe(str(bound.minimum))} {currency} {ceiling}".replace("  ", " ")
+        case BoundKind.PERIOD:
+            start = "" if bound.starts_at is None else _safe(_when(bound.starts_at))
+            end = "" if bound.ends_at is None else _safe(_when(bound.ends_at))
+            zone = "" if bound.timezone is None else f", read in {_safe(bound.timezone)}"
+            return f"from {start} up to but not including {end}{zone}"
+        case BoundKind.TERMS:
+            named = ", ".join(_safe(term) for term in bound.terms or ())
+            return f"one of: {named}"
+
+
+def _render_coverage(coverage: Sequence[CoverageView], *, indent: str) -> None:
+    """Every member as its own statement, with the words behind it (ADR-0254 §11).
+
+    **A member per line and the span beneath it**, because ADR-0254 §8 makes both
+    halves survive — *"neither is derivable from the other"* — so a reader can check
+    the working rather than take the figure on trust.
+
+    **An empty coverage says what it is and never nothing at all** (§1, §11). It is
+    an authority over a call that carries no argument, and it is a wildcard over
+    nothing: a blank here would read as *"no limits"*, which is the opposite of what
+    the record says.
+
+    Args:
+        coverage: The views to render, in the record's own order.
+        indent: The leading whitespace this block sits at.
+    """
+    if not coverage:
+        _print(
+            f"{indent}[dim]It fixes no value, because the call carries no argument of "
+            f"yours. It covers a call with no arguments and nothing else — it is not "
+            f"permission for anything wider.[/]"
+        )
+        return
+    for view in coverage:
+        argument = _safe(view.argument)
+        if view.bound is not None:
+            _print(f"{indent}{argument}: {_bound_sentence(view.bound)}")
+        else:
+            _print(f"{indent}{argument}: fixed at {_safe(str(view.fixed))}")
+        _print(f'{indent}  [dim]from what you said: "{_safe(view.span)}"[/]')
+
+
+def _render_confirmation_authorization(projection: AuthorizationProjection | None) -> None:
+    """What answering *yes* would leave standing (ADR-0254 §11).
+
+    **Said before the answer is collected**, because §11's whole point is that *"a
+    confirmation that establishes a bound without naming it is not a confirmation of
+    that bound"* — ADR-0148 §8's fourth clause read onto what the answer makes
+    standing.
+
+    **Absence prints nothing at all** (ADR-0178 §4). What the member states when it is
+    present is that answering establishes a standing authority; its absence states
+    that answering establishes none, and a sentence saying so on every ordinary
+    confirmation would be noise on the overwhelming majority of them. The one-call
+    reading is the default a user already holds.
+
+    **It names no identifier** (§11) — not the goal's, not the row's, not a
+    connection reference — because a confirmation is about a row the user has not
+    established: there is nothing yet to withdraw and so no handle to carry. The
+    listing and the announcement, which *are* about rows that exist, carry one.
+
+    **The horizon is stated here and again in every listing** (ADR-0256), and it is
+    the instant that was **written** rather than one recomputed now: the row was
+    proposed before this question was put, so a restart between the question and the
+    answer shows the same instant.
+
+    Args:
+        projection: What the answer would establish, or ``None`` where it would
+            establish nothing.
+    """
+    if projection is None:
+        return
+    _print("  [bold]Answering yes also leaves a standing authority:[/]")
+    _render_coverage(projection.coverage, indent="    ")
+    _print(f"    [dim]It lapses at {_safe(_when(projection.expires_at))}.[/]")
+    _print(
+        "    [dim]Until then I can make this call for this piece of work again "
+        "without asking. You can withdraw it at any time — it will be listed under "
+        "'assistant authorizations'.[/]"
+    )
+
+
+def _render_authorization(view: AuthorizationView) -> None:
+    """One standing record, as ADR-0254 §11's listing renders it.
+
+    **The goal by its statement and never by its id** (§11), the declaration by its
+    own identifier and description, each member as a statement with the words behind
+    it, the horizon (ADR-0256), whether it still stands, and the row's ``id`` as the
+    **revocation handle** — which is the one internal value the bar admits, because
+    *"a listing that named no id would state an act and withhold the means to perform
+    it"*.
+
+    **Lapsed rows are here and are marked**, because ADR-0254 §16 returns them
+    deliberately: a user can see and revoke what they once authorised, and the
+    withdrawal path then needs no history query.
+
+    **``live`` is reported and is never read as a promise.** §11: *"The listing is a
+    record of what the user authorised and is not a promise that the next call will
+    be allowed"* — so nothing here says the next call will go through, and a record
+    resting on a recipient authority that has since lapsed still reads as standing,
+    because that is what it is.
+
+    Args:
+        view: The record to render.
+    """
+    _print(f"\n[bold]{_safe(view.goal_statement)}[/]")
+    _print(f"  Through: {_safe(view.tool.id)} — {_safe(view.tool.description)}")
+    _render_coverage(view.coverage, indent="  ")
+    standing = "still stands" if view.live else "has lapsed"
+    _print(f"  [dim]{standing}; the horizon is {_safe(_when(view.expires_at))}.[/]")
+    if not _is_pasteable(view.id):
+        _uncopyable("this authorisation's handle")
+        return
+    _print_hint(f"  [dim]Withdraw it:[/] assistant revoke-authorization {_argument(view.id)}")
+
+
+def _render_standing_authorizations(standing: Sequence[AuthorizationView], *, goal_id: str) -> None:
+    """The listing for one goal (ADR-0254 §11).
+
+    **Per goal, and the empty answer is not a fault.** §11 makes the listing keyed on
+    a goal and adds no cross-goal read, and a goal this system holds no record for —
+    or holds no *authority* for — is answered by an empty listing rather than by a
+    refusal.
+
+    Args:
+        standing: What the engine answered, in the store's own order.
+        goal_id: The goal that was asked about, for the empty sentence.
+    """
+    if not standing:
+        _print(
+            f"[dim]Nothing standing for {_safe(goal_id)}. Every call for that piece of "
+            f"work is put to you as it comes up.[/]"
+        )
+        return
+    _print("[bold]What this piece of work authorises:[/]")
+    for view in standing:
+        _render_authorization(view)
+    _print(
+        "\n[dim]These are records of what you authorised. They are not a promise that "
+        "the next call will go through — I check every call against everything else "
+        "at the moment I make it.[/]"
+    )
+
+
+def _render_authorization_settlement(settlement: AuthorizationSettlement, handle: str) -> None:
+    """What the withdrawal did, as a statement per member (ADR-0254 §16).
+
+    **The store's own four-member vocabulary, rendered as prose and never as its own
+    spelling** (§11, §16): a second three-valued word for one fact is the second
+    carrier ADR-0150 is named after, so the member crosses unmapped and this is where
+    it becomes English.
+
+    **All four members are handled and the ``match`` has no catch-all.**
+    ``WOULD_DUPLICATE`` is **unreachable on this surface** — it is reachable only on a
+    settlement to ``ESTABLISHED`` and a withdrawal settles to ``REVOKED`` — and it is
+    still given a sentence, because the closed vocabulary crosses a version boundary:
+    a hub that sent it would otherwise render as silence, which is the failure
+    ADR-0177 §7's enumeration rule exists against. It is not a fault slot either; the
+    sentence says what the hub said and claims nothing further.
+
+    **No member of the vocabulary is reported as an error**, and none of them is one:
+    each says what the store found, and the two that moved nothing are the store
+    working rather than failing.
+
+    Args:
+        settlement: What the engine answered.
+        handle: The handle the user passed, for the sentences that name it.
+    """
+    match settlement:
+        case AuthorizationSettlement.SETTLED:
+            _print("[green]Withdrawn.[/]")
+            _print(
+                "[dim]Calls this authority covered will be put to you again. Nothing "
+                "already decided is rewritten and nothing already done is undone, and "
+                "a call already going out is not stopped.[/]"
+            )
+        case AuthorizationSettlement.NOT_AT_SOURCE:
+            _print(
+                f"[yellow]Nothing to withdraw.[/] I hold {_safe(handle)}, and it is not "
+                f"a standing authority: it may have been withdrawn already, replaced by "
+                f"a later one, lapsed, or be a question you never answered."
+            )
+            _print(
+                "[dim]A question you have not answered is withdrawn by declining it, not here.[/]"
+            )
+        case AuthorizationSettlement.NO_SUCH_AUTHORIZATION:
+            _print(f"[yellow]Nothing to withdraw.[/] I hold no record {_safe(handle)} at all.")
+            _print("[dim]'assistant authorizations <goal>' shows what stands now.[/]")
+        case AuthorizationSettlement.WOULD_DUPLICATE:
+            _print(
+                f"[yellow]Nothing was withdrawn.[/] The hub answered about "
+                f"{_safe(handle)} with an outcome a withdrawal cannot produce, so I have "
+                f"changed nothing and I am not guessing at what it meant."
+            )
+
+
+def _render_opened_authorizations(opened: Sequence[AuthorizationView]) -> None:
+    """ADR-0254 §11's announcement: authorities this turn opened without asking.
+
+    **One statement per row and never a merged one** (§11): one instruction can open
+    two authorities that are not the same authority, their coverage is not
+    interchangeable, and each is announced as itself so the user tells them apart by
+    the declaration each is about.
+
+    **It carries the withdrawal handle at the moment the authority comes into
+    being**, rather than only afterwards — a surface that named an act without naming
+    what withdraws it would state an act and withhold its remedy.
+
+    **Silence where the turn opened none**, which is every turn that did not: the
+    member is empty then, and there is no act to report.
+
+    Args:
+        opened: The rows this turn opened, in the order they were written.
+    """
+    if not opened:
+        return
+    _print("\n[bold]I have taken that as standing permission:[/]")
+    for view in opened:
+        _render_authorization(view)
 
 
 def _render_withheld_confirmation(confirmation: Confirmation, *, because: str) -> None:

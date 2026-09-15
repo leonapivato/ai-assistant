@@ -1057,6 +1057,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "goals",
         "withdraw_clarification",
         "abandon_goal",
+        "standing_authorizations",
+        "revoke_authorization",
         "delivery-stream",
     }
 

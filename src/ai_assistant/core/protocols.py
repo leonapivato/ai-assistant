@@ -118,6 +118,7 @@ if TYPE_CHECKING:
         Authorization,
         AuthorizationDisposition,
         AuthorizationSettlement,
+        AuthorizationView,
         BatchHandle,
         BatchItemOutcome,
         BatchRequest,
@@ -14595,6 +14596,148 @@ class AssistantEngine(Protocol):
             InvalidDestinationTrustError: If the trust store could not be read or
                 written, on any ground other than the record having been revoked in the
                 interval.
+        """
+        ...
+
+    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
+    #
+    # **Exactly two operations, and the roster is closed** (ADR-0254 §16): a
+    # listing and a revocation, and no lane invents a third. Proposing a row,
+    # settling one, correcting one and opening one are `orchestration`'s writer
+    # clauses (§15) and reach no client; reading a row whole reaches none either,
+    # because §16 promotes no member of `GoalAuthorizations`,
+    # `AuthorizationResolution` or `GoalAuthorizationStore` and lets no
+    # `Authorization` cross a frame.
+    #
+    # **The listing is per goal, and that is a decision rather than an omission**
+    # (§11). §16's `standing(goal)` is keyed on a goal and ADR-0254 adds no
+    # goal-free read: §1's uniqueness bounds the `ESTABLISHED` set per goal and
+    # declaration and bounds it not at all across goals, and this store carries no
+    # outstanding-count ceiling of the kind ADR-0193 §1 gives the grant store — so
+    # a cross-goal read would have to choose between a truncated answer and an
+    # unbounded one, and :meth:`standing_recipient_grants`' own reason forbids the
+    # first. ADR-0254 §19 books the cross-goal listing with what fires it.
+
+    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
+        """What one goal's recorded acts still authorise (ADR-0254 §11).
+
+        The ``ESTABLISHED`` rows of that goal, **live and lapsed**, read from
+        :meth:`GoalAuthorizationStore.standing` and projected into
+        :class:`~ai_assistant.core.types.AuthorizationView`. A lapsed row is returned
+        because a user can then see and revoke what they once authorised, which is
+        ADR-0193 §9's own reason for keeping an expired grant visible one store over,
+        and it is why the withdrawal path needs no history query. A ``PROPOSED`` row is
+        **never** here — that is a question the user has not answered and not an
+        authority they hold — and ``standing`` is what makes that a fact about the read
+        rather than a filter a renderer applies.
+
+        **It takes no ``limit``**, for :meth:`standing_recipient_grants`' stated
+        reason: *"a truncated answer to 'what do I authorise' is a false answer rather
+        than a partial one"*.
+
+        **It composes, filters, enriches and summarises nothing beyond the
+        projection.** The goal's statement is read through :meth:`PlanStore.get_goal`,
+        and **a goal that store does not hold is an empty answer rather than a raise**.
+        No other store is read: no recipient grant annotates a row, no audit row is
+        consulted, and no ``Settings`` value reaches the answer.
+
+        **The liveness is the engine's one clock reading** (ADR-0254 §16), taken once
+        for the whole listing, because ``standing`` evaluates none and reports none — a
+        listing that read an advancing clock per row could answer over a set true at no
+        real instant (ADR-0193 §9).
+
+        **:attr:`~ai_assistant.core.types.AuthorizationView.live` reports the row's own
+        liveness and never the standing of another act.** A row whose ``origin`` is
+        ``OPENING_ACT`` rests on a recipient grant ADR-0254 §6 re-takes at every
+        dispatch, and that grant may have lapsed or been revoked since. Such a row
+        **still appears and still reads live** where §1's predicate holds, because
+        hiding an ``ESTABLISHED`` row the user may revoke would hide an authority they
+        hold. **The listing is a record of what the user authorised and is not a
+        promise that the next call will be allowed** — ``decide`` is the only thing
+        that answers that (§13), and this operation reads no grant seam at all.
+
+        **The rendering bar** (ADR-0254 §11, ADR-0193 §11). The view carries the row's
+        ``id``, because that is the handle :meth:`revoke_authorization` takes and a
+        listing that named no id would state an act and withhold the means to perform
+        it. It carries **no** subject digest, **no** ``BoundAccount`` and no account
+        reference, **no** connection reference, **no** ``confirmation``, **no**
+        ``supersedes``, **no** resolution, **no** ``destinations`` and no basis beyond
+        each member's span; the goal is rendered by **statement** and never by id.
+
+        Args:
+            goal_id: The goal whose standing authorities to list.
+
+        Returns:
+            One view per ``ESTABLISHED`` row of that goal, in the store's own order,
+            and an empty tuple where the goal holds none or the plan store does not
+            hold the goal.
+
+        Raises:
+            ValueError: If ``goal_id`` is blank or has no UTF-8 encoding. Refused
+                locally, before any I/O.
+            AuthorizationError: If the authorization store could not be read.
+            PlanningError: If the plan store could not be read.
+            OversizedValueError: If the listing does not fit the contract limit.
+        """
+        ...
+
+    async def revoke_authorization(
+        self, authorization_id: DurableIdentifier
+    ) -> AuthorizationSettlement:
+        """Withdraw one standing authorization (ADR-0254 §11).
+
+        :meth:`GoalAuthorizationStore.settle` to ``REVOKED`` on ADR-0254 §1's one edge
+        out of ``ESTABLISHED``, its answer returned **unmapped**: a second three-valued
+        vocabulary for one fact is exactly the second carrier ADR-0150 is named after,
+        so the surface renders prose from the member and never the member's own
+        spelling.
+
+        **An unknown id is a result and never a raise**, which is
+        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
+        rule and :meth:`revoke_recipient_grant`'s own shape one store over. A ``bool``
+        was considered and refused — it cannot tell an unknown id from a row that was
+        not at the source, which this surface must tell apart (§16).
+
+        **Which members can reach a caller here.**
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.SETTLED` where the row
+        stood ``ESTABLISHED`` and now stands ``REVOKED``;
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NOT_AT_SOURCE` where
+        the store holds the row and §1's one edge into ``REVOKED`` does not leave where
+        it stands — a ``PROPOSED`` row, a retired one, and the loser of two racing
+        settlements alike; and
+        :attr:`~ai_assistant.core.types.AuthorizationSettlement.NO_SUCH_AUTHORIZATION`
+        where the store holds no row with that id.
+        **:attr:`~ai_assistant.core.types.AuthorizationSettlement.WOULD_DUPLICATE` is
+        unreachable here** and is not a reason to mint a narrower type: it is reachable
+        only on a settlement **to ``ESTABLISHED``**, and a revocation settles to
+        ``REVOKED``, so the member is excluded by the edge rather than by the
+        vocabulary.
+
+        **A ``PROPOSED`` row is therefore not revocable**, and that is §1's graph
+        rather than an omission: a question the user has not answered is withdrawn by
+        declining it or by letting it lapse, and ``standing`` never offers one to a
+        listing in the first place. **A lapsed ``ESTABLISHED`` row is revocable**,
+        which is why ``standing`` returns it.
+
+        **Never refused for a ceiling** — there is none — and **revocation is whole**:
+        no operation narrows a record, re-scopes one, extends one or edits one in place
+        (§1). It is prospective: a recorded ``ALLOW`` stays recorded and stays true
+        about the moment it was made, and a call already dispatched is not recalled.
+
+        Args:
+            authorization_id: The row to withdraw, as
+                :attr:`~ai_assistant.core.types.AuthorizationView.id` renders it.
+
+        Returns:
+            The store's own settlement outcome, unmapped and unrenamed.
+
+        Raises:
+            ValueError: If ``authorization_id`` is blank or has no UTF-8 encoding.
+                Refused locally, before any I/O.
+            AuthorizationError: If the authorization store could not be read or
+                written.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the argument exceeds the contract limit.
         """
         ...
 

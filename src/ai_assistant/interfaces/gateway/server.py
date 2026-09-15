@@ -151,6 +151,8 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     AnswerOutcome,
     Attestation,
+    AuthorizationProjection,
+    AuthorizationView,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -165,6 +167,7 @@ from ai_assistant.core.types import (
     ConversationDigest,
     ConversationSummary,
     CoverageUnrecordedBinding,
+    CoverageView,
     Disposition,
     EgressBinding,
     EgressSpan,
@@ -200,6 +203,7 @@ from ai_assistant.core.types import (
     SuccessorLink,
     TurnOutcome,
     TurnReference,
+    ValueBound,
     Warrant,
     routed_listing_arm,
     secret_value,
@@ -433,6 +437,32 @@ _GOALS_PATH: Final = "/goals"
 _WITHDRAW_CLARIFICATION_PATH: Final = "/clarification/withdraw"
 _ABANDON_GOAL_PATH: Final = "/goal/abandon"
 
+#: ADR-0254 §11's goal-authorization surface. **Two paths for the two operations that
+#: decision promotes** — a listing and a revocation — which is the whole of its §16
+#: roster on ``AssistantEngine``.
+#:
+#: **ADR-0177 §1's closed enumeration is widened by this and ADR-0254's own
+#: ``- Status:`` line does not yet record it** (issue #2274 is the same shape, one
+#: decision earlier). ADR-0254 §11 owes *"a listing and a revocation"* on **the
+#: surfaces**, and §20 assigns *"the interface adapters that render them"* to this
+#: lane — so the routes follow the governing decision, exactly as ADR-0244 §13's
+#: ``cancel_read`` route did, and the reciprocal header record on ADR-0177 is ADR-0254's
+#: to make rather than this lane's. That record is filed rather than written here
+#: because an ADR text change is outside this lane's fence.
+#:
+#: **The listing is per goal and there is no goal-free path**, which is §11's decision
+#: rather than an omission here: a cross-goal read would have to choose between a
+#: truncated answer and an unbounded one, and *"a truncated answer to 'what do I
+#: authorise' is a false answer rather than a partial one"*. §19 books the cross-goal
+#: listing with what fires it.
+#:
+#: **The verb comes last** for :data:`_CANCEL_READ_PATH`'s reason — the path names the
+#: thing acted on and then the act — and the listing is its own path rather than an
+#: empty answer of the act, because the door classifies "from its method and path
+#: alone" (ADR-0168 §6).
+_AUTHORIZATIONS_PATH: Final = "/authorizations"
+_REVOKE_AUTHORIZATION_PATH: Final = "/authorization/revoke"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -502,6 +532,8 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _GOALS_PATH): "goals",
     ("POST", _WITHDRAW_CLARIFICATION_PATH): "withdraw_clarification",
     ("POST", _ABANDON_GOAL_PATH): "abandon_goal",
+    ("POST", _AUTHORIZATIONS_PATH): "standing_authorizations",
+    ("POST", _REVOKE_AUTHORIZATION_PATH): "revoke_authorization",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -1158,6 +1190,8 @@ class Gateway:
             _GOALS_PATH: self._goals,
             _WITHDRAW_CLARIFICATION_PATH: self._withdraw_clarification,
             _ABANDON_GOAL_PATH: self._abandon_goal,
+            _AUTHORIZATIONS_PATH: self._authorizations,
+            _REVOKE_AUTHORIZATION_PATH: self._revoke_authorization,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -3003,6 +3037,64 @@ class Gateway:
         )
         return _rendered({"abandonment": abandoned.value})
 
+    # --- ADR-0254 §11: the goal-authorization surface ---------------------
+
+    async def _authorizations(self, request: Request) -> Response:
+        """What one goal's recorded acts still authorise (ADR-0254 §11).
+
+        **Unpaged and unlimited, deliberately.** The operation takes no ``limit``,
+        because a truncated answer to *"what do I authorise"* is a false answer rather
+        than a partial one — so a listing too large for the frame is refused whole.
+
+        **This adapter computes no liveness and reads no store.** ``live`` on each view
+        is the engine's own single clock reading (§16, ADR-0193 §9); a gateway that
+        compared instants of its own could disagree with the ruling about what stands,
+        and ADR-0042 §6 gives it no clock to compare with in any case.
+
+        Args:
+            request: The admitted request, carrying ``goal_id``.
+
+        Returns:
+            One view per ``ESTABLISHED`` row of that goal, live and lapsed. A goal this
+            system holds no record of is an empty listing and never a raise.
+        """
+        listed = await self._relayed(
+            partial(
+                self._engine.standing_authorizations,
+                _required_string(_payload(request), "goal_id"),
+            )
+        )
+        return _rendered({"authorizations": [_authorization_view(one) for one in listed]})
+
+    async def _revoke_authorization(self, request: Request) -> Response:
+        """Withdraw one standing authorization (ADR-0254 §11).
+
+        **The browser supplies the row's id and nothing else.** There is no narrowing,
+        no re-scoping and no partial withdrawal to express, so the operation takes no
+        second argument and this gateway adds none.
+
+        **The store's four-member vocabulary crosses unmapped** (§16), as its own
+        value: a second three-valued spelling for one fact is the second carrier
+        ADR-0150 is named after, and the page renders prose from the member.
+        ``would_duplicate`` is unreachable here — it is reachable only on a settlement
+        to ``ESTABLISHED`` — and this adapter neither filters it out nor translates it.
+
+        Args:
+            request: The admitted request, carrying ``authorization_id``.
+
+        Returns:
+            Which of :class:`~ai_assistant.core.types.AuthorizationSettlement`'s four
+            states the act reached, as its own value. An unknown id is
+            ``no_such_authorization`` and never a raise.
+        """
+        settlement = await self._relayed(
+            partial(
+                self._engine.revoke_authorization,
+                _required_string(_payload(request), "authorization_id"),
+            )
+        )
+        return _rendered({"settlement": settlement.value})
+
     # --- ADR-0177 §10: the notification review surface --------------------
     #
     # Five operations on the notification **record** (ADR-0130 §7, §9) and none on a
@@ -4490,6 +4582,148 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "disambiguation": (
             None if outcome.disambiguation is None else _disambiguation_view(outcome.disambiguation)
         ),
+        # ADR-0254 §11's announcement: one view per authority this turn opened
+        # **without putting a question**, in the order the rows were written, and an
+        # empty list on every turn that opened none. §11 makes it a member of its own
+        # rather than a case of ``goal_engagement``, so it is rendered on its own here
+        # and no member is suppressed on account of another (ADR-0244 §9's shape).
+        "authorizations": [_authorization_view(one) for one in outcome.authorizations],
+    }
+
+
+def _coverage_view(view: CoverageView) -> dict[str, Any]:
+    """One coverage member, as the page receives it (ADR-0254 §11).
+
+    **One translator for the question, the listing and the announcement**, because §11
+    puts the same three facts in front of the user at all three and a second shape
+    would be the two carriers ADR-0150 is named after.
+
+    **Every value crosses as data and is neutralised on the page by being inserted
+    through a text node** (ADR-0042 §4, ADR-0175 §9): ``argument`` is a
+    caller-influenced key (ADR-0150 §13), ``fixed`` is whatever the record holds, and
+    ``span`` is the user's own text.
+
+    **The span crosses and the resolution does not** (§11). The rule, the ``now`` that
+    was read, the zone it was read in and the record it resolved to are provenance for
+    an auditor and reach one through ``export``; *"no surface renders a resolution as a
+    justification, a confidence, an assurance or a reason to trust the value more"*.
+
+    **``fixed`` crosses as text through** :func:`_parameter_text` **and never as a JSON
+    value**, which is that function's own rule reaching a second member: a JSON number
+    read by ``JSON.parse`` becomes a double, so an integer above ``2**53`` would reach
+    the person **changed** — and a rendering showing a value the record does not hold
+    is worse than one showing none. A string crosses as itself and every other value in
+    the notation it arrived in; nothing is truncated, abbreviated or summarised.
+
+    Args:
+        view: The member to translate.
+
+    Returns:
+        The member, as the page receives it.
+    """
+    return {
+        "argument": view.argument,
+        "fixed": None if view.fixed is None else _parameter_text(view.fixed),
+        "bound": None if view.bound is None else _bound_view(view.bound),
+        "span": view.span,
+    }
+
+
+def _bound_view(bound: ValueBound) -> dict[str, Any]:
+    """One permitted range, as the page receives it (ADR-0254 §2).
+
+    **Every field of the type crosses and the page branches on ``kind``**, which is
+    :func:`_confirmation_view`'s own enumeration discipline: what may appear on the
+    page is decided here, and a member of the vocabulary this build does not know is
+    then still rendered by the page's own unknown-member path rather than dropped.
+
+    **The instants cross as ISO-8601 strings and the decimals as their exact
+    characters.** Nothing is rounded, re-cased, localised or normalised here: ADR-0254
+    §10 puts whatever normalising an act needed at the moment the member was minted,
+    and a second one at the boundary would be the second shape ADR-0150 names.
+
+    Args:
+        bound: The bound to translate.
+
+    Returns:
+        The bound, as the page receives it.
+    """
+    return {
+        "kind": bound.kind.value,
+        "currency": bound.currency,
+        "currency_argument": bound.currency_argument,
+        "maximum": None if bound.maximum is None else str(bound.maximum),
+        "minimum": None if bound.minimum is None else str(bound.minimum),
+        "starts_at": None if bound.starts_at is None else bound.starts_at.isoformat(),
+        "ends_at": None if bound.ends_at is None else bound.ends_at.isoformat(),
+        "timezone": bound.timezone,
+        "terms": None if bound.terms is None else list(bound.terms),
+    }
+
+
+def _authorization_projection_view(projection: AuthorizationProjection) -> dict[str, Any]:
+    """What answering a question would establish, as the page receives it (§11).
+
+    **Two members and no third, because the type carries two.** It names **no
+    identifier of any kind** — not the goal's id, not the row's, not a connection
+    reference, not a credential slot and not a ``Settings`` field — since a
+    confirmation is about a row the user has not established and there is therefore
+    nothing to withdraw and no handle to carry.
+
+    **``coverage`` may be empty and the page must say so rather than say nothing**
+    (§1, §11): an empty projection is an authority over an argument-free call, and a
+    blank there would read as *"no limits"*, which is the opposite of what it states.
+
+    Args:
+        projection: What the answer would establish.
+
+    Returns:
+        The projection, as the page receives it.
+    """
+    return {
+        "coverage": [_coverage_view(one) for one in projection.coverage],
+        "expires_at": projection.expires_at.isoformat(),
+    }
+
+
+def _authorization_view(view: AuthorizationView) -> dict[str, Any]:
+    """One standing authorization, as the page receives it (ADR-0254 §11).
+
+    **Every field of the type and nothing beside it.** The rendering bar is enforced by
+    the carrier rather than restated here: the type has no field for a subject digest,
+    a :class:`~ai_assistant.core.types.BoundAccount`, an account or connection
+    reference, a ``confirmation``, a ``supersedes``, a resolution or a ``destinations``
+    set, so this translator cannot leak one by forgetting a rule. **The goal crosses as
+    a statement and never as an id.**
+
+    **The row's ``id`` crosses because it is the revocation handle** and for no other
+    reason (§11, ADR-0193 §11 read as it stands): a listing that named no id would
+    state an act and withhold the means to perform it, which is
+    ``recent_recipient_grants``' stated reason one store over.
+
+    **``live`` is the engine's answer and is never recomputed here** (§16). This
+    gateway holds no clock (ADR-0042 §6), so it cannot second-guess the one reading the
+    listing was decided over — and a second comparison could put two rows of one
+    listing at two instants.
+
+    **The declaration crosses by value**, as :class:`RecipientGrant` already does one
+    store over, and the page renders its identifier and its description: two
+    announcements of one act are told apart by the declaration each is about.
+
+    Args:
+        view: The record to translate.
+
+    Returns:
+        The record, as the page receives it.
+    """
+    return {
+        "id": view.id,
+        "goal_statement": view.goal_statement,
+        "tool_id": view.tool.id,
+        "tool_description": view.tool.description,
+        "coverage": [_coverage_view(one) for one in view.coverage],
+        "expires_at": view.expires_at.isoformat(),
+        "live": view.live,
     }
 
 
@@ -4725,6 +4959,17 @@ def _confirmation_view(confirmation: Confirmation) -> dict[str, Any]:
         "reason": confirmation.reason,
         "egress": None if confirmation.egress is None else _egress_view(confirmation.egress),
         "read": None if confirmation.read is None else confirmation.read.value,
+        # ADR-0254 §11's projection — what answering *yes* would leave standing.
+        # **Absence crosses as absence** (ADR-0178 §4), exactly as ``egress``' does:
+        # ``null`` states that answering establishes no standing authority, and neither
+        # this view nor the page reads it as a warrant about anything else the call
+        # does. **It carries no identifier at all**, because a confirmation is about a
+        # row the user has not established — there is nothing yet to withdraw.
+        "authorization": (
+            None
+            if confirmation.authorization is None
+            else _authorization_projection_view(confirmation.authorization)
+        ),
     }
 
 

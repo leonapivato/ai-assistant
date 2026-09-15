@@ -117,10 +117,11 @@ def _reduced(binding: EgressBinding) -> ConfirmationEgress:
 def test_confirmation_carries_exactly_the_declared_fields_and_still_forbids_extras() -> None:
     """ADR-0178 §1: one field added, none removed, ``extra="forbid"`` unchanged.
 
-    **ADR-0244 §4 adds the seventh**, ``read``, and the set is spelled out rather than
-    counted so that a lane adding an eighth meets this arm rather than a model that
-    quietly grew. The count is deliberately not in the name: it has moved once, and a
-    figure in a test name is a claim that goes stale silently.
+    **ADR-0244 §4 adds the seventh**, ``read``, and **ADR-0254 §11 the eighth**,
+    ``authorization`` — and the set is spelled out rather than counted so that a lane
+    adding a ninth meets this arm rather than a model that quietly grew. The count is
+    deliberately not in the name: it has moved twice, and a figure in a test name is a
+    claim that goes stale silently.
     """
     assert set(Confirmation.model_fields) == {
         "tool_id",
@@ -130,6 +131,7 @@ def test_confirmation_carries_exactly_the_declared_fields_and_still_forbids_extr
         "token",
         "egress",
         "read",
+        "authorization",
     }
     with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
         Confirmation(

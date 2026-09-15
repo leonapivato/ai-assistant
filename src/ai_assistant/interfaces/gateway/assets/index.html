@@ -489,6 +489,36 @@
         <div id="goal-list"></div>
       </section>
 
+      <!--
+        The goal-authorization surface (ADR-0254 §11). "The surfaces this decision owes
+        are a listing and a revocation", per goal — which is why this panel has no
+        button of its own in the choice row above: it is opened from the goal it is
+        about, and §11 adds no cross-goal listing for a button to open.
+
+        Each row renders the goal by its **statement** and never by its id, the
+        declaration, every value the act fixed or bounded with the owner's own words
+        beneath it, the horizon (ADR-0256), whether it still stands, and the record's
+        id — which is on screen because it is the revocation handle and "a listing that
+        named no id would state an act and withhold the means to perform it".
+      -->
+      <section id="authorizations" class="panel" hidden>
+        <h3>What this authorises</h3>
+        <p class="hint">
+          One entry per act of yours, for the piece of work named below. What has
+          lapsed is here too, so you can still withdraw it. This is a record of what you
+          authorised and not a promise about the next call: I check every call against
+          everything else at the moment I make it.
+        </p>
+        <!--
+          What the last act on this panel did, in the vocabulary's own words. `notice`
+          and not `account`, on `goal-said`'s stated reason one panel over: every member
+          is something the hub established, the two that moved nothing included, so a
+          withdrawal that took nothing back is the act working rather than failing.
+        -->
+        <p id="authorization-said" class="notice" hidden></p>
+        <div id="authorization-list"></div>
+      </section>
+
       <section id="review" class="panel" hidden>
         <h3>Notifications I am holding</h3>
         <p class="hint">

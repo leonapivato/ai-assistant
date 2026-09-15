@@ -140,6 +140,7 @@ def _step_park() -> TurnOutcome:
                 token=ContinuationToken(handle="h-1"),
                 egress=None,
                 read=None,
+                authorization=None,
             ),
         ),
         conversation_id="c-1",

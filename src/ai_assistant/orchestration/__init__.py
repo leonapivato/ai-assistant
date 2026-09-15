@@ -183,6 +183,7 @@ interruption. It concludes nothing else: no model call, no importance judgement,
 no absence, no disposition, and no cursor (ADR-0111 §11).
 """
 
+from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
 from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import (
@@ -238,6 +239,7 @@ __all__ = [
     "ENVELOPE_RESERVE_BYTES",
     "MIN_FRAME_BYTES",
     "AssembledHistory",
+    "AuthorizationOperations",
     "CaptureReport",
     "ComposedReply",
     "ComposingStage",

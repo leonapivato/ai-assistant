@@ -68,6 +68,7 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
+    AuthorizationOperations,
     ComposingStage,
     ConnectionOperations,
     ConsolidationStage,
@@ -1794,6 +1795,18 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             search=search_servicer,
             clock=_utcnow,
         )
+        # **ADR-0254 §11's read side, over the same store the policy and the writer
+        # hold.** Three holders, one object: a listing assembled from a second store
+        # could disagree with the ruling about what stands, which is the failure
+        # ADR-0016 §7 named for two registries one seam over. It is given `plans`
+        # because §11 renders a goal by its **statement** and never by its id, and
+        # `_utcnow` because §16 leaves the liveness comparison to the caller and
+        # ADR-0193 §9 requires it to be one reading for a whole listing.
+        authorization_operations = AuthorizationOperations(
+            authorizations=goal_authorizations,
+            plans=plans,
+            now=_utcnow,
+        )
         engine = Engine(
             loop=loop,
             # ADR-0250 §4's one seam, over the **same** model seam the planner and the
@@ -1863,6 +1876,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # rather than left as a claim. There is no type that could say so — both
             # parameters take the same class — so it is a property of *this* wiring.
             parked_reads=parked_read_operations,
+            # ADR-0254 §11's two operations and the confirmation projection, over the
+            # object built above.
+            authorization_operations=authorization_operations,
             # The two speech seams, each under the deadline decorator ADR-0200 §1
             # puts on the *wrapper* rather than in the seam, "so that it composes
             # over every implementation" (ADR-0118 §2). Wired **together**: half a

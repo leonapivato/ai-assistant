@@ -1224,6 +1224,11 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // reply and never in place of it, which is `renderRouted`'s own placement.
   renderReferenceOutcome(body, outcome.reference);
   renderGoalEngagement(body, outcome.goal_engagement);
+  // ADR-0254 §11's announcement, beside the reply and never in place of it: an
+  // authority a turn opened without putting a question is a fact about what the turn
+  // did, composed by the hub and not by a model, and it carries the withdrawal handle
+  // so the remedy is on screen at the instant the authority comes into being.
+  renderOpenedAuthorizations(body, outcome.authorizations);
   renderDisambiguation(body, outcome.disambiguation);
   renderClarification(body, outcome.clarification);
   // `null` only where nothing could be resolved (a recovered park, a deleted
@@ -2077,6 +2082,14 @@ function readConfirmation(confirmation) {
   // `null` the gateway wrote, which states that the ruling was taken over no egress
   // binding; a key that never arrived states nothing, and reading it as "no binding"
   // would put an egress call on the screen with its recipients silently dropped.
+  // ADR-0254 §11's projection, read exactly as `egress` and `read` are and for the
+  // totality rule above: a member `renderConfirmation` dereferences is a member this
+  // function tests. A `null` the gateway wrote is the state — answering establishes no
+  // standing authority — and a half-arrived projection is a confirmation this page
+  // refuses whole rather than one it renders with a limit missing from it.
+  if (confirmation.authorization !== null && !readAuthorizationProjection(confirmation.authorization)) {
+    return false;
+  }
   if (confirmation.egress === null) {
     return true;
   }
@@ -2257,6 +2270,11 @@ function renderConfirmation(parent, confirmation) {
   if (confirmation.read !== null) {
     line(item, READ_DISPATCHES_ONE, "notice");
   }
+  // ADR-0254 §11, **after the call itself and before the controls**: the owner reads
+  // what this one call would do and then what saying yes leaves standing. It is above
+  // `offerApproval` for ADR-0178 §7's "before it collects the user's answer" read as an
+  // obligation on this renderer, exactly as the floor above it is.
+  renderAuthorizationProjection(item, confirmation.authorization);
   // The whole floor is above this line, at both widths, which is ADR-0233 §8's
   // ordering clause and ADR-0178 §7's "before it collects the user's answer" read as an
   // obligation on this renderer. The cancellation act rides the same call because it is
@@ -9834,6 +9852,16 @@ function offerGoalActs(item, goal) {
     );
   });
   row.appendChild(take);
+  // ADR-0254 §11's listing, reached from the goal it is about. **Offered on every row,
+  // open or closed**: a closed goal may still hold a standing authority, and the
+  // withdrawal is the owner's remedy — a control withheld there would leave an
+  // authority visible through no route on this page. The listing answers empty where
+  // there is none, which is the honest answer rather than a reason to hide the button.
+  const authorities = document.createElement("button");
+  authorities.type = "button";
+  authorities.textContent = "What this authorises";
+  authorities.addEventListener("click", () => listAuthorizations(goal, false));
+  row.appendChild(authorities);
   if (!CLOSED_GOAL_STATUSES.includes(goal.status)) {
     const give = document.createElement("button");
     give.type = "button";
@@ -9923,6 +9951,388 @@ async function abandonGoal(goal) {
     await listGoals();
   } catch (_) {
     fault(GATEWAY_GONE, "goals");
+  }
+}
+
+// The goal whose authorities the panel is showing, so a withdrawal can re-read the
+// listing it acted on rather than the one that happens to be open. `null` until the
+// panel has been opened once.
+//
+// **The goal is held rather than the goal's id**, because the panel renders the goal's
+// own outcome statement above the rows: ADR-0254 §11 renders a goal "never by its id",
+// and a re-read holding only an id would have nothing to render it by.
+let authorizedGoal = null;
+
+// --- what an authorization says, on this page (ADR-0254 §11) ----------------
+//
+// **One reader and one renderer for a coverage member**, shared by the question, the
+// listing and the announcement, because §11 puts the same three facts in front of the
+// owner at all three — the argument, the fixed value or the bound, and the owner's own
+// words. A second pair would be the two shapes of one fact ADR-0150 is named after,
+// and the round-9 parity lesson one surface over is that they drift.
+//
+// **Every value reaches the screen through a text node** (`line`), because an argument
+// key is caller-influenced (ADR-0150 §13), a fixed value is whatever the record holds,
+// and a span is the owner's own text.
+//
+// **Instants are rendered as the gateway sent them**, which is this page's existing
+// convention for every instant it shows and is issue #1392's open lane, not this one's:
+// a second format here would make one page speak two.
+
+// What each `AuthorizationSettlement` member reads as, in the words the vocabulary
+// itself carries (ADR-0254 §16).
+//
+// **All four, and `would_duplicate` among them although it is unreachable here**: it is
+// reachable only on a settlement to `ESTABLISHED` and a withdrawal settles to
+// `REVOKED`, but the vocabulary crosses a version boundary and a member with no
+// sentence renders as silence. `goalMemberWords` answers the unknown-member refusal for
+// anything else, so a hub at another version is reported rather than misreported.
+//
+// **Not one of them is a fault**, the two that moved nothing included: each says what
+// the store found, which is the act working rather than the act failing. They take the
+// quiet `notice` slot for `goal-said`'s stated reason one panel over.
+const AUTHORIZATION_SETTLEMENT_WORDS = {
+  settled:
+    "Withdrawn. Calls that authority covered will be put to you again. Nothing already " +
+    "decided is rewritten, nothing already done is undone, and a call already going out " +
+    "is not stopped.",
+  not_at_source:
+    "I hold that record and it is not a standing authority, so nothing was withdrawn. It " +
+    "may have been withdrawn already, replaced by a later one, lapsed, or be a question " +
+    "you never answered — a question you have not answered is withdrawn by declining it, " +
+    "not here.",
+  no_such_authorization: "I hold no record of that id at all, so nothing was withdrawn.",
+  would_duplicate:
+    "The hub answered with an outcome a withdrawal cannot produce, so nothing was " +
+    "changed here and this page is not guessing at what it meant.",
+};
+
+// One bound, as a sentence (ADR-0254 §2's three kinds and no fourth).
+//
+// **A kind this build does not know is reported and never rendered as a blank**, which
+// is `goalMemberWords`' rule applied to a nested vocabulary: a bound whose kind is a
+// member from a hub at another version says so, rather than putting an empty limit
+// beside an argument and letting it read as "no limit".
+//
+// **Nothing is rounded, re-cased, localised or normalised.** ADR-0254 §10 puts whatever
+// normalising an act needed at the moment the member was minted; a second one here
+// would be the second shape ADR-0150 names.
+function boundSentence(bound) {
+  if (bound.kind === "money") {
+    const currency = bound.currency === null ? "" : ` ${bound.currency}`;
+    const ceiling = `up to ${bound.maximum}${currency}`;
+    return bound.minimum === null ? ceiling : `from ${bound.minimum}${currency} ${ceiling}`;
+  }
+  if (bound.kind === "period") {
+    const zone = bound.timezone === null ? "" : `, read in ${bound.timezone}`;
+    return `from ${bound.starts_at} up to but not including ${bound.ends_at}${zone}`;
+  }
+  if (bound.kind === "terms") {
+    return `one of: ${(bound.terms || []).join(", ")}`;
+  }
+  return GOAL_MEMBER_UNREADABLE;
+}
+
+// Whether a bound arrived whole enough to render (ADR-0254 §2).
+//
+// **Totality over what `boundSentence` dereferences**, which is `readConfirmation`'s
+// own rule: a member this page reads is a member it tests, so a half-arrived bound is
+// refused rather than rendered with `undefined` in it.
+function readBound(bound) {
+  if (!isRecord(bound) || !isText(bound.kind)) {
+    return false;
+  }
+  if (bound.terms !== null && !Array.isArray(bound.terms)) {
+    return false;
+  }
+  return [
+    bound.currency,
+    bound.currency_argument,
+    bound.maximum,
+    bound.minimum,
+    bound.starts_at,
+    bound.ends_at,
+    bound.timezone,
+  ].every((one) => one === null || isText(one));
+}
+
+// One coverage member, as it crosses (ADR-0254 §11).
+//
+// **Exactly one of `fixed` and `bound`**, which is the two-shape rule `CoverageMember`
+// and `CoverageView` are both built on: a member stating both would need a precedence
+// rule at the rendering, and one stating neither renders nothing the owner said.
+function readCoverageView(view) {
+  if (!isRecord(view) || !isText(view.argument) || !isText(view.span)) {
+    return false;
+  }
+  if (view.fixed !== null && !isText(view.fixed)) {
+    return false;
+  }
+  if (view.fixed === null) {
+    return view.bound !== null && readBound(view.bound);
+  }
+  return view.bound === null;
+}
+
+// Every member of a coverage, each as its own statement with the words behind it.
+//
+// **The span is beneath every member and is never dropped**, because ADR-0254 §8 makes
+// both halves survive — "neither is derivable from the other" — so the owner can check
+// the working rather than take the figure on trust.
+//
+// **An empty coverage says what it is and never nothing at all** (§1, §11): it is an
+// authority over a call that carries no argument of the owner's, and a blank here would
+// read as "no limits", which is the opposite of what the record says.
+function renderCoverage(item, coverage) {
+  if (coverage.length === 0) {
+    line(
+      item,
+      "It fixes no value, because the call carries no argument of yours. It covers a " +
+        "call with no arguments and nothing else — it is not permission for anything wider.",
+      "hint"
+    );
+    return;
+  }
+  coverage.forEach((view) => {
+    const said =
+      view.bound === null ? `fixed at ${view.fixed}` : boundSentence(view.bound);
+    line(item, `${view.argument}: ${said}`, "notification-summary");
+    line(item, `from what you said: "${view.span}"`, "hint");
+  });
+}
+
+// What answering *yes* would leave standing (ADR-0254 §11).
+//
+// **Rendered before the answer is collected**, because §11's whole point is that "a
+// confirmation that establishes a bound without naming it is not a confirmation of that
+// bound" — ADR-0148 §8's fourth clause read onto what the answer makes standing.
+//
+// **Absence renders nothing at all** (ADR-0178 §4). What the member states when present
+// is that answering establishes a standing authority; its absence states that answering
+// establishes none, and a sentence saying so on every ordinary confirmation would be
+// noise on the overwhelming majority of them.
+//
+// **It names no identifier**, because a confirmation is about a row the owner has not
+// established: there is nothing yet to withdraw and so no handle to carry. The listing
+// and the announcement, which are about rows that exist, carry one.
+//
+// **This is not the clause ADR-0244 §13 forbids.** That clause bars the *read* sentence
+// from stating "that a standing authorisation is being created"; this states what a
+// durable row the hub has already written would establish, and it is rendered on the
+// presence of that row and on nothing else.
+function renderAuthorizationProjection(item, projection) {
+  if (projection === null || projection === undefined) {
+    return;
+  }
+  line(item, "Answering yes also leaves a standing authority:", "notice");
+  renderCoverage(item, projection.coverage);
+  line(
+    item,
+    `It lapses at ${projection.expires_at}. Until then I can make this call for this ` +
+      "piece of work again without asking, and you can withdraw it at any time from " +
+      "What this authorises.",
+    "hint"
+  );
+}
+
+// Whether a projection arrived whole (ADR-0254 §11).
+function readAuthorizationProjection(projection) {
+  return (
+    isRecord(projection) &&
+    isText(projection.expires_at) &&
+    Array.isArray(projection.coverage) &&
+    projection.coverage.every(readCoverageView)
+  );
+}
+
+// Whether one standing record arrived whole (ADR-0254 §11).
+function readAuthorizationView(view) {
+  return (
+    isRecord(view) &&
+    isText(view.id) &&
+    isText(view.goal_statement) &&
+    isText(view.tool_id) &&
+    isText(view.tool_description) &&
+    isText(view.expires_at) &&
+    typeof view.live === "boolean" &&
+    Array.isArray(view.coverage) &&
+    view.coverage.every(readCoverageView)
+  );
+}
+
+// One standing record, with everything `AuthorizationView` carries and nothing it does
+// not (ADR-0254 §11).
+//
+// **The goal by its statement and never by its id**, the declaration by its own
+// identifier and description, each member as a statement with the words behind it, the
+// horizon (ADR-0256), whether it still stands, and the row's id — which is the one
+// internal value the bar admits, because it is the **revocation handle** and "a listing
+// that named no id would state an act and withhold the means to perform it".
+//
+// **No subject digest, no account, no connection reference, no `confirmation`, no
+// `supersedes`, no resolution and no destinations**: the view carries none of them, so
+// this renders every field it has and invents none.
+//
+// **`live` is reported and is never read as a promise.** "The listing is a record of
+// what the user authorised and is not a promise that the next call will be allowed", so
+// nothing here says the next call goes through — and a record resting on a recipient
+// authority that has since lapsed still reads as standing, because that is what it is.
+function renderAuthorization(list, view) {
+  const item = document.createElement("div");
+  item.className = "notification-row";
+  line(item, view.goal_statement, "reply");
+  line(item, `Through: ${view.tool_id} — ${view.tool_description}`, "hint");
+  renderCoverage(item, view.coverage);
+  const standing = view.live ? "still stands" : "has lapsed";
+  line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
+  line(item, `id: ${view.id}`, "hint");
+  const row = document.createElement("p");
+  row.className = "choice";
+  const withdraw = document.createElement("button");
+  withdraw.type = "button";
+  withdraw.textContent = "Withdraw this";
+  withdraw.addEventListener("click", () => revokeAuthorization(view));
+  row.appendChild(withdraw);
+  item.appendChild(row);
+  list.appendChild(item);
+}
+
+// ADR-0254 §11's announcement: authorities a turn opened **without asking**.
+//
+// **One statement per row and never a merged one**: one instruction can open two
+// authorities that are not the same authority, their coverage is not interchangeable,
+// and each is announced as itself so the owner tells them apart by the declaration each
+// is about.
+//
+// **The withdrawal handle is on screen at the instant the authority comes into being**,
+// rather than only afterwards — a surface naming an act without naming what withdraws
+// it would state an act and withhold its remedy.
+//
+// **Silence where the turn opened none**, which is every turn that did not: the member
+// is empty then and there is no act to report.
+function renderOpenedAuthorizations(body, opened) {
+  if (!Array.isArray(opened) || opened.length === 0) {
+    return;
+  }
+  if (!opened.every(readAuthorizationView)) {
+    line(body, GOAL_MEMBER_UNREADABLE, "notice");
+    return;
+  }
+  line(body, "I have taken that as standing permission:", "notice");
+  opened.forEach((view) => renderAuthorization(body, view));
+}
+
+// What the last act on the authorizations panel did, in the vocabulary's own words.
+//
+// The quiet slot, on `sayGoalAct`'s stated reason: every member is something the hub
+// established, the two that moved nothing included, so a withdrawal that took nothing
+// back is the act working and not the act failing.
+function sayAuthorizationAct(said) {
+  const node = el("authorization-said");
+  node.textContent = said === null ? "" : said;
+  node.hidden = said === null;
+}
+
+// What one piece of work still authorises (ADR-0254 §11).
+//
+// **Unpaged, because the operation takes no limit**: "a truncated answer to 'what do I
+// authorise' is a false answer rather than a partial one", so there is no more-button
+// here and a listing too large for the frame comes back as a refusal rather than short.
+//
+// **Per goal, and reached from the goal it is about** — §11 adds no cross-goal read,
+// and the id this sends is the row's own rather than one typed here.
+// **`keepSaid` exists because the account of the last act would otherwise be erased at
+// the instant it was written**: `revokeAuthorization` re-reads the listing immediately
+// after writing one, and every other route into the panel clears it first. That is
+// `listGoals`' own arrangement one panel over.
+async function listAuthorizations(goal, keepSaid) {
+  fault(null, "authorizations");
+  if (!keepSaid) {
+    sayAuthorizationAct(null);
+  }
+  authorizedGoal = goal;
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/authorizations", { goal_id: goal.id }, "authorizations");
+    if (body === null) {
+      return;
+    }
+    const list = el("authorization-list");
+    clearNode(list);
+    line(list, goal.outcome, "reply");
+    if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {
+      line(list, GOAL_MEMBER_UNREADABLE, "notice");
+      show("authorizations", true);
+      return;
+    }
+    if (body.authorizations.length === 0) {
+      line(
+        list,
+        "Nothing standing for this piece of work. Every call for it is put to you as it " +
+          "comes up.",
+        "hint"
+      );
+    } else {
+      body.authorizations.forEach((one) => renderAuthorization(list, one));
+      line(
+        list,
+        "These are records of what you authorised. They are not a promise that the next " +
+          "call will go through — I check every call against everything else at the " +
+          "moment I make it.",
+        "hint"
+      );
+    }
+    show("authorizations", true);
+  } catch (_) {
+    fault(GATEWAY_GONE, "authorizations");
+  }
+}
+
+// Withdraw one standing authority (ADR-0254 §11).
+//
+// **Show-then-confirm at the unit the owner thinks in** (ADR-0073 §5), from the row
+// they are looking at: what it shows is the goal's statement and the declaration, and
+// it says in terms what the act does not do.
+//
+// **Whole and never narrowing**: there is no partial withdrawal to offer, so the
+// ceremony does not imply one.
+async function revokeAuthorization(view) {
+  const asked = window.confirm(
+    `About to withdraw this authority.\n\n${view.goal_statement}\n${view.tool_id}\n\n` +
+      "Calls it covered will be put to you again.\n\nNothing already decided is " +
+      "rewritten, nothing already done is undone, and a call already going out is not " +
+      "stopped.\n\nWithdrawal is whole: there is no narrowing, and changing what you " +
+      "authorise means withdrawing this and answering a fresh question later."
+  );
+  if (!asked) {
+    return;
+  }
+  fault(null, "authorizations");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const done = await relay(
+      half,
+      "/authorization/revoke",
+      { authorization_id: view.id },
+      "authorizations"
+    );
+    if (done === null) {
+      return;
+    }
+    sayAuthorizationAct(goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement));
+    if (authorizedGoal !== null) {
+      await listAuthorizations(authorizedGoal, true);
+    }
+  } catch (_) {
+    fault(GATEWAY_GONE, "authorizations");
   }
 }
 
@@ -11028,6 +11438,10 @@ const CONTROL_PANELS = [
   "connections",
   "connection-log",
   "observation",
+  // ADR-0254 §11's listing. It is hidden when a session ends for every other panel's
+  // reason: what it shows is one goal's standing authorities, which is exactly the
+  // content a page with no session may not be showing.
+  "authorizations",
 ];
 
 // `because` is the re-entry sentence (ADR-0182 §6), and **omitting it leaves whatever

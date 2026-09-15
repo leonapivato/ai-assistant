@@ -160,6 +160,7 @@ def _question(handle: str = "h-1") -> Confirmation:
             coverage=egress.coverage,
         ),
         read=ReadKind.WEB_SEARCH,
+        authorization=None,
     )
 
 

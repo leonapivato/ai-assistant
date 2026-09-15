@@ -1867,7 +1867,85 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — ADR-0260's L1 mints no error
 #: class and removes none.
-PROTOCOL_VERSION: Final[int] = 44
+#: **45 since ADR-0254 §20's Lane 3**, and the ground is **both** limbs of ADR-0124 §9
+#: rather than one, which is why §16 says this lane carries a bump *"under its first
+#: (the promoted surface gains methods) and its second (`Confirmation` gains a
+#: member)"*.
+#:
+#: The **first**: :class:`~ai_assistant.core.protocols.AssistantEngine` gains
+#: ``standing_authorizations`` and ``revoke_authorization``, and ``wire/surface.py``
+#: reads the promoted method set off the Protocol — so a hub at 45 admits two methods a
+#: hub at 44 answers ``unknown_method`` for, and a client at 45 calls them.
+#:
+#: The **second**, twice over. :class:`~ai_assistant.core.types.Confirmation` gains
+#: ``authorization``, **required with no default**, and
+#: :class:`~ai_assistant.core.types.TurnOutcome` gains ``authorizations``, defaulting to
+#: empty. Both models set ``extra="forbid"`` and ``wire/codec.py`` renders a model by
+#: ``model_dump()``, so a hub at 45 emits ``"authorization": …`` on **every**
+#: confirmation and ``"authorizations": []`` on **every** turn, and a client at 44 fails
+#: each with ``extra_forbidden``; in the other direction a client at 44 decoding is the
+#: same refusal, and a hub at 44 handed a 45 client's frames refuses the handshake first.
+#: **A defaulted member is still a shape change**, exactly as the entries at 39, 40, 42,
+#: 43 and 44 state of ``AttemptEffort.kind``, ``TurnOutcome``'s four,
+#: ``PermissionRuling.authorised_goal``, ``TurnOutcome.outbound_statement`` and
+#: ``TurnOutcome.forecast_not_read``.
+#:
+#: **No integer is fixed in the ADR** (§16, §20): ADR-0249 §12 already schedules a bump
+#: and other lanes of this batch may land before or after, so the figure is whatever the
+#: tree holds when this lane lands plus one. It branched at 43 and was written 44; ADR-0260's
+#: L1 landed 44 first, so this lane re-bumped to **45** — which is that entry's own
+#: instruction, *"a lane that lands after this one re-bumps rather than reusing the
+#: figure"*, and the reason ADR-0260 §11 refuses to write an integer into an ADR at all.
+#:
+#: **What crosses, and it is four values and no fifth** (§16). The listing as a
+#: ``tuple[AuthorizationView, ...]``, the revocation as an
+#: :class:`~ai_assistant.core.types.AuthorizationSettlement`,
+#: ``Confirmation.authorization`` as an
+#: :class:`~ai_assistant.core.types.AuthorizationProjection`, and the announcement as a
+#: ``tuple[AuthorizationView, ...]`` on ``TurnOutcome.authorizations`` — the **same**
+#: carrier as the listing and not a second shape of it. **No**
+#: :class:`~ai_assistant.core.types.Authorization` crosses whole and **no member of**
+#: ``GoalAuthorizations``, ``AuthorizationResolution`` **or** ``GoalAuthorizationStore``
+#: **is promoted**, so no client holds a record's basis beyond each member's span, its
+#: resolution, its subject digest, its ``confirmation``, its ``supersedes``, its account
+#: or its ``destinations``.
+#:
+#: **No new class of content crosses.**
+#: :class:`~ai_assistant.core.types.CoverageView` carries an argument key, a
+#: :data:`~ai_assistant.core.types.FrozenJsonValue` the record already held, a
+#: :class:`~ai_assistant.core.types.ValueBound` and a span of the user's own words;
+#: ``AuthorizationView`` adds the row's ``id``, the goal's statement, a
+#: :class:`~ai_assistant.core.types.ToolDefinition` by value — as
+#: :class:`~ai_assistant.core.types.RecipientGrant` already carries one across this
+#: surface — an instant and a ``bool``. No row is minted in ADR-0087 §2c's scalar table:
+#: ``project`` already renders every ``Enum`` as its ``value`` and every instant as its
+#: ISO form.
+#:
+#: **No compatibility shim, negotiation or lenient decode** (§16). ADR-0084 §3's
+#: exact-match handshake is the mechanism and the refusal naming both versions is the
+#: intended user-visible outcome.
+#:
+#: **ADR-0177 §1's browser enumeration does move, and the reciprocal record is owed by
+#: ADR-0254 rather than by this lane.** §11 owes a listing and a revocation on *"the
+#: surfaces"* and §20 assigns *"the interface adapters that render them"* to this lane,
+#: so the gateway gains two routes; ADR-0177's ``- Status:`` line records ADR-0200's and
+#: ADR-0250's widenings and carries none for this one. That is issue #2274's shape
+#: exactly, one decision later, and it is filed rather than fixed here: an ADR text
+#: change is outside this lane.
+#:
+#: **No stored-record version moves and no migration is owed.** Nothing here is
+#: persisted: a ``Confirmation`` is assembled per call and a ``TurnOutcome`` is stored by
+#: nothing. The plan store's ``schema_version`` stays where it is,
+#: ``PlanExport.schema_version`` stays where it is — **untouched, and said rather than
+#: assumed** — the parked-read store's stays at **3**, the authorization store's stays at
+#: **1**, and ``ConversationExport.schema_version`` stays at **2**.
+#: ``core.config.Settings`` gains nothing at all (ADR-0254 §12, ADR-0256 §2).
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — this lane mints no error class,
+#: and the two ADR-0254 mints are Lane 1's and cross no frame.
+PROTOCOL_VERSION: Final[int] = 45
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

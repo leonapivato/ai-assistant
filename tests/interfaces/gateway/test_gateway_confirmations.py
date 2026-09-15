@@ -28,6 +28,7 @@ from test_gateway_streams import Harness, _harness
 
 from ai_assistant.core.errors import UnknownContinuationError
 from ai_assistant.core.types import (
+    AuthorizationProjection,
     BoundAccount,
     Confirmation,
     ConfirmationEgress,
@@ -123,6 +124,7 @@ def _confirmation(  # noqa: PLR0913 — one keyword per member of the confirmati
     egress: bool = True,
     planned_with_external_content: bool = False,
     coverage: SpanCoverage = SpanCoverage.NOT_COVERED,
+    authorization: AuthorizationProjection | None = None,
 ) -> Confirmation:
     """One parked confirmation, with an egress member unless ``egress`` is false.
 
@@ -149,6 +151,7 @@ def _confirmation(  # noqa: PLR0913 — one keyword per member of the confirmati
             else None
         ),
         read=None,
+        authorization=authorization,
     )
 
 
@@ -267,11 +270,16 @@ async def test_a_turn_that_parks_renders_the_confirmation_and_not_a_boolean() ->
             "reason",
             "egress",
             "read",
+            "authorization",
         }
         assert view["tool_id"] == "smtp"
         assert view["tool_description"] == "Send an email."
         assert view["reason"] == "this discloses data off-device"
         assert view["read"] is None
+        # ADR-0254 §11, and **absent as absence** (ADR-0178 §4): this park proposes no
+        # row, so ``null`` states that answering establishes no standing authority —
+        # not that the call transmits nothing, which ``egress`` beside it is about.
+        assert view["authorization"] is None
         _, body = await one.whole("POST", "/ask", {"utterance": "again"})
         assert "awaiting_confirmation" not in body["outcome"]["step"], body
 

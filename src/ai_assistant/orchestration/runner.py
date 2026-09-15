@@ -64,6 +64,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionRequest,
+    Authorization,
     AuthorizationDisposition,
     CarriedProvenance,
     CoverageUnrecordedBinding,
@@ -529,6 +530,29 @@ class StepDisposition:
             **Never gated on** ``StepStatus.SUCCEEDED`` (§13 item 8): a failed send may
             still have transmitted, so the two reached-the-callable shapes carry the
             same value.
+        opened: The `Authorization` rows this drive opened **without a question** —
+            ADR-0254 §1's path (iii) — in the order they were written, and empty on
+            every drive that opened none. This is the channel ADR-0254 §11's
+            announcement is carried on: *"The trigger is that the row was written, and
+            the row is what the view is transcribed from"*, so the engine transcribes
+            these into :attr:`~ai_assistant.core.types.TurnOutcome.authorizations`
+            rather than re-reading a store that would by then hold rows of other turns
+            too.
+
+            **A path-(i) proposal is not one of these and never appears here.** A
+            proposal is a question the user has not answered; an opening act is an
+            authority that already stands, which is the whole of what §11's
+            announcement is about — *"An authority established without a question is
+            therefore announced at the act and revocable at any moment after it"*.
+
+            **It is empty on this tree**, because the path-(iii) writer §20 assigns to
+            Lane 2 is not implemented: minting the `CoverageMember` such an act rests
+            on has no clause saying how a span becomes a member for a named argument
+            (issue #2373), so :func:`~ai_assistant.orchestration.authorizing.
+            proposed_authorization` mints none and no opening act is written at all.
+            The channel is declared with the carrier it feeds so that the writer, when
+            it lands, announces by filling this rather than by growing a second
+            mechanism.
     """
 
     disposition: Disposition
@@ -540,6 +564,7 @@ class StepDisposition:
     violations: tuple[ParameterViolation, ...] = ()
     establishing: EstablishingAnswer | None = None
     outbound: OutboundReach | None = None
+    opened: tuple[Authorization, ...] = ()
 
 
 type Ruled = Callable[[PermissionDecision], Awaitable[None]]

@@ -704,8 +704,16 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     and the browser both implement this decision". The gateway serves none of them
     yet — that is ADR-0250 §19's M4 — so what moved here is the promoted set and the
     admitted set, and not the served one.
+
+    **ADR-0254 §11 adds two**, ``standing_authorizations`` and
+    ``revoke_authorization`` — §16 calls that roster complete, *"two members on an
+    existing Protocol and no other change to it"* — and §20 assigns both to that
+    decision's Lane 3 together with the adapters that render them. They move ADR-0177
+    §1's enumeration too, and ADR-0254's own ``- Status:`` line does not yet record it:
+    that is issue #2274's shape one decision later, and the reciprocal header record is
+    ADR-0254's to make rather than the implementing lane's.
     """
-    assert len(_method_names()) == 61
+    assert len(_method_names()) == 63
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -1196,6 +1204,16 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     moves it and a number written here would be a claim that goes stale silently" — so
     43 is what the tree held when this lane branched.
 
+    **45 is where both numbers move together for ADR-0254 §20's Lane 3**, which is the
+    first entry in this docstring's run where they do: that lane adds **two** methods to
+    the promoted surface — ADR-0124 §9's first limb — **and** a member to
+    ``Confirmation`` and one to ``TurnOutcome`` — its second, twice — so 61 becomes 63
+    and 44 becomes 45. ADR-0254 §16 and §20 fix no numeral either, for the reason they
+    state: other lanes of the batch move the same constant and a number in the document
+    would be a claim about an order nobody controls — which is exactly what happened
+    here, this lane having been written at 44 and re-bumped once ADR-0260's L1 landed
+    first.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1204,7 +1222,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 44), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 45), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

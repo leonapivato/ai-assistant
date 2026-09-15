@@ -35,6 +35,7 @@ from playwright.async_api import expect
 from test_browser_answers import _stop_substituting, _substitute
 
 from ai_assistant.core.types import (
+    AuthorizationProjection,
     Confirmation,
     ConfirmationEgress,
     ContinuationToken,
@@ -154,6 +155,7 @@ def _confirmation(
     parameters: Mapping[str, FrozenJson],
     handle: str = "h-1",
     coverage: SpanCoverage = SpanCoverage.MODEL_ON_EVERY_PATH,
+    authorization: AuthorizationProjection | None = None,
 ) -> Confirmation:
     """One parked egress confirmation, over the arguments its spans decompose.
 
@@ -179,6 +181,7 @@ def _confirmation(
             planned_with_external_content=False,
         ),
         read=None,
+        authorization=authorization,
     )
 
 
@@ -1058,7 +1061,9 @@ _QUERY = (
 )
 
 
-def _read(*, handle: str = "r-1") -> Confirmation:
+def _read(
+    *, handle: str = "r-1", authorization: AuthorizationProjection | None = None
+) -> Confirmation:
     """One parked read, with the binding ADR-0244 §4 says a real one always has."""
     return Confirmation(
         tool_id="web_search",
@@ -1073,6 +1078,7 @@ def _read(*, handle: str = "r-1") -> Confirmation:
             planned_with_external_content=False,
         ),
         read=ReadKind.WEB_SEARCH,
+        authorization=authorization,
     )
 
 
