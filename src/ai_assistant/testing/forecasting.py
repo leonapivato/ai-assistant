@@ -44,6 +44,12 @@ it.
 to script per-ask, because there is no ask: the place is the deployment's configuration
 and the horizon is the forecaster's own bound.
 
+**It performs ADR-0260 §6's three pre-execution checks**, because §6 puts them on
+``read`` itself and the shared suite asserts them of every implementation — a fake
+that answered a call production would refuse would let a consumer's test pass over
+an exchange no deployment can have. They are written out rather than imported, for
+the reason the rest of this package restates what it stands in for.
+
 **Not a fault injector.** Everything here conforms. A consumer that needs a forecaster
 which *breaks* the contract on purpose — one whose ``name`` moves between calls, one
 minting a record attested to some other instant, one returning an outcome carrying both
@@ -63,6 +69,9 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
 
+from pydantic import ValidationError
+
+from ai_assistant.core.errors import ToolBindingError
 from ai_assistant.core.types import (
     ActionRequest,
     Attestation,
@@ -77,6 +86,7 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     SemanticMemory,
+    ToolCall,
     ToolCost,
     ToolDefinition,
 )
@@ -86,7 +96,7 @@ from ai_assistant.testing.spend import countable
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import FrozenJson, MemoryRecord, ToolCall
+    from ai_assistant.core.types import FrozenJson, MemoryRecord
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: The id this fake's declaration carries. Distinct from the production forecaster's,
@@ -635,6 +645,10 @@ class FakeForecaster:
                 because "there is always a bound" is a claim about every implementation.
                 Refused **before** the call is recorded, so a consumer asserting that a
                 refused value reached nothing has the absence of a row to assert over.
+            ToolBindingError: If the call does not survive ADR-0260 §6's three
+                pre-execution checks (:meth:`_authorised`). Carrying **no**
+                ``ForecastRefusal``, because it is no outcome of the read: the servicing
+                records ``BINDING_FAILED``, which establishes no contact.
             CancelledError: Re-raised unchanged when a call armed by
                 :meth:`suspend_next` is cancelled from outside while suspended, and
                 converted into neither an outcome nor a refusal (ADR-0060, ADR-0260 §4).
@@ -645,6 +659,7 @@ class FakeForecaster:
             msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
             raise ValueError(msg)
         self.read_calls.append(call)
+        self._authorised(call)
         try:
             async with asyncio.timeout(timeout.total_seconds()):
                 return await self._answered()
@@ -653,6 +668,58 @@ class FakeForecaster:
             # a `TimeoutError` of its own accord, so there is no second condition for
             # `Timeout.expired()` to tell apart here.
             return ForecastOutcome(refusal=ForecastRefusal.DEADLINE_EXPIRED)
+
+    def _authorised(self, call: ToolCall) -> None:
+        """Run ADR-0260 §6's three pre-execution checks, as every ``read`` owes them.
+
+        **Stated here rather than inherited, which is this module's whole posture**: a
+        canonical fake that answered a call production would refuse would let a
+        consumer's test pass over an exchange no deployment can have. §6 puts the three
+        on ``read`` itself — "The ``ToolCall`` is **revalidated and detached** … the
+        definition on that detached copy is compared for equality against the
+        forecaster's own registered declaration … ``PermissionDecision.authorises`` is
+        **re-evaluated** against that same detached copy" — and the shared conformance
+        suite asserts them of every implementation.
+
+        **Written out rather than imported.** ``ai_assistant.tools.registry`` holds the
+        production statement of the first check, and this package may not import the
+        subsystem it stands in for (``CLAUDE.md`` golden rule 1) — the same reason
+        :mod:`ai_assistant.testing.invoker` restates ADR-0192's consume. The shared
+        suite drives both, so a divergence is a test failure rather than a latent
+        surprise.
+
+        **It runs after the call is recorded**, which is deliberate: a refused call
+        *did* reach this member, and :attr:`read_calls` answers "was ``read`` reached"
+        rather than "did a read complete". The ``timeout`` guard is the one thing ahead
+        of the record, because a value no deployment could pass reaches nothing at all.
+
+        Args:
+            call: The call as handed, read only through the copy this makes of it.
+
+        Raises:
+            ToolBindingError: If the call does not survive revalidation, carries a
+                definition unequal to this forecaster's own, or is not authorised by
+                its decision.
+        """
+        try:
+            checked = ToolCall.model_validate(call.model_dump())
+        except ValidationError as exc:
+            msg = "the call did not survive revalidation, so it is not the call that was authorised"
+            raise ToolBindingError(msg) from exc
+        if checked.request.tool != self._declaration:
+            msg = (
+                f"{self._declaration.id}: the definition carried by this call is not the "
+                f"one this forecaster registered, so the thing about to run is not the "
+                f"thing declared (ADR-0029 §2, ADR-0260 §6)"
+            )
+            raise ToolBindingError(msg)
+        if not checked.decision.authorises(checked.request):
+            msg = (
+                f"{self._declaration.id}: decision {checked.decision.id!r} does not "
+                f"authorise this request, so the thing about to run is not the thing "
+                f"that was authorised (ADR-0029 §2, ADR-0260 §6)"
+            )
+            raise ToolBindingError(msg)
 
     async def _answered(self) -> ForecastOutcome:
         """The scripted outcome, from inside the modelled resource.

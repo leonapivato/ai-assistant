@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections import Counter
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
@@ -336,6 +337,13 @@ _LINE_BREAKS: Final = frozenset("\n\r")
 _DATE_LENGTH: Final = 10
 _OFFSET_LENGTH: Final = 6
 
+#: The widest each component of a documented offset may be. **Judged separately, and
+#: before either reaches a ``timedelta``**, because ``timedelta`` normalises: a check
+#: made after it cannot tell ``+01:99`` from the ``+02:39`` it becomes, and would mint
+#: a day at a position the provider never declared.
+_MAX_OFFSET_HOURS: Final = 23
+_MAX_OFFSET_MINUTES: Final = 59
+
 #: ADR-0038 §2a's figure for an attested producer, which ADR-0260 §5 names for this
 #: one.
 _ATTESTED_CONFIDENCE: Final = 0.9
@@ -379,9 +387,13 @@ def _provider_days(body: bytes) -> tuple[Mapping[str, FrozenJson], ...] | None:
     decoded = decoded_object(body)
     if decoded is None:
         return None
-    rows = decoded.get(_PROVIDER_DAYS_KEY)
-    if rows is None:
+    if _PROVIDER_DAYS_KEY not in decoded:
+        # **Membership, not retrieval**: a provider with nothing to say for the
+        # coordinate omits the member, and ``get`` cannot tell that from a member
+        # present as ``null`` — which is a value this documented format does not
+        # admit and is therefore a response of another shape.
         return ()
+    rows = decoded[_PROVIDER_DAYS_KEY]
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         return None
     return tuple(rows)
@@ -458,13 +470,24 @@ def _declared_offset(text: str) -> timedelta | None:
     if not all(field.isdigit() and field.isascii() for field in fields):
         return None
     hours, minutes = (int(field) for field in fields)
+    if hours > _MAX_OFFSET_HOURS or minutes > _MAX_OFFSET_MINUTES:
+        # **Each component is judged on its own, before either reaches a
+        # ``timedelta``.** ``timedelta`` *normalises*, so ``+01:99`` would arrive as
+        # two hours and thirty-nine minutes — a well-formed, in-range offset the
+        # provider never declared, and a day minted at a position nothing in the
+        # response states. §5 drops a day whose offset cannot be read rather than
+        # minting it at one this system computed, and a check made after the
+        # normalisation cannot tell the two apart.
+        return None
     magnitude = timedelta(hours=hours, minutes=minutes)
     offset = -magnitude if text[0] == "-" else magnitude
     try:
         timezone(offset)
-    except ValueError:
-        # `timezone` admits strictly between -24 and +24 hours; a well-formed
-        # `+99:00` is a value no day is in.
+    except ValueError:  # pragma: no cover — the component bounds above already refuse it
+        # `timezone` admits strictly between -24 and +24 hours. The component bounds
+        # are strictly narrower, so this is the guard behind the guard rather than a
+        # reachable branch — kept because the bound it enforces is the library's and
+        # not this module's to restate.
         return None
     return offset
 
@@ -1030,9 +1053,15 @@ class ForecastEgress:
             day and where §5 dropped every one it did.
         """
         read = [self._day_of(row) for row in rows]
-        named = [day.named for day in read if day is not None]
-        once = {day for day in named if named.count(day) == 1}
-        kept = [day for day in read if day is not None and day.named in once]
+        # **Counted in one pass over the days, not one pass per day.** A response well
+        # inside ``forecast_max_response_bytes`` can carry thousands of compact rows,
+        # and a membership count taken per row would be quadratic — tens of millions of
+        # comparisons on the event loop's own thread, with no ``await`` anywhere in this
+        # method for the deadline to be delivered at. The bound §4 puts over "the
+        # response read and the transcription" is only as good as the work under it
+        # being linear.
+        seen = Counter(day.named for day in read if day is not None)
+        kept = [day for day in read if day is not None and seen[day.named] == 1]
         minted = tuple(self._record(day, reported_at) for day in kept[: self._max_days])
         if not minted:
             return _refused(ForecastRefusal.NO_RESULT)

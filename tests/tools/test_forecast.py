@@ -265,6 +265,116 @@ async def test_a_day_whose_offset_cannot_be_read_mints_no_record_for_that_day(
 
 
 @pytest.mark.parametrize(
+    ("hours", "minutes"),
+    [
+        pytest.param("23", "59", id="the-widest-either-component-admits"),
+        pytest.param("00", "00", id="the-narrowest"),
+    ],
+)
+async def test_an_offset_at_its_component_bounds_is_read(hours: str, minutes: str) -> None:
+    """The positive arm of the component check, so the refusals below are not vacuous.
+
+    ``+23:59`` and ``+00:00`` are the widest and narrowest this documented format
+    spells, and both are offsets a day can be in — so a check that refused either would
+    be dropping days the provider described perfectly well.
+    """
+    subject = await built(
+        channels=[answering(day(date="2026-09-05", utc_offset=f"+{hours}:{minutes}"))]
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-05"]
+
+
+@pytest.mark.parametrize(
+    "normalising",
+    [
+        pytest.param("+01:99", id="minutes-past-fifty-nine"),
+        pytest.param("-01:60", id="minutes-at-sixty"),
+        pytest.param("+24:00", id="hours-at-twenty-four"),
+        pytest.param("+99:99", id="both"),
+    ],
+)
+async def test_an_offset_whose_components_normalise_is_not_a_declared_one(
+    normalising: str,
+) -> None:
+    """§5: the day is dropped rather than minted at an offset the provider never stated.
+
+    **``timedelta`` normalises, and that is the whole of this case.** ``+01:99`` becomes
+    two hours and thirty-nine minutes — a well-formed, in-range offset — so an
+    implementation that built the duration first and range-checked afterwards cannot
+    tell it from a provider that declared ``+02:39``, and mints the day at a position
+    nothing in the response states. §5 admits an extent computed "from the day the
+    provider named and the UTC offset the provider's own response declared for it, and
+    from nothing else"; a normalised one is neither.
+
+    ``+24:00`` is the sibling case on the other component, and it is the one a check
+    resting on ``timezone``'s own ±24-hour bound would *also* miss — ``timezone`` refuses
+    it, but only after the normalisation has already merged the two fields.
+    """
+    subject = await built(
+        channels=[
+            answering(
+                day(date="2026-09-05", utc_offset=normalising),
+                day(date="2026-09-06", utc_offset="+01:00"),
+            )
+        ]
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
+async def test_a_day_list_present_as_null_is_a_response_of_another_shape() -> None:
+    """§5: a member the documented format does not admit is ``PROVIDER_REFUSED``.
+
+    **Absence and ``null`` are two different operator facts**, and ``dict.get`` cannot
+    tell them apart: a provider with nothing to say for the coordinate omits the member,
+    where one that sent ``null`` sent a value this format does not admit. Reading the
+    second as the first would report ``NO_RESULT`` — the provider answered and had
+    nothing — about a response this system could not read at all.
+    """
+    subject = await built(channels=[far_end(response(payload=b'{"days": null}'))])
+
+    outcome = await _read(subject)
+
+    assert outcome.refusal is ForecastRefusal.PROVIDER_REFUSED
+
+
+async def test_a_response_of_many_rows_is_read_in_one_pass_over_them() -> None:
+    """§4's deadline covers the transcription and the minting, so the work under it is
+    linear.
+
+    A response well inside ``forecast_max_response_bytes`` can carry thousands of
+    compact rows — this one does — and **no ``await`` occurs anywhere between the octets
+    arriving and the records being minted**, so there is no point at which an expiry
+    could be delivered while that work runs. A duplicate pass taken per row rather than
+    over the days would be quadratic there: tens of millions of comparisons on the event
+    loop's own thread, with the bound §4 states over "the response read and the
+    transcription" unable to fire.
+
+    What the case asserts is the outcome at that size — the cap, and §5's duplicate rule
+    still holding across the whole response rather than within a window. The linearity is
+    what makes the assertion return at all.
+    """
+    rows = [
+        day(date=f"2026-{1 + index // 28:02d}-{1 + index % 28:02d}", utc_offset="+00:00")
+        for index in range(2000)
+    ]
+    # One day named twice, at the two ends of the response: a pass that only compared
+    # neighbours, or only looked inside the cap, would keep both.
+    rows.append(day(date="2026-01-01", utc_offset="+00:00", conditions="Rain"))
+    subject = await built(channels=[answering(*rows)], max_response_bytes=4 * 1024 * 1024)
+
+    outcome = await _read(subject)
+
+    assert len(outcome.records) == MAX_DAYS
+    assert _days(outcome) == ["2026-01-02", "2026-01-03", "2026-01-04"]
+
+
+@pytest.mark.parametrize(
     "broken",
     [
         pytest.param({"conditions": None}, id="null"),
