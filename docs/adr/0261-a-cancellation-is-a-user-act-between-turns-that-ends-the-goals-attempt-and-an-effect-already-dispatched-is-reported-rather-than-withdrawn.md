@@ -1445,7 +1445,12 @@ it.
    holding an `ABANDONED` goal with **two** live attempts ends **both**, each with the outcome §3's
    limbs yield over its **own** executions, so the goal's reopen can open its new one — the two
    being what pins the migration to *every* non-terminal attempt rather than the newest, since
-   repairing one would leave the other live and the reopen refused. **And an open goal's attempts
+   repairing one would leave the other live and the reopen refused. **That arm is stated over every
+   source version `_UPGRADABLE_FROM` admits** — as a dated observation at `28eb9e82` the set is
+   `{1, 2, 3}`, each upgraded directly — because a repair run only for the newest source passes a
+   single unparameterised arm and leaves an older database with an `ABANDONED` goal and live
+   attempts. Each source asserts the same repair, the same outcomes, the same advanced attempt
+   versions and the same final `schema_version`. **And an open goal's attempts
    are left exactly as they were**, which pins the migration to the act a user actually performed
    (§10).
 7. **The post-cancellation prohibition (L2).** After a cancellation, a claim of a step of the
@@ -1517,7 +1522,13 @@ it.
     the step resolves `SUCCEEDED` **after** the act's one call and before the listing is taken, the
     act still answers `ABANDONED_EFFECT_IN_FLIGHT` and the listing reads **false** — R78's
     *completed* disposition, carried because the act's instant is the instant the writes took.
-    **No arm asserts that the two agree across two instants.**
+    **No arm asserts that the two agree across two instants.** **And the exit code, which is where a
+    silent regression lives**: the abandon command answers **zero for `ABANDONED_EFFECT_IN_FLIGHT`
+    as well as for `ABANDONED`** — both are successful cancellations — and non-zero for
+    `ALREADY_CLOSED` and `NO_SUCH_GOAL`. The tree's parameterised assertion reads
+    `code == (0 if member is GoalAbandonment.ABANDONED else 1)`, which a new member joins on the
+    **failing** side while staying green, so **the arm is stated over the exit code and not over the
+    rendered text**.
 
 **No arm demands a duplicate dispatch be demonstrated**, which is A8's acceptance requirement on
 A8's lane (ADR-0255 §12), and **ADR-0255 §13's Q4 rule is what makes the interval safe**: no
