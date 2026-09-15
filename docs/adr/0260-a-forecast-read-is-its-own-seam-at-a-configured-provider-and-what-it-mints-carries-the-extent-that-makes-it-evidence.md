@@ -40,7 +40,7 @@
 - **Amends** [ADR-0251](0251-an-attempt-investigates-in-bounded-rounds-over-typed-read-outcomes-and-keeps-a-reserve-to-answer-with.md)
   **§2's per-member source lists**, in that one respect: each list names the members of
   `SearchDisposition`, `SearchRefusal`, `FetchRefusal` and `StructuredOutcome` that map
-  onto it, and §7 below adds this decision's two vocabularies to them. §2's seven
+  onto it, and §8 below adds this decision's two vocabularies to them. §2's seven
   members, its closure, its classifier, its four facts, its total precedence and its
   no-message clause all bind entire and none moves.
 - **Amends** [ADR-0264](0264-a-turn-that-reached-outside-this-system-says-so-and-a-reply-cannot-deny-a-contact-the-trail-recorded.md)
@@ -83,11 +83,10 @@ The project owner's ruling of 2026-09-12 on #2255, decision 8:
 > separate, scheduled after the investigation foundation is stable; it need not wait for
 > M34.
 
-and the design report's Q3, over *"A weather `Reader` (ADR-0095) and a booking
-integration declared at the `tools/` egress seam (ADR-0154, ADR-0016/0018)"*: *"It
-demonstrates investigation, dependent execution, uncertain outcomes and verification
-**without any new destination-trust decision**, because a configured reader and a
-registered integration are already-governed shapes."*
+and the design report's Q3, over *"A weather `Reader` (ADR-0095)"* and a booking
+integration at the `tools/` seam: it demonstrates investigation, dependent execution and
+verification *"**without any new destination-trust decision**, because a configured reader
+and a registered integration are already-governed shapes."*
 
 **This ADR is the forecast half and nothing else.** It decides one read kind and one seam,
 and decides no booking integration (a `tools/` integration at ADR-0154's seam, its own
@@ -107,17 +106,12 @@ implementing lane delivers the real one, and what would make it deliver a mock i
   `WEB_SEARCH`, `STRUCTURED_READ` — its docstring recording the third to fifth as additive
   entries under ADR-0226 §1's licence. `ReadAsk` has one field per kind's argument and a
   five-arm validator, `WEB_SEARCH`'s being the arm that refuses all four arguments.
-- **The egress boundaries are three**, ADR-0124 §1 being the live rule that replaced
-  ADR-0017 §1's enumeration: `models/`, the designated `tools/` seam and the hub's remote
-  transport in both halves. *"Every other egress is a bug."*
 - **`tools/web_search.py` is the worked shape** for a configured HTTPS provider at that
   seam — a declaration, a provider adapter and a searcher driving the seam's own
   `HttpsExchange`, reaching no transport of its own, bound by the import contract.
 - **`readers/calendar.py` is the only site in the tree that constructs a
   `ReportedExtent`**, which ADR-0252 §3 records as a dated observation: the evidence window
   axis applies *"on nothing else until decision 8's reader lands"*.
-- **`PROTOCOL_VERSION` is 43**, and lanes in flight also move it; §11 states the
-  obligation without fixing the figure.
 
 ### What the corpus already decides, and is used here as given
 
@@ -127,9 +121,7 @@ implementing lane delivers the real one, and what would make it deliver a mock i
   second servicing site, a second budget or a second audit."* §2 and §7 are that statement.
 - **ADR-0230 §5 and ADR-0231 §10** are the two minting precedents, and §5 below follows
   the second where they differ, a forecast provider being a remote source answering a live
-  interrogation. **ADR-0264 §5** requires a second outbound seam to add its own
-  `OutboundDestination` member, and §10 does. **ADR-0251 §4** governs whether a further
-  round fires, over facts that are not about the kind; nothing here changes it.
+  interrogation.
 - **ADR-0117 §2's extent, and §8's general rule.** *"Where a source's entries have a
   position in that source's world, that position is producer testimony and is carried by
   the extent (§2); it is never carried by the record's envelope validity window."* §8 names
@@ -147,14 +139,11 @@ Each is recorded because, taken at face value, it would have produced a differen
 decision, and a reader comparing this ADR against #2255's wording is owed the difference.
 
 **1. It cannot be a `Reader`, and the corpus has already ruled on exactly this shape.**
-ADR-0093 §10 gives `read()` no arguments *by decision*: *"a caller able to widen the read is
-a caller able to defeat the bound"* (read under ADR-0095 §1's substitution). ADR-0230 §4
-met the same question for the fetch seam and answered it: *"Reusing `Reader` was never
-available … an argument is exactly what this contract needs"*, so *"it is a
-`core/protocols.py` addition and this is its ADR (golden rule 5)"*. A turn-time forecast
-read is a read the turn asks for; a `Reader` is a whole-source read on the reader's own
-cadence. "Alternatives considered" argues the `Reader` shape out so the ruling is
-reversible on the page.
+ADR-0093 §10 gives `read()` no arguments *by decision* — *"a caller able to widen the read
+is a caller able to defeat the bound"* — and ADR-0230 §4 met the same question for the
+fetch seam: *"Reusing `Reader` was never available … an argument is exactly what this
+contract needs"*, so *"it is a `core/protocols.py` addition and this is its ADR (golden
+rule 5)"*. "Alternatives considered" argues the shape out so the ruling is reversible.
 
 **2. `SourceReadRecord` is not what a forecast read returns.** ADR-0185 §1 makes its unit
 *"one **attempt** by a driver to read one source"*, and §2 an audit row that *"carries
@@ -212,10 +201,9 @@ source what it currently says about the days ahead*, so the seam is a **`Forecas
 
 **The difference from `Reader` is the one ADR-0230 §4 already named, and it is not about
 the weather.** A `Reader` is bound by its own configuration and takes no address; a
-turn-time read must be a contract that can be *asked*. This seam takes the smallest
-possible ask — §3 makes it none at all — which honours ADR-0093 §10's reason rather than
-working around it: there is nothing for a caller to widen, and the bound stays the
-source's own configuration.
+turn-time read must be a contract that can be *asked*. This seam takes the smallest ask —
+§3 makes it none at all — so ADR-0093 §10's reason is honoured and not worked around:
+there is nothing for a caller to widen.
 
 **And the difference from a `ContextProvider` is the cadence again.** ADR-0252 §3 rules
 that no facet produces an evidence row, and ADR-0096 §3 that *"No facet is served from a
@@ -247,9 +235,9 @@ cached, carried-over or previously assembled reading"*.
 over.** §1 of that ADR rules that *"no lane widens an admitted kind's meaning to carry a
 read the ADR that admitted it did not describe"*, and ADR-0231 §1 says what a `WEB_SEARCH`
 **is**: one search of the web whose query is composed from the turn's own utterance. A
-forecast read sends no query and composes nothing, and its answer is a table rather than a
-result list — so folding the two would widen an admitted kind's meaning against the first
-sentence and change its servicing against the second.
+forecast read sends no query and composes nothing, and answers with a table rather than a
+result list — so folding the two would widen an admitted kind's meaning and change its
+servicing, against those two sentences in turn.
 
 **And the two do not reach the same records.** A search mints transcriptions carrying no
 structural axis at all — ADR-0252 §3 records that *"every `WEB_SEARCH` and every
@@ -285,19 +273,18 @@ declare an extent, which is the whole reason this kind is worth adding (§9).
 > the days. The model points outward and names **nothing at all**; no record identifier,
 > no label and no address crosses the seam in either direction.
 
-**An empty ask is the strongest form available and it is chosen for that reason.** The
+**An empty ask is the strongest form available and is chosen for that reason.** The
 alternatives — a planner-composed window and a planner-named place — are refused in
-"Alternatives considered" on one ground each. What the corpus says about the empty arm at
-the search seam is true here word for word: *"a field the planner cannot write is a field
-that cannot carry covered content"*.
+"Alternatives considered". What the corpus says of the empty arm at the search seam holds
+word for word: *"a field the planner cannot write is a field that cannot carry covered
+content"*.
 
-**The honest cost is that one deployment reads one place**, and it is stated rather than
-glossed. The campsite walkthrough's forecast half is answered for the owner's own
-configured place; a forecast *at the campsite* needs a place this system holds a recorded
-coordinate for, which no type on the tree carries today. §14 defers the place listing with
-what fires it, and that is a narrowing rather than a gap: a reader answering "what is the
-weather this weekend" for the place the owner lives is the useful reader decision 8 asks
-for, and every later place arrives as a widening of §3 rather than a second seam.
+**The honest cost is that one deployment reads one place**, stated rather than glossed.
+The campsite walkthrough's forecast half is answered for the owner's own configured place;
+a forecast *at the campsite* needs a recorded coordinate no type on the tree carries today.
+§14 defers the place listing with what fires it, and that is a narrowing rather than a gap:
+answering "what is the weather this weekend" where the owner lives is the useful reader
+decision 8 asks for, and every later place widens §3 rather than adding a seam.
 
 ### 4. The contract: `Forecaster`, and the bound the caller cannot widen
 
@@ -335,15 +322,20 @@ for, and every later place arrives as a widening of §3 rather than a second sea
 
 > **Normative.** `core/types.py` gains **`ForecastOutcome`**, a frozen model refusing
 > mutation and unknown fields, carrying exactly `records: tuple[MemoryRecord, ...]`,
-> `reported_at: UtcInstant | None` and `refusal: ForecastRefusal | None`, with **exactly
-> one of** a non-empty `records` and a non-`None` `refusal`, enforced by the model —
-> neither both nor neither — and `reported_at` present exactly where `records` is.
+> `reported_at: UtcInstant | None`, `refusal: ForecastRefusal | None` and
+> `days_dropped: int`, with **exactly one of** a non-empty `records` and a non-`None`
+> `refusal`, enforced by the model — neither both nor neither — and `reported_at` present
+> exactly where `records` is. **`days_dropped` is a count and never negative**: it is how
+> many days §5 dropped whole, and it exists so that a response *this system* thinned is
+> never read as a response the provider gave thin — the conflation §7 forbids by name for
+> the budget, at the one other place it can arise.
 
 > **Normative.** **`ForecastOutcome` itself enforces exactly the following and no others**,
 > in `SearchOutcome`'s own shape and for its stated reason: conditions on the model are
 > *"decidable in any process and true of every"* implementation this system ever wires,
 > **the canonical fake included**. Every record is `SEMANTIC`, carries
-> `MemorySource.EXTERNAL`, carries empty `evidence`, carries a fully-open `validity`,
+> `MemorySource.EXTERNAL`, carries empty `evidence`, carries empty `topics`, carries no
+> `about_person`, carries a fully-open `validity`,
 > carries an `Attestation` whose `reported_by` is one value shared by every record of the
 > outcome, carries an `extent` that is a constructible half-open interval, and carries a
 > `reported_at` **equal to the outcome's own** — a record disagreeing with its outcome
@@ -416,7 +408,9 @@ for, and every later place arrives as a widening of §3 rather than a second sea
 > supplied it as `null`, or supplied a value of a type its documented format does not
 > admit, and a day whose transcription exceeds `forecast_max_day_chars` measured as
 > ADR-0230 §6 measures a fetched document. **Where every day is dropped the read yields
-> nothing**, the refusal is `NO_RESULT`, and §7's audit counts the drops.
+> nothing** and the refusal is `NO_RESULT`. **Every drop is counted in the outcome's
+> `days_dropped`, partial and total alike**, which is the only thing §7's audit is given
+> about them.
 
 > **Normative.** The record's `Provenance` carries `source=MemorySource.EXTERNAL`, which
 > `band_of` places in the `ATTESTED` band, so `rests_on_recorded_external_content` is
@@ -446,8 +440,8 @@ for, and every later place arrives as a widening of §3 rather than a second sea
 > forecast is a claim a model run made before we asked. It is **not** the instant we sent
 > the request, not the instant we received the response, and not a clock this system read.
 > A response declaring **no** instant, or carrying in that position a value that cannot be
-> read as one, mints **no record**: the refusal is `UNATTESTED`, and §7's audit records the
-> class. **No implementation reads an unparseable field as licence to fall back to a clock
+> read as one, mints **no record**: the refusal is `UNATTESTED`, whose class §8's
+> disposition carries into §7's audit. **No implementation reads an unparseable field as licence to fall back to a clock
 > it read.**
 
 > **Normative.** **The `Attestation` carries a `ReportedExtent` equal to the day that
@@ -559,17 +553,17 @@ envelope window would not yet be open"* — and a forecast is that in its purest
 **Why the rule is stated over the request and not over the destination**, which is
 ADR-0247 §1's argument inherited whole: a fact about a *destination* is readable by every
 kind, so a call of another kind bound to the forecast provider's set would inherit an
-authorisation the owner gave about forecasts. That call is unreachable today, and
-*"unreachable today is exactly the argument this corpus refuses to rest on"*.
+authorisation the owner gave about forecasts — unreachable today, and *"unreachable today
+is exactly the argument this corpus refuses to rest on"*.
 
 **And why the third conjunct is a carried fact rather than `closed_loop`.** ADR-0247 §4
 defines `closed_loop` as *"the request's kind is `WEB_SEARCH` and this deployment holds a
 search registration"*, so it is the conjunct that says *which act this is* — the derived
 fact *"cannot assert which account and origin the binding carries; a lane reading it alone
-reopens the hole §3's limbs are stated to close"*, and the converse holds too. §11
-therefore gives `CarriedProvenance` **one more boolean in `closed_loop`'s own shape**
-rather than widening `closed_loop`'s meaning, which would rewrite what every stored row
-asserts and supersede a clause ADR-0247 §4 states as unchanged. §14 books the fold.
+reopens the hole §3's limbs are stated to close"*, and the converse holds too. §11 therefore
+gives `CarriedProvenance` **one more boolean in `closed_loop`'s own shape** rather than
+widening `closed_loop`, which would rewrite every stored row and supersede a clause
+ADR-0247 §4 states as unchanged. §14 books the fold.
 
 ### 7. Servicing: one site, one budget, and where the forecast sits
 
@@ -636,11 +630,12 @@ asserts and supersede a clause ADR-0247 §4 states as unchanged. §14 books the 
 > once, over the turn's final supply**, neither twice and neither from an intermediate
 > supply; records this kind returns are inside both by construction.
 
-> **Normative.** **The audit gains two fields on ADR-0226 §9's existing per-turn record
-> and no second audit**: whether the ask was serviced, and its `ForecastDisposition` where
-> it has one. **No value the provider returned, no day, no place, no coordinate, no origin,
-> no account and no `Settings` field name reaches it**, which is ADR-0226 §9's
-> counts-and-no-copy rule binding unchanged.
+> **Normative.** **The audit gains three fields on ADR-0226 §9's existing per-turn record
+> and no second audit**: whether the ask was serviced, its `ForecastDisposition` where it
+> has one, and the outcome's `days_dropped` — a **count**, which is exactly what ADR-0226
+> §9's counts-and-no-copy rule admits. **No value the provider returned, no day, no place,
+> no coordinate, no origin, no account and no `Settings` field name reaches it**, which is
+> that rule binding unchanged.
 
 ### 8. The typed outcome: `ForecastDisposition`, and where it lands in ADR-0251 §2's seven
 
@@ -696,8 +691,8 @@ asserts and supersede a clause ADR-0247 §4 states as unchanged. §14 books the 
 **Two vocabularies and not one, which is ADR-0231's shape taken for its reason.** The seam
 answers for what *it* did; the servicing answers for the stages the seam never sees — a
 deployment that configured nothing, a budget that did not reach the ask, a binding that
-would not derive, a ruling that was not an `ALLOW`. One vocabulary would make the
-forecaster's contract carry members it can never return.
+would not derive, a ruling that was not an `ALLOW`. One vocabulary would make the contract
+carry members it can never return.
 
 ### 9. The evidence row: `requested` absent, `supported` composed from the extent
 
@@ -750,11 +745,11 @@ forecaster's contract carry members it can never return.
 
 **This is the row ADR-0252 §3 says the corpus cannot write today, and the difference is
 one field.** That section observes that *"every `WEB_SEARCH` and every `LOCAL_FILE` row
-carries `supported` empty, fails §6's first test, and satisfies no condition"*, because
-neither minting clause declares an extent. A forecast record declares one per day, so a
-goal whose criterion is about Saturday meets a region that covers Saturday and one that
-does not. **What it still does not establish is whether the forecast is right**: an extent
-says where the reported entry lies, never that the report is accurate.
+carries `supported` empty, fails §6's first test, and satisfies no condition"*, neither
+minting clause declaring an extent. A forecast record declares one per day, so a goal whose
+criterion is about Saturday meets a region that covers it and one that does not. **What it
+still does not establish is whether the forecast is right**: an extent says where the
+reported entry lies, never that the report is accurate.
 
 ### 10. What the user is told, and the contact this turn made
 
@@ -831,9 +826,9 @@ says where the reported entry lies, never that the report is accurate.
 
 **The negative statement is owed for ADR-0242's own reason and the positive one for
 ADR-0264's.** A forecast that did not happen is invisible in a reply composed without its
-records, and the model is then free to say something the trail contradicts — the asymmetry
-#2268 recorded for search, arriving at a second seam. It costs one enumeration and one
-optional field here, where discovering it afterwards cost a milestone QA run.
+records, and the model is then free to say what the trail contradicts — the asymmetry #2268
+recorded for search, at a second seam. It costs one enumeration and one optional field
+here, where discovering it afterwards cost a milestone QA run.
 
 ### 11. `Settings`, persistence, and the versions that move
 
@@ -949,7 +944,7 @@ optional field here, where discovering it afterwards cost a milestone QA run.
 > asks for a forecast read.
 
 > **Normative.** **L3 — the servicing, in `orchestration/` alone**: §7's servicing site and
-> its two audit fields, §8's `ForecastDisposition` and its classifier entries, §9's
+> its three audit fields, §8's `ForecastDisposition` and its classifier entries, §9's
 > evidence composition, and §10's fold and contact carrier.
 
 > **Normative.** **Every lane corrects, in its own change, every docstring and comment
@@ -983,13 +978,18 @@ optional field here, where discovering it afterwards cost a milestone QA run.
 > taken.** A response whose day the provider names with a declared offset mints a record
 > whose `Attestation.extent` is that day's own half-open interval and whose
 > `MemoryBase.validity` is fully open; a response naming a day without declaring an offset
-> mints **no record for that day**; and a response declaring no instant, and one carrying
-> an unreadable value in that position, each mint **no record** and yield `UNATTESTED`. In
-> none of the four does any minted value equal a clock the test controls. **L1.**
+> mints **no record for that day**; a response one of whose days omits a documented field,
+> supplies it as `null`, or supplies a type its format does not admit mints its **siblings
+> only**, reporting `days_dropped` of one; a response every day of which is so dropped mints
+> nothing, yields `NO_RESULT` and reports `days_dropped` equal to the days it named; and a
+> response declaring no instant, and one carrying an unreadable value in that position, each
+> mint **no record** and yield `UNATTESTED`. In none of them does any minted value equal a
+> clock the test controls. **L1.**
 
 > **Normative.** **(b′) The refusals at the boundaries.** A `ForecastOutcome` carrying a
 > record that is not `SEMANTIC`, one whose `Provenance` is not `EXTERNAL`, one carrying
-> non-empty `evidence`, one whose `validity` is not fully open, one carrying no `extent`,
+> non-empty `evidence`, one carrying a `topics` or an `about_person`, one whose `validity`
+> is not fully open, one carrying no `extent`,
 > one whose `reported_by` differs from its siblings', and one whose attestation instant
 > differs from the outcome's `reported_at`, is **refused at construction** in each case; a
 > `Settings` naming a non-finite or out-of-range coordinate, a `forecast_max_days` outside
@@ -999,7 +999,11 @@ optional field here, where discovering it afterwards cost a milestone QA run.
 > pair — **does not start**; and a **response** of exactly `forecast_max_response_bytes`,
 > its status line and headers included, is read and minted where one of that figure plus
 > one is abandoned **while reading**, yielding `RESPONSE_TOO_LARGE` with no parse
-> attempted. And over the **production** forecaster's own output, a minted record's
+> attempted; a day whose transcription is exactly `forecast_max_day_chars` is minted where
+> one of that figure plus one is dropped; and a provider answer of fewer than, of exactly,
+> and of more than `forecast_max_days` days mints that many, that many, and exactly
+> `forecast_max_days`. And over the **production** forecaster's own output, a minted
+> record's
 > `confidence` is `0.9`, its `derived_from_external` is `False`, its `placement` is the
 > default that narrows nothing, and its `Attestation.reported_by` **equals that
 > forecaster's own `name`** — asserted against the configured instance's `name` and not
@@ -1124,20 +1128,18 @@ to the earlier ADR's text, which is what ADR-0082 §1 asks of an author.**
   its actual subject, the egress step machinery — binds entire**, and §10 derives the fact
   from a forecast call's recorded disposition and from nothing that clause names.
 
-**The clause above is the first of two things this section states; the second is the
-clauses a reader would expect to have moved, and which did not.** **ADR-0093
-§10's no-arguments rule** — `Reader.read()` still takes no arguments, and its reason is
-**honoured** by §3 rather than worked around: this seam's ask carries nothing either, and
-the bound stays the source's own configuration. **ADR-0092 §3** — unamended, and §5 takes
-the provider's declared instant with no substitute; ADR-0230 §5's local-substitute scope
-expressly does not reach a remote source's earlier answer. **ADR-0208 §1** — honoured by §1 rather than approached, and this
-kind is no relevance selection over the store, so it needs no supersession either. **ADR-0252
-§3** — its `requested` enumeration is scoped in terms to *"the vocabulary ADR-0226 §2,
-ADR-0230 §1, ADR-0231 §1 and ADR-0240 §1 leave closed"*, so a sixth member is outside what
-it names; §9 is a **stacked addition** recorded here and, under ADR-0082 §1, owing that ADR
-no record. **ADR-0117 §2** — used as given, and §8's general rule is the ground §5 mints an
-extent on. **ADR-0185, ADR-0097, ADR-0132 and ADR-0133** — untouched; §4 contracts no grant
-seam, for ADR-0230 §11's reason.
+**The second thing this section states is the clauses a reader would expect to have moved,
+and which did not.** **ADR-0093 §10's no-arguments rule** — `Reader.read()` still takes
+none, and its reason is **honoured** by §3 rather than worked around: this seam's ask
+carries nothing either. **ADR-0092 §3** — unamended; §5 takes the provider's declared
+instant with no substitute, and ADR-0230 §5's local-substitute scope expressly does not
+reach a remote source's earlier answer. **ADR-0208 §1** — honoured by §1 rather than
+approached; this kind is no relevance selection over the store. **ADR-0252 §3** — its
+`requested` enumeration is scoped in terms to *"the vocabulary ADR-0226 §2, ADR-0230 §1,
+ADR-0231 §1 and ADR-0240 §1 leave closed"*, so a sixth member is outside what it names, and
+§9 is a **stacked addition** owing that ADR no record under ADR-0082 §1. **ADR-0117 §2** —
+used as given. **ADR-0185, ADR-0097, ADR-0132 and ADR-0133** — untouched; §4 contracts no
+grant seam, for ADR-0230 §11's reason.
 
 ### 16. Marking, review and ratification
 
@@ -1155,43 +1157,41 @@ against any clause until this ADR is merged** (golden rule 5, ADR-0015 §5).
 
 **What becomes easier.** A turn can ask the world a structured question whose answer is
 records rather than prose, and ADR-0252's evidence machinery acquires its first producer
-that can make a `supported` window mean something — the half of #2255's lifecycle stated
-and never exercised. §6 also writes the configuration-based authority over more than one
-kind for the first time, so the lane that adds a third finds it already general.
+that can make a `supported` window mean something. §6 also writes the configuration-based
+authority over more than one kind, so the lane that adds a third finds it general.
 
 **What becomes harder, stated rather than glossed.** There are now **two** carried facts
 about being at a configured provider where there was one, and §14 books the fold rather
-than pretending the drift is not there. The egress relaxations reach two kinds instead of
-one, a wider surface for a later ADR to widen again — §6's last clause and ADR-0247 §9's
-bar hold that line, both over the *request*. And a deployment configuring a forecast
-provider spends up to three of ADR-0226 §6's ten record slots whenever the planner asks.
+than pretending the drift is not there. The egress relaxations reach two kinds, a wider
+surface for a later ADR to widen again — §6's last clause and ADR-0247 §9's bar hold that
+line, both over the *request*. And a forecast draws up to three of ADR-0226 §6's ten
+slots.
 
-**What would trigger revisiting this.** A measurement that the three-day cap is the wrong
-figure; a place listing arriving from the booking side, which fires §14's first bullet; a
-third configured-provider kind, which fires the fold; or a provider whose response declares
-no instant, which §5 makes unusable — the honest answer there is a different provider
-rather than a substituted clock.
+**What would trigger revisiting this.** A measurement that the three-day cap is wrong; a
+place listing from the booking side, firing §14's first bullet; a third configured-provider
+kind, firing the fold; or a provider declaring no instant, which §5 makes unusable — the
+honest answer there being a different provider, not a clock.
 
 ## Alternatives considered
 
 **A `Reader` over a configured forecast source, read on its own cadence and ingested.**
-This is #2255's own wording and it is the alternative a reader will most want. It is
-refused because the two consumers it would have are the wrong two: ADR-0095's `Reader`
-feeds the situational-context facet and the ingestion stage, both *cadences*, and ADR-0096
-§3 and ADR-0252 §3 between them forbid a facet from serving a carried-over reading or
-producing an evidence row at all. A forecast a turn asks for, whose answer becomes that
-turn's evidence, is a turn-time read — and ADR-0230 §4 already ruled *"Reusing `Reader` was
-never available"* for exactly that shape. The refusal costs one more Protocol in `core`;
-accepting it would have cost a scheduled ingester writing durable weather beliefs about the
-owner, which ADR-0230 §11's third firing condition makes a **stop**.
+This is #2255's own wording and the alternative a reader will most want. It is refused
+because the two consumers it would have are the wrong two: ADR-0095's `Reader` feeds the
+situational-context facet and the ingestion stage, both *cadences*, and ADR-0096 §3 and
+ADR-0252 §3 between them forbid a facet from serving a carried-over reading or producing an
+evidence row at all. A forecast a turn asks for, whose answer becomes that turn's evidence,
+is a turn-time read — and ADR-0230 §4 already ruled *"Reusing `Reader` was never available"*
+for that shape. The refusal costs one more Protocol in `core`; accepting it would have cost
+a scheduled ingester writing durable weather beliefs about the owner, which ADR-0230 §11's
+third firing condition makes a **stop**.
 
 **An ask carrying a planner-composed `TimeWindow`.** It would give ADR-0252 §3's
 `requested` a typed part and let a planner ask about a specific weekend. It is refused
 because a window the planner composed is model output reaching an egress payload, and what
-it buys is small — the provider's own horizon already covers the days a planner would name
-— against the property ADR-0231 §1 calls a kind's *whole safety mechanism*. §14's
-place-listing deferral is the shape in which an argument returns, and it returns as a
-**label into a listing the loop showed**, never as a value the model wrote.
+it buys is small — the provider's own horizon already covers the days a planner would name —
+against the property ADR-0231 §1 calls a kind's *whole safety mechanism*. §14's
+place-listing deferral is the shape an argument returns in: a **label into a listing the
+loop showed**, never a value the model wrote.
 
 **A registered tool at the egress seam, invoked through `ToolInvoker`.** Refused by two
 rulings §1 satisfies by not being a tool: ADR-0170 §5a, *"a tool's result is a JSON payload
