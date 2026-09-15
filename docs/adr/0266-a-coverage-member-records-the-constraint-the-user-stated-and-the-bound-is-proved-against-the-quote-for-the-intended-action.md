@@ -50,15 +50,19 @@ the quote for the intended action
   **fourteenth** type, `BoundedArgument`, and a **sixth and seventh** field,
   `ToolDefinition.bounded_arguments` and `ActionRequest.intended_action`; and *"`PermissionDecision`
   gains no field"* gains one, `intended_action`, without which a decision recorded for one act
-  authorises a request for another. **§20's arm enumeration, scoped as a class rather than a list**:
-  every arm of its seventy-one whose statement reads the contract §§3-7 change, which five named
-  mechanisms decide — a member *naming an argument*; a bound's `currency_argument` and its
-  cross-member refusal; a row carrying two members of one **kind** or a `fixed` value the kind
-  validation refuses; a `MONEY` member met **without a quote**, and `ResolutionRule`'s closure at
-  three; and a **path-(iii) opening act** minted from a stated bound. §9 lists the arms each
-  reaches. **Each is restated over the new shape by the lane that owns it and none is dropped**, and
-  §9 records the arms the sweep cleared with their ground, arm 5 among them. **Every other clause of
-  all twelve sections binds entire**, §9 naming them section by section.
+  authorises a request for another. **§20's arm enumeration, scoped by a decidable test and not by a
+  list**: every arm of its seventy-one an implementation of §§3-7 cannot satisfy, which **six**
+  mechanisms decide — a member *naming an argument* or condition 6 over key sets; a bound's
+  `currency_argument` and its cross-member refusal; two members of one **kind** or a `fixed` value
+  the kind validation refuses; a `MONEY` member met **without a quote**, or `ResolutionRule`'s
+  closure at three; a **path-(iii) opening act carrying a member §4 mints**; and an act whose **own
+  words §4's four-form table does not match**. §9 applies each and names examples, relying on no
+  list as closed. **For five of the six the property each arm demonstrates is unchanged and only its
+  value or its act moves, and no arm is dropped; for the path-(iii) one it is a supersession
+  outright**, arms 64 and 65 losing their no-question limb for a member §4 mints while their whole
+  structure stands for an act §10's three ratified resolutions mint. §9 also records the arms the
+  sweep cleared with their ground. **Every other clause of all twelve sections binds entire**, §9
+  naming them section by section.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -761,30 +765,39 @@ the lane attribution of every roster entry, the `core/protocols.py` and `core/er
 *"`core/config.py` gains nothing at all"*, the `PROTOCOL_VERSION` clause and the
 transcribe-the-ruling-whole rule, which is how `intended_action` reaches the record.
 
-**ADR-0254 §20 — in its arm enumeration, stated as the class rather than as a list, because the list
-is long and a partial one is what two review rounds each found wrong.** §20 obliges its lanes to
-ship the seventy-one arms enumerated under it; Lanes 1 and 3 have landed, so those arms are tests in
-the tree. **The scope is every arm whose statement reads the contract §§3-7 change, and the change
-reaches it by exactly five mechanisms**, each named so the set is decidable rather than enumerated
-from memory: **(i)** a member *naming an argument*, and condition 6 over **key sets** — arms 8, 15,
-20, 47, 53, 54, 59 and 68; **(ii)** a bound's `currency_argument`, and the cross-member refusal that
-a `fixed` member naming it equals the bound's `currency` — arms 10 and 18; **(iii)** a row carrying
-two members of one **kind**, or a `fixed` value the kind validation now refuses — arms 1, 7, 14, 18,
-48 and 64, whose records fix an entity **and** terms, or hold a bare number; **(iv)** a `MONEY`
-member treated as **met without a quote**, and `ResolutionRule`'s closure at three — arms 31, 34,
-44, 45, 46, 49, 57, 60, 66, 67 and 70; and **(v)** a **path-(iii) opening act** minted from a stated
-bound, which §4 forbids — arms 64 and 65, whose *"you may spend up to fifty pounds on this"* is
-exactly this decision's reading. **Every arm reached by one of the five is restated over the new
-shape by the lane that owns it and none is dropped**: the property each demonstrates is unchanged
-and only the value it is stated over moves — the arms of mechanism (iv) mostly keep their outcome
-and gain a quote, and the two of (v) become path-(i) proposals answered once. A reader holding only
-§20 ships a suite that will not construct. **And the arms the sweep checked and cleared, recorded
-with the ground**: **arm 5** stands verbatim, `maximum_exclusive` defaulting to `False`; **arm
-21**'s basis refusals and **arm 35**'s roster assertions are negative and stay true under
-`CoverageView`'s new field; **arm 12**'s `TERMS` set, **arm 11**'s half-open `PERIOD` and **arm
-6**'s float refusal test §4's readings, unmoved; and **`TERMS` and `PERIOD` members stay
-constructible**, §2 admitting a kind and §4 minting none being two different things. **§20's lane
-cut, its wire clause and its dependency clause bind entire.**
+**ADR-0254 §20 — in its arm enumeration, scoped by a decidable test and not by a list, because three
+review rounds each found a list incomplete.** §20 obliges its lanes to ship the seventy-one arms
+enumerated under it; Lanes 1 and 3 have landed, so those arms are tests in the tree. **The scope is
+every arm whose statement an implementation of §§3-7 above cannot satisfy, and six mechanisms decide
+it** — the test is applied arm by arm by the lane that owns the arm, and **no enumeration here is
+closed or relied on as one**; the arms named are examples. **(i)** A member *naming an argument*, or
+condition 6 read over **key sets** (arms 8, 47, 53, 54). **(ii)** A bound's `currency_argument`, or
+the cross-member refusal that a `fixed` member naming it equals the bound's `currency` (arms 10,
+18). **(iii)** A row carrying two members of one **kind**, or a `fixed` value the kind validation
+now refuses (arms 1, 7, 14, 48). **(iv)** A `MONEY` member treated as **met without a quote**, or
+`ResolutionRule`'s closure at three (arms 31, 34, 44, 45, 46, 49, 57, 66, 67, 70). **(v)** A
+**path-(iii) opening act carrying a member §4 mints**, which §4 forbids (arms 64, 65). **(vi)** An
+act whose **own recorded words §4's four-form table does not match**, so the arm's act mints nothing
+— *"actually, make it Sunday"*, *"make it up to eighty"*, *"you may spend up to fifty pounds on
+this"* (arms 14, 15, 20, 39, 47, 57, 64, 65). **The disposition is stated per mechanism rather than
+asserted of all.** For (i)-(iv) and (vi) the property each arm demonstrates is unchanged and only
+the value or act it is stated over moves — the lane restates the act in a form §4's table carries,
+or supplies the quote — and **no arm is dropped**. **For (v) it is a supersession outright**: arm
+64's *"a row is written `ESTABLISHED` … with no `CONFIRM` put at all"* and arm 65's *"never asked to
+repeat the bound"* do **not** survive for a member §4 mints, since that member is proposed and
+settled by an answer (§4). **What survives of arms 64 and 65 is named rather than left to
+inference**: their whole structure stands for an opening act minted by §10's **three ratified
+resolutions**, untouched here — the `TurnOutcome.authorizations` announcement and its empty case,
+the listing and revocation, the not-constructible empty-coverage row, the round-trip, the
+no-second-path-(iii)-row clause, the ADR-0250 §6 safeguard and arm 65's recipient-grant negatives.
+**What does not survive at all is arm 64's two-declaration case** — *"up to fifty pounds for the
+train and a hundred for the hotel"* — which one member per kind now mints nothing from, and which
+§9's §1 entry above already records. **And the arms the sweep cleared, with the ground**: **arm 5**
+stands verbatim, `maximum_exclusive` defaulting to `False`; **arms 21 and 35** state negative
+assertions that stay true under `CoverageView`'s new field; **arms 6, 11 and 12** test §4's
+readings, unmoved; and `TERMS` and `PERIOD` members stay **constructible**, §2 admitting a kind and
+§4 minting none being two different things. **§20's lane cut, its wire clause and its dependency
+clause bind entire.**
 
 **ADR-0016 §1 — in one scope**, and it is the scope ADR-0254 §18 already took there reaching one
 further field: the model declaration, and the required-field clause applied to `bounded_arguments`
@@ -1010,7 +1023,9 @@ superseded.
    exclusive `maximum` of `100` a value of exactly `"100"` does **not** satisfy and against an
    inclusive one it does. **Both halves are parameterised over the whole of §4's closed reading and
    not over its illustrations** — every one of the four forms, every currency word and symbol in
-   **both** orders, mixed case, runs of tabs and spaces, and `99.50` as well as `100`.
+   **both** orders, mixed case, runs of **every ASCII whitespace character** — space, tab, newline,
+   carriage return, form feed and vertical tab — against a non-ASCII space that is **not**
+   collapsed, and `99.50` as well as `100`.
 4. **One member per kind, and the exclusivity ordering at an equal ceiling.** **4(a):** an
    `Authorization` carrying two `MONEY` members is not constructible and one carrying a `MONEY` and
    a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
