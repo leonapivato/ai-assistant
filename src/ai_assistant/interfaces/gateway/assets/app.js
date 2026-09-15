@@ -10179,9 +10179,17 @@ function readCoverageView(view) {
     return false;
   }
   if (view.fixed === null) {
-    return view.bound !== null && readBound(view.bound);
+    // **The bound's kind is the member's, and a page that did not check would
+    // render a claim the record cannot hold** (ADR-0266 §3): a `terms` view
+    // carrying a money bound reads as "the terms: up to 50 GBP", which is a
+    // statement about the owner's authority that no `CoverageMember` could have
+    // produced. `CoverageView` refuses it one layer up; this is the page refusing
+    // to render what a hub at another version, or a wrong one, might still send.
+    return view.bound !== null && readBound(view.bound) && view.bound.kind === view.kind;
   }
-  return view.bound === null;
+  // **A `money` view fixes nothing**: an amount carries no currency on a fixed
+  // member, so the page would be rendering a figure nothing denominates.
+  return view.bound === null && view.kind !== "money";
 }
 
 // Every member of a coverage, each as its own statement with the words behind it.

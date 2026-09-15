@@ -1793,6 +1793,60 @@ class AuditTrailContract:
 
         await _refuses(trail, answer_for_b)
 
+    async def test_a_resolution_must_share_the_confirmations_intended_action(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0266 §7: B's answer may not resolve a ``CONFIRM`` put about A.
+
+        The act a request is an attempt at is part of the subject a resolution must
+        share, because **the whole of ADR-0266's proof is that the amount was quoted
+        for that act**: a decision resolved for one act and then answering a request
+        that is an attempt at another would carry the coverage through the one value
+        nothing compared. ``from_confirmation`` transcribes it, so a conforming
+        caller cannot produce this — which is exactly why the trail states it, the
+        caller this catches being the one that does not follow the contract.
+        """
+        await trail.record(decision("c-a", request=action(intended_action="act-a")))
+        answer_for_b = decision(
+            "r-b",
+            request=action(intended_action="act-b"),
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-a"),
+            resolves="c-a",
+        )
+
+        await _refuses(trail, answer_for_b)
+
+    async def test_a_resolution_carrying_no_intended_action_may_not_answer_one_that_does(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0266 §7, in the direction a defaulted field makes reachable.
+
+        ``None`` is what a decision written before the field decodes as, so a
+        resolution that simply omits it must not answer a question that named an
+        act — otherwise dropping the value would be the way past the check above.
+        **Both directions**, because neither is the obvious one on its own.
+        """
+        await trail.record(decision("c-a", request=action(intended_action="act-a")))
+        await _refuses(
+            trail,
+            decision(
+                "r-none",
+                request=action(),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-a"),
+                resolves="c-a",
+            ),
+        )
+        await trail.record(decision("c-none", request=action()))
+        await _refuses(
+            trail,
+            decision(
+                "r-act",
+                request=action(intended_action="act-a"),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-none"),
+                resolves="c-none",
+            ),
+        )
+
     async def test_a_concrete_binding_carries_at_most_one_resolution(
         self, trail: AuditTrail
     ) -> None:

@@ -21,7 +21,7 @@ import re
 import string
 import unicodedata
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum, StrEnum
 from hashlib import sha256
@@ -19204,6 +19204,118 @@ PERIOD_DATE_TIME: Final[re.Pattern[str]] = re.compile(
 )
 
 
+def period_reading_form(text: str) -> date | datetime | None:
+    """What ADR-0254 §4's ``PERIOD`` reading reads ``text`` as, or ``None``.
+
+    A **calendar date** for the ``full-date`` arm, an **aware instant** for the
+    ``date-time`` arm, and ``None`` where the reading refuses the text — which is
+    §4's totality: *"every failure of it is a refusal to cover"*.
+
+    **One parser, consumed by the construction and by the comparison** (ADR-0266
+    §3). The grammar is checked before anything is parsed, so the two arms are told
+    apart by which pattern matched rather than by which parser happened to succeed;
+    and the parse is then run, so a string that is **shaped** like a date but names
+    none — ``2026-02-30``, ``2026-13-01``, ``2026-09-13T25:00:00Z`` — is refused
+    here rather than admitted by one caller and refused by the other. A member
+    fixing such a value would be compared by byte equality and would cover a call
+    carrying the same impossible string, which is a value §4's reading accepts
+    nowhere.
+
+    **It reads no zone and needs none.** Which instant a calendar date denotes is
+    the bound's own ``timezone``'s to say, and that arm — including the civil day a
+    zone skips entirely — belongs to the comparison, which holds the bound. This
+    answers only what the text *is*.
+
+    Args:
+        text: The argument's value, or a member's fixed value.
+
+    Returns:
+        The date or the instant the reading reads, or ``None``.
+    """
+    if PERIOD_FULL_DATE.match(text):
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None
+    if not PERIOD_DATE_TIME.match(text):
+        return None
+    # **RFC 3339 §5.6's own case rule permits a lower-case ``t`` and ``z``**, and
+    # ``datetime.fromisoformat`` accepts the first and refuses the second. Upper-
+    # casing both markers before the parse is what makes the grammar above and the
+    # reading below admit exactly the same set: a regex that claimed a form the parse
+    # then refused would be a second statement of the rule, free to disagree with the
+    # first — and the disagreement would be silent, since a refusal to read is
+    # indistinguishable from a refusal to cover.
+    normalised = f"{text[:10]}T{text[11:-1]}{text[-1].upper()}"
+    try:
+        parsed = datetime.fromisoformat(normalised)
+    except ValueError:
+        return None
+    return parsed if parsed.utcoffset() is not None else None
+
+
+def _refusal_of_a_value_its_kind_does_not_state(  # noqa: PLR0911 — one per shape §3 refuses
+    kind: BoundKind, fixed: FrozenJsonValue | None, bound: ValueBound | None
+) -> str | None:
+    """ADR-0266 §3's kind validation, stated once for the record and the view.
+
+    **A bound carries the member's kind**, and **a ``fixed`` value is validated
+    against it too** — *"without which arbitrary JSON could be labelled at a kind
+    and compared under a reading it does not fit"*.
+
+    * A ``MONEY`` ``fixed`` is **refused outright**: an amount carries no currency
+      on a fixed member, and ADR-0254 §4's ``MONEY`` reading compares none without
+      one, so such a member states an amount nothing can denominate.
+    * A ``PERIOD`` ``fixed`` is a value that reading accepts
+      (:func:`period_reading_form`) — shape **and** calendar, not shape alone.
+    * A ``TERMS`` ``fixed`` is a JSON string, which is the only thing §4's
+      membership reading compares.
+
+    **One statement, read by :class:`CoverageMember` and by :class:`CoverageView`.**
+    §11 makes the view a *transcription* of the record, so a view the record could
+    not have produced is a mis-transcription: a ``TERMS`` view carrying a ``MONEY``
+    bound would render *"the terms: up to 50 GBP"*, and a ``MONEY`` view carrying a
+    fixed value would render an amount nothing denominates — each a claim about the
+    authority on the one screen the user answers from. Two statements of this rule
+    would be free to disagree, and the surface would render whichever one it asked.
+
+    Args:
+        kind: The member's or view's kind.
+        fixed: The exact value, where it states one.
+        bound: The permitted range, where it states one.
+
+    Returns:
+        The refusal's reason, or ``None`` where the value is one this kind states.
+    """
+    if bound is not None:
+        if bound.kind is not kind:
+            return (
+                f"of kind {kind} states a bound of that kind, got {bound.kind}; the kind "
+                f"and its bound are one statement about one thing the user said "
+                f"(ADR-0266 §3)"
+            )
+        return None
+    if kind is BoundKind.MONEY:
+        return (
+            "of kind money states a bound and never a fixed value; an amount carries no "
+            "currency on a fixed member, so nothing could denominate it (ADR-0266 §3)"
+        )
+    if kind is BoundKind.PERIOD:
+        if not isinstance(fixed, str) or period_reading_form(fixed) is None:
+            return (
+                "of kind period fixes a value ADR-0254 §4's reading accepts: an RFC 3339 "
+                "date-time carrying an offset, or a calendar date — and a real one, since "
+                "a fixed value is compared by byte equality (ADR-0266 §3)"
+            )
+        return None
+    if not isinstance(fixed, str):
+        return (
+            "of kind terms fixes a JSON string, which is the only value §4's membership "
+            "reading compares (ADR-0266 §3)"
+        )
+    return None
+
+
 class ValueBound(BaseModel):
     """A permitted range over one argument's value (ADR-0254 §2).
 
@@ -19715,58 +19827,18 @@ class CoverageMember(BaseModel):
     def _the_value_is_one_this_kind_states(self) -> CoverageMember:
         """Refuse a value the member's own ``kind`` does not read (ADR-0266 §3).
 
-        **A bound carries the member's kind**, and **a ``fixed`` value is validated
-        against it too** — *"without which arbitrary JSON could be labelled at a kind
-        and compared under a reading it does not fit"*.
-
-        * A ``MONEY`` ``fixed`` is **refused outright**: an amount carries no
-          currency on a fixed member, and ADR-0254 §4's ``MONEY`` reading compares
-          none without one, so such a member states an amount nothing can
-          denominate. Such an act mints a **bound** or nothing.
-        * A ``PERIOD`` ``fixed`` is a value that reading accepts — an RFC 3339
-          date-time carrying an offset, or a calendar date
-          (:data:`PERIOD_DATE_TIME`, :data:`PERIOD_FULL_DATE`, the one statement of
-          that grammar).
-        * A ``TERMS`` ``fixed`` is a JSON string, which is the only thing §4's
-          membership reading compares.
+        :func:`_refusal_of_a_value_its_kind_does_not_state` states the rule, and
+        :class:`CoverageView` reads the same statement of it — §11 makes the view a
+        transcription of this record, so a second statement would let the surface
+        render what the record cannot hold.
 
         Raises:
             ValueError: If a ``bound``'s kind differs from the member's, or if a
                 ``fixed`` value is not one this kind states.
         """
-        if self.bound is not None:
-            if self.bound.kind is not self.kind:
-                msg = (
-                    f"a coverage member of kind {self.kind} states a bound of that kind, "
-                    f"got {self.bound.kind}; a member and its bound are one statement "
-                    f"about one thing the user said (ADR-0266 §3)"
-                )
-                raise ValueError(msg)
-            return self
-        if self.kind is BoundKind.MONEY:
-            msg = (
-                "a MONEY coverage member states a bound and never a fixed value; an amount "
-                "carries no currency on a fixed member, so nothing could denominate it "
-                "(ADR-0266 §3)"
-            )
-            raise ValueError(msg)
-        if self.kind is BoundKind.PERIOD:
-            readable = isinstance(self.fixed, str) and bool(
-                PERIOD_FULL_DATE.match(self.fixed) or PERIOD_DATE_TIME.match(self.fixed)
-            )
-            if not readable:
-                msg = (
-                    "a PERIOD coverage member fixes a value ADR-0254 §4's reading accepts: "
-                    "an RFC 3339 date-time carrying an offset, or a calendar date "
-                    "(ADR-0266 §3)"
-                )
-                raise ValueError(msg)
-            return self
-        if not isinstance(self.fixed, str):
-            msg = (
-                "a TERMS coverage member fixes a JSON string, which is the only value §4's "
-                "membership reading compares (ADR-0266 §3)"
-            )
+        refusal = _refusal_of_a_value_its_kind_does_not_state(self.kind, self.fixed, self.bound)
+        if refusal is not None:
+            msg = f"a coverage member {refusal}"
             raise ValueError(msg)
         return self
 
@@ -20415,6 +20487,35 @@ class CoverageView(BaseModel):
                 f"a coverage view of kind {self.kind} shows a fixed value or a bound; "
                 f"one that shows neither renders nothing the user said (ADR-0254 §2, §11)"
             )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _the_value_is_one_this_kind_states(self) -> CoverageView:
+        """Refuse a rendering the record it transcribes could not have produced.
+
+        **ADR-0266 §3's kind validation, read through §11's transcription rule.**
+        §11 requires the projection to carry *"the recorded values by transcription
+        and not a second derivation of them"*, and a :class:`CoverageMember` cannot
+        carry a bound of another kind or a ``fixed`` its kind does not state — so a
+        view that does is a **mis-transcription** rather than a value some other
+        rule admits.
+
+        **The cost of not stating it is on the screen the user answers from**: a
+        ``TERMS`` view carrying a ``MONEY`` bound renders *"the terms: up to 50
+        GBP"*, and a ``MONEY`` view carrying a fixed value renders an amount
+        nothing denominates. Both misstate the authority at the one moment §11
+        exists to make checkable. This makes the view *"refusable in exactly the
+        cases the record is"*, which is §11's own principle one field further on,
+        and it forbids no rendering a conforming record can produce.
+
+        Raises:
+            ValueError: If a ``bound``'s kind differs from the view's, or if a
+                ``fixed`` value is not one this kind states.
+        """
+        refusal = _refusal_of_a_value_its_kind_does_not_state(self.kind, self.fixed, self.bound)
+        if refusal is not None:
+            msg = f"a coverage view {refusal}"
             raise ValueError(msg)
         return self
 

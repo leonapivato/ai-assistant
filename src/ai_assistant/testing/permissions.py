@@ -1034,6 +1034,15 @@ class FakeAuditTrail:
             or confirmed.parameters_digest != decision.parameters_digest
             or confirmed.step_id != decision.step_id
             or confirmed.execution_id != decision.execution_id
+            # **The act the question was asked about is part of that subject**
+            # (ADR-0266 §7). ``from_confirmation`` transcribes it, so a conforming
+            # caller cannot differ — and this check exists for the one that does not:
+            # without it a ``CONFIRM`` put about action A is answerable by an
+            # otherwise identical decision naming action B, and ``authorises`` then
+            # authorises B. The whole of ADR-0266's proof is that the amount was
+            # quoted **for that act**, so the value the coverage was proved through
+            # would be the one value this trail could not compare.
+            or confirmed.intended_action != decision.intended_action
         ):
             msg = (
                 f"decision {decision.id!r} resolves {confirmed.id!r} but rules on a "
