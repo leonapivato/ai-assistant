@@ -9,6 +9,10 @@ the planner seam's ``A`` block and its strict extraction are **L3's**. So arms
 here would mean writing a second statement of the loop's substitution in test code and
 then asserting the test against it, which certifies nothing about the system.
 
+**The brief's ``actions`` projection is L2's too** (§9), so what is asserted of it here
+is its **shape** — the field, its bound and ``BriefAction``'s containment — and that
+``GoalBrief.of`` fills none of it.
+
 What is here is **arm 7** whole, **arm 6**'s round trip and its export limb, and the
 type-level half of **arm 1(a)** — that two intended actions of one goal are two
 distinct identities a plan's two steps can name apart while their capability and
@@ -28,11 +32,9 @@ from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     MAX_INTENDED_ACTIONS,
     ActionPlan,
-    BriefAction,
     EvidenceHistory,
     Goal,
     GoalBrief,
-    GoalElement,
     GoalInterpretation,
     GoalStatus,
     Ground,
@@ -345,57 +347,24 @@ def test_a_goal_written_before_this_decision_decodes_with_no_intended_actions() 
 # --- §4: what the brief renders, and what it does not -----------------------
 
 
-def test_the_brief_renders_one_entry_per_action_with_its_live_links() -> None:
-    """§4: "one entry per member of ``Goal.intended_actions`` in that tuple's own
-    order", each carrying the ``C``/``S``/``D`` **labels** of the current revision.
+def test_the_projection_renders_no_action_and_filling_it_is_l2s() -> None:
+    """§9 puts "the ``GoalBrief.actions`` projection with its live-link rendering" in
+    "L2 — the loop, in ``orchestration`` alone", and names L1's list without it.
 
-    So ``A1`` names the first-minted action on both sides of the seam, and the link is
-    shown "where it is still true".
+    So what L1 lands is the **shape** — the field, its bound and ``BriefAction``'s
+    containment — and :meth:`GoalBrief.of` fills none of it, exactly as it fills no
+    ``open_questions``. An action-free brief is well-formed rather than degraded
+    (§1: "the goal's opening write mints none"), which is ADR-0249 §9's own posture
+    toward an element-free one, so nothing here is a degraded rendering waiting to be
+    repaired — it is the rendering until L2 lands.
     """
-    goal = _goal(
-        actions=(_action("ia1", serves=("e1", "e2")), _action("ia2")),
-        constraints=(
-            GoalElement(id="e1", text="under 100 euro", ground=Ground.USER_STATED, span="under"),
-        ),
-        conditions=(GoalElement(id="e2", text="the trip happens", ground=Ground.INFERRED),),
-    )
+    intending = _goal(actions=(_action("ia1", serves=("e1",)),))
 
-    brief = GoalBrief.of(goal)
+    brief = GoalBrief.of(intending)
 
-    assert brief.actions == (
-        BriefAction(intent="book the room", serves=("C1", "D1")),
-        BriefAction(intent="book the room"),
-    )
-
-
-def test_the_brief_omits_a_link_whose_element_is_not_in_the_current_revision() -> None:
-    """§4: "an entry whose element is not in the current revision (§3) is **omitted from
-    the rendering**, so the brief shows the link where it is still true and shows
-    nothing where it is not."
-
-    This is §3's staleness rendered rather than repaired: "the entry is not rewritten,
-    not recomputed, not dropped and not refreshed" **on the record**, and what changes
-    is only what a brief projected from the current revision can show.
-    """
-    goal = _goal(
-        actions=(_action("ia1", serves=("gone", "e1")),),
-        constraints=(
-            GoalElement(id="e1", text="under 100 euro", ground=Ground.USER_STATED, span="under"),
-        ),
-    )
-
-    brief = GoalBrief.of(goal)
-
-    assert brief.actions == (BriefAction(intent="book the room", serves=("C1",)),)
-
-
-def test_a_brief_of_a_goal_intending_nothing_carries_no_actions() -> None:
-    """§1: "the goal's opening write mints none", so ``actions`` is empty on every goal
-    at the moment it is opened — and an action-free brief is well-formed rather than
-    degraded, on ADR-0249 §9's own posture toward an element-free one.
-    """
-    assert GoalBrief.of(_goal()).actions == ()
-    assert GoalBrief.of(_goal()).status is GoalStatus.ACTIVE
+    assert brief.actions == ()
+    assert brief.status is GoalStatus.ACTIVE
+    assert intending.intended_actions[0].serves == ("e1",), "and the record is untouched"
 
 
 def test_a_planner_output_proposing_actions_carries_them_beside_the_plan() -> None:

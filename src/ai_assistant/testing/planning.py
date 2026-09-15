@@ -896,9 +896,25 @@ class FakePlanStore:
         compare-and-swap in one call, so every later change goes through
         :meth:`record_interpretation`.
 
+        **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2).
+        "The goal's opening write mints none", and "the only route to a new
+        ``IntendedAction`` is a ``ProposedAction`` recorded by the member §5 adds" — so
+        a seeded tuple would take at the door what ``MAX_INTENDED_ACTIONS`` forbids and
+        leave the bound enforced on nothing. Stated here rather than imported, for the
+        reason this module's own docstring gives.
+
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``.
+            PlanningError: If the store already holds a goal under this ``id``, or if
+                the goal is opened carrying an intended action.
         """
+        if goal.intended_actions:
+            named = ", ".join(action.id for action in goal.intended_actions)
+            msg = (
+                f"goal {goal.id} is opened carrying intended action {named}: a goal's "
+                f"opening write mints none, and the only route to an intended action "
+                f"is record_intended_actions (ADR-0265 §1, §2)"
+            )
+            raise PlanningError(msg)
         async with self._resource.held():
             if goal.id in self._goals:
                 msg = (

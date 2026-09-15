@@ -59,6 +59,41 @@ _PHASE_ORDER: Final[dict[AttemptPhase, int]] = {
 }
 
 
+def refuse_a_seeded_minting(goal: Goal) -> None:
+    """Refuse an opening write carrying intended actions (ADR-0265 §1, §2).
+
+    **The goal's opening write mints none** (§1): "a goal is opened carrying revision 1
+    alone (ADR-0249 §3), which ``orchestration`` mints from the request without a
+    planner call, so ``intended_actions`` is empty on every goal at the moment it is
+    opened". And §2 closes the route in terms: "**the only route to a new
+    ``IntendedAction`` is a ``ProposedAction`` recorded by the member §5 adds**".
+
+    **It is also what makes §1's bound a bound.** That section's "``GoalBrief.actions``
+    is therefore bounded by construction" reasons from the minting's refusal, and a
+    ``save_goal`` that accepted a seeded tuple would "take at the door what the ceiling
+    forbids and enforce it on nothing" — :func:`bounded`'s own sentence for ADR-0249
+    §2's ceiling, which that clause states over **the write** rather than over one
+    member. The two bounds take opposite remedies for the reason §1 gives: a revision
+    is **elided** because the elision "leaves a count on the record and loses no
+    identity", while an intended action is **refused** because "an identity that can
+    vanish is not an identity".
+
+    Args:
+        goal: The goal as the caller handed it in.
+
+    Raises:
+        PlanningError: If the opening write carries an intended action.
+    """
+    if goal.intended_actions:
+        named = ", ".join(action.id for action in goal.intended_actions)
+        msg = (
+            f"goal {goal.id} is opened carrying intended action {named}: a goal's "
+            f"opening write mints none, and the only route to an intended action is "
+            f"record_intended_actions (ADR-0265 §1, §2)"
+        )
+        raise PlanningError(msg)
+
+
 def bounded(goal: Goal) -> Goal:
     """Hold ``goal``'s history to ADR-0249 §2's bound, disclosing what it drops.
 
