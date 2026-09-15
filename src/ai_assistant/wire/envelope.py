@@ -2124,9 +2124,6 @@ from ai_assistant.wire.errors import (
 #: rather than one to repair. **And no ``AuthorizationProjection`` is stored at all**, it
 #: riding inside a ``Confirmation`` that crosses a frame.
 #:
-#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
-#: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
-#: registered, and the error mapping is untouched — this lane mints no error class.
 #: **49 since ADR-0261 §10**, whose ground is ADR-0124 §9's **second** limb — *"a change
 #: to a wire-carried ``core`` type that makes a value one peer emits invalid for the
 #: other"* — and which ADR-0178 §6 is the precedent for stating in the deciding ADR.
@@ -2201,7 +2198,64 @@ from ai_assistant.wire.errors import (
 #: registered, the promoted method set does not move, no gateway route is added, and the
 #: error mapping gains the one class ADR-0261 §7 declares and nothing else. Retention,
 #: deletion and export are untouched, and no new durable record is minted.
-PROTOCOL_VERSION: Final[int] = 49
+#:
+#: **50 since ADR-0259 §9**, and the ground is stated rather than weighed: *"``
+#: PROTOCOL_VERSION`` is moved once, by L1"*. **Three grounds, one bump, and there is
+#: no fourth.**
+#:
+#: **The first.** :class:`~ai_assistant.core.types.Disposition` gains
+#: ``EFFECT_ALREADY_CLAIMED`` and ``EFFECT_UNSCOPED``. That enum is a ``StrEnum`` a
+#: client reads off :class:`~ai_assistant.core.types.StepOutcome` inside a
+#: :class:`~ai_assistant.core.types.TurnOutcome`, so a hub at 49 emits
+#: ``"effect_already_claimed"`` and a client at 49 fails it against its own closed
+#: enumeration — ADR-0084 §4's additive-on-the-wire rule met by the version moving, the
+#: same shape the entry at 6 took for ``GrantScope``'s ``NOTIFY``.
+#:
+#: **The second.** :class:`~ai_assistant.core.types.TurnOutcome` gains
+#: ``satisfied_from_earlier``, defaulted ``None`` and emitted by ``model_dump()`` on
+#: **every** outcome that crosses, which a client at 49 fails with ``extra_forbidden``
+#: — the entry at 8's own reading, stated over one more member.
+#:
+#: **The third.** :class:`~ai_assistant.core.types.StepExecution` gains
+#: ``satisfied_by_execution`` and ``satisfied_by_step``, likewise defaulted and likewise
+#: emitted on every step of every :class:`~ai_assistant.core.types.ExecutionState` a
+#: ``StepOutcome`` carries.
+#:
+#: **What earns no ground of its own, said rather than left to inference.**
+#: :class:`~ai_assistant.core.types.ExchangeDisposition` gains two members and
+#: :class:`~ai_assistant.core.types.StepTransition` gains three fields, but neither
+#: crosses a frame: the first rides on :class:`~ai_assistant.core.types.EpisodicMemory`,
+#: which the engine surface does not return, and the second is ``PlanStore``'s write
+#: command, which no wire operation takes. :class:`~ai_assistant.core.types.EffectKey`,
+#: :class:`~ai_assistant.core.types.EffectClaim`,
+#: :class:`~ai_assistant.core.types.EffectOutcome` and
+#: :class:`~ai_assistant.core.types.EffectRecord` are minted and reach a frame nowhere
+#: at all — ``claim_effect`` is a ``PlanStore`` member and ``effects`` rides only in the
+#: export document.
+#:
+#: **No integer is fixed in the ADR** (§9). It is whatever the tree holds when this lane
+#: lands plus one: this lane branched at 47 and was written **48**; ADR-0267 §11's Q1
+#: landed 48 first, so it re-bumped to **49**; and ADR-0261 §10's L1 then landed 49, so
+#: it re-bumped again to **50**. That is both of those entries' own instruction — *"a
+#: lane that lands after this one re-bumps rather than reusing it"* — and the reason §9
+#: refuses to write an integer into an ADR at all.
+#:
+#: **One stored-record version moves and one migration is owed** (§9).
+#: ``PlanExport.schema_version`` moves **15 → 16**, because the document gains
+#: ``effects`` and every step it carries gains the two satisfaction marks; and the plan
+#: store's schema moves **7 → 8** for the ``goal_effects`` table, whose migration
+#: **creates it empty** — "no lane reconstructs a row for an execution that predates
+#: the migration". The goal-authorization store's stays at **1**, the parked-read store's at
+#: **3** and ``ConversationExport.schema_version`` at **2**. The captured episode is
+#: untouched as a *record*: ``ExchangeDisposition``'s two members are additive on a
+#: model that sets no ``extra="forbid"``, so every row already in a store deserialises
+#: and no migration, backfill, column or index is owed for them. And
+#: ``core.config.Settings`` gains nothing at all.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
+#: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
+#: registered, and the error mapping is untouched — this lane mints no error class.
+PROTOCOL_VERSION: Final[int] = 50
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

@@ -1283,6 +1283,18 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     47, then re-bumped to **49** when ADR-0267's Q1 landed 48 first, on that entry's
     own instruction. ADR-0259's L1 also moves it and re-bumps in its turn.
 
+    **49 is ADR-0259 §9's L1, and it is under the second limb alone, on three grounds.**
+    ``Disposition`` gains ``EFFECT_ALREADY_CLAIMED`` and ``EFFECT_UNSCOPED`` — a
+    ``StrEnum`` value a client at 48 refuses against its own closed enumeration, which
+    is the entry at 5's shape; ``TurnOutcome`` gains ``satisfied_from_earlier``; and
+    ``StepExecution`` gains the two satisfaction marks, emitted on every step of every
+    ``ExecutionState`` a ``StepOutcome`` carries. **The method set does not move and
+    stays at 63**: L1 adds no ``AssistantEngine`` member and no gateway route, so the
+    two numbers part company for a fourth consecutive entry. §9 fixes no numeral
+    either, and this lane was written **48** and re-bumped to **49** when ADR-0267
+    §11's Q1 landed 48 first — on that entry's own instruction, and the reason every
+    entry above it gives.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
