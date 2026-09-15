@@ -8170,6 +8170,9 @@ def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_
     assert '<section id="authorizations"' in document
     assert 'id="authorizations-button"' not in document
     assert 'id="authorization-list"' in document
+    # The goal line and the settlements sit **outside** the list, which the listing
+    # clears: inside it, a settlement is detached before the owner can read it.
+    assert 'id="authorization-goal"' in document
 
     authorities = "".join(
         _functions(script)[name]
@@ -8201,17 +8204,38 @@ def test_one_withdrawal_act_reports_where_no_listing_can_detach_it() -> None:
     retires a record the store says is now ``REVOKED``. **The control is out of reach for
     the duration**, so two presses cannot produce two answers that contradict each other.
     """
-    act = _functions(_code("app.js"))["revokeAuthorization"]
+    script = _code("app.js")
+    act = _functions(script)["revokeAuthorization"]
+    result = _functions(script)["actResult"]
 
     assert "confirmWithdrawal(view)" in act
-    assert "actResult(row.item, row.list)" in act
+    assert "actResult(row.list, view)" in act
     assert "statedSettlement(view, done.settlement)" in act
     assert "row.withdraw.disabled = true" in act
     assert '"/authorization/revoke",' in act
     assert 'done.settlement === "settled"' in act
     assert "row.controls.remove()" in act
     assert "listAuthorizations" not in act, "an act does not re-read a listing"
+    # One entry per record, in a region the listing does not own.
+    assert "list.parentElement.insertBefore(region, list)" in result
+    assert "node.dataset.record = key" in result
     assert 'id="authorization-said"' not in _asset("index.html"), "no slot in the markup"
+
+
+def test_the_act_is_offered_in_the_panel_and_named_in_a_reply() -> None:
+    """ADR-0254 §11 puts the **handle** in front of the owner at the act.
+
+    An announcement sits in a reply the next turn replaces, so a withdrawal taken there
+    would report into DOM the page has already thrown away. It names the handle and where
+    the act is taken instead — which is what the command line's announcement does, and is
+    what keeps the two surfaces stating the same act in the same place. Adversarial
+    review, round 6, ``blocker``.
+    """
+    row = _functions(_code("app.js"))["renderAuthorization"]
+
+    assert "if (!withGoal) {" in row
+    assert "Withdraw this" in row
+    assert "What this authorises" in row
 
 
 def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
@@ -8238,7 +8262,11 @@ def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     assert 'bound.kind === "terms"' in reader
     assert "bound.terms.length > 0" in reader
     assert "bound.terms.every(isText)" in reader
-    assert reader.rstrip().endswith("return true;\n}"), "an unknown kind is not refused here"
+    # And every field of another kind must be absent, or a limit the record carries is
+    # dropped from the rendering (round 6, ``major``).
+    assert "absent(bound," in reader
+    assert '"terms"' in reader
+    assert '"starts_at"' in reader
 
 
 def test_only_an_empty_array_is_an_empty_announcement() -> None:

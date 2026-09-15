@@ -110,6 +110,15 @@ CLAUSES: Final = (
         "standing permission",
         "standing permission",
     ),
+    # The announcement **names** the remedy on both surfaces and performs it on neither:
+    # the terminal prints the command to type, and the page names the panel the act is
+    # taken in. A control in a reply reports into DOM the next turn throws away, which is
+    # what round 6 found, and a terminal has no such control to offer in the first place.
+    (
+        "§11: the announcement names the remedy and does not take it",
+        "revoke-authorization",
+        "What this authorises",
+    ),
 )
 
 
