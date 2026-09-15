@@ -129,12 +129,11 @@ twenty-seven members; `MAX_GOAL_EVIDENCE` at 64 and `MAX_EVIDENCE_RECORDS` at 32
 ### What this ADR is not allowed to settle
 
 It is the quote's machinery and nothing wider. It does not touch ADR-0266 §7's comparison — it
-supplies that comparison's operand and the seam it is read through, and every rule about **what
-covers a request** stays where ADR-0266 ratified it. It does not decide the booking integration,
-the simulated booking service's shape, or anything M33 owes (#2255). It draws no line through
-`system_supplied` — ADR-0266 §10 books that elsewhere and §6 of this document states what it costs
-here. And it verifies nothing: the actual charge is A10's, on the owner's ruling that a
-quote/charge mismatch is *"a reported finding"*.
+supplies that comparison's operand and the seam it is read through, every rule about **what covers
+a request** staying where ADR-0266 ratified it. It decides neither the booking integration nor
+anything M33 owes (#2255), draws no line through `system_supplied` (ADR-0266 §10 books it; §6
+states what it costs here), and verifies nothing: the actual charge is A10's, on the owner's ruling
+that a quote/charge mismatch is *"a reported finding"*.
 
 ## Decision
 
@@ -355,12 +354,13 @@ record of the same durability.
 > case"*. ADR-0252 §7's *"a refresh supersedes the row it displaces"* is honoured by position
 > rather than by a mark, which is the whole reason §2 puts the record in an ordered tuple.
 
-> **Normative — the mint is not atomic with the transition that recorded the output, and both
-> residuals are fail-closed.** A process that stops between the two writes leaves the step
-> `SUCCEEDED` with its output and the goal with **no** quote for that act, so the act asks; **no
-> lane reconciles a missing quote from a stored output**, because re-reading a price is a fresh
-> read appended like any other (above) and minting one from an output recorded earlier would state
-> a reading nobody took at an instant nobody observed.
+> **Normative — the mint is not atomic with the transition that recorded the output.** A process
+> stopping between the two writes leaves the step `SUCCEEDED` with its output and the goal without
+> that reading: the act **asks** where no earlier quote names that action, and is proved against
+> the **earlier** one where one stands — the reconciliation §10 books, and not a claim that the
+> interruption is free. **No lane reconciles a missing quote from a stored output**: re-reading a
+> price is a fresh read appended like any other (above), and minting one from an output recorded
+> earlier would state a reading nobody took at an instant nobody observed.
 
 > **Normative — a mint is taken in the step of the walk that recorded the output it reads and never
 > afterwards, and a write the store refuses is re-read rather than rebased.** **No lane defers,
@@ -379,10 +379,14 @@ record of the same durability.
 > under an advanced `quotes_elided` is abandoned on the same ground**: a quote for that action may
 > have landed and been elided since, and an absence the minter cannot tell from an elision is not
 > proof that nothing displaced its reading (§2's elision drops from the front and counts what it
-> drops). A second refusal abandons the mint in the same way, and **an abandoned mint raises nothing
-> into the walk**: the step stays `SUCCEEDED` and the act asks. **So no append ever puts an older
-> reading after a
-> newer one for one action**, however turns interleave — ADR-0266 §7's *"An earlier quote is
+> drops). **A second refusal is the one case that is not silent**: the minter holds a price it read
+> and could not record while an **earlier** quote for that action may still stand and still cover
+> the act, so it **raises** — nothing swallows it, the walk stops under ADR-0255's own discipline
+> rather than dispatching against a reading known to be superseded, and ADR-0148 §1's trade is
+> taken as §6 takes it. **The other two abandonments stay silent and are safe on the record**: a
+> different quote for that action is a **later** reading and governs, and an absence is no quote at
+> all, which is uncovered and asks. **So no append ever puts an older reading after a newer one
+> for one action**, however turns interleave — ADR-0266 §7's *"An earlier quote is
 > consulted in no case"* held by the order of the writes rather than by a test at the store, which
 > §1 and §2 each forbid the store to make. **An abandoned mint is a lost reading and never a
 > revival**: the goal keeps a reading nothing displaced, §7's projection renders that one and
@@ -430,11 +434,11 @@ record of the same durability.
 > the one call is authorised by route (a) or not at all.
 
 **The composition root wires the plan store here, and that is golden rule 1 rather than an
-exception to it.** The quotes are inside the `Goal`, so the object that answers `for_action` is
-`planning`'s store; `permissions` names only the `core` Protocol and `app/` passes the concrete, as
-it already does for `GoalAuthorizations`. A conforming store satisfies `GoalQuotes` structurally,
-which is that seam's own stated construction — *"a composition root may pass one object to each
-seam; what a policy cannot do is **name** `record`"*.
+exception to it.** The quotes are inside the `Goal`, so `planning`'s store answers `for_action`;
+`permissions` names only the `core` Protocol and `app/` passes the concrete, as it already does for
+`GoalAuthorizations`, a conforming store satisfying `GoalQuotes` structurally — that seam's own
+construction: *"a composition root may pass one object to each seam; what a policy cannot do is
+**name** `record`"*.
 
 ### 6. Freshness: a stale quote authorises exactly what a fresh one does, and the gate is where that is answered
 
@@ -473,10 +477,9 @@ seam; what a policy cannot do is **name** `record`"*.
 
 **This is the honest half of the answer and the corpus has taken it before.** ADR-0148 §1's trade —
 *"Refusing costs a recoverable error the user sees; proceeding costs a disclosure nobody can detect
-afterwards"* — is why the gate condition is a refusal to wire rather than a tolerance to configure.
-The alternative designs all put a check where the fact is not: a shorter Δ, a re-quote immediately
-before the call, a hash of the provider's page. Each narrows the window and none closes it, and a
-narrowed window is the failure mode that arrives rarely enough to be attributed to something else.
+afterwards"* — is why the gate condition is a refusal to wire rather than a tolerance to configure,
+and why every alternative in "Alternatives considered" is refused: each narrows the window without
+closing it, and a narrowed window arrives rarely enough to be attributed to something else.
 
 ### 7. The rendering: the row records the figure it was proposed against, and the projection transcribes it
 
@@ -511,16 +514,17 @@ narrowed window is the failure mode that arrives rarely enough to be attributed 
 > with it `None`**.
 
 **It is on the row because it is part of what the user answered, and that is ADR-0254 §1's own
-reason for writing the row first.** §1 writes the record before the question so that *"what the user
-is shown is a rendering of a durable row"* and so that a restart *"renders the same projection"*; a
-figure the answer was taken over that lived only on the goal would be re-selected at every
+reason for writing the row first.** §1 writes the record before the question so that a restart
+*"renders the same projection"*; a figure that lived only on the goal would be re-selected at every
 recovery and could be a different number by then. **It is not two shapes of one fact**: the goal's
-tuple holds what the act costs **now**, this field holds what it cost **when the user said yes**,
-and neither is derivable from the other once a refresh has landed — ADR-0254 §8's *"Both halves
-survive, and neither is derivable from the other"*, taken about the span and true here for the same
-reason. **And it is what keeps the two lanes independent**: the engine performs a record lookup by
-position over a goal it already holds, so no coverage comparison crosses a subsystem boundary and
-`permissions` is asked for nothing at proposal time.
+tuple holds what the act costs **now**, this field what it cost **when the user said yes**, neither
+derivable from the other once a refresh has landed — ADR-0254 §8's *"Both halves survive, and
+neither is derivable from the other"* one record over. **And the selection itself asks
+`permissions` for nothing**: it is a record lookup by
+position over a goal the writer already holds, so no coverage comparison crosses a subsystem
+boundary on its account. **What the writer must still obtain from `permissions` is condition 6's
+answer** — ADR-0266 §7 places that comparison there and this decision moves it nowhere — and by
+what it obtains it is #2401's question, booked in §10.
 
 > **Normative — `quoted` is selected by §2's order alone, by no comparison, and by the component
 > that writes the row.** ADR-0254 §15 rules that an `Authorization` is *"written and settled by
@@ -539,7 +543,7 @@ governing quote every time, so an act whose price has moved above the ceiling is
 the confirmation read. **Where ADR-0254 §1's completeness condition is evaluated, and through what
 a component that is not `permissions` obtains condition 6's answer, is not settled here**: ADR-0266
 §7 states the one implementation and ADR-0254 §1 states the condition, **this decision moves
-neither, adds no second implementation of either, and evaluates condition 6 in none of its three
+neither, adds no second implementation of either, and evaluates condition 6 in neither of its
 lanes** (§11) — the question is booked in §10 with what fires it and with the amendment issue that
 holds it.
 
@@ -553,7 +557,7 @@ holds it.
 > absent exactly where that field is absent. **A confirmation that renders a ceiling without the
 > figure the act was quoted at is not a confirmation of that charge**, which is ADR-0254 §11's own
 > construction — *"A confirmation that establishes a bound without naming it is not a confirmation
-> of that bound"* — read onto the value the bound is proved against, and it is why §11's concrete
+> of that bound"* — read onto the figure the row was built over, and it is why §11's concrete
 > list already requires the question to name *"the price as a figure or as a bounded limit with its
 > currency"*.
 
@@ -713,32 +717,34 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
   a declaration a machine-checkable statement of totality, by the one that gives an intended action
   a parameter or capability identity — which ADR-0266 §10 books and ADR-0265 §1's *"no fourth
   field"* closes today — and by the one that rules what a verification finding does.
-- **Where ADR-0254 §1's completeness condition is evaluated, and through what a component that is
-  not `permissions` asks for condition 6's answer.** ADR-0266 §7 places *"One implementation, in
-  `permissions`"* and restates §1's condition over condition 6; the proposal is written by
-  `orchestration` (ADR-0254 §15), so something must join them, and golden rule 1 forbids the import
-  that would join them directly. **This decision adds neither a seam nor a second implementation,
-  and no lane of it evaluates condition 6** (§11): §7's selection of `quoted` needs none, being a
-  position in a tuple, and the population of that field rides the lane that lands the proposal
-  path. **The gap is ratified ADR-0266's and is booked there as an amendment, at #2401** — a
-  Protocol member answering, for a concrete request and the coverage a proposed row would carry,
-  whether that coverage is met — which widens a `core` Protocol and so owes its own ADR merged
-  first under golden rule 5, and is not this decision's to take. Fired by that amendment, which is
-  booked **ahead of** ADR-0254 §20's Lane 2 and which that lane waits on (§11).
-- **Reconciling a mint that did not complete, and ordering two appends whose reads were
-  concurrent.** §4 rules the mint non-atomic with the transition that recorded the output, and the
-  two interruptions are not one question. **A write that never happened is unrecoverable here**:
-  the quote is lost, the act asks, and **no lane reconciles one from a stored output** or writes a
-  recovery pass over them. **An ambiguously committed write is decided rather than left open** —
-  §4's re-read recognises it by the record's own equality and appends nothing, which is this
-  decision's idempotency mechanism and is why no lane mints an idempotency key or a sequence for
-  one. **And nothing here makes a concurrently read price
-  survive**: §4 keeps position in reading order by abandoning the loser of a race rather than by
-  ordering the two, so where two turns read one action at once the later writer's reading is
-  **lost** and the recorded one stands — safe against revival, and a reading the system paid for
-  and threw away. Fired by the decision that reconciles an attempt's unfinished work at a turn-start
-  pass, which is where ADR-0259 §1 already puts that shape of question, and by the decision that
-  gives a quote a store-authored order should a plan ever read one price twice at once.
+- **Where ADR-0254 §1's completeness condition is evaluated, through what a component that is not
+  `permissions` asks for condition 6's answer, and whether the row records the quote that answered
+  it.** ADR-0266 §7 places *"One implementation, in `permissions`"* and restates §1's condition
+  over condition 6; the proposal is written by `orchestration` (ADR-0254 §15), so something must
+  join them, and golden rule 1 forbids the import that would. **This decision adds neither a seam
+  nor a second implementation, and evaluates condition 6 in neither lane** (§11): §7's selection
+  needs none, being a position in a tuple, and the field's population rides the proposal lane.
+  **The gap is ratified ADR-0266's, booked there as an amendment at #2401** — a Protocol member
+  answering, for a concrete request and a proposed row's coverage, whether that coverage is met —
+  which widens a `core` Protocol and so owes its own ADR merged first (golden rule 5). **Until a
+  seam returns the quote it read, `quoted` and condition 6's operand are two reads and can differ**
+  where a refresh lands between them: the row then records the reading it was built over and the
+  confirmation renders that one, which is §7's rule and is why the seam's shape is the amendment's
+  question rather than this document's. Fired by that amendment, booked **ahead of** ADR-0254
+  §20's Lane 2 and waited on by it (§11).
+- **Reconciling a mint that did not complete.** §4 rules the mint non-atomic with the transition
+  that recorded the output, and the interruptions are not one question. **A write that never
+  happened is unrecoverable here**: the reading is lost, the act asks where no earlier quote names
+  that action and is proved against the earlier one where one stands, and **no lane reconciles one
+  from a stored output** or writes a recovery pass over them. **An ambiguously committed write is
+  decided rather than left open** — §4's re-read recognises it by the record's own equality, which
+  is why no lane mints an idempotency key or a sequence. **And a concurrently read price does not
+  survive**: §4 keeps position in reading order by abandoning the loser rather than ordering the
+  two, so one of two simultaneous readings is lost — silently where what stands is later or
+  nothing, and **as a raise that stops the walk** where an earlier quote could still cover the act
+  (§4). Fired by the decision that reconciles an attempt's unfinished work at a turn-start pass,
+  which is where ADR-0259 §1 already puts that shape of question, and by the decision that gives a
+  quote a store-authored order should a plan ever read one price twice at once.
 - **A quote read from anywhere but one key of one object.** §3 fixes depth one and one key pair, so
   a tool returning a **list** of priced options, a nested price, a price split across two keys, or
   two currencies in one output yields **no** quote and its acts ask. Fired by the decision stating
@@ -754,11 +760,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 - **An identifier of a quote's own, and any record that names one.** §1 declines it because the act
   and the digest select one deterministically. Fired by the decision that records a verification
   finding against the quote it contradicts, if that record needs a handle the pair cannot give.
-- **Retiring, withdrawing or invalidating a quote.** A cancelled booking, a provider that
-  repudiates a price, a goal abandoned mid-walk: none of them marks a quote, and the record carries
-  no standing (§1). A displaced quote is displaced by position alone (§4). Fired by the decision
-  that gives a quote a standing with a producer for its second member — the empty-box failure
-  ADR-0249 §10 refuses, avoided here by omission rather than by a one-sided enum.
+- **Retiring, withdrawing or invalidating a quote.** A cancelled booking, a repudiated price, a
+  goal abandoned mid-walk: none marks a quote, the record carrying no standing (§1), and a
+  displaced quote is displaced by position alone (§4). Fired by the decision that gives a quote a
+  standing with a producer for its second member — ADR-0249 §10's empty-box failure, avoided here
+  by omission rather than by a one-sided enum.
 - **Which system-supplied keys are per-call identity rather than inputs a price depends on.**
   ADR-0266 §10 books it and this decision draws no line, so §1's digest excludes nothing and a
   declaration filling an idempotency key per call is covered by **no** quote and asks on every act.
@@ -766,8 +772,7 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
   by the decision that classifies such a key, unchanged from where ADR-0266 left it.
 - **The provider-side hold or conditional execution itself.** §6 makes one a prerequisite and
   states no shape for it: not a type, not a Protocol, not a `ToolDefinition` field, not a seam.
-  Fired by the decision that wires the first consequential capability a `MONEY` ceiling authorises,
-  which owes ADR-0255 §13 as §6 leaves it.
+  Fired by the decision wiring the first consequential capability a `MONEY` ceiling authorises.
 - **What the listing and the revocation surface render about a price**, and what an export carries
   of one beyond the `Goal` it rides in. §7 reaches the confirmation alone. Fired by the decision
   that states what a standing authority's history shows of the figures it was proved against.
@@ -883,7 +888,8 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 1. **The record, and the four facts.** An `ActionQuote` is constructible at each of §1's shapes and
    round-trips through its own dump; it is **not** constructible carrying a non-finite or negative
    `amount`, an `arguments_digest` that is not lowercase 64-character hex, or an eighth field; and
-   a `QuoteView` is constructible and carries no digest, no action and no identifier. **And the
+   a `QuoteView` carries no digest, no action and no identifier. **Zero is a price**: `Decimal("0")`
+   constructs, covers under any ceiling of its currency, and is no absence. **And the
    goal's order is the total order**: a goal carrying quotes for two actions returns them oldest
    first, the **last** naming an action is the governing one, and appending a second for one action
    leaves the first in place and unmarked.
@@ -925,12 +931,13 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    **different** quote, the later reading still governing; **appends nothing** where it gained
    the **equal** one; and **appends nothing** where that action's quote landed and was then
    **elided**, the absence being one `quotes_elided`'s advance forbids it to read as proof; **and
-   where that authorised retry is itself refused stale it abandons**, raising nothing, taking no
-   third `record_quote` and leaving the goal as the winner left it. No interleaving leaves an older
-   reading last, and no later pass over a stored output mints at all. **And no `verifies` is
-   read**: a `SUCCEEDED` step whose plan-declared `verifies` predicate would **fail**
+   where that authorised retry is itself refused stale it **raises**, taking no third
+   `record_quote`, propagating rather than swallowing, and leaving the goal as the winner left it;
+   and the mint of a JSON integer `0` and a string `"0"` each records `Decimal("0")` (§4). No
+   interleaving leaves an older reading last, and no later pass over a stored output mints at all.
+   **And no `verifies` is read**: a `SUCCEEDED` step whose plan-declared predicate would **fail**
    over its own output mints exactly as one whose predicate holds, the mint evaluating no
-   plan-carried value and adding no evaluation site to the two ADR-0255 §8 names.
+   plan-carried value and adding no site to the two ADR-0255 §8 names.
 5. **The comparison, end to end, and it is ADR-0266's own.** Against a quote for the request's
    `intended_action` at `"120"`/`"EUR"` over the request's own arguments the request is **covered**
    against a `150` `EUR` ceiling; at `"170"` it is not; at `"120"`/`"USD"` it is not; with **no**
@@ -985,9 +992,8 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 
 **A reader acts differently, so this is a decision and not a clarification.** A reader holding the
 corpus without it can prove no `MONEY` ceiling at all — ADR-0266 §7's evidence route has no
-operand — and would either leave
-#2373 stopped where it stopped or invent a carrier, a producer and a
-selector no clause authorises, which is the `stars`-in-the-`price`-slot failure §3 exists to
+operand — and would either leave #2373 stopped where it stopped or invent a carrier, a producer
+and a selector no clause authorises, which is the `stars`-in-the-`price`-slot failure §3 exists to
 prevent (ADR-0070 §1). **It is a partial supersession of exactly four documents** (ADR-0070 §3) —
 ADR-0254 in three scopes, ADR-0016, ADR-0255 and ADR-0249 in one each — and the `Status` line of
 each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's
@@ -995,12 +1001,11 @@ extraction invariant holds. **The records land in the same change as this docume
 §7), and nothing else in any of the four is edited — no Decision text is rewritten, which ADR-0070
 §1 forbids.
 
-**This ADR is marked** under ADR-0089 as ADR-0257 §1 widens the token: every obligation it imposes
-is a normative blockquote at column 0 stating its own scope, unmarked text beside a mark supplies
-no obligation of its own but is read to settle what a mark means (§3), and quoted marks from
-other ADRs appear inside quotation marks in running prose. §11's lane bullets and its arms are
-that unmarked content, read under marks stating the lane count, the one-change rule and the
-no-lane-is-complete rule.
+**This ADR is marked** under ADR-0089 as ADR-0257 §1 widens the token: every obligation is a
+normative blockquote at column 0 stating its own scope, unmarked text beside a mark supplies no
+obligation of its own but settles what a mark means (§3), and quoted marks appear inside quotation
+marks in running prose. §11's lane bullets and its arms are that unmarked content, read under
+marks stating the lane count, the one-change rule and the no-lane-is-complete rule.
 
 **It is a contract-surface change** — `core/types.py` gains four types and five fields, and
 **`core/protocols.py` gains a Protocol and a `PlanStore` member** — so it owes **both** review
@@ -1023,33 +1028,32 @@ obtain condition 6's answer — so #2373 is unblocked by ADR-0266, that amendmen
 together, and the confirmation renders a figure only from Lane 2 onward.
 
 **What becomes harder, and every part of it is a question asked rather than a call authorised.** A
-declaration that names no `quoted_output` never quotes, so every act of it that a `MONEY` ceiling
-would authorise asks. A quoting call and an acting call differing in **any** argument key never
-match — **a per-call system-supplied key included**, which is this decision's sharpest cost and is
-ADR-0266 §10's booking rather than this one's to close. A price the system would have to compute —
-a sum of components, a converted currency, a per-unit rate multiplied out — is not a quote and
-mints none. And a tool returning a **list** of priced options quotes nothing, §3 reading one key of
-one object.
+declaration naming no `quoted_output` never quotes, so every act of it a `MONEY` ceiling would
+authorise asks. A quoting call and an acting call differing in **any** argument key never match —
+**a per-call system-supplied key included**, this decision's sharpest cost and ADR-0266 §10's
+booking to close. A price the system would have to compute — a sum of components, a converted
+currency, a per-unit rate multiplied out — mints none. And a tool returning a **list** of priced
+options quotes nothing, §3 reading one key of one object.
 
-**What is disclosed rather than closed, and it is the one residual this document is honest about.**
-A quote true when it was read and false when the charge was made authorises an over-bound charge,
-and **no local mechanism detects it**: an expiry nobody enforces, elapsed-time proximity and a
-local compare-and-swap are each a check in the wrong place (§6). What closes it is provider-side
-and is therefore a **gate prerequisite** rather than a rule in `permissions`, which is why ADR-0255
-§15 item 19 grows by one and why nothing here pretends the window is shut. Until such a capability
-is wired the figure and its instant are **rendered to the user** and the charge is **verified
-afterwards** by A10, and neither is a prevention.
+**What is disclosed rather than closed.** A quote true when it was read and false when the charge
+was made authorises an over-bound charge, and **no local mechanism detects it**: an expiry nobody
+enforces, elapsed-time proximity and a local compare-and-swap are each a check in the wrong place
+(§6). What closes it is provider-side and is therefore a **gate prerequisite** rather than a rule
+in `permissions`, which is why ADR-0255 §15 item 19 grows by one. Until such a capability is wired
+the figure and its instant are **rendered** and the charge **verified afterwards** by A10, and
+neither is a prevention. **A reading the system takes and loses is the second disclosure**: a mint
+abandoned to a race leaves an earlier quote governing, silently where nothing could cover the act
+and as a stopped walk where one could (§4).
 
 **These are the cases that would falsify the design.** A corpus of real declarations whose prices
 are not one key of one flat object — a list of options, a nested breakdown, a fee beside a total —
 which would make §3's depth-one reading quote almost nothing. A booking flow whose acting call
 carries an argument the quoting call did not, so the digest never matches and the mechanism is
-inert in exactly the case it was built for; the practical falsifier by a distance, and the one to
-measure first. Integration authors who declare `quoted_output` at the wrong key, which §1's
-totality obligation asks of them and no code checks. A provider offering neither a hold nor a
-conditional execution, which under §6 means the capability is **not wired** rather than wired with
-a shorter window. And a goal whose investigation re-quotes so often that 64 quotes elide the only
-reading of an earlier act, turning a covered call into a question.
+inert in exactly the case it was built for — the practical falsifier by a distance, and the one to
+measure first. Integration authors who declare `quoted_output` at the wrong key, which no code
+checks. A provider offering neither a hold nor a conditional execution, which under §6 means the
+capability is **not wired**. And a goal re-quoting so often that 64 quotes elide the only reading
+of an earlier act, turning a covered call into a question.
 
 ## Alternatives considered
 
@@ -1081,13 +1085,12 @@ and authorises a `200` purchase. No validator of shape catches it, ADR-0254 §3'
 at the source. The declaration is the same fact written once by a human and reviewed once.
 
 **An expiry on the quote, enforced locally.** Refused in §6. A `read_at + Δ` test refuses quotes
-that are still true and admits quotes that are already false, because Δ is a guess about a
-provider's pricing; a compare-and-swap at dispatch observes stored values and not the provider's
-current price; and a re-quote immediately before the call narrows the window without closing it.
-Each looks like a freshness proof and is not, which is worse than the absence, because a reader who
-sees one stops asking for the mechanism that would work. What the provider can offer — a hold, or a
-conditional execution that validates the amount atomically with the act — is what §6 makes a
-prerequisite on wiring.
+still true and admits quotes already false, Δ being a guess about a provider's pricing; a
+compare-and-swap at dispatch observes stored values and not the provider's current price; a
+re-quote immediately before the call narrows the window without closing it; and a hash of the
+provider's page is the same guess spelled differently. Each looks like a freshness proof and is
+not, which is worse than the absence, because a reader who sees one stops asking for the mechanism
+that would work — the provider's own hold or conditional execution, which §6 makes a prerequisite.
 
 **A tuple of quoted outputs on the declaration.** Refused in §3 for the reason a tuple of anything
 admitting exactly one member is refused: the one-member rule is a thing somebody must remember at
