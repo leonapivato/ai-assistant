@@ -371,19 +371,16 @@ says so.
 > carries no check and is unestablished**, which is the conservative direction and which §4's
 > limbs report as `UNCERTAIN` or `PARTIAL` rather than as verification.
 
-> **Normative — what a wrongly permissive check can and cannot cause, stated rather than left to
-> be worked out, because the direction of the authority is the question ADR-0249 §7 asks.** A
-> planner authors the check, so a permissive one is a path to `VERIFIED` and to
-> `GoalStatus.ACHIEVED` that a *missing* check does not open — the asymmetry `PlanStep.verifies`
-> does not have, where absence permits and presence can only refuse. **What it buys is a false
-> report and two denials, and never an act**: **nothing in this system is dispatched, authorised,
-> claimed, transmitted or spent on a `CriterionCheck`**, no clause of any ratified decision reads
-> one, and the two things a wrong `VERIFIED` does cause — the goal closes to further planning
-> (ADR-0250 §1) and its authorisation ends with it (the owner's ruling of 2026-09-14, §9) — are
-> each a **deny**. That is #2096 item 8's own direction, ruled by the owner: *"A model is a safe
-> denier and an unsafe allower, because of who rehearses against it."* **The residual is that a
-> user may be told a goal is done when it is not**, which `OUTPUT_PRESENT`'s refusal, the binding
-> above and the freeze above each narrow and none removes; §9 books what would remove it.
+> **Normative — what a wrongly permissive check can and cannot cause, stated because the direction
+> of the authority is the question ADR-0249 §7 asks.** A planner authors the check, so a permissive
+> one is a path to `VERIFIED` and to `GoalStatus.ACHIEVED` that a *missing* check does not open —
+> the asymmetry `PlanStep.verifies` does not have, where absence permits and presence can only
+> refuse. **What it buys is a false report and two denials, and never an act**: **nothing in this
+> system is dispatched, authorised, claimed, transmitted or spent on a `CriterionCheck`**, and the
+> two things a wrong `VERIFIED` does cause — the goal closes to further planning (ADR-0250 §1) and
+> its authorisation ends with it (the owner's ruling of 2026-09-14) — are each a **deny**.
+> **That bound is not a settlement**, and §9 states the fork this decision leaves open rather than
+> resolving it here.
 
 > **Normative — an unestablished criterion is never reported as met, which is R50 and is a
 > property of the three results rather than a rule about ambiguity.** An answer the check does not
@@ -515,10 +512,10 @@ lookup; it is the **refusal to say verified**.
 > **Normative — which member the attempt earns, decided by §2's three results over the criteria §1
 > fixes, by §3's rung, and by those two facts, in this order and over nothing else.**
 >
-> 1. **`CONDITION_PREVENTED`** — **no** criterion is met, **`blocked`**, **not `failed`**, and the
+> 1. **`FAILED`** — **no** criterion is met, and **`failed`** or some criterion is **unmet**.
+> 2. **`CONDITION_PREVENTED`** — **no** criterion is met, **`blocked`**, **not `failed`**, and the
 >    attempt is **not at rung 2**. The plan's own declared conditions, or the user's own refusal,
 >    refused the work, and nothing consequential ran.
-> 2. **`FAILED`** — **no** criterion is met, and **`failed`** or some criterion is **unmet**.
 > 3. **`UNCERTAIN`** — the attempt is at **rung 2** (§3), **not `failed`**, **no** criterion is
 >    **unmet**, and **not `fully_met`**: a consequential act ran and the record does not establish
 >    that every criterion holds.
@@ -534,11 +531,13 @@ lookup; it is the **refusal to say verified**.
 > those six it gives **five** the producer they have never had.
 
 > **Normative — the order is the rule, and four of its positions are load-bearing.**
-> **`CONDITION_PREVENTED` and `FAILED` precede everything** because such an attempt may also have
+> **`FAILED` and `CONDITION_PREVENTED` precede everything** because such an attempt may also have
 > every criterion unestablished and would otherwise fall to `ANSWERED`, whose ratified definition
 > asserts *"that no step failed and that no condition blocked"* — the member would be reporting
-> two things the record contradicts. **`FAILED` precedes `CONDITION_PREVENTED`** where both hold,
-> because a failure was established and a condition merely withheld the work; and
+> two things the record contradicts. **`FAILED` is first and `CONDITION_PREVENTED` second**, so
+> that where both predicates hold — a bound step reporting a mismatching value beside another step
+> skipped `UNMET_DEPENDENCY` — the established failure is reported and the condition does not
+> suppress it; and
 > **`CONDITION_PREVENTED` is refused at rung 2**, because a consequential act did run and *a
 > condition prevented action* would then be false. **`UNCERTAIN` precedes `PARTIAL`** so that a
 > rung-2 attempt with a **met** criterion and an **unestablished** one is reported as uncertain
@@ -611,20 +610,22 @@ criteria, and then committed would record a terminal attempt — and possibly a 
 a step a concurrent driver had meanwhile taken `PENDING → RUNNING → SUCCEEDED`, whose answer the
 comparison never saw and which could have made a criterion **unmet**. A conjunct testing only
 `RUNNING` and `INDETERMINATE` would not catch that, because by the time it runs the step is
-`SUCCEEDED`. **Requiring every step to be `SUCCEEDED`, `FAILED` or `SKIPPED` closes it by
-construction, and the exhaustiveness rests on three ratified facts.** ADR-0014 §4's graph admits a
-`→ RUNNING` claim only from `PENDING` or `AWAITING_APPROVAL`, so where the conjunct holds **there
-is no step any driver can claim at all**. A step of a **new** execution is unreachable too: ADR-0255
-§3's attempt conjunct refuses a claim whose execution the attempt does not carry, and putting one
-there is a `commit_attempt` append (ADR-0249 §12) which **advances `GoalAttempt.version`**, so the
-ending transition's own `expected_version` refuses. And a claim that lands **after** the commit
-meets a terminal attempt and is refused by ADR-0255 §3's state limb. **The one remaining status a
-claim could in principle leave is `FAILED`**, which `TERMINAL_STEP_STATUSES` excludes *"(it may
-still be retried)"* — and **no driver in this corpus re-claims one**: ADR-0255 §2 rules that the
-walk *"passes over it"*, §5's resume walks the plan again disposing of `PENDING` steps and not
-`FAILED` ones, and the only `→ RUNNING` claimant in `src/` is that driver (ADR-0261 §10's dated
-observation). **There is no fourth case**, and **no lane closes this with a version list on the
-transition, a snapshot argument or a lock.**
+`SUCCEEDED`. **The status set narrows the window and does not close it, and saying which is this section's
+honest half.** ADR-0014 §4's graph admits a `→ RUNNING` claim only from `PENDING` or
+`AWAITING_APPROVAL`, so where the caller's read found every step `SUCCEEDED`, `FAILED` or
+`SKIPPED` **no step of the attempt is claimable at all**, and a step of a **new** execution is
+unreachable because putting one on the attempt is a `commit_attempt` append (ADR-0249 §12) that
+advances `GoalAttempt.version`, which the ending transition's own `expected_version` refuses.
+**What is left is exactly one interleaving**: `FAILED` is outside `TERMINAL_STEP_STATUSES` *"(it
+may still be retried)"*, so a `FAILED → RUNNING → SUCCEEDED` retry landing entirely between the
+comparison and the commit is admitted by the graph and by the conjunct alike. **No driver in this
+corpus performs it** — ADR-0255 §2 rules the walk *"passes over"* a `FAILED` step — but resting the
+contract on that would make `PlanStore` non-extensible, so it is **stated rather than relied on**.
+**What closes it is a version comparison and nothing weaker**: the ending transition carrying each
+named execution's `ExecutionState.version` as the caller read it, with `commit_attempt` refusing
+where any has advanced. **That field is not landed here** and §9 books it with what fires it,
+beside the question §2a leaves open — both decide what this phase may treat as established, and
+two decisions landing two shapes on `AttemptTransition` is the collision one ADR avoids.
 
 **The cost is one turn and is bounded by an act that already runs.** An attempt whose walk stopped
 leaving a step `PENDING` — ADR-0255 §2's `AMBIGUOUS_CAPABILITY`, `INVALID_PARAMETERS` and
@@ -952,14 +953,37 @@ right about it, and it is the last place the count can be stated before somebody
   output could settle — *the forecast said the trip qualifies* — is **unestablished**. Fired by a
   decision that widens `settles` to a criterion element, which would owe ADR-0253 §8's ordering
   rule and its one-`settles`-per-plan refusal their own argument.
-- **What would remove a wrongly permissive check's residual** — §2a states the bound and narrows
-  it three ways and closes none of them. **Not decided.** What would close it is a check whose
-  predicate the **tool** declares rather than the planner — a postcondition on `ToolDefinition`,
-  which ADR-0016 §1 would make required-and-undefaulted like every other safety field — so that a
-  criterion's check could only select among declarations a deployment authored. **This decision
-  adds no `ToolDefinition` field**, and one added for this would reach every registered tool and
-  every MCP server (ADR-0147). Fired by a measured case of a planner verifying a goal that was not
-  reached, which the arms of §12 cannot produce because they supply the checks themselves.
+- **Whether a planner-authored predicate may be the *positive* half of goal verification, and the
+  trusted declaration that would replace it.** **NOT SETTLED BY THIS DECISION, AND STATED AS AN
+  OPEN FORK RATHER THAN A RESIDUAL.** §2a states the bound and narrows it three ways —
+  `OUTPUT_PRESENT` refused, the check bound to an `IntendedAction`, the check frozen before the
+  act — and closes none of them: a planner declaring `FIELD_EQUALS` on `status == "ok"` for a
+  criterion about a **date** produces `VERIFIED` and `ACHIEVED` over a booking made for the wrong
+  day. **Two readings of ADR-0249 §7 are available on its text** — that its *"a model may never
+  clear a … prerequisite"* is categorical and reaches this, or that its stated ground is the
+  deny/allow asymmetry about **effects** and nothing here dispatches — and this decision **does not
+  choose between them**. **What would close it is a check whose predicate the *tool* declares**: a
+  `postconditions` declaration on `ToolDefinition`, from which a `CriterionCheck` **selects by
+  index** rather than authoring — ADR-0265 §4's *"Selection, never invention"* and ADR-0226 §3's
+  namer rule applied once more — which would also close **the same-act collision** below, since a
+  quote tool's declared postconditions cannot satisfy a criterion about a booking. **That is a
+  `ToolDefinition` change reaching every registered tool and every MCP server (ADR-0016 §1,
+  ADR-0147), which this lane does not own and this decision does not make.** Fired by the decision
+  that takes it.
+- **Binding a criterion's check finer than one intended action.** **Not decided**, and §2's binding
+  is as fine as the corpus goes: two steps of one act — a quote and the booking it prices — are
+  both bound steps, so a quote's `{"date": "Sunday"}` satisfies a criterion about the booking's
+  date. `IntendedAction` carries *"no fourth field"* and therefore no parameters (ADR-0265 §1), and
+  **ADR-0266 §10 books that same gap in its own words** — *"What pins an *undeclared* user-facing
+  argument to the user's own act … `IntendedAction` cannot close the gap"*. Fired by the
+  postcondition decision above, or by the one that gives an intended action a parameter identity.
+- **The execution-version comparison the ending commit needs** (§4). **Not decided, and the field
+  is not landed here**: `AttemptTransition` carrying each named execution's `ExecutionState.version`
+  as the caller read it, with `commit_attempt` refusing where any has advanced. §4 states why the
+  status conjunct is insufficient and why no weaker argument works. **It is booked with the fork
+  above rather than separately**, because both decide what this phase may treat as established and
+  two decisions landing two shapes on `AttemptTransition` is the collision one ADR avoids. Fired
+  by that decision.
 - **A verification that calls a model.** **Not decided, and §2 states why not rather than leaving
   it to be inferred**: establishing a goal's achievement is the `ACHIEVED` write's prerequisite,
   and ADR-0249 §7 forbids a model clearing one. What a model supplies is the **declaration** — a
@@ -1280,31 +1304,26 @@ that the arithmetic is on the record.
 **What becomes harder.** A peer at the old `PROTOCOL_VERSION` refuses a peer at the new one, and an
 export reader at the old schema refuses a document written after L1 — both intended and both loud.
 A goal that reaches `ACHIEVED` can no longer open an attempt at all (ADR-0261 §2), so a caller must
-reopen it first (ADR-0250 §13). A planner now has one more thing it may get wrong, and a goal whose
-criteria carry no check never reaches `VERIFIED` — the cost §3 and §9 state rather than hide. A
-criterion about an amount is unverifiable until #2387 lands. And a goal with an unresolved effect
-now deliberately **does not** end its attempt, so such a goal stays open until A8's reconciliation
-reaches it — the owner's ruling, and a state a user sees on `assistant goals` rather than one the
-system quietly closes.
+reopen it first (ADR-0250 §13). A planner now has one more thing it may get wrong; a goal whose
+criteria carry no check never reaches `VERIFIED`, and one about an amount is unverifiable until
+#2387 lands. And a goal with an unresolved effect now deliberately **does not** end its attempt, so
+it stays open until A8's reconciliation reaches it — the owner's ruling, and a state a user sees on
+`assistant goals` rather than one the system quietly closes.
 
-**What would trigger revisiting this.** A measured case in which real planners routinely propose no
-check, or propose ones that pass trivially, would say the declaration is in the wrong place and
-would fire §9's evidence-route entry. The quote decision (#2387) landing would give an amount
-criterion its operand and fire §9's inequality entry with it. And a deployment in which `ANSWERED`
+**What would trigger revisiting this.** A measured case of a planner verifying a goal that was not
+reached fires §9's first entry, whose resolution would reshape §2 entire. The quote decision
+(#2387) landing would give an amount criterion its operand. And a deployment in which `UNCERTAIN`
 is the effective terminal member for every consequential goal would say the checks, and not this
 comparison, are where the work is missing.
 
 ## Alternatives considered
 
 **Declaring the check on the plan — a `PlanStep.establishes` naming criteria by `S` label.**
-Refused, and the reason is S2 rather than the size. A check on a step dies with the plan the step
-belonged to, and *"Actually, make it Sunday"* supersedes the plan while keeping the goal — so a
-re-planned goal would carry criteria nothing could ever check again unless every later plan
-re-declared them, which is exactly the silent loss ADR-0249 §7's element retention exists to stop
-one value over. It is also larger in every direction: it would widen `PlanStep`, extend ADR-0253
-§9's substitution to a third field, extend `save_plan`'s refusal, and need an `S`-label reservation
-on `GoalElement.id` beside ADR-0253 §7's `D` one — four scopes against ADR-0253 to buy a worse
-lifetime.
+Refused, and the reason is S2 rather than the size. A check on a step dies with the plan, and
+*"Actually, make it Sunday"* supersedes the plan while keeping the goal — so a re-planned goal
+would carry criteria nothing could check again unless every later plan re-declared them, the
+silent loss ADR-0249 §7's retention exists to stop one value over. It is also larger in every
+direction: four scopes against ADR-0253 to buy a worse lifetime.
 
 **Establishing a criterion from a `GoalEvidence` row through ADR-0252 §6's four tests.** Refused
 (§9), and it was this decision's first shape. Those tests are stated over a `StepCondition`, whose
@@ -1322,9 +1341,9 @@ criterion with an act.
 
 **Reusing `PlanStep.verifies` as the criterion check.** Refused (§2). One predicate would answer
 two questions — *did this step produce what the plan said* and *does the goal's criterion hold* —
-which are routinely different predicates over one output, and it would add a third reader to
-ADR-0255 §8's *"exactly the two places"*. Reusing the **type** and not the **field** keeps
-ADR-0253 §4's fence true by construction.
+routinely different predicates over one output, and it would add a third reader to ADR-0255 §8's
+*"exactly the two places"*. Reusing the **type** and not the **field** keeps ADR-0253 §4's fence
+true by construction.
 
 **Admitting `OUTPUT_PRESENT` as a criterion check.** Refused (§2). *"The step returned something"*
 is the circularity R48 exists to close, one level down from *"a reply was composed"*, and a
@@ -1339,11 +1358,10 @@ row names *"the six-member report vocabulary"* and no verdict vocabulary at all.
 
 **A `PlanStore.close_goal_achieved` mirroring ADR-0261 §2's `close_goal_abandoned`.** Refused, and
 the asymmetry is the reason rather than the economy. That member exists because the answer R78 owes
-— whether anything was outstanding — is a fact about the instant the goal closed, and because the
-outcome of a cancelled attempt is a function of statuses **the store can read**. This decision's
-outcome is a comparison against the goal's **criteria** and their checks, which would put a JSON
-predicate evaluator inside a store write. §4's conjunct closes the one race a mirrored member would
-have been bought to close, at the cost of one refusal rather than one member.
+is a fact about the instant the goal closed, and because a cancelled attempt's outcome is a
+function of statuses **the store can read**. This decision's outcome is a comparison against the
+goal's **criteria** and their checks, which would put a JSON predicate evaluator inside a store
+write.
 
 **Retrying the `ACHIEVED` write after a lost `Goal.version`.** Refused after round 1, which is
 where it was found. A goal's version moves when a turn records a new interpretation revision, so
@@ -1357,29 +1375,27 @@ the `ACHIEVED` write's prerequisite and ADR-0249 §7 forbids a model clearing on
 allower."* A model that wrongly leaves a goal unverified costs a goal the user asks about again;
 one that wrongly verifies it tells them a booking happened.
 
-**Verification performing the independent read itself at rung 2.** Refused after the owner's ruling
-of 2026-09-13, which the fit report's §I.2 predates: *"Nothing checks on its own initiative."* A
-read taken inside `VERIFY` would be an unplanned, unauthorised call made after the walk ended, on
-a budget §3 would have had to invent, in a phase no park can interrupt. Making it a step of a later
-attempt costs one turn and buys the whole of the phase machinery for free.
+**Verification performing the independent read itself at rung 2.** Refused after the owner's
+ruling of 2026-09-13, which the fit report's §I.2 predates: *"Nothing checks on its own
+initiative."* A read taken inside `VERIFY` would be an unplanned, unauthorised call made after the
+walk ended, on a budget §3 would have had to invent. Making it a step of a later attempt costs one
+turn and buys the phase machinery for free.
 
 **Deriving `GoalStatus.ACHIEVED` from `AttemptOutcome.VERIFIED` at read time.** Refused. ADR-0249
 §4 rules that *"An attempt reaching a terminal state **does not** move the goal's status"*, and a
 derived status would be a second authority that can disagree with the stored one — ADR-0249 §5's
-own argument against *paused* as a status member. The two writes are two facts and §5 takes both in
-one act because one comparison decided both.
+own argument against *paused* as a status member.
 
 **Reading `risk_level` into the ladder.** Refused (§3). Risk is what a policy thresholds to decide
-whether to **ask**; reversibility, disclosure and the binding are what describe what an act **did**.
-One scale answering two questions is how a deployment that tightened its approval threshold would
+whether to **ask**; reversibility, disclosure and the binding describe what an act **did**. One
+scale answering two questions is how a deployment that tightened its approval threshold would
 silently change what counts as verified.
 
 **Announcing the outcome through `GoalEngagement` rather than a member of its own.** Refused.
-ADR-0250 §5's four facets are *what this turn did with the goal it engaged* and its announcement
-rule is about resumptions and revisions; what an attempt produced is a different fact, owed on
-turns §5's rule is silent about and absent on turns it fires on. ADR-0244 §9's rule — one
-`None`-defaulting member per fact — is the ratified shape, and collapsing the two would make one
-field mean two things a client must discriminate before rendering either.
+ADR-0250 §5's four facets are *what this turn did with the goal it engaged*; what an attempt
+produced is a different fact, owed on turns §5's rule is silent about and absent on turns it fires
+on. ADR-0244 §9's one-member-per-fact rule is the ratified shape, and collapsing the two would make
+one field mean two things a client must discriminate before rendering either.
 
 **Putting the offer to continue on the surface rather than in the reply.** Refused (§6). Its whole
 purpose is that a bare *"yes"* on the next turn binds by reply reference (ADR-0250 §3), and a
