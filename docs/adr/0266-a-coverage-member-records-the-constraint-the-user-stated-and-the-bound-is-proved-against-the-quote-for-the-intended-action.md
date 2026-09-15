@@ -101,6 +101,28 @@ the quote for the intended action
   no clause here verifies anything, compares a charge or writes a finding, are untouched — **and so
   does every other clause of this ADR**, §1's mint, §3's `kind` and §7's proof of the bound
   **before** the act conspicuously so: that proof is what binds spending and ADR-0262 relies on it.
+- **Partially superseded: 2026-09-15 by ADR-0270 — two limbs, and nothing else in this ADR.**
+  **§7's last normative clause, in the limb naming `ActionPolicy.decide` as the only site where
+  condition 6 is taken.** That clause reads *"At `ActionPolicy.decide`, on the concrete request, at
+  every dispatch, with no cached verdict anywhere … One implementation, in `permissions`, and §5's
+  mint runs none of it."* Read whole it answers *where the comparison is taken* exhaustively, so a
+  reader holding only §7 puts condition 6 behind `decide` and exposes no face — and the component
+  ADR-0254 §15 obliges to write the row then cannot obtain the answer §7 itself makes that row's
+  proposal conditional on, golden rule 1 forbidding the import that would
+  ([#2401](https://github.com/leonapivato/ai-assistant/issues/2401)). The comparison is now taken at
+  `decide` at every dispatch **and** at `ActionPolicy.coverage_met` before a row is written, over
+  one implementation. **The one-implementation limb is kept and not weakened** — the new member is
+  that implementation's face rather than a second one — and the **no-cached-verdict limb binds
+  entire**, no answer that member returns being cached, carried to a dispatch or read by a later
+  comparison. **And §11's lane-ordering clause, in its Lane-2 limb alone**: *"ADR-0254 §20's Lane 2
+  is briefed after the quote decision (§10) rather than after these two"* now reads **after the
+  quote decision and after ADR-0270's own lane**, Lane 2 being the lane that calls the new member
+  and, briefed on §11's ordering alone, the lane that would evaluate condition 6 in `orchestration`.
+  Every other limb of §11 binds entire — L1's and L2's surfaces and arms, *"two lanes and no
+  third"* for this ADR's own implementation, L1's wait on ADR-0254 §20's Lane 3, the wire clause
+  and the no-migration clause — and so does every other clause of this ADR, §7's two routes, its
+  condition 6, its fault clause and its lineage narrowing conspicuously so: they are what the new
+  member answers with.
 
 ## Context
 
