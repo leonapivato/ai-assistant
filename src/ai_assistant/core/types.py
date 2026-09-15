@@ -9747,10 +9747,13 @@ class PlanStep(BaseModel):
     of ratifying a choice the planner already made.
 
     **And it declares what it waits on, what fills its arguments and what must be
-    evidenced before it is dispatched** (ADR-0253). Every one of the five fields
-    below is **defaulted**, so a step declaring none of them is exactly the step
-    this system has always written: no dependency, no reference, no condition, no
-    verification and no recency requirement.
+    evidenced before it is dispatched** (ADR-0253). Every one of the five fields **that
+    decision adds** below is **defaulted**, so a step declaring none of them is exactly
+    the step this system has always written: no dependency, no reference, no condition,
+    no verification and no recency requirement. :attr:`intended_action` is a **sixth**
+    defaulted field and ADR-0265 §4's, not among that five, and the sentence holds of
+    it too: a step declaring none of the six is the step this system has always
+    written.
 
     **``depends_on`` points strictly backwards, so a cycle is unconstructible**
     (§1). Every member names a step of the same plan at a **strictly earlier**
@@ -9788,7 +9791,13 @@ class PlanStep(BaseModel):
     resolved by the loop from an ``A`` label "under ADR-0253 §9's identical discipline
     — taken by the loop, taken once, immediately on return, in place of whatever came
     back". **A planner mints no action here and names no identifier**: a step "selects
-    from the supply the brief rendered, or names none". **A step naming none is held
+    from the supply the brief rendered, or names none". **That supply runs on past the
+    brief**: §4's closing clause is that "the action label indexes ``GoalBrief.actions``
+    extended by this call's ``PlannerOutput.actions`` in order, and that is the whole of
+    it", because §2's ordering records this call's proposals **before** the loop
+    resolves the plan's labels — so a step may name an act the same output proposed,
+    which is *"book two rooms"* on the turn the user says it and "the ordinary shape of
+    it and not an exotic one". **A step naming none is held
     to nothing** — a read step, a composition step and every step of every plan written
     before that decision carry ``None``, "and that is a conforming plan rather than a
     degraded one" — and **whether an effect-bearing dispatch must name one is decided

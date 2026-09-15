@@ -67,6 +67,17 @@ _CONDITION_LABEL: Final = re.compile(r"D[1-9][0-9]*")
 #: conforming planner is allowed to have **emitted**.
 _ELEMENT_LABEL: Final = re.compile(r"[CSD][1-9][0-9]*")
 
+#: ADR-0265 §4's action-label grammar, stated here for :data:`_CONDITION_LABEL`'s own
+#: reason and in the same relation to ``core``'s copy: ``_ACTION_LABEL`` there is the
+#: **disjointness** reservation an ``IntendedAction.id`` is held away from and is
+#: deliberately wider, where this is the canonical form a renderer produces — "the ASCII
+#: string ``A`` followed by *n* in **ASCII** decimal digits ``0``-``9``, with no padding
+#: and no sign". It says what a conforming planner is allowed to have **emitted**, and
+#: says nothing about which ordinals are in range: the supply is the brief's ``actions``
+#: extended by the same call's ``PlannerOutput.actions``, and resolving against it is
+#: the loop's (§4).
+_ACTION_LABEL: Final = re.compile(r"A[1-9][0-9]*")
+
 #: A vocabulary to drive the contract over — two plausible advertised names.
 #:
 #: The contents decide nothing, and that is the point: ADR-0211 §9 item 2 forbids
@@ -1112,7 +1123,9 @@ class PlannerContract:
         §10's writer clause makes ADR-0249 §8's two-field clause a **four**-field one:
         "the fields another component sets on a plan are **exactly four**:
         ``supersedes``, ``targets_revision``, and each ``StepCondition.about`` and
-        ``PlanInterpretation.settles``". A planner names a condition by the **label**
+        ``PlanInterpretation.settles``" — and ADR-0265 §4 makes that four a **five**,
+        adding ``PlanStep.intended_action``, which the arm below this one holds. A
+        planner names a condition by the **label**
         §9 fixes — "the ASCII string ``D`` followed by a 1-based ordinal in decimal with
         no padding" — and the loop replaces it with the ``GoalElement.id`` it resolves
         to, once, before any other component observes the plan.
@@ -1145,6 +1158,50 @@ class PlannerContract:
             assert _CONDITION_LABEL.fullmatch(value), (
                 f"{value!r} is not a condition label: a planner names an element by "
                 f"its D label and the loop substitutes the id (ADR-0253 §9)"
+            )
+
+    async def test_it_names_an_intended_action_by_label_and_never_by_id(
+        self, planner: Planner
+    ) -> None:
+        """ADR-0265 §4: the fifth field the loop takes, at the seam that emits it.
+
+        The arm beside this one, applied to one more vocabulary. "**A planner mints no
+        action here and names no identifier**: a step selects from the supply the brief
+        rendered, or names none", and "**the loop resolves it once**, in §2's step (d),
+        replacing the label with the ``IntendedAction.id`` it names, under ADR-0253
+        §9's identical discipline — taken by the loop, taken once, immediately on
+        return, in place of whatever came back".
+
+        **The supply is wider than the brief and the arm does not narrow it** (§4's
+        closing clause). "The action label indexes ``GoalBrief.actions`` extended by
+        this call's ``PlannerOutput.actions`` in order", because §2's ordering records
+        this call's proposals before the loop resolves the plan's labels — so a
+        conforming planner may name an act *this same output proposed*, which is "book
+        two rooms" on the turn the user says it. What is decidable here without the
+        goal the loop holds is the **grammar**, not the ordinal: the positive form is
+        asserted exactly as it is for a ``D`` label, and which ordinals are in range is
+        the loop's to refuse (§4).
+
+        **A planner that names no action is conforming and is the common case**: the
+        arm passes vacuously for one, which is §4's "a step naming no intended action is
+        held to nothing by this decision" read at this seam.
+        """
+        plan = (
+            await planner.plan(
+                _goal(),
+                utterance=_REQUEST,
+                context=_context(),
+                memories=_supply() + _fourth_group(),
+                capabilities=_VOCABULARY,
+            )
+        ).plan
+        for step in plan.steps:
+            if step.intended_action is None:
+                continue
+            assert _ACTION_LABEL.fullmatch(step.intended_action), (
+                f"{step.intended_action!r} is not an action label: a planner names an "
+                f"intended action by its A label and the loop substitutes the id "
+                f"(ADR-0265 §4)"
             )
 
     async def test_it_declares_no_more_interpretations_than_a_plan_may_carry(
