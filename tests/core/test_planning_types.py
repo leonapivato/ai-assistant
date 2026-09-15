@@ -1134,6 +1134,76 @@ def test_a_web_search_ask_carrying_an_entry_is_refused() -> None:
         ReadAsk(kind=ReadKind.WEB_SEARCH, entry="F1")
 
 
+# ADR-0260 §13's arm (a): "A ``ReadAsk`` of this kind carrying a ``query``, carrying
+# ``labels``, carrying an ``entry`` and carrying a ``structure`` is refused, each with
+# its own message; one carrying none of the four constructs."
+
+
+def test_a_forecast_read_ask_carries_no_argument_at_all() -> None:
+    """ADR-0260 §3's positive arm, so the four refusals below are not vacuous.
+
+    "A ``FORECAST_READ`` ask **states its kind and nothing else**." The ask is
+    constructible from the kind alone, which is what makes the emission expressible at
+    all — every other kind's own argument is required, and a validator that read this
+    one through a neighbour's arm would refuse a conforming emission.
+    """
+    ask = ReadAsk(kind=ReadKind.FORECAST_READ)
+
+    assert (ask.query, ask.labels, ask.entry, ask.structure) == (None, (), None, None)
+
+
+@pytest.mark.parametrize(
+    ("argument", "complaint"),
+    [
+        pytest.param({"query": "will it rain on Saturday"}, "must not carry a query", id="query"),
+        pytest.param({"labels": ("M1",)}, "must not carry labels", id="labels"),
+        pytest.param({"entry": "F1"}, "must not carry an entry", id="entry"),
+        pytest.param(
+            {"structure": StructuredAsk(topics=("weather",))},
+            "must not carry a structure",
+            id="structure",
+        ),
+    ],
+)
+def test_a_forecast_read_ask_carrying_any_argument_is_refused(
+    argument: dict[str, Any], complaint: str
+) -> None:
+    """ADR-0260 §3, and this is the arm the whole kind's safety claim rests on.
+
+    "The ask carries **no query, no labels, no entry and no structure**, and that is
+    this kind's whole safety mechanism": the place a forecast is read for is the
+    deployment's own configured place, so a planner cannot name where — and the failure
+    mode ADR-0231 §1 is built against, a planner-writable field carrying covered content
+    to an egress seam, is **unreachable rather than forbidden**.
+
+    **Each of the four is refused separately and its message names this kind**, which is
+    §3's own clause — "each of the four existing arguments is refused **separately**,
+    because each would be a different mistake with a different fix" — and which is what
+    a shared arm reached by two kinds could otherwise get wrong by naming the search.
+    """
+    with pytest.raises(ValidationError, match=complaint):
+        ReadAsk(kind=ReadKind.FORECAST_READ, **argument)
+
+    with pytest.raises(ValidationError, match="forecast_read ask"):
+        ReadAsk(kind=ReadKind.FORECAST_READ, **argument)
+
+
+def test_a_request_naming_two_forecast_read_asks_is_refused() -> None:
+    """ADR-0260 §2: "one emission carries at most one ``FORECAST_READ`` ask".
+
+    ADR-0226 §2's rule binds unchanged, and it has to be asserted over this kind rather
+    than inherited for the reason it is asserted over the search: the ask carries no
+    argument, so two of them are the one case where a duplicate is invisible by
+    inspection — ``(ask, ask)`` is a pair of equal values, and a validator keyed on
+    anything but ``kind`` would let it through. "One ask is one read" is what the refusal
+    protects.
+    """
+    ask = ReadAsk(kind=ReadKind.FORECAST_READ)
+
+    with pytest.raises(ValidationError, match="at most one ask of each kind"):
+        ReadRequest(asks=(ask, ask))
+
+
 def test_a_request_naming_two_web_search_asks_is_refused() -> None:
     """§1: "one emission carries at most one ``WEB_SEARCH`` ask".
 
@@ -1169,6 +1239,7 @@ def test_a_request_may_carry_one_ask_of_every_kind_the_enumeration_admits() -> N
             _hop("M1"),
             ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
             ReadAsk(kind=ReadKind.WEB_SEARCH),
+            ReadAsk(kind=ReadKind.FORECAST_READ),
             ReadAsk(
                 kind=ReadKind.STRUCTURED_READ,
                 structure=StructuredAsk(window=TimeWindow(start=_WHEN)),
@@ -1242,22 +1313,23 @@ def test_a_label_that_resolves_to_nothing_is_still_constructible() -> None:
         assert _hop(label).labels == (label,)
 
 
-def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
+def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
     """ADR-0226 §1: a closed enumeration, and §4: added to and never renamed.
 
     Pinned by value as well as by name, because the serialised spelling is what a
     ``PlanExport`` carries and what a later reader matches on — renaming a member
     would silently invalidate every document already written.
 
-    **Five since ADR-0240 §1**, which admits ``STRUCTURED_READ`` as an *additive
-    entry* under ADR-0226 §1's own licence, exactly as ADR-0231 §1 admitted
-    ``WEB_SEARCH`` and ADR-0230 §1 ``LOCAL_FILE``: it adds no second request object,
-    no second servicing site, no second budget and no second audit. The closure is
-    unchanged — a sixth still needs the ADR that decides it — and so is the no-rename
-    rule, which is why the four older values are still asserted here one by one.
+    **Six since ADR-0260 §2**, which admits ``FORECAST_READ`` as an *additive entry*
+    under ADR-0226 §1's own licence, exactly as ADR-0240 §1 admitted
+    ``STRUCTURED_READ``, ADR-0231 §1 ``WEB_SEARCH`` and ADR-0230 §1 ``LOCAL_FILE``: it
+    adds no second request object, no second servicing site, no second budget and no
+    second audit. The closure is unchanged — a seventh still needs the ADR that decides
+    it — and so is the no-rename rule, which is why the five older values are still
+    asserted here one by one.
 
     **The set assertion is what closes it**, and it is the half that fails on a
-    member added without a decision: an implementation growing a sixth spelling
+    member added without a decision: an implementation growing a seventh spelling
     passes every value assertion below and fails the equality above.
     """
     assert {member.value for member in ReadKind} == {
@@ -1266,12 +1338,14 @@ def test_the_kind_vocabulary_is_the_five_the_decisions_admit() -> None:
         "local_file",
         "web_search",
         "structured_read",
+        "forecast_read",
     }
     assert ReadKind.SIGHTED_QUERY.value == "sighted_query"
     assert ReadKind.CITATION_HOP.value == "citation_hop"
     assert ReadKind.LOCAL_FILE.value == "local_file"
     assert ReadKind.WEB_SEARCH.value == "web_search"
     assert ReadKind.STRUCTURED_READ.value == "structured_read"
+    assert ReadKind.FORECAST_READ.value == "forecast_read"
 
 
 # --- PlanExport ---------------------------------------------------------
@@ -1490,6 +1564,7 @@ def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() ->
                 _hop("M2", "M5"),
                 ReadAsk(kind=ReadKind.LOCAL_FILE, entry="F1"),
                 ReadAsk(kind=ReadKind.WEB_SEARCH),
+                ReadAsk(kind=ReadKind.FORECAST_READ),
                 ReadAsk(kind=ReadKind.STRUCTURED_READ, structure=structure, query="the lease"),
             )
         ),
@@ -1514,6 +1589,13 @@ def test_an_export_round_trips_one_ask_of_every_kind_the_enumeration_admits() ->
     assert by_kind[ReadKind.LOCAL_FILE].entry == "F1"
     bare = by_kind[ReadKind.WEB_SEARCH]
     assert (bare.query, bare.labels, bare.entry, bare.structure) == (None, (), None, None)
+    forecast = by_kind[ReadKind.FORECAST_READ]
+    assert (forecast.query, forecast.labels, forecast.entry, forecast.structure) == (
+        None,
+        (),
+        None,
+        None,
+    )
     structured = by_kind[ReadKind.STRUCTURED_READ]
     assert structured.query == "the lease"
     assert structured.structure is not None

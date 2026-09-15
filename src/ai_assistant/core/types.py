@@ -10954,11 +10954,16 @@ class ForecastOutcome(BaseModel):
                 msg = "a refused forecast read declares no report instant"
                 raise ValueError(msg)
             return self
+        if not self.records:
+            # **The *neither* case first, and that ordering is the decision** (ADR-0260
+            # §13's arm (j)): an outcome accepted while empty and unrefused is one a
+            # servicing can read as an answered read, so the refusal a bare
+            # `ForecastOutcome()` earns should name *that* mistake rather than the
+            # missing instant it also has.
+            msg = "a forecast outcome carries records or a refusal, never neither"
+            raise ValueError(msg)
         if self.reported_at is None:
             msg = "a forecast outcome that carries no refusal declares a report instant"
-            raise ValueError(msg)
-        if not self.records:
-            msg = "a forecast outcome carries records or a refusal, never neither"
             raise ValueError(msg)
         return self
 
