@@ -791,10 +791,15 @@ lies, never that the report is accurate.
 > `RULING_UNAVAILABLE` or `SPEND_REFUSED` establishes **no** contact — every one of those
 > is a stage before the send. A call whose disposition is `TRANSPORT_FAILED`,
 > `DEADLINE_EXPIRED` or **`PROVIDER_REFUSED`** establishes **nothing either way** and
-> contributes `INDETERMINATE`: `PROVIDER_REFUSED` is recorded **both** for a response the
-> provider gave and this system refused **and** for an account that changed across the
-> credential read, whose limbs *"discarded the credential and wrote nothing to any channel
-> — none was opened"* (ADR-0148 §6), and the disposition carries no value separating them.
+> contributes `INDETERMINATE`: `PROVIDER_REFUSED` is recorded for **a response the provider
+> gave and this system refused** — a rate limit, a blocked origin, a body its documented
+> format does not admit — and the disposition carries no value saying which of those it was.
+> **No credential-change producer is recorded here.** ADR-0148 §6's account-changed limbs
+> *"discarded the credential and wrote nothing to any channel — none was opened"*, and §12's
+> provider is keyless and reads no credential at all, so this partition covers exactly what
+> a configured forecast provider can produce and no more; §14 defers that producer with what
+> fires it. A credentialed provider does not change this member's meaning — it adds a second
+> way to reach it, which is that lane's to record.
 > **The partition is total over the twelve members and the absence of one is the
 > thirteenth case**, and the least-claiming direction is taken deliberately, which is
 > ADR-0264 §2's own reading of its own third group at a second performing site. It is
@@ -953,102 +958,132 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 
 > **Normative.** Each arm is a test the owning lane owes, over the **production** type or
 > component and never over a fake standing in for it, and each is **deterministic, offline
-> and in the ordinary gate**.
+> and in the ordinary gate**. **They are grouped below by owning lane, and the grouping
+> carries no obligation of its own**: every lettered arm is owed separately and in full, and
+> a lane discharges the arms under its own heading.
 
-> **Normative.** **(a) The empty ask.** A `ReadAsk` of this kind carrying a `query`,
-> carrying `labels`, carrying an `entry` and carrying a `structure` is refused, each with
-> its own message; one carrying none of the four constructs. **L1.**
+> **Normative — L1: the contract, what it mints, and the model.**
+>
+> - **(a) The empty ask.** A `ReadAsk` of this kind carrying a `query`, carrying `labels`,
+>   carrying an `entry` and carrying a `structure` is refused, each with its own message;
+>   one carrying none of the four constructs.
+> - **(b) The declarations the source owes, and the fallbacks that are not taken.** A
+>   response whose day the provider names with a declared offset mints a record whose
+>   `Attestation.extent` is that day's own half-open interval and whose
+>   `MemoryBase.validity` is fully open; a response naming a day without declaring an
+>   offset mints **no record for that day**; a response one of whose days omits a
+>   documented field, supplies it as `null`, or supplies a type its format does not admit
+>   mints its **siblings only**; a response every day of which is so dropped mints nothing
+>   and yields `NO_RESULT`; and a response declaring no instant, and one carrying an
+>   unreadable value in that position, each mint **no record** and yield `UNATTESTED`. In
+>   none of them does any minted value equal a clock the test controls.
+> - **(b′) The refusals at the boundaries.** A `ForecastOutcome` carrying a record that is
+>   not `SEMANTIC`, one whose `Provenance` is not `EXTERNAL`, one carrying non-empty
+>   `evidence`, one carrying a `topics` or an `about_person`, one whose `validity` is not
+>   fully open, one carrying no `extent`, one whose `reported_by` differs from its
+>   siblings', and one whose attestation instant differs from the outcome's `reported_at`,
+>   is **refused at construction** in each case; a `Settings` naming a non-finite or
+>   out-of-range coordinate, a `forecast_max_days` outside `1..3`, a non-positive
+>   `forecast_max_day_chars` or `forecast_max_response_bytes`, **or any half-set pair** —
+>   connection without origin or the reverse, one coordinate without the other, one cost
+>   field without the other, coordinates or costs with no provider pair, **and a connection
+>   and origin with both coordinates unset** — **does not start**; and a **response** of
+>   exactly `forecast_max_response_bytes`, its status line and headers included, is read
+>   and minted where one of that figure plus one is abandoned **while reading**, yielding
+>   `RESPONSE_TOO_LARGE` with no parse attempted; a day whose transcription is exactly
+>   `forecast_max_day_chars` is minted where one of that figure plus one is dropped; and a
+>   provider answer of fewer than, of exactly, and of more than `forecast_max_days` days
+>   mints that many, that many, and exactly `forecast_max_days`. And over the
+>   **production** forecaster's own output, a minted record's `confidence` is `0.9`, its
+>   `derived_from_external` is `False`, its `placement` is the default that narrows
+>   nothing, and its `Attestation.reported_by` **equals that forecaster's own `name`** —
+>   asserted against the configured instance's `name` and not merely against its siblings',
+>   which §4's model already enforces and which a vendor string stamped consistently would
+>   satisfy. These are the §5 facts that are the producer's rather than
+>   `ForecastOutcome`'s, in `SearchOutcome`'s own division of labour.
+> - **(c) The cancellation that stays an exception, and the deadline's own shape.** Each
+>   acting member — `request` and `read` — cancelled from outside while suspended re-raises
+>   `CancelledError` and is asserted separately, so that neither can regress while the
+>   other holds; neither yields a `ForecastOutcome`, neither yields a `ForecastRefusal`,
+>   and in particular neither yields `DEADLINE_EXPIRED`, which is `read`'s **own** expiry
+>   and never an outer one (ADR-0241 §4). And `read`'s `timeout` is **required with no
+>   default**, so omitting it is a `TypeError`; a value that is not a `timedelta`, a zero
+>   and a negative each raise `ValueError` **before** the call is revalidated, before any
+>   credential is read and before any channel is opened, asserted over those three
+>   orderings so that zero cannot pass as an instant expiry.
+> - **(i) The deadline that actually expires.** A production forecaster whose exchange is
+>   suspended past a **positive** `timeout` **returns** `DEADLINE_EXPIRED`, raises no
+>   `CancelledError` outward, opens no second channel, and does not report
+>   `TRANSPORT_FAILED`. This is the case that separates a seam enforcing its own deadline
+>   from one that merely accepts the keyword, and (c) does not reach it: (c) asserts what
+>   an invalid timeout refuses, this asserts what a valid one does.
+> - **(j) The outcome's exactly-one rule, and the instant that rides with it.** A
+>   `ForecastOutcome` carrying **both** a non-empty `records` and a non-`None` `refusal`,
+>   and one carrying **neither**, is refused at construction; so is one carrying records
+>   with no `reported_at`, and one carrying a refusal **with** a `reported_at`. The
+>   *neither* case is asserted in its own right, because an outcome accepted while empty
+>   and unrefused is one a servicing can read as an answered read — and would then report a
+>   provider the turn never reached.
 
-> **Normative.** **(b) The declarations the source owes, and the fallbacks that are not
-> taken.** A response whose day the provider names with a declared offset mints a record
-> whose `Attestation.extent` is that day's own half-open interval and whose
-> `MemoryBase.validity` is fully open; a response naming a day without declaring an offset
-> mints **no record for that day**; a response one of whose days omits a documented field,
-> supplies it as `null`, or supplies a type its format does not admit mints its **siblings
-> only**; a response every day of which is so dropped mints nothing and yields `NO_RESULT`;
-> and a
-> response declaring no instant, and one carrying an unreadable value in that position, each
-> mint **no record** and yield `UNATTESTED`. In none of them does any minted value equal a
-> clock the test controls. **L1.**
+> **Normative — L2: the authority.**
+>
+> - **(d) The mismatched binding.** A forecast request whose account or origin is not the
+>   configured pair, and a request of another kind bound to the configured forecast pair,
+>   each take **no** route (c): both `_only_the_disclosure_floor` limbs bind in full and
+>   the ruling is what it is today.
+> - **(e) No new question.** A turn on a goal whose supply already carries an external
+>   record asks for a forecast at the configured provider and is ruled `ALLOW` with **no**
+>   `CONFIRM`, **no** grant seam read and `authorised_subject` unset — and the same turn's
+>   search at an unconfigured destination is unaffected.
 
-> **Normative.** **(b′) The refusals at the boundaries.** A `ForecastOutcome` carrying a
-> record that is not `SEMANTIC`, one whose `Provenance` is not `EXTERNAL`, one carrying
-> non-empty `evidence`, one carrying a `topics` or an `about_person`, one whose `validity`
-> is not fully open, one carrying no `extent`,
-> one whose `reported_by` differs from its siblings', and one whose attestation instant
-> differs from the outcome's `reported_at`, is **refused at construction** in each case; a
-> `Settings` naming a non-finite or out-of-range coordinate, a `forecast_max_days` outside
-> `1..3`, a non-positive `forecast_max_day_chars` or `forecast_max_response_bytes`, **or
-> any half-set pair** — connection without origin or the reverse, one coordinate without
-> the other, one cost field without the other, coordinates or costs with no provider pair,
-> **and a connection and origin with both coordinates unset** — **does not start**; and a **response** of exactly `forecast_max_response_bytes`,
-> its status line and headers included, is read and minted where one of that figure plus
-> one is abandoned **while reading**, yielding `RESPONSE_TOO_LARGE` with no parse
-> attempted; a day whose transcription is exactly `forecast_max_day_chars` is minted where
-> one of that figure plus one is dropped; and a provider answer of fewer than, of exactly,
-> and of more than `forecast_max_days` days mints that many, that many, and exactly
-> `forecast_max_days`. And over the **production** forecaster's own output, a minted
-> record's
-> `confidence` is `0.9`, its `derived_from_external` is `False`, its `placement` is the
-> default that narrows nothing, and its `Attestation.reported_by` **equals that
-> forecaster's own `name`** — asserted against the configured instance's `name` and not
-> merely against its siblings', which §4's model already enforces and which a vendor
-> string stamped consistently would satisfy. These are the §5 facts that are the
-> producer's rather than `ForecastOutcome`'s, in `SearchOutcome`'s own division of
-> labour. **L1.**
-
-> **Normative.** **(c) The deadline, and the cancellation that stays an exception.** Each
-> acting member — `request` and `read` — cancelled from outside while suspended re-raises
-> `CancelledError` and is asserted separately, so that neither can regress while the other
-> holds; neither yields a `ForecastOutcome`, neither yields a `ForecastRefusal`, and in
-> particular neither yields `DEADLINE_EXPIRED`, which is `read`'s **own** expiry and never
-> an outer one (ADR-0241 §4). And `read`'s `timeout` is **required with no default**, so
-> omitting it is a `TypeError`; a value that is not a `timedelta`, a zero and a negative
-> each raise `ValueError` **before** the call is revalidated, before any credential is read
-> and before any channel is opened, asserted over those three orderings so that zero cannot
-> pass as an instant expiry. **L1.**
-
-> **Normative.** **(d) The mismatched binding.** A forecast request whose account or
-> origin is not the configured pair, and a request of another kind bound to the configured
-> forecast pair, each take **no** route (c): both `_only_the_disclosure_floor` limbs bind
-> in full and the ruling is what it is today. **L2.**
-
-> **Normative.** **(e) No new question.** A turn on a goal whose supply already carries an
-> external record asks for a forecast at the configured provider and is ruled `ALLOW` with
-> **no** `CONFIRM`, **no** grant seam read and `authorised_subject` unset — and the same
-> turn's search at an unconfigured destination is unaffected. **L2.**
-
-> **Normative.** **(f) The budget and the order.** A servicing whose file and search have
-> taken nine slots admits **one** forecast record and records the kind as truncated; one
-> reached with no slots left composes no request, opens no channel, and yields **no
-> outcome entry** for the ask; and a servicing carrying an ask of **all six** kinds
-> services them in §7's stated order, asserted over the whole sequence and not only over
-> the kinds ahead of the forecast, so that no later kind can take the slot this one was
-> reached with. **L3.**
-
-> **Normative.** **(g) The evidence row.** A forecast servicing on a goal turn writes a
-> row whose `requested` is absent, whose `records` is empty, and whose `supported` carries
-> one region per record **the ask returned** — §9's population, not the admitted one —
-> applying **only** a window equal to that record's extent. **A servicing returning three
-> records of which the budget admits one still writes three regions**, asserted as its own
-> case, because ADR-0252 §2 composes `supported` from what the read returned and §13(b′)
-> already refuses a record with no extent at construction, so no forecast servicing can
-> present one. **L3.**
-
-> **Normative.** **(h) The statement and the contact.** A read the provider answered
-> carries `forecast_not_read` `None` and an outbound statement naming
-> `FORECAST_PROVIDER`; a read refused before the send carries the folded member, its fixed
-> statement and **no** destination class; a transport failure carries `INDETERMINATE`; and
-> **both** producers of `PROVIDER_REFUSED` — a response the provider gave and this system
-> refused, and an account that changed across the credential read — carry `INDETERMINATE`
-> with `destinations` empty, asserted separately so that neither can regress to `REACHED`
-> or `NOT_REACHED` while the other holds; a **revising** turn whose two forecast servicings
-> recorded `RULING_DENY` and `TRANSPORT_FAILED` reports `DECLINED` in **both** encounter
-> orders, and one whose denied read is followed by an answered read still reports
-> `DECLINED` and its statement rather than `None`; and **`RESPONSE_TOO_LARGE` and `UNATTESTED` each
-> carry `UNAVAILABLE` with `FORECAST_PROVIDER` `REACHED`**, asserted separately too,
-> because §10 classes both as reached from octets this system took off the channel and
-> either folded to `INDETERMINATE` would deny a contact the trail recorded. **L3.**
+> **Normative — L3: the servicing.**
+>
+> - **(f) The budget and the order.** A servicing whose file and search have taken nine
+>   slots admits **one** forecast record and records the kind as truncated; one reached
+>   with no slots left composes no request, opens no channel, and yields **no outcome
+>   entry** for the ask; and a servicing carrying an ask of **all six** kinds services them
+>   in §7's stated order, asserted over the whole sequence and not only over the kinds
+>   ahead of the forecast, so that no later kind can take the slot this one was reached
+>   with.
+> - **(g) The evidence row.** A forecast servicing on a goal turn writes a row whose
+>   `requested` is absent, whose `records` is empty, and whose `supported` carries one
+>   region per record **the ask returned** — §9's population, not the admitted one —
+>   applying **only** a window equal to that record's extent. **A servicing returning three
+>   records of which the budget admits one still writes three regions**, asserted as its
+>   own case, because ADR-0252 §2 composes `supported` from what the read returned and (b′)
+>   already refuses a record with no extent at construction, so no forecast servicing can
+>   present one.
+> - **(h) The statement and the contact.** A read the provider answered carries
+>   `forecast_not_read` `None` and an outbound statement naming `FORECAST_PROVIDER`; a read
+>   refused before the send carries the folded member, its fixed statement and **no**
+>   destination class; a transport failure and a `PROVIDER_REFUSED` each carry
+>   `INDETERMINATE` with `destinations` empty, asserted separately so that neither can
+>   regress to `REACHED` or `NOT_REACHED` while the other holds; a **revising** turn whose
+>   two forecast servicings recorded `RULING_DENY` and `TRANSPORT_FAILED` reports
+>   `DECLINED` in **both** encounter orders, and one whose denied read is followed by an
+>   answered read still reports `DECLINED` and its statement rather than `None`; and
+>   **`RESPONSE_TOO_LARGE` and `UNATTESTED` each carry `UNAVAILABLE` with
+>   `FORECAST_PROVIDER` `REACHED`**, asserted separately too, because §10 classes both as
+>   reached from octets this system took off the channel and either folded to
+>   `INDETERMINATE` would deny a contact the trail recorded.
+> - **(k) The classifier, total over both vocabularies.** Every member of `ForecastRefusal`
+>   and every member of `ForecastDisposition` is asserted against the `ReadOutcomeKind`
+>   member §8 gives it, **enumerated exhaustively over both types** so that a member added
+>   without a mapping fails the arm rather than passing silently; `NO_BUDGET` produces **no
+>   outcome entry at all**; and `TRUNCATED` displaces `EMPTY`, `DUPLICATE` and
+>   `RETURNED_RECORDS` where ADR-0226 §6's budget cut this kind's yield.
+> - **(l) Two seams, one statement.** A turn that reached the configured **search**
+>   provider and the configured **forecast** provider carries **one** outbound statement
+>   naming **both** destination classes, in §10's stated order, neither displacing the
+>   other — because an implementation overwriting `SEARCH_PROVIDER` with
+>   `FORECAST_PROVIDER` would deny a contact the trail recorded, which is the asymmetry
+>   §10 exists to close.
+> - **(m) The carried external-content fact.** A turn whose pre-servicing supply carries
+>   **no** external record, and whose web search then contributes one, builds a forecast
+>   binding carrying `planned_with_external_content` **`True`** — asserted over the binding
+>   itself, because §7 computes it over the pre-servicing supply **and** over every record
+>   this servicing has already contributed, and an implementation inspecting only the first
+>   passes every other arm while writing `False`.
 
 ### 14. Deferred, by name, each with what fires it
 
@@ -1070,6 +1105,12 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
   per-turn record, which would need its own ADR amending a clause stated against it.
 - **Geocoding.** Turning a place name into a coordinate is a second destination and a
   second registration. Fired by the lane that needs the bullet above.
+- **The credential-change producer of `PROVIDER_REFUSED`.** §10 records that member for a
+  response the provider gave and this system refused, and for nothing else, because §12's
+  provider is keyless and an arm over a production component cannot reach a path no
+  production component has. Fired by the **first credentialed forecast provider**, whose
+  lane adds the producer to §10's partition and its arm to §13(h). The member itself is
+  **not** deferred and needs no widening: it is reachable today.
 - **The booking integration**, a `tools/` integration at ADR-0154's seam and its own
   decision under ADR-0016/ADR-0018. Fired by #2255's M33 walkthrough lane.
 - **Autonomous web research (C-WEB)** and **milestone 32's bounded fetch**. ADR-0247 §9's
