@@ -4065,13 +4065,24 @@ def _render_brief_actions(goal: GoalBrief) -> list[str]:
     ``serves`` prints no bracket at all rather than an empty one, which would read as
     a claim that the act serves nothing rather than as the silence §3 makes it.
 
-    **The intent is quoted and the labels are not** (ADR-0098 §2). An ``intent`` is
-    free text this system wrote but did not constrain, and this block's own syntax is a
-    label a later reply names and the loop resolves, so an unquoted multi-line intent
-    could open an ``- A9`` bullet of its own and offer a label for an act nobody
-    minted — :func:`_render_brief_elements`' reason over one more sequence. A
-    ``serves`` label is derived from a position by the projection rather than held, so
-    there is nothing there to forge with.
+    **Every held value on the bullet is quoted, the links included** (ADR-0098 §2).
+    An ``intent`` is free text this system wrote but did not constrain, and this
+    block's own syntax is a label a later reply names and the loop resolves, so an
+    unquoted multi-line intent could open an ``- A9`` bullet of its own and offer a
+    label for an act nobody minted — :func:`_render_brief_elements`' reason over one
+    more sequence.
+
+    **A ``serves`` entry is quoted for the same reason, and the projection that fills
+    it is not what decides that.** ``BriefAction.serves`` is a tuple of
+    :data:`~ai_assistant.core.types.EncodableText`, which admits every newline and
+    bracket there is; the value this seam is handed comes across a Protocol, and §2's
+    rule is about what the **assembler** may embed rather than about what a particular
+    caller happens to put there. ``orchestration``'s projection derives each entry from
+    a position today, so no production value can forge anything — but a renderer that
+    relied on that would be one subsystem holding an invariant of another's
+    implementation, which is golden rule 1 read backwards. Quoted, the entries also
+    read as the JSON strings a reply writes them back as
+    (:data:`_INTENDED_ACTION_GUIDANCE`).
 
     **An empty tuple prints nothing at all** — no heading, no line, no mention that the
     goal intends nothing. §1 makes ``intended_actions`` empty "on every goal at the
@@ -4092,7 +4103,8 @@ def _render_brief_actions(goal: GoalBrief) -> list[str]:
     for ordinal, action in enumerate(goal.actions, start=1):
         bullet = f"  - {_brief_label('A', ordinal)} {_quoted_span(action.intent)}"
         if action.serves:
-            bullet += f" [serves {', '.join(action.serves)}]"
+            links = ", ".join(_quoted_span(label) for label in action.serves)
+            bullet += f" [serves {links}]"
         lines.append(bullet)
     return lines
 
