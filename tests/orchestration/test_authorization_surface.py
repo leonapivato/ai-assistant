@@ -380,6 +380,46 @@ async def test_a_confirmation_that_proposed_no_row_projects_nothing() -> None:
     assert await operations.projection_for("confirm-none") is None
 
 
+async def test_a_row_under_that_id_naming_another_question_projects_nothing() -> None:
+    """The derived id is a **key**, never the evidence that a row answers this question.
+
+    ``StepRunner._settle_authorization`` already makes this comparison, and
+    ``test_a_row_under_that_id_naming_another_question_settles_nothing`` pins it on that
+    side: a row already occupying the id this ``CONFIRM`` derives, naming a *different*
+    confirmation, means the proposal was refused as a duplicate id and the answer
+    settles nothing. The comparison has to be made **here** as well or the two halves of
+    one mechanism disagree — the question rendering the squatter's coverage while the
+    answer establishes none of it, which is a confirmation that states limits nothing
+    will hold it to.
+
+    **Reachable across a restart**, which is the ordering that makes it more than
+    theoretical: the recovered confirmation is rebuilt from the store rather than from
+    the proposal this process made, so nothing in memory remembers that the proposal was
+    refused. Adversarial review, round 13, ``blocker``.
+    """
+    squatter = authorization(id=authorization_id_for("confirm-99"), confirmation="confirm-98")
+    store = FakeGoalAuthorizationStore()
+    plans = FakePlanStore()
+    await plans.save_goal(_goal())
+    await store.record(squatter)
+
+    # A second operations object over the same store, which is what a restart is from
+    # this seam's side.
+    recovered = await AuthorizationOperations(
+        authorizations=store, plans=plans, now=_Clock()
+    ).projection_for("confirm-99")
+
+    assert recovered is None
+    # And the row it does answer for is unaffected: the guard is a comparison, not a
+    # refusal to project at all.
+    assert (
+        await AuthorizationOperations(
+            authorizations=store, plans=plans, now=_Clock()
+        ).projection_for("confirm-98")
+        is None
+    ), "the squatter is keyed under another id and is not found by its own confirmation"
+
+
 async def test_the_projection_survives_a_restart_because_it_is_read_from_the_row() -> None:
     """§20 arm 40: *"restart the process; recover the confirmation → the same coverage
     and the same `expires_at`"*.
