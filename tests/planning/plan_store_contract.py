@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
+    MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
     AttemptEffort,
@@ -57,6 +58,8 @@ from ai_assistant.core.types import (
     GoalRevision,
     GoalStatus,
     Ground,
+    IntendedAction,
+    IntendedActionMinting,
     InterpretationVerdict,
     InterpretedOutput,
     MemorySource,
@@ -277,6 +280,49 @@ def _plan(  # noqa: PLR0913 — the plan's own fields, each a distinct thing an 
         read_request=read_request,
         supersedes=supersedes,
         targets_revision=targets_revision,
+    )
+
+
+def _intended(action_id: str = "ia1", *, serves: tuple[str, ...] = ()) -> IntendedAction:
+    """One intended action, minted by ``orchestration`` in the shape ADR-0265 §1 admits."""
+    return IntendedAction(id=action_id, intent=f"perform {action_id}", serves=serves)
+
+
+def _minting(
+    *actions: IntendedAction, goal_id: str = "g1", expected_version: int = 0
+) -> IntendedActionMinting:
+    """The command that appends ``actions`` to ``goal_id`` (ADR-0265 §5)."""
+    return IntendedActionMinting(
+        goal_id=goal_id, actions=actions, expected_version=expected_version
+    )
+
+
+def _acting_plan(
+    plan_id: str = "p1", *, first: str | None = "ia1", second: str | None = None
+) -> ActionPlan:
+    """A plan whose steps carry one **capability** and byte-identical ``parameters``.
+
+    ADR-0265 §10 arm 1(a)'s shape: what separates the two steps is the intended action
+    each names and nothing else, "so the triple §6's first clause requires is **distinct
+    for the two steps** while the argument key is equal".
+    """
+    parameters: Mapping[str, Any] = {"hotel": "the one by the station", "nights": 1}
+    named = (first,) if second is None else (first, second)
+    return ActionPlan(
+        id=plan_id,
+        goal_id="g1",
+        steps=tuple(
+            PlanStep(
+                id=f"s{index}",
+                intent="book a room",
+                capability="book_room",
+                parameters=parameters,
+                intended_action=action,
+            )
+            for index, action in enumerate(named, start=1)
+        ),
+        created_at=_WHEN,
+        targets_revision=1,
     )
 
 
@@ -2126,6 +2172,323 @@ class PlanStoreContract:
         await store.save_plan(plan)
         assert await store.get_plan("p1") == plan
 
+    # --- ADR-0265: the intended action, the minting and save_plan's conjunct ---
+
+    async def test_two_actions_minted_in_one_call_are_two_identities_a_plan_names_apart(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0265 §10 arm 1(a), and it is the owner's two-rooms case whole.
+
+        "A goal minted two ``IntendedAction``s in one ``IntendedActionMinting`` holds
+        two members with **distinct** ids, and a plan whose two steps carry the **same**
+        capability and byte-identical ``parameters`` but **different**
+        ``intended_action`` values is saved" — so §6's triple is distinct for the two
+        steps while the argument key is equal, "which is the fact an at-most-once claim
+        scoped to the goal alone cannot see".
+
+        **One compare-and-swap and not two** (§5): the two actions are appended in one
+        call, so ``version`` advances by exactly one.
+        """
+        await store.save_goal(_goal())
+
+        minted = await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+
+        assert [action.id for action in minted.intended_actions] == ["ia1", "ia2"]
+        assert minted.version == 1, "two actions in one call take one compare-and-swap"
+
+        await store.save_plan(_acting_plan(first="ia1", second="ia2"))
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        first, second = stored.steps
+        assert (first.capability, first.parameters) == (second.capability, second.parameters)
+        assert (first.intended_action, second.intended_action) == ("ia1", "ia2")
+
+    async def test_record_intended_actions_refuses_an_unknown_goal(self, store: PlanStore) -> None:
+        """§5: the member refuses a goal the store does not hold, as every other goal
+        write does and with the class ADR-0249 §12 gives ``save_goal``."""
+        with pytest.raises(PlanningError):
+            await store.record_intended_actions(_minting(_intended()))
+
+    async def test_two_mintings_against_one_version_leave_one_loser(self, store: PlanStore) -> None:
+        """§5: "a stale write raises the ``PlanningError`` class ``StaleExecutionError``
+        occupies for executions", and the read, the comparison and the write are one
+        indivisible step.
+
+        The loser writes **nothing**: the goal holds the winner's action alone, which is
+        what makes a retry a re-read rather than a second append.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        with pytest.raises(StaleExecutionError):
+            await store.record_intended_actions(_minting(_intended("ia2")))
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert [action.id for action in held.intended_actions] == ["ia1"]
+        assert held.version == 1
+
+    async def test_record_intended_actions_refuses_an_id_the_goal_already_holds(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 5, and §5's first refusal.
+
+        "An intended action is minted once", so an ``id`` the goal already carries is an
+        **invariant breach at the current version** rather than a lost race — which is
+        why it takes ``PlanningError`` and **not** the stale-write class: "a caller that
+        re-read and retried would re-raise for ever".
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.record_intended_actions(_minting(_intended("ia1"), expected_version=1))
+        assert not isinstance(refusal.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert [action.id for action in held.intended_actions] == ["ia1"]
+        assert held.version == 1, "the refusal writes nothing, not even a version"
+
+    async def test_a_minting_past_the_bound_is_refused_whole_and_elides_nothing(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 5's bound limb, over a goal at 63 handed **two**.
+
+        "The last over a goal at 63 handed **two** actions, so the all-or-nothing limb
+        is exercised and **neither** is recorded." §1 is what forbids the alternative:
+        "no lane elides an intended action, for any reason, at any age", because "an
+        identity that can vanish is not an identity" and a rollover "would make a
+        completed booking's claim fresh again, silently, at the moment capacity ran
+        out".
+        """
+        await store.save_goal(_goal())
+        filled = await store.record_intended_actions(
+            _minting(*(_intended(f"ia{index}") for index in range(1, MAX_INTENDED_ACTIONS)))
+        )
+        assert len(filled.intended_actions) == MAX_INTENDED_ACTIONS - 1
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.record_intended_actions(
+                _minting(_intended("over-1"), _intended("over-2"), expected_version=1)
+            )
+        assert not isinstance(refusal.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.intended_actions == filled.intended_actions, "no member elided"
+        assert held.version == 1, "no count advanced"
+
+    async def test_the_last_legal_mint_carries_a_goal_to_exactly_the_bound(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 5, over a **separate goal at 63** and never the one the refusal above
+        is taken over.
+
+        "One action handed to it **records** and carries it to exactly
+        ``MAX_INTENDED_ACTIONS`` — the last legal mint, which a ``>=``-shaped comparison
+        refuses while every refusal named here still passes, and which a fixture shared
+        with the refusal above could not reach."
+        """
+        await store.save_goal(_goal("g2"))
+        await store.record_intended_actions(
+            _minting(
+                *(_intended(f"ia{index}") for index in range(1, MAX_INTENDED_ACTIONS)),
+                goal_id="g2",
+            )
+        )
+
+        filled = await store.record_intended_actions(
+            _minting(_intended("last"), goal_id="g2", expected_version=1)
+        )
+
+        assert len(filled.intended_actions) == MAX_INTENDED_ACTIONS
+        assert filled.intended_actions[-1].id == "last"
+
+    async def test_a_minting_whose_second_action_serves_nothing_records_neither(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 5's ``serves`` limb, "asserted over a **two-action** command whose
+        **second** action carries the bad value, so that the refusal is shown to be
+        all-or-nothing rather than a partial append".
+
+        §5 states the check's one instant: "at the append every entry names an element
+        of the **current** interpretation, and a value that does not is a caller
+        reaching past ``orchestration`` with a dangling or foreign identifier".
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.record_intended_actions(
+                _minting(_intended("ia1", serves=("e1",)), _intended("ia2", serves=("nowhere",)))
+            )
+        assert not isinstance(refusal.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.intended_actions == (), "byte-for-byte what it was"
+        assert held.version == 0
+
+    async def test_a_minting_serving_another_goals_element_records_neither(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 5: "one naming an element of a **different** goal", on the same
+        two-action shape.
+
+        The element exists — it is simply not this goal's — so the refusal is about the
+        **goal's own current interpretation** rather than about resolvability anywhere
+        in the store, which is what §5's "an element of the goal's **current**
+        interpretation" says and what a store comparing against every element it holds
+        would silently widen.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        await store.save_goal(_conditioned_goal("g2", element_id="e2"))
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.record_intended_actions(
+                _minting(_intended("ia1", serves=("e1",)), _intended("ia2", serves=("e2",)))
+            )
+        assert not isinstance(refusal.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert (held.intended_actions, held.version) == ((), 0)
+
+    async def test_a_serves_entry_goes_stale_and_is_neither_repaired_nor_re_checked(
+        self, store: PlanStore
+    ) -> None:
+        """§3: "a ``serves`` entry naming an element not in the current revision is
+        stale, truthful and harmless … the entry is not rewritten, not recomputed, not
+        dropped and not refreshed", and "nothing re-checks it".
+
+        §5 is explicit that the conjunct "is checkable exactly once, and that instant is
+        the only one at which it is true by construction", so a later revision that
+        drops the element leaves the record exactly as it was — and a later minting
+        against that goal is not refused on account of the older action's stale link.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        await store.record_intended_actions(_minting(_intended("ia1", serves=("e1",))))
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=1)
+        )
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.intended_actions[0].serves == ("e1",), "truthful, and not repaired"
+
+        later = await store.record_intended_actions(
+            _minting(_intended("ia2"), expected_version=held.version)
+        )
+        assert later.intended_actions[0].serves == ("e1",), "and not re-checked"
+
+    async def test_save_plan_refuses_a_plan_naming_an_action_the_goal_does_not_hold(
+        self, store: PlanStore
+    ) -> None:
+        """§4: "``PlanStore.save_plan`` **refuses a plan any of whose
+        ``PlanStep.intended_action`` values is not the ``id`` of a member of
+        ``Goal.intended_actions`` of the plan's own goal**", with the same error class
+        ADR-0253 §9 gives an unresolvable condition label and for the same reason.
+
+        The refusal is also driven with a plan still carrying an unsubstituted ``"A1"``,
+        which §1's grammar rule makes exact: an ``IntendedAction`` whose ``id`` is
+        ``"A1"`` is **not constructible**, so the label matches no action on any goal
+        rather than silently scoping a claim to a different act.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        with pytest.raises(ValidationError):
+            IntendedAction(id="A1", intent="the collision")
+
+        for named in ("ia2", "A1"):
+            with pytest.raises(PlanningError):
+                await store.save_plan(_acting_plan(first=named))
+            assert await store.get_plan("p1") is None
+
+    async def test_save_plan_saves_a_step_that_names_no_intended_action(
+        self, store: PlanStore
+    ) -> None:
+        """§4: "A step naming no intended action is held to nothing by this decision" —
+        a read step, a composition step and "every step of every plan written before
+        this decision carry ``None``, and that is a conforming plan rather than a
+        degraded one".
+
+        The goal here holds an action, so the resolvable set is non-empty and the plan
+        is still not checked: what turns the conjunct on is a step **naming** one.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        await store.save_plan(_acting_plan(first=None))
+
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert stored.steps[0].intended_action is None
+
+    async def test_the_conjunct_reads_the_goals_tuple_and_not_the_targeted_revision(
+        self, store: PlanStore
+    ) -> None:
+        """§4: "``Goal.intended_actions`` is not revised: it is appended to", so the set
+        ``save_plan`` reads is the goal's own tuple and ``targets_revision`` does not
+        narrow it.
+
+        That is the one place this conjunct differs from ADR-0253 §9's, which is stated
+        over "the interpretation the plan's ``targets_revision`` names" — and a store
+        that reused that scoping would refuse every plan of a goal whose understanding
+        had moved since the act was minted, which is the *"change our booking to
+        Sunday"* case §10 arm 2 turns on.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.record_interpretation(
+            GoalRevision(goal_id="g1", interpretation=_revision(2), expected_version=1)
+        )
+
+        await store.save_plan(_acting_plan().model_copy(update={"targets_revision": 2}))
+
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert stored.steps[0].intended_action == "ia1"
+
+    async def test_a_goals_intended_actions_round_trip_and_the_export_carries_them(
+        self, store: PlanStore
+    ) -> None:
+        """§10 arm 6: "the record round-trips and the export closes".
+
+        "``PlanExport`` carries them inside ``goals`` with no new member", because an
+        ``IntendedAction`` rides inside ``Goal`` and ADR-0014 §5's closure rule is
+        satisfied by construction. And **a goal written before this decision decodes
+        with ``intended_actions`` empty**, which is the same assertion from the other
+        side: the store this suite runs over has never been told about an action for
+        ``g2``, and does not invent one.
+        """
+        await store.save_goal(_goal())
+        await store.save_goal(_goal("g2"))
+        await store.record_intended_actions(_minting(_intended("ia1", serves=()), _intended("ia2")))
+
+        export = await store.export()
+
+        carried = {goal.id: goal.intended_actions for goal in export.goals}
+        assert [action.id for action in carried["g1"]] == ["ia1", "ia2"]
+        assert carried["g2"] == ()
+
+    async def test_deleting_a_goal_removes_the_actions_with_it(self, store: PlanStore) -> None:
+        """§5: "``delete_goal``'s cascade reaches the actions because they are inside
+        the goal", and ADR-0014 §5's "a goal the user deletes must not leave its plan
+        history behind" "needs no extension: deleting the goal row deletes them".
+
+        **An intended action is not a reason to refuse a deletion** (§5): the live-step
+        refusal is unchanged and nothing here adds a second one.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+
+        await store.delete_goal("g1")
+
+        assert await store.get_goal("g1") is None
+        export = await store.export()
+        assert export.goals == ()
+
     async def test_two_executions_of_one_plan_produce_two_distinguishable_rows(
         self, store: PlanStore
     ) -> None:
@@ -2946,7 +3309,7 @@ class PlanStoreContract:
 
         export = await store.export()
 
-        assert export.schema_version == 12
+        assert export.schema_version == 13
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
 
@@ -4305,7 +4668,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 12
+        assert export.schema_version == 13
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:

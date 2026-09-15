@@ -3307,6 +3307,74 @@ def _version_3_database(path: Path) -> None:
         conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
 
 
+def _version_4_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0252 and before ADR-0265.
+
+    The **previous** version, which is the one ADR-0265 §5's migration is stated over.
+    Built from the version 3 shape and then carried forward by hand, so the file this
+    test opens is the one the previous release actually wrote rather than a fresh one
+    relabelled.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_3_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "CREATE TABLE goal_evidence("
+            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
+            "read_at TEXT NOT NULL, standing TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        conn.execute("ALTER TABLE goals ADD COLUMN evidence_elided INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+
+
+async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
+    tmp_path: Path,
+) -> None:
+    """ADR-0265 §10 arm 6's last limb, over the **previous** version's stored shape.
+
+    "A stored goal written before this decision decodes with ``intended_actions``
+    empty" (§5), and "**no lane invents an intended action for a stored goal**: an act
+    nothing declared is an act no claim was ever scoped to, and minting one would state
+    a history the row does not hold."
+
+    **The migration adds no table and no column**, which is what makes it "an addition
+    with a total default": an intended action rides inside the ``goals`` blob and
+    ``Goal.intended_actions`` is a defaulted empty tuple, so the stored blob decodes
+    unrewritten. **What moves is the marker alone**, and it moves for the reading in
+    the other direction — this code writes blobs an older build's ``extra="forbid"``
+    refuses, and ADR-0049 §1's loud refusal of a **newer** label is what a version that
+    did not move would leave that build nothing to fire.
+    """
+    path = tmp_path / "plans.db"
+    _version_4_database(path)
+    with sqlite3.connect(path) as conn:
+        before = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0]
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
+        assert goal.intended_actions == (), "and nothing is invented for it"
+
+        export = await store.export()
+        assert export.schema_version == 13
+        assert export.goals[0].intended_actions == ()
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "5",
+        )
+        assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
+            "the migration converts nothing: the blob is the one the previous release wrote"
+        )
+
+
 async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
     tmp_path: Path,
 ) -> None:
@@ -3338,14 +3406,14 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
         assert await store.evidence_of("g1") == EvidenceHistory(goal_id="g1")
 
         export = await store.export()
-        assert export.schema_version == 12
+        assert export.schema_version == 13
         assert export.evidence == (EvidenceHistory(goal_id="g1"),)
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "4",
+            "5",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -3389,14 +3457,14 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
         assert page.elided == 0
 
         export = await store.export()
-        assert export.schema_version == 12
+        assert export.schema_version == 13
         assert export.questions == ()
     finally:
         store.close()
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "4",
+            "5",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -3507,7 +3575,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         assert plan.targets_revision is None, "each plans row's targets_revision is absent"
 
         export = await store.export()
-        assert export.schema_version == 12
+        assert export.schema_version == 13
         assert [one.id for one in export.goals] == ["g1"]
         assert export.attempts == ()
 
@@ -3521,7 +3589,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "4",
+            "5",
         )
 
 
