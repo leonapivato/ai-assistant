@@ -351,13 +351,24 @@ def _real(value: object) -> float | None:
     return None
 
 
-def _check_coordinate(label: str, value: float, *, maximum: float) -> None:
-    """Refuse a coordinate outside ADR-0260 §11's stated domain for it.
+def _check_coordinate(label: str, value: float, *, maximum: float) -> float:
+    """The coordinate as a plain float, refused outside ADR-0260 §11's domain for it.
+
+    **It returns the value it judged, and the caller stores *that*.** Converting a
+    second time would let a ``float`` subclass whose ``__float__`` answers differently
+    on each call pass every check here and be stored as something else — a fake
+    configured for a place no deployment can be in, whose ``request`` then raises where
+    §4 says it returns. ``float()`` consults ``__float__`` on a subclass, so the guard
+    and the store must read one conversion and not two; the production forecaster's own
+    guard returns its value for the same reason.
 
     Args:
         label: The field's name, for the message.
         value: What was given.
         maximum: The degrees this axis runs to, which is also its negative floor.
+
+    Returns:
+        The value as a plain ``float`` — the **one** conversion this module makes of it.
 
     Raises:
         TypeError: If ``value`` is not a real number, ``bool`` included.
@@ -384,6 +395,7 @@ def _check_coordinate(label: str, value: float, *, maximum: float) -> None:
             f"{describe_untrusted(value)}"
         )
         raise ValueError(msg)
+    return number
 
 
 def _checked_cost(amount: Decimal | None, currency: str | None) -> ToolCost | None:
@@ -560,8 +572,10 @@ class FakeForecaster:
                 later call.
         """
         _check_bounds(max_days, max_day_chars)
-        _check_coordinate("latitude", latitude, maximum=_MAX_LATITUDE)
-        _check_coordinate("longitude", longitude, maximum=_MAX_LONGITUDE)
+        # **The conversion the guard made, kept** — never a second one. See
+        # :func:`_check_coordinate`.
+        checked_latitude = _check_coordinate("latitude", latitude, maximum=_MAX_LATITUDE)
+        checked_longitude = _check_coordinate("longitude", longitude, maximum=_MAX_LONGITUDE)
         _check_source(name, origin, reported_at)
         if refusal is not None and type(refusal) is not ForecastRefusal:
             # `ForecastOutcome.refusal` is typed to the enum, so a plain string would
@@ -591,8 +605,8 @@ class FakeForecaster:
         )
         self._name = name
         self._origin = origin
-        self._latitude = float(latitude)
-        self._longitude = float(longitude)
+        self._latitude = checked_latitude
+        self._longitude = checked_longitude
         self._days = tuple(days)
         self._refusal = refusal
         self._reported_at = reported_at
