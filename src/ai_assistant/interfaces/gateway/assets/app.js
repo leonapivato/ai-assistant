@@ -9968,6 +9968,20 @@ async function abandonGoal(goal) {
 // re-reads nothing, so it neither races a listing nor is lost to one (see `actResult`).
 let authorizationRuns = 0;
 
+// The listing read in flight, or `null` — `listing`'s twin one panel over, and it is
+// there for the reason that one states: *"Stopping the read closes both, which a
+// comparison after the `await` closes only the first of."*
+//
+// **A comparison after the `await` is too late, because `relay` has already written to
+// the page by then.** It renders a refusal before it returns — `refused` → `report` →
+// `sessionLost` — so a superseded listing that comes back refused puts a stale fault
+// over the newer listing's rows, and one refused `no-live-session` after the owner has
+// re-entered forgets the **new** session's header half and throws the page back to the
+// bootstrap form: a dead request ending a live session. Neither is reachable once the
+// superseded request is stopped: it produces no response to classify. Adversarial
+// review, round 12, `major`.
+let authorizationListing = null;
+
 // What this page knows about a record beyond what the last listing said.
 //
 // **A row's state is a function of the record, not of a node captured when it was
@@ -10456,14 +10470,27 @@ function renderOpenedAuthorizations(body, opened) {
 async function listAuthorizations(goal) {
   fault(null, "authorizations");
   authorizationRuns += 1;
+  if (authorizationListing !== null) {
+    const superseded = authorizationListing;
+    authorizationListing = null;
+    superseded.abort();
+  }
   const run = authorizationRuns;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
+  const stopping = new AbortController();
+  authorizationListing = stopping;
   try {
-    const body = await relay(half, "/authorizations", { goal_id: goal.id }, "authorizations");
+    const body = await relay(
+      half,
+      "/authorizations",
+      { goal_id: goal.id },
+      "authorizations",
+      stopping
+    );
     // A response that is not the latest is dropped whole: the run that overtook it owns
     // the panel, and rendering this one would draw one goal's rows under another's name.
     //
@@ -10480,6 +10507,7 @@ async function listAuthorizations(goal) {
     if (body === null || run !== authorizationRuns || headerHalf() !== half) {
       return;
     }
+    authorizationListing = null;
     const list = el("authorization-list");
     clearNode(list);
     if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {
@@ -10526,7 +10554,11 @@ async function listAuthorizations(goal) {
     }
     show("authorizations", true);
   } catch (_) {
-    fault(GATEWAY_GONE, "authorizations");
+    // An abort is not a transport failure, and only the newest read is entitled to say
+    // the gateway has gone — `listConversations`' own comparison, for its own reason.
+    if (run === authorizationRuns) {
+      fault(GATEWAY_GONE, "authorizations");
+    }
   }
 }
 
