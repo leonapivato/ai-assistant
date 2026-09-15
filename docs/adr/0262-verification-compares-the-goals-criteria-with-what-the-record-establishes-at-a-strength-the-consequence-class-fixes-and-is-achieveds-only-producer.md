@@ -563,9 +563,20 @@ it is the allow ADR-0249 §7 forbids (§2a).
 > this clause closes**: its borrowed `output` is an operand under §2, so an attempt could verify
 > against a consequential act's answer while classified as having done nothing.
 
+> **Normative — a claimed step whose own pinned decision cannot be read is at rung 2, which is the
+> same fail-closed answer the clause above gives for an unreadable holder.** Where a step reached a
+> `→ RUNNING` claim and its `approval_ref` names a decision the trail does not hold, or names none
+> at all, **neither its definition nor its `egress_binding` can be read**, so nothing says the act
+> was not irreversible or disclosing: the step **contributes rung 2** and makes §4's
+> **`effect_may_exist`** true. **§2's silence about such a step is not in tension with this**: there
+> it establishes no criterion, which is a statement about *evidence*, and here it withholds no
+> consequence, which is a statement about *strength* — both fail closed, in the directions their own
+> sections run. **No lane reads an unreadable decision as rung 0 or rung 1**, and a store *failure*
+> is still propagated rather than classified (below).
+
 > **Normative — the three rungs, and they are read off `ToolDefinition`'s required declarations.**
-> For each such step, the `ToolDefinition` recorded for its committed **`bound_tool`** and the
-> `PermissionDecision` its **`approval_ref`** names:
+> For each such step whose pinned decision *can* be read, the `ToolDefinition` recorded for its
+> committed **`bound_tool`** and the `PermissionDecision` its **`approval_ref`** names:
 >
 > - **Rung 2 — a consequential act ran.** Some such step's definition is **`side_effecting`** and
 >   at least one of: its **`reversibility` is more severe than `REVERSIBLE`**; its **`discloses` is
@@ -650,23 +661,32 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > **`FAILED`**; **`blocked`** is true where any such step stands **`SKIPPED`** carrying
 > `SkipReason.UNMET_DEPENDENCY` or `SkipReason.APPROVAL_DENIED`, whichever source status it was
 > committed from; **`fully_met`** is true where the goal carries **at least one** criterion,
-> **every** one **met**; and **`effect_unresolved`** is true where any such step stands **`FAILED`**
-> **under an operative definition that is `side_effecting`** (§2's own reading of ADR-0029 §3 and
-> §4: such a failure may have acted). **It is deliberately not the rung**: §3's rung measures the
-> **consequence** an act carries and puts a reversible, non-disclosing, non-transmitting side
-> effect at rung 1, while this fact measures whether an effect **may exist at all**, which that
-> same act's failure leaves open. **None of the four is stored, none is a field and no consumer
+> **every** one **met**; and **`effect_may_exist`** is true where any such step stands **`FAILED`**
+> **under an operative definition that is `side_effecting`**, or is a claimed step whose pinned
+> decision cannot be read (§3) — in each case §2 has no answer to hold a declaration against and
+> ADR-0029 §3's escaping exception leaves occurrence open. **It is deliberately not the rung**:
+> §3's rung measures the **consequence** an act carries and puts a reversible, non-disclosing,
+> non-transmitting side effect at rung 1, while this fact measures whether an effect **may exist at
+> all**, which that same act's failure leaves open. **And it is deliberately not ADR-0259's
+> `EFFECT_UNRESOLVED`, which is a *state* this decision never writes**: that state is reached from
+> an **`INDETERMINATE`** step, whose attempt §4's third ending condition keeps live for exactly
+> ADR-0259 §4's acts 3 and 4. A step ADR-0029 committed **`FAILED`** is terminal, so the attempt
+> **does** end, `UNCERTAIN`, and the goal stays **open** — no status is written (§5) — which is
+> what this decision can honestly say and where the user's next turn takes it. **That there is no
+> reconciliation route for a failed call that may have acted is a gap in the corpus rather than a
+> claim made here**, and §9 books it with what fires it. **No lane writes `EFFECT_UNRESOLVED` from
+> this fact, keeps an attempt live on it, or reads it as an ADR-0259 §4 trigger.** **None of the four is stored, none is a field and no consumer
 > reads any** — ADR-0252 §6's own posture toward its four tests, computed where they are used.
 
 > **Normative — which member the attempt earns, decided by §2's three results over the criteria §1
 > fixes, by §3's rung, and by those two facts, in this order and over nothing else.**
 >
 > 1. **`FAILED`** — **no** criterion is met, and either **some** criterion is **unmet**, or
->    **`failed`**, **not `effect_unresolved`**, and the attempt is **not at rung 2**.
+>    **`failed`**, **not `effect_may_exist`**, and the attempt is **not at rung 2**.
 > 2. **`CONDITION_PREVENTED`** — **no** criterion is met, **no** criterion is **unmet**,
 >    **`blocked`**, **not `failed`**, and the attempt is **not at rung 2**. The plan's own declared
 >    conditions, or the user's own refusal, refused the work, and nothing consequential ran.
-> 3. **`UNCERTAIN`** — the attempt is at **rung 2** (§3) **or `effect_unresolved`**, **no**
+> 3. **`UNCERTAIN`** — the attempt is at **rung 2** (§3) **or `effect_may_exist`**, **no**
 >    criterion is **unmet**, and **not `fully_met`**: an act that may have taken effect ran and the
 >    record does not establish that every criterion holds.
 > 4. **`PARTIAL`** — **some** criterion is met and **some** criterion is **not met**.
@@ -704,14 +724,14 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > that where both predicates hold — a bound step reporting a mismatching value beside another step
 > skipped `UNMET_DEPENDENCY` — the established failure is reported and the condition does not
 > suppress it; and **both are refused while an effect may exist — at rung 2, or with
-> `effect_unresolved` — unless a criterion is actually `unmet`**, because an act that may have
+> `effect_may_exist` — unless a criterion is actually `unmet`**, because an act that may have
 > taken effect ran: *a condition prevented action* would be false of it, and
 > so would *what was asked was established not to have happened* where the **only** failure on the
 > record is a step about something else. **An unrelated `FAILED` or `SKIPPED` step therefore does
 > not convert a rung-2 attempt whose criteria are merely unestablished into a claim about them.**
 > **And the member does not turn on whether a criterion happened to have a confirmed member**: a
 > `FAILED` step contradicts **no** criterion (§2), so the same record earns the same member bound
-> or unbound. **`effect_unresolved` is what keeps that honest below rung 2**: a reversible
+> or unbound. **`effect_may_exist` is what keeps that honest below rung 2**: a reversible
 > side-effecting call that applied its change and then raised is a rung-1 attempt whose effect may
 > exist, and limb 1's *"the work failed"* would be a claim about a world the record does not
 > describe — so such an attempt is `UNCERTAIN`, while a failed **read** at rung 0 or 1, which can
@@ -1268,15 +1288,19 @@ booking"*.
   a user's next turn and A8's reconciliation resolve. **No lane infers effect absence from a
   failure kind, a `retryable` flag or an idempotency declaration.** Fired by the decision that
   records, per failure, whether the call can have acted — ADR-0029's own vocabulary extended at the
-  seam that knows, never inferred at this one. **And
-  with them the identity that would tell a retry from a second identical act**: §2 groups a
-  criterion's bound steps by the call's own `parameters_digest`, two identical acts share one, and
-  a group carrying both answers is therefore `unestablished` rather than resolved — so a retry that
-  really did resolve its own failure reads `unestablished` too, and an `UNCERTAIN` attempt is what
-  this decision can honestly say about it. **No lane closes that by reading a step order, a
-  timestamp or a planner's label.** Fired by the decision that gives a dispatch a per-call
-  identity — which ADR-0266 §10 books as an opaque per-call reference — after which a retry is
-  distinguishable on the record rather than by inference.
+  seam that knows, never inferred at this one. **And with it the reconciliation route such a
+  failure has none of**: ADR-0259 §4 reconciles an **`INDETERMINATE`** step, and a call ADR-0029
+  committed `FAILED` is terminal, so the attempt ends `UNCERTAIN` under an open goal and nothing
+  later resolves whether the effect exists. **That is a gap in the corpus this decision reports
+  rather than closes** — it writes no `EFFECT_UNRESOLVED`, holds no attempt open and schedules
+  nothing (the sequencing ruling) — and it is fired by the same decision, which would give A8 a
+  failed-but-possibly-effecting step to reconcile. **And with it the identity that would tell a retry
+  from a second identical act**: two identical acts share one `parameters_digest`, so §2 cannot
+  tell a re-dispatch from a second act of the same shape. **That does not move any criterion** —
+  the criterion reads `met` on the successful dispatch either way (§2) — and what it leaves open is
+  the **duplicate** above and the arity residual below. **No lane closes it by reading a step
+  order, a timestamp or a planner's label.** Fired by the decision that gives a dispatch a per-call
+  identity, which ADR-0266 §10 books as an opaque per-call reference.
 - **Distinguishing the four causes `SkipReason.UNMET_DEPENDENCY` carries.** ADR-0255 §2 gives all
   four one member, so §4's `blocked` fact cannot tell an unsatisfied `when` from an unresolvable
   `resolves`. **`SkipReason` gains no member here.** Fired by a surface that must tell a user
@@ -1621,7 +1645,11 @@ are ordered only by each other.
    declarations the stored output would fail, the recorded verdict is **unchanged** (L1). **And a
    store failure is not a verdict**: an audit read and an `AuthorizationResolution.resolve` that
    each raise propagate, while a decision the trail does not hold and a row the resolution returns
-   as `None` are each `unestablished`. **And LA's own arm**: a trail at the previous marker opens,
+   as `None` are each `unestablished`. **And an unreadable pinned decision is rung 2, not rung 1**:
+   a **claimed** `SUCCEEDED` step whose `approval_ref` names a decision the trail does not hold,
+   with every criterion unestablished, reaches **rung 2**, makes `effect_may_exist` true and ends
+   **`UNCERTAIN`** — never `ANSWERED` — the arm that fails against an implementation defaulting an
+   unreadable definition to the harmless rung. **And LA's own arm**: a trail at the previous marker opens,
    migrates and is restamped, its existing decisions decoding with `postconditions` empty; a trail
    at the new marker is **refused at open** by code at the previous one, before any read.
 6. **§4's six limbs, and the order (L4).** One arm per member. **And one arm per precedence
@@ -1642,7 +1670,7 @@ are ordered only by each other.
    **unestablished**, → **`UNCERTAIN`**, and the identical record with that step **bound** to a
    criterion → **`UNCERTAIN`** likewise, never `FAILED` — the arms that fail against an
    implementation reading a side-effecting failure as a disproof, whatever its `idempotency`.
-   **And `effect_unresolved` is asserted below rung 2, which is where the rung alone would get it
+   **And `effect_may_exist` is asserted below rung 2, which is where the rung alone would get it
    wrong**: a **rung-1** attempt whose only step is `side_effecting` with
    `reversibility=REVERSIBLE`, empty `discloses` and no egress binding, standing **`FAILED`** — the
    post-effect exception ADR-0029 §3 records — with every criterion **unestablished** →
@@ -1658,7 +1686,7 @@ are ordered only by each other.
    no step failed"* be asserted of an attempt that borrowed a consequential act's own answer; a **rung 2** attempt with **every criterion
    met** beside an unrelated `FAILED` step → **`VERIFIED`**, and its goal `ACHIEVED` — the arm that pins limbs 4 and 5 to the criteria
    alone and keeps §6's `PARTIAL` statement true of every attempt that reaches it; a rung-2 attempt
-   with a criterion **unmet** → `FAILED` whatever else stands, `effect_unresolved` included; a **read that succeeded** followed
+   with a criterion **unmet** → `FAILED` whatever else stands, `effect_may_exist` included; a **read that succeeded** followed
    by a step skipped
    `APPROVAL_DENIED`, every criterion unestablished → `CONDITION_PREVENTED`, the arm that pins
    `blocked` to the skip rather than to the absence of any claim; and the **same state at rung 1
@@ -1765,8 +1793,8 @@ confirmed, the act ran under **that row**, and the tool declared what its succes
 a capability authorised per call, a criterion the user never stated in words a member rests on, a
 criterion stating an **amount**, and a goal whose acts nobody bounded each reach `UNCERTAIN` at
 rung 2 and stay open. **That is the deliberate direction and it is where a falsifier would show up
-first** (below). And a goal with an
-unresolved effect now deliberately **does not** end its attempt, so it stays open until A8's
+first** (below). And a goal whose step stands
+**`INDETERMINATE`** now deliberately **does not** end its attempt, so it stays open until A8's
 reconciliation reaches it — the owner's ruling, and a state a user sees on `assistant goals` rather
 than one the system quietly closes.
 
