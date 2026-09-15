@@ -50,6 +50,8 @@ from ai_assistant.core.types import (
     GoalRevision,
     GoalStatus,
     Ground,
+    IntendedAction,
+    IntendedActionMinting,
     MemorySource,
     PlanStep,
     ReadKind,
@@ -148,6 +150,10 @@ _SYNC_METHODS = {
     "record_evidence": "_record_evidence_sync",
     "get_evidence": "_read_evidence",
     "evidence_of": "_evidence_of_sync",
+    # ADR-0265 §5's member, which is a compare-and-swap: its read, its comparison and
+    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site rather than a
+    # caller of one above.
+    "record_intended_actions": "_record_intended_actions_sync",
 }
 
 
@@ -909,6 +915,41 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
             "record_interpretation (refused: stale version)",
             lambda: store.record_interpretation(
                 GoalRevision(goal_id="g1", interpretation=_revision(3), expected_version=0)
+            ),
+            closes="ROLLBACK",
+        )
+        # ADR-0265 §5's member, both ways out of the block: an append that commits and
+        # a refusal that must still reach a ROLLBACK rather than abandon the
+        # transaction open on the shared connection.
+        await recorded(
+            "record_intended_actions",
+            lambda: store.record_intended_actions(
+                IntendedActionMinting(
+                    goal_id="g1",
+                    actions=(IntendedAction(id="ia1", intent="book the room"),),
+                    expected_version=1,
+                )
+            ),
+        )
+        await recorded(
+            "record_intended_actions (refused: an id the goal already holds)",
+            lambda: store.record_intended_actions(
+                IntendedActionMinting(
+                    goal_id="g1",
+                    actions=(IntendedAction(id="ia1", intent="book the room"),),
+                    expected_version=2,
+                )
+            ),
+            closes="ROLLBACK",
+        )
+        await recorded(
+            "record_intended_actions (refused: stale version)",
+            lambda: store.record_intended_actions(
+                IntendedActionMinting(
+                    goal_id="g1",
+                    actions=(IntendedAction(id="ia2", intent="book the room"),),
+                    expected_version=0,
+                )
             ),
             closes="ROLLBACK",
         )
