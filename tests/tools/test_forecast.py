@@ -1627,6 +1627,15 @@ class TestForecastEgressContract(ForecasterContract):
         forecaster, call = await self._prepared(transport=transport)
         return GatedRead(forecaster=forecaster, call=call, arm=transport.suspend_next)
 
+    async def another_declaration(self) -> ScriptedRead:
+        # **Bound by the real seam**, which the shared id makes possible: the
+        # registration is found, the binding is derived for the same origin, and only
+        # the declaration's own text differs — so every check but the second passes.
+        subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, channels=[answering(day())])
+        weakened = FORECAST_READ.model_copy(update={"description": "nobody registered this"})
+        proposal = await request(subject, tool=weakened)
+        return ScriptedRead(forecaster=subject.forecaster, call=authorised_read(proposal))
+
     async def elsewhere(self) -> ScriptedRead:
         # **Bound by the real seam and authorised over itself.** The binding is derived
         # for the same registration and the same origin, so ADR-0148 §8's floor is
