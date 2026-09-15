@@ -1,6 +1,6 @@
 # 264. A turn that reached outside this system says so, and a reply cannot deny it on a surface that renders the statement
 
-- Status: Accepted
+- Status: Accepted, §5 amended by ADR-0260
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0242](0242-the-act-that-trusts-a-destination-has-its-own-surface-and-a-search-that-did-not-happen-is-explained-in-the-reply.md)
   — **§6's first clause, in its second sentence alone.** That sentence reads *"On every
@@ -17,6 +17,28 @@
   §7's carrier, §8's vocabulary and mapping and §9's statements are untouched, and §§1-5 and
   §§10-18 stand entire. ADR-0070 §1's test is met and its §3's partial form is the sanctioned
   tool: a reader holding only that ADR would assert a byte-identity that no longer holds.
+
+
+- Amended: 2026-09-15 by ADR-0260 — **§5's closure at exactly one member, in that one
+  respect.** `OutboundDestination` gains a second member, `FORECAST_PROVIDER`, rendering
+  after `SEARCH_PROVIDER` in §5's own order. **This is the clause working rather than a
+  departure from it**: §5 requires it in terms — *"A later outbound seam adds its own
+  member with its own ADR. It does not render as `SEARCH_PROVIDER` and does not render as
+  nothing: a contact class with no member is a contact this system made and did not
+  state"* — and [ADR-0260](0260-a-forecast-read-is-its-own-seam-at-a-configured-provider-and-what-it-mints-carries-the-extent-that-makes-it-evidence.md) §10 is that ADR. A reader holding only this ADR would read the
+  vocabulary as closed at one, which is ADR-0082 §1's test met on that sentence and on no
+  other.
+
+  **Every other clause binds entire.** §5's class-never-a-destination rule binds on the
+  new member, which names, encodes and is derived from no provider, host, account,
+  connection or tool. §1's three-valued statement and its never-inferred clause, §2's
+  establishment partition — which ADR-0260 §10 applies at a second performing site,
+  computing the fact **at that site** from the outcome it holds — §3's egress prohibition,
+  §4's carrier and its one count, §6, §7, §8's both-statements-ride-together rule and
+  §§9-15 are all unmoved.
+
+  Appended dated note per ADR-0070 §1; no ratified text is rewritten and no mark is added
+  (ADR-0089 §5). Refs #2255.
 
 ## Context
 
