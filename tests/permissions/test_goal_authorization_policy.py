@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from action_policy_contract import ActionPolicyContract
@@ -58,8 +58,10 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.permissions._coverage import (
     CoverageFailure,
+    _met_on_argument_route,
     coverage_subject,
     covers_on_argument_route,
+    declared_at,
     uncovered,
 )
 from ai_assistant.permissions.policy import (
@@ -85,6 +87,7 @@ if TYPE_CHECKING:
         Authorization,
         CanonicalDestination,
         CoverageMember,
+        ValueBound,
     )
 
 
@@ -260,6 +263,34 @@ PERIOD_TOOL: ToolDefinition = declaring(stay_from=BoundKind.PERIOD)
 #: reading. Here ``site`` is declared at no kind, which leaves it to condition 6's
 #: third conjunct; the arms below read the defect for ``choice`` and not the ruling.
 TERMS_TOOL: ToolDefinition = declaring(only=True, choice=BoundKind.TERMS)
+
+#: One value per shape the three kinds' readings accept, carried at ``choice``.
+#:
+#: **``"50"`` deliberately serves two kinds at once**: it is inside the ``MONEY``
+#: ceiling below *and* a term of the ``TERMS`` bound below, which is ADR-0266 §7's
+#: *"a hotel's star rating has a number in it and would fit a price"* as a value
+#: rather than as a sentence. An implementation selecting an argument by what its
+#: value looks like meets the wrong member at that cell.
+_ROUTE_VALUES: Final[frozenset[str]] = frozenset({"50", "flexible", AT.isoformat()})
+
+#: A well-formed bound of each kind, so the matrix is written over ``BoundKind``.
+_ROUTE_BOUNDS: Final[dict[BoundKind, ValueBound]] = {
+    BoundKind.MONEY: money_bound("60"),
+    BoundKind.PERIOD: period_bound(starts_at=AT, ends_at=AT + timedelta(hours=12)),
+    BoundKind.TERMS: terms_bound("50", "flexible"),
+}
+
+#: Which of :data:`_ROUTE_VALUES` each bound above accepts on its own reading.
+#:
+#: **What keeps the matrix's negative cells from passing vacuously**: a cell is
+#: expected to be met exactly where the kinds agree *and* the carried value is one
+#: this kind's own bound admits, so the diagonal is green and a refusal off it is
+#: about the kind rather than about the value.
+_ROUTE_ACCEPTS: Final[dict[BoundKind, frozenset[str]]] = {
+    BoundKind.MONEY: frozenset({"50"}),
+    BoundKind.PERIOD: frozenset({AT.isoformat()}),
+    BoundKind.TERMS: frozenset({"50", "flexible"}),
+}
 
 
 def defects(row: Authorization, call: ActionRequest) -> set[tuple[str, CoverageFailure]]:
@@ -915,30 +946,58 @@ class TestTheTwoRoutesAndConditionSixsThreeConjuncts:
 
         **No precedence rule at the comparison** — which is ADR-0254 §2's own reason
         one field over — so the restrictive direction is taken and the act asks.
+
+        **Stated as *neither* argument being selected, and not as one of them being
+        refused.** An implementation taking the last declaration and dropping the
+        rule would leave ``amount`` refused all the same — the non-selected argument
+        failing its own exactly-one guard — so an assertion naming only ``amount``
+        passes while precedence is introduced. :func:`declared_at` answering ``None``
+        is the rule itself, and the whole defect set is what it means here: both
+        declared amounts refused, the ceiling proved by nothing, and the currency key
+        left unexamined because no comparison read it. Adversarial review, round 8,
+        ``blocker``.
         """
         two = declaring(fee=BoundKind.MONEY)
         row = live(tool=two, coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60")),))
         call = request(binding(SITE), tool=two, amount="50", currency="GBP", fee="1")
-        assert ("amount", CoverageFailure.REFUSED) in defects(row, call)
+        assert declared_at(two, BoundKind.MONEY) is None
+        assert defects(row, call) == {
+            ("amount", CoverageFailure.REFUSED),
+            ("fee", CoverageFailure.REFUSED),
+            ("currency", CoverageFailure.UNNAMED),
+            ("money", CoverageFailure.UNPROVED),
+        }
 
-    async def test_a_terms_member_is_met_at_a_money_declared_argument_in_no_case(
-        self,
+    @pytest.mark.parametrize("carried", sorted(_ROUTE_VALUES))
+    @pytest.mark.parametrize("declared_kind", list(BoundKind))
+    @pytest.mark.parametrize("member_kind", list(BoundKind))
+    def test_the_argument_route_meets_a_member_at_its_own_kind_and_nowhere_else(
+        self, member_kind: BoundKind, declared_kind: BoundKind, carried: str
     ) -> None:
         """Arm 2(b): kind agreement and **not numeric fit**, which is the review's
         own case — *"a hotel's star rating has a number in it and would fit a price"*.
 
-        A ``TERMS`` member is met by a ``MONEY``-declared argument in no case
-        whatever number it carries, and a ``MONEY`` member at a ``TERMS``-declared
-        argument in none.
+        **The route predicate itself, over every cell of the matrix.** Read through
+        the defects instead, the reverse half of this arm proves nothing: ``("money",
+        UNPROVED)`` is emitted for *every* ``MONEY`` member in this tree whatever the
+        argument route does (:func:`_met_through_evidence` lands no quote), so an
+        implementation selecting an argument by numeric fit rather than by declared
+        kind would leave that assertion green. Adversarial review, round 8,
+        ``blocker``.
+
+        **The matrix is over ``BoundKind`` itself rather than over the two cells the
+        arm names**, so a fourth kind widens it without anyone remembering to. The
+        three carried values are each accepted by at least one kind's own bound and
+        :data:`_ROUTE_ACCEPTS` says which, so the diagonal is met and the negative
+        cells are not vacuous: ``"50"`` fits the ``MONEY`` ceiling **and** sits in the
+        ``TERMS`` bound, which is the star rating and the price in one value.
         """
-        money_only = declaring(only=True, amount=BoundKind.MONEY)
-        terms = live(site=False, coverage=(coverage_member(BoundKind.TERMS, fixed="50"),))
-        call = request(binding(SITE), tool=money_only, amount="50", currency="GBP")
-        assert ("terms", CoverageFailure.UNPROVED) in defects(terms, call)
-        terms_only = declaring(only=True, choice=BoundKind.TERMS)
-        money = live(site=False, coverage=(coverage_member(BoundKind.MONEY, bound=money_bound()),))
-        at_terms = request(binding(SITE), tool=terms_only, choice="50")
-        assert ("money", CoverageFailure.UNPROVED) in defects(money, at_terms)
+        tool = declaring(only=True, choice=declared_kind)
+        declared = tool.bounded_arguments[0]
+        call = request(binding(SITE), tool=tool, choice=carried, currency="GBP")
+        member = coverage_member(member_kind, bound=_ROUTE_BOUNDS[member_kind])
+        met = _met_on_argument_route(member, declared, coverage_subject(call))
+        assert met is (member_kind is declared_kind and carried in _ROUTE_ACCEPTS[member_kind])
 
     async def test_an_undeclared_argument_needs_a_member_met_through_the_evidence_route(
         self,
