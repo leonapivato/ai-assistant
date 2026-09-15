@@ -53,9 +53,9 @@
   surface a user reads to find out where a goal stands. **§15's every other clause binds entire**,
   and the new member is added **under** them: the *"carries no attempt id, no revision number, no
   element, no ground, no evidence reference and no plan"* rule is untouched and satisfied — a
-  `bool` is none of those — and `effect_in_flight` takes `paused`'s own clause one state over,
+  `bool` is none of those — and `effect_in_flight` takes `paused`'s own clause one fact over,
   **computed and never stored**, computed by the engine, and derived by no adapter.
-- **No other ADR is superseded in whole or in part**, and §12 says why none of the six further
+- **No other ADR is superseded in whole or in part**, and §12 says why none of the further
   ADRs this decision reaches owes a record.
 
 ## Context
@@ -258,10 +258,12 @@ mechanism.
 > status its own disposal gives it**, which is §H.4 test 2's *"never `SKIPPED`"* made a property
 > of there being no writer rather than a rule a driver is trusted to keep.
 
-> **Normative — the act takes no new store member and gives `PlanStore` none.** `commit_attempt`
-> and `set_goal_status` are the members ADR-0249 §12 and ADR-0250 §9 already landed;
-> **`PlanStore` gains no member, no argument and no refusal**, and `commit_transition` gains **no
-> conjunct** (§4).
+> **Normative — the act takes no new store member, and `PlanStore` gains exactly one refusal.**
+> `commit_attempt` and `set_goal_status` are the members ADR-0249 §12 and ADR-0250 §9 already
+> landed; **`PlanStore` gains no member and no argument**, and **`commit_transition` gains no
+> conjunct** (§4). What it gains is §3's outcome conjunct on `commit_attempt` — one refusal on one
+> member, on ADR-0255 §3's own footing that such a thing is **a strengthening of an existing
+> member rather than a new one**.
 
 > **Normative — a lost compare-and-swap raises, and nothing partial is reported as done.** Where
 > `commit_attempt` loses its race — a concurrent turn moved the attempt between the read and the
@@ -304,6 +306,30 @@ this one's.
 >
 > **The three limbs are total over the attempt's executions and no input is left undecided**, and
 > **no fourth limb, ordering or override is added**.
+
+> **Normative — the limbs are evaluated inside the same indivisible step as the write, because a
+> caller's read of them is not ordered against a claim.** **`PlanStore.commit_attempt` accepts an
+> `AttemptTransition` whose `to_state` is `CANCELLED` only where its `outcome` is the member the
+> three limbs above yield over that attempt's executions read inside that same step**, and refuses
+> every other with **`StaleExecutionError`**. **The caller re-reads and recomputes**, which is
+> exactly what that class means and directs (`core/errors.py`, ADR-0014 §5) — and is why this
+> refusal takes the stale class where ADR-0255 §3's permanent ones do not.
+
+**Why the store and not the engine, in the words the corpus already uses for it.** A claim writes
+an `ExecutionState` and **does not advance `GoalAttempt.version`**, so the attempt's own
+compare-and-swap cannot see one land: an engine that read the steps, chose `CANCELLED`, and then
+committed would record *nothing was outstanding* about a step a concurrent claim had just taken
+to `RUNNING` — a read-then-write with the time-of-check-to-time-of-use gap revision 1 §H.1
+identifies and ADR-0014 §5 assigns to the store, *"because the store is the only place with a
+total order over writes."* The construction is `commit_transition`'s own, one member over, and
+**it puts no policy in the store that the caller does not also compute**: the caller proposes the
+outcome and the store refuses a wrong one, which is `expected_version`'s shape and
+`approval_ref`'s.
+
+> **Normative — the conjunct binds on `to_state=CANCELLED` and on nothing else.** Every other
+> `AttemptTransition` is untouched — `ENDED`, the phase stamps, the effort counters and the three
+> `add_*` appends each behave exactly as ADR-0249 §12 rules — and **no lane reads this conjunct as
+> a general outcome check**. Which member a non-cancelled attempt earns stays A10's (§11).
 
 > **Normative — the outcome is not a second record of the state, and the rule above is what makes
 > that true.** `AttemptState.CANCELLED` says **why the attempt stopped**; `AttemptOutcome` says
@@ -359,13 +385,22 @@ done for, and `(CANCELLED, CANCELLED)` is the goal nothing happened on.
 >   set, and its outcome is one of the step's own — **never `SKIPPED`**, because §2 writes no step
 >   status at all. The cancellation reports an effect in flight (§6).
 
-> **Normative — exactly one of the two, never both and never neither, and the property is the
-> store's to keep.** `commit_transition` reads the attempt *"inside the same indivisible step as
-> the claim"* (ADR-0255 §3) and `commit_attempt` writes it under its own compare-and-swap, so a
-> conforming `PlanStore` **serialises the two**: there is no interleaving in which a claim both
-> lands and is refused, and none in which a cancellation both takes effect and leaves a claimable
-> attempt. **That is §H.4 test 4, it is an obligation on the Protocol rather than on
-> `orchestration`, and §14's arm 4 is where a conforming implementation shows it.**
+> **Normative — §H.4 test 4's invariant is stated over **one claim**, and that reading is fixed
+> here so the test and the claim-first case agree.** The invariant is: for the claim in question,
+> exactly one of **{this claim landed, this claim was refused by the cancellation}** holds — never
+> both, never neither. **It is not a statement that a cancellation and a claim cannot both be
+> effective**: the claim-first case above is precisely one in which the claim landed *and* the
+> cancellation then ended the attempt, which is revision 1 §H.2's own answer — *"The claim stands
+> and the action starts. The cancellation answers that there was something in flight"*. A reading
+> under which no conforming implementation could satisfy both is refused, and **no lane implements
+> test 4 as a mutual exclusion of the two acts.**
+
+> **Normative — the property is the store's to keep and not `orchestration`'s.**
+> `commit_transition` reads the attempt *"inside the same indivisible step as the claim"* (ADR-0255
+> §3) and `commit_attempt` writes it under its own compare-and-swap, so a conforming `PlanStore`
+> **serialises the two**: there is no interleaving in which one claim both lands and is refused,
+> and none in which it does neither. **§14's arm 3 is where a conforming implementation shows
+> it.**
 
 > **Normative — *"check revision → user cancels → action starts" cannot occur*, and the ground is
 > that there is no check.** Revision 1 §H.2's finding binds as written: the real sequence is
@@ -432,12 +467,28 @@ already ratified and already tested refuses the claim whichever turn, process or
 > `ALREADY_CLOSED` and `NO_SUCH_GOAL` keep their meaning exactly.
 
 > **Normative.** **`GoalSummary` gains one field, `effect_in_flight`, a `bool` defaulting to
-> `False`, computed and never stored.** It is **true** where the goal's current attempt's `state`
-> is **`EFFECT_UNRESOLVED`**, or where that attempt is terminal and its `outcome` is
-> **`UNCERTAIN`**, and **false** otherwise. **The engine computes it**, so that two surfaces cannot
-> render it differently, and **no adapter derives it** — ADR-0250 §15's own clause for `paused`,
-> one state over. It is read from the attempt the listing already reads for `paused`, so **the
-> listing takes no further store call.**
+> `False`, computed and never stored.** It is **true** where **any step of any execution any
+> attempt of that goal opened stands `INDETERMINATE` or `RUNNING`**, and **false** otherwise — the
+> same two statuses §3's limb 1 and ADR-0259 §4's act 4 read, so *outstanding* means one thing in
+> the corpus. **The engine computes it**, so that two surfaces cannot render it differently, and
+> **no adapter derives it** — ADR-0250 §15's own clause for `paused`, one fact over.
+
+> **Normative — it is derived from the authoritative record and never from an `AttemptOutcome`,
+> and that is what lets it clear.** ADR-0255 §6 makes the step's `INDETERMINATE` status *"the
+> authoritative record of the uncertainty"*, and **a terminal attempt's `outcome` is immutable**:
+> ADR-0249 §5's *"no transition leaves a terminal member"* means a cancelled attempt recorded
+> `UNCERTAIN` carries that word for ever, truthfully, as a fact about **what that attempt
+> produced**. A flag derived from it could never go false, so the listing would tell a user an
+> action was outstanding long after ADR-0259 §3 resolved it. **No lane derives this field, or any
+> other live-state fact, from a terminal `AttemptOutcome`**, and the resolution ADR-0259's act
+> lands — `INDETERMINATE → SUCCEEDED` — is exactly what makes it false again.
+
+> **Normative — what the derivation costs, stated rather than hidden.** It reads the goal's
+> attempts and their executions, which is one level deeper than the read `paused` already takes
+> and is bounded by the listing's page (ADR-0250 §15, ADR-0085 §3). **`PlanStore` gains no member
+> and no projection for it** — `attempts_of`, `execution_ids` and `get_execution` are what it
+> uses — and **no lane caches, stores or denormalises the value.** A measured cost on a wide
+> listing is what would reopen this, and is named in §11.
 
 > **Normative — what each surface states, and it is one fixed statement rather than a rendering
 > each adapter invents.** On ADR-0242 §9's construction: a surface renders, beside the reply and
@@ -489,26 +540,33 @@ for the same reason — a derived fact the engine computes so two surfaces canno
 
 > **Normative — a refused claim ends the walk, and it is not a sixth member of ADR-0255 §2's stop
 > list.** The driver **catches the `PlanningError` raised by the `commit_transition` call its own
-> claim made**, and that refusal alone: it commits nothing, leaves the step at the status and
-> version it stood at, dispatches no further step of the plan, and **does not retry the claim**.
+> claim made**, and that call alone: it commits nothing, leaves the step at the status and version
+> it stood at, dispatches no further step of the plan, and **does not retry the claim**.
 > ADR-0255 §2's list is *"what a disposal **this walk performed** leaves"*, and a refused claim
 > leaves no disposal at all: it **is** dispatched — *"§3 puts that claim inside the run, after the
 > request and the ruling"* — and **returns none because it raises** (ADR-0255 §11). So **no lane
 > reads this clause as widening that list, deriving a sixth trigger from it, or admitting a
 > `Disposition` member for it.**
 
-> **Normative — the turn composes without acting, and it does not replan.** The turn returns a
-> `TurnOutcome` with a composed reply; the refusal **does not fail the turn** and does not reach
-> the adapter as an exception. **No second `Planner.plan` call is taken on account of it**, no walk
+> **Normative — the turn composes without acting, and it does not replan — where a cause is
+> established, and only there.** Where the read below establishes one of the four causes, the turn
+> returns a `TurnOutcome` with a composed reply and the refusal **does not fail the turn**.
+> **Where it establishes none, the `PlanningError` propagates unchanged**, exactly as it does on
+> the tree today: a refusal no ratified conjunct explains is a compare-and-swap loss, an unknown
+> execution or a defect, and **a turn that reported it as a withheld drive would assert something
+> about the step that nothing established.** No lane converts such a refusal into a
+> `DriveWithheld`, and none reports a step as unstarted on the strength of an exception class. **No second `Planner.plan` call is taken on account of it**, no walk
 > is re-entered and no plan is selected: ADR-0255 §2's *"A stopped walk is re-entered by **exactly
 > one** route: `StepRunner.resume` answering a park of that plan"* and *"A later turn of the same
 > attempt **plans again**"* both bind entire, and *"What causes that later turn is a user act"*
 > is what follows a refusal.
 
 > **Normative.** **`core/types.py` gains `DriveWithheld`**, a `StrEnum` valued by lower-cased
-> member name and **closed at exactly five members**: **`GOAL_CANCELLED`**, **`ATTEMPT_PAUSED`**,
-> **`PLAN_SUPERSEDED`**, **`UNDERSTANDING_CHANGED`** and **`UNDETERMINED`**. The vocabulary is
-> added to and never renamed.
+> member name and **closed at exactly five members**: **`GOAL_CANCELLED`**, **`GOAL_CLOSED`**,
+> **`ATTEMPT_PAUSED`**, **`PLAN_SUPERSEDED`** and **`UNDERSTANDING_CHANGED`**. The vocabulary is
+> added to and never renamed. **Every member names a state a user act put the goal in**, and
+> there is deliberately **no member for a refusal nothing explains** — that case propagates
+> (above) rather than being given a name it could not support.
 
 > **Normative.** **`TurnOutcome` gains exactly one field, `drive_withheld`, typed `DriveWithheld |
 > None` and defaulting to `None`**, and its docstring names this ADR. It is **non-`None` exactly on
@@ -517,25 +575,39 @@ for the same reason — a derived fact the engine computes so two surfaces canno
 > ADR-0198 §1's restatement**, which drives nothing and claims nothing. That adds a value to
 > ADR-0198 §2's enumeration **without changing any value it fixes**.
 
-> **Normative — how the member is chosen, and the read that chooses it is a report and never a
-> decision.** After the refusal the engine takes **one** read of the goal and its current attempt
-> and answers, **in this order**: **`GOAL_CANCELLED`** where the goal's status is not `ACTIVE` or
-> the attempt's state is terminal; **`ATTEMPT_PAUSED`** where the attempt's state is
-> `AWAITING_CLARIFICATION`, `AWAITING_AUTHORIZATION` or `BLOCKED`; **`UNDERSTANDING_CHANGED`**
-> where the plan's `targets_revision` is not the goal's current `revision`; **`PLAN_SUPERSEDED`**
-> where a stored plan supersedes the plan; and **`UNDETERMINED`** otherwise. **Nothing is
-> dispatched, claimed, committed or decided on that read** — it fills a report after the store has
-> already refused — so it is not the read-then-claim ADR-0249 §8 and ADR-0255 §3 forbid, and **no
-> lane uses this read to take a claim, to retry one, or to skip a step.**
+> **Normative — how the member is chosen, and each test names the state it is true of rather than
+> a family it sits in.** After the refusal the engine takes **one** read of the goal and the
+> attempt the claim named and answers, **in this order**: **`GOAL_CANCELLED`** where the goal's
+> `status` is `ABANDONED` **or** the attempt's `state` is `CANCELLED`; **`GOAL_CLOSED`** where the
+> goal's `status` is `ACHIEVED` or `BLOCKED` **or** the attempt's `state` is `ENDED`;
+> **`ATTEMPT_PAUSED`** where the attempt's `state` is `AWAITING_CLARIFICATION`,
+> `AWAITING_AUTHORIZATION` or `BLOCKED`; **`UNDERSTANDING_CHANGED`** where the plan's
+> `targets_revision` is not the goal's current `revision`; and **`PLAN_SUPERSEDED`** where a stored
+> plan supersedes the plan. **Where none holds, no member is chosen and the refusal propagates.**
+
+> **Normative — `CANCELLED` and `ENDED` are not one member, and neither are `ABANDONED` and the
+> other two closures.** ADR-0249 §5 closes the terminal attempt states over **both** `CANCELLED`
+> and `ENDED`, and ADR-0249 §4 gives `GoalStatus` four members of which three are not `ACTIVE`.
+> **A rule that answered `GOAL_CANCELLED` for a terminal attempt or a non-`ACTIVE` goal would
+> render a cancellation the user never performed** — an attempt that simply ended, or a goal
+> reached or blocked — which is a fabricated fact in the one place the user reads what happened.
+> **No lane collapses the two members**, and `GOAL_CLOSED`'s statement names no cancellation.
+
+> **Normative — the read is a report and never a decision.** **Nothing is dispatched, claimed,
+> committed or decided on it** — it fills a report after the store has already refused — so it is
+> not the read-then-claim ADR-0249 §8 and ADR-0255 §3 forbid, and **no lane uses this read to take
+> a claim, to retry one, or to skip a step.**
 
 > **Normative — one fixed statement per member, and none of them asserts an outcome.** On ADR-0242
 > §9's construction a surface renders, beside the reply: for `GOAL_CANCELLED`, that the goal was
-> cancelled and nothing further was done for it; for `ATTEMPT_PAUSED`, that the goal is waiting on
-> the user, naming `assistant goals`; for `PLAN_SUPERSEDED` and `UNDERSTANDING_CHANGED`, that the
-> plan no longer matches what the goal now asks and that asking again plans afresh; and for
-> `UNDETERMINED`, that the step was not started, **naming no cause and no act** — which is ADR-0242
-> §9's `UNAVAILABLE` shape exactly. **No statement says that the step would have succeeded, that
-> the effect did not happen, or why a store refused.**
+> cancelled and **this turn did nothing further for it**; for `GOAL_CLOSED`, that the goal is no
+> longer open for work, **naming no cancellation**, with `assistant goals` as where its state is
+> read; for `ATTEMPT_PAUSED`, that the goal is waiting on the user, naming `assistant goals`; and
+> for `PLAN_SUPERSEDED` and `UNDERSTANDING_CHANGED`, that the plan no longer matches what the goal
+> now asks and that asking again plans afresh. **No statement says that the step would have
+> succeeded, that the effect did not happen, that no step of this plan was ever started, or why a
+> store refused** — what each asserts is what this turn did, which is the only thing the read
+> establishes.
 
 > **Normative — a driver skip needs no carrier and gains none.** A step the walk moved
 > `PENDING → SKIPPED`/`UNMET_DEPENDENCY`, and a step swept `SUPERSEDED`, **already reach composing
@@ -544,12 +616,16 @@ for the same reason — a derived fact the engine computes so two surfaces canno
 > `Disposition` a gate gave — and **`drive_withheld` is never written for a skip**. **No lane adds
 > a second carrier for a driver skip, and `SkipReason` gains no member.**
 
-**Five members because five causes are establishable and a sixth would be invented.** The store
-refuses a claim on ADR-0255 §3's attempt conjunct (four limbs), on its successor conjunct, and on
-ADR-0249 §8's revision conjunct, across two error classes — so **the exception alone cannot name
-the cause**, and a field that named one from it would be guessing. The ordered read names what is
-readable and `UNDETERMINED` says so where the state has moved again, which is the only honest
-answer for a race that resolved twice.
+**Five members because five states are establishable, and the classification is the read's rather
+than the exception's.** The store refuses a claim on ADR-0255 §3's attempt conjunct (four limbs),
+on its successor conjunct, and on ADR-0249 §8's revision conjunct — and the classes it raises are
+**shared with refusals that are not claim guards at all**: `StaleExecutionError` is also an
+ordinary compare-and-swap loss (ADR-0014 §5), `IllegalTransitionError` is also a transition no
+correct driver builds, and a bare `PlanningError` is also an unknown execution. **So the exception
+cannot name the cause**, and a decision that classified from it would report *this turn withheld
+the step* for a race another worker won. The read is what classifies, it names only states a user
+act produced, and where it names none the refusal is left to propagate — which keeps the field
+total over what it asserts rather than total over what can be raised.
 
 **And it composes rather than raising because a refused claim is not a fault.** Every cause above
 is *the user changed something*, and a turn that raised a `PlanningError` at the adapter would
@@ -645,7 +721,9 @@ revision 1 §H.1 identified.
 > (§7); **one field on `GoalSummary`** (`effect_in_flight`, §6); and **one field on `TurnOutcome`**
 > (`drive_withheld`, §7). **Nothing else** — no new model, no new constant, no widening of
 > `GoalAttempt`, `AttemptTransition`, `Goal`, `StepTransition`, `StepExecution`, `ExecutionState`,
-> `ActionPlan` or `PlanStep`, and **no member, argument or refusal on any Protocol**.
+> `ActionPlan` or `PlanStep`. **`PlanStore` gains no member and no argument**, and the whole of
+> what any Protocol gains is **one refusal on `commit_attempt`** (§3) — a strengthening of an
+> existing member, on ADR-0255 §3's and ADR-0249 §12's own classification of the same move.
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is breaking for the
 > wire rather than for a constructor.** Every field added defaults, and both enumerations are
@@ -711,8 +789,12 @@ revision 1 §H.1 identified.
 > **Normative — no new Protocol is created, so no new conformance suite and no new canonical fake
 > is owed; and `PlanStore`'s existing obligations do not move.** `PlanStore` gains **nothing** —
 > §2's act uses `commit_attempt` and `set_goal_status` as they stand, and §4 adds no conjunct — so
-> the shared suite's growth for this decision is **test 4's interleaving invariant alone** (§14),
-> which pins a property the two ratified conjuncts already require of a conforming store.
+> the shared suite's growth for this decision is **two cases** (§14): §H.4 test 4's interleaving
+> invariant, which pins a property the two ratified conjuncts already require of a conforming
+> store, and §3's outcome conjunct, which is the one refusal this decision adds. **The canonical
+> fake in `ai_assistant.testing` gains the same obligation in the same change that adds it**
+> (`CONTRIBUTING.md` → "Adding a Protocol": *"The triad is what a Protocol *change* is measured
+> against too"*).
 
 ### 11. What this decision does not decide, by name, each with what fires it
 
@@ -757,6 +839,11 @@ revision 1 §H.1 identified.
 - **Parallel execution of two steps, a driver that walks a plan outside a turn, and whether a
   second `CONFIRM` of one turn may be put.** ADR-0255 §12's entries, **untouched** and left exactly
   where they stand. Fired by the decisions that take them.
+- **A projection or index that answers *does this goal hold an outstanding effect* in one read.**
+  **Not decided.** §6 derives it from the executions the goal's attempts opened, which is bounded
+  by the listing's page and needs no new store surface. Fired by a **measured** cost on a wide
+  listing — and a decision taking it would owe the write-time invariant that keeps the projection
+  true, which is a second record of a fact a status already carries (ADR-0259 §4).
 - **Whether a `PlanStore` refuses a question admitted onto a closed goal.** ADR-0250 §12's own
   residual, filed against that decision. §2's new write neither widens nor narrows that window.
 
@@ -783,7 +870,7 @@ differently, or read one of its clauses more widely than it now holds?"*
   of both sections stays true, including §12's *"does not end an execution and does not cancel
   anything in flight"*, which §2 obeys.
 
-**Every other ADR this decision reaches owes no record**, and the seven entries below are the
+**Every other ADR this decision reaches owes no record**, and the eight entries below are the
 whole of them, each decided by the same test.
 
 - **ADR-0255** — *no*. §12 books three subjects here by name and §11 books two; a booking
@@ -806,6 +893,12 @@ whole of them, each decided by the same test.
   atomicity; §20's general-case deferral is left standing with its firing condition (§11).
 - **ADR-0259 §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes none of
   the replay §5 declines; *"A parked `ALLOW` … is left standing"* stays true.
+- **ADR-0249 §12** — *no*, for §3's conjunct on `commit_attempt`. That section declares the member
+  and its append-only discipline; it does not enumerate what the member refuses, and **ADR-0255 §3
+  added an execution-ownership refusal to the same member and recorded nothing against it**,
+  classifying the move as *"a **strengthening of an existing member** rather than a new one"*.
+  This is the identical move and records nothing either. §12's commands-not-snapshots rule, its
+  append-only tuples and its compare-and-swap discipline all stay true.
 - **ADR-0039 §10** — *no*. Its *"`StepExecution` is inside the export, so its shape changing is
   exactly what the version exists to announce"* says that a shape change announces itself; it does
   **not** say that only a shape change does. §10 extends the mechanism to a **value** an earlier
@@ -821,9 +914,10 @@ whole of them, each decided by the same test.
 
 - **L1 — `core` (with `wire` and `testing`).** The two enumeration members, `DriveWithheld`, the
   two model fields, and the docstrings that name this ADR; `PROTOCOL_VERSION` **+1** with its
-  `wire/envelope.py` log entry; `PlanExport.schema_version` **+1**; the canonical fakes in
-  `ai_assistant.testing` and the shared `PlanStore` conformance suite's test-4 invariant (§14,
-  arm 4). **This is the lane that moves the wire**, and it lands alone — golden rule 5, and
+  `wire/envelope.py` log entry; `PlanExport.schema_version` **+1**; **§3's outcome conjunct on
+  `PlanStore.commit_attempt`** with its `planning` implementation; and the canonical fakes in
+  `ai_assistant.testing` together with the shared `PlanStore` conformance suite's two cases (§14,
+  arms 3 and 4). **This is the lane that moves the wire**, and it lands alone — golden rule 5, and
   `CONTRIBUTING.md` → "Adding a Protocol" for the suite and the fake riding the same change.
 - **L2 — `orchestration`.** §2's attempt commit inside `abandon_goal` with its ordering, §3's
   three-limb outcome, §6's `GoalAbandonment` answer and `GoalSummary.effect_in_flight`
@@ -837,7 +931,7 @@ whole of them, each decided by the same test.
 
 ### 14. The arms this decision owes
 
-**Eight, and three of them are revision 1 §H.4's by name.** Each is stated over the lane that owes
+**Ten, and three of them are revision 1 §H.4's by name.** Each is stated over the lane that owes
 it.
 
 1. **§H.4 test 1 — cancel before claim (L2).** A cancellation commits between the driver's decision
@@ -848,27 +942,39 @@ it.
    assert the step's status is one of `SUCCEEDED`/`FAILED`/`INDETERMINATE` and **never `SKIPPED`**,
    that its `approval_ref` is set, that the act answered `ABANDONED_EFFECT_IN_FLIGHT` over an
    `INDETERMINATE` step, and that the cancelled attempt's outcome is `UNCERTAIN`.
-3. **§H.4 test 4 — the exhaustive interleaving (L1, shared suite).** Over the cancel/claim pair in
-   every ordering, **exactly one** of {the step was claimed, the cancellation was effective} holds —
-   never both, never neither — asserted against every conforming `PlanStore`.
-4. **The three-limb outcome (L2).** One arm per limb: an attempt holding an `INDETERMINATE` step →
+3. **§H.4 test 4 — the interleaving invariant (L1, shared suite).** For **one** claim, in every
+   ordering against a cancellation, exactly one of {this claim landed, this claim was refused}
+   holds — never both, never neither — asserted against every conforming `PlanStore`. **It does
+   not assert that a claim and a cancellation are mutually exclusive acts** (§4).
+4. **§3's outcome conjunct (L1, shared suite).** A `→ CANCELLED` `AttemptTransition` whose
+   `outcome` is not the member the three limbs yield is refused with `StaleExecutionError` and
+   **writes nothing**; a claim landing between the caller's read and its commit produces exactly
+   that refusal, and the caller's recomputed `UNCERTAIN` then lands. Every other
+   `AttemptTransition` is unaffected.
+5. **The three-limb outcome (L2).** One arm per limb: an attempt holding an `INDETERMINATE` step →
    `UNCERTAIN`; one holding only a `SUCCEEDED` step → `PARTIAL`; one holding neither → `CANCELLED`.
-5. **The ordering (L2).** A failure injected after the attempt commit and before the status write
+6. **The ordering (L2).** A failure injected after the attempt commit and before the status write
    leaves an `ACTIVE` goal with a terminal attempt, **no claim lands under it**, and the next turn
    opens a new attempt.
-6. **The post-cancellation prohibition (L2).** After a cancellation, a claim of a step of the
+7. **The post-cancellation prohibition (L2).** After a cancellation, a claim of a step of the
    cancelled attempt's execution is refused whether it names that attempt or another, and an effect
    the attempt completed answers `COMPLETED`/`UNCERTAIN` to a later plan of the goal rather than
    being dispatched again.
-7. **The refused-claim surface (L2, L3).** Each of `DriveWithheld`'s five members is produced by
-   the state that names it, the turn **composes a reply**, no `Planner.plan` call is taken on
-   account of the refusal, and no exception reaches the adapter.
-8. **The listing (L2, L3).** `effect_in_flight` is true for an attempt at `EFFECT_UNRESOLVED` and
-   for a terminal attempt whose outcome is `UNCERTAIN`, false otherwise, and **no adapter derives
-   it**. **The first limb is asserted over a store state constructed directly**, because as a
-   dated observation at `8dbfddf0` `AttemptState.EFFECT_UNRESOLVED` has **no producer in `src/`**
-   — ADR-0259 §4's act 3 and ADR-0255 §6 are its two, on their own lanes (ADR-0259 §6) — and an
-   arm that waited for one would be an arm this decision's lanes could not run.
+8. **The refused-claim surface (L2, L3).** Each of `DriveWithheld`'s five members is produced by
+   the state that names it, the turn **composes a reply**, and no `Planner.plan` call is taken on
+   account of the refusal. **And the negative arm**: a refusal the read explains by none of the
+   five — a compare-and-swap loss to a concurrent claimant — **propagates**, sets no
+   `drive_withheld`, and asserts nothing about the step.
+9. **The listing (L2, L3).** `effect_in_flight` is true where any step of any execution of any
+   attempt of the goal stands `INDETERMINATE` or `RUNNING`, false otherwise, and **no adapter
+   derives it**. It is asserted over store states constructed directly, because as a dated
+   observation at `8dbfddf0` `AttemptState.EFFECT_UNRESOLVED` has **no producer in `src/`** —
+   ADR-0259 §4's act 3 and ADR-0255 §6 are its two, on their own lanes — and an arm that waited
+   for one would be an arm this decision's lanes could not run.
+10. **The listing clears (L2).** A goal whose attempt was cancelled at `UNCERTAIN` and whose
+    `INDETERMINATE` step is then resolved `SUCCEEDED` reads `effect_in_flight` **false**, while
+    that attempt's `outcome` still reads `UNCERTAIN` — the arm that pins the flag to the
+    authoritative record rather than to the immutable terminal outcome (§6).
 
 **No arm demands a duplicate dispatch be demonstrated**, which is A8's acceptance requirement on
 A8's lane (ADR-0255 §12), and **ADR-0255 §13's Q4 rule is what makes the interval safe**: no
@@ -900,8 +1006,9 @@ up the objective has no act and must ask for one (§11).
 which ADR-0083's exclusivity posture does not admit, would make §4's serialisation argument
 insufficient and
 fire ADR-0244 §20. A live-steering decision would put a second writer at the same boundary. And a
-measured case in which `UNDETERMINED` is the usual answer rather than the rare one would say the
-ordered read of §7 is racing more than it reports.
+measured case in which §7's ordered read usually establishes no member — so that refusals
+propagate where a report was wanted — would say the boundary is racing more than the read can
+see.
 
 ## Alternatives considered
 
@@ -941,6 +1048,25 @@ internal error. Composing with a named fact is what ADR-0242 §9 established for
 **Deriving `DriveWithheld` from the exception class alone.** Refused. The store refuses across two
 classes over six limbs, so the class cannot name the cause; a field that guessed would be the
 fabricated verdict ADR-0255 §11 refuses for `Disposition`.
+
+**Deriving `effect_in_flight` from the cancelled attempt's `AttemptOutcome`.** Refused after
+round 1, which is where it was found: a terminal attempt's outcome is immutable under ADR-0249 §5,
+so a flag derived from `UNCERTAIN` could never go false and the listing would tell a user an action
+was outstanding for ever — the opposite of the accuracy R78 asks for. The authoritative record is
+the step's status (ADR-0255 §6), and §6 derives from that.
+
+**Computing the cancelled attempt's outcome in the engine and committing it with the attempt's
+own compare-and-swap.** Refused after round 1. A claim writes an `ExecutionState` and does not
+advance `GoalAttempt.version`, so that compare-and-swap cannot see one land between the engine's
+read and its commit: the act would record *nothing outstanding* about a step just taken to
+`RUNNING`. §3 puts the comparison inside the write, which is ADR-0014 §5's own assignment of a
+race to the store.
+
+**Classifying `drive_withheld` from the exception the store raised.** Refused after round 1. The
+claim guards share `StaleExecutionError` with an ordinary compare-and-swap loss and a bare
+`PlanningError` with an unknown execution, so the class cannot name the cause and a turn that read
+it would report *this turn withheld the step* for a race another worker won. §7 classifies from a
+read of states a user act produced, and lets anything it cannot explain propagate.
 
 **A durable cancellation record, queue or cross-process signal.** Refused. ADR-0244 §11 states the
 honest scope and §20 defers the general case to #2173's L7; the writes §2 makes are already durable
