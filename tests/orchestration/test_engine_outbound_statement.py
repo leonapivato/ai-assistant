@@ -30,6 +30,7 @@ from test_engine import (
     EGRESS_SCHEMA,
     PATIENT,
     Harness,
+    NoStepPlanner,
     OneStepPlanner,
     bound_binder,
 )
@@ -39,6 +40,7 @@ from test_engine import (
 from test_engine import (
     tool as _tool,
 )
+from test_engine_goal_association import _associating, _goal, _seed
 from test_engine_parked_reads import _ASKED, _Clock, _parked
 from test_engine_read_envelope import _AskingPlanner
 from test_engine_routing import _UTTERANCE as _ROUTED_PARK_UTTERANCE
@@ -52,6 +54,7 @@ from test_loop_search import (
 )
 
 from ai_assistant.core.types import (
+    AssociationVerdict,
     Disposition,
     OutboundDestination,
     OutboundReach,
@@ -87,6 +90,7 @@ if TYPE_CHECKING:
 #: ``test_outbound_statement``'s own copy, which is over the same literals).
 _REACHED_FRAGMENT: Final = "this assistant reached outside this system, and it took in"
 _NOT_REACHED_FRAGMENT: Final = "this assistant reached nothing outside this system"
+_INDETERMINATE_FRAGMENT: Final = "this system cannot say whether it reached outside itself"
 
 #: The sentence #2365 records a reply making on a turn that asked for no search.
 _FALSE_CLAIM: Final = "already in front of me from this turn's searches"
@@ -99,7 +103,7 @@ _DENIAL: Final = "nothing was searched just now"
 class _Wired:
     """An engine over shared stores, with a search this deployment is configured for."""
 
-    def __init__(  # noqa: PLR0913 — one knob per thing a case varies about the deployment: what the provider answers, whether a park can be written, whether the search is configured, the composing model, the planner and the tools; each is one fact and none is derivable from another
+    def __init__(  # noqa: PLR0913 — one knob per thing a case varies about the deployment: what the provider answers, whether a park can be written, whether the search is configured, the composing model, the planner, the tools and the streaming completer; each is one fact and none is derivable from another
         self,
         *,
         results: Sequence[str] = ("a result about the bell tower",),
@@ -109,6 +113,7 @@ class _Wired:
         planner: Any = None,
         tools: tuple[Any, ...] = (),
         one_id: bool = False,
+        streaming: FakeStreamingCompleter | None = None,
     ) -> None:
         """Wire the real pipeline, optionally over a store that can hold a park.
 
@@ -135,6 +140,11 @@ class _Wired:
         )
         self.parks = FakeParkedReads() if parked else None
         self.model = model
+        self.streaming = streaming
+        # Scripted rather than left to the fake's exhausted-script fallback, so a spoken
+        # case drives the same question every other case here drives and the planner is
+        # asked for the same read.
+        self.transcriber = FakeSpeechTranscriber(transcripts=[_ASKED])
         harness = Harness(
             memory=FakeMemoryStore(now=clock),
             planner=_AskingPlanner(_search(), rounds=1) if planner is None else planner,
@@ -159,28 +169,47 @@ class _Wired:
             parked_reads=self.parks,
             trail=self.trail,
             recipient_grants=grants,
-            composing=_composing(model),
+            composing=_composing(model, streaming),
+            transcriber=self.transcriber,
         )
         self.engine = harness.engine
 
 
-def _composing(model: FakeModelProvider | None) -> ComposingStage | None:
+def _composing(
+    model: FakeModelProvider | None, streaming: FakeStreamingCompleter | None = None
+) -> ComposingStage | None:
     """The **production** composing stage over a fake provider that records its prompt.
 
     ADR-0227 §7's fidelity rule forbids substituting the renderer whose output the
     assertion is about and permits a fake ``ModelProvider``: the stage assembling the
     prompt is the one the engine ships, and the fake merely records what it was handed
     and answers with the scripted reply.
+
+    ``streaming`` is handed in where a case asserts over the **streaming** composer's
+    prompt rather than the whole one's: the two are assembled by different methods of
+    the same stage, and the fake completer records what it was given exactly as the fake
+    provider does.
     """
     if model is None:
         return None
-    return ComposingStage(model=model, streaming=FakeStreamingCompleter())
+    return ComposingStage(model=model, streaming=streaming or FakeStreamingCompleter())
 
 
 def _system_prompt(model: FakeModelProvider, ordinal: int = -1) -> str:
     """The system message the production composing stage assembled, from the fake's record."""
     assert model.calls
     return next(one.content for one in model.calls[ordinal].messages if one.role is Role.SYSTEM)
+
+
+def _streamed_prompt(streaming: FakeStreamingCompleter) -> str:
+    """The system message the **streaming** composer assembled, from the fake's record.
+
+    :func:`_system_prompt`'s twin over the other seam. ``compose_streaming`` reaches the
+    ``StreamingCompleter`` and never the ``ModelProvider``, so a streamed pass records
+    nothing on the provider and an assertion about its instruction has to be read here.
+    """
+    assert streaming.calls, "the streaming composer was reached"
+    return next(one.content for one in streaming.last_messages if one.role is Role.SYSTEM)
 
 
 def _statement(outcome: TurnOutcome) -> Any:
@@ -709,3 +738,207 @@ async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> N
     assert not any(field.startswith("outbound") for field in type(spoken).model_fields), (
         "ADR-0200 §4: SpokenTurn gains nothing, so the guarantee does not reach the ear"
     )
+
+
+# --- §13 item 11's unrouted halves: the two composers the routed arms leave behind ---
+
+
+async def test_the_unrouted_streaming_pass_is_told_what_it_reached_and_carries_it() -> None:
+    """§13 item 11's streaming half on the pass that actually composes.
+
+    Item 11 names three composers — "whole-reply, streaming **and spoken**" — "which are
+    separate composers from the conversational one and the path an implementation
+    updating only the latter would leave behind". The **routed** arms above assert the
+    carried member, but ADR-0197 §6 gives the routed composers "exactly two" inputs and
+    no fragment, so neither of them exercises §6's forwarding at all: the argument that
+    carries it exists only on the unrouted path.
+
+    So this is the arm that discriminates. A lane that dropped ``outbound`` from
+    :meth:`Engine._compose_streaming`'s call leaves a streamed answer to a turn that
+    searched composed under no instruction — #2268's shape, on the streaming surface —
+    while every routed arm and every whole-reply arm above still passes.
+    """
+    streaming = FakeStreamingCompleter(script=(StreamAttempt(deltas=("I looked", " it up.")),))
+    wired = _Wired(model=FakeModelProvider("unreached on this path"), streaming=streaming)
+
+    produced = [value async for value in wired.engine.converse_streaming(_ASKED, timeout=PATIENT)]
+
+    (terminal,) = [value for value in produced if isinstance(value, TurnOutcomeType)]
+    assert wired.searcher.searched, "the streamed turn really did reach the provider"
+    assert terminal.routed is None, "an ordinary turn, so §6's fragment is owed"
+    statement = _statement(terminal)
+    assert statement.reach is OutboundReach.REACHED
+    assert statement.destinations == (OutboundDestination.SEARCH_PROVIDER,)
+    assert statement.records >= 1
+    assert _REACHED_FRAGMENT in _streamed_prompt(streaming), (
+        "the streaming composer was told the fact too (ADR-0264 §6)"
+    )
+
+
+async def test_the_unrouted_spoken_pass_is_told_what_it_did_and_carries_it() -> None:
+    """§13 item 11's spoken half on the pass that actually composes.
+
+    The spoken twin of the arm above, and it is owed for the reason §6 gives in terms:
+    "a spoken turn still carries the statement and an **unrouted** one still gets the
+    fragment", because "the reply composed for the ear is the only thing that user
+    hears, so it is the one place the instruction can still do any work at all".
+
+    **The fact asserted here is the drive's and not a search's**, because ADR-0226 §5
+    scopes a read request by channel — it "is not serviced on an operation whose output
+    channel's audience is unbounded" — so a spoken turn records ``servicing=declined``
+    and reaches no provider at all. The egress classification is therefore the only
+    non-``NOT_REACHED`` value this surface can carry, which makes it the arm that
+    discriminates: a lane that dropped ``outbound`` from
+    :meth:`Engine._composed_spoken`'s call composes the one reply a user only ever hears
+    under no instruction, while the routed spoken arm below — given no fragment by
+    ADR-0197 §6 in the first place — stays green.
+    """
+    model = FakeModelProvider("It has gone out.")
+    definition = _egress_tool()
+    wired = _Wired(model=model, planner=OneStepPlanner(), tools=(definition,))
+
+    spoken = await wired.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)
+
+    assert spoken.outcome is not None
+    assert spoken.outcome.routed is None, "an ordinary spoken turn, so §6's fragment is owed"
+    assert spoken.outcome.step is not None
+    assert spoken.outcome.step.disposition is Disposition.EXECUTED, "the callable was reached"
+    statement = _statement(spoken.outcome)
+    assert statement.reach is OutboundReach.INDETERMINATE
+    assert statement.destinations == (), "no class is named on a send's account (ADR-0264 §3)"
+    assert _INDETERMINATE_FRAGMENT in _system_prompt(model), (
+        "the spoken composer was told the fact, which §12 books as the whole of what it gets"
+    )
+    assert not any(field.startswith("outbound") for field in type(spoken).model_fields), (
+        "ADR-0200 §4 still adds nothing to SpokenTurn — the fragment is all this surface gets"
+    )
+
+
+# --- §13 item 8 on the resume: the drive's fact across the confirmation seam ---
+
+
+async def test_an_approved_confirmation_resumed_carries_the_drive_it_performed() -> None:
+    """§13 item 8's fold on ADR-0198's resume, the second place a step is driven.
+
+    §2 carries the egress classification "out of the drive" on
+    ``StepDisposition.outbound``, and a step driven **inside** a turn and one driven by
+    a resolving ``resume`` are two independently fallible wires to the same value:
+    :meth:`Engine._resolve_park` reads it off the disposition and
+    :meth:`Engine._capture_resumption` is handed the assembly built from it.
+
+    The driven-step arm above covers neither. A lane that dropped either of those two
+    forwardings answers a user who has just approved a send with ``NOT_REACHED`` or with
+    no statement at all — the denial shape of #2268 on the one pass where the user has
+    most reason to want the truth — while that arm, and every runner-level arm, passes.
+    """
+    model = FakeModelProvider("It has gone out.")
+    definition = _egress_confirmable()
+    harness = Harness(
+        memory=FakeMemoryStore(now=lambda: AT),
+        tools=(definition,),
+        binder=bound_binder(definition),
+        composing=_composing(model),
+    )
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None, "the step parked for confirmation"
+
+    outcome = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.EXECUTED, "the callable was reached"
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.INDETERMINATE, (
+        "§3: the drive establishes no contact, and §2 refuses the denial just as firmly"
+    )
+    assert statement.destinations == (), "no class is named on a send's account (ADR-0264 §3)"
+    assert statement.records == 0, "this pass serviced no read"
+    assert _INDETERMINATE_FRAGMENT in _system_prompt(model), (
+        "and the resume composes, so §6 gives its stage the fragment for the value it carries"
+    )
+
+
+# --- §7's two further NOT_REACHED shapes, each its own assignment --------------
+
+
+async def test_an_undecided_turn_reaches_nothing_and_says_so() -> None:
+    """§7's ``UNDECIDED`` shape — ``NOT_REACHED``, and never ``None``.
+
+    ADR-0250 §3 makes such a turn take "**no relevance read, no episodic supplement and
+    no ``Planner.plan`` call**", so it reached nothing; and it *composes* — §5 has
+    ``orchestration`` build the question deterministically from the typed value — so §7's
+    ``None`` rule, which is for a pass that "composes nothing", does not reach it.
+
+    **A distinct assignment from the ordinary no-search turn's**, made before
+    ``LearningLoop.respond`` is entered and on a path no arm above traverses: the
+    #2365 arm's turn runs the whole loop. A lane that left this one ``None`` ships
+    exactly what #2365 records — "not a missing acknowledgement but a false provenance
+    claim" with nothing typed beside it to contradict — on the one turn shape whose reply
+    this system wrote itself.
+    """
+    harness = Harness(
+        planner=NoStepPlanner(),
+        associator=_associating(AssociationVerdict.UNDECIDED, "G1", "G2"),
+    )
+    conversation = (await harness.conversations.begin(None)).id
+    for goal_id, outcome_text in (("goal-one", "book a campsite"), ("goal-two", "book a flight")):
+        await _seed(
+            harness.plans,
+            _goal(goal_id, outcome_text, conversation=conversation),
+            engaged_in=conversation,
+        )
+
+    outcome = await harness.engine.converse(
+        "make it Sunday", timeout=PATIENT, conversation_id=conversation
+    )
+
+    assert outcome.turn is None
+    assert outcome.disambiguation is not None, "the turn asked which goal it is about"
+    assert outcome.reply is not None, "and composed the question itself (ADR-0250 §5)"
+    statement = _statement(outcome)
+    assert statement.reach is OutboundReach.NOT_REACHED
+    assert statement.destinations == ()
+    assert statement.records == 0
+
+
+async def test_a_settled_token_restated_reaches_nothing_and_says_so() -> None:
+    """§7's restatement shape — ``NOT_REACHED``, and never ``None``.
+
+    ADR-0198 §§1-3's restatement "drives nothing and searches nothing", and §14 records
+    that giving it this value "adds a value to ADR-0198 §2's enumeration without changing
+    any value it fixes". It composes no prose of its own — the answer was composed once,
+    for the request that performed the act — but §7's rendering asymmetry is the
+    *surface's* rule, and §7 names this turn among the three carrying ``NOT_REACHED``
+    rather than ``None``.
+
+    **Its own assignment, on the branch that returns before the resume proper**, and the
+    arm above it cannot reach: the resume arm settles the park, and this one presents the
+    same token a second time. A lane that left it ``None`` hands the surface nothing to
+    render on a pass that is, by construction, the user asking a second time what
+    happened.
+    """
+    definition = _egress_confirmable()
+    harness = Harness(
+        memory=FakeMemoryStore(now=lambda: AT),
+        tools=(definition,),
+        binder=bound_binder(definition),
+    )
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    token = parked.step.confirmation.token
+    settled = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+    assert settled.step is not None
+    assert settled.step.disposition is Disposition.EXECUTED
+
+    restated = await harness.engine.resume(token, approved=True, timeout=PATIENT)
+
+    assert restated.turn is None, "ADR-0170 §4's second shape: it is not an exchange"
+    assert restated.reply is None
+    assert restated.step is not None, "and it restates the step the first answer settled"
+    statement = _statement(restated)
+    assert statement.reach is OutboundReach.NOT_REACHED
+    assert statement.destinations == ()
+    assert statement.records == 0
