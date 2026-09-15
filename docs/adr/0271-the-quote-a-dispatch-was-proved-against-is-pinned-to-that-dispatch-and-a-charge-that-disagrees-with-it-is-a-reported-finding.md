@@ -158,8 +158,7 @@ producer, no freshness rule and no coverage condition.
 > governing** quote for that pair **at the instant of the read**, which a later append displaces
 > and ADR-0267 §2's elision can drop, so the pin would drift off the reading it exists to fix.
 > **No lane mints a quote id, adds a field to `ActionQuote`, keys a record on one, or reconciles the
-> pinned value against the goal's tuple** — ADR-0267 §10's *"An identifier of a quote's own"* is
-> fired here and answered **no**.
+> pinned value against the goal's tuple** — ADR-0267 §10's *"An identifier of a quote's own"* is fired here and answered **no**.
 
 > **Normative — `permissions` writes it, at the ruling, and nothing else writes or repairs one.**
 > No `AuditTrail`, no store, no reader, no interface adapter, no tool and no model output
@@ -179,8 +178,8 @@ producer, no freshness rule and no coverage condition.
 > syntax to either — ADR-0267 §3's rule, stated once more where it governs. And **`ToolDefinition`
 > gains one field, `charged_output: ChargedOutput | None` defaulting to `None`**, the whole of what
 > a declaration says about where an act reports what it charged. **A declaration carrying `None`
-> reports no charge ever**, so no `MONEY` criterion resting on its acts is `met` — the fail-closed
-> default, and ADR-0016 §1's *"Declared, not inferred"*. Both are **BREAKING** contract changes to
+> reports no charge ever**, so no call under it is ever **satisfying** and it establishes no `MONEY`
+> criterion (§4) — the fail-closed default, and ADR-0016 §1's *"Declared, not inferred"*. Both are **BREAKING** contract changes to
 > `core/types.py` under golden rule 5 and are flagged as such.
 
 > **Normative — it is its own type and not `QuotedOutput` reused, and the reason is that the two
@@ -215,9 +214,10 @@ producer, no freshness rule and no coverage condition.
 > **Normative — every failure of that reading yields no charge, and nothing is repaired, coerced,
 > defaulted or substituted.** A declaration with no `charged_output`, an `output` that is not an
 > object, a missing key at either name, a value of any refused shape: each yields **no charge**, and
-> the charge test is then **not taken**, so §3's third limb calls the step **neither** and no such
-> criterion is ever `met` — `unestablished` **unless** §2's own contradicting test independently
-> holds over some bound step, in which case §3's **first** limb stands and it is `unmet`. **A yield
+> the charge test is then **not taken**, so §3's third limb calls the step **neither** and the call
+> it belongs to **never satisfying** — the criterion `unestablished` where its every call is one,
+> `unmet` where §2's own contradicting test independently holds over some bound step (§3's **first**
+> limb), and `met` only on a *different* call that does satisfy (§4). **A yield
 > of no charge raises nothing**: a string `Decimal` refuses — `"not-a-number"`, an empty string — and a string it **accepts** whose
 > value is **not finite** — `"NaN"`, `"Infinity"`, `"-Infinity"`, in any case — each leave the
 > comparison with no charge rather than with an exception, the second pair being the one a natural
@@ -351,8 +351,7 @@ producer, no freshness rule and no coverage condition.
 
 ### 6. What this decision does not decide, by name, each with what fires it
 
-> **Normative.** This decision settles nothing about the following, and no lane cites it toward any
-> of them.
+> **Normative.** This decision settles nothing about the following, and no lane cites it toward any of them.
 
 - **The receipt or statement reader itself.** §5 states the interface and no shape for it: not a
   Reader, not a Protocol, not a `ToolDefinition` field, not a turn trigger, not a schedule. Fired by
@@ -410,11 +409,9 @@ producer, no freshness rule and no coverage condition.
 > that a `MONEY` criterion is `unestablished` — arm 3's *"a confirmed `MONEY` member over a booking
 > step every declaration holds over → **unestablished**"* and arm 4's campsite pair — which the
 > implementing lane **restates** under §3's limbs: an agreeing charge yields `met` and `VERIFIED`,
-> a disagreeing one `unmet`, and each arm's other criteria, its negative half and its `ACHIEVED`
-> assertions are unmoved.
+> a disagreeing one `unmet`, and each arm's other criteria, its negative half and its `ACHIEVED` assertions are unmoved.
 > **§9's reassignment entry is *fired*, not falsified**: it books this subject here by name and a
-> booking discharged is not a clause made false, which is ADR-0262's own test for the seven
-> documents that book subjects into it.
+> booking discharged is not a clause made false, which is ADR-0262's own test for the seven documents that book subjects into it.
 
 > **Normative — no record is owed against ADR-0267, and the working is stated rather than assumed
 > because a reader may expect one.** §1's unmarked ground reads *"A later record naming one quote —
@@ -468,8 +465,7 @@ producer, no freshness rule and no coverage condition.
 > `met` — which is `quoted_output`'s and
 > `postconditions`' own ground, and which is a refusal to establish rather than a claim that nothing
 > is established, §3's first limb still reaching a step its own postconditions contradict. **`ChargedOutput` itself is a new type and
-> reaches §1's list in no way.** ADR-0016 §1's `frozen=True` rule, its no-inference rule and §5's
-> re-registration rule bind entire.
+> reaches §1's list in no way.** ADR-0016 §1's `frozen=True` rule, its no-inference rule and §5's re-registration rule bind entire.
 
 > **Normative — the header records this change writes, and they are the whole of it.** **ADR-0262's
 > and ADR-0016's `Status` lines, and no other's**, gain this decision's `ADR-0271 (<scope>)` pair
@@ -477,8 +473,7 @@ producer, no freshness rule and no coverage condition.
 > clauses and carrying **no `ADR-NNNN` token** so that ADR-0070 §4's *"every `ADR-NNNN` after the
 > leading `Partially superseded by` is a target"* reads true; and each gains the **appended dated
 > note** ADR-0070 §1 requires, stating its scopes in full. **No other ADR's header is edited —
-> ADR-0267's conspicuously not** — and no file under `src/` or `tests/` is touched by the lane that
-> lands this document.
+> ADR-0267's conspicuously not** — and no file under `src/` or `tests/` is touched by the lane that lands this document.
 > **ADR-0262's line is §4's canonical form and ADR-0016's is the grandfathered one, and this decision
 > accumulates on each rather than retrofitting either.** ADR-0070 §4's leading-token
 > rule is a **going-forward requirement** whose stated exception is the lines several ADRs *"already
@@ -498,7 +493,7 @@ producer, no freshness rule and no coverage condition.
 > it (ADR-0015, golden rule 5), and it is implemented in **four lanes and no fifth, exactly one
 > production subsystem each**. **P0**, `permissions`, **first**: the audit trail's `_SCHEMA_VERSION`
 > **+1** with its openable set and its additive create-and-migrate restamp (below), so that code
-> predating P1 refuses a trail carrying the new shapes at **open** rather than at the first
+> **predating P0** refuses a trail carrying the new shapes at **open** rather than at the first
 > unreadable row. **P1**, the
 > `core` record: `ChargedOutput` with its validator, `ToolDefinition.charged_output` and
 > `PermissionRuling.proved_quote` with its validator, in `core/types.py`, **together with the
@@ -520,8 +515,7 @@ producer, no freshness rule and no coverage condition.
 > 6's evidence route is taken. P3 is briefed after P2 and after **ADR-0262's own L1**, whose
 > comparison it restates a step's classification inside. **Where a dependency is not in its base, that lane is not
 > briefed**, and each lane re-takes this reading at its own base and states what it found. **M33's
-> campsite walkthrough's money criterion waits on P1, P2 and P3**, which is why #2409 is sequenced
-> before it.
+> campsite walkthrough's money criterion waits on P1, P2 and P3**, which is why #2409 is sequenced before it.
 
 > **Normative — P1 carries the `PROTOCOL_VERSION` bump, in its own change, and no integer is fixed
 > here.** `PermissionRuling` and `ToolDefinition` each cross the wire inside a `PermissionDecision`
@@ -532,8 +526,7 @@ producer, no freshness rule and no coverage condition.
 > compatibility shim, optional-member negotiation, per-member capability flag or lenient decode is
 > added** (ADR-0084 §3, whose refusal naming both versions is the intended outcome); **no decision
 > record is rewritten, back-filled or re-decided**, a stored `PermissionDecision` decoding with
-> `proved_quote` absent and a stored `ToolDefinition` with `charged_output` absent; and
-> `core/config.py` gains nothing.
+> `proved_quote` absent and a stored `ToolDefinition` with `charged_output` absent; and `core/config.py` gains nothing.
 
 > **Normative — P0 carries the audit trail's `schema_version`, by exactly one, for the same
 > reason ADR-0262 §8 moved it, and no integer is fixed here either.** Both widened shapes are
@@ -550,7 +543,13 @@ producer, no freshness rule and no coverage condition.
 > of its own landing before P1**, carrying that store's migration and its downgrade-refusal coverage
 > and nothing else — ADR-0262 §11's own cut for the analogous move, its **LA** *"`permissions`, first"*
 > ahead of its `core` lane, and what one-subsystem-per-change requires of a `core`/`wire` lane that
-> would otherwise edit `permissions/audit.py`. **P1 carries no part of it.**
+> would otherwise edit `permissions/audit.py`. **P1 carries no part of it.** **What the marker
+> protects is code predating P0**, which refuses such a trail at open; code **at P0 but not P1**
+> accepts the marker it set, so a P1-written record reaches it as a refused row rather than a refused
+> open — bounded by the merge order, and **exactly ADR-0262 §11's LA-before-L1 shape**, which this
+> decision follows and does not re-decide. Whether a marker move should be atomic with the widening
+> it protects is ADR-0049's and §11's ground, filed at
+> [#2433](https://github.com/leonapivato/ai-assistant/issues/2433).
 
 > **Normative — the lanes ship the five arms below, each over controlled fakes, and none is
 > demonstrated against a live integration or a real charge.**
@@ -619,7 +618,7 @@ producer, no freshness rule and no coverage condition.
 > **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment** for
 > **exactly two documents** (ADR-0070 §3): **ADR-0262**, in two scopes, a reader holding only its §2
 > or its §7 acting differently; and **ADR-0016**, in one, a reader holding only its §1 authoring a
-> declaration whose acts report no charge and no `MONEY` criterion resting on it ever `met`. Each
+> declaration no call under which is ever satisfying and which establishes no `MONEY` criterion. Each
 > takes ADR-0070 §3's partial form on its `Status` line. **Every other reach of this decision is a stacked addition**, ADR-0267's conspicuously,
 > recorded in this document and nowhere else (ADR-0082 §1, §7).
 

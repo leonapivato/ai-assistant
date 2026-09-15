@@ -200,9 +200,10 @@
   reach: ADR-0254 §3's condition 3 compares the request's declaration with the row's **by value**, so
   this field moves a route-(d) coverage answer exactly as a severity or schema edit does. Absent is
   an exception because it makes the **opposite** claim to the one §1 refuses — a declaration naming
-  no charged output reports none, so the charge test is never taken and no such criterion is ever
-  `met` — which is `quoted_output`'s ground and `postconditions`', and which is a **refusal to
-  establish** rather than a claim that nothing is established. Every other clause of §1 binds
+  no charged output reports none, so the charge test is never taken, no call under it is ever
+  satisfying and it establishes no such criterion — which is `quoted_output`'s ground and
+  `postconditions`', and which is a **refusal to establish** rather than a claim that nothing is
+  established. Every other clause of §1 binds
   entire, its `frozen=True` rule and its no-inference rule conspicuously, and §5's re-registration rule is untouched.
 
 ## Context
