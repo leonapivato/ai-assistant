@@ -643,14 +643,21 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > **`FAILED`**; **`blocked`** is true where any such step stands **`SKIPPED`** carrying
 > `SkipReason.UNMET_DEPENDENCY` or `SkipReason.APPROVAL_DENIED`, whichever source status it was
 > committed from; **`fully_met`** is true where the goal carries **at least one** criterion,
-> **every** one **met**; and **`effect_possible`** is true where some step of **§3's rung-2 class**
-> — the claimed steps whose declarations put the attempt at rung 2 — stands **`SUCCEEDED`**, or
-> stands **`FAILED` under a definition that is `side_effecting` with `Idempotency.NATURAL`**.
-> **Those are the only two states in which a consequential effect may exist**: ADR-0029 §4 commits
-> every other definitive failure of a claimed act as `FAILED` **having not acted**, an
-> `INDETERMINATE` step keeps the attempt live (§4's third ending condition) so no ending turn sees
-> one, and a `SKIPPED` step never ran. **`effect_possible` is false at rung 0 and rung 1 by
-> construction**, the class being empty there. **None of the four is stored, none is a field and no
+> **every** one **met**; and **`effect_possible`** is true where some step the attempt reaches
+> **rung 2** through (§3) may have left an effect. **§3 admits two categories and this fact is
+> stated over both.** A **claimed** rung-2 step counts where it stands **`SUCCEEDED`**, or stands
+> **`FAILED` under a definition that is `side_effecting` with `Idempotency.NATURAL`** — **the only
+> two states in which an effect may exist**, since ADR-0029 §4 commits every other definitive
+> failure of a claimed act as `FAILED` **having not acted**, an `INDETERMINATE` step keeps the
+> attempt live (§4's third ending condition) so no ending turn sees one, and a `SKIPPED` step never
+> ran. A step **satisfied from an earlier completed effect** — `SUCCEEDED` with ADR-0259 §2's
+> identifiers and no claim of its own — counts where the step those identifiers name is at rung 2,
+> **and equally where that step cannot be read**, which §3 already resolves to rung 2 rather than
+> guessing: such a step stands for an act that **did** complete, so reading it as *no effect* would
+> be the one direction the conservative rung rule exists to refuse. **`effect_possible` is
+> therefore true wherever the attempt is at rung 2 except where every rung-2 step of it failed
+> under a tool that is not `NATURAL`**, and **false at rung 0 and rung 1 by construction**, both
+> categories being empty there. **None of the four is stored, none is a field and no
 > consumer reads any** — ADR-0252 §6's own posture toward its four tests, computed where they are
 > used.
 
@@ -717,7 +724,9 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > rung 2 — a consequential act ran and nothing verified it, which is what `UNCERTAIN` says and what
 > `ANSWERED` would deny. And **`VERIFIED` sits below `PARTIAL`** so that no combination of met
 > criteria outvotes an unmet one, which is R53 read at the member level. **`ANSWERED` is therefore
-> reachable only at rung 0 or rung 1**, which is its honest scope, and **`PARTIAL` is reached
+> reachable only at rung 0 or rung 1**, which is its honest scope — at rung 2 every step of §3's
+> class is, on an ending turn, either `SUCCEEDED` or `FAILED`, so it makes **`effect_possible`** or
+> **`failed`** true and limbs 1-5 are exhaustive there — and **`PARTIAL` is reached
 > exactly where some criterion is met and some is not** — `unmet` or `unestablished` — so §6's
 > statement for it is true wherever it is rendered.
 
@@ -1620,7 +1629,13 @@ are ordered only by each other.
    → **`UNCERTAIN`**, the arm that fails against a rule reading the rung alone; a rung-2 attempt
    whose criterion's own **bound step stands `FAILED`** under a `KEYED` tool → `FAILED`, **never
    `UNCERTAIN`**, and the same step under a `NATURAL` one → `UNCERTAIN`, the pair that pins
-   *established not to hold* apart from *may have acted*; a **rung 2** attempt with **every criterion
+   *established not to hold* apart from *may have acted*. **And the satisfied step carries
+   `effect_possible` as it carries the rung**: an attempt whose only step is **satisfied from an
+   earlier effect** at a rung-2 holder, with every criterion **unestablished** and no failure and
+   no skip, → **`UNCERTAIN`**, **never `ANSWERED`**, and **the same where the holder cannot be
+   read** → `UNCERTAIN` likewise — the pair that fails against a fact stated over claimed steps
+   alone, which would let ADR-0249 §5's *"nothing was verified, no step failed"* be asserted of an
+   attempt that borrowed a consequential act's own answer; a **rung 2** attempt with **every criterion
    met** beside an unrelated `FAILED` step → **`VERIFIED`**, and its goal `ACHIEVED` — the arm that pins limbs 4 and 5 to the criteria
    alone and keeps §6's `PARTIAL` statement true of every attempt that reaches it; a rung-2 attempt
    with a criterion **unmet** → `FAILED` whatever else stands; a **read that succeeded** followed
