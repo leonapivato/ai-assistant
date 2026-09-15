@@ -636,6 +636,7 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "clarification",
         "reference",
         "disambiguation",
+        "authorizations",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
 
@@ -986,6 +987,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "disambiguation",
         "outbound_statement",
         "forecast_not_read",
+        "authorizations",
     }
 
 

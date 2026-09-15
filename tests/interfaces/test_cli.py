@@ -494,6 +494,7 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
         token=ContinuationToken(handle="tok"),
         egress=None,
         read=None,
+        authorization=None,
     )
     cli._render_confirmation(confirmation)
     rendered = output.getvalue()
@@ -536,6 +537,7 @@ def _forging_confirmation(value: str) -> Confirmation:
         token=ContinuationToken(handle="tok"),
         egress=None,
         read=None,
+        authorization=None,
     )
 
 
@@ -870,6 +872,7 @@ def _egress_confirmation(
             coverage=coverage,
         ),
         read=None,
+        authorization=None,
     )
 
 
@@ -1008,6 +1011,7 @@ def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
             token=ContinuationToken(handle="tok"),
             egress=None,
             read=None,
+            authorization=None,
         )
     )
     rendered = _flowed(output.getvalue())
@@ -1716,6 +1720,7 @@ def test_yes_answers_a_confirmation_that_carries_no_egress(output: StringIO) -> 
                 token=ContinuationToken(handle="tok"),
                 egress=None,
                 read=None,
+                authorization=None,
             )
         )
         is True
@@ -8238,6 +8243,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
     assert carried == {
         "abandon-goal:goal_id": True,
         "answer:question_id": True,
+        "authorizations:goal_id": True,
         "ask:answering": True,
         "ask:conversation": True,
         "ask:goal": True,
@@ -8249,6 +8255,7 @@ def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
         "observe:conversation_id": True,
         "remember-recipients:decision_id": True,
         "revoke-destination-trust:record_id": True,
+        "revoke-authorization:authorization_id": True,
         "revoke-recipient-grant:grant_id": True,
         "trust-destinations:decision_id": True,
         "withdraw-clarification:question_id": True,

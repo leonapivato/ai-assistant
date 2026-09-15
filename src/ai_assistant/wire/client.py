@@ -95,6 +95,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         AnswerOutcome,
+        AuthorizationSettlement,
+        AuthorizationView,
         Belief,
         BeliefBand,
         BeliefSummary,
@@ -1259,6 +1261,58 @@ class HubClient:
         """
         named = identifier(grant_id, name="grant_id")
         return await self._call("revoke_recipient_grant", grant_id=named)  # type: ignore[no-any-return]
+
+    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
+
+    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
+        """What one goal's recorded acts still authorise, read hub-side.
+
+        ``goal_id`` undergoes :data:`~ai_assistant.core.types.Identifier` validation
+        locally and before any I/O (ADR-0085 §3c), so this client refuses exactly what
+        the in-process engine refuses.
+
+        **No ``limit`` to refuse**, because the method takes none: a truncated answer to
+        *"what do I authorise"* is a false answer rather than a partial one, so a
+        listing too large for the frame comes back as ``OversizedValueError`` and not as
+        a short listing (ADR-0254 §11).
+
+        **The liveness on each view is the hub's one clock reading and is not
+        re-derived here** (ADR-0254 §16). This client holds no clock, compares no
+        instant and annotates no row: an adapter reads no store and holds no clock
+        (ADR-0042 §6), and a second comparison over the wire could disagree with the
+        one the hub took.
+
+        Args:
+            goal_id: The goal whose standing authorities to list.
+
+        Returns:
+            One view per ``ESTABLISHED`` row of that goal, live and lapsed.
+        """
+        named = identifier(goal_id, name="goal_id")
+        return await self._call("standing_authorizations", goal_id=named)  # type: ignore[no-any-return]
+
+    async def revoke_authorization(
+        self, authorization_id: DurableIdentifier
+    ) -> AuthorizationSettlement:
+        """Withdraw one standing authorization, hub-side.
+
+        The hub's own :class:`~ai_assistant.core.types.AuthorizationSettlement` crosses
+        **unmapped** (ADR-0254 §16): this client does not translate it into a ``bool``,
+        a ``None`` or a second vocabulary, because a second three-valued spelling for
+        one fact is the second carrier ADR-0150 is named after.
+
+        Args:
+            authorization_id: The id :meth:`standing_authorizations` renders.
+
+        Returns:
+            The hub's settlement outcome — ``SETTLED``, ``NOT_AT_SOURCE`` or
+            ``NO_SUCH_AUTHORIZATION``. ``WOULD_DUPLICATE`` is unreachable on this
+            surface, being reachable only on a settlement to ``ESTABLISHED``.
+        """
+        named = identifier(authorization_id, name="authorization_id")
+        return await self._call(  # type: ignore[no-any-return]
+            "revoke_authorization", authorization_id=named
+        )
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 

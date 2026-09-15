@@ -69,6 +69,7 @@ def _confirmation() -> Confirmation:
         token=ContinuationToken(handle="h-1"),
         egress=None,
         read=None,
+        authorization=None,
     )
 
 

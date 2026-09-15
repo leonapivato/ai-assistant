@@ -158,6 +158,7 @@ class TestNumbers:
             token=ContinuationToken(handle="h-1"),
             egress=None,
             read=None,
+            authorization=None,
         )
         assert _encoded(confirmation.parameters) == expected
         assert len(canonical_payload(confirmation.parameters)) == size
@@ -337,7 +338,8 @@ class TestComposites:
         same bytes; ``model_dump_json()`` gives them two.
         """
         expected = (
-            '{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"read":null,'
+            '{"authorization":null,"egress":null,'
+            '"parameters":{"Z":1,"body":"hi","to":"a@b"},"read":null,'
             '"reason":"external","token":{"handle":"h-1"},"tool_description":"send",'
             '"tool_id":"t-1"}'
         )
@@ -349,6 +351,7 @@ class TestComposites:
             token=ContinuationToken(handle="h-1"),
             egress=None,
             read=None,
+            authorization=None,
         )
         other = one.model_copy(update={"parameters": one.parameters})
         reordered = Confirmation(
@@ -359,6 +362,7 @@ class TestComposites:
             token=ContinuationToken(handle="h-1"),
             egress=None,
             read=None,
+            authorization=None,
         )
         assert _encoded(one) == expected
         assert canonical_payload(one) == canonical_payload(reordered) == canonical_payload(other)

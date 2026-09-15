@@ -117,6 +117,9 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     AttemptTransition,
+    AuthorizationProjection,
+    AuthorizationSettlement,
+    AuthorizationView,
     Belief,
     BeliefSummary,
     Clarification,
@@ -318,6 +321,7 @@ if TYPE_CHECKING:
         TranscriptHit,
         UtcInstant,
     )
+    from ai_assistant.orchestration.authorization_surface import AuthorizationOperations
     from ai_assistant.orchestration.composing import ComposingStage
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.consolidation import (
@@ -2300,6 +2304,7 @@ class Engine:
         recovery: RecoveryScan | None = None,
         routing: RoutingStage | None = None,
         parked_reads: ParkedReadOperations | None = None,
+        authorization_operations: AuthorizationOperations | None = None,
         transcriber: SpeechTranscriber | None = None,
         synthesizer: SpeechSynthesizer | None = None,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -2724,6 +2729,15 @@ class Engine:
                 none behind a token, and :meth:`cancel_read` raises
                 ``UnknownContinuationError`` — which is exactly what is true of a
                 deployment on which no servicing ever writes one.
+            authorization_operations: ADR-0254 §11's read side — the confirmation
+                projection, the listing and the revocation — or ``None`` where this
+                deployment wired no authorization store. **Passed rather than
+                defaulted**, for ``parked_reads``' reason: an engine with none proposes
+                no row either (``StepRunner`` is given the same store or none), so every
+                ``Confirmation`` it assembles carries ``authorization`` ``None``,
+                :meth:`standing_authorizations` answers empty and
+                :meth:`revoke_authorization` answers ``NO_SUCH_AUTHORIZATION`` — which
+                is exactly what is true of a deployment that holds no rows.
             transcriber: The speech-recognition seam ``converse_spoken`` transcribes
                 through (ADR-0200 §1, §2), already wrapped in whatever deadline
                 decorator the composition root wired (ADR-0118 §2) — ``None`` on a
@@ -3017,6 +3031,13 @@ class Engine:
             raise ConfigurationError(msg)
         self._routing = routing
         self._parked_reads = parked_reads
+        # ADR-0254 §11's read side. **Optional, and its absence is fail-closed**:
+        # a deployment with no authorization store proposes no row (ADR-0254 §1,
+        # `StepRunner._propose`), so there is no projection to render, no standing
+        # row to list and nothing a revocation could settle. The listing then
+        # answers empty and the revocation answers ``NO_SUCH_AUTHORIZATION``, which
+        # is what is true of a store that holds no row with that id.
+        self._authorization_operations = authorization_operations
         self._transcriber = transcriber
         self._synthesizer = synthesizer
         self._speakable_attested_sources = frozenset(speakable_attested_sources)
@@ -6755,7 +6776,7 @@ class Engine:
                         continue
                     live.add((state.id, step.step_id))
                     recovered.append(
-                        self._recovered_confirmation(
+                        await self._recovered_confirmation(
                             state.id, step.step_id, planned.parameters, confirmed
                         )
                     )
@@ -6811,7 +6832,9 @@ class Engine:
             # The trail read belongs **here** and not on the parking turn's path: this
             # operation already declares ``AuditError`` (ADR-0052 §1), and a park it did
             # not write is one it holds no decision for.
-            confirmation = self._read_confirmation(park, await self._trail.get(park.decision_id))
+            confirmation = await self._read_confirmation(
+                park, await self._trail.get(park.decision_id)
+            )
             if confirmation is not None:
                 offered.append(confirmation)
         return tuple(offered)
@@ -7611,6 +7634,132 @@ class Engine:
             "revoke_recipient_grant",
             checked=True,
         )
+
+    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
+
+    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
+        """What one goal's recorded acts still authorise (ADR-0254 §11).
+
+        Delegated whole to :class:`~ai_assistant.orchestration.authorization_surface.
+        AuthorizationOperations`; what this layer adds is the identifier validation,
+        the payload check, the drain tracking and the result measurement. **It takes
+        no ``limit``**, for :meth:`standing_recipient_grants`' stated reason: a
+        truncated answer to *"what do I authorise"* is a false answer rather than a
+        partial one, so a listing that does not fit the frame is an
+        ``OversizedValueError`` and no listing at all.
+
+        **An unwired surface answers empty rather than raising.** A deployment with no
+        authorization store proposes no row at all, so *"this goal authorises nothing"*
+        is the true answer there and not a degraded one.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``goal_id`` is blank or unwritable.
+            AuthorizationError: If the authorization store could not be read.
+            PlanningError: If the plan store could not be read.
+            OversizedValueError: If the listing exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        named = identifier(goal_id, name="goal_id")
+        check_arguments("standing_authorizations", max_bytes=self._max_payload_bytes, goal_id=named)
+        operations = self._authorization_operations
+        if operations is None:
+            return ()
+        return await self._tracked(
+            operations.standing_authorizations(named), "standing_authorizations", checked=True
+        )
+
+    async def revoke_authorization(
+        self, authorization_id: DurableIdentifier
+    ) -> AuthorizationSettlement:
+        """Withdraw one standing authorization (ADR-0254 §11).
+
+        The store's own :class:`~ai_assistant.core.types.AuthorizationSettlement`,
+        **unmapped**: a second three-valued vocabulary for one fact would be the second
+        carrier ADR-0150 is named after, and the surface renders prose from the member.
+
+        **Never refused for a ceiling** — there is none — and **an unknown id is a
+        result and never a raise**, which is
+        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
+        rule. An unwired surface answers ``NO_SUCH_AUTHORIZATION``, which is what is
+        true of a store holding no row with that id.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``authorization_id`` is blank or unwritable.
+            AuthorizationError: If the authorization store could not be read or
+                written.
+            PlanningError: If the injected clock's reading is not conforming.
+            OversizedValueError: If the argument exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        named = identifier(authorization_id, name="authorization_id")
+        check_arguments(
+            "revoke_authorization", max_bytes=self._max_payload_bytes, authorization_id=named
+        )
+        operations = self._authorization_operations
+        if operations is None:
+            return AuthorizationSettlement.NO_SUCH_AUTHORIZATION
+        return await self._tracked(
+            operations.revoke_authorization(named), "revoke_authorization", checked=True
+        )
+
+    async def _authorization_projection(
+        self, confirmation_id: str
+    ) -> AuthorizationProjection | None:
+        """ADR-0254 §11's projection for one recorded ``CONFIRM``, or ``None``.
+
+        The one read behind all three assembly sites — the live park, the recovered
+        park and the read park — so a surface needs one renderer and a restart renders
+        what the question rendered (§11, ADR-0178 §5's fourth clause).
+
+        **Absence is the answer on three grounds and is a fault on none**: a
+        deployment wiring no authorization store, a `CONFIRM` failing one of §1's four
+        proposal conditions, and a proposal the store refused. §1 already rules that
+        outcome — *"the answer establishes nothing: the `CONFIRM` is resolved and the
+        one call is authorised by route (a)"* — so a question that cannot say *this
+        would establish a standing authority* is a question that establishes none.
+
+        Args:
+            confirmation_id: The recorded ``CONFIRM``'s own id.
+
+        Returns:
+            The projection, or ``None``.
+
+        Raises:
+            AuthorizationError: If the authorization store could not be read.
+        """
+        operations = self._authorization_operations
+        if operations is None:
+            return None
+        return await operations.projection_for(confirmation_id)
+
+    async def _announced_authorizations(
+        self, disposition: StepDisposition
+    ) -> tuple[AuthorizationView, ...]:
+        """ADR-0254 §11's announcement for the rows this drive opened without a question.
+
+        **The trigger is that the row was written** (§11) and the channel is
+        :attr:`~ai_assistant.orchestration.runner.StepDisposition.opened`, which the
+        path-(iii) writer fills: the announcement is transcribed from the rows
+        themselves, so the value it needs exists at the instant it is emitted and there
+        is no act-time projection to keep in step with a row written later.
+
+        **It is empty on every turn that opened none**, including a turn that only
+        re-grounds an existing constraint — the case ADR-0250 §5 requires to stay
+        unannounced and the reason this member exists rather than riding
+        ``goal_engagement``.
+
+        Args:
+            disposition: What the drive did.
+
+        Returns:
+            One view per row opened, in the order they were written.
+        """
+        operations = self._authorization_operations
+        if operations is None or not disposition.opened:
+            return ()
+        return await operations.announced(disposition.opened)
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 
@@ -10390,7 +10539,7 @@ class Engine:
         read_confirmation = (
             None
             if responded.parked_read is None
-            else self._read_confirmation(responded.parked_read, responded.parked_decision)
+            else await self._read_confirmation(responded.parked_read, responded.parked_decision)
         )
         # ADR-0205 §5: the fact travels with the episode it qualifies and never
         # without it. `turn.memories` is the supply as `narrow` returned it, so
@@ -10677,7 +10826,7 @@ class Engine:
                 origin=origin,
                 on_ruled=ruled,
             )
-            step = self._step_outcome(
+            step = await self._step_outcome(
                 turn,
                 disposition,
                 step_id=first.id,
@@ -10829,6 +10978,14 @@ class Engine:
             # which goal it was about (§3), so only these two can be present here.
             goal_engagement=engagement,
             reference=association.reference,
+            # ADR-0254 §11's announcement: one view per row this drive **opened**
+            # without a question, in the order they were written, and empty on every
+            # turn that opened none. This is the one branch that drives a step, and a
+            # path-(iii) row is written only during a turn that drives one — "a step
+            # being dispatched inside one" — so no other outcome site can carry the
+            # member. A driver dispatching **outside** a turn is §19's booked case and
+            # is A7's, not this decision's.
+            authorizations=await self._announced_authorizations(disposition),
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -12455,7 +12612,9 @@ class Engine:
             )
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
-            step = self._step_outcome(parked.turn, disposition, step_id=parked.step_id, handle=None)
+            step = await self._step_outcome(
+                parked.turn, disposition, step_id=parked.step_id, handle=None
+            )
             # Answered once, and now **retained** rather than forgotten (ADR-0198 §1).
             # ADR-0044 §2b makes a second resolution impossible anyway; what changes is
             # what the engine says about one. Evicting used to turn a replay into an
@@ -12733,6 +12892,7 @@ class Engine:
         clarification: Clarification | None = None,
         reference: ReferenceOutcome | None = None,
         disambiguation: GoalDisambiguation | None = None,
+        authorizations: tuple[AuthorizationView, ...] = (),
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -12917,6 +13077,11 @@ class Engine:
             clarification=clarification,
             reference=reference,
             disambiguation=disambiguation,
+            # ADR-0254 §11's announcement, carried through from the drive that opened
+            # the rows. **Empty on every pass that opened none**, which is every pass
+            # that drove no step: a path-(iii) row is written only during a turn that
+            # dispatches one, and §19 books the outside-a-turn driver as A7's.
+            authorizations=authorizations,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
@@ -13077,7 +13242,7 @@ class Engine:
         page_argument(offset, name="offset")
         check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
 
-    def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the three values a park retains for its resolution's capture; every one is a distinct fact about the pass
+    async def _step_outcome(  # noqa: PLR0913 — the turn, the raw disposition, the step it names, the pre-minted handle, and the three values a park retains for its resolution's capture; every one is a distinct fact about the pass
         self,
         turn: TurnResult | None,
         disposition: StepDisposition,
@@ -13125,7 +13290,7 @@ class Engine:
                 # always carries a real turn; a recovered resume never parks anew.
                 msg = "a parked step reached rendering without its originating turn"
                 raise PlanningError(msg)
-            confirmation = self._confirmation(
+            confirmation = await self._confirmation(
                 turn,
                 disposition,
                 handle,
@@ -13141,7 +13306,7 @@ class Engine:
             confirmation=confirmation,
         )
 
-    def _confirmation(  # noqa: PLR0913 — the turn, the raw disposition, the pre-minted handle, and the three values the parked entry retains for its resolution's capture; every one is a distinct fact about the pass
+    async def _confirmation(  # noqa: PLR0913 — the turn, the raw disposition, the pre-minted handle, and the three values the parked entry retains for its resolution's capture; every one is a distinct fact about the pass
         self,
         turn: TurnResult,
         disposition: StepDisposition,
@@ -13164,6 +13329,18 @@ class Engine:
         AWAITING_APPROVAL, so a parked step is never stranded without a continuation
         (#287). The parameters are the driven step's own, carried as data for the
         adapter to escape per target (ADR-0042 §4).
+
+        **ADR-0254 §11's projection is read back here and is never recomputed.** The
+        row was written ``PROPOSED`` before this question was put, so what the user
+        is shown is a rendering of a durable record — the same coverage, the same
+        bounds and the same ``expires_at`` the row carries. It is read by the id
+        derived from this decision (issue #2375), which is why **a restart between
+        the question and the answer renders the same projection**
+        (:meth:`_recovered_confirmation`), and why nothing here re-runs §12's ladder
+        or re-reads the goal's ``deadline``. **Absence is the answer where §1's four
+        proposal conditions did not hold**, and a stage holding no authorization
+        store proposes none, so the projection is absent for every confirmation on
+        such a deployment.
         """
         recorded = disposition.decision
         if recorded is None:  # pragma: no cover — StepRunner always sets it on this branch
@@ -13200,9 +13377,10 @@ class Engine:
             # route it names, and is resumed exactly as it is today. No clause of
             # ADR-0244 reaches a step's park.
             read=None,
+            authorization=await self._authorization_projection(recorded.id),
         )
 
-    def _recovered_confirmation(
+    async def _recovered_confirmation(
         self,
         execution_id: str,
         step_id: str,
@@ -13229,9 +13407,13 @@ class Engine:
             # ADR-0244 §16: a step's confirmation is unchanged in every member and at
             # every assembly site, and gains ``read`` ``None``.
             read=None,
+            # ADR-0254 §11's recovery clause in terms: "A restart between the question
+            # and the answer recovers the row and renders the same projection". It is
+            # the same read as the live path's, keyed on the same decision id.
+            authorization=await self._authorization_projection(confirmed.id),
         )
 
-    def _read_confirmation(
+    async def _read_confirmation(
         self, park: ParkedRead, recorded: PermissionDecision | None
     ) -> Confirmation | None:
         """Assemble the question one open park is holding (ADR-0244 §4, §5).
@@ -13294,6 +13476,12 @@ class Engine:
             # step**, and nothing more. ``WEB_SEARCH`` is the one kind this decision
             # parks; §20 defers the rest by name with what fires them.
             read=ReadKind.WEB_SEARCH,
+            # ADR-0254 §11, and on this population it is ordinarily **absent**: §1's
+            # second proposal condition is an ``egress_binding`` on the recorded
+            # request, and the projection is read back by the decision's own id either
+            # way, so a park whose `CONFIRM` did propose a row renders it and one whose
+            # `CONFIRM` did not renders nothing. No branch here decides which.
+            authorization=await self._authorization_projection(recorded.id),
         )
 
     def _handle_for_park(self, park_id: str) -> str:

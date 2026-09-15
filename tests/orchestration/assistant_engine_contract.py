@@ -283,6 +283,7 @@ def spoken_step_park_outcome() -> TurnOutcome:
                 token=ContinuationToken(handle="park-1"),
                 egress=None,
                 read=None,
+                authorization=None,
             ),
         ),
         conversation_id="c-park",

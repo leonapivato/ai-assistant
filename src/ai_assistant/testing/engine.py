@@ -60,6 +60,11 @@ from ai_assistant.core.types import (
     AnswerKind,
     AnswerOutcome,
     Attestation,
+    Authorization,
+    AuthorizationDisposition,
+    AuthorizationProjection,
+    AuthorizationSettlement,
+    AuthorizationView,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -138,6 +143,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.authorization_surface import is_live, view_of
 
 # ADR-0206 §3's placement is **named rather than copied**, exactly as ADR-0207 §5's
 # third arm requires of `SPOKEN_PARK_SENTENCE` below and ADR-0087 §7 requires of the
@@ -169,6 +175,7 @@ from ai_assistant.orchestration.speech import SPOKEN_PARK_SENTENCE
 from ai_assistant.testing.archive import FakeTranscriptArchive
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.destination_trust import FakeDestinationTrustStore
+from ai_assistant.testing.goal_authorizations import FakeGoalAuthorizationStore
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
@@ -599,6 +606,25 @@ class FakeAssistantEngine:
         self.goal_summaries: list[GoalSummary] = []
         self.withdrawal: ClarificationWithdrawal = ClarificationWithdrawal.NOTHING_TO_WITHDRAW
         self.abandonment: GoalAbandonment = GoalAbandonment.NO_SUCH_GOAL
+        #: ADR-0254 §11's two operations, answered from a real canonical store rather
+        #: than from a scripted list — so a client's own paths are exercised against the
+        #: store's real vocabulary: a revocation of a ``PROPOSED`` row answers
+        #: ``NOT_AT_SOURCE`` here exactly as it does one store over, and a revoked row
+        #: is absent from the next listing because ``standing`` no longer returns it.
+        #: Seed it with :meth:`hold_authorization`.
+        self.goal_authorizations = FakeGoalAuthorizationStore()
+        #: The goal statement each listed authority is rendered by (ADR-0254 §11 — "the
+        #: goal's **statement** (never its id)"), keyed by goal id. A goal absent here
+        #: is the concrete engine's ``PlanStore.get_goal`` answering ``None``, which §11
+        #: makes an **empty answer** rather than a raise, so this fake answers empty too.
+        self.goal_statements: dict[str, str] = {}
+        #: What :attr:`~ai_assistant.core.types.TurnOutcome.authorizations` carries on
+        #: the next turn — ADR-0254 §11's announcement for the rows an act opened
+        #: without a question. **Empty by default**, because a fake opens no row: §11
+        #: makes the member empty "on every turn that opened none", so the default is
+        #: the honest value and not a stand-in.
+        self.authorizations: tuple[AuthorizationView, ...] = ()
+        self._pending_authorizations: list[Authorization] = []
         #: The grantable sources this engine holds, by declared identity, each
         #: mapped to its configured location or to ``None`` where it has none
         #: (ADR-0102 §6). Scriptable with :meth:`hold_source`, so a client's own
@@ -839,16 +865,32 @@ class FakeAssistantEngine:
         detached here is the member this decision makes load-bearing, and widening that
         to the whole outcome is a change to what scripting means rather than this lane's.
 
+        **ADR-0254 §11's announcement rides the same site**, and its default is the
+        opposite one for the opposite reason: §7's member states a fact about the pass
+        and so must be filled in, while §11's states *which rows this turn opened* and a
+        fake opens none — so ``()`` is the honest value and a scripted
+        :attr:`authorizations` is carried through unchanged. A scripted **outcome** that
+        already carries the member keeps what it carries: the announcement is
+        transcribed from rows, so a caller who stated them on the outcome has stated the
+        rows, and overwriting that with this engine's attribute would silently discard
+        the arrangement (`#2386 <https://github.com/leonapivato/ai-assistant/issues/2386>`_
+        is the aliasing note one member over and is not what this is).
+
         Args:
             outcome: The outcome this call is about to return.
 
         Returns:
-            The outcome, carrying §7's member where the pass composed a reply.
+            The outcome, carrying §7's member where the pass composed a reply and
+            §11's where this engine was scripted with one.
         """
         stated = outcome.outbound_statement
-        if stated is None and outcome.reply is None:
+        announced = outcome.authorizations or self.authorizations
+        if stated is None and outcome.reply is None and announced == outcome.authorizations:
             return outcome
         carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
+        carried["authorizations"] = announced
+        if stated is None and outcome.reply is None:
+            return TurnOutcome(**carried)
         statement = self._outbound() if stated is None else self._detached(stated)
         return TurnOutcome(**{**carried, "outbound_statement": statement})
 
@@ -2992,6 +3034,97 @@ class FakeAssistantEngine:
             raise
         return self._checked(record, "revoke_recipient_grant")
 
+    # --- the goal-authorization surface (ADR-0254 §11) -----------------------
+
+    def hold_authorization(self, row: Authorization, *, goal_statement: str | None = None) -> None:
+        """Seed one record, and the statement its goal is rendered by.
+
+        **Written through the store's own ``record``**, so a row this fake will not
+        accept is one the real store would not accept either — the shapes ADR-0254 §1
+        forbids are refused here at seeding rather than discovered at the listing.
+
+        Args:
+            row: The record to hold.
+            goal_statement: What §11's listing renders the goal as. Defaults to a
+                statement derived from the goal's id; pass ``None`` explicitly and then
+                delete the key to exercise the goal the plan store does not hold, which
+                §11 makes an **empty answer**.
+        """
+        self.goal_statements[row.goal] = goal_statement or f"work on {row.goal}"
+        self._pending_authorizations.append(row)
+
+    async def standing_authorizations(self, goal_id: Identifier) -> tuple[AuthorizationView, ...]:
+        """What one goal's recorded acts still authorise (ADR-0254 §11).
+
+        The ``ESTABLISHED`` rows of that goal, **live and lapsed**, read from
+        ``standing`` and projected — never a ``PROPOSED``, ``DECLINED``, ``EXPIRED``,
+        ``REVOKED`` or ``SUPERSEDED`` one, because ``standing`` does not offer them.
+
+        **One clock reading for the whole listing** (§16), taken here because
+        ``standing`` evaluates no liveness and reports none. **A goal this fake holds no
+        statement for is an empty answer and not a raise**, which is what the concrete
+        engine does where ``PlanStore.get_goal`` answers ``None``.
+        """
+        named = identifier(goal_id, name="goal_id")
+        check_arguments("standing_authorizations", max_bytes=self._max_payload_bytes, goal_id=named)
+        self.calls.append(("standing_authorizations", {"goal_id": named}))
+        await self._flush_authorizations()
+        statement = self.goal_statements.get(named)
+        if statement is None:
+            return self._checked((), "standing_authorizations")
+        reading = self._authorization_now()
+        rows = await self.goal_authorizations.standing(named)
+        return self._checked(
+            tuple(
+                view_of(row, goal_statement=statement, live=is_live(row, reading)) for row in rows
+            ),
+            "standing_authorizations",
+        )
+
+    async def revoke_authorization(
+        self, authorization_id: DurableIdentifier
+    ) -> AuthorizationSettlement:
+        """Withdraw one standing authorization (ADR-0254 §11).
+
+        ``settle`` to ``REVOKED`` on ADR-0254 §1's one edge out of ``ESTABLISHED``, its
+        answer returned **unmapped**. **No call raises**: an unknown id is
+        ``NO_SUCH_AUTHORIZATION`` and a row not at that edge's source is
+        ``NOT_AT_SOURCE``, which is
+        ``AssistantEngineContract::test_a_refusal_is_a_result_and_not_an_exception``'s
+        rule. **``WOULD_DUPLICATE`` is unreachable here** — it is reachable only on a
+        settlement **to** ``ESTABLISHED`` — and this fake maps nothing, so a client
+        tested against it meets exactly the vocabulary the hub sends.
+        """
+        named = identifier(authorization_id, name="authorization_id")
+        check_arguments(
+            "revoke_authorization", max_bytes=self._max_payload_bytes, authorization_id=named
+        )
+        self.calls.append(("revoke_authorization", {"authorization_id": named}))
+        await self._flush_authorizations()
+        return await self.goal_authorizations.settle(
+            named,
+            to=AuthorizationDisposition.REVOKED,
+            settled_at=self._authorization_now(),
+        )
+
+    async def _flush_authorizations(self) -> None:
+        """Write the rows :meth:`hold_authorization` took, once.
+
+        Seeding is synchronous because a test's arrangement is, and ``record`` is
+        ``async`` because a store is — so the write is deferred to the first operation
+        that reads. It is **not** re-run per row on later calls: the queue is drained.
+        """
+        while self._pending_authorizations:
+            await self.goal_authorizations.record(self._pending_authorizations.pop(0))
+
+    def _authorization_now(self) -> datetime:
+        """This engine's one clock reading for an authorization operation.
+
+        The same seam :meth:`_recipient_now` is, and for its reason: a fake that read
+        the wall clock would make a lapsed row live again between two lines of one test.
+        """
+        return self._recipient_now()
+
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 
     async def establish_destination_trust(
@@ -3687,7 +3820,12 @@ class FakeAssistantEngine:
         return record
 
     def park(
-        self, handle: str, *, tool_id: str = "t-1", egress: EgressBinding | None = None
+        self,
+        handle: str,
+        *,
+        tool_id: str = "t-1",
+        egress: EgressBinding | None = None,
+        authorization: AuthorizationProjection | None = None,
     ) -> Confirmation:
         """Park one confirmation this engine will resolve, and return it.
 
@@ -3708,6 +3846,9 @@ class FakeAssistantEngine:
             egress: The binding the ruling was taken over, or ``None`` for a
                 non-egress ``CONFIRM``. Reduced here rather than accepted
                 pre-reduced, so the reduction is the thing under test.
+            authorization: What answering would establish (ADR-0254 §11), or ``None``
+                where answering proposes no row — which is every park this fake makes
+                unless a caller states otherwise.
 
         Returns:
             The parked confirmation.
@@ -3730,6 +3871,11 @@ class FakeAssistantEngine:
             ),
             # A step's confirmation, so ``read`` is absent (ADR-0244 §4, §16).
             read=None,
+            # ADR-0254 §11, and **absent unless the caller states one**: §1's four
+            # proposal conditions decide presence, and this fake proposes no row — so
+            # ``None`` is what is true of a park it made, and a surface that renders the
+            # member is exercised by passing one.
+            authorization=authorization,
         )
         self.parked[handle] = confirmation
         return confirmation
@@ -3741,6 +3887,7 @@ class FakeAssistantEngine:
         query: str,
         origin: str = "search.example",
         egress: EgressBinding | None = None,
+        authorization: AuthorizationProjection | None = None,
     ) -> Confirmation:
         """Park one **read** this engine will answer, and return its question (§4, §5).
 
@@ -3765,6 +3912,8 @@ class FakeAssistantEngine:
                 :meth:`park` reduces it. ``None`` builds a question with no egress
                 member, which ADR-0244 §4 says a real ``WEB_SEARCH`` park never has —
                 and which a surface must still not crash on.
+            authorization: What answering would establish (ADR-0254 §11), on
+                :meth:`park`'s own terms.
 
         Returns:
             The parked read's confirmation.
@@ -3786,6 +3935,8 @@ class FakeAssistantEngine:
                 )
             ),
             read=ReadKind.WEB_SEARCH,
+            # ADR-0254 §11, on :meth:`park`'s own terms.
+            authorization=authorization,
         )
         self.read_parked[handle] = confirmation
         self._read_handles.add(handle)

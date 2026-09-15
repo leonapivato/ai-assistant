@@ -19478,6 +19478,272 @@ class Authorization(BaseModel):
         return {name: projection[name] for name in _AUTHORIZATION_SUBJECT}
 
 
+# --- what a surface is shown about an authorization (ADR-0254 §11) ------------
+# **Projections and never the record.** ADR-0254 §16 promotes no member of the
+# three authorization Protocols and lets no `Authorization` cross whole, so what a
+# client holds is what these three carry: the coverage an act fixed or bounded, the
+# user's own words behind each member, the instant it lapses, and — on the two
+# surfaces about a row that exists — that row's `id` as the revocation handle. The
+# basis beyond each member's span, the resolution, the subject digest, the account,
+# the connection reference and the destination set reach a surface through none of
+# them.
+
+
+def _coverage_view_tuple(value: tuple[CoverageView, ...]) -> tuple[CoverageView, ...]:
+    """Require ADR-0254 §2's one-member-per-argument rule of a projection too.
+
+    **Not a second rule — the first one, transcribed.** §2 forbids two members of
+    one record naming one argument, and §11 makes these views a *transcription* of
+    that record's coverage rather than a derivation of it. So a projection carrying
+    two views for one argument is not a value some other rule admits: it is a
+    mis-transcription, and the shape a reading surface would have to invent a
+    precedence rule to render.
+
+    Raises:
+        ValueError: If two views name the same ``argument``.
+    """
+    named = [view.argument for view in value]
+    if len(set(named)) != len(named):
+        msg = (
+            "no two coverage views of one projection name the same argument; the record "
+            "they transcribe cannot carry two members for one argument either "
+            "(ADR-0254 §2, §11)"
+        )
+        raise ValueError(msg)
+    return value
+
+
+class CoverageView(BaseModel):
+    """One coverage member, as the user is shown it (ADR-0254 §11).
+
+    **One carrier for the question and for the listing**, and not one shape each.
+    §11 puts the same three facts about a member in front of the user at both — the
+    argument, the fixed value or the bound, and the user's own words — so a second
+    view would be the two shapes of one fact ADR-0150 is named after.
+
+    **The span is required and is on both surfaces**, because ADR-0254 §8's *"Both
+    halves survive, and neither is derivable from the other"* is as true at the
+    question as it is afterwards: someone reading *"under sixty pounds"* beside a
+    bound of GBP 60 can check the working **before** they answer rather than only
+    after.
+
+    **It carries the span and never the resolution** (§11). The rule, the ``now``
+    that was read, the zone and the record resolved against are provenance for an
+    auditor and reach one through
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.export`; no surface
+    renders a resolution as a justification, a confidence, an assurance or a reason
+    to trust the value more.
+
+    **It carries no basis beyond the span, and no act id.** A member's
+    :class:`AuthorizationBasis` names the recorded turn it rests on, and §11's
+    rendering bar keeps that off every surface this decision owes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    argument: EncodableText = Field(
+        description=(
+            "The key of ``ActionRequest.parameters`` this view is about, transcribed "
+            "from :attr:`CoverageMember.argument` (ADR-0254 §11)."
+        )
+    )
+    fixed: FrozenJsonValue | None = Field(
+        default=None,
+        description=(
+            "The exact value the act fixed, or ``None`` where this view states a bound "
+            "instead — :attr:`CoverageMember.fixed`, transcribed."
+        ),
+    )
+    bound: ValueBound | None = Field(
+        default=None,
+        description=(
+            "The permitted range the act stated, or ``None`` where this view fixes a "
+            "value instead — :attr:`CoverageMember.bound`, transcribed. **A client "
+            "reading it can tell a fixed value from a bound** (ADR-0254 §11), which is "
+            "the whole reason this is a projection of the coverage and not of the "
+            "concrete arguments."
+        ),
+    )
+    span: NonBlankEncodableText = Field(
+        description=(
+            "The user's own words this member rests on, transcribed from its basis "
+            "(ADR-0254 §8, §11). **Required**: a member rendered without the words "
+            "behind it is one whose working cannot be checked."
+        )
+    )
+
+    @model_validator(mode="after")
+    def _a_view_fixes_a_value_or_states_a_bound(self) -> CoverageView:
+        """Admit exactly the two shapes :class:`CoverageMember` admits (ADR-0254 §2).
+
+        §11 puts these two fields *"under ``CoverageMember``'s own two-shape
+        validator"*, so the projection is refusable in exactly the cases the record
+        is: a view stating both would need a precedence rule at the rendering, and
+        one stating neither records nothing the user said.
+
+        Raises:
+            ValueError: If both are set, or neither is.
+        """
+        if self.fixed is not None and self.bound is not None:
+            msg = (
+                f"a coverage view for {self.argument!r} shows a fixed value or a bound, "
+                f"never both; a precedence rule between them is one somebody would have "
+                f"to remember at the rendering (ADR-0254 §2, §11)"
+            )
+            raise ValueError(msg)
+        if self.fixed is None and self.bound is None:
+            msg = (
+                f"a coverage view for {self.argument!r} shows a fixed value or a bound; "
+                f"one that shows neither renders nothing the user said (ADR-0254 §2, §11)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class AuthorizationProjection(BaseModel):
+    """What answering a ``CONFIRM`` would establish (ADR-0254 §11).
+
+    **Named for what it projects and not for the question that carries it**, because
+    what it states — the coverage an answer would establish and the instant it would
+    expire — is a fact about an authorization and not about a confirmation.
+
+    **Rendered from the proposed row and never recomputed** (§11). ADR-0254 §1 writes
+    the row ``PROPOSED`` *before* the question is put, so this is a transcription of a
+    durable record: the same coverage, the same bounds and the same ``expires_at`` the
+    row carries. **A restart between the question and the answer recovers the row and
+    renders this same projection**, which is ADR-0052 §1's recovery reading a durable
+    record rather than reconstructing a proposal nobody stored.
+
+    **It names no identifier at all** (§11): not the goal's id, not the
+    authorization's, not the connection reference, not a credential slot and not a
+    ``Settings`` field. A confirmation is about a row the user has not established, so
+    there is nothing yet to withdraw and no handle to carry — which is why this type
+    and :class:`AuthorizationView` differ here, stated rather than left as an apparent
+    contradiction.
+
+    **One nested value rather than several flat members**, which is
+    :class:`ConfirmationEgress`'s own construction and its reason: *"four independent
+    optional members admit fifteen partial states … One value is either whole or
+    absent."* **Absence is the discriminator** (ADR-0178 §4): what
+    :attr:`Confirmation.authorization` states when it is present is that answering
+    this question would establish a standing authority, and nothing more.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    coverage: Annotated[tuple[CoverageView, ...], AfterValidator(_coverage_view_tuple)] = Field(
+        description=(
+            "Every value the answer would fix and every bound it would establish, one "
+            "view per :attr:`Authorization.coverage` member (ADR-0254 §11). **Possibly "
+            "empty**, because §1 permits an empty ``coverage`` and §11 requires this to "
+            "transcribe it: an argument-free egress call proposes a row fixing nothing, "
+            "and an empty projection says what is true — that answering establishes an "
+            "authority over this goal, this declaration, this account and these "
+            "destinations, fixing no argument because the call carries none. Omitting "
+            "the projection there would say falsely that answering establishes no "
+            "authority, and minting a member would be an invention where §11 requires a "
+            "transcription."
+        )
+    )
+    expires_at: UtcInstant = Field(
+        description=(
+            "The instant the authority the answer establishes would lapse, transcribed "
+            "from the proposed row (ADR-0254 §11, §12; ADR-0256). It is shown **once at "
+            "the establishing act** and again in every listing, and it is the instant "
+            "that was written rather than one recomputed at the answer: §12's ladder ran "
+            "when the row was proposed and reads nothing again."
+        )
+    )
+
+
+class AuthorizationView(BaseModel):
+    """One standing authorization, as a listing renders it (ADR-0254 §11).
+
+    The carrier of both surfaces about a row that **exists** —
+    :meth:`~ai_assistant.core.protocols.AssistantEngine.standing_authorizations`'
+    listing and :attr:`TurnOutcome.authorizations`' announcement — and not a second
+    shape of one of them (§16).
+
+    **It carries the row's ``id`` because that is the revocation handle**, and
+    ADR-0193 §11's bar is read as it actually stands rather than one conjunct wider:
+    that bar is on what an *audit* surface asserts about a recorded decision, and the
+    ratified grant listing exposes a grant id for exactly this reason. **A listing that
+    named no id would state an act and withhold the means to perform it.**
+
+    **What it carries instead of everything else** (§11). No ``goal`` id — the goal is
+    rendered by its **statement** — no ``destinations``, no :class:`BoundAccount` and no
+    account or connection reference, no subject digest, no ``confirmation``, no
+    ``supersedes``, and no basis beyond each member's span.
+
+    **The absent ``destinations`` is a refusal rather than an omission.**
+    :class:`CanonicalDestination`'s connected-account arm carries a whole
+    :class:`BoundAccount`, ``reference`` included, and
+    :attr:`BoundAccount.reference` is *"never shown to the user"* (ADR-0148 §6, §8) —
+    so a record whose destination set is the connected account could not cross here by
+    value at all. Rendering it would need a destination projection carrying the
+    account's identity and not its reference, and ADR-0254 mints none; §19 books it
+    with what fires it. The destination set is what ADR-0148 §8's fourth clause puts in
+    front of the user **at the question**, in both forms, and this listing's subject is
+    what the act fixed about the arguments and when it lapses.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "The row's own id, and the handle "
+            ":meth:`~ai_assistant.core.protocols.AssistantEngine.revoke_authorization` "
+            "takes (ADR-0254 §11). It is the **only** internal value this view carries."
+        )
+    )
+    goal_statement: NonBlankEncodableText = Field(
+        description=(
+            "The goal this authority is about, **by statement and never by id** "
+            "(ADR-0254 §11). Read through "
+            ":meth:`~ai_assistant.core.protocols.PlanStore.get_goal` by the engine that "
+            "assembles the view, because an adapter reads no store (ADR-0042 §6)."
+        )
+    )
+    tool: ToolDefinition = Field(
+        description=(
+            "The declaration this authority was established about, **by value** "
+            "(ADR-0254 §11), as :class:`RecipientGrant` already carries one across this "
+            "surface. Its own ``id`` and ``description`` are what a listing renders, so "
+            "two announcements of one act are told apart by the declaration each is "
+            "about."
+        )
+    )
+    coverage: Annotated[tuple[CoverageView, ...], AfterValidator(_coverage_view_tuple)] = Field(
+        description=(
+            "What this act fixed or bounded, one view per :attr:`Authorization.coverage` "
+            "member, each with the span the user said (ADR-0254 §11). **Possibly "
+            "empty**: an authority over an argument-free call fixes nothing, and an "
+            "empty ``coverage`` is a wildcard over nothing (§1)."
+        )
+    )
+    expires_at: UtcInstant = Field(
+        description=(
+            "The instant this authority lapses, transcribed from the row (ADR-0254 §11, "
+            "§12; ADR-0256 — the horizon shown at the establishing act and in every "
+            "listing)."
+        )
+    )
+    live: bool = Field(
+        description=(
+            "Whether the row is still live, decided by the **engine's one clock "
+            "reading** for the whole listing (ADR-0254 §11, §16): "
+            ":meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.standing` "
+            "evaluates no liveness and reports none, so the comparison is the caller's, "
+            "taken once so a listing cannot be true at no real instant. **It reports "
+            "this row's own liveness and never the standing of another act**: a row "
+            "whose ``origin`` is ``OPENING_ACT`` rests on a recipient grant §6 re-takes "
+            "at every dispatch, and that grant may have lapsed since — such a row still "
+            "appears and still reads live, because **the listing is a record of what the "
+            "user authorised and is not a promise that the next call will be allowed**."
+        )
+    )
+
+
 # --- destination trust: what the user said about a destination (ADR-0238 §1) --
 # The **mirror** of the source side #2096 records. That note keeps one fact per
 # *source* — who may write here — and this is the same rule read on the other axis:
@@ -20963,6 +21229,19 @@ class Confirmation(BaseModel):
         description=(
             "The kind of read answering this question dispatches, or absent on a "
             "confirmation about a plan step (ADR-0244 §4)."
+        )
+    )
+    authorization: AuthorizationProjection | None = Field(
+        description=(
+            "Every fixed value and every bound answering this question would establish, "
+            "and the instant it would expire — or **absent** where answering proposes no "
+            "row at all (ADR-0254 §1, §11). **Required with no default**, for "
+            ":attr:`egress`' and :attr:`read`' reason: a member that could be left off is "
+            "one an assembly site can forget, and a confirmation that establishes a bound "
+            "without naming it ``is not a confirmation of that bound``. **Absence is the "
+            "discriminator** (ADR-0178 §4) and states that answering establishes no "
+            "standing authority — never that the call itself transmits nothing, and never "
+            "a warrant about anything else the call does."
         )
     )
 
@@ -24501,6 +24780,31 @@ class TurnOutcome(BaseModel):
             "make happen, or ``None`` where the servicing recorded no "
             "``ForecastDisposition`` at all — a turn that serviced no forecast read, "
             "and a read the provider answered (ADR-0260 §10)."
+        ),
+    )
+    authorizations: tuple[AuthorizationView, ...] = Field(
+        default=(),
+        description=(
+            "One view per :class:`Authorization` **opened without a question** during "
+            "this turn — ADR-0254 §1's path (iii) — in the order the rows were written, "
+            "and **empty** on every turn that opened none (ADR-0254 §11).\n\n"
+            "**A tuple, because one act can open two authorities that are not the same "
+            "authority**: *\u201cup to fifty pounds for the train and a hundred for the "
+            "hotel\u201d* reaches two declarations whose price argument may each be named "
+            "``amount``, and merging them would authorise an eighty-pound train booking "
+            "or refuse an eighty-pound hotel one. Each authority is announced as itself.\n\n"
+            "**The trigger is that the row was written**, with no materiality judgement "
+            "anywhere in it — which is why this is a member of its own and does not ride "
+            "ADR-0250 §5's ``goal_engagement`` rule, whose *\u201ca grounding-only revision "
+            "is recorded and not announced\u201d* is explicitly silent about an opening act "
+            "that re-grounds an existing constraint. §5's four members are untouched and "
+            "this is a fifth beside them, on ADR-0244 §9's shape: no member is derived "
+            "from another and a client renders each on its own.\n\n"
+            "**It carries the row's ``id`` as the revocation handle** and no other "
+            "identifier, so the withdrawal is in front of the user at the moment the "
+            "authority comes into being rather than only afterwards. The confirmation's "
+            "no-identifier rule is stated over a row the user has **not** established "
+            "and is not read onto this member."
         ),
     )
 

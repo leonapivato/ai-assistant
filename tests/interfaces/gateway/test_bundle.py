@@ -3875,6 +3875,7 @@ _FAULT_PANELS: Final = frozenset(
         "connections",
         "connection-log",
         "observation",
+        "authorizations",
     }
 )
 

@@ -342,6 +342,7 @@ def test_the_confirmation_shape_carries_the_transcribed_state_across_the_wire() 
         token=ContinuationToken(handle="h-1"),
         egress=egress,
         read=None,
+        authorization=None,
     )
 
     projected = project(confirmation)
