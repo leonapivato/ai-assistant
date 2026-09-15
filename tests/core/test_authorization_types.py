@@ -459,35 +459,63 @@ def test_a_terms_bound_is_non_empty_duplicate_free_and_keeps_the_users_order() -
         terms_bound("flexible", "flexible")
 
 
-# --- §8, §10: the resolution admits exactly three shapes ---------------------
+# --- §8, §10: the resolution admits exactly the shapes the rule names --------
+
+#: A well-formed value for each argument a :class:`ValueResolution` can carry.
+_RESOLUTION_ARGUMENTS: dict[str, object] = {
+    "now": AUTHORIZATION_PROPOSED_AT,
+    "timezone": "Europe/London",
+    "record": "rec-1",
+}
+
+#: What each :class:`ResolutionRule` takes, in both directions (§8).
+#:
+#: **``STATED_BOUND`` takes neither** (ADR-0266 §4): its one input is the span the
+#: basis already names, so there is nothing further to record.
+_RESOLUTION_SHAPES: dict[ResolutionRule, frozenset[str]] = {
+    ResolutionRule.AS_STATED: frozenset(),
+    ResolutionRule.DATE_FROM_CONTEXT: frozenset({"now", "timezone"}),
+    ResolutionRule.FROM_SHOWN_RECORD: frozenset({"record"}),
+    ResolutionRule.STATED_BOUND: frozenset(),
+}
 
 
-def test_as_stated_carries_neither_argument() -> None:
-    """§8, arm 34."""
-    assert ValueResolution(rule=ResolutionRule.AS_STATED).now is None
-    with pytest.raises(ValidationError, match="carries no"):
-        ValueResolution(rule=ResolutionRule.AS_STATED, now=AUTHORIZATION_PROPOSED_AT)
-    with pytest.raises(ValidationError, match="carries no"):
-        ValueResolution(rule=ResolutionRule.AS_STATED, record="rec-1")
+def test_every_resolution_rule_has_a_stated_shape() -> None:
+    """The matrix below is over the **enum**, so a fifth rule is a red test.
+
+    Written as a set comparison rather than as four keys anyone could forget to
+    extend: ADR-0266 §4 added the fourth rule and nothing obliged the suite to
+    exercise it, which left ``STATED_BOUND``'s validator branch pinned by its
+    spelling alone. Adversarial review, round 8, ``major``.
+    """
+    assert set(_RESOLUTION_SHAPES) == set(ResolutionRule)
 
 
-@pytest.mark.parametrize("absent", ["now", "timezone"])
-def test_date_from_context_requires_both_its_arguments(absent: str) -> None:
-    """§8: *"both required and neither absent"* — the inputs the resolution used."""
-    kwargs: dict[str, object] = {
-        "now": AUTHORIZATION_PROPOSED_AT,
-        "timezone": "Europe/London",
-    }
-    del kwargs[absent]
-    with pytest.raises(ValidationError, match="states its"):
-        ValueResolution.model_validate({"rule": ResolutionRule.DATE_FROM_CONTEXT, **kwargs})
+@pytest.mark.parametrize("rule", list(ResolutionRule))
+def test_a_resolution_carries_its_own_rules_arguments_and_no_others(rule: ResolutionRule) -> None:
+    """§8, §10, arm 34: *"both required and neither absent"*, per rule and in both
+    directions — the shape constructs, every argument the rule does not take is
+    refused where present, and every argument it does take is refused where absent.
 
-
-def test_from_shown_record_requires_the_record_it_resolved_to() -> None:
-    """§8, §10: the id of a record the loop put in front of the user on that turn."""
-    assert ValueResolution(rule=ResolutionRule.FROM_SHOWN_RECORD, record="rec-1").record == "rec-1"
-    with pytest.raises(ValidationError, match="states its"):
-        ValueResolution(rule=ResolutionRule.FROM_SHOWN_RECORD)
+    A zero-argument rule exercises the first two limbs and has no third, which is
+    what a driven case for it looks like: ``STATED_BOUND`` and ``AS_STATED`` are
+    **constructible bare** and refuse each of ``now``, ``timezone`` and ``record``.
+    """
+    taken = _RESOLUTION_SHAPES[rule]
+    payload = {name: _RESOLUTION_ARGUMENTS[name] for name in sorted(taken)}
+    resolution = ValueResolution.model_validate({"rule": rule, **payload})
+    assert resolution.rule is rule
+    carried = {name for name in _RESOLUTION_ARGUMENTS if getattr(resolution, name) is not None}
+    assert carried == taken
+    for stray in sorted(set(_RESOLUTION_ARGUMENTS) - taken):
+        with pytest.raises(ValidationError, match="carries no"):
+            ValueResolution.model_validate(
+                {"rule": rule, **payload, stray: _RESOLUTION_ARGUMENTS[stray]}
+            )
+    for absent in sorted(taken):
+        without = {name: value for name, value in payload.items() if name != absent}
+        with pytest.raises(ValidationError, match="states its"):
+            ValueResolution.model_validate({"rule": rule, **without})
 
 
 def test_a_basis_keeps_both_halves_and_neither_is_derivable_from_the_other() -> None:
