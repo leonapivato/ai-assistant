@@ -198,7 +198,7 @@ def _ask_of(kind: ReadKind) -> ReadAsk:
             return ReadAsk(kind=kind, labels=("M1",))
         case ReadKind.LOCAL_FILE:
             return ReadAsk(kind=kind, entry="F1")
-        case ReadKind.WEB_SEARCH:
+        case ReadKind.WEB_SEARCH | ReadKind.FORECAST_READ:
             return ReadAsk(kind=kind)
 
 
