@@ -247,14 +247,19 @@ does not take that decision by another route.
 >   indivisible step** settles every row of that goal standing `PROPOSED` or `ESTABLISHED` to
 >   `GOAL_CLOSED` with `settled_at` at `at`, **raises the goal's closure record to `goal_version`
 >   with the fence standing**, and answers **how many rows it moved**. It reads **no clock**, the
->   instant being the caller's, which is ADR-0254 §16's discipline for `record` and `settle` alike;
->   it **evaluates no liveness**, ending a lapsed row exactly as it ends a live one; and it edits
->   **nothing else** on any row, so the store's settlement trigger governs this write unchanged.
->   **Where the record already stands at a version *above* `goal_version` it moves no row, writes
->   nothing and answers `0`** — the stale-call rule below. **A goal the store holds no row of
->   answers `0`** and is fenced all the same, which is the shape `standing` already takes for a goal
->   it does not hold; and a call at or above a standing record finds no row left to move and answers
->   `0` too.
+>   instant being the caller's, which is ADR-0254 §16's discipline for `record` and `settle` alike.
+>   **That instant is the act's own, read once**: an act calling this member reads the clock
+>   **once** and passes that instant, and where its own status write carries one — ADR-0250 §9's
+>   `set_goal_status`, which the reopen and A10's `ACHIEVED` write both take — **it is the same
+>   instant**, so a `GOAL_CLOSED` row's `settled_at` is the instant of the **act** that ended it and
+>   never a second reading taken between the two writes, and a **retry attempt** (ADR-0261 §2)
+>   passes **its own attempt's** instant and not the first attempt's. It **evaluates no liveness**,
+>   ending a lapsed row exactly as it ends a live one; and it edits **nothing else** on any row, so
+>   the store's settlement trigger governs this write unchanged. **Where the record already stands
+>   at a version *above* `goal_version` it moves no row, writes nothing and answers `0`** — the
+>   stale-call rule below. **A goal the store holds no row of answers `0`** and is fenced all the
+>   same, which is the shape `standing` already takes for a goal it does not hold; and a call at or
+>   above a standing record finds no row left to move and answers `0` too.
 > - **`clear_closure(goal: Identifier, /, *, goal_version: int) -> bool`** — **lifts the fence and
 >   removes no record**: where the record stands at a version **at or below** `goal_version` it
 >   raises the record to `goal_version` with the fence **lifted**, and answers whether a standing
@@ -891,13 +896,17 @@ producer here.
 > disagrees takes the bump and records the correction in `wire/envelope.py`'s log**, rather than
 > reading this clause as permission to skip one.
 
-> **Normative — the authorization store's `schema_version` moves by exactly one and no migration is
-> owed.** A file written after this decision may carry a `disposition` an earlier reader refuses, and
-> carries a closure record earlier code does not know, which is ADR-0039 §10's mechanism as ADR-0261
-> §10 applies it one store over. **No row is rewritten, re-dispositioned or back-filled and no goal is
-> recorded closed by the upgrade** — so the migration is the version marker and the new storage, and
-> nothing else. The tree holds **1** as a dated observation at `61f40e9f`. **No compatibility shim,
-> lenient decode or tolerated-unknown entry is added.**
+> **Normative — the authorization store's `schema_version` moves by exactly one, and the migration
+> is structural and nothing more.** **A version-1 database opens under version 2 with every row it
+> held intact**: the upgrade **creates the closure-record storage and moves the marker**, and that
+> is the whole of it. **A lane that moved the marker without creating the storage has shipped a
+> store no existing database opens**, which is the failure arm 10 catches. **What is not owed is any
+> rewrite**: **no row is rewritten, re-dispositioned or back-filled and no goal is recorded closed
+> by the upgrade**, and nothing reads `PlanStore` at the upgrade to find out which goals closed
+> (below). A file written after this decision may carry a `disposition` an earlier reader refuses,
+> and carries a closure record earlier code does not know, which is ADR-0039 §10's mechanism as
+> ADR-0261 §10 applies it one store over. The tree holds **1** as a dated observation at `61f40e9f`.
+> **No compatibility shim, lenient decode or tolerated-unknown entry is added.**
 
 > **Normative — the ending is prospective, and the bound on what the upgrade leaves behind is stated
 > rather than implied.** **This decision governs closing acts taken after it ships and retrofits
@@ -931,8 +940,11 @@ producer here.
 >    both paths §1 states it over**: against a fence standing at the version passed it answers
 >    **`True`**, the fence is **lifted** — asserted by a `record` for that goal then succeeding —
 >    and the **record stands** at that version, which a second `clear_closure` at the same version
->    shows by answering **`False`**; against a goal the store holds **no** record of it answers
->    **`False`**, writes none and raises nothing.
+>    shows by answering **`False`**; **against a record already lifted at a *lower* version it
+>    answers `False` and still raises the watermark to the version passed** — proved by a delayed
+>    `end_for_goal` at that lower version then answering **`0`**, moving no row and standing no
+>    fence; and against a goal the store holds **no** record of it answers **`False`**, writes none
+>    and raises nothing.
 > 2. **Indivisibility, and the fence in the same step.** A `record` or a settlement to `ESTABLISHED`
 >    raced against `end_for_goal` leaves the store in one of exactly two states — the write landed
 >    **before** the call's step and the row is ended and counted, or it is **refused**, `record`
@@ -948,7 +960,8 @@ producer here.
 >    and **then** closes the goal; the act's answer is `ABANDONED` or `ABANDONED_EFFECT_IN_FLIGHT`
 >    exactly as ADR-0261 §6 fixes it; an act answering `NO_SUCH_GOAL` or `ALREADY_CLOSED` from its
 >    first read ends **nothing** and fences **nothing**; and a `StaleExecutionError` retry calls
->    `end_for_goal` **once per attempt it makes**, asserted over the call count — one whose re-read
+>    `end_for_goal` **once per attempt it makes**, each carrying **that attempt's own instant**
+>    (§1), asserted over the call count — one whose re-read
 >    finds the goal **closed** calls it once in the whole act, answers `ALREADY_CLOSED` and **leaves
 >    the fence standing**; one whose re-read finds it **open** calls it a **second** time, under the
 >    re-read version and before the retried write, so a **fresh** row a reopen admitted between the
@@ -957,22 +970,24 @@ producer here.
 > 5. **`BLOCKED`, the reopen, and two reopens racing.** `set_goal_status(…, BLOCKED)` ends **no**
 >    row, fences nothing, and the goal's rows still cover a later request. A reopen writes `ACTIVE`,
 >    **then ends, then clears** — the three asserted in that order — after which a fresh row
->    records; the goal's `USER_STATED` constraints are **unchanged** across the closure and the
->    reopening; and of **two acts reopening one goal**, the one whose `ACTIVE` write is refused
->    stale calls **neither** member and retires **no** row the winner established. **And each act
->    overtaken by the other changes nothing, which is what the watermark is for.** A reopen
->    overtaken by a later closure: with the reopen's `ACTIVE` write landed and a closing act then
->    fencing at its own higher version, the reopen's delayed `clear_closure` answers `False`, the
->    fence **stands**, and a `record` for that goal is refused. And a closing act overtaken by a
->    reopen — a first closure fenced at its version, a reopen then lifting that fence at a higher
->    one, a **fresh** row recorded under the reopened goal — the first act's delayed `end_for_goal`
->    at its **own** version answers **`0`**, leaves that row `ESTABLISHED` and **live**, and leaves
->    the fence **lifted**, a `record` for that goal still succeeding. **And the unfenced reopen window
->    is asserted over the ending and not over the asking**: reopening a goal the store holds **no**
->    closure record of, a `record` between the `ACTIVE` write and the ending **succeeds**, that row is
->    then ended `GOAL_CLOSED` with the rest, and a route-(d) `ALLOW` **already recorded** against it
->    with its trail written **is not retracted** by the ending — the row stands `GOAL_CLOSED` and the
->    trail entry is **unmoved** — on a pre-decision database and a `clear`ed one alike.
+>    records; **the rows it ends carry the `settled_at` of that `ACTIVE` write's own `at`** and not
+>    a later reading, asserted against a clock advanced between the two calls (§1); the goal's
+>    `USER_STATED` constraints are **unchanged** across the closure and the reopening; and of **two
+>    acts reopening one goal**, the one whose `ACTIVE` write is refused stale calls **neither**
+>    member and retires **no** row the winner established. **And each act overtaken by the other
+>    changes nothing, which is what the watermark is for.** A reopen overtaken by a later closure:
+>    with the reopen's `ACTIVE` write landed and a closing act then fencing at its own higher
+>    version, the reopen's delayed `clear_closure` answers `False`, the fence **stands**, and a
+>    `record` for that goal is refused. And a closing act overtaken by a reopen — a first closure
+>    fenced at its version, a reopen then lifting that fence at a higher one, a **fresh** row
+>    recorded under the reopened goal — the first act's delayed `end_for_goal` at its **own**
+>    version answers **`0`**, leaves that row `ESTABLISHED` and **live**, and leaves the fence
+>    **lifted**, a `record` for that goal still succeeding. **And the unfenced reopen window is
+>    asserted over the ending and not over the asking**: reopening a goal the store holds **no**
+>    closure record of, a `record` between the `ACTIVE` write and the ending **succeeds**, that row
+>    is then ended `GOAL_CLOSED` with the rest, and a route-(d) `ALLOW` **already recorded** against
+>    it with its trail written **is not retracted** by the ending — the row stands `GOAL_CLOSED` and
+>    the trail entry is **unmoved** — on a pre-decision database and a `clear`ed one alike.
 > 6. **The trail and the recheck.** A route-(d) `ALLOW` whose row is ended `GOAL_CLOSED` between
 >    `live_for` and `AuditTrail.record` is **refused** on ADR-0254 §7's disposition check, with no
 >    conjunct added; and `decide` over a goal whose rows are all `GOAL_CLOSED` reaches route (d) in
@@ -1002,21 +1017,22 @@ producer here.
 >    with the rest; a `record` for that closed goal afterwards **succeeds**, which is §1's universal
 >    holding *absent a `clear`* and is the stated cost. **And the scope on ADR-0004 §6 is asserted
 >    rather than assumed**: with a goal the store holds **no** row of fenced, `export` answers
->    **nothing** and the record is reached by no member of the store. `export` before the `clear` carries the
->    `GOAL_CLOSED` rows and **no fence**, ADR-0254 §16's snapshot being over rows.
+>    **nothing** and the record is reached by no member of the store. `export` before the `clear`
+>    carries the `GOAL_CLOSED` rows and **no fence**, ADR-0254 §16's snapshot being over rows.
 > 10. **A database written before this decision, which is what prospectivity leaves.** A store at
 >    the previous `schema_version` holding an `ESTABLISHED` row whose goal is **already closed**:
->    the upgrade ends **nothing**, records **no** closure and rewrites **no** row; the row still
->    appears in `standing` and still covers a call, **until its own `expires_at`** and no
+>    **it opens**, every row it held intact and the closure-record storage created under the new
+>    marker (§9); the upgrade ends **nothing**, records **no** closure and rewrites **no** row; the
+>    row still appears in `standing` and still covers a call, **until its own `expires_at`** and no
 >    longer — asserted by advancing the clock past it. **The reopen is the one path that is
->    closed**: reopening that goal ends the row `GOAL_CLOSED` before clearing the fence, so a
->    call of the reopened goal is covered by **no** row written before the upgrade. **And each
->    reopen call failing is injected, on both databases**: here `end_for_goal` raising after a
->    successful `ACTIVE` write leaves the goal **active and unfenced**, its legacy row **still
->    `ESTABLISHED` and still covering a call** until its own `expires_at`; on a goal closed
->    **under** this decision the same injection leaves it active and **fenced**, every `record`
->    refused; and on both, `clear_closure` raising leaves whatever the ending left and abandoning
->    then reopening recovers it.
+>    closed**: reopening that goal ends the row `GOAL_CLOSED` before clearing the fence, so a call
+>    of the reopened goal is covered by **no** row written before the upgrade. **And each reopen
+>    call failing is injected, on both databases**: here `end_for_goal` raising after a successful
+>    `ACTIVE` write leaves the goal **active and unfenced**, its legacy row **still `ESTABLISHED`
+>    and still covering a call** until its own `expires_at`; on a goal closed **under** this
+>    decision the same injection leaves it active and **fenced**, every `record` refused; and on
+>    both, `clear_closure` raising leaves whatever the ending left and abandoning then reopening
+>    recovers it.
 
 ### 10. This ADR classified, marked, and how it is ratified
 
