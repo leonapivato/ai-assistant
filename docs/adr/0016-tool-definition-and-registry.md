@@ -168,11 +168,16 @@
   predicate of its own; so a reader holding only §1 authors a definition against which nothing can
   be held, and every criterion resting on that tool is unestablished for want of an operand. The
   default is an exception to *"Every field that a permission decision depends on is required"*
-  taken on **the clause's own subject** rather than on the three exceptions recorded above: this
-  field is not one a permission decision depends on at all, being read **after** the act by the
-  verification phase alone and by no policy, gate or bar, and the empty tuple is fail-closed
-  besides — a declaration that declares nothing verifies nothing, and such a goal never reaches
-  `GoalStatus.ACHIEVED`. Every other clause of §1 binds entire, §2's ordering of the declarations
+  taken on the **same** ground as the three exceptions recorded above, and **not** on the field
+  being outside a permission decision's reach: a goal-scoped authorization compares the request's
+  declaration with the row's **by value**, so this field moves a coverage answer exactly as a
+  severity or schema edit does. The empty tuple is an exception because it makes the **opposite**
+  claim to the one §1 refuses — a declaration that declares nothing verifies nothing, no criterion
+  resting on that tool is ever met, and such a goal never reaches `GoalStatus.ACHIEVED` — so the
+  default can only refuse to establish and never establish. **The coupling has one consequence
+  worth stating**: an author adding or editing a postcondition changes the declaration's value, so
+  a row established over the earlier declaration stops covering a call built under the new one and
+  that call asks, which is what every declaration edit already costs. Every other clause of §1 binds entire, §2's ordering of the declarations
   is read by that decision's strength ladder and moved by nothing, and §§3-7 are untouched, §4's
   `parameters_schema` included: the new declaration is a field **beside** that schema and never a
   keyword inside it, for the hazard already recorded here.
