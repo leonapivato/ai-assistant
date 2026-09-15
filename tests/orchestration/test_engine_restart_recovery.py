@@ -608,9 +608,11 @@ def _downgrade_egress_rows(audit_path: Path) -> None:
                 continue
             del binding["planned_with_external_content"]
             del binding["coverage"]
-            # And no ``closed_loop``: ADR-0238 §13 added it after both, and every
-            # older shape forbids an extra key (ADR-0184 §2's ladder).
+            # And no ``closed_loop`` and no ``forecast_reach``: ADR-0238 §13 and
+            # ADR-0260 §11 each added their member after both, and every older shape
+            # forbids an extra key (ADR-0184 §2's ladder).
             del binding["closed_loop"]
+            del binding["forecast_reach"]
             conn.execute("UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(stored), row_id))
         conn.commit()
     finally:
