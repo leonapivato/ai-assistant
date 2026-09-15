@@ -8259,6 +8259,11 @@ def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     assert 'bound.kind === "period"' in reader
     assert "isText(bound.starts_at)" in reader
     assert "isText(bound.ends_at)" in reader
+    # ``minimum`` is the one optional argument in the three shapes: a ``PERIOD`` states
+    # its zone, so an interval without one is a different interval in every zone the
+    # owner might be in (round 7, ``major``).
+    assert "isText(bound.timezone)" in reader
+    assert "bound.timezone === null" not in reader
     assert 'bound.kind === "terms"' in reader
     assert "bound.terms.length > 0" in reader
     assert "bound.terms.every(isText)" in reader

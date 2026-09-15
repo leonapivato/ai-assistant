@@ -707,6 +707,68 @@ async def test_a_bound_carrying_another_kinds_field_is_reported(
         assert "up to 50 GBP" not in await panel.inner_text()
 
 
+async def test_a_period_bound_without_its_zone_is_reported_rather_than_rendered(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A ``PERIOD`` states its zone, and an interval without one is not one.
+
+    Driven through the **payload**, as its two neighbours are.
+    ``ValueBound._the_kind_carries_its_own_arguments_and_no_others`` builds its
+    ``missing`` list from every field the kind takes *except* ``minimum``, so ``PERIOD``
+    requires ``timezone`` and no conforming hub sends one without it. Rendering the two
+    ends anyway states a window that is a different window in every zone the owner might
+    be in — a limit the record does not carry. Adversarial review, round 7, ``major``.
+    """
+    body = {
+        "authorizations": [
+            {
+                "id": "auth-1",
+                "goal_statement": STATEMENT,
+                "tool_id": AUTHORIZATION_TOOL.id,
+                "tool_description": AUTHORIZATION_TOOL.description,
+                "coverage": [
+                    {
+                        "argument": "when",
+                        "fixed": None,
+                        "bound": {
+                            "kind": "period",
+                            "currency": None,
+                            "currency_argument": None,
+                            "maximum": None,
+                            "minimum": None,
+                            "starts_at": "2026-08-29T00:00:00+00:00",
+                            "ends_at": "2026-08-31T00:00:00+00:00",
+                            "timezone": None,
+                            "terms": None,
+                        },
+                        "span": "between the Saturday and the Monday",
+                    }
+                ],
+                "expires_at": "2026-09-13T21:00:00+00:00",
+                "live": True,
+            }
+        ]
+    }
+
+    async def route(one: Route) -> None:
+        await one.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.route("**/authorizations", route)
+
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+        await drive.page.wait_for_selector("#authorizations:not([hidden])")
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("no words for")
+        shown = await panel.inner_text()
+        assert "2026-08-29" not in shown, shown
+        assert "between the Saturday and the Monday" not in shown, shown
+
+
 async def test_an_announcement_names_the_handle_and_where_the_act_is_taken(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
