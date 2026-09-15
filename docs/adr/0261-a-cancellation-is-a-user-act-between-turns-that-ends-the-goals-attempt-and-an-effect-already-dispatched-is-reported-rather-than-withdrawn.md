@@ -613,15 +613,22 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 > walk cannot promise. **An unknown `goal_id` answers `false`**, never a raise, the shape `get_goal`
 > and `attempts_of` already take.
 
-> **Normative — it is a query and never a stored projection, and the cost sits where a bounded
-> answer can be given.** The store computes it from rows it already holds; **no column,
-> index-backed flag, counter or denormalised field is added**, nothing is written at claim time to
-> keep it true, and **no lane caches it** — keeping it out of ADR-0259 §4's *"no lane writes a
-> second record of a fact a status already carries"*, the **authoritative record staying the step's
-> own status** (ADR-0255 §6). **One call per listed goal is what the engine takes.** An engine-side
-> walk would call `attempts_of` then `get_execution` for every execution of every attempt, and both
-> are **append-only and unbounded over a goal's lifetime** (ADR-0249 §5, §12) — so one listed row
-> could traverse a whole history and the listing's page would bound nothing.
+> **Normative — it is a query and never a second authority, and what is forbidden is a record a
+> consumer could read instead of the status.** **No field, flag or counter is added to any `core`
+> type, to `PlanExport` or to any row a consumer reads**, nothing a consumer treats as the answer is
+> written at claim time, and **no lane caches the answer across calls** — which is ADR-0259 §4's
+> *"no lane writes a second record of a fact a status already carries"* binding one surface over,
+> the **authoritative record staying the step's own status** (ADR-0255 §6). **What is not forbidden
+> is how a conforming store finds the answer**: an index, a materialised set or any other structure
+> **private to one implementation**, derived from the statuses and read by nothing outside it, is
+> that implementation's to add and is the difference between a second authority and a lookup
+> strategy; §11 leaves that choice there and this clause does not take it back. **The engine takes
+> one call per listed goal**, where a walk would call `attempts_of` then `get_execution` for every
+> execution of every attempt — both **append-only and unbounded over a goal's lifetime** (ADR-0249
+> §5, §12) — so one listed row could traverse a whole history across a Protocol boundary. **What the
+> member buys is a bound on the *engine's* reads and an answer that is correct at all**, which the
+> walk could not be; **it does not by itself bound a store's own work**, and this decision does not
+> pretend otherwise. **No lane reads this section as a latency guarantee.**
 
 > **Normative — what each surface states, one fixed statement rather than a rendering each adapter
 > invents.** On ADR-0242 §9's construction a surface renders, beside the reply and never in place
@@ -653,9 +660,27 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 > derivation. **No mark, field, flag or store member is added for an in-flight effect**, which is
 > ADR-0259 §4's clause binding one surface over.
 
-> **Normative — a goal abandoned while an effect is unresolved is closed, and the reconciliation
-> it is owed is reached by the reopen act.** The act is **not refused** and **not deferred**: a
-> user who cannot cancel is worse served than one who is told accurately. The step stays
+> **Owner's question, recorded and not taken, beside §6's other.** Whether a user who abandons a
+> goal on which an action **already completed** should be told so **at the act** — rather than the
+> record carrying it on the cancelled attempt's `AttemptOutcome`, which no surface renders today.
+> It is not R78's (above), so nothing is owed; it is a question about how a cancellation should
+> **feel**, which is the owner's. **My recommendation is that they should be told**, and the
+> cheapest carrier is a fifth `GoalAbandonment` member rather than a second field — but it is a
+> product choice and this decision does not take it. Raised twice in review (rounds 5 and 9),
+> disposed of both times against the text above.
+
+> **Normative — R78's *completed* is the completed disposition of an effect that was **in flight
+> at the cancellation**, and a goal abandoned while one is unresolved is closed rather than
+> refused.** The requirement reads *"any completed or uncertain **in-flight** effect is reported
+> accurately"*, and the two adjectives are the two dispositions an in-flight effect reaches —
+> ADR-0259 §3's reconciliation takes an `INDETERMINATE` step to `SUCCEEDED`, *uncertain* becoming
+> *completed*. **Both are carried**: the act answers `ABANDONED_EFFECT_IN_FLIGHT` at the boundary
+> and the listing's field goes false when the reconciliation lands, which arm 10 asserts as a pair.
+> **A step that stood `SUCCEEDED` *before* the cancellation was never in flight at it**, is not what
+> R78 names, and is recorded by §3's outcome — `(CANCELLED, PARTIAL)`; **no lane reads R78 as
+> requiring every successful step of a goal's history to be rendered at the act.** And the act is
+> **not refused** and **not deferred**: a user who cannot cancel is worse served than one told
+> accurately. The step stays
 > `INDETERMINATE`, §5's records are kept, and **ADR-0259 §4's pass runs over the goal on any turn
 > that engages it** — which a reopen is (ADR-0250 §13). **No sweep, job, scheduler or background
 > pass is added**, and ADR-0259 §4's *"nothing schedules it, queues it, retries it out of band"*
@@ -734,10 +759,14 @@ the only thing a live predicate can be.
 
 > **Normative.** **`TurnOutcome` gains exactly one field, `drive_withheld`, typed `DriveWithheld |
 > None` and defaulting to `None`**, and its docstring names this ADR. It is **non-`None` exactly on
-> a turn whose walk ended on a refused claim**, and `None` on every other outcome — every turn that
-> dispatched, stopped on one of ADR-0255 §2's five, or drove nothing at all, and **`None` on
-> ADR-0198 §1's restatement**, which drives nothing and claims nothing. That adds a value to
-> ADR-0198 §2's enumeration **without changing any value it fixes**.
+> a turn that *returned* after a `ClaimRefused` whose post-refusal read established one of the
+> seven states** — which is every turn this section composes — and `None` on every other returned
+> outcome: every turn that dispatched, stopped on one of ADR-0255 §2's five, or drove nothing at
+> all, and **`None` on ADR-0198 §1's restatement**, which drives nothing and claims nothing. **A
+> refusal that propagates returns no `TurnOutcome` at all**, so it is outside the invariant rather
+> than a case of it — which is why the invariant is stated over turns that returned and not over
+> walks that met a refusal. That adds a value to ADR-0198 §2's enumeration **without changing any
+> value it fixes**.
 
 > **Normative — the field names the state the goal is in, and never the reason the store
 > refused.** After the refusal the engine takes **one** read — of the goal and the attempt the
@@ -975,7 +1004,19 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > nothing else. As a dated observation `_SCHEMA_VERSION` reads **4**. `ConversationExport` is
 > untouched.
 
-> **Normative — it invents no user act, and it leaves an open goal alone.** An `ABANDONED` goal was
+> **Normative — the transition is stated whole, because a partial one is not a valid `GoalAttempt`,
+> and the migration writes rows rather than calling `commit_attempt`.** Each migrated attempt is
+> written with `state=CANCELLED`, the `outcome` §3's limbs yield over its own executions,
+> **`ended_at` at the migration's own clock reading** — the instant of the upgrade, the only one the
+> database can honestly supply, the user's act having left no timestamp — and **`version` advanced
+> by one**. That satisfies `GoalAttempt`'s validator, whose terminal shape requires both `outcome`
+> and `ended_at` (ADR-0249 §5). **And ADR-0249 §12's sole-route rule is untouched by the write.** That rule governs **mutation through the
+> Protocol** — *"After the first write, every change goes through this member"* — and an upgrade
+> step is the store's own, below the Protocol and outside any caller's reach, exactly as ADR-0249
+> §12's own first migration of this database was. **No lane exposes the repair as a `PlanStore`
+> member, calls `commit_attempt` from the upgrade, or reads this as licence to write an attempt row
+> anywhere else**: every mutation a *caller* makes still goes through `commit_attempt`, and this is
+> the one write no caller makes. **And it invents no user act, and leaves an open goal alone.** An `ABANDONED` goal was
 > abandoned **by a user act** (ADR-0250 §12 makes `abandon_goal` its only writer), and under §2
 > that act ends the goal's attempts; the pre-change act simply did not take the second write, which
 > is the failure *The gap this closes* names — so the migration **records the consequence of an act
