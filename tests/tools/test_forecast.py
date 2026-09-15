@@ -869,6 +869,33 @@ async def test_a_content_is_the_provider_s_own_octets_joined_in_that_order() -> 
     assert minted.fact == minted.content
 
 
+async def test_a_transcription_carries_what_an_escape_encodes_and_not_the_escape() -> None:
+    """§5's transcription clause is ADR-0230 §5's **decoding**-not-rendering rule (§5).
+
+    §5 closes "This is ADR-0231 §10's transcription-not-rendering rule and ADR-0230 §5's
+    decoding-not-rendering rule at a third producer, and neither is relaxed", and ADR-0230
+    §5 defines that rule in terms: extraction from a container format is "a deterministic,
+    library-performed transformation of bytes into the text they encode". JSON's ``\\uXXXX``
+    is that format's encoding of a character, so the value the response *carried* is
+    ``Clear`` — six characters — and the record carries those six.
+
+    Pinned because the response here spells a character the format did not oblige it to
+    escape, which is where the two readings visibly differ: a producer keeping the raw
+    lexeme would put this system's reading of the transport into a record about a day the
+    provider described as ``Clear``, and §5's own closing words are "no word of this
+    system's is added".
+    """
+    escaped = body(day(conditions="Clear")).replace(b'"Clear"', b'"\\u0043lear"')
+    assert b"\\u0043lear" in escaped, "the case is about an escape that reached the wire"
+    subject = await built(channels=[far_end(response(payload=escaped))])
+
+    outcome = await _read(subject)
+
+    minted = outcome.records[0]
+    assert isinstance(minted, SemanticMemory)
+    assert minted.content == "2026-09-05\nClear\n11.4\n19.2\n0.0"
+
+
 async def test_a_day_whose_transcribed_span_carries_a_line_break_is_dropped() -> None:
     """§5's verbatim rule meeting this adapter's own separator.
 
