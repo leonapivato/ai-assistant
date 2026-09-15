@@ -286,7 +286,11 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
 def test_from_request_transcribes_the_subject() -> None:
     """The caller supplies the id, the clock and the ruling; ``core`` copies the rest."""
     request = ActionRequest(
-        tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-1"
+        tool=tool(),
+        parameters={"to": "a"},
+        step_id="step-1",
+        execution_id="exec-1",
+        intended_action="act-1",
     )
     ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine")
 
@@ -296,6 +300,7 @@ def test_from_request_transcribes_the_subject() -> None:
     assert made.parameters_digest == request.parameters_digest
     assert made.step_id == request.step_id
     assert made.execution_id == request.execution_id  # ADR-0044 §1
+    assert made.intended_action == request.intended_action  # ADR-0266 §7
     assert made.id == "d-1"
     assert made.decided_at == AT
     assert made.resolves is None
@@ -418,6 +423,9 @@ def test_a_decision_authorises_the_request_it_was_made_about() -> None:
         ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-2"),
         ActionRequest(tool=tool(), parameters={"to": "a"}),
         ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-2"),
+        ActionRequest(
+            tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action="act-b"
+        ),
     ],
     ids=[
         "a rebound id",
@@ -427,6 +435,7 @@ def test_a_decision_authorises_the_request_it_was_made_about() -> None:
         "another step",
         "no step at all",
         "another execution",
+        "an act the decision names none of",
     ],
 )
 def test_a_decision_does_not_authorise_a_substituted_request(substituted: ActionRequest) -> None:
@@ -448,6 +457,61 @@ def test_a_decision_does_not_authorise_a_substituted_request(substituted: Action
     )
 
     assert not made.authorises(substituted)
+
+
+@pytest.mark.parametrize(
+    ("act", "authorised"),
+    [("act-a", True), ("act-b", False), (None, False)],
+)
+def test_a_decision_authorises_only_a_request_that_is_an_attempt_at_its_own_act(
+    act: str | None, authorised: bool
+) -> None:
+    """ADR-0266 §7's **sixth conjunct**, in both directions and over the value the
+    coverage was proved *through*.
+
+    *"Without that conjunct a decision taken for one act authorises a later request
+    differing only in the act it is an attempt at — and the whole of this decision's
+    proof is that the amount was quoted **for that act**, so the value the coverage
+    was proved through would be the one value the trail could not compare."*
+
+    **Both directions, and neither is the obvious one on its own**: a decision that
+    names an act does not authorise a request naming another, and does not authorise
+    one naming none either — which is what keeps dropping the value from being the
+    way past the check. The ``None``/``None`` pair is the stored-row case and is the
+    substitution list's own last entry, taken from the other side.
+    """
+    approved = ActionRequest(
+        tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action="act-a"
+    )
+    made = PermissionDecision.from_request(
+        approved,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+        id="d-1",
+        decided_at=AT,
+    )
+
+    offered = ActionRequest(
+        tool=tool(), parameters={"to": "a"}, step_id="step-1", intended_action=act
+    )
+
+    assert made.authorises(offered) is authorised
+
+
+def test_a_decision_written_before_the_field_authorises_a_request_carrying_none() -> None:
+    """ADR-0266 §11: a stored decision decodes with ``intended_action`` ``None``,
+    *"which ``authorises`` then matches only against a request carrying none, the
+    fail-closed direction"* — so no migration is owed and nothing is repaired."""
+    stored = PermissionDecision.model_validate(
+        PermissionDecision.from_request(
+            ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1"),
+            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+            id="d-1",
+            decided_at=AT,
+        ).model_dump()
+    )
+
+    assert stored.intended_action is None
+    assert stored.authorises(ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1"))
 
 
 @pytest.mark.parametrize("outcome", [PermissionOutcome.CONFIRM, PermissionOutcome.DENY])
