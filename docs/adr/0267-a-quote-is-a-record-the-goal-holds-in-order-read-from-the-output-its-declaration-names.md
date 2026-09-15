@@ -6,10 +6,12 @@ and no local check proves it still true
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
   governing quote for the request's intended action **at the instant the row was proposed** — the
-  figure the user's answer was taken over. Without it §11's *"A restart between the question and
-  the answer recovers the row and renders the same projection"* is unsatisfiable for the one value
-  a `MONEY` ceiling rests on, since the figure would have to be re-selected at every recovery and
-  could be a different number by then. It is **provenance**: no comparison of any decision reads
+  figure the user's answer was taken over — **written on §1's path (i) alone and absent on paths
+  (ii) and (iii)**, which write `ESTABLISHED` directly, put no question and so show no figure, and
+  which a path-(ii) correction does not transcribe. Without it §11's *"A restart between the
+  question and the answer recovers the row and renders the same projection"* is unsatisfiable for
+  the one value a `MONEY` ceiling rests on, since the figure would have to be re-selected at every
+  recovery and could be a different number by then. It is **provenance**: no comparison of any decision reads
   it, and it sits **outside** `_AUTHORIZATION_SUBJECT`, so `subject_digest` and §7's recompute
   parity are unmoved. **§11's `AuthorizationProjection` field list**: that model is declared as
   carrying *"exactly `coverage` … and `expires_at`"* and gains `quote`, a `QuoteView | None`
@@ -440,11 +442,20 @@ narrowed window is the failure mode that arrives rarely enough to be attributed 
 
 > **Normative.** **`Authorization` gains one field, `quoted: ActionQuote | None` defaulting to
 > `None`** — **the governing quote for the request's intended action at the instant the row was
-> proposed**, selected by §2's order alone, and **absent** where the row carries no `MONEY` member,
-> where the request carries no `intended_action`, or where no quote named that action. It is
-> written once, by the same `orchestration` code that builds the row and before the question is
-> put, and **is never edited afterwards** — ADR-0254 §1's never-edited-coverage discipline reaching
-> the field beside it.
+> proposed**, selected by §2's order alone. It is written once, by the same `orchestration` code
+> that builds the row and before the question is put, and **is never edited afterwards** —
+> ADR-0254 §1's never-edited-coverage discipline reaching the field beside it.
+
+> **Normative — the rule is total over ADR-0254 §1's three write paths, and it is written on one
+> of them.** `quoted` is written on a **path-(i) proposal** alone, and is **absent** there in three
+> cases: the row carries no `MONEY` member, the request carries no `intended_action`, or no quote
+> of the goal names that action. **It is absent on every path-(ii) and every path-(iii) row**, and
+> a path-(ii) correction **does not transcribe it** from the row it supersedes, the transcription
+> list §1 fixes being unchanged. **The ground is that those paths put no question**: both write
+> `ESTABLISHED` directly, so there is no rendering anyone was shown and no figure an answer was
+> taken over, which is the whole of what this field records; a predecessor's quote would be the
+> figure shown at a **different** act. **No lane infers, back-fills or re-selects one for such a
+> row.**
 
 > **Normative — `quoted` is provenance and no comparison of any decision reads it.** ADR-0254 §13's
 > recheck at dispatch and ADR-0266 §7's evidence route each read the **current** governing quote
@@ -464,6 +475,22 @@ survive, and neither is derivable from the other"*, taken about the span and tru
 reason. **And it is what keeps the two lanes independent**: the engine performs a record lookup by
 position over a goal it already holds, so no coverage comparison crosses a subsystem boundary and
 `permissions` is asked for nothing at proposal time.
+
+> **Normative — the quote the row records and the quote its completeness condition was evaluated
+> over are one value, selected once, in one read.** ADR-0254 §1's completeness condition is
+> evaluated **where the proposal is written** — `orchestration`, in the function that builds the
+> row, which is where `orchestration/authorizing.py` evaluates it today — so the selection this
+> section requires is **not a second selection of anything `permissions` chose**. **No lane selects
+> the governing quote twice within one proposal, carries one across a subsystem boundary, or
+> re-reads the goal between the completeness evaluation and the write.**
+
+**The policy's own reads answer a different question, and on path (i) there is nothing for them to
+have covered.** `ActionPolicy.decide` evaluates ADR-0266 §7 over the goal's **live rows**; a path-(i)
+proposal exists precisely because no live row covered the request, so there is no earlier
+selection to be inconsistent with. **A refresh landing after the proposal's own read changes
+neither the row nor the rendering** — both are that read's — **and changes the ruling**, which
+ADR-0254 §13 takes at every dispatch over the **current** governing quote, so an act whose price
+has moved above the ceiling is uncovered and asked about however the confirmation read.
 
 > **Normative.** `core/types.py` gains **`QuoteView`**, a frozen model with `extra="forbid"` whose
 > fields are exactly three: **`amount`**, a `Decimal`; **`currency`**, an `EncodableText`; and
@@ -521,7 +548,9 @@ none, which ADR-0082 §1 requires as firmly.
 **ADR-0254 §1 — in `Authorization`'s field list alone.** §1 declares that row *"a frozen model with
 `extra="forbid"` whose fields are exactly"* the eleven it lists, and §7 above adds `quoted`, an
 `ActionQuote | None` defaulting to `None`, carrying the governing quote the row was proposed
-against. A reader holding only §1 builds a row that cannot say what the user was shown, so §11's
+against — **written on path (i) alone and absent on paths (ii) and (iii)**, which put no question
+and so show no figure, and which a path-(ii) correction does not transcribe. A reader holding only
+§1 builds a row that cannot say what the user was shown, so §11's
 *"A restart between the question and the answer recovers the row and renders the same projection"*
 becomes unsatisfiable for the one value a `MONEY` ceiling rests on — the figure would have to be
 re-selected at every recovery and could be a different number by then. **Every other clause of §1
@@ -809,7 +838,13 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    quote **field for field**; a row whose request carries no `intended_action`, one for an action
    no quote names, and one carrying no `MONEY` member each carry `quoted` **absent**; and
    `Authorization.subject_digest` is **unchanged** across two rows differing only in `quoted`,
-   which is what keeps ADR-0254 §7's recompute parity. **The projection is then a transcription**:
+   which is what keeps ADR-0254 §7's recompute parity. **And the rule is exercised over all three
+   write paths**: a path-(ii) correction carrying a `MONEY` member is written with `quoted`
+   **absent** and does **not** transcribe the superseded row's, and a path-(iii) opening act
+   carrying a `MONEY` member is written with `quoted` absent. **And the proposal takes one read**:
+   over a store whose goal read is instrumented, building one row reads the goal's `quotes`
+   **once**, and a quote appended between that read and the write leaves the row carrying the
+   quote the read returned. **The projection is then a transcription**:
    the `AuthorizationProjection` carries a `QuoteView` of `120`, `EUR` and that quote's `read_at`,
    **beside** the `CoverageView` carrying the `150` bound and the user's own span, and carries
    `quote` absent exactly where `quoted` is absent. **And a re-render after a refresh to `170`
