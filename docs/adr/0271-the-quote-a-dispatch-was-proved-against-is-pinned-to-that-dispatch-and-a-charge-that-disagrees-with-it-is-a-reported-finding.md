@@ -30,9 +30,9 @@ disagrees with it is a reported finding
   that amount's ISO-4217 code. A reader holding only §1 authors a definition whose acts report no
   charge, so **no call under such a declaration is ever satisfying, no `MONEY` criterion every call
   of which runs under one is ever `met`, and no such goal reaches `ACHIEVED`** (§4 states what this
-  does and does not block) — the charge test being not taken, which is §3's third limb, leaving such a
-  criterion `unestablished` **unless** its own postconditions independently contradict, in which case
-  §3's first limb stands and it is `unmet`.
+  does and does not block) — the charge test being not taken, which is §3's third limb: such a
+  criterion is `unestablished` where its every call is one, and `unmet` where a step's own
+  postconditions independently contradict under §3's first limb.
   **The required-field clause takes a fifth recorded exception, on its own fail-closed ground and
   not on the field being outside a permission decision's reach**: ADR-0254 §3's condition 3 compares
   the request's declaration with the row's **by value**, so this field moves a route-(d) coverage
@@ -255,8 +255,7 @@ producer, no freshness rule and no coverage condition.
 > bound steps into **calls** by `ActionRequest.parameters_digest`, its
 > satisfying/contradicting/**ambiguous** rule over a call, its three results, its *"no fourth result
 > exists"* and its *"a `FAILED` bound step is never decisive"* all bind entire and are what these
-> limbs are stated inside — **a `FAILED` step reaches limb 3 in every case**, the charge test being
-> taken over a `SUCCEEDED` step alone.
+> limbs are stated inside — **a `FAILED` step reaches limb 3 in every case**, the charge test being taken over a `SUCCEEDED` step alone.
 
 > **Normative — a charge that disagrees is the finding, and the finding is a report and never a
 > prevention.** It is reported as **the criterion's own result**, the one §2's machinery produces
@@ -369,13 +368,13 @@ producer, no freshness rule and no coverage condition.
   ADR-0267 left it.
 - **A charge in a currency the quote was not taken in, and any reconciliation between two
   currencies.** §3 compares byte for byte and refuses the pair otherwise, which makes such an act's
-  criterion `unmet` rather than converted. **No lane adds a rate, a table, a tolerance or a
+  step **contradicting** rather than converted, its criterion's result left to §2's calls (§§3-4). **No lane adds a rate, a table, a tolerance or a
   rounding.** Fired by the decision that states what a cross-currency act proves, with its own
   argument against the comparison this decision refuses.
 - **A charge read from anywhere but one key of one object, a charge split across legs, and a
   partial or staged charge.** §2 fixes depth one and one key pair, so a tool reporting a deposit and
-  a balance, a list of line items, or nothing until settlement yields no charge and its criterion is
-  `unestablished`. Fired by the decision stating a wider reading, which owes ADR-0254 §4's
+  a balance, a list of line items, or nothing until settlement yields no charge, so that call is
+  **never satisfying** and its criterion's result is §2's to reach (§§3-4). Fired by the decision stating a wider reading, which owes ADR-0254 §4's
   no-schema rule and ADR-0267 §3's no-model-selector rule, both binding it.
 - **Anything in ADR-0262, ADR-0266, ADR-0267 or ADR-0270 beyond the two scopes this decision
   states.** The booking integration, the two routes, the member vocabulary, the quote's producer,
@@ -461,8 +460,7 @@ producer, no freshness rule and no coverage condition.
 > the row's **by value**, so an edit to it moves a route-(d) coverage answer as a severity edit does;
 > and the default is admissible because **absent makes the opposite claim to the one §1 refuses** —
 > a declaration naming no charged output reports none, so the charge test is never taken, no call
-> under it is ever satisfying and no `MONEY` criterion every call of which runs under one is ever
-> `met` — which is `quoted_output`'s and
+> under it is ever satisfying and no `MONEY` criterion every call of which runs under one is ever `met` — which is `quoted_output`'s and
 > `postconditions`' own ground, and which is a refusal to establish rather than a claim that nothing
 > is established, §3's first limb still reaching a step its own postconditions contradict. **`ChargedOutput` itself is a new type and
 > reaches §1's list in no way.** ADR-0016 §1's `frozen=True` rule, its no-inference rule and §5's re-registration rule bind entire.
@@ -481,8 +479,7 @@ producer, no freshness rule and no coverage condition.
 > by` and already carries **four** decisions' pairs, each accumulated there the same way (§4's
 > *"Independent partial supersessions accumulate on the one line"*). **Retrofitting that line is
 > refused here and is not a record this decision may write**: converting it would oblige a scope text
-> for **ADR-0018**, which that line carries none for, and inventing one would state another decision's
-> record — so the repair is filed at
+> for **ADR-0018**, which that line carries none for, and inventing one would state another decision's record — so the repair is filed at
 > [#2430](https://github.com/leonapivato/ai-assistant/issues/2430) and left to a lane that owns it,
 > exactly as ADR-0270 §7 made ADR-0267's leading-`Accepted,` repair its own recorded act. **No lane
 > reads this as licence to write a new legacy line.**
@@ -493,8 +490,7 @@ producer, no freshness rule and no coverage condition.
 > it (ADR-0015, golden rule 5), and it is implemented in **four lanes and no fifth, exactly one
 > production subsystem each**. **P0**, `permissions`, **first**: the audit trail's `_SCHEMA_VERSION`
 > **+1** with its openable set and its additive create-and-migrate restamp (below), so that code
-> **predating P0** refuses a trail carrying the new shapes at **open** rather than at the first
-> unreadable row. **P1**, the
+> **predating P0** refuses a trail carrying the new shapes at **open** rather than at the first unreadable row. **P1**, the
 > `core` record: `ChargedOutput` with its validator, `ToolDefinition.charged_output` and
 > `PermissionRuling.proved_quote` with its validator, in `core/types.py`, **together with the
 > `PROTOCOL_VERSION` bump and the `wire/envelope.py` log entry those widened shapes oblige**
@@ -548,13 +544,12 @@ producer, no freshness rule and no coverage condition.
 > accepts the marker it set, so a P1-written record reaches it as a refused row rather than a refused
 > open — bounded by the merge order, and **exactly ADR-0262 §11's LA-before-L1 shape**, which this
 > decision follows and does not re-decide. Whether a marker move should be atomic with the widening
-> it protects is ADR-0049's and §11's ground, filed at
-> [#2433](https://github.com/leonapivato/ai-assistant/issues/2433).
+> it protects is ADR-0049's and §11's ground, filed at [#2433](https://github.com/leonapivato/ai-assistant/issues/2433).
 
 > **Normative — the lanes ship the five arms below, each over controlled fakes, and none is
 > demonstrated against a live integration or a real charge.**
 
-1. **The pin is set exactly where the evidence route decided something.** A route-(d) `ALLOW` whose
+1. **The pin is set, and survives the trail, exactly where the evidence route decided something.** A route-(d) `ALLOW` whose
    coverage carries a `MONEY` member met against a governing quote at `"120"`/`"EUR"` records that
    quote on the ruling and on the decision `from_request` builds; the same request with a coverage
    carrying no `MONEY` member, one whose member is met by no route, a `CONFIRM`, a `DENY` and a
@@ -564,7 +559,11 @@ producer, no freshness rule and no coverage condition.
    **unset**, the **route-(b)** shape with `authorised_by` and `authorised_subject` set and
    `authorised_goal` **unset**, and the **route-(c)** shape with `authorised_by` set and
    `authorised_subject` and `authorised_goal` **both unset** — the last two being the arm that fails
-   a validator gating on `authorised_by` alone.
+   a validator gating on `authorised_by` alone. **And both fields survive the durable record**: a
+   decision carrying a `proved_quote` and a `ToolDefinition` carrying a `charged_output`, written to
+   the audit trail and read back after a close and reopen, decodes both **byte for byte** — the arm
+   failing a serialisation that drops either, which would leave verification with no pin to compare
+   against and no declaration to read a charge under.
 2. **The pin is a value and not a pointer, and it is the value condition 6 was proved against.** A
    quote appended to the goal after the ruling leaves the pinned value **unchanged**, and a
    comparison over the pinned decision reads the earlier reading — the arm that fails an
@@ -587,8 +586,7 @@ producer, no freshness rule and no coverage condition.
    are driven by name**: `"not-a-number"` and `""`, which `Decimal` **refuses**, and `"NaN"`,
    `"Infinity"` and `"-Infinity"`, which it **accepts** as non-finite values — each yields **no
    charge and raises nothing**, the arm that fails both an implementation letting an
-   `InvalidOperation` escape into verification and one that compares a non-finite amount against a
-   quote.
+   `InvalidOperation` escape into verification and one that compares a non-finite amount against a quote.
 4. **The comparison and the finding.** Against a pin at `"120"`/`"EUR"` under a member bounded at
    `150`/`EUR`: a charge of `"120"` and a charge of `"100"` each **hold** the test; `"130"` **fails**
    it though it is under the ceiling — the mismatch the ruling calls a finding; `"120"`/`"USD"`
@@ -597,7 +595,7 @@ producer, no freshness rule and no coverage condition.
    `FAILED` step is decisive in **no** case. **And §3's ordering is driven, not assumed**: a
    `SUCCEEDED` step whose operative declaration's postcondition its output **refuses**, under a
    decision carrying **no** `proved_quote` and a declaration carrying **no** `charged_output`, is
-   **contradicting** and its criterion **`unmet`** — the arm that fails an implementation taking the
+   **contradicting** and, as the criterion's only call, its criterion **`unmet`** — the arm failing an implementation taking the
    *charge test not taken* case first and answering `neither`/`unestablished`. **And §2's grouping
    is driven, not assumed**: two `SUCCEEDED` steps sharing one `ActionRequest.parameters_digest`,
    charging `"120"` and `"130"` against that same pin, make that **call** ambiguous and the criterion
@@ -606,12 +604,14 @@ producer, no freshness rule and no coverage condition.
    test straight to a criterion-level `unmet` without §2's calls. **And the mixed case is driven**: a
    satisfying call beside a second `SUCCEEDED` call whose declaration carries **no** `charged_output`
    leaves the criterion **`met`**, while that second call **alone** leaves it **`unestablished`** —
-   the pair fixing what an unreadable charge blocks and what it does not.
+   the pair fixing what an unreadable charge blocks and what it does not. **And the member conjunct
+   is driven on its own**: against a member bounded at `110`-`150`/EUR and a pin at `"120"`, a charge
+   of `"100"` **fails** the test though it agrees with the quote and is under the ceiling — the arm
+   failing an implementation testing currency and *not greater than the quote* and stopping there.
 5. **The finding is reported and prevents nothing.** A failing test yields `unmet`, an
    `AttemptOutcome` of `PARTIAL` where another criterion is met and `FAILED` where none is, and an
    `AttemptReport` carrying **exactly two fields** and no figure; and across the comparison **no
-   `Authorization` is written, settled or revoked, no decision is recorded, no dispatch is refused
-   and no store is written**.
+   `Authorization` is written, settled or revoked, no decision is recorded, no dispatch is refused and no store is written**.
 
 ### 9. This ADR classified, marked, and how it is ratified
 
