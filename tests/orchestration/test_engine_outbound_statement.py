@@ -94,6 +94,8 @@ _INDETERMINATE_FRAGMENT: Final = "this system cannot say whether it reached outs
 
 #: The opening clause of ``composing._PLAN_IS_ABOUT_ACTING``, whose **absence** is what
 #: keeps ADR-0197 §6's "exactly two" closure true on every routed composer (ADR-0264 §14).
+#: It rides the **user** turn, beside the plan block it scopes, which is why every arm
+#: asserting its absence reads the whole conversation and not the system turn alone.
 _PLAN_SCOPE_LEAD: Final = "All of that is about acting"
 
 #: The sentence #2365 records a reply making on a turn that asked for no search.
@@ -203,6 +205,17 @@ def _system_prompt(model: FakeModelProvider, ordinal: int = -1) -> str:
     """The system message the production composing stage assembled, from the fake's record."""
     assert model.calls
     return next(one.content for one in model.calls[ordinal].messages if one.role is Role.SYSTEM)
+
+
+def _whole_conversation(messages: Sequence[Any]) -> str:
+    """Every recorded turn's content, joined — what a composer was handed in total.
+
+    ``_PLAN_IS_ABOUT_ACTING`` rides the **user** turn, beside the plan block it scopes,
+    while ADR-0264 §6's fragment rides the system one. An absence asserted over the
+    system message alone is therefore vacuous for the first of them, so the arms that
+    assert ADR-0197 §6's closure read the whole conversation rather than half of it.
+    """
+    return "\n".join(one.content for one in messages)
 
 
 def _streamed_prompt(streaming: FakeStreamingCompleter) -> str:
@@ -452,9 +465,13 @@ async def test_a_routed_pass_that_is_not_a_park_carries_not_reached() -> None:
     assert statement.reach is OutboundReach.NOT_REACHED
     assert statement.destinations == ()
     assert statement.records == 0
-    prompt = _system_prompt(model)
-    assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
-    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
+    assert _NOT_REACHED_FRAGMENT not in _system_prompt(model), (
+        "ADR-0197 §6's two inputs, unnarrowed"
+    )
+    assert _PLAN_SCOPE_LEAD not in _whole_conversation(model.calls[-1].messages), (
+        "a routed pass renders no plan block — asserted over the **user** turn too, "
+        "which is where that line rides"
+    )
 
 
 async def test_a_routed_park_carries_no_statement_at_all() -> None:
@@ -518,9 +535,13 @@ async def test_the_streaming_routed_pass_carries_it_on_the_terminal_outcome() ->
     assert statement.reach is OutboundReach.NOT_REACHED
     assert statement.destinations == ()
     assert statement.records == 0
-    prompt = _streamed_prompt(streaming)
-    assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
-    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
+    assert _NOT_REACHED_FRAGMENT not in _streamed_prompt(streaming), (
+        "ADR-0197 §6's two inputs, unnarrowed"
+    )
+    assert _PLAN_SCOPE_LEAD not in _whole_conversation(streaming.last_messages), (
+        "a routed pass renders no plan block — asserted over the **user** turn too, "
+        "which is where that line rides"
+    )
 
 
 # --- §13 item 8 through the engine: the drive's fact, forwarded ---------------
@@ -744,9 +765,13 @@ async def test_the_routed_spoken_pass_carries_the_member_and_renders_none() -> N
     assert not any(field.startswith("outbound") for field in type(spoken).model_fields), (
         "ADR-0200 §4: SpokenTurn gains nothing, so the guarantee does not reach the ear"
     )
-    prompt = _system_prompt(model)
-    assert _NOT_REACHED_FRAGMENT not in prompt, "ADR-0197 §6's two inputs, unnarrowed"
-    assert _PLAN_SCOPE_LEAD not in prompt, "a routed pass renders no plan block"
+    assert _NOT_REACHED_FRAGMENT not in _system_prompt(model), (
+        "ADR-0197 §6's two inputs, unnarrowed"
+    )
+    assert _PLAN_SCOPE_LEAD not in _whole_conversation(model.calls[-1].messages), (
+        "a routed pass renders no plan block — asserted over the **user** turn too, "
+        "which is where that line rides"
+    )
 
 
 # --- §13 item 11's unrouted halves: the two composers the routed arms leave behind ---
