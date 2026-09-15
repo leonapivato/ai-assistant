@@ -313,6 +313,56 @@ def test_a_pass_that_composed_no_reply_renders_only_the_reached_statement(
     assert "this turn reached outside this system" in _flat(output.getvalue())
 
 
+@pytest.mark.parametrize("shape", ["composition_failed", "recovered_park"])
+async def test_a_reply_less_pass_renders_only_the_reached_statement_on_the_screen(
+    shape: str, output: StringIO
+) -> None:
+    """§13 arm 10, driven through :func:`cli._render_turn` and not through the helper.
+
+    The arm above pins what the helper does with ``composed_a_reply=False``; this pins
+    that a reply-less pass **reaches** it at all. A renderer that called it only where
+    ``outcome.reply`` was set would leave every arm in this module green while a turn
+    that searched and then composed nothing said nothing about the contact — which is
+    exactly the case §7 says the user is owed "whether or not prose was written".
+
+    Two of ADR-0170 §4's reply-less shapes, because they leave
+    :func:`cli._render_turn` differently: one whose composition failed before anything
+    was published, and one resumed from a **recovered** park, which carries no ``turn``
+    at all and so skips every block below the statement.
+
+    **The two silent values are asserted defensively here.** §7 leaves the member
+    ``None`` on a reply-less pass that established nothing, so a conforming engine does
+    not produce a reply-less ``NOT_REACHED`` — but §13 arm 10 names rendering one "with
+    no reply beside it" as a failure in terms, and a surface is held to what it does
+    with a value it is handed.
+    """
+
+    engine = FakeAssistantEngine()
+    composed = await engine.converse("when does it open?", timeout=PATIENT)
+
+    def _outcome(statement: OutboundStatement) -> TurnOutcome:
+        if shape == "composition_failed":
+            return TurnOutcome(
+                turn=composed.turn, reply=None, reply_degraded=True, outbound_statement=statement
+            )
+        return TurnOutcome(turn=None, reply=None, outbound_statement=statement)
+
+    cli._render_turn(_outcome(_REACHED))
+    reached = _flat(output.getvalue())
+    output.truncate(0)
+    output.seek(0)
+    for silent in (_NOT_REACHED, _INDETERMINATE):
+        cli._render_turn(_outcome(silent))
+        rendered = _flat(output.getvalue())
+        output.truncate(0)
+        output.seek(0)
+        for fragment in _STATEMENTS[silent.reach]:
+            assert fragment not in rendered, f"{silent.reach} rendered with no reply beside it"
+
+    assert "this turn reached outside this system" in reached
+    assert "3 records" in reached
+
+
 @pytest.mark.parametrize(
     "prose",
     [
