@@ -35,7 +35,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import CanonicalDestination, CostBasis, DestinationProtocol
 from ai_assistant.permissions import ConfiguredSearchDestination, ThresholdActionPolicy
 from ai_assistant.tools import WebSearchIntegration, build_web_search_integration
-from ai_assistant.tools.egress import StreamOutboundTransport, WebSearchTransport
+from ai_assistant.tools.egress import HttpsEgressTransport, StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.web_search import (
     ORIGIN_ARGUMENT,
@@ -184,7 +184,7 @@ async def test_a_configured_deployment_builds_one_searcher_over_the_real_transpo
         searcher = integration.searcher
         assert searcher.name
         seam = searcher._transport
-        assert isinstance(seam, WebSearchTransport)
+        assert isinstance(seam, HttpsEgressTransport)
         assert seam.origin == SEARCH_ORIGIN
         assert isinstance(seam._exchange._transport, StreamOutboundTransport)
     finally:

@@ -3239,24 +3239,39 @@ def _past_bad_whitespace(text: str, position: int) -> int:
 
 
 @final
-class WebSearchTransport:
-    """Carry one authorised search to the connected account's origin, or refuse it.
+class HttpsEgressTransport:
+    """Carry one authorised HTTPS request to a registered integration's origin.
 
-    :class:`SmtpEgressTransport`'s counterpart for ADR-0231's kind, and the same
-    division of labour: the **declaration**, the request's shape and what a response
-    transcribes to are the integration's, in
-    :mod:`ai_assistant.tools.web_search`; **this** is where the account's credential
-    is read and where a channel to the world is opened. ADR-0231 §5 designates this
-    module for exactly that — "A ``WEB_SEARCH`` request leaves through
-    ``ai_assistant.tools.egress`` … and through no other module" — and the
-    import-linter contract that confines network transports here is what makes the
-    designation mechanical rather than remembered.
+    :class:`SmtpEgressTransport`'s counterpart for the kinds that ask an origin a
+    bounded question and read one answer, and the same division of labour: the
+    **declaration**, the request's shape and what a response transcribes to are the
+    integration's, in :mod:`ai_assistant.tools.web_search` (ADR-0231) and
+    :mod:`ai_assistant.tools.forecast` (ADR-0260); **this** is where the account's
+    credential is read and where a channel to the world is opened. ADR-0231 §5 and
+    ADR-0260 §6 each designate this module for exactly that — "A ``WEB_SEARCH``
+    request leaves through ``ai_assistant.tools.egress`` … and through no other
+    module", and "the forecast provider is reached from ``ai_assistant.tools.egress``
+    and from nowhere else" — and the import-linter contract that confines network
+    transports here is what makes the designation mechanical rather than remembered.
 
-    **Constructed in exactly one place, and only where a deployment configured an
-    account**: :func:`~ai_assistant.tools.builtin.build_web_search_integration`.
+    **One class and not one per kind, which is what keeps ADR-0148 §6 stated once
+    for HTTPS.** Everything below is expressed over ``self._registration``: which
+    connection record is read, which endpoint is pinned, and which ``tool_id``
+    a refusal names. A second copy of the four pre-transmit conditions — the whole
+    of what stands between an authorised call and a credential leaving the device —
+    would be a place two integrations could drift apart on the one path where drift
+    is unaffordable. The mail transport is a separate class because SMTP is a
+    different protocol with a different session, not because it is a different
+    integration.
+
+    **Constructed in exactly one place per integration, and only where a deployment
+    configured an account**:
+    :func:`~ai_assistant.tools.builtin.build_web_search_integration` and
+    :func:`~ai_assistant.tools.builtin.build_forecast_integration`.
 
     The order in :meth:`fetch` is the decision, not an implementation detail, and
-    every step of it is one of ADR-0148 §6's marked clauses read for this kind:
+    every step of it is one of ADR-0148 §6's marked clauses read for the integration
+    this transport was built for:
 
     1. The binding's connection reference is the registration's, its transport
        endpoint is the one this integration is configured to use, and the **origin
@@ -3278,10 +3293,10 @@ class WebSearchTransport:
     consequence of where the read is rather than as a rule anyone has to remember.
 
     **It holds no ledger, no gate and no clock**, and that is the boundary between
-    this object and the searcher: ADR-0231 §6's three pre-execution checks, §15's
-    spend admission, ADR-0192's claim and completion and ADR-0029 §4's deadline are
-    all decided *before* :meth:`fetch` is entered, by the one component that has the
-    authorised call in hand.
+    this object and the component that drives it: ADR-0029 §2's three pre-execution
+    checks, ADR-0231 §15's spend admission, ADR-0192's claim and completion and
+    ADR-0241 §1's deadline are all decided *before* :meth:`fetch` is entered, by the
+    one component that has the authorised call in hand.
     """
 
     __slots__ = ("_exchange", "_records", "_registration", "_secrets")
@@ -3295,6 +3310,10 @@ class WebSearchTransport:
         exchange: HttpsExchange,
     ) -> None:
         """Bind a transport to one registered integration and one connected account.
+
+        One instance per registered integration: the registration it is handed is
+        what every comparison below is stated over, so two integrations wired to one
+        instance would be one account wearing two names.
 
         Args:
             registration: The integration's egress registration — its connection
@@ -3310,9 +3329,12 @@ class WebSearchTransport:
                 is not this object's, and a transport handed a writing face could
                 delete the credential it reads.
             exchange: The HTTPS exchange, which holds ADR-0231 §5's five properties
-                and its read bound. It reads a credential from nowhere and holds
-                none: it is handed the header that carries one and never the face
-                that would produce one.
+                and the integration's own read bound —
+                ``Settings.search_max_response_bytes`` for the search,
+                ``Settings.forecast_max_response_bytes`` for the forecast read
+                (ADR-0260 §11). It reads a credential from nowhere and holds none: it
+                is handed the header that carries one and never the face that would
+                produce one.
         """
         self._registration = registration
         self._records = records
@@ -3351,8 +3373,9 @@ class WebSearchTransport:
         unless it equals the registration's — a second, independently mutable
         recipient is exactly what ADR-0148 §4's third clause says a seam may not
         re-derive its way around. What the *integration* composed — the path, the
-        parameter names and the fields — is passed beside it, because ADR-0231 §5 puts
-        that choice inside ``ai_assistant.tools`` and outside this seam.
+        parameter names and the fields — is passed beside it, because ADR-0231 §5 and
+        ADR-0260 §6 both put that choice inside ``ai_assistant.tools`` and outside
+        this seam.
 
         Args:
             binding: The egress binding the authorising decision carries. The account
@@ -3370,7 +3393,7 @@ class WebSearchTransport:
 
         Returns:
             The response, whose ``status`` is never a redirect and whose octets took
-            at most ``search_max_response_bytes`` off the channel.
+            at most the exchange's own read bound off the channel.
 
         Raises:
             TransportPinError: If the binding names another connection, another
@@ -3447,11 +3470,11 @@ class WebSearchTransport:
         an identity, both record checks pass, and the query goes out under A's
         credential although the approval named B.
 
-        **The third is ADR-0231 §5's own, and it is here rather than inside
-        :class:`HttpsExchange`.** §5 makes the origin a per-call argument bearing
-        ``x-egress-destination``, so the exchange takes one per call and pins the
-        channel to it; what says that the *ruled* origin is the one this integration
-        is registered for is this comparison, in the object that holds the
+        **The third is ADR-0231 §5's own — and ADR-0260 §6's — and it is here rather
+        than inside :class:`HttpsExchange`.** §5 makes the origin a per-call argument
+        bearing ``x-egress-destination``, so the exchange takes one per call and pins
+        the channel to it; what says that the *ruled* origin is the one this
+        integration is registered for is this comparison, in the object that holds the
         registration. (PR #2074's round-9 architecture finding asked for the opposite
         placement; the waiver's grounds are §5's per-call argument and §17's putting
         the registration in this lane.)
@@ -3476,14 +3499,14 @@ class WebSearchTransport:
             msg = (
                 f"{self._registration.tool_id}: the bound transport endpoint is not the "
                 f"one this integration is configured to use, so the channel would not "
-                f"be to the service the ruling named (ADR-0148 §6, ADR-0231 §5)"
+                f"be to the service the ruling named (ADR-0148 §6)"
             )
             raise TransportPinError(msg)
         if origin != self._registration.transport_endpoint:
             msg = (
                 f"{self._registration.tool_id}: the origin this call was ruled on is not "
                 f"the one this integration is registered for, so a channel would be "
-                f"opened to a recipient no grant covered (ADR-0231 §5)"
+                f"opened to a recipient no grant covered (ADR-0231 §5, ADR-0260 §6)"
             )
             raise TransportPinError(msg)
 
@@ -3546,7 +3569,7 @@ class WebSearchTransport:
             return await self._records.latest(self._registration.reference)
         except ConnectionStoreError as exc:
             _log.warning(
-                "web_search_record_reread_unanswerable",
+                "egress_record_reread_unanswerable",
                 reference=self._registration.reference,
                 error_type=type(exc).__name__,
             )
@@ -3597,6 +3620,7 @@ __all__ = [
     "STARTTLS_SCHEME",
     "BoundCallChangedError",
     "EgressTransportError",
+    "HttpsEgressTransport",
     "HttpsExchange",
     "HttpsExchangeError",
     "HttpsRedirectRefusedError",
@@ -3608,7 +3632,6 @@ __all__ = [
     "SmtpEgressTransport",
     "StreamOutboundTransport",
     "TransportPinError",
-    "WebSearchTransport",
     "parse_https_origin",
     "parse_smtp_endpoint",
     "smtp_message",
