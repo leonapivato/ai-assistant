@@ -398,7 +398,16 @@ does not take that decision by another route.
 > resulting status, and that is deliberate**: the ending and the `GoalStatus` write are two writes in
 > two stores (§1), the ending is taken first, and a closing write that then fails leaves rows this
 > member describes truthfully — they *were* ended by an act that was closing their goal — where a
-> member meaning *its goal closed* would assert an event that did not occur. **What the member never
+> member meaning *its goal closed* would assert an event that did not occur. **One row is described
+> loosely by that meaning, and it is named here rather than given a member of its own**: the row
+> recorded in the **unfenced reopen window** below — written after a reopen's `GoalStatus.ACTIVE`
+> write and before that reopen's ending, on a goal this store was never told closed — is ended with
+> the rest though **the closing act causing its ending predates it**. **`GOAL_CLOSED` is what ended
+> it**, the reopen's ending completing that earlier act rather than asserting a closure of its own,
+> which is the second reason the meaning is stated over the act. **No second member, field or flag is
+> minted for that row**: a disposition minted for it would stand on the graph for as long as the
+> vocabulary does, to mark a window **two databases have and neither keeps** (§9), and `recent` and
+> `export` carry the row whole for an auditor who wants to tell it apart. **What the member never
 > means is that the row lapsed, that the user withdrew it or that a later row replaced it**, which is
 > what distinguishes it from the three §2 refuses below. The vocabulary is *added to and never
 > renamed*, which is ADR-0254 §1's own rule and the licence for this member. **`GOAL_CLOSED` is
@@ -463,11 +472,18 @@ does not take that decision by another route.
 > fence to stand in that window, and the ending reaches what is written in it**: on a goal this
 > store was never told closed — §9's pre-decision database, or a store the user has `clear`ed since
 > — a row recorded between the `ACTIVE` write and the ending is ended `GOAL_CLOSED` with the rows
-> the closure never reached, and that turn's call asks. **It is the same fail-closed direction and
-> the same two conditions**, and costs a **question** rather than leaving an authority. **No lane
-> reorders the pair to close it**: an ending taken before the `ACTIVE` write is one a losing reopen
-> would take over the winner's rows, two acts reopening one goal reading it at the same version. **No lane clears a fence anywhere else or on any other act**,
-> `clear_closure` having exactly this one caller (§1).
+> the closure never reached, which is the row the meaning clause above names. **What the ending costs
+> that turn is what ADR-0254 §13 already gives and nothing stronger**: it is prospective exactly as a
+> revocation is — it *"retracts no decision already recorded and stops no request already claimed"* —
+> so a turn still to read `live_for` finds no live row and **asks**; a turn whose route-(d) `ALLOW` is
+> resolved but whose trail is not yet written is **refused** on ADR-0254 §7's disposition check (§6);
+> and a turn that has **already claimed is not stopped**, which is that section's own residual window
+> **unnarrowed and unwidened**, booked to **A9** by §8 — a second instance of a residual this corpus
+> already carries and **not a new class**. **The fail-closed direction is the same for every call of
+> the goal that has still to read.** **No lane reorders the pair to close it**: an ending taken
+> before the `ACTIVE` write is one a losing reopen would take over the winner's rows, two acts
+> reopening one goal reading it at the same version. **No lane clears a fence anywhere else or on
+> any other act**, `clear_closure` having exactly this one caller (§1).
 
 > **Normative — a failure of either reopen call leaves whatever the closure left, and the two cases
 > differ.** **Where either raises after a successful `ACTIVE` write the act propagates**, and no later
@@ -645,7 +661,9 @@ and not the words the user used.
 > as ADR-0254 §20's arm 4 records for a revocation landing in the same window. **A goal closing
 > between the ruling and a claim already taken is ADR-0254 §13's stated residual and §19's A9 booking,
 > unnarrowed and unwidened**: a settlement is a settlement, and this decision claims nothing stronger
-> about its own than that section claims about a revocation.
+> about its own than that section claims about a revocation. **A reopen's ending reaching a row
+> written in §2's unfenced window is that same residual read one act over**, booked to A9 by §8 and
+> not answered here.
 
 > **Normative — what is untouched, named so a lane cannot read silence as licence.** `Authorization`'s
 > **field list stays closed** and gains nothing. `CoverageMember`, `ValueBound`, `BoundedArgument`,
@@ -800,8 +818,9 @@ producer here.
   neighbourhood.
 - **The cross-store linearisation of a settlement against an act in another store.** §1's fence
   closes the establish-against-closure race **inside one store**; it says nothing about a call
-  already claimed when its goal closes, which is ADR-0254 §13's stated residual window and
-  §19's booking to **A9**, declined there *"on ADR-0193 §9's own refusal of a cross-store
+  already claimed when its goal closes, nor about one that claimed against a row it wrote in §2's
+  unfenced reopen window before that reopen's ending reached it — **one residual read at two acts**,
+  which is ADR-0254 §13's stated residual window and §19's booking to **A9**, declined there *"on ADR-0193 §9's own refusal of a cross-store
   linearisation"*. **This decision neither narrows nor widens it**, and no lane reads the fence
   as having closed it.
 - **A `record` begun before a closure and admitted after a reopen has cleared the fence.** The
@@ -937,10 +956,11 @@ producer here.
 >    one, a **fresh** row recorded under the reopened goal — the first act's delayed `end_for_goal`
 >    at its **own** version answers **`0`**, leaves that row `ESTABLISHED` and **live**, and leaves
 >    the fence **lifted**, a `record` for that goal still succeeding. **And the unfenced reopen window
->    is asserted rather than assumed**: reopening a goal the store holds **no** closure record of, a
->    `record` between the `ACTIVE` write and the ending **succeeds** and that row is then ended
->    `GOAL_CLOSED` with the rest — §2's stated cost, on a pre-decision database and a `clear`ed one
->    alike.
+>    is asserted over the ending and not over the asking**: reopening a goal the store holds **no**
+>    closure record of, a `record` between the `ACTIVE` write and the ending **succeeds**, that row is
+>    then ended `GOAL_CLOSED` with the rest, and a route-(d) `ALLOW` **already recorded** against it
+>    with its trail written **is not retracted** by the ending — the row stands `GOAL_CLOSED` and the
+>    trail entry is **unmoved** — on a pre-decision database and a `clear`ed one alike.
 > 6. **The trail and the recheck.** A route-(d) `ALLOW` whose row is ended `GOAL_CLOSED` between
 >    `live_for` and `AuditTrail.record` is **refused** on ADR-0254 §7's disposition check, with no
 >    conjunct added; and `decide` over a goal whose rows are all `GOAL_CLOSED` reaches route (d) in
@@ -1048,10 +1068,12 @@ authorities gone, its fence standing and every call of it asking until the user 
 it — compensated by nothing and repaired by no sweep (§1, §8), because a compensation cannot tell an
 orphaned fence from one a concurrent closing act is standing on. Between a reopen's `ACTIVE` write
 and its `clear_closure` a turn is refused a row and asks where a fence stood, and where none did
-(§2) a row it writes in that window is ended with the rest and its next call asks. And where a closure under this decision
-had run, a failure of either reopen call leaves that same open-and-fenced state with the same
-repair. A call already claimed when its goal closes is ADR-0254 §13's residual window unchanged and
-A9's to close — a **cross-store** race the fence does not reach and does not claim to.
+(§2) a row it writes in that window is ended with the rest — that turn asking, or refused on
+ADR-0254 §7's disposition check, according to where it had got to. And where a closure under this
+decision had run, a failure of either reopen call leaves that same open-and-fenced state with the
+same repair. A call already claimed — when its goal closes, or when a reopen's ending reaches the
+row that call wrote in the window above — is ADR-0254 §13's residual window unchanged and A9's to
+close: a **cross-store** race the fence does not reach and does not claim to.
 
 **Those that can leave an authority, stated rather than rounded away.** On a **pre-decision
 database** (§9) the ending is prospective: **no upgrade and no sweep** ends a row whose goal closed
