@@ -395,7 +395,14 @@ def _checked_bound(timeout: object) -> timedelta:
             something the event loop does not keep.
     """
     if not isinstance(timeout, timedelta):
-        msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
+        # **Rendered through `core`'s own describer, which never raises.** The value is
+        # the caller's and its `__repr__` is the caller's too, so a message interpolating
+        # it directly could turn the `ValueError` ADR-0241 §1 promises into whatever that
+        # `__repr__` threw — the diagnostic destroying the diagnosis.
+        msg = (
+            f"timeout must be a strictly positive timedelta (ADR-0241 §1); "
+            f"got {describe_untrusted(timeout)}"
+        )
         raise ValueError(msg)
     duration = timedelta(
         days=timedelta.days.__get__(timeout),

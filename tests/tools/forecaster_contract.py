@@ -103,6 +103,32 @@ _SHORT_BOUND: Final = timedelta(milliseconds=50)
 _WAIT_SECONDS: Final = 5.0
 
 
+class _CannotDescribeItself:
+    """A bound outside the domain whose ``__repr__`` raises.
+
+    **The diagnostic must not be able to destroy the diagnosis.** The value and its
+    ``__repr__`` are both the caller's, so an implementation interpolating it into the
+    message that reports it raises whatever that ``__repr__`` threw — in place of the
+    ``ValueError`` ADR-0241 §1 says a bound outside the domain gets. ``core`` carries
+    :func:`~ai_assistant.core.types.describe_untrusted` for exactly this, and this case is
+    what holds every ``Forecaster`` to using something like it.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Raise instead of describing this value.
+
+        Returns:
+            Never.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        msg = "a value that will not say what it is"
+        raise RuntimeError(msg)
+
+
 class _LyingBound(timedelta):
     """A bound of :data:`_SHORT_BOUND`'s duration whose own arithmetic cannot be trusted.
 
@@ -447,6 +473,7 @@ class ForecasterContract:
             pytest.param("30s", id="a-string"),
             pytest.param(timedelta(0), id="zero"),
             pytest.param(timedelta(seconds=-1), id="negative"),
+            pytest.param(_CannotDescribeItself(), id="a-value-whose-repr-raises"),
         ],
     )
     async def test_a_bound_outside_its_domain_is_refused(self, bound: object) -> None:
@@ -499,19 +526,6 @@ class ForecasterContract:
         )
         assert outcome.records == ()
 
-    # --- what a request proposes (ADR-0260 §4) ------------------------------
-
-    #: Whether this implementation has no unconfigured state to exhibit, because it is
-    #: constructed only where a provider is configured — which is what ADR-0260 §12
-    #: requires of ``app/composition.py``'s wiring. The two clauses are both §4's and
-    #: they are not in tension: a deployment that configured nothing holds **no**
-    #: concrete forecaster at all, and the ``None`` arm is what a ``Forecaster`` whose
-    #: provider can be absent — the canonical fake — answers with. So the obligation is
-    #: real and is not every implementation's, which is exactly the shape
-    #: ``CONTRIBUTING.md`` gives ``optional_obligation``.
-    constructed_only_with_a_provider: bool = False
-
-    @pytest.mark.optional_obligation
     async def test_a_bound_whose_own_arithmetic_lies_is_still_enforced(self) -> None:
         """ADR-0241 §1: the bound is the duration the value carries, not what it reports.
 
@@ -542,6 +556,19 @@ class ForecasterContract:
             f"Got: {outcome.refusal!r}"
         )
 
+    # --- what a request proposes (ADR-0260 §4) ------------------------------
+
+    #: Whether this implementation has no unconfigured state to exhibit, because it is
+    #: constructed only where a provider is configured — which is what ADR-0260 §12
+    #: requires of ``app/composition.py``'s wiring. The two clauses are both §4's and
+    #: they are not in tension: a deployment that configured nothing holds **no**
+    #: concrete forecaster at all, and the ``None`` arm is what a ``Forecaster`` whose
+    #: provider can be absent — the canonical fake — answers with. So the obligation is
+    #: real and is not every implementation's, which is exactly the shape
+    #: ``CONTRIBUTING.md`` gives ``optional_obligation``.
+    constructed_only_with_a_provider: bool = False
+
+    @pytest.mark.optional_obligation
     async def test_request_answers_none_where_no_provider_is_configured(self) -> None:
         """§4: ``request`` returns ``None`` "where the deployment has configured no
         forecast provider".
