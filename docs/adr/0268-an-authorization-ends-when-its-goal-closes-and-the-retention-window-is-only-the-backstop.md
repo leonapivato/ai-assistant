@@ -28,11 +28,11 @@ backstop, and an offered change carries the price its acceptance authorises
   `InvalidAuthorizationError` clause, in its enumeration of refused writes.** The **eight**
   signatures stated *"in full, because a roster of names is not a contract"* become **ten**,
   gaining `end_for_goal(goal, /, *, at, goal_version) -> int` — which in one indivisible step
-  settles every row of a goal standing `PROPOSED` or `ESTABLISHED` to `GOAL_CLOSED`, records the
-  goal closed to this store at that version, and answers how many rows it moved, reading no
-  clock and evaluating no liveness — and `clear_closure(goal, /, *, goal_version) -> bool`,
-  which lifts that fence where the record stands at or below the version passed, removes no
-  record and settles nothing.
+  settles every row of a goal standing `PROPOSED` or `ESTABLISHED` to `GOAL_CLOSED`, fences the
+  goal in this store at that version, and answers how many rows it moved, reading no clock,
+  evaluating no liveness and doing none of it where the store's record already stands
+  higher — and `clear_closure(goal, /, *, goal_version) -> bool`, which lifts that fence where
+  the record stands at or below the version passed, removes no record and settles nothing.
   And the
   list of writes `record` refuses gains one further entry, a row whose `goal` the store holds
   fenced, refused in the same indivisible step as the write; **that class is reused and
