@@ -896,6 +896,38 @@ async def test_a_transcription_carries_what_an_escape_encodes_and_not_the_escape
     assert minted.content == "2026-09-05\nClear\n11.4\n19.2\n0.0"
 
 
+async def test_a_duplicate_json_member_is_resolved_by_the_decoder_and_not_by_this_seam() -> None:
+    """The container format's own ambiguity is resolved by the decoding (ADR-0230 §5).
+
+    RFC 8259 admits a repeated member name and fixes no meaning for it; Python's decoder
+    resolves one deterministically, last occurrence winning. ADR-0230 §5 — which ADR-0260
+    §5 imports by name — makes "extraction from a container format" a **decoding**, "a
+    deterministic, library-performed transformation of bytes into the text they encode",
+    and §5's own hazard is a *re-rendering*, "never a re-rendering of a parsed number".
+
+    **ADR-0260 §5's duplicate clause is stated over a different object**: "A day the
+    response names more than once is dropped in every one of its rows" — a day, keyed on
+    the ``date`` field, which the suite's own case and this module's four arms pin. It is
+    not stated over the transport's object members, and reading it onto them would put a
+    duplicate-detecting decoder into the reader ``tools/http_reading.py`` shares with the
+    ``WEB_SEARCH`` seam, whose ADR-0231 asks for no such thing — machinery no decision
+    names, at a seam this lane does not own.
+
+    Pinned so the reading is decided rather than undecided, which is the whole of what is
+    owed here: what the record carries is what the decoder read.
+    """
+    payload = body(day(conditions="second")).replace(
+        b'"conditions": "second"', b'"conditions": "first", "conditions": "second"'
+    )
+    subject = await built(channels=[far_end(response(payload=payload))])
+
+    outcome = await _read(subject)
+
+    minted = outcome.records[0]
+    assert isinstance(minted, SemanticMemory)
+    assert minted.content == "2026-09-05\nsecond\n11.4\n19.2\n0.0"
+
+
 async def test_a_day_whose_transcribed_span_carries_a_line_break_is_dropped() -> None:
     """§5's verbatim rule meeting this adapter's own separator.
 

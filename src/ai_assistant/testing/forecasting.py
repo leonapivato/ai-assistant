@@ -211,8 +211,14 @@ class ScriptedDay:
         try:
             year, month, day = self.named
             midnight = datetime(year, month, day, tzinfo=UTC)
-        except (ValueError, TypeError) as error:
-            msg = f"named must be a year, month and day the calendar has; got {self.named!r}"
+        except (ValueError, TypeError, OverflowError) as error:
+            # **The cause is rendered and the value is not.** A year of ten thousand
+            # digits reaches `datetime` as an `OverflowError` rather than a `ValueError`,
+            # and a message interpolating it would raise a second, unrelated error out
+            # of this one — `repr` refuses an integer past
+            # `sys.get_int_max_str_digits()`. What a caller needs is which of the three
+            # fields the calendar refused, which the cause already says.
+            msg = f"named must be a year, month and day the calendar has ({error})"
             raise ValueError(msg) from error
         # §5 computes the bounds "from the day the provider named and the UTC offset the
         # provider's own response declared for it": a day a whole day long, starting at
@@ -353,6 +359,53 @@ FAKE_FORECAST_READ: Final = ToolDefinition(
         "additionalProperties": False,
     },
 )
+
+
+def _checked_bound(timeout: object) -> timedelta:
+    """The caller's bound as a plain ``timedelta`` this fake can enforce (ADR-0241 §1).
+
+    **The annotation is not the enforcement**, which is why this is checked at all: the
+    value crosses a Protocol boundary from a possibly untyped or dynamically-wired
+    caller, and ``read``'s contract is that there is always a bound.
+
+    **A plain ``timedelta``, rebuilt from the base class's own descriptors, and never the
+    caller's object.** ``isinstance`` admits a subclass, and the window is opened from the
+    duration *after* the call has been recorded — so a subclass whose ``total_seconds``
+    raises would leave a recorded call with no outcome, and one returning ``inf`` would
+    disable the deadline the contract says there always is. The three fields are read
+    through ``timedelta``'s own descriptors, so a subclass shadowing one with a property
+    decides nothing, and the positivity comparison is made against the snapshot so an
+    overridden ``__le__`` decides nothing either.
+
+    The production seam's own guard does this and for these reasons; this package
+    restates it rather than importing it, exactly as it restates ADR-0260 §6's checks —
+    and a canonical fake that took a bound it could not enforce would let a consumer's
+    deadline test pass over a call no deployment could have bounded.
+
+    Args:
+        timeout: The caller's bound, unread and untrusted.
+
+    Returns:
+        A plain ``timedelta`` of exactly the same duration.
+
+    Raises:
+        ValueError: If ``timeout`` is not a ``timedelta``, or is not strictly positive.
+            Strictly positive rather than "expired means do not call", for ADR-0029 §4's
+            reason: expiry is delivered at an await point, so a zero bound would promise
+            something the event loop does not keep.
+    """
+    if not isinstance(timeout, timedelta):
+        msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
+        raise ValueError(msg)
+    duration = timedelta(
+        days=timedelta.days.__get__(timeout),
+        seconds=timedelta.seconds.__get__(timeout),
+        microseconds=timedelta.microseconds.__get__(timeout),
+    )
+    if duration <= timedelta(0):
+        msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {duration}"
+        raise ValueError(msg)
+    return duration
 
 
 def _check_bounds(max_days: int, max_day_chars: int) -> None:
@@ -796,6 +849,8 @@ class FakeForecaster:
 
         Raises:
             ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly positive
+                — measured on the duration ``timedelta``'s own fields carry, so that a
+                subclass overriding its arithmetic states no bound this fake then trusts
                 — ADR-0241 §1's guard, and this fake states it rather than inheriting it,
                 because "there is always a bound" is a claim about every implementation.
                 Refused **before** the call is recorded, so a consumer asserting that a
@@ -810,12 +865,11 @@ class FakeForecaster:
                 **Never converted into ``DEADLINE_EXPIRED``** (ADR-0241 §7): a
                 cancellation this fake did not itself issue is not its expiry.
         """
-        if not isinstance(timeout, timedelta) or timeout <= timedelta(0):
-            msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
-            raise ValueError(msg)
+        duration = _checked_bound(timeout)
         self.read_calls.append(call)
+        deadline = asyncio.timeout(duration.total_seconds())
         try:
-            async with asyncio.timeout(timeout.total_seconds()):
+            async with deadline:
                 # **Inside the window, and ahead of everything else** (ADR-0241 §1):
                 # the bound covers "the seam's own work — the revalidation, … the
                 # response read and the transcription", so a clock started after the
@@ -825,9 +879,14 @@ class FakeForecaster:
                 self._authorised(call)
                 return await self._answered()
         except TimeoutError:
-            # This fake's own deadline, and only ever this one: nothing it awaits raises
-            # a `TimeoutError` of its own accord, so there is no second condition for
-            # `Timeout.expired()` to tell apart here.
+            # **Classification keys on whether *this* deadline fired, never on the
+            # exception's type** (ADR-0241 §7), which is the production seam's own rule.
+            # A `TimeoutError` raised inside the window for some other reason — an
+            # injected `id_factory` is the one callable this fake runs that a consumer
+            # wrote — leaves `expired()` `False` and is not this fake's expiry: it
+            # leaves as itself, unwrapped and with no outcome invented for it.
+            if not deadline.expired():
+                raise
             return ForecastOutcome(refusal=ForecastRefusal.DEADLINE_EXPIRED)
 
     def _authorised(self, call: ToolCall) -> None:
