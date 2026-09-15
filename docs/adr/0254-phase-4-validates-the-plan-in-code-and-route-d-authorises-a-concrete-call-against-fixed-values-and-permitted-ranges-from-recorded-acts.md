@@ -181,6 +181,23 @@
 
   **§16.** The roster grows by four types and five fields. Every other clause of the three sections
   binds entire; `PermissionDecision` gains nothing and no error class is minted.
+- **Partially superseded: 2026-09-15 by ADR-0262 — §16's sentence naming
+  `AuthorizationResolution` *"the face a trail holds"*, together with §7's clause constructing
+  `AuditTrail` implementations with one, in their application to *who may hold and read that
+  Protocol* alone. Nothing else in this ADR.** That decision's verification phase holds the same
+  face, to read the `Authorization` a step's own pinned route-(d) `PermissionDecision` points at —
+  never to authorise anything, never by enumeration, and never through `record`, `settle`,
+  `standing`, `recent` or `live_for`, which `mypy --strict` keeps unnameable on the narrow type
+  exactly as §16 argues. A reader holding only §16 builds a system in which the audit trail is that
+  Protocol's sole holder and `AuditTrail.record` its sole reader, and would refuse the construction
+  that decision's orchestration lane needs. **`AuthorizationResolution` itself is untouched**:
+  `resolve(id) -> Authorization | None` and nothing else, every one of the eight signatures
+  unmoved, the detached-snapshot discipline binding, no member added to it or to
+  `GoalAuthorizationStore`, and `live_for`'s and `record`'s restriction to the policy and the
+  composition root unchanged. §16's structural-typing argument binds **entire** and is what keeps
+  the widening narrow. Every other clause of §7 binds entire — the discriminator, the
+  ten-condition refusal at `record` and the digest recomputation conspicuously so, that decision
+  reading all three as the proof of what a dispatch stood on.
 
 ## Context
 
