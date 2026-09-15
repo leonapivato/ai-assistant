@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     AttemptOutcome,
     AttemptPhase,
     AttemptState,
+    BriefAction,
     BriefElement,
     EvidenceApplicability,
     EvidenceBasis,
@@ -1353,18 +1354,20 @@ def test_the_kind_vocabulary_is_the_six_the_decisions_admit() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 12
+    assert export.schema_version == 13
     assert export.goals == ()
 
 
-def test_export_pins_the_schema_version_to_exactly_twelve() -> None:
+def test_export_pins_the_schema_version_to_exactly_thirteen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
-    ``Literal[12]`` refuses an explicit ``11`` — a document of the shape this export
-    had before ``ActionPlan`` and ``PlanStep`` gained the plan's graph, ``GoalElement``
-    gained an identity and an applicability, and ``GoalEvidence`` gained
-    ``interpreted_output`` does not validate against this contract at all (ADR-0253
-    §10), exactly as a ``10`` stopped validating when this document gained
+    ``Literal[13]`` refuses an explicit ``12`` — a document of the shape this export
+    had before ``Goal`` gained ``intended_actions`` and ``PlanStep`` gained
+    ``intended_action`` does not validate against this contract at all (ADR-0265 §5),
+    exactly as an ``11`` stopped validating when ``ActionPlan`` and ``PlanStep`` gained
+    the plan's graph, ``GoalElement`` gained an identity and an applicability and
+    ``GoalEvidence`` gained ``interpreted_output`` (ADR-0253 §10), a ``10`` when this
+    document gained
     ``evidence``, a ``9`` when it gained ``questions``, an ``8`` when
     ``AttemptEffort`` gained ``kind``, a ``7`` when this document gained ``attempts``
     and ``ActionPlan`` gained ``targets_revision``, a ``6`` when ``ReadKind`` gained
@@ -1374,13 +1377,13 @@ def test_export_pins_the_schema_version_to_exactly_twelve() -> None:
     value, so the advertised version cannot be mislabelled. The positive default is
     what a producer gets for free; only the rejections pin it.
 
-    **The neighbour on each side is asserted and not only the far ones**: ``11`` is
-    the shape this contract had one decision ago and ``13`` is the shape nobody has
+    **The neighbour on each side is asserted and not only the far ones**: ``12`` is
+    the shape this contract had one decision ago and ``14`` is the shape nobody has
     decided, and a ``Literal`` that admitted either would be a document announcing a
     shape it does not have.
     """
-    assert PlanExport(exported_at=_WHEN, schema_version=12).schema_version == 12
-    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13):
+    assert PlanExport(exported_at=_WHEN, schema_version=13).schema_version == 13
+    for stale in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14):
         with pytest.raises(ValidationError):
             PlanExport(exported_at=_WHEN, schema_version=stale)  # type: ignore[arg-type]
 
@@ -1427,7 +1430,7 @@ def test_export_carries_a_whole_supersession_chain() -> None:
         exported_at=_WHEN, goals=(_goal(),), plans=(first, revision), evidence=_histories("g1")
     )
 
-    assert export.schema_version == 12
+    assert export.schema_version == 13
     assert [plan.supersedes for plan in export.plans] == [None, "p1"]
 
 
@@ -1520,7 +1523,7 @@ def test_export_round_trips_through_json() -> None:
     )
     restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
     assert restored == export
-    assert restored.schema_version == 12
+    assert restored.schema_version == 13
     request = restored.plans[0].read_request
     assert request is not None
     assert {ask.kind for ask in request.asks} == {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP}
@@ -1816,11 +1819,20 @@ def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -
     ``goal_id`` is the one identifier and is not a record identifier in ADR-0228 §8's
     sense (§9): it names the *subject* of the call rather than a record in the labelled
     supply, and it is rendered nowhere.
+
+    **``actions`` joins the enumeration under ADR-0265 §4**, which partially supersedes
+    §9's field enumeration, and it is inside the structural claim rather than an
+    exception to it: a :class:`BriefAction` carries "no ``IntendedAction.id``, no
+    effect, no execution, no step, no outcome and no indication of whether the action
+    has already been performed", and its ``serves`` carries the brief's own labels,
+    which are minted per call and persisted nowhere.
     """
     forbidden = {"evidence_id", "span", "record_id", "memory_id", "evidence_row_id", "address"}
 
     assert set(GoalBrief.model_fields) & forbidden == set()
     assert set(BriefElement.model_fields) == {"text", "ground"}
+    assert set(BriefAction.model_fields) & forbidden == set()
+    assert set(BriefAction.model_fields) == {"intent", "serves"}
     assert set(EvidenceDigest.model_fields) & forbidden == set()
     assert set(EvidenceDigest.model_fields) == {
         "requested",
@@ -1837,6 +1849,7 @@ def test_a_brief_and_a_digest_carry_no_field_a_ground_reference_could_sit_in() -
         "constraints",
         "criteria",
         "conditions",
+        "actions",
         "status",
         "deadline",
         "open_questions",
@@ -2002,11 +2015,18 @@ def test_a_proposed_element_is_new_or_retaining_and_never_both() -> None:
 
 def test_a_planner_output_proposes_nothing_by_default() -> None:
     """§7: ``None`` is "the semantically correct answer for a planner that knows
-    nothing of this envelope", and is never read as an error."""
+    nothing of this envelope", and is never read as an error.
+
+    **Three fields since ADR-0265 §2**, which partially supersedes §7's enumeration in
+    the count alone: an empty ``actions`` "means the planner proposes no new intended
+    action", on the identical argument, and "no implementation reads an empty
+    ``actions`` as an error, a degradation or an instruction to re-plan".
+    """
     output = PlannerOutput(plan=ActionPlan(id="p1", goal_id="g1", steps=(), created_at=_WHEN))
 
     assert output.understanding is None
-    assert set(PlannerOutput.model_fields) == {"plan", "understanding"}
+    assert output.actions == ()
+    assert set(PlannerOutput.model_fields) == {"plan", "understanding", "actions"}
 
 
 # --- ADR-0249 §5, §6: the attempt ---------------------------------------------

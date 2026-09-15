@@ -372,6 +372,7 @@ async def test_the_upgrade_touches_the_goal_column_and_nothing_else(path: Path) 
         "constraints": [],
         "criteria": [],
         "conditions": [],
+        "actions": [],
         "status": held["goal"]["status"],
         "deadline": held["goal"]["deadline"],
         "open_questions": [],

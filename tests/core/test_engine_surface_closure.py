@@ -1214,6 +1214,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     here, this lane having been written at 44 and re-bumped once ADR-0260's L1 landed
     first.
 
+    **46 is ADR-0265 §5's L1, and it is straight back under the second limb alone** —
+    the entry above being the run's one both-limbs move rather than a new normal. Two
+    wire-carried ``core`` shapes move: ``GoalBrief`` gains ``actions`` and is what
+    ``TurnResult.goal`` carries, and ``PlanStep`` gains ``intended_action`` and rides
+    inside ``ActionPlan``, which is ``TurnResult.plan``. Both set ``extra="forbid"``
+    and ``project`` renders a model by ``model_dump()``, so a hub at 46 emits
+    ``"actions": []`` on every turn and ``"intended_action": null`` on every step, and
+    a client at 45 refuses each. **The method set does not move and stays at 63**:
+    ADR-0265's L1 adds no ``AssistantEngine`` member and no gateway route, so the two
+    numbers part company again immediately — which is what this pin exists to make a
+    lane say out loud rather than discover. §5 fixes no numeral, so this lane was
+    written 45 and re-bumped to 46 when ADR-0254 §20's Lane 3 landed first, on that
+    entry's own instruction. **``Goal`` is not the ground**, though §5 names it:
+    ``TurnResult.goal`` is a ``GoalBrief`` (ADR-0249 §11) and no frame carries a
+    ``Goal`` — the correction is a dated note on ADR-0265 and closes #2400.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1222,7 +1238,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 45), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (63, 46), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

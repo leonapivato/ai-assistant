@@ -772,6 +772,16 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
     OS keyring, is read through ``SecretStore`` by ``models/`` and ``tools/`` alone, and
     reaches an ``Authorization``'s basis by no route at all. A ``Confirmation``'s
     ``parameters`` already put the user's own argument values in front of this stage.
+
+    **``BriefAction`` joined it with ADR-0265 §4**, because ``GoalBrief`` gained
+    ``actions`` and the brief is one of the four arguments the stage takes. The same
+    judgement, made rather than inherited: §4 closes the model at two fields and states
+    the bar over them in terms — no ``IntendedAction.id``, no effect, no execution, no
+    step, no outcome and no indication of whether the action has already been
+    performed. What is left is prose this system's own planner proposed and a tuple of
+    the brief's own ``C``/``S``/``D`` labels, which are ordinals into the current
+    revision, minted per call and persisted nowhere. Neither field admits a
+    ``SecretStr``, and the model sets ``extra="forbid"``.
     """
     reachable = _reachable_from_the_composing_stage()
 
@@ -790,6 +800,7 @@ def test_the_composing_stages_supply_is_enumerated_so_a_new_field_must_be_judged
         "EgressDestination",
         "EgressSpan",
         "EmailFacet",
+        "BriefAction",
         "BriefElement",
         "EpisodicMemory",
         "ExecutionState",
