@@ -14,7 +14,7 @@ of what crosses the seam
 - **Partially supersedes** [ADR-0266](0266-a-coverage-member-records-the-constraint-the-user-stated-and-the-bound-is-proved-against-the-quote-for-the-intended-action.md)
   — **two scopes. §7's last normative clause, in the limb naming `ActionPolicy.decide` as the only
   site where condition 6 is taken**: the comparison is now taken at `decide` at every dispatch
-  **and** at `ActionPolicy.coverage_met` before a row is written, over the one implementation §7
+  **and** at `CoverageAnswers.coverage_met` before a row is written, over the one implementation §7
   places in `permissions`, which this member is the face of. **And §11's lane-ordering clause, in
   its Lane-2 limb alone**: that lane is briefed after the quote decision **and** after this
   decision's own lane. Every other clause of both sections binds entire, and §5 shows the working.
@@ -74,8 +74,13 @@ renders *"the price as a figure or as a bounded limit with its currency"* beside
 
 - `core/protocols.py`'s `ActionPolicy` carries **two** members, `decide` and `resolve`, and
   `orchestration`'s `StepRunner` already holds one: it calls `decide` before the claim and
-  `proposed_authorization` beside it, in one method. **No new seam and no new composition-root
-  wiring is needed to ask it a third question.**
+  `proposed_authorization` beside it, in one method. **But `ActionPolicy` is held by two components
+  that write no proposal** — `RecipientGrantOperations` (`orchestration/recipient_grants.py`) and
+  parked-read servicing (`orchestration/reads.py`) — which is what §1 cuts the face against.
+- **`permissions` already answers a second face from one object.** `ThresholdActionPolicy` is handed
+  `RecipientGrants` (ADR-0193 §7) and, under ADR-0267 §5, a `GoalQuotes`; `SqliteSourceGrantStore`'s
+  own docstring records the pattern as the one ADR-0021 §3 *"predicted it would take: a second
+  Protocol beside `ActionPolicy`"*.
 - `permissions/_coverage.py` holds condition 6 as `covers`, `covers_arguments` and `uncovered`,
   over a `CoverageSubject` read off the request in one observation. It is module functions, holds
   no store and no seam, and is called by the policy alone.
@@ -92,31 +97,40 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 
 ## Decision
 
-### 1. `ActionPolicy.coverage_met`: one member, and it answers condition 6 and nothing else
+### 1. `CoverageAnswers.coverage_met`: one face, one member, and it answers condition 6 alone
 
-> **Normative.** `core/protocols.py`'s `ActionPolicy` gains **one** member and no lane adds a
-> second: **`async def coverage_met(self, request: ActionRequest, coverage:
+> **Normative.** `core/protocols.py` gains **`CoverageAnswers`**, a Protocol with **one** member
+> and no lane adds a second: **`async def coverage_met(self, request: ActionRequest, coverage:
 > tuple[CoverageMember, ...]) -> CoverageAnswer`**, answering whether `coverage` — the coverage a
 > row this system would write would carry — satisfies **ADR-0266 §7's condition 6** for `request`,
-> in the closed value §2 mints. It is **`async`** because the evidence route reads a durable seam,
+> in the closed value §2 mints. **It is a new Protocol, so the triad is owed in one change** — the
+> Protocol, its shared conformance suite, and a canonical fake in `ai_assistant.testing`
+> (`CONTRIBUTING.md` → "Adding a Protocol"), which is ADR-0267 §5's own shape one seam over. It is
+> **`async`** because the evidence route reads a durable seam,
 > `GoalQuotes.for_action` (ADR-0267 §5), on `CLAUDE.md`'s own rule and as
 > `GoalAuthorizations.live_for` is. Cancelling it is governed by `core/protocols.py`'s cancellation
 > clause (ADR-0060) and its observation of its arguments by ADR-0065's, like every member of that
 > module. This is a **BREAKING** contract change to `core/protocols.py` under golden rule 5 and is
 > flagged as one.
 
-> **Normative — it is on `ActionPolicy` and not on a narrow face beside it, and the ground is that
-> the caller already holds one.** `StepRunner` is handed an `ActionPolicy` today and calls `decide`
-> in the same method that builds the proposal, so the member costs **no new seam, no new
-> composition-root wiring and no new object for a lane to forget to pass**. The narrow-face
-> argument ADR-0097 §3 and ADR-0193 §1 make is about denying a component a capability it should not
-> have; this member **denies rather than grants** — it returns no ruling and writes nothing (§4) —
-> so a separate face would deny its caller nothing it does not already hold and would buy only a
-> second thing to wire.
+> **Normative — it is a face of its own and not a third member on `ActionPolicy`, and the ground is
+> that the answer carries a durable record.** §2's answer returns an `ActionQuote` read from the
+> goal's quotes, so this member **grants a capability rather than withholding one** — which is
+> exactly what ADR-0097 §3's and ADR-0193 §1's narrow faces exist to keep from spreading. On this
+> tree `ActionPolicy` is injected into `RecipientGrantOperations` and into parked-read servicing,
+> neither of which writes a proposal; a member there would give both **a typed route returning a
+> quote for any goal and action**, and `mypy --strict` over `src` and `tests` is what makes a
+> separate face a real withholding rather than a convention — ADR-0254 §16's own structural-typing
+> argument for its three faces. **It is one object and not a second implementation**: `permissions`
+> satisfies both Protocols from the policy it already builds (ADR-0193 §1's *"three faces, one
+> object"*), and the composition root passes that one object to the proposal writer under this
+> annotation, which is ADR-0267 §5's composition-root clause and golden rule 1 rather than an
+> exception to it. **The cost is one parameter on one caller**, and it is the cost ADR-0021 §3
+> already anticipated in *"a second Protocol beside `ActionPolicy`"*.
 
-> **Normative — it takes the coverage tuple and never the row.** ADR-0254 §15 rules that no
-> `ActionPolicy` writes or settles an `Authorization`; handing the policy the row about to be
-> written would put one in its hands for the one question that does not need it. Condition 6 is
+> **Normative — it takes the coverage tuple and never the row.** ADR-0254 §15 rules that an
+> `Authorization` is written and settled by `orchestration` alone; handing the policy the row about
+> to be written would put one in its hands for the one question that does not need it. Condition 6 is
 > stated over the request's user-facing arguments, its declaration's `bounded_arguments`, its
 > `intended_action` and the row's `coverage`, and the first three are on the request — so the
 > request and the tuple are the whole operand, and `id`, `goal`, `tool`, `account`,
@@ -316,10 +330,17 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 > clauses bind entire.** §16 states what `core/types.py` gains; ADR-0266 §9 left that at
 > **fourteen** types and **seven** fields and ADR-0267 §9 at **eighteen** and **twelve**. §2 above
 > adds `CoverageAnswer` — a **nineteenth** type — and **no** further field, so a reader holding
-> only §16 implements a roster test that fails on this decision's own surface, which is the ground
-> ADR-0267 §9 took the same scope on. **§16's `core/protocols.py` roster is untouched**: it
-> enumerates what ADR-0254's own lanes add there and names `ActionPolicy` in none of it, the
-> widening of that Protocol being *"a widening §16 does not close"* as ADR-0267 §9 already read it.
+> only §16 implements a roster test that fails on this decision's own surface. **That §16 opens
+> *"the `core` surface this decision adds"* does not make a later addition a stacked one, and the
+> corpus has ruled so twice**: ADR-0266 §9 took this scope for a fourteenth type and ADR-0267 §9
+> took it again in terms — *"§16 states what `core/types.py` gains, and ADR-0266 §9 left that at
+> fourteen types and seven fields"* — so the roster is a running statement maintained by successive
+> records rather than a frozen count of one decision's lanes, and a third addition recorded as a
+> stacked one would break the chain at its own link. **§16's `core/protocols.py` roster is
+> untouched**: it
+> enumerates what ADR-0254's own lanes add to that module, and a Protocol added by a later decision
+> is *"a widening §16 does not close"* — ADR-0267 §9's own reading, and ADR-0266 §9's, each of which
+> left that roster binding entire while taking the `core/types.py` limb.
 > **Its `PermissionDecision` clause is untouched**, that record gaining nothing here; **its
 > `core/errors.py` roster is untouched**, §4 minting no error class; and its
 > *"`core/config.py` gains nothing at all"*, its wire clause, its lane attribution and its
@@ -337,12 +358,14 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 
 > **Normative.** This ADR is ratified and merged as its own PR before anything implements against
 > it (ADR-0015, golden rule 5), and it is implemented in **one lane and no second**:
-> `CoverageAnswer` in `core/types.py` with its validator, `core/protocols.py`'s member, the
-> obligations above in the shared conformance suite, the canonical fake in `ai_assistant.testing`,
-> and the one implementation in `permissions`, which is `_coverage.py`'s condition 6 reached
-> through the policy. **`CoverageAnswer` is a type and not a Protocol**, so it owes no triad of its
-> own; the member rides an existing Protocol, whose conformance suite and canonical fake grow with
-> it. **The call site is not this lane's**: `orchestration`'s in-place evaluation is replaced by
+> `CoverageAnswer` in `core/types.py` with its validator, `CoverageAnswers` in `core/protocols.py`
+> with **the triad it owes as a new Protocol** — the obligations above in a shared conformance
+> suite and a canonical fake in `ai_assistant.testing` — and the one implementation in
+> `permissions`, which is `_coverage.py`'s condition 6 reached through the policy object that
+> already answers `ActionPolicy`. **`CoverageAnswer` is a type and not a Protocol** and owes no
+> triad of its own. **The composition-root wiring is not this lane's either**: `app/` passes that
+> one object to the proposal writer under the new annotation in the lane that moves the call site.
+> **The call site is not this lane's**: `orchestration`'s in-place evaluation is replaced by
 > the call, and `Authorization.quoted` written from the answer, in **ADR-0254 §20's Lane 2**, which
 > owns the proposal path and its path-(i) writer and is briefed after this lane (§5). **This lane
 > writes no `Authorization`, wires no consequential capability and touches no file under
@@ -453,9 +476,11 @@ wire ground appears, no stored shape moves, and no vocabulary is minted for a re
 exist. What crosses the seam is the one fact the writer cannot compute for itself, and the one
 value that fact was computed against.
 
-**What becomes harder.** `ActionPolicy` gains a third member and `core/types.py` a nineteenth type,
-so every conforming implementation and the canonical fake grow — a cost golden rule 5 makes visible
-rather than cheap. Two lanes now queue behind a third: ADR-0254 §20's Lane 2 and, with it,
+**What becomes harder.** `core/protocols.py` gains a Protocol with its triad and `core/types.py` a
+nineteenth type, and the composition root passes one more reference to one more caller — a cost
+golden rule 5 makes visible rather than cheap, and the one ADR-0193 §1 already rules worth paying
+wherever a face would otherwise hand a capability to a component that has no use for it. Two lanes
+now queue behind a third: ADR-0254 §20's Lane 2 and, with it,
 ADR-0267's population of `quoted` wait on this decision's lane, which itself waits on ADR-0266's L1
 and ADR-0267's Q1. And a caller that wants to know **why** a coverage was not met has nothing to
 read; a decision that gives one a reader widens the member rather than a field.
@@ -470,10 +495,13 @@ a second read of a seam that may have moved and still would not be the value `de
 
 ## Alternatives considered
 
-**A narrow Protocol beside `ActionPolicy`**, on ADR-0097 §3's and ADR-0193 §1's pattern. Declined in
-§1: those faces exist to **deny** a component a capability, and this member denies its caller
-nothing it does not already hold — `StepRunner` has the policy in hand. A second object would be a
-second thing for a composition root to pass and a lane to forget, bought for no guarantee.
+**A third member on `ActionPolicy`**, on the ground that the caller already holds one and the face
+would cost a second reference to wire. Declined in §1, and it was this ADR's shape while the answer
+was a bare `bool`: once the answer carries an `ActionQuote`, a member there hands
+`RecipientGrantOperations` and parked-read servicing a typed route to read any goal's quotes, and
+neither writes a proposal. Cheap wiring is not a reason to widen a contract two components hold for
+something else — ADR-0021 §3 predicted *"a second Protocol beside `ActionPolicy`"* for exactly this,
+and structural typing makes it one object either way.
 
 **A bare `bool`, leaving `Authorization.quoted` to the writer's own selection.** Declined in §2, and
 it was this ADR's second draft. It costs no `core` type and takes no scope on ADR-0267 §7 — but it
@@ -489,9 +517,10 @@ of condition 6's three conjuncts failed. Declined in §2 for want of a reader: n
 no projection renders, and the account a user sees is `decide`'s. A vocabulary minted ahead of the
 surface that reads it is ADR-0249 §10's empty box.
 
-**Passing the proposed `Authorization` itself.** Declined in §1: it hands an `ActionPolicy` the row
-ADR-0254 §15 rules it may never write, for a question that needs only the request and the coverage
-tuple. Narrower is not merely tidier here — it makes the writer clause true by construction.
+**Passing the proposed `Authorization` itself.** Declined in §1: it hands the policy the row
+ADR-0254 §15 rules `orchestration` alone writes, for a question that needs only the request and the
+coverage tuple. Narrower is not merely tidier here — it makes the writer clause true by
+construction.
 
 **Leaving the evaluation in `orchestration` and calling it a permitted duplication.** Declined: it
 is exactly the second implementation ADR-0266 §7 forbids, and the two would be free to disagree the
