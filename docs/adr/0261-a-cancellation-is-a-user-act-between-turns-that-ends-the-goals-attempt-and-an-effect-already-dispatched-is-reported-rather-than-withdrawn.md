@@ -145,18 +145,16 @@ decision does not take either (§11).
 **Revision 1 §H.4's four tests**, quoted whole because they are the acceptance of this decision:
 
 > 1. **Interleaved cancel before claim.** A cancellation commits between the driver's decision to
->    run a step and its claim; assert that the claim is refused, that the `ToolInvoker` was
->    **never entered** (a fake that records entry), that the step is `PENDING` at its stored
->    version, and that the cancellation reports the withdrawal.
-> 2. **Interleaved cancel after claim.** The claim commits first; assert that the step's terminal
->    status is one of `SUCCEEDED`/`FAILED`/`INDETERMINATE`, **never `SKIPPED`**, that
->    `approval_ref` is set, and that the cancellation reports an in-flight effect.
-> 3. **A store-level invariant, in the shared `PlanStore` conformance suite** so both
->    implementations carry it: **no `→ RUNNING` transition is ever accepted whose goal revision is
->    not the stored one.**
-> 4. **An exhaustive two-writer interleaving test** over the cancel/claim pair asserting that in
->    every ordering **exactly one** of {the step was claimed, the cancellation was effective}
->    holds — never both, never neither.
+> run a step and its claim; assert that the claim is refused, that the `ToolInvoker` was **never
+> entered** (a fake that records entry), that the step is `PENDING` at its stored version, and that
+> the cancellation reports the withdrawal. 2. **Interleaved cancel after claim.** The claim commits
+> first; assert that the step's terminal status is one of `SUCCEEDED`/`FAILED`/`INDETERMINATE`,
+> **never `SKIPPED`**, that `approval_ref` is set, and that the cancellation reports an in-flight
+> effect. 3. **A store-level invariant, in the shared `PlanStore` conformance suite** so both
+> implementations carry it: **no `→ RUNNING` transition is ever accepted whose goal revision is not
+> the stored one.** 4. **An exhaustive two-writer interleaving test** over the cancel/claim pair
+> asserting that in every ordering **exactly one** of {the step was claimed, the cancellation was
+> effective} holds — never both, never neither.
 
 **Test 3 is already landed and is relied on rather than re-decided.** Its revision half is
 ADR-0249 §8's `commit_transition` conjunct — *"accepts a **`→ RUNNING`** claim only where the plan
@@ -307,8 +305,11 @@ exhaustive whichever history the database has, and is identical wherever the inv
 > engagement stamp, not the interpretation, not an attempt — and **computes §6's outstanding-effect
 > predicate over that goal at that same instant**, returning it. **`abandon_goal` writes
 > `ABANDONED` through this member and through no other** and takes **no separate outstanding-effect
-> read on the abandoning path**; `ALREADY_CLOSED` and `NO_SUCH_GOAL` stay decided by the act's own
-> first read (ADR-0250 §12) and the member mints no class for either. **No lane gives it a second
+> read on the abandoning path**. **An unknown `goal_id` raises the missing-goal `PlanningError`
+> `set_goal_status` already raises** — never an answer, because an answer would report an
+> abandonment no write performed — so a goal deleted between the act's first read and this call
+> propagates rather than reporting; `ALREADY_CLOSED` and `NO_SUCH_GOAL` stay decided by that first
+> read (ADR-0250 §12) and the member mints no class for either. **No lane gives it a second
 > status argument, a second scope, or a caller outside that act.**
 
 **One call rather than a read and then a write, because the window between them is closed by
@@ -328,8 +329,8 @@ every ordinary abandonment. So the discrimination goes where the atomicity alrea
 
 > **Normative — a retry of an act that did complete answers `ALREADY_CLOSED`, and that loses
 > nothing, because the answer is not the fact's only carrier.** `GoalSummary.effect_in_flight`
-> (§6) is the same predicate over the same scope and keeps saying it on the listing for as long as
-> it is true, which is where §6 has a user read where a goal stands. **No lane re-derives an
+> (§6) keeps saying it on the listing for as long as it is true, which is where §6 has a user read
+> where a goal stands. **No lane re-derives an
 > abandonment answer for a goal already `ABANDONED`**, re-runs the act's writes against one, or
 > gives `ALREADY_CLOSED` a second meaning: it keeps exactly the one ADR-0250 §12 gives it.
 
@@ -417,8 +418,9 @@ refusal is refused by name (Alternatives).
 > **once**, by the same rule §2 already states for `commit_attempt`.** The act re-reads the goal and
 > **every** attempt of it, commits each non-terminal one to `CANCELLED` (this section's own write,
 > with §3's outcome over that attempt's executions), and calls `close_goal_abandoned` again — **the
-> answer being the one that call returns**, since the predicate is computed inside the write that
-> succeeded and no earlier answer is carried forward. **A second refusal propagates** and the act ends there, leaving the `ACTIVE`
+> answer being §6's disjunction over the act as retried**: that call's own result, or `UNCERTAIN` on
+> any attempt this act committed, the retry's included. **No earlier `close_goal_abandoned` result
+> is carried forward**, the write it belonged to not having happened. **A second refusal propagates** and the act ends there, leaving the `ACTIVE`
 > goal with terminal attempts that §2's ordering already rules harmless and that the ordinary act
 > repairs — the bound being deliberate, because an opener that raced the act once can race it
 > again and an unbounded act would spin against it. **No lane loops, sweeps or retries a third
@@ -600,22 +602,38 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 
 > **Normative.** **`GoalAbandonment` gains one member and closes at four**:
 > **`ABANDONED_EFFECT_IN_FLIGHT`**, valued by lower-cased member name like the other three. It is
-> returned **exactly where `close_goal_abandoned` answers true** — §2's one call, whose answer is
-> the outstanding-effect predicate below computed **in the same indivisible step as the
-> `ABANDONED` write** — and **`ABANDONED` is returned in every other abandoning case**. `ALREADY_CLOSED` and
-> `NO_SUCH_GOAL` keep their meaning exactly.
+> returned **exactly where something of the goal was outstanding at any instant of the act**, which
+> is **the disjunction of two facts the act already holds and nothing else**: `close_goal_abandoned`
+> answered **true** (§2 — the predicate below, computed in the same indivisible step as the
+> `ABANDONED` write), **or** any attempt this act cancelled was committed with the `AttemptOutcome`
+> **`UNCERTAIN`**, which §3's limb 1 yields **inside `commit_attempt`'s own step** exactly where a
+> step of that attempt stood `INDETERMINATE` or `RUNNING` when it was made terminal.
+> **`ABANDONED` is returned in every other abandoning case**, and `ALREADY_CLOSED` and
+> `NO_SUCH_GOAL` keep their meaning exactly. **No lane takes a third read for this, adds a store
+> member for it, or derives it from an attempt this act did not cancel.**
 
-> **Normative — the act's answer and the listing's field are the same predicate over the same
-> scope, each read at its own instant: they cannot disagree **about one instant**, and are never
-> required to agree across two.** The act's answer is a **snapshot at its observation boundary**,
-> and that boundary is the closing write's own instant — what the store held when the goal was
-> closed, in the step that closed it — and is not falsified by a step that resolved afterwards, or
-> between that write and the act's return. **A later listing reading `effect_in_flight`
-> false is then the accurate answer to a different question**, which §6's *"and it clears"* rule
-> requires. **No lane makes the act's answer durable, re-reads it to keep it current, or treats the
-> pair as an invariant over time.** Both are **one predicate under two members** —
-> `has_outstanding_effect` for the listing, `close_goal_abandoned`'s answer for the act — and it is
-> **goal-wide and not per-attempt**: a goal reopened after a
+**The disjunction is what R78's *completed* costs, and one write cannot carry it. It is also
+ADR-0244 §11's construction held to rather than abandoned** — *"One operation whose answer *reports*
+which of the two happened puts the discrimination where the atomicity already is"* — because **each
+of the act's two writes computes its half of the answer inside itself**, and neither half is a read
+the engine took. §4 rules the claim-first case and revision 1 §H.2 states its answer — *"The claim
+stands and the action starts. The cancellation answers that there was something in flight"* — and
+the act makes **two** writes: a step standing `RUNNING` when `commit_attempt` ends its attempt can
+reach `SUCCEEDED` before `close_goal_abandoned` runs, at which point the closing predicate is
+truthfully **false** and the listing's is too. Reporting from the closing write alone would then say
+nothing about an effect in flight at the cancellation that completed during it — exactly the
+*completed* disposition R78 names. The attempt's committed outcome is the store's snapshot of the
+other instant, so the two halves cover the act's whole window.
+
+> **Normative — the act's answer and the listing's field answer two different questions, and a
+> disagreement between them is not an inconsistency.** The act answers ***was* anything of this
+> goal outstanding at any instant of this act** — a fact about a closed window, true for ever once
+> true — and the listing answers ***is* anything outstanding now**. **So the act may answer
+> `ABANDONED_EFFECT_IN_FLIGHT` over a goal whose listing row reads `effect_in_flight` false at the
+> very same instant**, and both are accurate; that is R78's *completed* disposition, not a defect.
+> **No lane makes the act's answer durable, re-reads it to keep it current, reconciles the two, or
+> treats the pair as an invariant.** Both are **goal-wide and not per-attempt**: a goal reopened
+> after a
 > cancellation that left an `INDETERMINATE` step carries that uncertainty on an **older** attempt,
 > and an answer scoped to the current attempt would report `ABANDONED` while the listing it is
 > read beside reported an outstanding effect. **§3's limb 1 stays per-attempt** and is a different
@@ -634,20 +652,22 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 > (ADR-0249 §5's *"no transition leaves a terminal member"*): a cancelled attempt recorded
 > `UNCERTAIN` carries that word for ever, truthfully, about **what that attempt produced**. A flag
 > derived from it could never go false, so the listing would report an action outstanding long
-> after ADR-0259 §3 resolved it. **No lane derives this field, or any other live-state fact, from a
-> terminal `AttemptOutcome`**; the resolution `INDETERMINATE → SUCCEEDED` is what makes it false.
+> after ADR-0259 §3 resolved it. **No lane derives this field, or any other *live-state* fact, from
+> a terminal `AttemptOutcome`**; the resolution `INDETERMINATE → SUCCEEDED` is what makes it false.
+> **The act's answer is not such a fact and is the one place an outcome is read** (above): it
+> reports a **closed window**, is never re-read and never clears, so the immutability that would
+> make the listing wrong is exactly what makes the act's answer keep being right.
 
 > **Normative — the existential is the store's, and the listing reads it through a member of its
-> own.**
-> `PlanStore` gains **`async def has_outstanding_effect(self, goal_id: Identifier, /) -> bool`**,
-> **true where any step of any execution any attempt of that goal opened stands `INDETERMINATE` or
-> `RUNNING`** and false otherwise. **It reads inside one indivisible step**, so the answer
-> corresponds to a state the store actually held and **no sequence of concurrent claims and
-> resolutions makes it false while an effect was outstanding throughout** — which a per-execution
-> walk cannot promise. **An unknown `goal_id` answers `false`**, never a raise, the shape `get_goal`
-> and `attempts_of` already take. **`close_goal_abandoned` reports this same predicate over this
-> same scope** (§2), so **no lane gives the act a predicate of its own, a per-attempt scope, or a
-> second definition of *outstanding***.
+> own.** `PlanStore` gains **`async def has_outstanding_effect(self, goal_id: Identifier, /) ->
+> bool`**, **true where any step of any execution any attempt of that goal opened stands
+> `INDETERMINATE` or `RUNNING`** and false otherwise. **It reads inside one indivisible step**, so
+> the answer corresponds to a state the store actually held and **no sequence of concurrent claims
+> and resolutions makes it false while an effect was outstanding throughout** — which a
+> per-execution walk cannot promise. **An unknown `goal_id` answers `false`**, never a raise, the
+> shape `get_goal` and `attempts_of` already take. **`close_goal_abandoned` reports this same
+> predicate over this same scope** (§2), so **no lane gives the act a predicate of its own, a
+> per-attempt scope, or a second definition of *outstanding***.
 
 > **Normative — it is a query and never a second authority, and what is forbidden is a record a
 > consumer could read instead of the status.** **No field, flag or counter is added to any `core`
@@ -669,8 +689,8 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 > **Normative — what each surface states, one fixed statement rather than a rendering each adapter
 > invents.** On ADR-0242 §9's construction a surface renders, beside the reply and never in place
 > of it: for `ABANDONED_EFFECT_IN_FLIGHT`, that the goal was given up **and that an action of it
-> was already claimed and may have been sent, with its outcome unknown**, naming `assistant goals`
-> as where that goal's state is read; and for a listing row whose `effect_in_flight` is true, that
+> had been claimed and may have been sent**, naming `assistant goals` as where that goal's state,
+> and any outcome since established, is read; and for a listing row whose `effect_in_flight` is true, that
 > an action of this goal **is outstanding — claimed, possibly sent, outcome unknown**. **No
 > statement says that the action did not happen, that it did, or that anything the user does will
 > withdraw it** — ADR-0244 §11's *"no caller assumes the **query** did not leave"* generalised as
@@ -720,16 +740,6 @@ found; a ratified store-side conjunct refuses the claim whichever turn, process 
 > on any turn that engages it** — which a reopen is (ADR-0250 §13). **No sweep, job, scheduler or
 > background pass is added**, and ADR-0259 §4's *"nothing schedules it, queues it, retries it out of
 > band"* binds entire.
-
-**One act whose answer reports which of two things it did, rather than two acts.** ADR-0244 §11
-made this choice for the same reason: *"One operation whose answer *reports* which of the two
-happened puts the discrimination where the atomicity already is."* Here the atomicity is the
-store's twice over — `commit_attempt` makes the attempts terminal, and the discrimination is
-computed **inside the write that closes the goal** (§2), which is that sentence taken literally
-rather than approximated by a read placed beside a write. Where a concurrent resolution lands
-after that write, the act's answer and a later
-listing differ and **both are accurate**: that is what a snapshot of a live predicate is, and §6
-states it rather than promising an agreement no unlocked read could keep.
 
 **And the listing carries it because the act's answer is heard once.** A user who comes back
 tomorrow asking *"did that booking go through?"* reads `assistant goals`, and a listing showing an
@@ -1364,7 +1374,8 @@ it.
    `close_goal_abandoned`***: it carries that same conjunct — refused with `StaleExecutionError`,
    **writing nothing**, over a goal holding a non-terminal attempt, including one opened after the
    caller read it — refuses a stale `expected_version`, advances `Goal.version` by one, writes the
-   status and **nothing else**, and **answers the predicate arm 9 pins**. **And the answer is
+   status and **nothing else**, **raises over a goal deleted since the caller read it**, and
+   **answers the predicate arm 9 pins**. **And the answer is
    asserted to be the write's own instant**: with the goal's only outstanding step resolved
    `SUCCEEDED` by a transition admitted only *after* the close commits it answers **true**, and
    with it resolved before, **false** — the pair no read beside the write can produce.
@@ -1378,12 +1389,14 @@ it.
    order is what is asserted.
 6. **The ordering (L2).** A failure injected after the attempt commit and before the status write
    leaves an `ACTIVE` goal with a terminal attempt, **no claim lands under it**, and the next turn
-   opens a new attempt. **And the reporting read's own failure**: a `has_outstanding_effect` that
-   raises leaves the goal `ACTIVE` and **not closed**, the act propagates rather than answering,
-   and a **retry of the act closes the goal and returns the answer** —
-   `ABANDONED_EFFECT_IN_FLIGHT` where a step is still outstanding — taking **no second attempt
-   write** (§2). The arm that would fail without §2's ordering is the one asserting that no
-   sequence of failures durably abandons a goal while losing the answer. **And the concurrent
+   opens a new attempt. **And the closing call's own failure**: a `close_goal_abandoned` that
+   raises leaves the goal `ACTIVE`, **writes nothing** — the status unmoved and `Goal.version`
+   unadvanced, which is what its one-step contract buys — the act propagates rather than answering,
+   and a **retry of the act closes the goal and returns the answer**, taking **no second attempt
+   write** (§2). **The injection is into that member and not into `has_outstanding_effect`**, which
+   the abandoning path does not call (§2); a failure of that member is the **listing's** arm. The
+   arm that would fail without §2's ordering is the one asserting that no sequence of failures
+   durably abandons a goal while losing the answer. **And the concurrent
    opener**: a new attempt opened by another turn **between the act's read of the goal's attempt
    and its status write** makes the status write refuse; the act's one retry cancels that attempt
    and closes the goal; and **no interleaving of `open_attempt` with the act leaves an
@@ -1425,9 +1438,13 @@ it.
    cannot see propagates too** (§7).
 9. **The outstanding-effect predicate, under both members (L1, shared suite).** Every assertion
    below is made of `has_outstanding_effect` **and of `close_goal_abandoned`'s answer**, over the
-   same seeded states, which is what pins §6's *one predicate under two members*. True where any
+   same seeded states, which is what pins them to one definition of *outstanding*. True where any
    step of any execution of any attempt of the goal stands `INDETERMINATE` or `RUNNING`, false
-   otherwise, **false and never a raise** for an unknown goal, and **true for an `INDETERMINATE` step of an attempt that is not
+   otherwise. **The unknown goal is the one case they part, and the arm asserts the difference**:
+   `has_outstanding_effect` answers **false and never raises**, while `close_goal_abandoned`
+   **raises the missing-goal `PlanningError` and writes nothing** — including over a goal deleted
+   between the act's first read and the call — because an answer there would report an abandonment
+   no write performed (§2). Over a known goal, and **true for an `INDETERMINATE` step of an attempt that is not
    the current one** — the reopen-then-abandon case, which is the arm that pins the predicate
    goal-wide. **Asserted against every conforming `PlanStore`**, and over store states constructed
    directly: as a dated observation at `28eb9e82` `AttemptState.EFFECT_UNRESOLVED` has **no
@@ -1456,18 +1473,21 @@ it.
    escape has not been shown to answer from one read. **And merely issuing a concurrent call is not
    this arm**: it may be scheduled wholly before or after the pair, passes, and makes the arm
    probabilistic.
-10. **The two surfaces agree (L2, L3).** `GoalAbandonment` and `GoalSummary.effect_in_flight` are
-    the same call: abandoning a goal whose **older** attempt holds an `INDETERMINATE` step answers
+10. **The two surfaces, and where they part (L2, L3).** Abandoning a goal whose **older** attempt
+    holds an `INDETERMINATE` step answers
     `ABANDONED_EFFECT_IN_FLIGHT`, the listing row beside it reads `effect_in_flight` **true**, and
     **no adapter derives either**. **And it clears**: once that step is resolved `SUCCEEDED` the
     field reads **false**, while the cancelled attempt's `outcome` still reads `UNCERTAIN` — the
     assertion that pins the field to the authoritative record rather than to the immutable
     terminal outcome (§6). **And the race is asserted as correct rather than as a defect**: where
-    the step resolves `SUCCEEDED` **after** the act's read and before the listing is taken, the
-    act still answers `ABANDONED_EFFECT_IN_FLIGHT` and the listing reads **false**, and the arm
-    asserts exactly that pair — the act's answer being a snapshot at its observation boundary
-    (§6) and the listing being the answer for the instant it is asked at. **No arm asserts that
-    the two agree across two instants.**
+    the step resolves `SUCCEEDED` **after** the closing write and before the listing is taken, the
+    act still answers `ABANDONED_EFFECT_IN_FLIGHT` and the listing reads **false**. **And the arm
+    §4's claim-first case rests on**: a step claimed `RUNNING` by another turn, ended `UNCERTAIN`
+    by the act's `commit_attempt` and resolved `SUCCEEDED` **before** `close_goal_abandoned` runs —
+    the closing predicate false, the listing false, and the act **still answering
+    `ABANDONED_EFFECT_IN_FLIGHT`** from the attempt's committed outcome (§6). That is the arm that
+    fails against an answer taken from the closing write alone, and the one R78's *completed*
+    disposition rests on. **No arm asserts that the two agree.**
 
 **No arm demands a duplicate dispatch be demonstrated**, which is A8's acceptance requirement on
 A8's lane (ADR-0255 §12), and **ADR-0255 §13's Q4 rule is what makes the interval safe**: no
@@ -1548,7 +1568,9 @@ chooses the member** (§7).
 round 1, which is where it was found: a terminal attempt's outcome is immutable under ADR-0249 §5,
 so a flag derived from `UNCERTAIN` could never go false and the listing would tell a user an action
 was outstanding for ever — the opposite of the accuracy R78 asks for. The authoritative record is
-the step's status (ADR-0255 §6), and §6 derives from that.
+the step's status (ADR-0255 §6), and §6 derives the **listing's** field from that. **The act's
+answer is the one place the outcome is read, and for the reason that refuses it here**: it reports
+a window that is closed, so the immutability is the property it wants (§6).
 
 **Computing the cancelled attempt's outcome in the engine and committing it with the attempt's
 own compare-and-swap.** Refused after round 1. A claim writes an `ExecutionState` and does not
