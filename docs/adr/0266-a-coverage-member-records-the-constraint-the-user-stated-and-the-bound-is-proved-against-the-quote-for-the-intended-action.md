@@ -13,20 +13,22 @@
   `CoverageMember` stops carrying an `argument` and carries a **`kind`** instead, so a member
   records *what the user stated* and never *which slot it fills*; with it go §2's depth-one
   clause, its no-two-members-name-one-argument rule (which becomes **one member per kind**), its
-  `currency_argument` field on a `MONEY` bound, and `maximum`'s requiredness (a stated **floor**
-  mints a `minimum` and no `maximum`), while each endpoint gains an **exclusivity flag** so that a
-  strictly stated bound stops being recorded as an inclusive one. **§3's condition 6 and its field count**: the set equality
+  `currency_argument` field on a `MONEY` bound, while the bound gains **`maximum_exclusive`** so
+  that a ceiling the user stated strictly stops being recorded as an inclusive one. **`maximum`
+  stays required and `minimum` stays optional**, exactly as ratified: §4 mints only ceilings, so
+  no floor is minted through this decision at all. **§3's condition 6 and its field count**: the
+  set equality
   over argument **keys** and the per-argument rule that reads a member *"naming it"* are replaced
   by **two routes** — a member is met against the **quote recorded for the step's intended
   action**, or, where the declaration declares an argument at the member's kind, against that
   argument — and each endpoint names exactly one: a `MONEY` **`maximum`** needs the quote, and the
-  declared argument **as well** where one exists, while a `MONEY` **`minimum`** needs the declared
-  argument and is met by no quote; the validator refusing a member
+  declared argument **as well** where one exists; the validator refusing a member
   that names a system-supplied argument goes with the field it read, its rule preserved by a
-  refusal on a new declaration field; and `ToolDefinition` gains **one** further field,
-  `bounded_arguments`. **§4's `MONEY` reading, in two limbs**: the currency is read off the
+  refusal on a new declaration field; and `ToolDefinition` gains **two** further fields,
+  `bounded_arguments` and `quoted_outputs`, so §3's *"`ToolDefinition` gains one field"* is
+  over-narrow by two. **§4's `MONEY` reading, in two limbs**: the currency is read off the
   **quote** on the evidence route and off the **declaration** on the argument route, never off the
-  bound; and its two inequalities are read strictly where the bound's own flag is set. **§9 clause
+  bound; and its `maximum` inequality is read strictly where `maximum_exclusive` is set. **§9 clause
   (ii)**: *"an argument the act's own words bear on"* is given its mechanical test — agreement
   between the constraint's kind and the kind of the thing it is proved against, never numeric fit
   and never a model's nomination. **§8's and §10's resolution enumeration, in the closure at three
@@ -309,13 +311,20 @@ rules did not. §10 books the floor with what fires it.
 > **second** negation token inside the prefix takes the span out of every form; and an inflected
 > spending word (*"never spending over 100 euros"*) is not a member of the closed set.
 >
-> **And a negation anywhere before the span refuses the reading**, because a truncation can drop
-> one: a `STATED_BOUND` reading is refused where **any token of the negation vocabulary occurs in
-> the act's own recorded utterance before the span begins**, folded and tokenised as above, so
-> *"do not spend under 100 euros"* mints nothing from the span *"under 100 euros"*. That is
-> deliberately blunt and refuses *"I'm not fussy — spend under 100 euros"* too, which costs a
-> question. The negated rows still read, their own negation being **inside** the span they
-> match.
+> **The negated rows read because their own negation is inside the span they match**, which the
+> paragraph below is stated over.
+>
+> **A negation anywhere before the span refuses every reading, not only this table's.** **No
+> member of any kind is minted from an element whose `span` is preceded, anywhere in the act's
+> own recorded utterance, by a token of the negation vocabulary**, folded and tokenised as above.
+> A model chooses the span and a truncation can drop the word that reverses it: *"do not spend
+> under 100 euros"* would otherwise mint a ceiling from *"under 100 euros"*, *"do not send to
+> Alice"* a `TERMS` member fixing *"Alice"* from `AS_STATED`, and *"do not book Sunday"* a `PERIOD`
+> member from `DATE_FROM_CONTEXT` — and the last two are authorities in exactly the direction the
+> user forbade. **The bar is over every reading of this section**, it is deliberately blunt, and
+> it refuses *"I'm not fussy — spend under 100 euros"* along with them, which costs a question.
+> **It closes only what this vocabulary can see**: a refusal spelled *avoid*, *skip* or *rather
+> not* leaves the truncation readable, which §10 books and ADR-0249 §7 owns.
 
 > **Normative — a strict word mints a strict bound, and the endpoint is never widened.**
 > *"under 100 euros"* mints `maximum` `100` with `maximum_exclusive`, so a call at exactly `100`
@@ -457,8 +466,14 @@ absolute again: **no model output reaches any input of a quote**.
 > `execution_ids` (ADR-0255 §3) and `step_id` a step of it — **and one whose `read_from` names a
 > step whose own `intended_action` is not the quote's, or whose declaration carries no
 > `QuotedOutput` at the quote's `kind` naming `read_from.field`, so a quote can never be read
-> under one act and offered under another, nor read from a field the tool never declared** — the window ADR-0265 §4 closes at the store for a plan, closed here for
-> every reference the quote carries and with the same error class. **That is what makes the export
+> under one act and offered under another, nor read from a field the tool never declared. **And it
+> recomputes every derived field and refuses a mismatch**: the `value` at that field of that
+> execution's stored output, the `currency` at the declared `currency_field`, and the
+> `arguments_digest` over that step's own request's user-facing arguments. A command is therefore
+> a **pointer the store checks**, not a value it is told, and a caller reaching past
+> `orchestration` cannot record a price the execution does not hold.** That is the window ADR-0265
+> §4 closes at the store for a plan, closed here for every reference and every derived value a
+> quote carries, with the same error class. **That is what makes the export
 > closure and the deletion cascade true rather than asserted**: every identifier on a quote
 > resolves inside the goal the quote rides in, so ADR-0014 §5's rule is satisfied by construction
 > and `delete_goal` leaves nothing dangling.
@@ -632,11 +647,11 @@ Sunday price is `170` is covered by nothing, and the user is asked about that co
 
 > **Normative.** **`orchestration` mints every coverage member and every quote, and nothing else
 > does.** No `ActionPolicy`, no `ToolRegistry`, no store, no reader, no interface adapter, no tool
-> and no model **mints, writes, repairs or supplies the recorded value of** one. The exclusivity
-> is over the **mint and the durable provenance**: a planner supplies validated selectors that
-> **influence** which output field a quote is read at (§6) and supplies no recorded value, and no
-> other component does even that. This is ADR-0254 §15's writer clause reaching the values §5 and
-> §6 add.
+> and no model **mints, writes, repairs or supplies any part of** one. **No plan and no model
+> names the output field a quote is read at**: that is the declaration's, on
+> `ToolDefinition.quoted_outputs` (§6), and it is the whole of why this clause can be absolute
+> where an earlier draft's was not. This is ADR-0254 §15's writer clause reaching the values §5
+> and §6 add.
 
 > **Normative — no durable value of this decision is ever taken from a model, and the list is
 > exact.** A planner envelope carrying a **`CoverageMember`**, a **`ValueBound`**, an
@@ -648,13 +663,15 @@ Sunday price is `170` is covered by nothing, and the user is asked about that co
 > unprovenanced.
 
 > **Normative — a model contributes exactly one thing to this decision, and it is the span.** An
-> interpretation element's span is checked against that turn's own utterance by ADR-0249 §7 and
-> read only through §4's closed table, which mints a **ceiling or nothing**, so a differently
-> chosen span yields a different or no member and never an authority in the direction the user did
-> not give. **Nothing else a model produces reaches any input of §4, §5, §6 or §7**: the field a
-> quote is read at is the **declaration's** (§6), the argument a member meets is the
-> declaration's (§7), and the identifiers are the loop's. **A model names no argument key, no
-> output field, no currency key and no identifier anywhere in this decision.**
+> interpretation element's span is checked against that turn's own utterance by ADR-0249 §7, and
+> §4 bounds what a differently chosen one can do in two ways: **its table mints a ceiling or
+> nothing**, so no truncation yields an authority in the direction the user did not give; and **no
+> reading of §4 is taken at all where a negation stands before the span**, which is what stops
+> *"do not send to Alice"* from minting a `TERMS` member fixing `"Alice"`. Neither closes the
+> class whole, and §10 books what remains. **Nothing else a model produces reaches any input of
+> §4, §5, §6 or §7**: the field a quote is read at is the **declaration's** (§6), the argument a
+> member meets is the declaration's (§7), and the identifiers are the loop's. **A model names no
+> argument key, no output field, no currency key and no identifier anywhere in this decision.**
 
 ### 9. What this records against earlier ADRs, clause by clause, under ADR-0082 §1
 
@@ -682,10 +699,10 @@ and never a path"*, rules that *"No two members of one `Authorization` name the 
 gives a `MONEY` bound a `currency_argument` as *"the whole of the association between an amount
 and the currency it is denominated in"*, and makes `maximum` required. §3 above replaces
 `argument` with `kind`, restates the no-two-members rule over the kind, moves the currency key to
-the declaration and the quote, makes both endpoints optional with one present, and gives each an
-**exclusivity flag**. A reader holding only §2 authors a member that claims to know which slot it
-fills, cannot represent a floor at all, and records *"under 100"* as a bound a call at exactly 100
-satisfies. **Every other clause binds entire**: the two-shapes validator, `BoundKind`'s members
+the declaration and the quote, and gives `maximum` an **exclusivity flag**; `maximum` stays
+required and `minimum` stays optional, exactly as ratified, §4 minting no floor at all. A reader
+holding only §2 authors a member that claims to know which slot it fills and records *"under
+100"* as a bound a call at exactly 100 satisfies. **Every other clause binds entire**: the two-shapes validator, `BoundKind`'s members
 and their vocabulary rule, the three kinds' own fields and refusals, the
 every-other-argument-is-fixed-only default, and the asymmetry argument that *"A comparison the
 system gets wrong in the permissive direction authorises a call the user did not authorise"* —
@@ -701,8 +718,10 @@ comparison in which a price must be an argument of the call, and refuses every b
 is a consequence of the site and the dates — the failure the owner's ruling of 2026-09-14 names.
 With the `argument` field goes the validator making a row whose coverage names a system-supplied
 argument not constructible; **its rule is preserved** by §7's refusal on `bounded_arguments`. And
-`ToolDefinition` gains **one** further field, so *"`ToolDefinition` gains **one** field"* is
-over-narrow by one. **Every other clause binds entire**: conditions 1-5 — condition 3's by-value
+`ToolDefinition` gains **two** further fields — `bounded_arguments` (§7) and `quoted_outputs`
+(§6), the second being what lets any completed read become a quote at all — so *"`ToolDefinition`
+gains **one** field"* is over-narrow by two, and a reader implementing from §3's inventory alone
+authors a declaration no quote can ever be read from. **Every other clause binds entire**: conditions 1-5 — condition 3's by-value
 declaration comparison conspicuously so — the user-facing classification and its empty default,
 the fill-before-the-fit-test and `parameters_digest` clauses, the bar-stays-monotone clause, the
 seam/policy split, the coverage-never-widens rule, the ADR-0021 §5 monotonicity clauses, the
@@ -767,7 +786,7 @@ clears the other"*, which stays true. **ADR-0252** is read and **not moved**: §
 its two bases and per-basis verdict vocabularies, §6's four tests, §7's conflict rule, §11's digest
 and §§12-13's store, retention and export are untouched, and §6 states why a quote is a record of
 its own instead. **ADR-0253** is superseded in nothing: §8's `InterpretedOutput` is reused
-**unaltered**, composed by the loop from a plan-carried selector exactly as that section composes
+**unaltered**, composed by the loop from the declaration's own field exactly as that section composes
 it from a `StepOutputRef`, so its *"No model supplies any of the three"* is honoured by the same
 construction, and this decision now adds **no** field to `PlanStep` at all, so §9's label-space
 count and resolve-once discipline are untouched and nothing of that ADR is reached.
@@ -817,11 +836,13 @@ relied on rather than superseded.
   idempotency key and a client reference are per-call identity, and a **locale** is an input a
   price can depend on. **This decision draws no line between them, and §11 makes drawing it a
   prerequisite of the gate.** Fired by the decision that classifies a system-supplied key.
-- **A wider class of model-chosen span than §4's truncation test closes.** That test refuses a
-  span the table's own negation grammar would have extended; a negation the vocabulary does not
-  carry leaves a truncation readable. **ADR-0249 §7 owns that question** — its span check is a
-  containment test, never a check of what the model meant. Fired by the decision that constrains
-  how a span is chosen.
+- **A model-chosen span that reverses the user's words without a negation this vocabulary
+  carries.** §4 bars every reading where a negation token stands before the span, and its table
+  mints only ceilings, so what remains is a refusal spelled *avoid*, *skip* or *rather not* in
+  front of a `TERMS` or `PERIOD` span — *"avoid sending to Alice"* still yielding a member fixing
+  *"Alice"*. **ADR-0249 §7 owns that question**: its span check is a containment test, never a
+  check of what the model meant. Fired by the decision that constrains how a span is chosen, or
+  that gives an element a polarity the loop can read.
 - **What makes a `DATE_FROM_CONTEXT` resolution total over a span** — the reader that turns
   *"Sunday"* into a half-open interval in a zone. §4 states what such a resolution **mints** and
   not how it is **taken**. **Until it lands, the only readings an element takes are
@@ -911,20 +932,18 @@ relied on rather than superseded.
    span `"4 stars"` mints **no `MONEY` member**: it matches no form of §4's table, so `AS_STATED`
    gives it a `TERMS` member. **2(b):** that `TERMS` member is met by a `MONEY` quote in no case
    and by a `MONEY`-declared argument in none, whatever number either carries.
-3. **A stated floor, the endpoints, and the negation rule at its edges.** **3(a):** span
-   `"at least 150 euros"` mints `minimum` `Decimal("150")`, **no** `maximum` and **no**
-   `minimum_exclusive`; `"more than 150 euros"` mints the same `minimum` **with** it;
-   `"under 100 euros"` mints `maximum` `100` **with** `maximum_exclusive` and `"at most 100
-   euros"` mints it without; `"never spend over 100 euros"` mints an **inclusive** `maximum` of
-   `100`; `"never notify me about charges over 100 euros"`, `"not exactly 100 euros"` and
-   `"never spending over 100 euros"` each mint **nothing**; and the span `"under 100 euros"` taken
-   from the utterance `"not under 100 euros"`, and the span `"over 100 euros"` taken from
-   `"under no circumstances spend over 100 euros"`, each mint **nothing**, a negation standing
-   before the span in both.
+3. **Only ceilings, the endpoints, and the negation refusals.** **3(a):** span `"under 100 euros"`
+   mints `maximum` `100` **with** `maximum_exclusive`, `"at most 100 euros"` mints it without, and
+   `"never spend over 100 euros"` mints an **inclusive** `maximum` of `100`. **Nothing at all** is
+   minted by `"at least 150 euros"`, `"more than 150 euros"` or `"over 150 euros"`, none of which
+   is a form of the table; by `"never notify me about charges over 100 euros"`, `"not exactly 100
+   euros"` or `"never spending over 100 euros"`; or by the span `"under 100 euros"` taken from the
+   utterance `"not under 100 euros"`, the span `"over 100 euros"` taken from `"under no
+   circumstances spend over 100 euros"`, the span `"Alice"` taken from `"do not send to Alice"`
+   and the span `"Sunday"` taken from `"do not book Sunday"` — the last four each refused by the
+   negation standing before the span, over **every** reading and not the table's alone.
    **3(b):** against an exclusive `maximum` of `100` a value of exactly `"100"` does **not**
-   satisfy and against an inclusive one
-   it does, and the same both ways at a `minimum`; and a `MONEY` member carrying a `minimum` is
-   met by **no quote** however large, and is met at a declared money argument.
+   satisfy and against an inclusive one it does.
 4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
    constructible. **4(b):** a goal carrying two `USER_STATED` constraints that each read as
    `MONEY` mints **neither**, and a `PERIOD` constraint beside them still mints its own — with
@@ -940,7 +959,8 @@ relied on rather than superseded.
    `read_from` names an execution or step that is not a completed one, and one whose `read_from`
    names a completed execution of **another attempt of the same goal**, of a step whose own
    `intended_action` differs from the quote's, or of a field the step's declaration names in no
-   `QuotedOutput` at that kind.
+   `QuotedOutput` at that kind; and it refuses a command whose `value`, `currency` or
+   `arguments_digest` differs from what it recomputes from that execution and that declaration.
    **5(c):** after a step whose declaration carries a `QuotedOutput` completes, the minted quote
    carries the step's `intended_action`, the attempt it ran under, the value at the **declared**
    field of that step's stored output, the currency at `currency_field`, a `read_from` naming that
@@ -1039,16 +1059,21 @@ nothing**, so a planner cannot turn *"not under 100 euros"* into a ceiling; **th
 asymmetric on purpose**, bare *"less than 100 euros"* minting nothing; and **a strict word mints a
 strict bound**, which is why `ValueBound` gains the two flags.
 
+**And one residual is the loudest.** A model chooses the span, and §4 bars only the refusals this
+negation vocabulary carries; *"avoid sending to Alice"* still yields a `TERMS` member fixing
+*"Alice"*. The table's ceiling-only reading closes the money direction by construction, and
+ADR-0249 §7 owns what is left.
+
 **These are the cases that would falsify the design.** A deployment where users state bounds the
 table does not carry, so route (d) is never reached. A quoting read and a booking whose argument
 sets differ by a key, so the digest never matches and every act asks — the practical falsifier,
 and the one to measure first. A goal whose investigation and whose act fall in **different
 attempts** as a matter of course, so the attempt conjunct refuses every quote. A declaration whose
 sole `MONEY` argument is an amount the user **receives**, where a ceiling stated about spending
-meets it on the argument route — which is why §7 refuses to prove a **floor** against a quote at
-all, and why the remaining case is the declaration author's. And a planner naming the wrong output
-declaration whose `quoted_outputs` names the wrong field, which is an integration defect rather
-than a per-turn one and which the tool's own author is the only party able to make.
+meets it on the argument route — which is why §4 mints no floor at all, and why the remaining case
+is the declaration author's. And a declaration whose `quoted_outputs` names the wrong field, which
+is an integration defect rather than a per-turn one, and which the tool's own author is the only
+party able to make.
 
 
 ## Alternatives considered
