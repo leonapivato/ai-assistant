@@ -694,15 +694,15 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > 6. **`ANSWERED`** — otherwise, which is exactly ADR-0249 §5's own definition of the member: a
 >    reply exists, **no step failed** and **no condition blocked**, and nothing was verified.
 >
-> **The six limbs are total over the three results, the rung and the three facts.** **No seventh
+> **The six limbs are total over the three results, the rung and the four facts.** **No seventh
 > limb, reordering or override is added.** `AttemptOutcome` gains **no member**: the vocabulary is
 > ADR-0249 §5's six as ADR-0261 §3 made them **seven**, this decision reaches **six** — the clause
 > below says which one it does not — and of
 > those six it gives **five** the producer they have never had.
 
 > **Normative — a step is not a criterion, and `failed` decides nothing where the criteria decide
-> it.** Limbs 4 and 5 read the criteria alone. **A `FAILED` step that contradicts a criterion has
-> made that criterion neither `met` nor `unmet` but `unestablished`** (§2), a failure returning no
+> it.** Limbs 4 and 5 read the criteria alone. **A `FAILED` step of a criterion's own call leaves
+> that criterion `unestablished` rather than `unmet`** (§2), a failure returning no
 > answer to hold a declaration against — **so what limb 1 reports as an established failure is a
 > criterion some *successful* step's own answer refused**, and a failed step is reported by limb 1
 > only where no criterion is met, no side-effecting step may have acted, and the attempt is at rung
@@ -1276,10 +1276,11 @@ booking"*.
   that lifts that bar.
 - **Retry across turns, reconciliation, idempotency keys, modify-before-replace, and how an
   `INDETERMINATE` step is resolved.** **A8**, as ADR-0255 §12 and ADR-0259 §10 book them. **And
-  with them, whether a *failed* consequential call left an effect**: §2 reads no `FAILED` step of a
-  `side_effecting` definition as a disproof, because ADR-0029 §3's escaping exception is an
-  `INTERNAL` failure a tool raises as readily after the provider acted as before it called, and no
-  field of the record separates that from a refusal. **The same silence leaves a possible
+  with them, whether a *failed* consequential call left an effect**: §2 reads **no** `FAILED` step
+  as an answer at all, a failed result carrying no output (ADR-0029 §3), and for a side-effecting
+  one it reads no disproof either, because that section's escaping exception is an `INTERNAL`
+  failure a tool raises as readily after the provider acted as before it called and no field of the
+  record separates that from a refusal. **The same silence leaves a possible
   duplicate**: where a failed dispatch and a later successful one share a `parameters_digest`, §2
   reads the criterion `met` on the success, and whether the failure **also** took effect — two
   bookings where the user asked for one — is A8's idempotency question and is answered by no clause
