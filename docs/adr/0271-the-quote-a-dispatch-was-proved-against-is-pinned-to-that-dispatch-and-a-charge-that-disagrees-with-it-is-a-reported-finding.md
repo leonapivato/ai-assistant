@@ -280,8 +280,8 @@ producer, no freshness rule and no coverage condition.
 > record — the pin on the decision, the charge in the step's stored output — for a reader that does
 > not exist yet, and §6 books the decision that gives one a surface with what fires it.
 
-> **Normative — nothing in this comparison reads a model, a plan or a prose value.** Not a
-> `verifies`, not an `intended_action` a planner wrote, not a step's position, not a
+> **Normative — nothing in this comparison reads a model, a plan or a prose value.** Not a `verifies`,
+> not an `intended_action` a planner wrote, not a step's position, not a
 > `GoalElement.text`, not a `StepFailure.message` and not a tool description — ADR-0262 §2's
 > no-model-operand clauses binding on the charge test exactly as on its own two. **The operands are
 > the policy's pinned quote, the tool author's declaration and the provider's returned output, and there is no fourth.**
@@ -343,10 +343,9 @@ producer, no freshness rule and no coverage condition.
 > criterion's three results at the next turn that engages the goal. **This decision mints no type,
 > no field, no Protocol, no seam and no store for it**, and no lane cites this section toward one.
 
-> **Normative — a later act never rewrites what an earlier turn reported.** It re-renders no
-> statement, retracts no reply, edits no stored `AttemptOutcome` and reopens no ended attempt:
-> **a correction is a fresh comparison at a later turn and never a replay of an earlier one**,
-> which is ADR-0262 §6's rule reached by one further case.
+> **Normative — a later act never rewrites what an earlier turn reported.** It re-renders no statement, retracts no
+> reply, edits no stored `AttemptOutcome` and reopens no ended attempt: **a correction is a fresh comparison at a later
+> turn and never a replay of an earlier one**, which is ADR-0262 §6's rule reached by one further case.
 
 ### 6. What this decision does not decide, by name, each with what fires it
 
@@ -607,11 +606,13 @@ producer, no freshness rule and no coverage condition.
    the pair fixing what an unreadable charge blocks and what it does not. **And the member conjunct
    is driven on its own**: against a member bounded at `110`-`150`/EUR and a pin at `"120"`, a charge
    of `"100"` **fails** the test though it agrees with the quote and is under the ceiling — the arm
-   failing an implementation testing currency and *not greater than the quote* and stopping there.
-5. **The finding is reported and prevents nothing.** A failing test yields `unmet`, an
-   `AttemptOutcome` of `PARTIAL` where another criterion is met and `FAILED` where none is, and an
-   `AttemptReport` carrying **exactly two fields** and no figure; and across the comparison **no
-   `Authorization` is written, settled or revoked, no decision is recorded, no dispatch is refused and no store is written**.
+   failing an implementation testing currency and *not greater than the quote* only.
+5. **The finding is reported and prevents nothing.** Over a **single, non-ambiguous contradicting
+   call** — one call, its charge disagreeing, so §2's ambiguity rule does not fire — the criterion is
+   `unmet`, and the outcome is ADR-0262 §4's limbs over a **stated** criterion set carrying no
+   unestablished member: **`PARTIAL`** (limb 4) with one further criterion met, **`FAILED`** (limb 1)
+   with that criterion alone. The `AttemptReport` carries **exactly two fields** and no figure, and
+   **no `Authorization` is written, settled or revoked, no decision is recorded, no dispatch is refused and no store is written**.
 
 ### 9. This ADR classified, marked, and how it is ratified
 
