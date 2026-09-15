@@ -246,7 +246,18 @@ class AuthorizationOperations:
             AuthorizationError: If the store could not be read.
         """
         row = await self._authorizations.resolve(authorization_id_for(confirmation_id))
-        if row is None:
+        # **The derived id is a key, never the evidence that a row answers this
+        # question** — `StepRunner._settle_authorization`'s own comparison, and it has to
+        # be made in both places or the two halves of one mechanism disagree. The store
+        # admits a row already occupying the id this `CONFIRM` derives while naming a
+        # different confirmation, which `test_a_row_under_that_id_naming_another_question
+        # _settles_nothing` pins: the proposal is then refused as a duplicate id, the
+        # answer settles nothing, and without this the **question** would meanwhile
+        # render the squatter's coverage — telling the user that answering yes
+        # establishes limits nothing will establish. Reachable across a restart, where
+        # the recovered confirmation is rendered from the store rather than from the
+        # proposal this process made. Adversarial review, round 13, `blocker`.
+        if row is None or row.confirmation != confirmation_id:
             return None
         return projection_of(row)
 
