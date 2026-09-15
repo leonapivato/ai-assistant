@@ -65,16 +65,17 @@ backstop, and an offered change carries the price its acceptance authorises
   decision's title: *"**A row written on this rung is bounded by the turn-retention window in
   force at its own write, measured from `proposed_at`, and by nothing longer**"* stays true as an
   **upper** bound and stops being the horizon — such a row is ended by a closing act of its goal
-  where one reaches it, and lapses on that instant where none does. A reader holding only that decision reads the window as when
-  the authority ends, and would report a live authority over a finished request for the rest of
-  it. **Every other clause binds entire and several are what this rests on**: §1's rung, its
-  `proposed_at`-only read, its no-new-reader rule and its illustrative list of rows that outlive
-  an act's record; §2's `Settings`-gains-nothing, read-once and fail-closed arithmetic; §3's
-  keep-turns-forever case, which writes no row at all; §4's rendering and its refusal of a
-  `source` member; §5's narrowing correction; and **§6 entire**, whose *"No row is moved,
-  shortened or settled by anything that happens to the act's own record"* is stated over the
-  **act's record** and is reached by no clause of this decision — what ends a row here is the
-  **goal's** status, which is neither an episode nor a conversation. §§7-11 stand as they are.
+  where one reaches it, and lapses on that instant where none does. A reader holding only that
+  decision reads the window as when the authority ends, and would report a live authority over a
+  finished request for the rest of it. **Every other clause binds entire and several are what
+  this rests on**: §1's rung, its `proposed_at`-only read, its no-new-reader rule and its
+  illustrative list of rows that outlive an act's record; §2's `Settings`-gains-nothing,
+  read-once and fail-closed arithmetic; §3's keep-turns-forever case, which writes no row at all;
+  §4's rendering and its refusal of a `source` member; §5's narrowing correction; and **§6
+  entire**, whose *"No row is moved, shortened or settled by anything that happens to the act's
+  own record"* is stated over the **act's record** and is reached by no clause of this decision —
+  what ends a row here is the **goal's** status, which is neither an episode nor a conversation.
+  §§7-11 stand as they are.
 - **Partially supersedes** [ADR-0250](0250-a-turn-finds-its-goal-before-it-plans-and-a-material-ambiguity-becomes-one-durable-question-bound-to-that-goal.md)
   — **one scope.** **§13's enumeration of what a reopen does, in that enumeration alone**:
   *"Reopening writes `GoalStatus.ACTIVE` through `PlanStore.set_goal_status` (§9), opens a new
@@ -277,17 +278,17 @@ decision by another route.
 > reconstructs one afterwards, or reads `PlanStore` to rebuild one.**
 
 > **Normative — two writes, not one, and the fence is taken first.** The ending and the
-> `GoalStatus` write are **two writes in two stores** and the corpus offers no transaction
-> across them — ADR-0255 §6 states the constraint one store over, *"`PlanStore` offers no
-> multi-write commit"* — so **no lane states, implements or tests them as one**. `orchestration`
-> calls `end_for_goal` **after the closing act's own first read has found the goal open and
-> strictly before the closing write**, and on the `ABANDONED` path that closing write is
-> `PlanStore.close_goal_abandoned` (ADR-0261 §2), whose three writes stay one indivisible step
-> and gain nothing here. **The order is what makes the ending total rather than best-effort**:
-> from the instant `end_for_goal` returns, and for as long as the record it wrote stands, no row
-> of that goal stands `PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write
-> cannot be raced by an establishment. **Taken after the status write it would be exactly that race**, and no lane
-> reverses it.
+> `GoalStatus` write are **two writes in two stores** and the corpus offers no transaction across
+> them — ADR-0255 §6 states the constraint one store over, *"`PlanStore` offers no multi-write
+> commit"* — so **no lane states, implements or tests them as one**. `orchestration` calls
+> `end_for_goal` **after the closing act's own first read has found the goal open and strictly
+> before the closing write**, and on the `ABANDONED` path that closing write is
+> `PlanStore.close_goal_abandoned` (ADR-0261 §2), whose three writes stay one indivisible step and
+> gain nothing here. **The order is what makes the ending total rather than best-effort**: from the
+> instant `end_for_goal` returns, and for as long as the record it wrote stands, no row of that
+> goal stands `PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write cannot be
+> raced by an establishment. **Taken after the status write it would be exactly that race**, and no
+> lane reverses it.
 
 > **Normative — what each failure leaves, and the closing act compensates nothing.** **Where
 > `end_for_goal` raises, the closing act ends there having written nothing at all** — no status,
@@ -459,19 +460,20 @@ decision by another route.
 
 ### 3. The retention window is the backstop, and no instant is moved
 
-> **Normative.** **ADR-0256 §1's rung is the expiry of a row whose goal never closes, and of no
-> other.** Every clause of that decision binds unchanged: the rung is taken on ADR-0254 §12's
-> paths (i) and (iii) at the instant the row is written, from `Settings.episode_retention` and
-> `proposed_at`; `Settings` gains nothing; a correction takes no rung of the ladder; §3's `None`
-> case still writes no row at all; and §5's narrowing correction is untouched. **What is
-> subordinated is only the claim that the window is the horizon**: a row standing when a closing
-> act of its goal runs is ended by that act, so its own `expires_at` is an **upper** bound and
-> not the horizon. **The bound is stated over the act and not over the two instants**, which is
-> §2's meaning read one section on: a row the closing act never reached — written after it, or
-> under a closure that predates this decision (§9) — is **not** ended by it and lapses on its own
-> `expires_at` exactly as ADR-0256 ratifies, which is §8's booked residual and §9's
-> prospectivity bound respectively. **A lane reading this as "the earlier of two instants" has
-> read a rule this decision does not state**, and would owe a sweep no clause here licenses.
+> **Normative.** **ADR-0256 §1's rung is the expiry of a row no closing act of its goal ends, and
+> of no other**, which is a wider set than *a row whose goal never closes* and deliberately so.
+> Every clause of that decision binds unchanged: the rung is taken on ADR-0254 §12's paths (i) and
+> (iii) at the instant the row is written, from `Settings.episode_retention` and `proposed_at`;
+> `Settings` gains nothing; a correction takes no rung of the ladder; §3's `None` case still writes
+> no row at all; and §5's narrowing correction is untouched. **What is subordinated is only the
+> claim that the window is the horizon**: a row standing when a closing act of its goal runs is
+> ended by that act, so its own `expires_at` is an **upper** bound and not the horizon. **The bound
+> is stated over the act and not over the two instants**, which is §2's meaning read one section
+> on: a row the closing act never reached — written after it, or under a closure that predates this
+> decision (§9) — is **not** ended by it and lapses on its own `expires_at` exactly as ADR-0256
+> ratifies, which is §8's booked residual and §9's prospectivity bound respectively. **A lane
+> reading this as "the earlier of two instants" has read a rule this decision does not state**, and
+> would owe a sweep no clause here licenses.
 
 > **Normative — no instant is moved, shortened, recomputed or re-read, and the row ends by a
 > disposition alone.** ADR-0254 §12's *"the expiry is taken once, when the row is written, and
@@ -484,7 +486,9 @@ decision by another route.
 > **Normative — the window keeps the one job it had, and it is the one ADR-0256 §1 argued for.**
 > A goal that never closes — the user stops engaging it, no act abandons it, A10 never verifies
 > it — has no closing write for §1 to hang an ending on, and its rows lapse on the window
-> exactly as ratified. **That is the whole of the backstop**, and ADR-0256 §1's ground for the
+> exactly as ratified. **So do the rows a closing act ran but never reached**: a row written
+> after the closure and admitted at a reopen (§8), and a row under a closure predating this
+> decision (§9). **Those three cases are the whole of the backstop**, and ADR-0256 §1's ground for the
 > figure is undisturbed: *"an authority takes the window the deployment keeps the record of its
 > act for, and never a window minted for it"*. **No lane reads this decision as a reason to
 > lengthen, cap, default or re-derive that window**, and ADR-0256 §6's exclusions —
@@ -662,18 +666,19 @@ each limb below the answer is yes, and the sentence that becomes false or over-w
    shape of this ending's own race rather than as a case that moves.
 5. **ADR-0256 §1's bound clause, in the direction of the bound alone**, and with it that
    decision's title: *"**A row written on this rung is bounded by the turn-retention window in
-   force at its own write, measured from `proposed_at`, and by nothing longer**"* stays true as an
-   **upper** bound and stops being the horizon — such a row is ended by a closing act of its
-   goal where one reaches it, and lapses on that instant where none does. A reader holding only ADR-0256 reads the window as when the
-   authority ends and would report a live authority over a finished request for the rest of it.
-   **Every other clause of ADR-0256 binds entire and several are what this rests on**: §1's rung
-   and its `proposed_at`-only read, its no-new-reader rule and its illustrative list of rows that
-   outlive an act's record; §2's `Settings`-gains-nothing, read-once and fail-closed arithmetic;
-   §3's `None` case, which writes no row at all and is untouched; §4's rendering and its refusal
-   of a `source` member; §5's narrowing correction; and **§6 entire**, whose *"No row is moved,
-   shortened or settled by anything that happens to the act's own record"* is stated over the
-   **act's record** and is reached by no clause of this decision — what ends a row here is the
-   **goal's** status, which is neither an episode nor a conversation. §§7-11 stand as they are.
+   force at its own write, measured from `proposed_at`, and by nothing longer**"* stays true as
+   an **upper** bound and stops being the horizon — such a row is ended by a closing act of its
+   goal where one reaches it, and lapses on that instant where none does. A reader holding only
+   ADR-0256 reads the window as when the authority ends and would report a live authority over a
+   finished request for the rest of it. **Every other clause of ADR-0256 binds entire and several
+   are what this rests on**: §1's rung and its `proposed_at`-only read, its no-new-reader rule
+   and its illustrative list of rows that outlive an act's record; §2's `Settings`-gains-nothing,
+   read-once and fail-closed arithmetic; §3's `None` case, which writes no row at all and is
+   untouched; §4's rendering and its refusal of a `source` member; §5's narrowing correction; and
+   **§6 entire**, whose *"No row is moved, shortened or settled by anything that happens to the
+   act's own record"* is stated over the **act's record** and is reached by no clause of this
+   decision — what ends a row here is the **goal's** status, which is neither an episode nor a
+   conversation. §§7-11 stand as they are.
 
 6. **ADR-0250 §13's enumeration of what a reopen does, in that enumeration alone**:
    *"Reopening writes `GoalStatus.ACTIVE` through `PlanStore.set_goal_status` (§9), opens a new
@@ -935,7 +940,8 @@ the three residuals below being where that sentence stops. And the campsite walk
 becomes checkable end to end — book, verify, close, and the ceiling is gone — rather than ending
 with a standing authority nobody intended and nothing retires.
 
-**What becomes harder, and each is a question asked rather than a call authorised.** Every
+**What becomes harder, and each is a question asked rather than a call authorised.** On the
+path this decision governs — a goal this store closed, outside the three residuals above — every
 request after a goal closes asks, including one the user experiences as a small amendment:
 *"make it Sunday"* the day after a confirmed booking is a fresh confirmation, and the only thing
 that stops it being a fresh **money** question is §5's offer carrying the figure. A goal closed
@@ -948,8 +954,9 @@ a coupling worth watching and one nothing here can hide.
 **What is disclosed rather than closed.** The ending is **two writes in two stores**, and the
 fence is what makes the first of them total rather than best-effort: from the instant
 `end_for_goal` returns, and for as long as the record it wrote stands, no row of that goal stands
-`PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write cannot be raced. **The residuals divide, and the division is the
-honest summary**: most cost a question, and three can leave an authority.
+`PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write cannot be raced. **The
+residuals divide, and the division is the honest summary**: most cost a question, and three can
+leave an authority.
 
 **Those that cost a question.** A failure between the two writes leaves the goal open, its
 authorities gone, its fence standing and every call of it asking until the user abandons and
