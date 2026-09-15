@@ -1,6 +1,6 @@
 # 262. Verification compares the goal's criteria with what the goal's own records establish, at a strength the consequence class fixes, and it is the only producer of `GoalStatus.ACHIEVED`
 
-- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with one further conjunct on its satisfying and contradicting tests: the charge the act reported agrees with the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in the limb *"the guarantee does not cover a capability whose acts make a charge"* alone — it covers one, for a deployment that declares where its acts report a charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
+- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's classification of a bound step restated as three ordered limbs: an agreeing charge is added conjunctively to satisfaction, a disagreeing one disjunctively to contradiction, and a contradiction §2 already reached stands whether or not a charge can be read — the charge being measured against the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in the limb *"the guarantee does not cover a capability whose acts make a charge"* alone — it covers one, for a deployment that declares where its acts report a charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope three records already take there reaching one further
@@ -87,11 +87,18 @@
   recorded nowhere ([#2409](https://github.com/leonapivato/ai-assistant/issues/2409)) — and the
   superseding decision **lands that operand**, pinning the quote `ActionPolicy.decide` took the
   evidence route over to the dispatch, by value, on the ruling that dispatch was allowed by. Such a
-  criterion is then **met**, **unmet** or **unestablished** on §2's own machinery, its satisfying and
-  contradicting tests each gaining **one conjunct**: a charge read from the bound step's own stored
-  output, at a key the operative declaration names, whose currency equals the pinned quote's byte for
-  byte, whose amount is not greater than the pinned quote's, and which satisfies the confirmed
-  member. **§2's `BoundKind.MONEY` limb of its `unestablished` list goes with the clause**; its five
+  criterion is then **met**, **unmet** or **unestablished** on §2's own machinery, its classification
+  of a bound step restated as **three ordered limbs**, total and disjoint, taken in this order: a
+  step is **contradicting** where §2's own contradicting test holds **or** where the charge test
+  **fails**; otherwise **satisfying** where §2's own satisfying test holds **and** the charge test
+  **holds**; otherwise **neither**. So an agreeing charge is a **conjunct** of satisfaction, a
+  disagreeing one a **disjunct** of contradiction, and **a contradiction §2 already reached stands
+  whether or not a charge can be read** — a tool's own refusal of its output being evidence the
+  absence of a readable charge neither supplies nor erases. The charge test is taken over a
+  **`SUCCEEDED`** step alone, so *"a `FAILED` bound step is never decisive"* is untouched; it reads
+  the charge from that step's own stored output, at a key the operative declaration names, and
+  **holds** where the charge's currency equals the pinned quote's byte for byte, its amount is not
+  greater than the pinned quote's, and it satisfies the confirmed member. **§2's `BoundKind.MONEY` limb of its `unestablished` list goes with the clause**; its five
   other limbs, its authorising rows, its confirmed member, its bound steps, its operative
   declaration, its grouping by `parameters_digest`, its ambiguity rule, its *"no fourth result
   exists"*, its *"a `FAILED` bound step is never decisive"* and every no-model-operand clause bind

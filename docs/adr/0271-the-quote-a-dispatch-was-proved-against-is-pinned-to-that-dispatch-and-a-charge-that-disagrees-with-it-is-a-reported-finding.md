@@ -6,17 +6,32 @@ disagrees with it is a reported finding
 - **Partially supersedes** [ADR-0262](0262-verification-compares-the-goals-criteria-with-what-the-record-establishes-at-a-strength-the-consequence-class-fixes-and-is-achieveds-only-producer.md)
   — **two scopes, and §7 shows the working for each. §2's `MONEY` clause, which rules that *"a
   criterion whose confirmed member is a `MONEY` one is `unestablished`"* outright**: such a
-  criterion now takes §2's own three results, over §2's own calls and decisive steps, with **one
-  further conjunct** on its satisfying and contradicting tests — the charge the act reported agrees
-  with the quote this decision pins to that dispatch. That clause's stated ground was that *"the
-  charge is not an operand this decision has"*; this decision lands the operand, which is what
-  ADR-0262 §9 reassigns here by name. **And §7's gate statement, in the limb *"the guarantee does
+  criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's
+  classification of a bound step restated as **three ordered limbs** (§3): an **agreeing** charge is
+  added **conjunctively** to satisfaction, a **disagreeing** one **disjunctively** to contradiction,
+  and a contradiction §2 already reached stands whether or not a charge can be read. That clause's
+  stated ground was that *"the charge is not an operand this decision has"*; this decision lands the
+  operand, which is what ADR-0262 §9 reassigns here by name. **And §7's gate statement, in the limb *"the guarantee does
   not cover a capability whose acts make a charge"* alone**: it covers one, for a deployment that
   declares where its acts report a charge. **Every other clause of both sections binds entire** —
   §2's authorising rows, its confirmed member, its bound steps, its operative declaration, its
   grouping by `parameters_digest`, its ambiguity rule, its no-fourth-result rule and its
   no-model-operand rules; §7's three wired-deployment obligations, its count of **seven**
   conditions and its *"ratification is not implementation"*.
+- **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
+  — **one scope, in §1, and it is the scope four records already take there reaching one further
+  field**: the `ToolDefinition` model declaration, and the required-field clause in the application
+  to **`charged_output`** alone — a `ChargedOutput | None` defaulting to `None`, naming at depth one
+  the key of an invocation's output carrying **the whole amount it charged** and the key carrying
+  that amount's ISO-4217 code. A reader holding only §1 authors a definition whose acts report no
+  charge, so every `MONEY` criterion resting on that tool is `unestablished` for want of an operand.
+  **The required-field clause takes a fifth recorded exception, on its own fail-closed ground and
+  not on the field being outside a permission decision's reach**: ADR-0254 §3's condition 3 compares
+  the request's declaration with the row's **by value**, so this field moves a route-(d) coverage
+  answer exactly as a severity or schema edit does. The default is an exception because absent makes
+  the **opposite** claim to the one §1 refuses — a declaration naming no charged output reports none
+  and establishes nothing — which is `quoted_output`'s and `postconditions`' own ground. Every other
+  clause of §1 binds entire, its `frozen=True` rule and its no-inference rule conspicuously.
 - **No other ADR is superseded in whole or in part**, and **ADR-0267 is not, in any scope**. §1's
   unmarked ground beside the no-eighth-field clause reads that a later record naming one quote
   *"names it by the act and the digest"* — and its very next sentence carves this case out: *"**It
@@ -244,15 +259,15 @@ producer, no freshness rule and no coverage condition.
 > **Normative — nothing in this comparison reads a model, a plan or a prose value.** Not a
 > `verifies`, not an `intended_action` a planner wrote, not a step's position, not a
 > `GoalElement.text`, not a `StepFailure.message` and not a tool description — ADR-0262 §2's
-> no-model-operand clauses binding on this conjunct exactly as on its own two. **The operands are
+> no-model-operand clauses binding on the charge test exactly as on its own two. **The operands are
 > the policy's pinned quote, the tool author's declaration and the provider's returned output, and
 > there is no fourth.**
 
 ### 4. What a `MONEY` criterion establishes now, and what the gate does and does not cover
 
 > **Normative — ADR-0262 §2's blanket is reversed, and what replaces it is §2's own three results
-> with §3's conjunct.** A criterion whose confirmed member is a `MONEY` one is **met** where §2's
-> conditions for `met` hold under §3's extended tests — no call contradicting, none ambiguous, some
+> with §3's three ordered limbs.** A criterion whose confirmed member is a `MONEY` one is **met**
+> where §2's conditions for `met` hold under §3's extended tests — no call contradicting, none ambiguous, some
 > call satisfying — which requires that the act was authorised against that confirmed member **and**
 > that the reported charge agrees with the pinned quote within the member's ceiling; **unmet** where
 > some call is contradicting, the mismatch among the ways one can be; and **unestablished**
@@ -358,7 +373,7 @@ producer, no freshness rule and no coverage condition.
 > **(d)** §7's gate statement, the second scope; and **(e)** §12's **arms 3 and 4**, each asserting
 > that a `MONEY` criterion is `unestablished` — arm 3's *"a confirmed `MONEY` member over a booking
 > step every declaration holds over → **unestablished**"* and arm 4's campsite pair — which the
-> implementing lane **restates** under §3's conjunct: an agreeing charge yields `met` and `VERIFIED`,
+> implementing lane **restates** under §3's limbs: an agreeing charge yields `met` and `VERIFIED`,
 > a disagreeing one `unmet`, and each arm's other criteria, its negative half and its `ACHIEVED`
 > assertions are unmoved.
 > **§9's reassignment entry is *fired*, not falsified**: it books this subject here by name and a
@@ -397,36 +412,49 @@ producer, no freshness rule and no coverage condition.
 > not the label"* and naming *"that a sibling ADR was recorded differently"* as a ground a record
 > may not rest on. The discrepancy with ADR-0266 §9's and ADR-0267 §9's scopes on that roster stays
 > filed at [#2425](https://github.com/leonapivato/ai-assistant/issues/2425) and is not settled here.
+> **And no record is owed against ADR-0192, ADR-0266, ADR-0270 or ADR-0249 either**, each being
+> reached rather than moved: ADR-0192 §2's no-content rule and §5's *"never money the tool moved"*
+> are **relied on** — they are why the pin does not ride the invocation row and why `incurred_cost`
+> is not the charge (§§1-2) — ADR-0266 §7's two routes and its proof before the act are read and
+> unmoved, ADR-0270 §2's `CoverageAnswer` is neither read nor widened, and ADR-0249 §9's containment
+> and ADR-0262 §6's two-field `AttemptReport` are **obeyed** rather than scoped (§3).
 
-> **Normative — no record is owed against ADR-0192, ADR-0266, ADR-0270 or ADR-0016, and each is
-> reached rather than moved.** **ADR-0192 §2's** no-content rule and **§5's** *"never money the tool
-> moved"* are **relied on**: they are why the pin does not ride the invocation row and why
-> `incurred_cost` is not the charge (§§1-2), and both stay true. **ADR-0266 §7's** two routes, its
-> condition 6 and its proof before the act are read and unmoved; **ADR-0270 §2's** `CoverageAnswer`
-> is neither read nor widened, this decision adding no member and no field to it; **ADR-0016 §1's**
-> declared-not-inferred default is applied, not amended. **ADR-0249 §9's** containment and **ADR-0262
-> §6's** two-field `AttemptReport` are obeyed rather than scoped (§3).
+> **Normative — ADR-0016 §1 is superseded in one scope, and it is the scope four records already
+> take there.** §1's `ToolDefinition` model declaration fixes a field list, and its required-field
+> clause rules that *"Every field that a permission decision depends on is required"*. §2's
+> `charged_output` is a fifth field on that model and a fifth recorded exception to that clause, and
+> **the exception is taken on its own ground rather than by precedent**: the field **is** one a
+> permission decision depends on, ADR-0254 §3's condition 3 comparing the request's declaration with
+> the row's **by value**, so an edit to it moves a route-(d) coverage answer as a severity edit does;
+> and the default is admissible because **absent makes the opposite claim to the one §1 refuses** —
+> a declaration naming no charged output reports none and establishes nothing, which is
+> `quoted_output`'s and `postconditions`' own ground. **`ChargedOutput` itself is a new type and
+> reaches §1's list in no way.** ADR-0016 §1's `frozen=True` rule, its no-inference rule and §5's
+> re-registration rule bind entire.
 
-> **Normative — the header record this change writes, and it is the whole of it.** **ADR-0262's
-> `Status` line alone** takes ADR-0070 §4's canonical partial form on **one physical line**, this
-> decision's pair carrying **both** scopes and added beside any already there rather than replacing
-> it, the scope text naming clauses and carrying **no `ADR-NNNN` token** so that §4's *"every
-> `ADR-NNNN` after the leading `Partially superseded by` is a target"* reads true; and that ADR gains
-> the **appended dated note** ADR-0070 §1 requires, stating both scopes in full. **No other ADR's
-> header is edited — ADR-0267's conspicuously not** — and no file under `src/` or `tests/` is touched
-> by the lane that lands this document.
+> **Normative — the header records this change writes, and they are the whole of it.** **ADR-0262's
+> and ADR-0016's `Status` lines, and no other's**, take ADR-0070 §4's canonical partial form on **one
+> physical line**, this decision's pair added beside any already there rather than replacing it and
+> carrying that ADR's scopes, the scope text naming clauses and carrying **no `ADR-NNNN` token** so
+> that §4's *"every `ADR-NNNN` after the leading `Partially superseded by` is a target"* reads true;
+> and each gains the **appended dated note** ADR-0070 §1 requires, stating its scopes in full.
+> **No other ADR's header is edited — ADR-0267's conspicuously not** — and no file under `src/` or
+> `tests/` is touched by the lane that lands this document.
 
 ### 8. The lane cut, and the arms this decision owes
 
 > **Normative.** This ADR is ratified and merged as its own PR before anything implements against
 > it (ADR-0015, golden rule 5), and it is implemented in **three lanes and no fourth**. **P1**, the
 > `core` record: `ChargedOutput` with its validator, `ToolDefinition.charged_output` and
-> `PermissionRuling.proved_quote` with its validator, in `core/types.py`, and nothing else.
-> **`ChargedOutput` is a type and not a Protocol** and owes no triad of its own. **P2**, the pin: `permissions` setting `proved_quote` at the
+> `PermissionRuling.proved_quote` with its validator, in `core/types.py`, **together with the
+> `PROTOCOL_VERSION` bump and the `wire/envelope.py` log entry those widened shapes oblige** (below),
+> and nothing else. **`ChargedOutput` is a type and not a Protocol** and owes no triad of its own.
+> **P2**, the pin: `permissions` setting `proved_quote` at the
 > ruling, from the read condition 6's evidence route was proved over. **P3**, the verification read:
-> §2's charge reading and §3's conjunct inside ADR-0262's comparison, in the subsystem that
+> §2's charge reading and §3's limbs inside ADR-0262's comparison, in the subsystem that
 > decision's own lane cut puts it in. **No lane wires a consequential capability**, registers a
-> booking integration, mints a quote, writes an `Authorization` or touches `wire/`.
+> booking integration, mints a quote or writes an `Authorization`, and **no lane but P1 touches
+> `wire/`**, which it touches for the bump and its log entry and for nothing else.
 
 > **Normative — the lanes are briefed in that order and each waits on real operands.** P1 is briefed
 > after **ADR-0266's L1** (`ActionRequest.intended_action`, `CoverageMember.kind`) and **ADR-0267's
@@ -434,18 +462,21 @@ producer, no freshness rule and no coverage condition.
 > and `ChargedOutput` has no `quoted_output` beside it to be distinguished from. P2 is
 > briefed after P1 and after **ADR-0270's lane**, whose `CoverageAnswers` answer is where condition
 > 6's evidence route is taken. P3 is briefed after P2 and after **ADR-0262's own L1**, whose
-> comparison it adds a conjunct to. **Where a dependency is not in its base, that lane is not
+> comparison it restates a step's classification inside. **Where a dependency is not in its base, that lane is not
 > briefed**, and each lane re-takes this reading at its own base and states what it found. **M33's
 > campsite walkthrough's money criterion waits on all three**, which is why #2409 is sequenced
 > before it.
 
-> **Normative — neither `PROTOCOL_VERSION` nor any stored shape moves on P1's account alone, and
-> the lane states which.** `PermissionRuling` and `ToolDefinition` each cross the wire inside a
-> `PermissionDecision` a client decodes, so **P1 carries whatever version bump ADR-0254 §16's
-> no-shim rule requires of a widened decoded shape**, decided at its own base against the bumps
-> other lanes of this batch land and **never as an integer written into this document**. **No
-> compatibility shim, optional-member negotiation or lenient decode is added** (ADR-0084 §3), no row
-> is migrated or dropped, and `core/config.py` gains nothing.
+> **Normative — P1 carries the `PROTOCOL_VERSION` bump, in its own change, and no integer is fixed
+> here.** `PermissionRuling` and `ToolDefinition` each cross the wire inside a `PermissionDecision`
+> a client decodes, so P1 widens a decoded shape and **owes the bump and its `wire/envelope.py` log
+> entry in the same change**, which is ADR-0254 §16's own rule and admits no deferral to a later
+> lane. **The integer is chosen at P1's own base** against the bumps other lanes of this batch land,
+> and a number written into this document would be a claim about an order nobody controls. **No
+> compatibility shim, optional-member negotiation, per-member capability flag or lenient decode is
+> added** (ADR-0084 §3, whose refusal naming both versions is the intended outcome); **no stored row
+> is migrated or dropped**, a stored `PermissionDecision` decoding with `proved_quote` absent and a
+> stored `ToolDefinition` with `charged_output` absent; and `core/config.py` gains nothing.
 
 > **Normative — the lanes ship the five arms below, each over controlled fakes, and none is
 > demonstrated against a live integration or a real charge.**
@@ -465,7 +496,10 @@ producer, no freshness rule and no coverage condition.
    **float**, a JSON **boolean**, a negative value, a missing key, a non-object output, `"usd"` and
    `"EURO"` — the first two yield a charge and the rest yield **none**, and a declaration carrying
    **no** `charged_output` yields none. **A `bool` is not an `int` here**, the arm failing an
-   implementation written as an `int` instance test. **And the amount strings a `Decimal` mishandles
+   implementation written as an `int` instance test. **And `ChargedOutput` refuses construction with
+   `amount` equal to `currency`**, the arm that fails an implementation omitting the validator — one
+   key cannot carry both a number and an ISO-4217 code, so such a declaration would silently report
+   no charge at every act. **And the amount strings a `Decimal` mishandles
    are driven by name**: `"not-a-number"` and `""`, which `Decimal` **refuses**, and `"NaN"`,
    `"Infinity"` and `"-Infinity"`, which it **accepts** as non-finite values — each yields **no
    charge and raises nothing**, the arm that fails both an implementation letting an
@@ -476,7 +510,11 @@ producer, no freshness rule and no coverage condition.
    it though it is under the ceiling — the mismatch the ruling calls a finding; `"120"`/`"USD"`
    **fails** it; and a step with no pin, or under a declaration with no `charged_output`, leaves the
    test **not taken**. The criterion is then `met`, `unmet` and `unestablished` respectively, and a
-   `FAILED` step is decisive in **no** case.
+   `FAILED` step is decisive in **no** case. **And §3's ordering is driven, not assumed**: a
+   `SUCCEEDED` step whose operative declaration's postcondition its output **refuses**, under a
+   decision carrying **no** `proved_quote` and a declaration carrying **no** `charged_output`, is
+   **contradicting** and its criterion **`unmet`** — the arm that fails an implementation taking the
+   *charge test not taken* case first and answering `neither`/`unestablished`.
 5. **The finding is reported and prevents nothing.** A failing test yields `unmet`, an
    `AttemptOutcome` of `PARTIAL` where another criterion is met and `FAILED` where none is, and an
    `AttemptReport` carrying **exactly two fields** and no figure; and across the comparison **no
@@ -486,10 +524,11 @@ producer, no freshness rule and no coverage condition.
 ### 9. This ADR classified, marked, and how it is ratified
 
 > **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment** for
-> ADR-0262: a reader holding only its §2 or its §7 would act differently, so §7's two records take
-> ADR-0070 §3's and §4's partial form, on that ADR alone. **Every other reach of this decision is a
-> stacked addition**, ADR-0267's included, recorded in this document and nowhere else (ADR-0082 §1,
-> §7).
+> **exactly two documents** (ADR-0070 §3): **ADR-0262**, in two scopes, a reader holding only its §2
+> or its §7 acting differently; and **ADR-0016**, in one, a reader holding only its §1 authoring a
+> declaration whose acts report no charge. Their `Status` lines take ADR-0070 §3's and §4's partial
+> form. **Every other reach of this decision is a stacked addition**, ADR-0267's conspicuously,
+> recorded in this document and nowhere else (ADR-0082 §1, §7).
 
 > **Normative.** It is a **contract** decision — it widens `core/types.py` — so under ADR-0015 §1 it
 > is reviewed by **both** lenses while `Proposed`, ratified by `just adr-ratify`'s one-line flip, and
