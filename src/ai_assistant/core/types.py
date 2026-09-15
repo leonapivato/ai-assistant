@@ -11784,6 +11784,286 @@ class ForecastOutcome(BaseModel):
         return self
 
 
+# --- egress identity, ahead of the planning types (ADR-0259 §1) -------------
+# The visible-text refinements and the three egress declarations an effect key is
+# built from, declared **here** rather than beside the egress binding where
+# ADR-0150's own lane put them. ADR-0259 §1 builds :class:`EffectKey` out of a
+# tool id, a parameters digest, a :class:`BoundAccount`, a transport endpoint and
+# a tuple of :class:`CanonicalDestination`, and that key is a field of
+# :class:`StepTransition` and — through :class:`EffectRecord` — of
+# :class:`PlanExport`, both declared far above the old positions. That is the case
+# the comment above :data:`Identifier` already rules on and the ADR-0252 evidence
+# block already took one level up from a scalar: "a forward reference plus
+# ``model_rebuild`` would have kept the old positions at the cost of making two
+# `core` types depend on an import-order side effect, so the primitives moved
+# instead of the models". Nothing about any of them changed.
+
+
+# --- text that renders, and text that encodes (ADR-0018 §1) ------------------
+# The shared predicates behind every "must contain visible text" validator in
+# this module — a tool's id and description, a ruling's reason, a step's and a
+# tool's failure message — plus the UTF-8 test the durable fields reuse.
+
+
+#: Unicode major categories that carry standalone visible content: letters,
+#: numbers, punctuation and symbols. Deliberately a **whitelist**. The first
+#: attempt enumerated the invisible categories instead and missed the combining
+#: marks (``Mn``/``Me``) — a variation selector or a combining grapheme joiner
+#: with no base character renders as nothing, so a description made of them
+#: passed. Listing what counts as visible cannot be defeated by a category
+#: nobody thought of; listing what does not, can.
+_VISIBLE_CATEGORIES = ("L", "N", "P", "S")
+
+#: Characters that sit in a visible category yet display as nothing, so the
+#: whitelist above would otherwise accept them (ADR-0018 §1). A short exception
+#: list layered on a whitelist is not the blocklist that failed before: the
+#: whitelist still carries the burden, and this narrows a known, enumerable gap
+#: on top of it, where being incomplete makes it weaker rather than wrong.
+#:
+#: Deliberately not deferred to a canonical identifier syntax (issue #62): that
+#: governs identifiers, and a ``description`` is free text no syntax rule will
+#: ever constrain, so parking these there would park them somewhere that never
+#: arrives.
+_BLANK_RENDERING = frozenset(
+    {
+        "\u2800",  # BRAILLE PATTERN BLANK (So)
+        "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
+        "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+        "\u3164",  # HANGUL FILLER (Lo)
+        "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    }
+)
+
+
+def _has_visible_text(value: str) -> bool:
+    """Whether ``value`` contains at least one character that renders.
+
+    Not a complete test, and cannot be: without a font and a shaping engine
+    there is no general "renders as something" oracle, so a determined author
+    can likely find a codepoint this misses. It covers the known cases.
+    """
+    return any(
+        char not in _BLANK_RENDERING and unicodedata.category(char).startswith(_VISIBLE_CATEGORIES)
+        for char in value
+    )
+
+
+def _visible_identifier(value: str) -> str:
+    """Reject an identifier with nothing visible in it, returning it stripped.
+
+    Stricter than :data:`Identifier`, which only refuses a blank. A tool's id
+    and capability are shown to the user in an approval prompt and written into
+    audit records beside the description, so an id of nothing but zero-width
+    spaces would render as blank in exactly the places
+    :meth:`ToolDefinition._description_is_present` exists to keep meaningful —
+    and would be indistinguishable from any other invisible id.
+
+    Applied to tool identifiers rather than to :data:`Identifier` itself
+    because that type is shared with ``planning`` (ADR-0014), where tightening
+    it is a cross-lane change; see issue #62.
+    """
+    stripped = value.strip()
+    if not _has_visible_text(stripped):
+        msg = "identifier must contain visible text"
+        raise ValueError(msg)
+    return stripped
+
+
+type VisibleIdentifier = Annotated[EncodableText, AfterValidator(_visible_identifier)]
+"""An identifier that renders as something — for ids a user is shown.
+
+Layered on :data:`EncodableText` rather than on :data:`str`, because visible and
+encodable are independent: ``_has_visible_text`` sees the letters in
+``"smtp_\\ud800"`` and passes it.
+"""
+
+
+def _rejecting_invisible(value: str) -> str:
+    """Reject text that renders as nothing, returning it **unchanged**.
+
+    :func:`_visible_identifier` is the same test with a normalising half; this is
+    the rejecting half alone, and the asymmetry is the decision. Every string in
+    this surface is compared against something outside it — a supplied form
+    against an argument the callable will transmit, an account identity against
+    the identity a connection record currently holds — so stripping one here
+    would be `core` rewriting a bound value, which is exactly what ADR-0148 §4's
+    third clause forbids between the ruling and transmission. ADR-0096 §2 states
+    the general rule this follows: **a faithful copy may tighten only in ways
+    that reject.**
+
+    **The message names no value**, which is ADR-0150 §8's second clause: a
+    refusal message reaches a log, and the values here are recipient addresses.
+
+    Raises:
+        ValueError: If nothing in the value renders.
+    """
+    if not _has_visible_text(value):
+        msg = "must contain visible text"
+        raise ValueError(msg)
+    return value
+
+
+type _VisibleUnchangedText = Annotated[EncodableText, AfterValidator(_rejecting_invisible)]
+"""Text that renders as something, byte-for-byte as supplied (ADR-0150 §3, §7)."""
+
+
+class DestinationProtocol(StrEnum):
+    """The protocol under whose rules a destination's canonical form was computed.
+
+    A member is a **safety claim**, not a label: its whole content is a ruling
+    about which two supplied forms denote one recipient (ADR-0148 §2's second
+    clause). ADR-0150 §3 therefore fixes this membership and requires a ratified
+    contract ADR for every further member, stating which equivalences that
+    protocol establishes and which it does not.
+
+    An enum rather than a ``str`` for ADR-0021 §1's canonicalisation-per-caller
+    reason: a string field admits ``"smtp"`` and ``"SMTP"`` as two protocols, and
+    two integrations that disagreed would produce a false mismatch at execution.
+
+    ``SMTP`` asserts exactly the equivalences ADR-0150 §3 states — local parts
+    byte-identical, domains equal after ASCII lowercasing — and **authorises
+    nothing**: it neither implies a canonicaliser exists, nor registers a tool,
+    nor permits any transmission. The canonicaliser itself lives at the seam
+    (ADR-0148 §2's sixth clause), never here; a copy of the rule in `core` would
+    be the second canonicaliser that clause exists to forbid.
+
+    ``HTTPS`` is ADR-0231 §8's member, and the same two sentences hold of it. Its
+    ratified contract ADR is that section: the canonical form is the **origin** —
+    ``https://host:port``, the scheme, the host and the port and nothing below
+    them — and the equivalences it establishes are **exactly three**: the scheme
+    differs only by ASCII case, the host differs only by ASCII case, and one form
+    omits the port where the other states ``443``. Six are stated as *not*
+    established and are written down there so no lane infers one: a name against
+    an address it resolves to, a trailing dot against none, a percent-encoded
+    octet against its decoded form, an internationalised host against any
+    ASCII-compatible encoding, ``http`` against ``https``, and anything at all
+    involving a path, a query or a fragment. It **authorises nothing** either: it
+    registers no tool, permits no transmission, and implies no canonicaliser
+    beyond the one §8 fixes at the seam.
+    """
+
+    SMTP = "smtp"
+    HTTPS = "https"
+
+
+class BoundAccount(BaseModel):
+    """The connected account a call is made through, as the ruling fixed it.
+
+    **Not** ADR-0151 §4's ``ConnectedAccount``, and not a narrowing of it. That
+    model is the *live connection record* and carries ``revision`` and ``state``,
+    both of which move while a parked ruling stands; this one is the **snapshot
+    the ruling was taken over**, which ADR-0148 §1 requires not to move after the
+    ruling at all. Carrying the live record here would put a ``revision`` inside
+    the value :meth:`PermissionDecision.authorises` compares, so a
+    re-provisioning between the confirmation and the answer would make a parked
+    ``CONFIRM`` unanswerable (ADR-0150 §7).
+
+    **Two facts, not one.** ADR-0148 §6 binds an account by its identity *and*
+    its connection reference. Two connectable records can hold one identity, so
+    an identity-only account compares equal across them and a standing grant
+    would cover a record the user never granted; a reference is stable across a
+    rotation by design, which is what makes it survive a re-provisioning to a
+    *different* account. Either alone is a destination two different accounts
+    satisfy.
+
+    **No credential slot.** A :class:`SecretName`, its ``name``, and any string
+    identifying a keyring entry are forbidden here and everywhere in this surface
+    (ADR-0150 §7). `core` cannot distinguish a slot name from a reference — both
+    are strings — so that is a rule checked where the connection record is read,
+    not a type, and this docstring claims no protection it does not have.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    identity: _VisibleUnchangedText = Field(
+        description=(
+            "The durable, user-recognisable name recorded when the account was "
+            "connected. Visible text because ADR-0148 §8's fourth clause shows it "
+            "to the user at the moment they decide, and an identity that rendered "
+            "as nothing would leave the confirmation with nothing to say about "
+            "whose account this is."
+        )
+    )
+    reference: DurableIdentifier = Field(
+        description=(
+            "Names the account's connection record (ADR-0149 §3). Never shown to "
+            "the user — ADR-0148 §6 says it is not something an account can be "
+            "recognised by, and §8's fourth clause bars it from the confirmation."
+        )
+    )
+
+
+class CanonicalDestination(BaseModel):
+    """One member of ADR-0148 §2's canonical destination set (ADR-0150 §3).
+
+    **Exactly two well-formed shapes, and it refuses at construction to depart
+    from either**: a *selected recipient*, carrying a protocol and a canonical
+    form and no account; or *the connected account* the call is made to,
+    carrying an account and neither of the other two. No member carries all
+    three, none carries neither shape, and there is no third kind.
+
+    The account is a **member** rather than an alternative to the members, and
+    two earlier drafts failing in opposite directions are why. One defined the
+    derived set to be empty exactly where ADR-0148 §2's third clause says that
+    set *is* the connected account, so a policy reading ADR-0148 §8's third floor
+    literally would refuse every resolution call. The other split the name in two
+    and left the set with no value shape at all, so every consumer would branch
+    and invent its own comparison — this document's own title failing on the
+    document. One type, total for a consumer that never has to ask which case it
+    is in before comparing.
+
+    The account case states no protocol deliberately: an account is not named
+    under any protocol that establishes equivalences between supplied forms, and
+    minting a member for "the account" would require stating which equivalences
+    it establishes, of which it has none.
+
+    **Equality is over every field.** A canonical form is never compared across
+    protocols, and an account member never equals a selected recipient, whatever
+    strings the two hold.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    protocol: DestinationProtocol | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    canonical: _VisibleUnchangedText | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    account: BoundAccount | None = Field(
+        default=None, description="Set on the connected account; absent on a recipient."
+    )
+
+    @model_validator(mode="after")
+    def _is_one_of_the_two_shapes(self) -> CanonicalDestination:
+        """Refuse every combination ADR-0150 §3's two-shape clause excludes.
+
+        A bag of optional fields would admit eight combinations of which six are
+        meaningless. The distinction ADR-0150 §1 draws against partial states is
+        about facts that are only meaningful together and can arrive apart; here
+        the variants are exactly two and a validator makes every other
+        combination unconstructable.
+
+        **The message names no value**, per ADR-0150 §8: which fields are present
+        is what names the defect, and the strings are recipient addresses.
+
+        Raises:
+            ValueError: If the member is neither a selected recipient nor the
+                connected account.
+        """
+        recipient = self.protocol is not None and self.canonical is not None
+        if recipient and self.account is None:
+            return self
+        if self.account is not None and self.protocol is None and self.canonical is None:
+            return self
+        msg = (
+            "a canonical destination is either a selected recipient (a protocol and a "
+            "canonical form, no account) or the connected account (an account, neither "
+            "of the other two)"
+        )
+        raise ValueError(msg)
+
+
 # --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
 # The statuses, and the sets drawn over them. Only the sets live here: the
 # transition *graph* is `planning`'s, because it is not intrinsic to the type
@@ -14232,85 +14512,6 @@ class CostBasis(StrEnum):
     UNKNOWN = "unknown"
 
 
-# --- text that renders, and text that encodes (ADR-0018 §1) ------------------
-# The shared predicates behind every "must contain visible text" validator in
-# this module — a tool's id and description, a ruling's reason, a step's and a
-# tool's failure message — plus the UTF-8 test the durable fields reuse.
-
-
-#: Unicode major categories that carry standalone visible content: letters,
-#: numbers, punctuation and symbols. Deliberately a **whitelist**. The first
-#: attempt enumerated the invisible categories instead and missed the combining
-#: marks (``Mn``/``Me``) — a variation selector or a combining grapheme joiner
-#: with no base character renders as nothing, so a description made of them
-#: passed. Listing what counts as visible cannot be defeated by a category
-#: nobody thought of; listing what does not, can.
-_VISIBLE_CATEGORIES = ("L", "N", "P", "S")
-
-#: Characters that sit in a visible category yet display as nothing, so the
-#: whitelist above would otherwise accept them (ADR-0018 §1). A short exception
-#: list layered on a whitelist is not the blocklist that failed before: the
-#: whitelist still carries the burden, and this narrows a known, enumerable gap
-#: on top of it, where being incomplete makes it weaker rather than wrong.
-#:
-#: Deliberately not deferred to a canonical identifier syntax (issue #62): that
-#: governs identifiers, and a ``description`` is free text no syntax rule will
-#: ever constrain, so parking these there would park them somewhere that never
-#: arrives.
-_BLANK_RENDERING = frozenset(
-    {
-        "\u2800",  # BRAILLE PATTERN BLANK (So)
-        "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
-        "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
-        "\u3164",  # HANGUL FILLER (Lo)
-        "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
-    }
-)
-
-
-def _has_visible_text(value: str) -> bool:
-    """Whether ``value`` contains at least one character that renders.
-
-    Not a complete test, and cannot be: without a font and a shaping engine
-    there is no general "renders as something" oracle, so a determined author
-    can likely find a codepoint this misses. It covers the known cases.
-    """
-    return any(
-        char not in _BLANK_RENDERING and unicodedata.category(char).startswith(_VISIBLE_CATEGORIES)
-        for char in value
-    )
-
-
-def _visible_identifier(value: str) -> str:
-    """Reject an identifier with nothing visible in it, returning it stripped.
-
-    Stricter than :data:`Identifier`, which only refuses a blank. A tool's id
-    and capability are shown to the user in an approval prompt and written into
-    audit records beside the description, so an id of nothing but zero-width
-    spaces would render as blank in exactly the places
-    :meth:`ToolDefinition._description_is_present` exists to keep meaningful —
-    and would be indistinguishable from any other invisible id.
-
-    Applied to tool identifiers rather than to :data:`Identifier` itself
-    because that type is shared with ``planning`` (ADR-0014), where tightening
-    it is a cross-lane change; see issue #62.
-    """
-    stripped = value.strip()
-    if not _has_visible_text(stripped):
-        msg = "identifier must contain visible text"
-        raise ValueError(msg)
-    return stripped
-
-
-type VisibleIdentifier = Annotated[EncodableText, AfterValidator(_visible_identifier)]
-"""An identifier that renders as something — for ids a user is shown.
-
-Layered on :data:`EncodableText` rather than on :data:`str`, because visible and
-encodable are independent: ``_has_visible_text`` sees the letters in
-``"smtp_\\ud800"`` and passes it.
-"""
-
-
 # --- tools: what a call costs, and what it may touch (ADR-0016 §4) -----------
 # Cost is structured so a spend policy can tell *free* from *unknown* and fail
 # closed on the second. `TierReach` orders `DataTier` by sensitivity, so two
@@ -16009,74 +16210,13 @@ def canonical_json_bytes(value: FrozenJson) -> bytes:
 # `parameters_digest` is computed rather than supplied: a value each caller
 # filled in is a canonicalisation per caller, and two that disagreed produce a
 # false mismatch at execution, which reads as an attack rather than as a bug.
-
-
-def _rejecting_invisible(value: str) -> str:
-    """Reject text that renders as nothing, returning it **unchanged**.
-
-    :func:`_visible_identifier` is the same test with a normalising half; this is
-    the rejecting half alone, and the asymmetry is the decision. Every string in
-    this surface is compared against something outside it — a supplied form
-    against an argument the callable will transmit, an account identity against
-    the identity a connection record currently holds — so stripping one here
-    would be `core` rewriting a bound value, which is exactly what ADR-0148 §4's
-    third clause forbids between the ruling and transmission. ADR-0096 §2 states
-    the general rule this follows: **a faithful copy may tighten only in ways
-    that reject.**
-
-    **The message names no value**, which is ADR-0150 §8's second clause: a
-    refusal message reaches a log, and the values here are recipient addresses.
-
-    Raises:
-        ValueError: If nothing in the value renders.
-    """
-    if not _has_visible_text(value):
-        msg = "must contain visible text"
-        raise ValueError(msg)
-    return value
-
-
-type _VisibleUnchangedText = Annotated[EncodableText, AfterValidator(_rejecting_invisible)]
-"""Text that renders as something, byte-for-byte as supplied (ADR-0150 §3, §7)."""
-
-
-class DestinationProtocol(StrEnum):
-    """The protocol under whose rules a destination's canonical form was computed.
-
-    A member is a **safety claim**, not a label: its whole content is a ruling
-    about which two supplied forms denote one recipient (ADR-0148 §2's second
-    clause). ADR-0150 §3 therefore fixes this membership and requires a ratified
-    contract ADR for every further member, stating which equivalences that
-    protocol establishes and which it does not.
-
-    An enum rather than a ``str`` for ADR-0021 §1's canonicalisation-per-caller
-    reason: a string field admits ``"smtp"`` and ``"SMTP"`` as two protocols, and
-    two integrations that disagreed would produce a false mismatch at execution.
-
-    ``SMTP`` asserts exactly the equivalences ADR-0150 §3 states — local parts
-    byte-identical, domains equal after ASCII lowercasing — and **authorises
-    nothing**: it neither implies a canonicaliser exists, nor registers a tool,
-    nor permits any transmission. The canonicaliser itself lives at the seam
-    (ADR-0148 §2's sixth clause), never here; a copy of the rule in `core` would
-    be the second canonicaliser that clause exists to forbid.
-
-    ``HTTPS`` is ADR-0231 §8's member, and the same two sentences hold of it. Its
-    ratified contract ADR is that section: the canonical form is the **origin** —
-    ``https://host:port``, the scheme, the host and the port and nothing below
-    them — and the equivalences it establishes are **exactly three**: the scheme
-    differs only by ASCII case, the host differs only by ASCII case, and one form
-    omits the port where the other states ``443``. Six are stated as *not*
-    established and are written down there so no lane infers one: a name against
-    an address it resolves to, a trailing dot against none, a percent-encoded
-    octet against its decoded form, an internationalised host against any
-    ASCII-compatible encoding, ``http`` against ``https``, and anything at all
-    involving a path, a query or a fragment. It **authorises nothing** either: it
-    registers no tool, permits no transmission, and implies no canonicaliser
-    beyond the one §8 fixes at the seam.
-    """
-
-    SMTP = "smtp"
-    HTTPS = "https"
+#
+# `_rejecting_invisible`, `_VisibleUnchangedText`, `DestinationProtocol`,
+# `BoundAccount` and `CanonicalDestination` are declared **ahead of the planning
+# types** rather than here, because :class:`EffectKey` is built from three of them
+# and is reached by :class:`StepTransition` and :class:`PlanExport` (ADR-0259 §1);
+# the block above :class:`StepStatus` carries the reason. Nothing about them
+# changed in the move.
 
 
 class DiscloserProvenance(StrEnum):
@@ -16210,124 +16350,6 @@ class EgressDestination(BaseModel):
     canonical: _VisibleUnchangedText = Field(
         description="The form ADR-0148 §2 computed from the supplied one, at the seam."
     )
-
-
-class BoundAccount(BaseModel):
-    """The connected account a call is made through, as the ruling fixed it.
-
-    **Not** ADR-0151 §4's ``ConnectedAccount``, and not a narrowing of it. That
-    model is the *live connection record* and carries ``revision`` and ``state``,
-    both of which move while a parked ruling stands; this one is the **snapshot
-    the ruling was taken over**, which ADR-0148 §1 requires not to move after the
-    ruling at all. Carrying the live record here would put a ``revision`` inside
-    the value :meth:`PermissionDecision.authorises` compares, so a
-    re-provisioning between the confirmation and the answer would make a parked
-    ``CONFIRM`` unanswerable (ADR-0150 §7).
-
-    **Two facts, not one.** ADR-0148 §6 binds an account by its identity *and*
-    its connection reference. Two connectable records can hold one identity, so
-    an identity-only account compares equal across them and a standing grant
-    would cover a record the user never granted; a reference is stable across a
-    rotation by design, which is what makes it survive a re-provisioning to a
-    *different* account. Either alone is a destination two different accounts
-    satisfy.
-
-    **No credential slot.** A :class:`SecretName`, its ``name``, and any string
-    identifying a keyring entry are forbidden here and everywhere in this surface
-    (ADR-0150 §7). `core` cannot distinguish a slot name from a reference — both
-    are strings — so that is a rule checked where the connection record is read,
-    not a type, and this docstring claims no protection it does not have.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-
-    identity: _VisibleUnchangedText = Field(
-        description=(
-            "The durable, user-recognisable name recorded when the account was "
-            "connected. Visible text because ADR-0148 §8's fourth clause shows it "
-            "to the user at the moment they decide, and an identity that rendered "
-            "as nothing would leave the confirmation with nothing to say about "
-            "whose account this is."
-        )
-    )
-    reference: DurableIdentifier = Field(
-        description=(
-            "Names the account's connection record (ADR-0149 §3). Never shown to "
-            "the user — ADR-0148 §6 says it is not something an account can be "
-            "recognised by, and §8's fourth clause bars it from the confirmation."
-        )
-    )
-
-
-class CanonicalDestination(BaseModel):
-    """One member of ADR-0148 §2's canonical destination set (ADR-0150 §3).
-
-    **Exactly two well-formed shapes, and it refuses at construction to depart
-    from either**: a *selected recipient*, carrying a protocol and a canonical
-    form and no account; or *the connected account* the call is made to,
-    carrying an account and neither of the other two. No member carries all
-    three, none carries neither shape, and there is no third kind.
-
-    The account is a **member** rather than an alternative to the members, and
-    two earlier drafts failing in opposite directions are why. One defined the
-    derived set to be empty exactly where ADR-0148 §2's third clause says that
-    set *is* the connected account, so a policy reading ADR-0148 §8's third floor
-    literally would refuse every resolution call. The other split the name in two
-    and left the set with no value shape at all, so every consumer would branch
-    and invent its own comparison — this document's own title failing on the
-    document. One type, total for a consumer that never has to ask which case it
-    is in before comparing.
-
-    The account case states no protocol deliberately: an account is not named
-    under any protocol that establishes equivalences between supplied forms, and
-    minting a member for "the account" would require stating which equivalences
-    it establishes, of which it has none.
-
-    **Equality is over every field.** A canonical form is never compared across
-    protocols, and an account member never equals a selected recipient, whatever
-    strings the two hold.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-
-    protocol: DestinationProtocol | None = Field(
-        default=None, description="Set on a selected recipient; absent on the account."
-    )
-    canonical: _VisibleUnchangedText | None = Field(
-        default=None, description="Set on a selected recipient; absent on the account."
-    )
-    account: BoundAccount | None = Field(
-        default=None, description="Set on the connected account; absent on a recipient."
-    )
-
-    @model_validator(mode="after")
-    def _is_one_of_the_two_shapes(self) -> CanonicalDestination:
-        """Refuse every combination ADR-0150 §3's two-shape clause excludes.
-
-        A bag of optional fields would admit eight combinations of which six are
-        meaningless. The distinction ADR-0150 §1 draws against partial states is
-        about facts that are only meaningful together and can arrive apart; here
-        the variants are exactly two and a validator makes every other
-        combination unconstructable.
-
-        **The message names no value**, per ADR-0150 §8: which fields are present
-        is what names the defect, and the strings are recipient addresses.
-
-        Raises:
-            ValueError: If the member is neither a selected recipient nor the
-                connected account.
-        """
-        recipient = self.protocol is not None and self.canonical is not None
-        if recipient and self.account is None:
-            return self
-        if self.account is not None and self.protocol is None and self.canonical is None:
-            return self
-        msg = (
-            "a canonical destination is either a selected recipient (a protocol and a "
-            "canonical form, no account) or the connected account (an account, neither "
-            "of the other two)"
-        )
-        raise ValueError(msg)
 
 
 class ConfirmationDestination(BaseModel):
