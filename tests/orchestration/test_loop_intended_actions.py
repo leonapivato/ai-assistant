@@ -79,13 +79,16 @@ def _step(step_id: str, *, action: str | None = None) -> PlanStep:
     rooms asked for from one room asked for twice, and the only thing that separates
     them is the identity this decision mints.
     """
-    return PlanStep(
-        id=step_id,
-        intent="book it",
-        capability="book_room",
-        parameters={"nights": 2},
-        intended_action=action,
-    )
+    built = PlanStep(id=step_id, intent="book it", capability="book_room", parameters={"nights": 2})
+    if action is None:
+        return built
+    # `model_copy` rather than the constructor, because `Identifier` **strips** and two
+    # of §10 arm 4's spellings — ``"A1 "`` and ``" A1"`` — would otherwise arrive as the
+    # canonical ``"A1"``. What §4 refuses is a *label*, and a test that could only ever
+    # hand the loop canonical labels would be asserting the field's validator rather
+    # than the loop's parser. Every other spelling survives the constructor unchanged
+    # and is unaffected by which route builds it.
+    return built.model_copy(update={"intended_action": action})
 
 
 class _Proposing:
@@ -590,7 +593,9 @@ async def test_a_label_past_the_goals_own_actions_refuses_the_plan() -> None:
         await _turn(loop, planner, steps=(_step("step-1", action="A2"),), continuing=goal)
 
 
-@pytest.mark.parametrize("label", ["A0", "A01", "A+1", "a1", "A 1", "A\uff11", "banana", "A"])
+@pytest.mark.parametrize(
+    "label", ["A0", "A01", "A+1", "a1", "A 1", "A1 ", " A1", "A\uff11", "banana", "A"]
+)
 async def test_a_value_that_is_not_an_action_label_refuses_the_plan(label: str) -> None:
     """§10 arm 4's table: every spelling the grammar excludes, refused rather than parsed.
 
@@ -599,11 +604,16 @@ async def test_a_value_that_is_not_an_action_label_refuses_the_plan(label: str) 
     while every other arm still passes" — and each of them "resolves to nothing and is
     refused … rather than parsed, repaired or case-folded".
 
-    ``A1 `` is **absent from this table and is asserted separately**
-    (:func:`test_a_trailing_space_never_reaches_the_loop_as_its_own_spelling`): the field
-    is an ``Identifier``, which strips at construction, so the loop is never handed that
-    spelling and cannot refuse it. Refusing it is the **seam's**, under §9's L3 — "the
-    strict extraction of the step's ``action`` key".
+    **The two whitespace-bordered spellings are built past the field's own validator**
+    (:func:`_step`), because ``PlanStep.intended_action`` is an ``Identifier`` and
+    ``Identifier`` **strips** — so ``"A1 "`` and ``" A1"`` normalise to ``"A1"`` at
+    construction and the ordinary path can never carry them
+    (:func:`test_the_field_normalises_a_bordering_space_before_any_loop_sees_it`). What
+    this arm asserts is that the **loop's own parser** refuses them independently of that
+    normalisation, which is the window a faulty caller building a step past its
+    validators would otherwise open — the same reason §4 closes the window "at the store
+    as well as at the loop". An implementation leaning on the strip would pass this arm
+    only by accident and would fail it the moment the field's type relaxed.
     """
     goal = _goal_holding(_intended("ia-1"))
     loop, planner = _driver()
@@ -612,15 +622,16 @@ async def test_a_value_that_is_not_an_action_label_refuses_the_plan(label: str) 
         await _turn(loop, planner, steps=(_step("step-1", action=label),), continuing=goal)
 
 
-def test_a_trailing_space_never_reaches_the_loop_as_its_own_spelling() -> None:
-    """Why ``A1 `` is not in the table above, stated rather than left as a gap.
+def test_the_field_normalises_a_bordering_space_before_any_loop_sees_it() -> None:
+    """Why the table above has to build its two whitespace spellings past the validator.
 
-    :data:`~ai_assistant.core.types.Identifier` is "non-blank **and stripped**"
-    (ADR-0018 §2), so ``PlanStep`` normalises ``"A1 "`` to ``"A1"`` before any loop sees
-    it: there is no value here for §4's refusal to act on, and a loop that "refused the
-    trailing-space spelling" would be refusing a string it can never be handed. §10 arm
-    4 names it among L2's refusals; the mechanism that can take it is L3's strict
-    extraction, which reads the planner's JSON before a ``PlanStep`` exists.
+    :data:`~ai_assistant.core.types.Identifier` is non-blank **and stripped**, so an
+    ordinarily constructed ``PlanStep`` carrying ``"A1 "`` *is* one carrying ``"A1"`` —
+    a label §4 resolves. The refusal the arm above asserts is therefore about a value
+    only a caller reaching past the field's validator can produce, and this is the pin
+    that says so: without it, a reader would take that arm for a statement about the
+    ordinary path, and a later relaxation of the field's type would silently change what
+    it proves.
     """
     assert PlanStep(id="s", intent="book it", capability="book_room", intended_action="A1 ") == (
         PlanStep(id="s", intent="book it", capability="book_room", intended_action="A1")
