@@ -3,14 +3,6 @@ of what crosses the seam
 
 - Status: Proposed
 - Date: 2026-09-15
-- **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
-  — **one scope, in §16's `core`-surface roster and in none of its other clauses**: `core/types.py`
-  gains a **nineteenth** type, `CoverageAnswer`, counting from where the quote decision left that
-  roster at eighteen types and twelve fields, and **no further field**. A reader holding only §16
-  implements a roster test that fails on this decision's own surface. §16's `core/protocols.py`
-  roster, its `PermissionDecision` clause, its `core/errors.py` roster, its
-  *"`core/config.py` gains nothing at all"* and its wire clause are untouched, and §5 shows the
-  working.
 - **Partially supersedes** [ADR-0266](0266-a-coverage-member-records-the-constraint-the-user-stated-and-the-bound-is-proved-against-the-quote-for-the-intended-action.md)
   — **two scopes. §7's last normative clause, in the limb naming `ActionPolicy.decide` as the only
   site where condition 6 is taken**: the comparison is now taken at `decide` at every dispatch
@@ -326,28 +318,19 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 > `Partially supersedes` record of ADR-0254 §1's field list stays true word for word, the field's
 > **meaning** being what it states and that being unmoved.
 
-> **Normative — ADR-0254 §16's `core`-surface roster is superseded in one limb, and its other
-> clauses bind entire.** §16 states what `core/types.py` gains; ADR-0266 §9 left that at
-> **fourteen** types and **seven** fields and ADR-0267 §9 at **eighteen** and **twelve**. §2 above
-> adds `CoverageAnswer` — a **nineteenth** type — and **no** further field, so a reader holding
-> only §16 implements a roster test that fails on this decision's own surface. **That §16 opens
-> *"the `core` surface this decision adds"* does not make a later addition a stacked one, and the
-> corpus has ruled so twice**: ADR-0266 §9 took this scope for a fourteenth type and ADR-0267 §9
-> took it again in terms — *"§16 states what `core/types.py` gains, and ADR-0266 §9 left that at
-> fourteen types and seven fields"* — so the roster is a running statement maintained by successive
-> records rather than a frozen count of one decision's lanes, and a third addition recorded as a
-> stacked one would break the chain at its own link. **§16's `core/protocols.py` roster is
-> untouched**: it
-> enumerates what ADR-0254's own lanes add to that module, and a Protocol added by a later decision
-> is *"a widening §16 does not close"* — ADR-0267 §9's own reading, and ADR-0266 §9's, each of which
-> left that roster binding entire while taking the `core/types.py` limb.
-> **Its `PermissionDecision` clause is untouched**, that record gaining nothing here; **its
-> `core/errors.py` roster is untouched**, §4 minting no error class; and its
-> *"`core/config.py` gains nothing at all"*, its wire clause, its lane attribution and its
-> transcribe-the-ruling-whole rule bind entire.
-
-> **Normative — no other record is owed against ADR-0254, and the working is stated rather than
-> assumed.** §1 states the completeness condition, its four conditions and its disposition, and
+> **Normative — no record is owed against ADR-0254 at all, §16's roster included, and the working
+> is stated rather than assumed.** §16's roster clause is scoped by its own opening to *"the `core`
+> surface **this decision** adds, in full, with the lane that lands each so that this roster and
+> §20's cut cannot drift apart"* — a statement about ADR-0254's own lanes, kept beside §20's cut for
+> that reason. `CoverageAnswers` and `CoverageAnswer` are added by **this** decision, so no sentence
+> of §16 becomes false or over-wide and none is read more widely than it now holds: it is a
+> **stacked addition**, recorded here and nowhere else (ADR-0082 §1). **ADR-0266 §9 and ADR-0267 §9
+> each took a scope on that roster for an addition of their own**, and this decision **disturbs
+> neither** — ADR-0082 §1 rules that *"the test controls, not the label"* and names *"that a sibling
+> ADR was recorded differently"* as a ground a record may **not** rest on, so the working above is
+> stated rather than the precedent followed, and the discrepancy is filed rather than settled here
+> ([#2425](https://github.com/leonapivato/ai-assistant/issues/2425)). §1 states the completeness
+> condition, its four conditions and its disposition, and
 > says **nothing** about which component evaluates it or how one obtains the answer — which is
 > exactly what ADR-0267 §10 records as not decided — so no sentence of §1 becomes false or
 > over-wide. §13's recheck-at-`decide` and its no-cached-verdict rule stay true word for word (§3).
@@ -432,8 +415,8 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 ### 7. This ADR classified, marked, and how it is ratified
 
 > **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment**: a reader
-> holding only ADR-0254 §16, ADR-0266 §7 or §11, or ADR-0267 §7 would act differently, so §5's four
-> scopes take the partial form (ADR-0070 §3, §4). It is a **contract** decision — it widens
+> holding only ADR-0266 §7 or §11, or ADR-0267 §7, would act differently, so §5's three scopes take
+> the partial form (ADR-0070 §3, §4). It is a **contract** decision — it widens
 > `core/protocols.py` and `core/types.py` — so under ADR-0015 §1 it is reviewed by **both** lenses
 > while `Proposed`, ratified by `just adr-ratify`'s one-line flip, and merged as its own PR before
 > anything implements against it.
@@ -442,9 +425,9 @@ producer, carrier or freshness, nor what a declaration declares, nor what a conf
 > of §2's grammar, and unmarked text beside a mark is read to determine what that mark means and
 > supplies no obligation of its own (ADR-0089 §3).
 
-> **Normative — the records this change writes, and they are the whole of it.** ADR-0254's,
-> ADR-0266's and ADR-0267's `Status` lines each take ADR-0070 §4's canonical partial form on **one
-> physical line**, carrying this decision's pair beside the ones already there, each scope naming a
+> **Normative — the records this change writes, and they are the whole of it.** ADR-0266's and
+> ADR-0267's `Status` lines each take ADR-0070 §4's canonical partial form on **one
+> physical line**, carrying this decision's pair beside the one already there, each scope naming a
 > clause and carrying no `ADR-NNNN` token so that §4's *"every `ADR-NNNN` after the leading
 > `Partially superseded by` is a target"* reads true; and each gains the **appended dated note**
 > ADR-0070 §1 requires beside it, stating its scope of §5 in full. **Taking the leading token
@@ -476,8 +459,8 @@ wire ground appears, no stored shape moves, and no vocabulary is minted for a re
 exist. What crosses the seam is the one fact the writer cannot compute for itself, and the one
 value that fact was computed against.
 
-**What becomes harder.** `core/protocols.py` gains a Protocol with its triad and `core/types.py` a
-nineteenth type, and the composition root passes one more reference to one more caller — a cost
+**What becomes harder.** `core/protocols.py` gains a Protocol with its triad and `core/types.py`
+one type, and the composition root passes one more reference to one more caller — a cost
 golden rule 5 makes visible rather than cheap, and the one ADR-0193 §1 already rules worth paying
 wherever a face would otherwise hand a capability to a component that has no use for it. Two lanes
 now queue behind a third: ADR-0254 §20's Lane 2 and, with it,
