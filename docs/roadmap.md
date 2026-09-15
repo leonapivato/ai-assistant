@@ -494,25 +494,25 @@ what it found, are on #1844 rather than here.
   assistant formulates searches from the conversation's context and from what it
   knows about the user, refines them once it has seen results, and keeps going
   inside an enforced budget. It reverses two of milestone 29's limits rather than
-  relaxing them — the composer that sees only the latest utterance (ADR-0231 §3)
-  and the conversation that declines every later search once it has read one
-  (ADR-0231 §12) — and the ground of the reversal is **destination trust**: the
-  provider is a destination the user chose, in an explicit and revocable act of
-  the user's own that no connected account, no configuration and no model output
-  can stand in for (ADR-0238 §1; ADR-0242 §1 for the surface that act rides), so
-  task-relevant context reaching it is disclosure to a trusted party bounded by
-  budget and audit. The bounds are that searches go only to the configured,
-  authorised provider; that credentials stay out structurally; that *excluded*
-  information is a record-level fact the user sets on memory records rather than
-  a content filter (ADR-0146 §2); that the call allowance, the monetary spend
-  controls and a bound on elapsed search time stay distinct from one another
-  (#2167); and that a search result authorises nothing else. It fires
-  ADR-0231 §19's memory-enriched-query and second-search deferrals, owes a
-  principled same-kind carve-out to ADR-0181 §5 rather than an exception, and
-  takes the open search-cost work on ADR-0236's base (#2126, #2116) so that
-  repeated searching runs under a real budget. Reachable setup for destination
-  trust and for recipient authorisation, and an account of a refused or exhausted
-  search, are #2168.
+  relaxing them — which two they were, and what stands in their place, is on
+  ADR-0231's status header and the ADRs recorded there — and the ground of the
+  reversal is **destination trust**: the provider is a destination the user
+  chose, and which act does the choosing, for which request kind, is on
+  ADR-0238 §1 and its own status header, with ADR-0242 §1 for the surface that
+  act rides. Task-relevant context reaching it is therefore disclosure to a
+  trusted party bounded by budget and audit. The bounds are that searches go only
+  to the configured, authorised provider; that credentials stay out structurally;
+  that *excluded* information is a record-level fact the user sets on memory
+  records rather than a content filter (ADR-0146 §2); that a search result
+  authorises nothing else; and that which spend, call and elapsed-time controls
+  bound a conversation's searching — which of them stand and which were removed —
+  is on #1908's milestone-31 entry and the ADRs it names. It fires ADR-0231 §19's
+  memory-enriched-query and second-search deferrals; how ADR-0181 §5's lineage
+  floor applies to this kind is on that ADR's status header; and it takes the
+  search-cost work on ADR-0236's base so that repeated searching runs under a
+  real budget, what of that work is still open being on #1908. Reachable setup
+  for destination trust and for recipient authorisation, and an account of a
+  refused or exhausted search, are #2168.
   *Exit: "find more about that, taking my preferences into account" resolves the
   reference, uses relevant context, performs useful follow-up searches and
   answers without repeated permission requests; and an injected result can
@@ -581,13 +581,12 @@ is not a discharge.
 **Sequencing.** 27 → 28 → 29 → 30 by design: 29's steered-loop risk needs 28's
 bound, and 30 lands on an envelope milestone 27 has proven. 31 → 32 → 33 by
 design as well: 32's link-following needs 31's destination-trust fact and #2096's
-tiering, and 33's flows land on research that 32 has proven. 30 and 31 run beside
-each other rather than in line — 31 consumes 30's retrieval surface but opens
-beside it. Milestone 32's deeper loop ratifies its revision, stopping and outcome
-contracts before it is implemented, and that includes an explicit change to
-ADR-0228's fixed two-planner-call bound wherever one is required. One opening
-sits outside the line and waits on the owner's word: the archive's feed-back
-mechanism (ADR-0225 §12), an envelope kind ("address", user-named) additive to
+tiering, and 33's flows land on research that 32 has proven. Milestone 32's
+deeper loop ratifies its revision, stopping and outcome contracts before it is
+implemented, and that includes an explicit change to ADR-0228's fixed
+two-planner-call bound wherever one is required. One opening sits outside the
+line and waits on the owner's word: the archive's feed-back mechanism
+(ADR-0225 §12), an envelope kind ("address", user-named) additive to
 milestone 27's shape. Whether it has been ruled is on #1908.
 
 **Deferred — stated, not scheduled:**
