@@ -347,8 +347,8 @@ does not take that decision by another route.
 > watermark's cost, one record per goal this store was ever told closed, alongside the rows of that
 > goal it already holds. **`clear` answers the count of rows unchanged**, a record being no row. **So
 > the ending's universal — no row of a closed goal stands and none can be recorded — holds *absent a
-> `clear`*, and after one a turn that read the goal open before the closure can record a row under
-> it.** That is stated rather than closed, because **the alternative is worse in the direction that
+> `clear`*, and absent a reuse of the goal's identifier — §8's residual, which this decision adds —
+> and after a `clear` a turn that read the goal open before the closure can record a row under it.** That is stated rather than closed, because **the alternative is worse in the direction that
 > matters**: the only fix is retaining the goal identifiers of a cleared store, and what a `clear`
 > leaves is a store with no rows, no history and no authority to inherit. **No lane retains a record
 > across `clear`, reconstructs one afterwards, or reads `PlanStore` to rebuild one.** **The record is
@@ -932,20 +932,24 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
   §9 refuses to have inferred from silence, *"a later ADR that wants a stronger ordering decides
   it explicitly and with an implementation in hand"*. **Booked to A9 with the entry above**, and
   **no lane adds a field, an argument or a retained generation to `record` on its strength.**
-- **A goal identifier reused after `delete_goal`, and what then stands under it.**
+- **A goal identifier reused after `delete_goal` — a residual this decision *adds*.**
   `PlanStore.delete_goal` cascades to a goal's plans, executions, attempts and questions and
   **reaches this store not at all**, and `save_goal` refuses only an id the store **currently**
   holds (ADR-0250 §9) — so a deleted goal's identifier can be minted again, and this decision's
-  closure record then stands under a different goal wearing the same key: a delayed
-  `end_for_goal` discarded against a watermark the dead goal left, or a fence of the dead goal
-  refusing the new one's rows. **This decision adds one more datum under a key the corpus already
-  reuses, and narrows nothing**: under ratified ADR-0254 the deleted goal's **`Authorization` rows
-  already outlive it** with the same key, no record involved, so a row of the dead goal can already
-  cover a call of the recreated one. **What closing it would take is an incarnation identity**,
-  distinguishing one life of an identifier from the next — a field on a record and a contract
-  change no clause here has an ADR number for — and **no lane mints one on this decision's
-  strength, nor reads `PlanStore` to tell the lives apart.** Fired by the decision that lands an
-  incarnation identity, or by a measured occurrence.
+  closure record, erased by nothing but `clear` (§1), then stands under a **different goal wearing
+  the same key**, at a version that goal never reached. **It fails both ways.** A **standing
+  fence** of the dead goal refuses every row of the new one, so every call of it asks. And a
+  **lifted record standing above the new goal's version** discards that goal's own `end_for_goal`
+  as stale — it answers `0` and moves no row — **leaving an `ESTABLISHED` row under a goal that
+  has just closed**, §1's universal broken on a second path with the closing write succeeding.
+  **This decision adds that residual rather than inheriting it**: ADR-0254's rows already outlive
+  their goal under the same key, so a **row** of the dead goal can already cover a call of the
+  recreated one — but **a goal that held no row carried no exposure at all** before this record
+  existed, and now carries one. **What closes it is an incarnation identity**, distinguishing one
+  life of an identifier from the next, which is a contract change no clause here has an ADR number
+  for; **no lane mints one on this decision's strength or reads `PlanStore` to tell the lives
+  apart**, and arm 1 pins the state. Fired by an incarnation identity landing, or by a measured
+  occurrence.
 - **A viewing or export surface for the closure record.** §1 states why this decision adds none —
   ADR-0254 §16's export is over rows, the record carries no content, the identifier is the goal's —
   and **a reader holding ADR-0004 §6 to reach every retained datum reads it the other way**. This
@@ -1039,7 +1043,10 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >    answers `False` and still raises the watermark to the version passed** — proved by a delayed
 >    `end_for_goal` at that lower version then answering **`0`**, moving no row and standing no
 >    fence; and against a goal the store holds **no** record of it answers **`False`**, writes none
->    and raises nothing.
+>    and raises nothing. **And a record outliving its goal is pinned rather than assumed absent**:
+>    a goal's record standing, that goal deleted from `PlanStore`, a **new** goal saved under the
+>    same identifier at a lower version — its own `end_for_goal` answers **`0`** and leaves its row
+>    `ESTABLISHED` under a goal that closes, §8's residual pinned as arms 8 and 9 pin theirs.
 > 2. **Indivisibility, and the fence in the same step.** A `record` or a settlement to `ESTABLISHED`
 >    raced against `end_for_goal` leaves the store in one of exactly two states — the write landed
 >    **before** the call's step and the row is ended and counted, or it is **refused**, `record`
@@ -1102,9 +1109,14 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >    directly** — `end_for_goal` strictly before the closing write on every path that takes both.
 >    **Every injection above is a store fault.** **A cancellation of either write is asserted over
 >    ADR-0060 §1's two guarantees alone** — the `CancelledError` **arrives** at the act's caller
->    unabsorbed and no resource is left held — and **the arm admits either stored outcome at each**:
->    the rows ended with the fence standing or neither, the goal closed or still open. **No limb
->    asserts a cancelled write left nothing** (§1).
+>    unabsorbed, and the resource is **safe** — which §3 of that ADR rules propagation does **not**
+>    show, *"a propagation-only suite would certify exactly the bug this ADR exists to catch"*: with
+>    the call blocked mid-flight and its awaiting task cancelled, a **second** call of this store
+>    reaches the resource only once that work has finished, and the store still serves reads. **This
+>    store is not among ADR-0060 §3's four**, that scope being its own, but **§1's rule binds every
+>    Protocol in the file** and is what this limb stands under. **The arm admits either stored
+>    outcome at each**: the rows ended with the fence standing or neither, the goal closed or still
+>    open, and **no limb asserts a cancelled write left nothing** (§1).
 > 8. **A proposal across a closure and a reopen, which is what the fence is for.** An unexpired
 >    `PROPOSED` row exists when the goal closes; it is ended `GOAL_CLOSED`; the goal is reopened and
 >    the fence cleared; an answer naming that row then settles **nothing**, answering
