@@ -211,6 +211,17 @@ the user's words, and §9 clause (i) makes *"the authority is the act"* a proper
 > nothing in this decision mints a `MONEY` `minimum` (§4), so no floor is representable through
 > it. `PERIOD` and `TERMS` are unchanged.
 
+> **Normative — `maximum_exclusive` is ordered for ADR-0254 §5's narrowing test, and the
+> direction is stated rather than left to a numeric comparison.** §5 refuses a path-(ii)
+> correction that **raises a ceiling**, and at **equal** `maximum` the flag is the whole of the
+> difference: **setting it narrows** (*"at most 100"* corrected to *"under 100"* withdraws the
+> endpoint) and **clearing it widens** (*"under 100"* corrected to *"at most 100"* adds a call at
+> exactly `100` that the live row refused). **A clearing at an equal `maximum` is therefore a
+> widening §5 refuses**, path (ii) writes no row, and the act asks and is established by path (i)
+> carrying `supersedes` — §5's own disposition, unweakened. A lane that compared `maximum` alone
+> would read the second as a correction and establish a wider authority with no confirmation,
+> which is the permissive direction ADR-0254 §2's asymmetry names.
+
 > **Normative — ADR-0254 §4's `MONEY` comparison is restated over the one flag and in no other
 > respect.** The amount satisfies the bound where it is **less than** `maximum` if
 > `maximum_exclusive` and **less than or equal to** it otherwise. Every other conjunct is unmoved
@@ -343,12 +354,19 @@ nothing and every act resting on one asks. §10 books all three.
 
 ### 6. What a `MONEY` ceiling is proved against: the quote, stated as an interface and read from nowhere concrete
 
-> **Normative — a quote is a record of a price, it supplies exactly four facts, and it carries no
-> kind.** §7 is written over four facts alone: the **`IntendedAction`** (ADR-0265 §1) it was taken
-> for, by `id`; the **arguments it was quoted over**, as the digest below compares; an **amount**
-> and its **currency**, the amount in the form ADR-0254 §4's `MONEY` reading accepts and the
-> currency as that reading's ISO-4217 code; and the **step output it was read from**, which is
-> provenance and is compared by nothing. **A quote states a price and states nothing of any other
+> **Normative — a quote is a record of what the intended action will cost in full, it supplies
+> exactly four facts, and it carries no kind.** §7 is written over four facts alone: the
+> **`IntendedAction`** (ADR-0265 §1) it was taken for, by `id`; the **arguments it was quoted
+> over**, as the digest below compares; an **amount** and its **currency**, the amount in the form
+> ADR-0254 §4's `MONEY` reading accepts and the currency as that reading's ISO-4217 code; and the
+> **step output it was read from**, which is provenance and is compared by nothing. **The amount
+> is the whole charge the act will make and never a component of it** — not a fee, not a deposit,
+> not a per-unit rate, not one leg of a transfer — because §7 proves the user's ceiling against
+> it and against nothing else: a quote of a €1 fee for a €200 transfer satisfies a €150 ceiling
+> while the act breaches it. **That is an obligation on the quote decision** (§10), which alone
+> decides what records a quote and from what, and a record that states a component is not a quote
+> under this interface rather than a conforming one this section admits.
+> **A quote states a price and states nothing of any other
 > kind**, so it carries no `BoundKind` and needs none: §7's evidence route is `MONEY`-only for
 > that reason, and a carrier that generalised a quote to a kind-tagged value would be answering a
 > question this decision does not ask. The quotes of one goal are **totally ordered**, so that a
@@ -400,7 +418,12 @@ reason the two are separated, and what the Alternatives record.
 > ...]`**, possibly empty, **defaulting to the empty tuple**, duplicate-free on `argument`, and
 > naming **no key of that declaration's own `system_supplied`** — refused at construction. It is
 > the whole of what a declaration says about which of its arguments takes an amount, a period or
-> a named term. **That refusal is what preserves ADR-0254 §3's system-supplied protection after
+> a named term. **Declaring a money argument is a safeguard and not a requirement** — the owner's
+> ruling makes the quote the primary route at every tool — so a declaration omitting one keeps its
+> user's ceiling proved against the quote and forgoes only the second comparison, at the cost §10
+> books: an amount-bearing argument nobody declared is compared against no member, and a quote
+> that measured a component rather than the whole charge (§6) is then caught by nothing.
+> **That refusal is what preserves ADR-0254 §3's system-supplied protection after
 > the validator stating it is gone**: that section makes a row whose coverage names a
 > system-supplied argument not constructible and it read `CoverageMember.argument`, which no
 > longer exists — so a system-supplied key being declared at no kind is what keeps *"a user is
@@ -656,10 +679,15 @@ resolution the loop cannot take is not taken, and no member is minted"*.
 
 **ADR-0016 §1 — in one scope**, and it is the scope ADR-0254 §18 already took there reaching one
 further field: the model declaration, and the required-field clause applied to `bounded_arguments`
-alone. The grounds are that clause's own reason, which does not reach this default — the empty
-tuple makes the **opposite** claim to the one §1 refuses. **The exception is this one further
-field on this one argument**, no lane reading the two records together as licence to default a
-third, and every other clause of §1 binds entire.
+alone. **The grounds are stated exactly, the obvious one being false**: the empty tuple does not
+make the opposite claim in every direction, the argument route being an **additional** safeguard
+over a bound the quote already proves — so a declaration declaring nothing keeps the primary proof
+and forgoes only the second check, at the recorded cost that an amount-bearing argument nobody
+declared is compared against no member. The exception is taken because requiring the field would
+oblige every declaration and fixture in the tree to write `()`, and because a `ToolDefinition` is
+stored inside a `PermissionDecision`, so a required field would refuse every decision written
+before it. **The exception is this one further field on this one argument**, no lane reading the
+two records together as licence to default a third, and every other clause of §1 binds entire.
 
 **And the ones that come out no, deliberately.** **ADR-0255** takes **no** record: §15 item
 19's gate enumeration is untouched, §4's equality rule closing the polarity residual outright
@@ -693,7 +721,13 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
   **This is the largest thing this decision does not settle**, and until it lands §7's evidence
   route has no operand: every `MONEY` member is unmet, §1's completeness condition proposes no
   row, and **ADR-0254 §20's Lane 2 is briefed after that decision rather than after this one's
-  lanes** (§11). Fired
+  lanes** (§11). **It also owns what makes a quote measure the whole charge** (§6): a declaration
+  that names a fee where the charge is produces a quote that satisfies a ceiling the act breaches,
+  and no mechanism here catches it, an undeclared amount-bearing argument being compared against
+  no member at all. That is an integration-declaration defect of the same class as a wrong
+  `risk_level` or a wrong `system_supplied` — what this decision adds is that **declaring the
+  argument at `MONEY` is the safeguard against it** (§7), optional by the owner's ruling and worth
+  taking. Fired
   by **the quote decision**, tracked as issue **#2387**, which carries §6's constraint that a
   quote is *"a second copy of what was read"* — what ADR-0252 §1 refuses of a `GoalEvidence` row.
 - **The system-supplied argument, in two respects.** **Who supplies its value**: ADR-0254 §3
@@ -867,8 +901,13 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
    whole of §4's closed reading and not over its illustrations** — every one of the seven forms,
    every currency word and symbol in **both** orders, mixed case, runs of tabs and spaces, and
    `99.50` as well as `100`.
-4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
-   constructible, and one carrying a `MONEY` and a `TERMS` member is. **4(b):** a goal carrying
+4. **One member per kind, and the exclusivity ordering at an equal ceiling.** **4(a):** an
+   `Authorization` carrying two `MONEY` members is not constructible, and one carrying a `MONEY`
+   and a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
+   `maximum_exclusive`, a path-(ii) correction to the same `maximum` **with** it is written as a
+   narrowing, while against a live row whose `maximum` is `100` **with** it, a correction to the
+   same `maximum` **without** it is **refused as a widening** — no row written, no standing route,
+   and the act asks (ADR-0254 §5). **4(b):** a goal carrying
    two `USER_STATED` constraints that each read as `MONEY` mints **neither**, and one carrying a
    money ceiling beside a constraint no reading mints still mints the ceiling.
 5. **The arguments are the ones quoted, and the worked case.** A request whose arguments equal
