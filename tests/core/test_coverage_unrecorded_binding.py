@@ -188,6 +188,10 @@ def test_the_three_rosters_are_the_chain_read_off_in_order() -> None:
         # would make every legacy shape carry a fact its own epoch never recorded —
         # which is the failure this roster exists to catch (ADR-0184 §2).
         "closed_loop",
+        # ADR-0260 §11's seventh, on the leaf for `closed_loop`'s own reason and in that
+        # field's own shape: a row of either older epoch predates it too, and widening
+        # `closed_loop` to carry both kinds would rewrite what every stored row asserts.
+        "forecast_reach",
     )
 
 

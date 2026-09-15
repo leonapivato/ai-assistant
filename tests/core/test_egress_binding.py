@@ -213,10 +213,17 @@ def test_a_request_carries_exactly_one_field_for_the_binding() -> None:
 #: milestone 31 does not work rather than a floor bypassed by a missing field. It is
 #: also what keeps ADR-0152 §7's transcription count untouched: ``rebind``
 #: constructs ``False`` rather than transcribing a fourth thing from ``approved``.
-_DEFAULTED = "closed_loop"
+#:
+#: **Two since ADR-0260 §11**, which gives the binding ``forecast_reach`` in this
+#: field's own shape and for its own reason: ``False`` is the restrictive value there
+#: too, so a composition site that fails to compute it yields a request that is not at
+#: the configured forecast provider; and ``rebind`` transcribes nothing new for it,
+#: because §11 mints **no park** for a forecast read and so no forecast binding is ever
+#: rebound.
+_DEFAULTED = frozenset({"closed_loop", "forecast_reach"})
 
 
-@pytest.mark.parametrize("omitted", sorted(set(EgressBinding.model_fields) - {_DEFAULTED}))
+@pytest.mark.parametrize("omitted", sorted(set(EgressBinding.model_fields) - _DEFAULTED))
 def test_every_field_of_a_binding_is_required(omitted: str) -> None:
     """§1's "every field §2 names is required on it", one omission at a time.
 
@@ -226,9 +233,9 @@ def test_every_field_of_a_binding_is_required(omitted: str) -> None:
     than obliging the producer to state that the payload has no spans, and the
     empty description is exactly what ADR-0148 §8's third clause makes a floor.
 
-    ``closed_loop`` is excluded by name rather than by the parametrisation reading
-    ``model_fields``, so that adding a *second* defaulted field is a deliberate edit
-    to :data:`_DEFAULTED` and not something a later lane gets for free.
+    The defaulted members are excluded **by name** rather than by the parametrisation
+    reading ``model_fields``, so that adding one is a deliberate edit to
+    :data:`_DEFAULTED` and not something a later lane gets for free.
     """
     whole = {
         "spans": (_span("body", extent=2),),
