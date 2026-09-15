@@ -307,7 +307,8 @@ declaration declares, nor what a confirmation renders.
 > would put ADR-0070 §4's extraction invariant, *"every `ADR-NNNN` after the leading `Partially
 > superseded by` is a target"*, at risk over a line this decision did not write, and appending a
 > qualifier would extend a sentence that does not parse as one. **Repairing another decision's
-> header is not this change**: the residual is filed as an issue and cited here. **No other ADR's
+> header is not this change**: the residual is filed as
+> [#2419](https://github.com/leonapivato/ai-assistant/issues/2419) and cited here. **No other ADR's
 > header is edited**, and no file under `src/` or `tests/` is touched.
 
 ## Consequences
