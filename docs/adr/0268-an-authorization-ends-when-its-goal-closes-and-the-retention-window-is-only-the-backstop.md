@@ -391,9 +391,9 @@ does not take that decision by another route.
 > of this decision reads over one**: ADR-0060 §1 rules a cancelled call's effect *"indeterminate to
 > the caller"* — *"A cancelled write may or may not have committed. The caller may assume neither"*
 > — so a `CancelledError` leaving **any write this act takes**, either store member or the closing
-> write itself, admits **either** outcome at that write: the rows ended with the fence standing or
-> nothing written at all, the goal closed or still open. **No clause here states what a cancelled act
-> left, and no lane infers one or compensates on its strength**; what the rule buys is *"that the
+> write itself, admits **both outcomes of that write alone** — it committed, or it did not — and what
+> the act is left in is whatever those compose to. **No clause here enumerates those states**, a list
+> being a claim about which writes landed that ADR-0060 §1 refuses; **no lane infers one**; what the rule buys is *"that the
 > resource is safe and the cancellation arrives"* (arm 7), the act propagating rather than
 > classifying it, and the repair is the user's own two acts under either outcome. **ADR-0261 §2
 > states the identical claim unqualified**; that clause is untouched here (§7). **Where it succeeds
@@ -556,9 +556,9 @@ does not take that decision by another route.
 > **until its own `expires_at`**. **That is §9's prospectivity bound exactly, no worse than the
 > pre-decision behaviour and the state the reopen exists to improve on rather than one this decision
 > creates**; **no clause claims every call of such a goal asks.** **A cancellation of either call is
-> ADR-0060 §1's indeterminate case here too**, admitting either of the two states this clause
-> already states — fenced, or unfenced with its legacy row standing — and **no clause says which one
-> it leaves**. **The repair is the user's own two
+> ADR-0060 §1's indeterminate case here too, admitted per call and not over this clause's two fault
+> states**: a cancelled `clear_closure` that committed leaves the goal `ACTIVE`, its row `GOAL_CLOSED`
+> and the fence **lifted**, a third state nothing here refuses. **None is enumerated.** **The repair is the user's own two
 > acts in both cases**: abandoning closes the goal truthfully and, on the legacy path, fences it and
 > ends the row for the first time; reopening then ends any survivor and clears the fence. **So no goal
 > is permanently unable to authorize and no legacy row outlives its own expiry**, and **no lane adds a
@@ -1114,9 +1114,9 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >    **mid-resource-use**, its awaiting task cancelled, a **second** call of this store reaching the
 >    resource only once that work has finished, and the store still serving reads after.
 >    **This store is not among ADR-0060 §3's four** — that scope is its own — but §1's rule binds every
->    Protocol in the file. **Either stored outcome is admitted at each**: the rows ended with the
->    fence standing or neither, the goal closed or still open, and **no limb asserts a cancelled
->    write left nothing** (§1).
+>    Protocol in the file. **Each cancelled write admits both of its own outcomes, and the arm asserts
+>    no composition of them**: a cancelled `clear_closure` that landed leaves the rows ended and the
+>    fence **lifted**, which no limb refuses. **No limb asserts a cancelled write left nothing** (§1).
 > 8. **A proposal across a closure and a reopen, which is what the fence is for.** An unexpired
 >    `PROPOSED` row exists when the goal closes; it is ended `GOAL_CLOSED`; the goal is reopened and
 >    the fence cleared; an answer naming that row then settles **nothing**, answering
@@ -1144,8 +1144,8 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >    call faulting is injected, on both databases** — a store fault throughout; **a cancellation of
 >    either reopen call takes arm 7's shape entire, `clear_closure` included**, blocked
 >    mid-resource-use with its awaiting task cancelled and a second call kept off the resource until
->    that work finishes, either stored outcome admitted (§1): here `end_for_goal`
->    faulting after a successful
+>    that work finishes, each cancelled write admitting both of its own outcomes (§1): here
+>    `end_for_goal` faulting after a successful
 >    `ACTIVE` write leaves the goal **active and unfenced**, its legacy row **still `ESTABLISHED`
 >    and still covering a call** until its own `expires_at`; on a goal closed **under** this
 >    decision the same injection leaves it active and **fenced**, every `record` refused; and on
