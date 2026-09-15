@@ -253,6 +253,7 @@ import re
 import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Final, NamedTuple, TextIO, assert_never, cast, final
 
@@ -8020,6 +8021,37 @@ def _reached_outside(outcome: TurnOutcome) -> bool:
     return statement is not None and statement.reach is OutboundReach.REACHED
 
 
+def _counted(records: int) -> str:
+    """``records`` as decimal digits, for a value the type bounds only with ``ge=0``.
+
+    **Not an f-string, and the difference is a traceback rather than a nicety.**
+    CPython caps ``int``-to-``str`` conversion at
+    :func:`sys.get_int_max_str_digits` digits and raises :class:`ValueError` above it,
+    so ``f"{records}"`` turns a large admitted value into a crash on the one surface
+    that has to render it. ``OutboundStatement.records`` is a **boundary-crossing**
+    field a wire decode builds as well as this tree — ADR-0264 §4 is explicit that
+    "what validation it carries beyond ``ge=0`` is this module's to settle and
+    ADR-0264 §4 settles none of it", holding that question open under
+    `#2362 <https://github.com/leonapivato/ai-assistant/issues/2362>`_ — so the value
+    reaching here is whatever a frame carried, and a renderer that raises on it has
+    replaced §7's statement with a stack trace.
+
+    :class:`~decimal.Decimal` converts exactly and is not subject to that cap, and an
+    integer becomes a ``Decimal`` with exponent ``0``, which renders as plain digits
+    and never in scientific notation. **The process-wide limit is deliberately not
+    raised**: :func:`sys.set_int_max_str_digits` would change the behaviour of every
+    other conversion in the process, which is a global answer to one surface's local
+    problem.
+
+    Args:
+        records: The count to render, ``ge=0`` and otherwise unbounded.
+
+    Returns:
+        Its decimal digits.
+    """
+    return str(Decimal(records))
+
+
 def _render_outbound_statement(
     statement: OutboundStatement | None, *, composed_a_reply: bool
 ) -> None:
@@ -8068,6 +8100,11 @@ def _render_outbound_statement(
     brought nothing back is the one a user cannot otherwise tell from a turn that
     never looked.
 
+    **The count is rendered through** :func:`_counted` **and never through an
+    f-string**, because ``records`` is bounded only by ``ge=0`` (§4) and CPython
+    refuses a large ``int``-to-``str`` conversion — a statement §7 obliges must not
+    become a traceback on a value the type admits.
+
     **None of the three carries** a destination, a host, an origin, a provider name,
     a connection reference, an account identity, a tool identifier, a query or any
     fragment of one, a record, a title, a snippet, a monetary figure, a duration, a
@@ -8096,8 +8133,8 @@ def _render_outbound_statement(
     match statement.reach:
         case OutboundReach.REACHED:
             classes = ", ".join(_outbound_destination(one) for one in statement.destinations)
-            count = statement.records
-            records = f"{count} record" if count == 1 else f"{count} records"
+            count = _counted(statement.records)
+            records = f"{count} record" if statement.records == 1 else f"{count} records"
             _print(
                 f"[dim]Note: this turn reached outside this system, to {classes}. It "
                 f"brought {records} into what this turn had to work from. A count here "

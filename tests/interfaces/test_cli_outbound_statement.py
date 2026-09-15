@@ -17,6 +17,7 @@ notice are asserted as a screen and not as a call this module made itself.
 
 from __future__ import annotations
 
+import sys
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
@@ -706,3 +707,34 @@ def test_a_default_fake_turn_says_it_reached_nothing_driving_assistant_ask(
 
     assert result.exit_code == 0
     assert "this turn reached nothing outside this system" in _flat(result.output)
+
+
+def test_a_count_past_cpythons_conversion_cap_still_renders(output: StringIO) -> None:
+    """A statement ADR-0264 §7 obliges must not become a traceback on an admitted value.
+
+    ``records`` is bounded by ``ge=0`` and by nothing else — §4 hands "what validation
+    it carries beyond ``ge=0``" to this module and to #2362, and settles none of it — and
+    it is a **boundary-crossing** field a wire decode builds as well as this tree. So the
+    value reaching the renderer is whatever a frame carried, and CPython raises
+    :class:`ValueError` converting an ``int`` past :func:`sys.get_int_max_str_digits`
+    digits to text: an f-string here would replace §7's statement with a stack trace on
+    the one surface obliged to render it.
+
+    Asserted by **counting the digits on screen** rather than by matching the number as a
+    substring, because Rich wraps a 4301-digit word across display lines and a substring
+    assertion would be about the console's width.
+    """
+    digits = sys.get_int_max_str_digits() + 1
+    cli._render_outbound_statement(
+        OutboundStatement(
+            reach=OutboundReach.REACHED,
+            destinations=(OutboundDestination.SEARCH_PROVIDER,),
+            records=10 ** (digits - 1),
+        ),
+        composed_a_reply=True,
+    )
+    rendered = _flat(output.getvalue())
+
+    assert "this turn reached outside this system" in rendered
+    assert sum(character.isdigit() for character in rendered) == digits
+    assert "e+" not in rendered, "and as plain digits, never in scientific notation"
