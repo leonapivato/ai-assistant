@@ -245,11 +245,19 @@ addressable. §10 books the case that would need one with what fires it.
 > it: the read, the comparison and the write are one indivisible step, and a stale write raises
 > the class `StaleExecutionError` occupies.
 
-> **Normative — the store validates nothing about the number and refuses one thing.** It refuses a
+> **Normative — the store validates nothing about the number and refuses two things.** It refuses a
 > `quote` whose `intended_action` is not the `id` of a member of that goal's `intended_actions` at
 > the instant of the append, writing nothing, on the error class ADR-0249 §12 gives `save_goal` for
 > a goal whose id it already holds — an invariant breach at the current version rather than a lost
-> race. **It applies no other test**: not the amount, not the currency, not the digest, not the
+> race. **And on that same class, writing nothing, it refuses a `quote` whose `read_at` is earlier
+> than the `read_at` of the goal's last quote naming that action**: position is the order a quote's
+> governing rule is read under, so an append putting an **older reading last** would make position
+> disagree with reading and revive a price nothing re-read — ADR-0266 §7's *"An earlier quote is
+> consulted in no case"* breached by the record rather than by a comparison. **An equal `read_at`
+> is accepted**, that being one output minted twice (§4), and it leaves the governing figure
+> unchanged. **It is not a freshness test and §6's refusals stand**: it compares two records this
+> goal already holds and reads no age, no window and no provider's current price. **It applies no
+> other test**: not the amount, not the currency, not the digest, not the
 > provenance, and **no test of whether this quote refreshes an earlier one** — a refresh is
 > position in the tuple and not a predicate, so there is nothing for a store to evaluate and no
 > second place the rule could live (ADR-0252 §12's split, kept).
@@ -307,15 +315,22 @@ record of the same durability.
 
 ### 4. The mint: one step output yields one quote, and every failure of the reading refuses it
 
-> **Normative — `orchestration` mints a quote after a step succeeds, where all five hold, and in no
-> other case.** The step is `SUCCEEDED` and its `verifies` holds; the plan step carries an
+> **Normative — `orchestration` mints a quote after a step succeeds, where all four hold, and in no
+> other case.** The step is `SUCCEEDED`; the plan step carries an
 > `intended_action` (ADR-0265 §4); the declaration the step was bound to carries a `quoted_output`
 > (§3); the step's `output` is a JSON **object** carrying, at the key that declaration's
 > `QuotedOutput` names as its `amount`, a JSON **string** that `Decimal` accepts or a JSON
 > **integer**, whose `Decimal` is finite and not negative; and it carries, at the key it names as
 > its `currency`, a JSON **string**. The quote is then written by `record_quote` (§2) with
 > `arguments_digest` taken from the request that produced that output, `plan` and `read_from`
-> naming where it was read, and `read_at` the instant the step's output was recorded.
+> naming where it was read, and `read_at` the instant the step's output was recorded. **No
+> `verifies` is among the four and none is evaluated here.** ADR-0255 §8 reads that predicate at
+> exactly two sites — a dependent step's second conjunct and an interpretation's gate — and rules
+> that one no dependency and no interpretation reads *"is evaluated by nothing and imposes
+> nothing"*; a mint conditioned on it would be a **third** site, and it would put a plan-carried,
+> model-authored predicate in the path of a quote, which §8 below refuses for every other value
+> this decision touches. **ADR-0255 §8 therefore binds entire and this decision takes no scope on
+> it.**
 
 > **Normative — every failure of that reading mints nothing, and nothing is repaired, coerced,
 > defaulted or substituted.** A step with no `intended_action`, a declaration with no
@@ -351,9 +366,13 @@ record of the same durability.
 > lane reconciles a missing quote from a stored output**, because re-reading a price is a fresh
 > read appended like any other (above) and minting one from an output recorded earlier would state
 > a reading nobody took at an instant nobody observed. A retry whose predecessor committed appends
-> a **second quote equal to the first**, which then governs and carries the same number, so **an
-> append is idempotent in effect though not in storage**; its only cost is a slot against
-> `MAX_ACTION_QUOTES`, whose elision is itself fail-closed (§2). **No lane adds a duplicate test, a
+> a **second quote equal to the first** where the goal holds no later reading for that action: it
+> then governs, carries the same number, and **an append is idempotent in effect though not in
+> storage**, its only cost a slot against `MAX_ACTION_QUOTES`, whose elision is itself fail-closed
+> (§2). **Where a refresh landed in between, the late append is refused** by §2's `read_at`
+> monotonicity refusal, writing nothing and leaving the later quote governing — so **no retry ever
+> revives an earlier reading**, which is the one case in which a repeated mint would be fail-open
+> rather than merely wasteful. **No lane adds a duplicate test beyond that refusal, a
 > reconciliation key or a recovery pass** ahead of the decision §10 books.
 
 ### 5. How the policy obtains one: a new Protocol, keyed and never asked, failing closed
@@ -625,6 +644,8 @@ against a recorded number and correctly verified afterwards, and the over-bound 
 happened. **§13's rule binds verbatim and is relied on**, its own *"this decision adds **two**
 prerequisites"* staying true of that decision; what grows is the gate's total. §15's every other
 item, its thin/full division and its owed-by-the-lane-that-lands-the-clause rule are untouched.
+**And §8 binds entire and is relied on rather than reached**: the mint evaluates no `verifies` (§4),
+so that section's *"exactly the two places"* stay two and no third evaluation site is created here.
 
 **ADR-0249 §1 — in the `Goal` field count alone**, which ADR-0250 and ADR-0265 have each taken
 before it. `Goal` gains `quotes` and `quotes_elided` (§2), so a reader holding only §1 authors a
@@ -729,9 +750,10 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 
 ### 11. The lane cut, and the arms this decision owes
 
-> **Normative.** This decision is implemented in **three lanes and no fourth**: **Q1**, the
-> contract, the seam, the fakes and the store; **Q2**, the read in `permissions`; and **Q3**, the
-> mint in `orchestration`. **No lane wires a consequential capability** (§6, ADR-0255 §13), and
+> **Normative.** This decision is implemented in **two lanes and no third**: **Q1**, the contract,
+> the triad, the store **and the read in `permissions`** — the triad riding with the consumer whose
+> demands shape it; and **Q2**, the mint in `orchestration`. **No lane wires a consequential
+> capability** (§6, ADR-0255 §13), and
 > **no lane of this decision writes, proposes or populates an `Authorization`** — Q1 lands
 > `Authorization.quoted` as `core` shape and nothing more, and **the field's population, together
 > with arm 7, rides ADR-0254 §20's Lane 2**, the lane that owns the proposal path and its
@@ -740,11 +762,21 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 > (§7, §10). The bullets below assign each lane its surface and its arms, and **no lane is complete
 > without what it is assigned there**.
 
-> **Normative — Q1 is three packages and it is one change**, under `CLAUDE.md`'s Protocol-triad
-> exception as ADR-0137 §2 widens it: §5 mints a **new** Protocol, so the Protocol, its shared
-> conformance suite and its canonical fake are one unit; and the consumer whose demands shape it is
-> the plan store, which is where the quotes live (§2), so `planning`'s implementation and
-> `InMemoryPlanStore` ride with it. **`ToolDefinition.quoted_output`, `Authorization.quoted` and
+> **Normative — Q1 is four packages and it is one change**, under `CLAUDE.md`'s Protocol-triad
+> exception as ADR-0137 §2 widens it, and the reading is ADR-0254 §20's Lane 1 applied unchanged.
+> §5 mints a **new** Protocol, so the Protocol, its shared conformance suite and its canonical fake
+> are one unit; ADR-0137 §2's *"primary"* is *"the consumer whose demands shape the contract"* and
+> for `GoalQuotes` that is **`permissions`' evidence route**, the first real caller, not the store
+> that answers it — so the read rides here and the contract stays soft while its hardest consumer
+> exercises it. `planning`'s implementation and `InMemoryPlanStore` ride with it because the seam
+> the consumer calls has to be answered by a production store, which is ADR-0254 §20 Lane 1's own
+> shape one package over — *"the triad rides with the primary consumer whose demands shape the
+> contract"*, its `SqliteGoalAuthorizationStore` and `ThresholdActionPolicy`'s route (d) in one
+> change. **The provider cannot be deferred to a later lane**: `app/` passes the plan store where a
+> `GoalQuotes` is wanted, and a store without `for_action` does not satisfy the Protocol, so a lane
+> landing the read against the canonical fake alone leaves a composition root `mypy` refuses.
+>
+> **`ToolDefinition.quoted_output`, `Authorization.quoted` and
 > `AuthorizationProjection.quote` ride Q1 too, as shape and nothing else** — each is a `core`
 > shape change, `quoted_output` is authored by the integration rather than produced at all (§8),
 > and the other two have **no producer in any lane of this decision**: they are populated by
@@ -771,53 +803,56 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 > row**: a price nothing read is a price no record holds. **Q1 re-takes that reading at its own
 > base and states what it found**; were a stored goal to hold a quote by then, the lane stops.
 
-- **Q1 — the contract, the seam, the fakes and the store** (`core/types.py`, `core/protocols.py`,
-  `ai_assistant.testing`, `planning`). `ActionQuote`, `QuotedOutput`, `ActionQuoteMinting` and
-  `QuoteView`; `MAX_ACTION_QUOTES`; `Goal.quotes` and `Goal.quotes_elided` with §2's append-only,
-  order and elision rules; `ToolDefinition.quoted_output`; `Authorization.quoted` and
-  `AuthorizationProjection.quote`; `GoalQuotes` with its conformance suite and its canonical fake;
-  `PlanStore.record_quote` with its compare-and-swap, its elision and its one refusal, in the
-  Protocol, the conformance suite, `InMemoryPlanStore` and `planning`'s durable store;
-  `PROTOCOL_VERSION` with `wire/envelope.py`'s log entry; and `PlanExport.schema_version`. **It
-  reads no quote, mints none and writes no `Authorization`.** Arms 1, 2, 3, 6 and 8.
-- **Q2 — the read, in `permissions` alone.** `GoalQuotes.for_action` wired into ADR-0266 §7's
-  evidence route: the governing-quote selection, the digest comparison against the concrete
-  request, the currency conjunct taken at the quote's own currency, and the fault clause. **It is
-  ADR-0266's own L3** and is briefed on that decision and this one together. Its arms are driven
+- **Q1 — the contract, the seam, the store and the read** (`core/types.py`, `core/protocols.py`,
+  `ai_assistant.testing`, `planning`, `permissions`). `ActionQuote`, `QuotedOutput`,
+  `ActionQuoteMinting` and `QuoteView`; `MAX_ACTION_QUOTES`; `Goal.quotes` and `Goal.quotes_elided`
+  with §2's append-only, order and elision rules; `ToolDefinition.quoted_output`;
+  `Authorization.quoted` and `AuthorizationProjection.quote`; `GoalQuotes` with its conformance
+  suite and its canonical fake; `PlanStore.record_quote` with its compare-and-swap, its elision and
+  its two refusals, in the Protocol, the conformance suite, `InMemoryPlanStore` and `planning`'s
+  durable store; **`GoalQuotes.for_action` wired into ADR-0266 §7's evidence route** — the
+  governing-quote selection, the digest comparison against the concrete request, the currency
+  conjunct taken at the quote's own currency and the fault clause (§5); `PROTOCOL_VERSION` with
+  `wire/envelope.py`'s log entry; and `PlanExport.schema_version`. Its comparison arms are driven
   over quotes **constructed** on a goal, no mint existing in its base — which is why it does not
-  wait on Q3. **With it ride the arms ADR-0266 §11 assigns the quote decision** — its arms 1(b), 5
+  wait on Q2. **With it ride the arms ADR-0266 §11 assigns the quote decision** — its arms 1(b), 5
   and 6(a)'s with-a-quote limbs, arm 2(b)'s quote half, and the covered limbs of every ADR-0254
-  §20 arm its mechanism (iv) reaches, arm 45's GBP 50 `ALLOW` among them. Arm 5.
-- **Q3 — the mint, in `orchestration` alone.** §4's mint on every path a step's output is
-  recorded, its five conditions and its refusals; the `record_quote` write; and §8's discard of
+  §20 arm its mechanism (iv) reaches, arm 45's GBP 50 `ALLOW` among them. **It mints no quote and
+  writes no `Authorization`.** Arms 1, 2, 3, 5, 6 and 8.
+- **Q2 — the mint, in `orchestration` alone.** §4's mint on every path a step's output is
+  recorded, its four conditions and its refusals; the `record_quote` write; and §8's discard of
   every value this decision adds. **It writes no `Authorization`, populates no `quoted`, renders no
   projection and reads no quote at all**, so it needs neither a met member nor a proposable row:
-  **Q3 waits on Q1 and is independent of Q2**, either order. **It also waits on ADR-0266's L2**,
-  which sets `ActionRequest.intended_action` from the plan step the request serves, without which
-  the mint has no digest to pair with an act. Arm 4.
+  **Q2 waits on Q1 alone.** **It also waits on ADR-0266's L2**, which sets
+  `ActionRequest.intended_action` from the plan step the request serves, without which the mint has
+  no digest to pair with an act. Arm 4.
 
-> **Normative — Q1 is briefed after ADR-0266's L1 lands, Q2 and Q3 follow it in either order, and
-> ADR-0254 §20's Lane 2 is briefed after the last of the three and after the amendment #2401
-> books.** L1 lands `ActionRequest.intended_action`, `CoverageMember.kind` and ADR-0266 §7's two
-> routes, and above it ADR-0254 §20's Lane 3 has landed `AuthorizationProjection` and ADR-0265's
-> core lane `IntendedAction`, `Goal.intended_actions` and `PlanStep.intended_action` — Q1 adds a
+> **Normative — Q1 is briefed after ADR-0266's L1 lands, Q2 follows it, and ADR-0254 §20's Lane 2
+> is briefed after both and after the amendment #2401 books.** L1 lands
+> `ActionRequest.intended_action`, `CoverageMember.kind` and ADR-0266 §7's two routes — which Q1's
+> read is wired **into**, so the dependency is a precondition of Q1's own surface and not only of
+> its arms — and above it ADR-0254 §20's Lane 3 has landed `AuthorizationProjection` and ADR-0265's
+> core lane `IntendedAction`, `Goal.intended_actions` and `PlanStep.intended_action`. Q1 adds a
 > field to two of those types and refuses an action the goal does not hold, so **where L1 is not
-> yet in its base, Q1 is not briefed**. **Lane 2 is briefed after all three and not after Q1**,
-> because its arms drive an end-to-end proposal, its question and its answer: that needs a met
-> `MONEY` member (Q2), a quote there is a producer for (Q3), and the seam by which the component
-> that writes the row obtains condition 6's answer — which is #2401's and neither Lane 2's nor
-> this decision's to invent. **Every tree any of the three lanes leaves is conforming and
-> fail-closed** (ADR-0084 §3): before Q2 no `MONEY` member is met and every such act asks; before
-> Q3 no quote is ever minted, so the same holds a fortiori; and `Authorization.quoted` stands
-> `None` on every row until Lane 2, which §7 makes a conforming row rather than one to repair.
+> yet in its base, Q1 is not briefed**. **Lane 2 is briefed after both and not after Q1**, because
+> its arms drive an end-to-end proposal, its question and its answer: that needs a met `MONEY`
+> member (Q1), a quote there is a producer for (Q2), and the seam by which the component that
+> writes the row obtains condition 6's answer — which is #2401's and neither Lane 2's nor this
+> decision's to invent. **ADR-0266 §11 cuts two lanes and no third**, so the read is this
+> decision's own and is briefed on that decision and this one together rather than as a lane of
+> that one. **Every tree either lane leaves is conforming and fail-closed** (ADR-0084 §3): before
+> Q1 no `MONEY` member is met and every such act asks; before Q2 no quote is ever minted, so the
+> same holds a fortiori; and `Authorization.quoted` stands `None` on every row until Lane 2, which
+> §7 makes a conforming row rather than one to repair.
 
-> **Normative.** **The three lanes ship seven of the eight arms below — 1, 2, 3, 4, 5, 6 and 8 —
+> **Normative.** **The two lanes ship seven of the eight arms below — 1, 2, 3, 4, 5, 6 and 8 —
 > each over controlled fakes, and no lane is complete without the arms it is assigned. Arm 7 is
 > assigned to ADR-0254 §20's Lane 2 with the row population, and is owed there rather than here.**
 > **No arm asserts anything its own lane's tree cannot produce**, which is why the end-to-end
-> comparison is Q2's and why arm 7 belongs to the lane that can propose a row at all: at every tree
-> this decision's own lanes leave, no row carrying a met `MONEY` member is proposable, so an arm
-> over one would assert against a builder that returns none. Every arm states a correction as
+> comparison is Q1's, where the read lands, and why arm 7 belongs to the lane that can propose a
+> row at all: at every tree this decision's own lanes leave, no row carrying a met `MONEY` member
+> is proposable, so an arm over one would assert against a builder that returns none. Every arm
+> states a correction as
 > a **subsequent turn**, on the owner's sequencing ruling of 2026-09-13, and **none is demonstrated
 > against a live integration** (§6).
 
@@ -831,7 +866,10 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 2. **The store: the write, the refusals and the elision.** `record_quote` appends and advances
    `version`; a stale `expected_version` refuses on the class `StaleExecutionError` occupies and
    writes nothing; a `quote` whose `intended_action` is not an id of the goal's `intended_actions`
-   refuses on the invariant class and writes nothing, **against a control naming one that is**. And
+   refuses on the invariant class and writes nothing, **against a control naming one that is**; and
+   **a `quote` whose `read_at` precedes the `read_at` of the goal's last quote naming that action
+   refuses on that same class and writes nothing**, the earlier reading never landing last, against
+   a control whose `read_at` is **equal**, which is accepted. And
    the elision: appending to a goal already holding `MAX_ACTION_QUOTES` drops **exactly one** from
    the front and advances `quotes_elided` by one; **an elision that drops an action's only quote
    leaves that action with none** and an elision that drops its **oldest of two** leaves the
@@ -859,7 +897,12 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    boundaries** (§4): a walk stopped after the output transition committed and **before**
    `record_quote` leaves the step `SUCCEEDED` with its output, the goal's `quotes` **unchanged**,
    and no reconciliation on a later read — the act asks; and a mint driven twice over one output
-   appends **two** equal quotes and nothing raises.
+   appends **two** equal quotes and nothing raises, **while the same second mint taken after a
+   later quote for that action landed appends nothing**, §2's refusal leaving the later quote
+   governing — the arm that pins a delayed retry against reviving the earlier price. **And no
+   `verifies` is read**: a `SUCCEEDED` step whose plan-declared `verifies` predicate would **fail**
+   over its own output mints exactly as one whose predicate holds, the mint evaluating no
+   plan-carried value and adding no evaluation site to the two ADR-0255 §8 names.
 5. **The comparison, end to end, and it is ADR-0266's own.** Against a quote for the request's
    `intended_action` at `"120"`/`"EUR"` over the request's own arguments the request is **covered**
    against a `150` `EUR` ceiling; at `"170"` it is not; at `"120"`/`"USD"` it is not; with **no**
@@ -940,8 +983,8 @@ ratification flip is one line and no other byte (ADR-0165).
 
 ## Consequences
 
-**What becomes possible, and when.** Q1 lands the carrier, Q2 the read and Q3 the producer, and
-with Q2 and Q3 both landed ADR-0266 §7's evidence route has a minted operand for the first time: a
+**What becomes possible, and when.** Q1 lands the carrier and the read, Q2 the producer, and with
+both landed ADR-0266 §7's evidence route has a minted operand for the first time: a
 `MONEY` ceiling the user stated is **confirmed once, in the authorisation phase, beside both the
 words it was read from and the figure the act was quoted at**, and then covers every later call for
 that act whose quote sits under it — **at a tool that declares nothing about money at all**, which
