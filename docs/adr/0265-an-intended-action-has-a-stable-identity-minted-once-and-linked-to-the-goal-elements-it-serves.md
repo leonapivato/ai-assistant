@@ -1,6 +1,6 @@
 # 265. An intended action has a stable identity, minted once, linked to the goal elements it serves
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0269 (one scope, and it is one refusal conjunct of §5, stated there and once more as an arm. §5's third conjunct — *"refuses a `serves` value that is not the `id` of an element of the goal's **current** interpretation at the instant of the append"* — becomes a membership test over **every revision the goal holds at that instant**, so a link §3 already calls *"stale, truthful and harmless"* is admitted where it was refused and the conjunct keeps the whole of its job, refusing *"a dangling or foreign identifier"*. A reader holding only §5 builds a store that refuses the minting of every turn that **opens** a goal and then restates the element it minted against, which is the state issue #2414 records. And §10 arm 5's `serves`-refusal limb — *"a `serves` value naming an identifier of **no** element of the goal's current interpretation"* — states the same rule as an arm and narrows with it, to an identifier of no element of any revision the goal holds. That one conjunct, and nothing else in this ADR: §5's refusal of an `id` the goal already holds, its `MAX_INTENDED_ACTIONS` refusal, its all-or-nothing rule, its error-class rule and its compare-and-swap discipline all bind entire; arm 5's other-goal limb, its two-action shape, its byte-for-byte assertions and its error-class assertion bind entire; §1's append-only rule, its bound, its opening-write clause and its `A`-disjointness are relied on and are what make the state forced rather than chosen; §2's minting rule, its per-call ordering and its all-or-nothing bound bind entire and are relied on; §3 binds entire and is the ground the narrowing is taken on; §4's label space and its step-label refusal are untouched, and the asymmetry §3 draws between them is preserved; and §§6-11 stand entire)
 - Date: 2026-09-13
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **three narrowly stated scopes, and §8 shows the working for all three. §1's `Goal` model
@@ -75,6 +75,25 @@
   which is where a reader looking for the carrier will be — 46 and not 45 because
   ADR-0254 §20's Lane 3 landed 45 while L1 was in review, which is §5's own "the figure
   is that lane's" working rather than a second correction.
+
+- **Partially superseded: 2026-09-15 by ADR-0269 — §5's third refusal conjunct, and §10 arm 5's
+  limb stating the same rule as an arm. Nothing else in this ADR.**
+  The conjunct reads the goal's **current** interpretation at the instant of the append, and §5's
+  own reasoning for checking it exactly once is that *"§2's ordering records this call's revision
+  **before** its actions"*. On a turn that **opens** a goal that instant is not available.
+  ADR-0249 §11 defers every write to one end-of-turn site and its §12 makes `save_goal` *"the
+  opening write alone"*, carrying the whole interpretation chain in one call, while §1 of this
+  decision rules that *"the goal's opening write mints none"* — so an opening turn's minting is
+  necessarily appended **after the last call's revision**, and a link §2 resolved against the
+  **first** call's is refused there as though it were dangling. Issue #2414 records the state and
+  PR #2411 pinned it as a test.
+
+  **The conjunct becomes a membership test over every revision the goal holds**, which refuses a
+  dangling or foreign identifier exactly as before — a fabricated value, an element of another
+  goal, an element of a revision ADR-0249 §2 has elided — and admits the one §3 already calls
+  *"stale, truthful and harmless"*. The test is strictly wider, so no `serves` value this
+  conjunct admitted is now refused, no stored goal becomes non-conforming and no migration is
+  owed.
 
 ## Context
 
