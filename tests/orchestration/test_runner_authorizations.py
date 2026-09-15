@@ -18,13 +18,15 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from authorizing_builders import AT, GOAL, RETENTION, a_goal, a_tool
+from authorizing_builders import ACCOUNT, AT, GOAL, RETENTION, a_binding, a_goal, a_tool
 
 from ai_assistant.core.errors import AuthorizationError
 from ai_assistant.core.types import (
     ActionPlan,
     AttemptTransition,
+    Authorization,
     AuthorizationDisposition,
+    AuthorizationOrigin,
     DataTier,
     Disposition,
     GoalAttempt,
@@ -32,6 +34,7 @@ from ai_assistant.core.types import (
     StepStatus,
 )
 from ai_assistant.orchestration import StepExecutor, StepRunner
+from ai_assistant.orchestration.authorizing import authorization_id_for
 from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -45,7 +48,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ai_assistant.core.types import Authorization, ExecutionState, Goal, ToolDefinition
+    from ai_assistant.core.types import ExecutionState, Goal, ToolDefinition
 
 #: The one step every test here disposes of. It carries **no argument**, which is
 #: the request ADR-0254 §20's arm 54 is stated over and the only shape this lane
@@ -366,6 +369,81 @@ async def test_a_stage_holding_no_store_settles_nothing() -> None:
 
     (row,) = await store.export()
     assert row.disposition is AuthorizationDisposition.PROPOSED
+
+
+# --- the settlement is an exact lookup, at any age (#2375) ---------------
+
+
+def _another_goals_row(n: int) -> Authorization:
+    """A `PROPOSED` row of some *other* goal, newer than the proposal under test."""
+    return Authorization(
+        id=f"auth-other-{n}",
+        goal=f"g-other-{n}",
+        tool=a_tool(),
+        account=ACCOUNT,
+        destinations=a_binding().canonical_destination_set,
+        origin=AuthorizationOrigin.CONFIRMED,
+        coverage=(),
+        proposed_at=AT + timedelta(minutes=1 + n),
+        expires_at=AT + timedelta(days=1),
+        confirmation=f"d-other-{n}",
+        supersedes=None,
+        disposition=AuthorizationDisposition.PROPOSED,
+        settled_at=None,
+    )
+
+
+async def test_an_answer_settles_its_proposal_past_any_bounded_lookback() -> None:
+    """Issue #2375: the settlement carries no finite-history assumption.
+
+    Reading back over a bounded `recent` page lost a proposal that newer rows of
+    **other** goals had displaced: the row stayed `PROPOSED` for ever, and the
+    authority the user had answered for was never established. The id is derived
+    from the confirmation, so ADR-0254 §16's keyed `resolve` finds it exactly —
+    no page, no limit, no ordering assumption, and no ninth store signature.
+
+    Two hundred and one rows is one past the page the lookback used to read.
+    """
+    harness = Harness()
+    parked = await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+    for n in range(201):
+        await harness.authorizations.record(_another_goals_row(n))
+
+    result = await harness.runner.resume(
+        parked, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    (standing,) = await harness.authorizations.standing(GOAL)
+    assert standing.disposition is AuthorizationDisposition.ESTABLISHED
+    assert standing.id == authorization_id_for(standing.confirmation or "")
+
+
+async def test_a_row_under_that_id_naming_another_question_settles_nothing() -> None:
+    """The derived id is a **key**, never the evidence that a row answers a question.
+
+    The store is handed a row already occupying the id this turn's `CONFIRM` would
+    derive, naming a different confirmation. The proposal is refused as a duplicate
+    id — which ADR-0254 §1 already rules harmless, the call falling back to route
+    (a) — and the answer must then settle **nothing** rather than settle the row it
+    found there.
+    """
+    store = FakeGoalAuthorizationStore()
+    squatter = _another_goals_row(0).model_copy(
+        update={"id": authorization_id_for("d-1"), "confirmation": "d-0"}
+    )
+    await store.record(squatter)
+    harness = Harness(authorizations=store)
+
+    parked = await _parked(harness, a_goal(deadline=AT + timedelta(hours=12)))
+    result = await harness.runner.resume(
+        parked, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    (row,) = await store.export()
+    assert row == squatter
+    assert await store.standing(GOAL) == ()
 
 
 # --- the resolving decision is not itself a question ---------------------

@@ -33,7 +33,7 @@ than a wildcard over anything (§3).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
     Authorization,
@@ -43,10 +43,16 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
     from datetime import datetime, timedelta
 
     from ai_assistant.core.types import ActionRequest, Goal, PermissionDecision
+
+
+#: The namespace every id derived from a confirmation is written under
+#: (:func:`authorization_id_for`). One literal, defined once, because the writer
+#: and the reader must agree on it exactly or a settlement silently finds nothing.
+_DERIVED_ID_PREFIX: Final = "goal-authorization-for-confirmation:"
 
 
 def user_facing_arguments(request: ActionRequest, /) -> tuple[str, ...]:
@@ -137,7 +143,7 @@ def horizon(
     return reached if reached > proposed_at else None
 
 
-def proposed_authorization(  # noqa: PLR0913 — the request, the decision, and one parameter per thing a condition of ADR-0254 §1 is taken against; every one is a distinct fact and a bundle would mint a type for an argument list
+def proposed_authorization(
     request: ActionRequest,
     decision: PermissionDecision,
     /,
@@ -145,7 +151,6 @@ def proposed_authorization(  # noqa: PLR0913 — the request, the decision, and 
     goal: Goal | None,
     retention: timedelta | None,
     standing: Sequence[Authorization],
-    id_factory: Callable[[], str],
 ) -> Authorization | None:
     """The row this `CONFIRM` proposes, or ``None`` where it proposes none.
 
@@ -198,7 +203,6 @@ def proposed_authorization(  # noqa: PLR0913 — the request, the decision, and 
         retention: The deployment's turn-retention window, for rung 3.
         standing: The `ESTABLISHED` rows of that goal, live and lapsed, as
             `GoalAuthorizationStore.standing` returns them.
-        id_factory: Mints the row's own id.
 
     Returns:
         The row to record `PROPOSED`, or ``None`` where this `CONFIRM` proposes
@@ -218,7 +222,7 @@ def proposed_authorization(  # noqa: PLR0913 — the request, the decision, and 
     if expires_at is None:
         return None
     return Authorization(
-        id=id_factory(),
+        id=authorization_id_for(decision.id),
         goal=request.goal,
         tool=request.tool,
         account=binding.account,
@@ -249,37 +253,54 @@ def _superseded(standing: Sequence[Authorization], request: ActionRequest, /) ->
     return None
 
 
-def proposal_of(rows: Sequence[Authorization], confirmation_id: str, /) -> Authorization | None:
-    """The `PROPOSED` row written against ``confirmation_id``, or ``None``.
+def authorization_id_for(confirmation_id: str, /) -> str:
+    """The id of the row a `CONFIRM` proposes, **derived from that decision's id**.
 
-    **The store is keyed by id and by goal, and carries no lookup by
-    `confirmation`** (ADR-0254 §16's eight signatures), so the answer is found by
-    reading back over `recent`. That is bounded and newest-first, and a proposal is
-    by construction recent relative to the answer it is waiting for — a `CONFIRM`
-    carries its own `expires_at` and a stale one is refused before this is reached.
+    ADR-0254 §16 closes `GoalAuthorizationStore` at eight signatures and none of
+    them is a lookup by ``confirmation``, so the answer that settles a proposal has
+    to find the row some other way. Reading back over `recent` was that way, and it
+    carried a finite-history assumption: a proposal displaced past the page by newer
+    rows of *other* goals was never settled, and the authority the user had granted
+    was silently lost (issue #2375).
 
-    **Not finding it is safe and is not repaired.** The `CONFIRM` still resolves and
-    the one call is still authorised by ADR-0148 §3's route (a); what is lost is the
-    standing authority, which is ADR-0254 §12's own shape for an answer that
-    establishes nothing. The failure direction is therefore an authority the user
-    has to grant again, never one granted without them.
+    **Deriving the id removes the search instead of widening it.** One `CONFIRM`
+    proposes at most one row (:func:`proposed_authorization` is called once per
+    recorded decision, and the trail refuses a duplicate decision id), so the
+    confirmation's id is already a unique name for that row — and §16's keyed
+    :meth:`~ai_assistant.core.protocols.GoalAuthorizationStore.resolve` then finds
+    it exactly, at any age, with no page, no limit and no ordering assumption. No
+    store signature is added, no `core` type gains a field, and ADR-0254 §1's
+    *"minted by the caller that records it"* is satisfied by a caller that derives
+    rather than draws: what it forbids is a **store** minting the id, and this is
+    still `orchestration` naming its own row.
+
+    **The prefix is what makes the derivation collision-free**, not a decoration.
+    An `Authorization` id is an
+    :data:`~ai_assistant.core.types.DurableIdentifier` — non-blank encodable text
+    and nothing narrower — so a row minted by any other route could in principle
+    carry any string. Namespacing every derived id under one prefix that no
+    id-minting seam on this tree produces keeps the derived names disjoint from the
+    drawn ones by construction rather than by probability.
+
+    **It is not read back as a confirmation id.** The caller that resolves a row
+    checks the row's own ``confirmation`` field against the answered decision
+    (:meth:`~ai_assistant.orchestration.runner.StepRunner._settle`), so the id is a
+    lookup key and never the evidence that one row answers one question.
 
     Args:
-        rows: What `GoalAuthorizationStore.recent` returned, newest first.
-        confirmation_id: The answered decision's id.
+        confirmation_id: The id of the recorded `CONFIRM` the row is proposed
+            against — `PermissionDecision.id`, which is also the row's
+            ``confirmation``.
 
     Returns:
-        The row, or ``None`` where these rows carry none for that confirmation.
+        The row's id.
     """
-    for row in rows:
-        if row.confirmation == confirmation_id:
-            return row
-    return None
+    return f"{_DERIVED_ID_PREFIX}{confirmation_id}"
 
 
 __all__ = [
+    "authorization_id_for",
     "horizon",
-    "proposal_of",
     "proposed_authorization",
     "user_facing_arguments",
 ]
