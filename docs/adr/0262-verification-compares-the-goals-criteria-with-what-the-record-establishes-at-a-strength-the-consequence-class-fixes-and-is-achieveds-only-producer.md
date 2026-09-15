@@ -21,14 +21,17 @@
   `parameters_schema` included, the new declaration being a field **beside** that schema and never
   a keyword inside it.
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
-  — **one scope, in §16, and it is a sentence about a *holder* rather than about a shape**: that
-  decision introduces `AuthorizationResolution` as *"the face a trail holds"*, and §3 of this
-  decision gives the same face to the verification phase, which reads a row a step's own pinned
-  decision already points at. **The Protocol itself is untouched** — `resolve(id)` and nothing
-  else, the eight signatures unmoved, no member added to it or to `GoalAuthorizationStore` — and
-  §16's structural-typing argument binds entire and is what keeps the addition narrow: a
-  verification phase holding that face can name neither `record` nor `live_for`, exactly as a trail
-  cannot. **Every other clause of ADR-0254 binds entire**, §13's no-cached-verdict rule
+  — **one scope, in §16's *"the face a trail holds"* sentence together with §7's clause
+  constructing `AuditTrail` implementations with one, in their application to *who may hold and
+  read that Protocol* alone**: §3 of this decision gives the same face to the verification phase,
+  to read the row a step's own pinned route-(d) decision points at. **That is a change to
+  `AuthorizationResolution`'s contract even though its shape does not move**, and §8 classifies it
+  as one rather than as a use: a reader holding only §16 builds a system in which the trail is the
+  sole holder and `record` the sole reader. **The Protocol's shape *is* untouched** — `resolve(id)`
+  and nothing else, the eight signatures unmoved, no member added to it or to
+  `GoalAuthorizationStore`, `live_for` and `record` still out of reach — and §16's
+  structural-typing argument binds entire and is what keeps the widening narrow. **Every other
+  clause of ADR-0254 binds entire**, §7's ten-condition refusal and §13's no-cached-verdict rule
   conspicuously so (§10).
 - **No other ADR is superseded in whole or in part** — **ADR-0249 is not, in any scope**, this
   decision adding no field to `GoalElement`, to `ProposedElement` or to anything a planner returns
@@ -46,8 +49,8 @@
 This is **A10** of the six-phase task lifecycle design ([#2255](https://github.com/leonapivato/ai-assistant/issues/2255)),
 and the last of its ten. Its row in revision 1 of the fit report is exact about the subject —
 *"Verification against the goal's criteria, **strength proportional to consequence**, the
-six-member report vocabulary"* — and equally exact about what it takes from earlier decisions:
-*"Nothing. Reads strength off ADR-0016 §1's required declarations, ordered by §2."*
+six-member report vocabulary"* — and about what it takes: *"Nothing. Reads strength off ADR-0016
+§1's required declarations, ordered by §2."*
 
 The six requirements, quoted:
 
@@ -65,9 +68,8 @@ itself establishes that the goal was achieved; completion criteria concern the r
 ADR-0249 §4 states it as a prohibition and ADR-0253 §4 and ADR-0255 §8 as a boundary around
 `verifies`; this decision is where the positive half is written.
 
-**And decision 4 of the same ruling** — *"every reassignment explicit, production consequential
-workflows carry verification/unknown-outcome/cancellation guarantees as a rule"* — is what §7
-answers: this ADR is the **verification** guarantee of ADR-0255 §13's gate.
+**And decision 4 of the same ruling** — *"production consequential workflows carry
+verification/unknown-outcome/cancellation guarantees as a rule"* — is what §7 answers.
 
 ### What is booked here, verbatim
 
@@ -107,11 +109,10 @@ about an unfinished goal)"*. §6 takes it.
 - **The authorisation's lifetime.** *"A request is judged against the world as it is now. Forecast
   dry → booking executes → **verification confirms** → goal complete → **the authorisation ends
   with the goal**."* **The ending itself is not written here**: the owner disposed of it as *"a
-  short superseding ADR, one edge + one clause, sequenced after [ADR-0266]"*, and this decision
-  contradicts it in no clause — what this decision supplies is the antecedent that ruling names,
-  *verification confirms*, and the act that makes the goal terminal (§5). **The one case the ruling
-  keeps open is preserved by §4**: the **uncertain-outcome** case, where the attempt does not end
-  and the goal stays open until the uncertainty is resolved through the phases.
+  short superseding ADR, one edge + one clause"*, and this decision contradicts it in no clause —
+  what it supplies is the antecedent that ruling names and the act that makes the goal terminal
+  (§5). **The one case the ruling keeps open is preserved by §4**: the **uncertain-outcome** case,
+  where the attempt does not end.
 - **The charge is confirmed afterwards.** *"The actual charge is confirmed by the verification
   phase afterward; a quote/charge mismatch is a reported finding."* §2 takes it as an operand rule
   §2 takes it as a comparison that can only **deny**, against the `ActionQuote` ADR-0267 landed
@@ -132,11 +133,10 @@ or runs outside a turn** — *"Nothing checks on its own initiative."*
 
 ### What the tree holds today, read rather than assumed, at `origin/main` `58f0797f`
 
-- **`GoalInterpretation`** carries `outcome`, `outcome_ground` and its arguments, and
-  `constraints`, `criteria` and `conditions`, each a `tuple[GoalElement, ...]`. **`criteria` is
-  read by nothing that decides anything**: ADR-0249 §7's revision path writes it, ADR-0250 §5's
-  `added`/`removed` compares it element-wise, and ADR-0249 §9's `S` labels project it — three
-  readers, none of which settles anything about the goal.
+- **`GoalInterpretation`** carries `constraints`, `criteria` and `conditions`, each a
+  `tuple[GoalElement, ...]`. **`criteria` is read by nothing that decides anything**: ADR-0249 §7's
+  revision path writes it, ADR-0250 §5's `added`/`removed` compares it element-wise, and ADR-0249
+  §9's `S` labels project it — three readers, none settling anything about the goal.
 - **`AttemptOutcome`** is the six members ADR-0249 §5 fixed. **`AttemptOutcome.ANSWERED` is the
   only member any code writes**, at three sites in `orchestration/engine.py`, each guarded by a
   helper whose docstring says so in terms: *"a pass failing any of them ends no attempt — **which
@@ -144,10 +144,9 @@ or runs outside a turn** — *"Nothing checks on its own initiative."*
 - **`GoalStatus.ACHIEVED` has no producer**: `set_goal_status` is called at exactly two sites in
   `orchestration/engine.py`, writing `ABANDONED` and ADR-0250 §13's reopen to `ACTIVE` — **two of
   the four members**, neither of which says *this was reached*.
-- **`GoalAttempt`'s validator** admits two shapes: a terminal `state` with both `outcome` and
-  `ended_at` present, a non-terminal one with both absent — **so an `AttemptOutcome` cannot be
-  written except in the transition that ends the attempt**, which is why §4 states the two
-  together.
+- **`GoalAttempt`'s validator** admits a terminal `state` with both `outcome` and `ended_at`
+  present and a non-terminal one with both absent — **so an `AttemptOutcome` cannot be written
+  except in the transition that ends the attempt**, which is why §4 states the two together.
 - **`CoverageMember` still carries `argument` and no `kind`**, and `PermissionRuling` carries no
   `authorised_goal`: ADR-0254 and ADR-0266 are **ratified and not implemented**, so §2's operands
   are contracts rather than code today, which §11 states as a sequencing fact rather than leaves
@@ -173,8 +172,8 @@ because the comparison is hard but because nothing reads `criteria`.**
 
 **The consequence, named because it is the one that costs.** ADR-0255 §13's gate holds a
 consequential capability out of production until its **verification**, uncertain-outcome and
-cancellation guarantees exist. A8's is ratified (ADR-0259) and A9's is ratified (ADR-0261); this is
-the third, and until it lands the gate cannot be met by any capability at all.
+cancellation guarantees exist. A8's and A9's are ratified (ADR-0259, ADR-0261); this is the third,
+and until it lands the gate cannot be met by any capability at all.
 
 ### What this decision is not allowed to settle
 
@@ -284,10 +283,16 @@ honest one."*
 > carries a **route-(d) `ALLOW`** — ADR-0254 §7's discriminator, *"`resolves` unset,
 > `authorised_by` set, `authorised_subject` set, `authorised_goal` **set**"* — whose
 > `authorised_goal` is this goal, resolving each distinct `authorised_by` through
-> **`AuthorizationResolution.resolve`** (§3), and keeping the rows that come back `ESTABLISHED`
-> with `origin` **`CONFIRMED`** — ADR-0254 §1's path (i), *"put to the user as a question and
-> answered"*, the `PROPOSED → ESTABLISHED` edge and the only route on which the user saw the
-> rendered values and assented (ADR-0254 §11). **The set is enumerable from the attempt alone and
+> **`AuthorizationResolution.resolve`** (§3), and keeping the rows that come back with `origin`
+> **`CONFIRMED`** — ADR-0254 §1's path (i), *"put to the user as a question and answered"*, the
+> only route on which the user saw the rendered values and assented (ADR-0254 §11). **The
+> disposition is *not* re-tested here, and that is deliberate**: ADR-0254 §7 makes `record` refuse
+> a route-(d) row unless the store's row was `ESTABLISHED` and live at `decided_at`, so the pinned
+> decision **is** the proof of the row's standing at the moment the act ran, and a row **revoked or
+> superseded afterwards** must not retract a verification of something that already happened. **No
+> lane reads a present disposition as evidence about a past dispatch, in either direction**, and
+> `origin` is the field ADR-0254 §1 has a correction transcribe unchanged, so it is stable under
+> every later edge. **The set is enumerable from the attempt alone and
 > this decision reaches no further**: a row **no step of this attempt acted under** is not an
 > authorising row, is not looked for, and establishes and refuses nothing — **no lane enumerates
 > the goal's rows, calls `standing`, `recent` or `live_for`, or reads a row by any route but a
@@ -351,16 +356,20 @@ honest one."*
 > stored `output`, it carries a **`PlanStep.intended_action`** (ADR-0265 §4), and — where the
 > criterion's kind is `BoundKind.MONEY` — §2a's charge conjunct **agrees**. Call it
 > **contradicting** where it stands `SUCCEEDED` and **some** declaration of its operative
-> definition does **not** hold, or where §2a's charge conjunct **disagrees**.
+> definition does **not** hold, where §2a's charge conjunct **disagrees**, or where it stands
+> **`FAILED`** — a bound step's failure is the act the criterion rests on **provably not having
+> happened** (ADR-0029 records `FAILED` only where the call did nothing, `INDETERMINATE` where its
+> fate is unknown), which is *established not to hold* and not an absence of evidence.
 >
 > - **Unmet** — **some** bound step is contradicting: the act's own author said what a success
 >   establishes and the record **disagrees**. **Unmet is decided first**, so a later contradicting
 >   step is never outvoted by an earlier satisfying one.
 > - **Met** — no bound step is contradicting, and **some** bound step is satisfying.
 > - **Unestablished** — otherwise: the criterion has no confirmed member, no bound step, no bound
->   step standing `SUCCEEDED`, no operative definition held, a definition declaring **nothing**, a
->   step naming no intended action, or a `MONEY` criterion whose charge the record does not let
->   this decision read.
+>   step that is satisfying or contradicting — every one `PENDING`, `SKIPPED`, `RUNNING` or
+>   `INDETERMINATE` — no operative definition held, a definition declaring **nothing**, a step
+>   naming no intended action, or a `MONEY` criterion whose charge the record does not let this
+>   decision read.
 >
 > **No fourth result exists, no result is a degree, and no lane reads *unestablished* as either of
 > the other two**; and **no step of another goal, another row, another route or no route at all is
@@ -425,23 +434,27 @@ honest one."*
 > `BoundKind.MONEY` and on no other**, and over a bound step standing `SUCCEEDED` it has exactly
 > three outcomes:
 >
-> Its operand is the **governing quote**, and this decision selects one by **adopting ADR-0267
-> §7's own selection rather than stating a second**: *"the last member of the goal's `quotes`
-> naming the request's `intended_action`"*, taken over `Goal.quotes` as it stands when the
-> comparison runs. **No lane searches earlier members, prefers a matching digest, takes the
-> cheapest, the dearest or the nearest, or reads `read_at`** (ADR-0267 §1).
+> **Its operand is the criterion's own row's `quoted`** — ADR-0267 §7's `Authorization.quoted`,
+> *"the governing quote for the request's intended action in the goal the row was built from"*,
+> written once before the question was put and **never edited**. **This decision selects no quote
+> at all**: the figure compared against is the one **the user was shown and answered over**
+> (ADR-0254 §11), pinned on the row the act ran under. **No lane reads `Goal.quotes` here, selects
+> a member of it, prefers a matching digest, or takes the cheapest, the dearest or the latest** —
+> and the reason is the failure that selection would cause: ADR-0267 §4 has a successful step
+> carrying a `quoted_output` **append a quote of its own output**, so a comparison that searched
+> the goal's tuple would compare the booking's charge against the quote the booking itself minted
+> and find a €170 charge agreeing with a €170 quote under a €120 authorisation.
 >
 > - **It agrees** where the step's operative definition carries a **`quoted_output`** (ADR-0267
->   §3), a governing quote exists whose `arguments_digest` is that step's request's
->   `parameters_digest` (ADR-0267 §1), and the step's stored `output` carries, at the two keys that
+>   §3), R carries a **`quoted`**, and the step's stored `output` carries, at the two keys that
 >   declaration names, an amount **equal** to that quote's `amount` as a `Decimal` and a currency
 >   **equal byte for byte** to its `currency`.
 > - **It disagrees** where all of that holds except that either value **differs** — the *reported
 >   finding* the owner's ruling names, which §4 renders as `FAILED` or `PARTIAL`.
 > - **It neither agrees nor disagrees, and the criterion is `unestablished`**, in every remaining
->   case: the definition names **no** `quoted_output`; the goal names **no** quote for that act;
->   the governing quote's `arguments_digest` is **another call's**; or the output carries nothing
->   readable at those keys. **This is the arm that must not be inert.** A
+>   case: the definition names **no** `quoted_output`; **R carries no `quoted`**, which ADR-0267 §7
+>   makes true of every path-(ii) correction and of a row whose goal held no quote for the act; or
+>   the output carries nothing readable at those keys. **This is the arm that must not be inert.** A
 >   `MONEY` criterion says what the user was willing to be charged, and an act whose charge the
 >   record does not carry has not been confirmed to have honoured it — so the honest result is that
 >   nothing establishes it, not that everything else did.
@@ -531,18 +544,16 @@ honest one."*
 > Reversibility.REVERSIBLE`** under those overridden operators, and **no lane substitutes a rank
 > table, a membership test against a hand-written set, or a string comparison.**
 
-> **Normative — `discloses` is read beside `reversibility` and neither stands alone**, which is
-> ADR-0016 §2's own conclusion binding here: *"a `REVERSIBLE` tool with a non-empty `discloses`
-> performed an irrevocable disclosure while making a revocable change, and a policy that reads only
-> the scale would auto-grant it. Reading both fields is not an implementation detail."*
+> **Normative — `discloses` is read beside `reversibility` and neither stands alone**, ADR-0016
+> §2's own conclusion: *"a `REVERSIBLE` tool with a non-empty `discloses` performed an irrevocable
+> disclosure while making a revocable change … Reading both fields is not an implementation
+> detail."*
 
-> **Normative — `risk_level` is not read, and the narrowing is stated rather than left to be
-> noticed.** Risk is the scale a *policy* thresholds to decide **whether to ask** — ADR-0016 §2's
-> own sentence for it, *"The canonical policy sentence is a threshold — 'confirm anything at or
-> above `MEDIUM`'"* — and the question here is **what an act did**, which `side_effecting`,
-> `reversibility`, `discloses` and the binding answer directly. **No lane adds a `risk_level` limb
-> to the ladder**, and a deployment that wants a stricter rung declares a stricter
-> `reversibility` — which is a declaration ADR-0016 §1 already requires with no default.
+> **Normative — `risk_level` is not read.** Risk is the scale a *policy* thresholds to decide
+> **whether to ask** — ADR-0016 §2's *"The canonical policy sentence is a threshold"* — and the
+> question here is **what an act did**, which `side_effecting`, `reversibility`, `discloses` and
+> the binding answer directly. **No lane adds a `risk_level` limb to the ladder**, and a deployment
+> that wants a stricter rung declares a stricter `reversibility`.
 
 > **Normative — what each rung owes, stated over the criteria and never over a call.**
 >
@@ -888,7 +899,10 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > **`FAILED`**, that what
 > was asked was established not to have happened; for **`UNCERTAIN`**, that an action was taken and
 > **its outcome is not established**, naming `assistant goals`; and for **`CONDITION_PREVENTED`**,
-> that a stated condition did not hold so nothing was done. **The exact wording is the lane's; what
+> that the action was **prevented before it ran** — which covers both of `blocked`'s sources (§4)
+> without asserting either, since `SkipReason.UNMET_DEPENDENCY` is a stated condition that did not
+> hold and `SkipReason.APPROVAL_DENIED` is the user's own refusal, and since a read may well have
+> succeeded first. **The exact wording is the lane's; what
 > is fixed is which fact each names.**
 
 > **Normative — no statement asserts anything the record does not carry.** None says that the goal
@@ -899,19 +913,17 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > implemented this section and is not a permitted degradation** (ADR-0242 §9).
 
 > **Normative — this is not ADR-0250 §5's announcement and neither displaces the other.** §5's
-> sentence is about **which goal a turn is about** and is owed on a resumption, a reopen or a
-> revision that moved a word; this statement is about **what the attempt produced**. A turn may owe
-> both, one or neither, they are two `None`-defaulting members on ADR-0244 §9's rule, and **no lane
-> derives either from the other or collapses them.** §5's rule that an `OPENED` or `CONTINUED` turn
-> which moved no word *"says nothing about goals at all"* stays true word for word: a statement
-> about what this attempt produced is not a sentence about the goal's identity.
+> sentence is about **which goal a turn is about**; this statement is about **what the attempt
+> produced**. A turn may owe both, one or neither — two `None`-defaulting members on ADR-0244 §9's
+> rule — and **no lane derives either from the other or collapses them.** §5's rule that an
+> `OPENED` or `CONTINUED` turn which moved no word *"says nothing about goals at all"* stays true
+> word for word.
 
 > **Normative — a meaningful completion is announced once, and the record is what says it
 > afterwards.** The statement is rendered on the one turn `attempt_report` is non-`None`. **No lane
 > repeats it on a later turn, re-renders it from the stored `AttemptOutcome`, or makes the value
 > durable on any other record**: where a user asks later how a goal stands, `assistant goals` reads
-> the goal's status and the attempt's own stored outcome, which is why each statement that needs a
-> route names that command.
+> the goal's status and the attempt's stored outcome.
 
 ### 7. Q4's gate: this decision is the third guarantee, and all six conditions still stand
 
@@ -997,10 +1009,15 @@ booking"*.
 > existing shared `PlanStore` conformance suite and the canonical fake in `ai_assistant.testing`
 > gain both obligations **in the same change that adds them** (`CONTRIBUTING.md` → "Adding a
 > Protocol": *"The triad is what a Protocol **change** is measured against too"*), which is §12's
-> arm 8. **`AuthorizationResolution` gains nothing either**: §3's read is `resolve(id)` exactly as
-> ADR-0254 §16 declares it, taken by a second holder, and a Protocol acquiring a caller is not a
-> Protocol changing — so that decision's triad is owed no case by this one. This is a **BREAKING**
-> contract change under golden rule 5.
+> arm 8. **And `AuthorizationResolution` takes a third strengthening, of its *contract* and not of
+> its shape**: §3's read is `resolve(id)` exactly as ADR-0254 §16 declares it — no member, no
+> argument, no widened return — but that Protocol is declared *the face a trail holds*, read by
+> `AuditTrail.record`, and this decision gives it a second holder and a second reader. **It is
+> therefore carried as a contract change**, its docstring naming this ADR and this decision's
+> supersession recorded on ADR-0254, in the same lane as the two `PlanStore` limbs (§11). **No
+> conformance case and no fake changes for it**: a holder is not behaviour a suite can assert, and
+> the member's signature, return and detached-snapshot discipline are untouched. All three are
+> **BREAKING** contract changes under golden rule 5.
 
 > **Normative — what a conforming `Planner` must now produce: *nothing new at all*.**
 > `Planner.plan`'s roster, its `PlannerOutput` and every shape a planner returns are **untouched**,
@@ -1039,11 +1056,10 @@ booking"*.
 > **Normative — nothing else under `wire/` changes, and retention, deletion and export are
 > untouched.** The connect exchange gains no member, no frame's encoding changes, no `FrameKind` or
 > codec entry is registered, the promoted method set does not move, no gateway route is added, and
-> the error mapping gains nothing. Every value this decision writes rides a `GoalAttempt`, a
-> `Goal` or a `GoalInterpretation` the plan store already holds, so ADR-0014 §5's deletion and
-> export obligations, ADR-0249 §12's `delete_goal` cascade and ADR-0249 §2's interpretation
-> elision bind as they stand: **no retention rule, sweep, expiry, second store or new durable
-> record is minted.**
+> the error mapping gains nothing. Every value this decision writes rides a `GoalAttempt` the plan
+> store already holds, so ADR-0014 §5's obligations and ADR-0249 §12's `delete_goal` cascade bind
+> as they stand: **no retention rule, sweep, expiry, second store or new durable record is
+> minted.**
 
 > **Normative — no new class of content crosses any seam.** A `CriterionCheck` crosses none at
 > all, and a `ToolDefinition`'s `postconditions` carry the same kind, key
@@ -1083,10 +1099,10 @@ booking"*.
   and never a prevention**, which is exactly what ADR-0267 §10 says is available. Fired for each
   residual by the decision that section names.
 - **Establishing a criterion from a `GoalEvidence` row.** **Not decided**: the corpus carries **no
-  association from a criterion to an evidence row**, for the reasons the alternative below states.
-  **The cost is stated** — a criterion only an interpretation over a read's output could settle is
-  **unestablished**. Fired by a decision that widens `settles` to a criterion element, which would
-  owe ADR-0253 §8's ordering rule and its one-`settles`-per-plan refusal their own argument.
+  association from a criterion to an evidence row** (Alternatives), so a criterion only an
+  interpretation over a read's output could settle is **unestablished**. Fired by a decision that
+  widens `settles` to a criterion element, which would owe ADR-0253 §8's ordering rule its own
+  argument.
 - **Establishing a criterion for an act authorised per call rather than against a confirmed row.**
   **Not decided, and §2a states the cost**: a route-(a) confirmation records a `parameters_digest`
   and no **typed value**, so there is nothing a criterion could agree with by kind, and every
@@ -1104,20 +1120,19 @@ booking"*.
   … `IntendedAction` cannot close the gap"*. Fired by a decision that plans an **independent
   confirming read** as a step of a later attempt, which is where §3 puts one and which would owe
   its own authority, budget and reporting rules.
-- **A verification that calls a model.** **Not decided, and §2 states why not**: establishing a
-  goal's achievement is the `ACHIEVED` write's prerequisite, and ADR-0249 §7 forbids a model
-  clearing one. Fired by a decision that lifts that bar.
+- **A verification that calls a model.** **Not decided**: establishing a goal's achievement is the
+  `ACHIEVED` write's prerequisite and ADR-0249 §7 forbids a model clearing one. Fired by a decision
+  that lifts that bar.
 - **Retry across turns, reconciliation, idempotency keys, modify-before-replace, and how an
   `INDETERMINATE` step is resolved.** **A8**, as ADR-0255 §12 and ADR-0259 §10 book them.
 - **Distinguishing the four causes `SkipReason.UNMET_DEPENDENCY` carries.** ADR-0255 §2 gives all
   four one member, so §4's `blocked` fact cannot tell an unsatisfied `when` from an unresolvable
   `resolves`. **`SkipReason` gains no member here.** Fired by a surface that must tell a user
-  which, which would owe the vocabulary and the migration for it.
+  which.
 - **`GoalStatus.BLOCKED`'s producer.** **A3**, as ADR-0249 §4 and ADR-0250 §12 reserve it.
 - **An act that ends an attempt while leaving its goal open, and whether a store enforces *at most
   one live attempt per goal*.** **ADR-0261 §11's entries, untouched.** §5's conjunct refuses a
-  **write** where a live attempt stands and **no attempt on account of another**, so the two-opener
-  state is neither introduced nor repaired here.
+  **write** and **no attempt on account of another**.
 - **What a report says about a **cancelled** attempt, and the retention, export or rendering of a
   per-criterion result.** The first is **A9's** (ADR-0261 §3, §6): `attempt_report` is written by
   §4's act alone, so an attempt ADR-0261 §2's act ended carries none. The second is **not decided
@@ -1153,14 +1168,11 @@ says and acts identically.
 **Every other ADR this decision reaches owes no record**, and the entries below are the whole of
 them, each decided by the same test.
 
-- **ADR-0249 §4 and §5** — *no*, and the text is explicit about why. §4's *"`GoalStatus.ACHIEVED`
-  gets no producer **in this decision**"* and §5's *"**Which member a given attempt earns is
-  A10's**"* are **statements about that decision's own change** and stay true word for word: a
-  reader holding only ADR-0249 builds the vocabulary, the validator and the absence, and acts
-  **identically**. A booking **discharged** is not a clause made false (ADR-0261 §12's own words).
-  §5's two-shape validator, its *"no transition leaves a terminal member"*, its
-  attempt-opened-only-by-a-user-act rule and its *paused* derivation each bind entire and are what
-  §4 of this decision reasons from.
+- **ADR-0249 §4 and §5** — *no*. §4's *"`GoalStatus.ACHIEVED` gets no producer **in this
+  decision**"* and §5's *"**Which member a given attempt earns is A10's**"* are **statements about
+  that decision's own change** and stay true word for word, and a booking **discharged** is not a
+  clause made false (ADR-0261 §12's own words). §5's two-shape validator, its *"no transition
+  leaves a terminal member"* and its *paused* derivation bind entire and are what §4 reasons from.
 - **ADR-0249 §1 and §7** — *no*, which is the entry a reader of this decision's earlier drafts
   would expect to go the other way. §1's `GoalElement` field enumeration and §7's `ProposedElement`
   enumeration, four-shape validator, `Planner.plan` roster, ground-resolution rules, silent drop
@@ -1168,10 +1180,9 @@ them, each decided by the same test.
   **interpretation-is-the-model's asymmetry** is not merely left true but is the clause §2a reasons
   from: a reader holding only ADR-0249 authors the same element, returns the same envelope and
   refuses the same shapes.
-- **ADR-0249 §6 and §9** — *no*. The phase vocabulary, its order, its writer clause and its
-  *"stamped and left in the same instant"* rule are each **relied on**; this decision gives
-  `VERIFY` work and adds no phase, member or writer. §9's `GoalBrief`/`BriefElement` enumerations
-  gain **nothing**, the containment kept as that section argues it (§8).
+- **ADR-0249 §6 and §9** — *no*. The phase vocabulary, its order and its writer clause are
+  **relied on**; this decision gives `VERIFY` work and adds no phase, member or writer. §9's
+  `GoalBrief`/`BriefElement` enumerations gain **nothing** (§8).
 - **ADR-0250 §9** — *no*, for §5's conjunct. **Its one sentence about refusals is about which
   *member* may be written** — *"which acts may write which member is the caller's rule, not this
   member's"* — and §5 refuses no member: `ACHIEVED` stays writable, by this act alone. What is
@@ -1185,46 +1196,39 @@ them, each decided by the same test.
   append-only reference tuples and its compare-and-swap discipline all stay true, and
   `execution_versions` is a field of the **command** under that same discipline rather than a
   second route.
-- **ADR-0250 §12** — *no*. Its *"`GoalStatus.ACHIEVED` likewise gains none, which is A10's"* is a
-  statement about that decision and stays true; its three user acts that open an attempt, its
-  `SUPERSEDED` producer and its abandonment clauses are untouched and **relied on** by §5.
-- **ADR-0250 §5** — *no*, twice over. Its *"`TurnOutcome` gains **four** `None`-defaulting
-  members"* stays true of a reader who builds those four — **ADR-0242 §9's own precedent for the
-  identical move**, which recorded nothing — and its announcement rule is untouched, §6 stating a
-  different fact on a different member.
+- **ADR-0250 §5 and §12** — *no*. §5's *"`TurnOutcome` gains **four** `None`-defaulting members"*
+  stays true of a reader who builds those four — **ADR-0242 §9's own precedent for the identical
+  move**, which recorded nothing — and its announcement rule is untouched; §12's *"`ACHIEVED`
+  likewise gains none, which is A10's"* is a statement about that decision and stays true, its
+  three user acts and abandonment clauses **relied on** by §5.
 - **ADR-0170 §4, §5, §5a and §6** — *no*. §4's shapes are untouched; §5's construction and its
   honest limit are **adopted whole** by §6; §5a's deterministic-local-summary rule is what §6's
   fixed statements satisfy, the outcome being a member of a closed vocabulary this system owns;
   §6's render-beside-never-instead rule binds entire.
 - **ADR-0198 §2** — *no*: a value is added to its enumeration without changing any value it fixes,
   ADR-0242 §9's own reading of the same move.
-- **ADR-0252 §6, §9, §10 and §11** — *no*, and this is the entry a reader is most likely to expect
-  to go the other way. §2 **does not call §6's four tests at all** and states why (§9). §9's
-  invalidation predicate reads a **condition** element's `applicability` and is untouched; §10's
-  fourth `GoalElement` shape is untouched and the new field is orthogonal to it; §11's digest gains
-  nothing.
-- **ADR-0253 §2, §4, §5, §7, §8, §9 and §10** — *no*, and §2 and §8 of this document are careful
-  to keep it so. §4's *"this is not the verification A10 lands"* is **fulfilled**: this decision is
-  that verification, is stated over the goal's criteria, and **reuses `StepVerification` as a
-  value** rather than adding a reader of `PlanStep.verifies`. §5's `StepCondition` and §8's
-  `PlanInterpretation` keep their condition-element restriction **entire**. §7's `GoalElement.id`,
-  its `D`-label reservation and its no-migration clause stay true, and its *"`orchestration` mints
-  the id"* is relied on by nothing this decision writes. **§9's label scheme is not extended** — no
-  value of this decision carries a label — so **the fields another component sets on a plan stay
-  *exactly four***, and §10's
-  `PlanStep` enumeration is untouched: **this decision adds no field to `PlanStep`**.
+- **ADR-0252 §6, §9, §10 and §11** — *no*. §2 **does not call §6's four tests at all** and states
+  why (§9); §9's invalidation predicate, §10's fourth `GoalElement` shape and §11's digest each
+  gain nothing, this decision adding no field to `GoalElement` at all.
+- **ADR-0253 §2, §4, §5, §7, §8, §9 and §10** — *no*. §4's *"this is not the verification A10
+  lands"* is **fulfilled**: this decision is that verification, is stated over the goal's criteria,
+  and **reuses `StepVerification` as a value** rather than adding a reader of `PlanStep.verifies`.
+  §5's `StepCondition` and §8's `PlanInterpretation` keep their condition-element restriction
+  **entire**; §7's `GoalElement.id`, its `D`-label reservation and its no-migration clause stay
+  true. **§9's label scheme is not extended** — no value here carries a label — so **the fields
+  another component sets on a plan stay *exactly four***, and **this decision adds no field to
+  `PlanStep`**.
 - **ADR-0255 §3, §8, §12 and §13** — *no*. §3's claim conjuncts are **relied on**; §8's fence is
   fulfilled as ADR-0253 §4's is, its *"exactly the two places"* rule staying true because this
   decision adds no reader of `verifies`; §12's A10 entry and §13's gate are **bookings discharged
   in part**, §13's rule carried verbatim by §7 with its prerequisites and count untouched.
 - **ADR-0259 §2, §3, §4 and §9** — *no*. §2's satisfied-step commit and §9's
-  `satisfied_by_execution`/`satisfied_by_step` are **read** by §2's declaration lookup and §3's
-  rung and gain no clause; §4's acts 3 and 4 are **relied on** and are what §4's third ending
-  condition keeps reachable; nothing here resolves an `INDETERMINATE` step.
+  `satisfied_by_execution`/`satisfied_by_step` are **read** by §2 and §3 and gain no clause; §4's
+  acts 3 and 4 are what §4's third ending condition keeps reachable; nothing here resolves an
+  `INDETERMINATE` step.
 - **ADR-0261 §2, §3, §6 and §11** — *no*. §3's limbs stay the rule for a **cancelled** attempt,
-  which §4 reaches none of; §2's `open_attempt` closed-goal limb is **relied on**; §6's in-flight
-  statements are untouched; §11's booked question about `→ ACHIEVED` is **fired** by §5 — a booking
-  discharged — and its two-live-attempt entry stands.
+  which §4 reaches none of; §2's `open_attempt` closed-goal limb is **relied on** (§5, §11); §6's
+  in-flight statements are untouched; §11's booked question about `→ ACHIEVED` is **fired** by §5.
 - **ADR-0265 §1, §3, §4 and §8** — *no*, and §2a is written to keep it so. `IntendedAction` gains
   **no field**; §1's enumeration of what reads `Goal.intended_actions` — *"§4's `GoalBrief.actions`
   projection and its label resolution, §5's export, and the effect claim §6 obliges, and … nothing
@@ -1245,10 +1249,10 @@ them, each decided by the same test.
   authorisation stopped being checkable"* — and this decision authorises nothing, dispatches
   nothing and reaches no policy; what it reads is the **record** ADR-0254 §7 obliges `record` to
   refuse unless ten conditions held.
-- **ADR-0254 §16** — *yes*, in one scope, and the header states it: **its sentence naming
-  `AuthorizationResolution` *"the face a trail holds"***. §3's comparison holds that same face, so
-  a reader holding only §16 builds a system in which the trail is its only holder and would refuse
-  the construction L4 needs. **Nothing else of §16 moves**: the member is `resolve(id)` and nothing
+- **ADR-0254 §16, with §7's construction clause** — *yes*, in one scope, and the header states it:
+  **the sentences naming `AuthorizationResolution` the trail's face and its reader**. §3's
+  comparison holds that same face, so a reader holding only them builds a system in which the trail
+  is its only holder and would refuse the construction L4 needs. **Nothing else of either moves**: the member is `resolve(id)` and nothing
   else, the eight signatures, the detached-snapshot discipline, `live_for`'s and `record`'s
   restriction to the policy and the composition root, and the structural-typing argument that makes
   the division sound each bind entire — a verification phase can name neither `record` nor
@@ -1265,14 +1269,11 @@ them, each decided by the same test.
   §1's own prohibition, obeyed. §3's `quoted_output` is **read** as the key name it already is and
   is widened by nothing. §10's *"A10's verification of the charge afterwards"* is **fired**, and
   every other residual that section books is left standing by name (§9).
-- **ADR-0021 §1 and ADR-0192 §2** — *no*, and this is the pair a reader might expect to go the
-  other way. §2 of this decision **relies on** ADR-0021 §1's embedded definition rather than
-  widening it — *"There is no name left to rebind"* is the clause that makes a pinned comparison
-  possible — and it adds no field to `ActionRequest`, `PermissionDecision` or `PermissionRuling`.
-  ADR-0192 §2's
+- **ADR-0021 §1 and ADR-0192 §2** — *no*. §2 **relies on** ADR-0021 §1's embedded definition rather
+  than widening it — *"There is no name left to rebind"* is what makes a pinned comparison possible
+  — and adds no field to `ActionRequest`, `PermissionDecision` or `PermissionRuling`. ADR-0192 §2's
   *"Version 2 is the invocation shape"* is a statement about that decision's own bump and stays
-  true of it; the marker moving again is that section's **mechanism exercised**, on ADR-0049 §1's
-  ordering, and a reader holding only ADR-0192 still writes and migrates exactly what it says.
+  true; the marker moving again is that section's **mechanism exercised** (ADR-0049 §1).
 - **ADR-0016 §2, ADR-0014 §4 and §5, ADR-0039 §10, ADR-0049 §1, ADR-0148 §9, ADR-0173 §6,
   ADR-0193 §6 and §11, ADR-0237 §3, ADR-0242 §9, ADR-0244 §2 and §9** — *no*. Each is cited for a rule it already states and gains no
   clause; every sentence of each stays true.
@@ -1300,8 +1301,10 @@ and safe at every point in it.**
   on `PlanStore.commit_attempt`** — the Protocol strengthening, its `planning` implementation, the
   suite cases and the fake's refusals, **in one change**, which is `CONTRIBUTING.md` → "Adding a
   Protocol" read for a **change** to one: *"The triad is what a Protocol change is measured against
-  too"*, travelling with its one primary production implementation. This is the **BREAKING**
-  contract change under golden rule 5.
+  too"*, travelling with its one primary production implementation. **It also carries
+  `AuthorizationResolution`'s docstring change** (§8) — a contract edit in the same
+  `core/protocols.py` file, with no implementation, suite case or fake to move. These are the
+  **BREAKING** contract changes under golden rule 5.
 - **L4 — `orchestration`, the phase.** The `VERIFY` comparison: §3's rung, §2's three results,
   `CriterionCheck`, and §4's six limbs — all **before** the composing stage; then, after it, the
   `commit_attempt` that ends the attempt with its outcome, §5's `set_goal_status` with its
@@ -1368,26 +1371,27 @@ L2, L3 and L5 depend on none of them and are ordered only by each other.
    composed reply, by a `GoalElement.text` and by an `IntendedAction.intent` and by no bound step's
    output — **unestablished** likewise. In every failing case the attempt is not `VERIFIED` and the
    goal is not `ACHIEVED`. **And the charge conjunct has three outcomes and no fourth**: for a
-   `MONEY` criterion whose booking tool declares a `quoted_output` over a goal holding a matching
-   `ActionQuote`, an output whose amount and currency equal the quote's is **met**, one whose
-   **amount** differs and one whose **currency** differs by case are each **unmet**, and — **the
-   arm that fails against an inert conjunct** — a definition naming **no** `quoted_output`, a goal
-   holding **no** matching quote, a quote whose `arguments_digest` is another call's, and an output
-   carrying **nothing readable** at the named keys are each **unestablished**, `VERIFIED` and
-   `ACHIEVED` unreachable in every one. **And the governing quote is the last one**: two quotes
-   naming that act, the later at the charged figure and the earlier not, → **met**, and the two
-   swapped → **unmet** — the arms that fail against an implementation searching the tuple for an
-   agreeing member. **And it binds on `MONEY` alone**: a `PERIOD` criterion over the same step with
+   `MONEY` criterion whose booking tool declares a `quoted_output` over a row carrying a `quoted`,
+   an output whose amount and currency equal it is **met**, one whose **amount** differs and one
+   whose **currency** differs by case are each **unmet**, and — **the arm that fails against an
+   inert conjunct** — a definition naming **no** `quoted_output`, a row carrying **no** `quoted`,
+   and an output carrying **nothing readable** at the named keys are each **unestablished**.
+   **And the operand is the row's and never the goal's tuple**: the booking step **appends its own
+   quote** at the charged figure (ADR-0267 §4) while the row's `quoted` names the lower one the
+   user answered over → **unmet** — the arm that fails against any implementation reading
+   `Goal.quotes`. **And it binds on `MONEY` alone**: a `PERIOD` criterion over the same step with
    the same absent quote is unaffected.
 4. **No model can move any criterion to *met*, and the campsite case end to end (L4).** A goal
    whose criteria are *Riverside*, *Sunday* and *up to 150 euros*, a confirmed row carrying the
    three members those spans rest on, and a booking step authorised route-(d) against it whose
    declared postconditions hold → **`VERIFIED`** and `ACHIEVED`. **And each conjunct removed in
-   turn leaves the criterion unestablished**: the row `PROPOSED` rather than `ESTABLISHED`; the row
-   `ESTABLISHED` with `origin` `OPENING_ACT`; the row belonging to **another goal**; the step's
+   turn leaves the criterion unestablished**: the row's `origin` `OPENING_ACT`; the row belonging
+   to **another goal**; the step's
    decision a route-(a), (b) or (c) `ALLOW`, or carrying no `authorised_by`; the member's
    `basis.span` differing from the criterion's `span` by one character; the criterion carrying **no
-   `span`** at all; and the satisfying step naming **no `PlanStep.intended_action`**. **And the
+   `span`** at all; and the satisfying step naming **no `PlanStep.intended_action`**. **And a row
+   `REVOKED` or `SUPERSEDED` *after* the dispatch still establishes** — the arm that fails against
+   an implementation re-testing the disposition at `VERIFY`. **And the
    join is asserted to be unique or nothing**: two `ESTABLISHED`/`CONFIRMED` rows of this goal for
    **two declarations**, each carrying a member on that one span, one row's bound step satisfying
    its declarations and the other's contradicting them → **unestablished**, whichever order the
@@ -1439,8 +1443,10 @@ L2, L3 and L5 depend on none of them and are ordered only by each other.
    `FAILED` step at rung 2 with every criterion unestablished** → `UNCERTAIN`, **never `FAILED`**,
    and **the same beside a `SKIPPED` one** → `UNCERTAIN`, **never `CONDITION_PREVENTED`** — the two
    arms that fail against limbs 1 and 2 reading a failure about something else as a verdict about
-   the criteria; a **rung 2** attempt with **every criterion met** beside an unrelated `FAILED`
-   step → **`VERIFIED`**, and its goal `ACHIEVED` — the arm that pins limbs 4 and 5 to the criteria
+   the criteria; a rung-2 attempt whose criterion's own **bound step stands `FAILED`** → `FAILED`,
+   **never `UNCERTAIN`**, and the same step `INDETERMINATE` → `UNCERTAIN`, the pair that pins
+   *established not to hold* apart from *unknown*; a **rung 2** attempt with **every criterion
+   met** beside an unrelated `FAILED` step → **`VERIFIED`**, and its goal `ACHIEVED` — the arm that pins limbs 4 and 5 to the criteria
    alone and keeps §6's `PARTIAL` statement true of every attempt that reaches it; a rung-2 attempt
    with a criterion **unmet** → `FAILED` whatever else stands; a **read that succeeded** followed
    by a step skipped
@@ -1497,10 +1503,11 @@ L2, L3 and L5 depend on none of them and are ordered only by each other.
     `continues` is set; and **`attempt_report` is `None`** on ADR-0198 §1's restatement and on a
     routed operation. **The statements are asserted by their facts rather than their prose** —
     `ANSWERED`'s says nothing was verified, `VERIFIED`'s speaks of the criteria **this attempt
-    compared** — and **no arm fixes the wording**, which is the lane's (§6).
+    compared**, `CONDITION_PREVENTED`'s is asserted true of **both** of `blocked`'s sources — an
+    `UNMET_DEPENDENCY` skip, and an `APPROVAL_DENIED` one after a read that succeeded — — and **no arm fixes the wording**, which is the lane's (§6).
 
-**No arm demonstrates a real consequential integration**, which §7's gate forbids; M33's
-walkthrough runs against a simulated booking service.
+**No arm demonstrates a real consequential integration** (§7's gate); M33's walkthrough runs
+against a simulated booking service.
 
 ### 13. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1513,13 +1520,12 @@ of what it obligates.
 ## Consequences
 
 **What becomes easier.** `GoalStatus.ACHIEVED` gains its producer, so a completed objective stops
-being indistinguishable from an unstarted one on every surface, and `GoalInterpretation.criteria`
-gains its first reader that settles anything. Five `AttemptOutcome` members gain producers. The
-records the user's own confirmation already leaves acquire a **second reader** — one that can only
-refuse to say *verified* — so R48 is met without a new field, a new label or a new thing for a
-model to get right. R53's distinction becomes a property of where two writes sit rather than a rule
-to remember. And ADR-0255 §13's gate acquires its third guarantee, with §7 naming what still
-stands.
+being indistinguishable from an unstarted one, and `GoalInterpretation.criteria` gains its first
+reader that settles anything. Five `AttemptOutcome` members gain producers. The records the user's
+own confirmation already leaves acquire a **second reader** — one that can only refuse to say
+*verified* — so R48 is met without a new field, a new label or a new thing for a model to get
+right. R53's distinction becomes a property of where two writes sit. And ADR-0255 §13's gate
+acquires its third guarantee.
 
 **What becomes harder.** A peer at the old `PROTOCOL_VERSION` refuses a peer at the new one —
 intended and loud. A goal that reaches `ACHIEVED` can no longer open an attempt at all (ADR-0261
@@ -1563,7 +1569,7 @@ to buy a link §2 does not need.
 (§9), and it was this decision's first shape. Those tests are stated over a `StepCondition`, whose
 `about` ADR-0253 §5 requires to name a **condition** element, and `PlanInterpretation.settles` is
 condition-only too — so there is **no ratified association from a criterion to a row**, and a
-verification reading "the goal's rows" without one would apply any qualifying row to any criterion.
+verification reading "the goal's rows" would apply any qualifying row to any criterion.
 **`IntendedAction.serves` is not that association either**, and ADR-0265 §3 refuses it in terms:
 *"`serves` gates nothing"*, and **no lane** *"gates a dispatch on a `serves` entry"* — a stale entry
 after a rewording is *"truthful and harmless"* precisely because nothing reads it, and reading it
@@ -1578,14 +1584,11 @@ the two places"* — and `OUTPUT_PRESENT` is refused anywhere here because *"the
 something"* is R48's circularity one level down.
 
 **Selecting among a tool's declared postconditions at all — by index, or by a key the criterion
-names.** Refused with the association above, and the second shape is worth stating because it
-looked safe: a key can only *narrow*, since **met** requires the whole declared set to hold, so no
-selection can excuse an unheld declaration. What it cannot do is stop a criterion the user never
-confirmed from becoming **met** over an act that happens to declare that key. **§2 needs no
-selector**: a criterion is told from its neighbours by the **kind of the member the user
-confirmed**, and the whole declared set is required of every bound step, so the two things the
-selector was buying — per-criterion comparison, and no excuse for a failed declaration — are each
-bought by something no model writes.
+names.** Refused with the association above. A key can only *narrow*, since **met** requires the
+whole declared set to hold; what it cannot do is stop a criterion the user never confirmed from
+becoming **met** over an act that happens to declare that key. **§2 needs no selector**: a
+criterion is told from its neighbours by the **member the user confirmed**, and the whole declared
+set is required of every bound step.
 
 **Widening the bound steps past a route-(d) `ALLOW`.** Refused (§2a, §9). A route-(a)
 confirmation is the user assenting to a **concrete call**, and what it records is a
@@ -1597,15 +1600,13 @@ constraint was met*, which is the inference R48 exists to refuse.
 the whole definition in the decision precisely so that *"There is no name left to rebind"*, and a
 registry read would let a restart change a recorded act's verdict.
 
-**Minting a per-criterion verdict enumeration — `ESTABLISHED`/`NOT_ESTABLISHED`/`AMBIGUOUS`, as
-revision 0 of the fit report proposed.** Refused. The three results §2 needs are computed and
-consumed inside one function, as ADR-0252 §6's four tests are, and a `core` enumeration would be a
-wire-carried, exported, storable value with no consumer — *"a field with no consumer is surface"*.
-**`CriterionCheck` is not that value and the difference is where it goes**: it is likewise computed
-and discarded (§8, §9), carried by no record and no frame, and it exists as a **type** rather than
-a pair for ADR-0244 §2's reason alone — two facts that travel together or the value does not
-construct. A lane that needed it durable would be minting the record §9 books, with that record's
-own retention and export obligations.
+**Minting a per-criterion verdict enumeration in `core` — `ESTABLISHED`/`NOT_ESTABLISHED`/
+`AMBIGUOUS`, as revision 0 of the fit report proposed.** Refused. The three results §2 needs are
+computed and consumed inside one function, as ADR-0252 §6's four tests are, and a `core`
+enumeration would be a wire-carried, exported, storable value with no consumer — *"a field with no
+consumer is surface"*. **`CriterionCheck` avoids that by staying `orchestration`'s** (§2): likewise
+computed and discarded, and a **type** rather than a pair only for ADR-0244 §2's reason — two facts
+that travel together or the value does not construct.
 
 **A `PlanStore.close_goal_achieved` mirroring ADR-0261 §2's `close_goal_abandoned`, including the
 variant carrying the already-computed verdict so the store evaluates nothing.** Refused twice over.
@@ -1625,9 +1626,9 @@ the `ACHIEVED` write's prerequisite and ADR-0249 §7 forbids a model clearing on
 8's principle is why the asymmetry runs one way — *"A model is a safe denier and an unsafe
 allower."*
 
-**Verification performing the independent read itself at rung 2.** Refused after the owner's
-ruling of 2026-09-13: *"Nothing checks on its own initiative."* A read taken inside `VERIFY` would
-be an unplanned, unauthorised call made after the walk ended, on a budget §3 would have invented.
+**Verification performing the independent read itself at rung 2.** Refused on the owner's ruling
+of 2026-09-13: *"Nothing checks on its own initiative."* A read inside `VERIFY` would be an
+unplanned, unauthorised call after the walk ended, on a budget §3 would have invented.
 
 **Deriving `GoalStatus.ACHIEVED` from `AttemptOutcome.VERIFIED` at read time.** Refused. ADR-0249
 §4 rules that *"An attempt reaching a terminal state **does not** move the goal's status"*, and a
@@ -1635,13 +1636,12 @@ derived status would be a second authority that can disagree with the stored one
 
 **Reading `risk_level` into the ladder.** Refused (§3). Risk is what a policy thresholds to decide
 whether to **ask**; reversibility, disclosure and the binding describe what an act **did**. One
-scale answering two questions is how a deployment that tightened its approval threshold would
-silently change what counts as verified.
+scale answering two questions would let a tightened approval threshold silently change what counts
+as verified.
 
 **Announcing the outcome through `GoalEngagement` rather than a member of its own.** Refused.
 ADR-0250 §5's four facets are *what this turn did with the goal it engaged*; what an attempt
-produced is a different fact, owed on turns §5's rule is silent about. ADR-0244 §9's
-one-member-per-fact rule is the ratified shape.
+produced is a different fact, and ADR-0244 §9's one-member-per-fact rule is the ratified shape.
 
 **Putting the offer to continue on the surface rather than in the reply.** Refused (§6). Its whole
 purpose is that a bare *"yes"* on the next turn binds by reply reference (ADR-0250 §3), and a
