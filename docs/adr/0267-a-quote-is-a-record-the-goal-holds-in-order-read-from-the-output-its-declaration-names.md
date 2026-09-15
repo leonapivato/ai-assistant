@@ -1,7 +1,7 @@
 # 267. A quote is a record the goal holds in order, read from the output its declaration names,
 and no local check proves it still true
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
