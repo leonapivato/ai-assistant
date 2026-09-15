@@ -43,7 +43,10 @@ clause has.
 a value: this fake mints at most :attr:`FakeForecaster.max_days` records, taken **from the
 front** as §5 requires, and **drops** — never truncates — a day whose content passes its
 own bound, yielding :attr:`ForecastRefusal.NO_RESULT` where that takes the last one with
-it.
+it. **And it drops every row of a day the script named more than once, before the cap**,
+which is §5's other drop and §13(b-prime)'s order: a fake that minted the first of them
+would be scriptable into a state no response can put the production forecaster in, which
+is the one thing this module refuses.
 
 **`request` takes no arguments and this fake has none to take** (§3). There is no place
 to script per-ask, because there is no ask: the place is the deployment's configuration
@@ -69,6 +72,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -147,6 +151,11 @@ _ATTESTED_CONFIDENCE: Final = 0.9
 #: How long one day is, which is what makes a day's extent half-open (ADR-0117 §2).
 _ONE_DAY: Final = timedelta(days=1)
 
+#: The exclusive bound :class:`datetime.timezone` puts on a UTC offset, and so the range
+#: a day's declared offset lies in — the widest an extent may sit from its named day's
+#: UTC midnight and still be the extent ADR-0260 §5 computes for that day.
+_OFFSET_LIMIT: Final = timedelta(hours=24)
+
 #: ISO-4217's alphabetic form is three letters — ``ToolCost.currency``'s own rule
 #: (ADR-0016 §4), which ADR-0236 §2 says is the code's whole domain here too.
 _CURRENCY_CODE_LENGTH: Final = 3
@@ -160,21 +169,71 @@ _MAX_LONGITUDE: Final = 180.0
 class ScriptedDay:
     """One day a fake forecaster answers with.
 
-    A pair rather than a record, because what a consumer scripts is what the *provider*
-    said: the content is the transcription §5 keeps verbatim, and the extent is the day
-    that content is about as the provider declared it. Everything else a minted record
-    carries — its kind, its source, its confidence, its empty axes and its attestation
-    instant — is fixed by §5 and is not a knob.
+    A triple rather than a record, because what a consumer scripts is what the *provider*
+    said: the day it named, the transcription §5 keeps verbatim, and the extent that day
+    lies in as the provider declared it. Everything else a minted record carries — its
+    kind, its source, its confidence, its empty axes and its attestation instant — is
+    fixed by §5 and is not a knob.
+
+    **The named day is carried rather than derived**, because it is ADR-0260 §5's
+    duplicate key: "A day the response names more than once is dropped in every one of
+    its rows". The production forecaster reads that key off the row's own ``date`` field,
+    independently of the offset the row declared; deriving it here from
+    :attr:`extent` would key on the *instant* a day starts at instead, so one day named
+    twice in two offsets would count as two days and both rows would be minted — which is
+    the clause read backwards.
 
     Attributes:
         content: The transcription this day's record carries, verbatim.
         extent: Where that day lies, as a half-open interval. Built by
             :func:`forecast_day` from a calendar day and the offset that day is in,
             which is how ADR-0260 §5 computes one.
+        named: The year, month and day the provider named — §5's duplicate key, and the
+            day :attr:`extent` must be the bounds of.
+
+    Raises:
+        ValueError: If ``named`` names no day the calendar has, or if ``extent`` is not
+            the bounds §5 would compute for that day in *some* declared offset — a day a
+            minted record would place somewhere its own date does not lie, which is a
+            state no response can put a forecaster in.
     """
 
     content: str
     extent: ReportedExtent
+    named: tuple[int, int, int]
+
+    def __post_init__(self) -> None:
+        """Refuse a day whose extent is not the one ADR-0260 §5 computes for it.
+
+        Raises:
+            ValueError: As the class docstring states it.
+        """
+        try:
+            year, month, day = self.named
+            midnight = datetime(year, month, day, tzinfo=UTC)
+        except (ValueError, TypeError) as error:
+            msg = f"named must be a year, month and day the calendar has; got {self.named!r}"
+            raise ValueError(msg) from error
+        # §5 computes the bounds "from the day the provider named and the UTC offset the
+        # provider's own response declared for it": a day a whole day long, starting at
+        # that day's midnight in the declared offset. So the offset is recoverable, and
+        # the pair is consistent exactly where it is one `timezone` admits. An extent
+        # open at either end fails the same test rather than a separate one: a day the
+        # provider dated has both bounds, and `ReportedExtent` admits an open one because
+        # other producers state windows that run on.
+        start = self.extent.extends_from
+        until = self.extent.extends_until
+        if (
+            start is None
+            or until is None
+            or until - start != _ONE_DAY
+            or abs(midnight - start) >= _OFFSET_LIMIT
+        ):
+            msg = (
+                f"extent must be the day {self.named!r} in some declared UTC offset "
+                f"(ADR-0260 §5); got {start} to {until}"
+            )
+            raise ValueError(msg)
 
 
 def forecast_day(
@@ -217,6 +276,7 @@ def forecast_day(
         extent=ReportedExtent(
             extends_from=start.astimezone(UTC), extends_until=(start + _ONE_DAY).astimezone(UTC)
         ),
+        named=(year, month, day),
     )
 
 
@@ -520,8 +580,11 @@ class FakeForecaster:
 
         Args:
             days: What this forecaster's provider answered with, in the order it
-                returned them — one record per day, before this fake's own bound is
-                applied.
+                returned them — one record per day it named **once**, before this fake's
+                own bound is applied. A day named twice is dropped in both of its rows
+                (ADR-0260 §5), so a script may name one day more than once and get no
+                record for it, which is the state a duplicate-carrying response puts the
+                production forecaster in.
             name: The source instance this forecaster names itself, and what a minted
                 record's ``reported_by`` carries. Non-blank and unchanged by
                 ``Identifier``'s validation, checked here rather than at the first mint.
@@ -726,9 +789,10 @@ class FakeForecaster:
         Returns:
             The outcome: the scripted refusal where one was given,
             :attr:`ForecastRefusal.DEADLINE_EXPIRED` where ``timeout`` expired while this
-            fake was held open, :attr:`ForecastRefusal.NO_RESULT` where every scripted day
-            is beyond this fake's content bound, and otherwise up to ``max_days`` records
-            carrying those days **from the front**, in order.
+            fake was held open, :attr:`ForecastRefusal.NO_RESULT` where ADR-0260 §5's two
+            drops — a day the script named more than once, a day beyond this fake's
+            content bound — took every scripted day, and otherwise up to ``max_days``
+            records carrying what survived them **from the front**, in order.
 
         Raises:
             ValueError: If ``timeout`` is not a ``timedelta`` or is not strictly positive
@@ -853,18 +917,31 @@ class FakeForecaster:
         async with self._resource.held():
             if self._refusal is not None:
                 return ForecastOutcome(refusal=self._refusal)
-            # **The drop first and the cap over what survived it**, which is §5's order
-            # and not an implementation detail: "Where more days survive the drop rule
-            # below than ``forecast_max_days`` admits, the records minted are the *first*
-            # that many". Slicing first would let an oversized early day consume a slot
-            # and yield ``NO_RESULT`` where the response described a usable later one.
+            # **The drops first and the cap over what survived them**, which is §5's
+            # order and not an implementation detail: "Where more days survive the drop
+            # rule below than ``forecast_max_days`` admits, the records minted are the
+            # *first* that many". Slicing first would let an oversized early day consume
+            # a slot and yield ``NO_RESULT`` where the response described a usable later
+            # one — and, for the duplicate rule, would mint the first row of a day the
+            # script named twice whenever the second naming sat beyond the cap, which is
+            # the failure ADR-0260 §13(b-prime) names in terms.
+            #
+            # **The duplicate count is taken over every scripted day**, not over the days
+            # that survived the content bound: §5 states the clause over the day a row
+            # *names* — "the response has not described that day **once**" — so a day
+            # named by an oversized row and again by an ordinary one is a day named
+            # twice, and keeping the ordinary one would be this fake preferring one of
+            # the provider's rows over another. The production forecaster counts in the
+            # same place and in one pass, and a fake that did otherwise would be
+            # scriptable into a state no deployment can be in.
+            named = Counter(day.named for day in self._days)
             surviving = [
                 day
                 for day in self._days
-                # ADR-0260 §5's drop, counted on the quoted rendering: the siblings are
-                # still minted, and where this takes the last one the read yielded
-                # nothing rather than failing.
-                if len(json.dumps(day.content)) <= self._max_day_chars
+                # ADR-0260 §5's two drops, the content one counted on the quoted
+                # rendering: the siblings of a dropped day are still minted, and where
+                # these take the last day the read yielded nothing rather than failing.
+                if named[day.named] == 1 and len(json.dumps(day.content)) <= self._max_day_chars
             ]
             minted = tuple(self._mint(day) for day in surviving[: self._max_days])
             if not minted:
