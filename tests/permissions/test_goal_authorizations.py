@@ -23,7 +23,7 @@ from authorization_builders import AT, EXPIRES, GOAL, NOW, SHARED_CLOCK, TOOL
 from goal_authorization_contract import GoalAuthorizationStoreContract, established
 
 from ai_assistant.core.errors import AuthorizationError
-from ai_assistant.core.types import AuthorizationDisposition
+from ai_assistant.core.types import AuthorizationDisposition, BoundKind
 from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorizationStore
 from ai_assistant.testing.goal_authorizations import authorization, coverage_member, money_bound
 
@@ -192,7 +192,7 @@ class TestWhatOnlyAFileCanSay:
         connection = sqlite3.connect(path)
         try:
             widened = established(
-                id="a1", coverage=(coverage_member("amount", bound=money_bound("800")),)
+                id="a1", coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("800")),)
             ).model_dump_json()
             with pytest.raises(sqlite3.IntegrityError, match="never edited"):
                 connection.execute(

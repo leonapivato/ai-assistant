@@ -87,6 +87,10 @@ def test_the_four_vocabularies_are_closed_at_the_membership_the_adr_fixes() -> N
         "as_stated",
         "date_from_context",
         "from_shown_record",
+        # **Four and not three** (ADR-0266 §4): ADR-0254 §19 books *"A fourth
+        # ``ResolutionRule``"* by name and ADR-0266 fires it, appended so the three
+        # ratified readings keep the values a stored row decodes from.
+        "stated_bound",
     ]
 
 
@@ -116,7 +120,7 @@ def test_a_member_carrying_both_a_fixed_value_and_a_bound_is_not_constructible()
     """§2: a model validator admits exactly two shapes."""
     with pytest.raises(ValidationError, match="fixes a value or states a bound"):
         CoverageMember(
-            argument="amount",
+            kind=BoundKind.MONEY,
             fixed="60",
             bound=money_bound(),
             basis=authorization_basis(),
@@ -126,7 +130,7 @@ def test_a_member_carrying_both_a_fixed_value_and_a_bound_is_not_constructible()
 def test_a_member_carrying_neither_is_not_constructible() -> None:
     """§2: *"one that does neither records nothing the user said"*."""
     with pytest.raises(ValidationError, match="fixes a value or states a bound"):
-        CoverageMember(argument="amount", basis=authorization_basis())
+        CoverageMember(kind=BoundKind.MONEY, basis=authorization_basis())
 
 
 def test_a_member_without_a_basis_is_not_constructible() -> None:
@@ -138,19 +142,36 @@ def test_a_member_without_a_basis_is_not_constructible() -> None:
     ``orchestration``'s, which §1's division of refusals states in terms.
     """
     with pytest.raises(ValidationError):
-        CoverageMember.model_validate({"argument": "amount", "fixed": "60"})
+        CoverageMember.model_validate({"kind": "terms", "fixed": "60"})
 
 
-def test_no_two_members_of_one_row_name_the_same_argument() -> None:
-    """§2: *"A precedence rule between two members about one argument is a rule
-    somebody would have to remember at the comparison"*."""
-    with pytest.raises(ValidationError, match="same argument"):
+def test_no_two_members_of_one_row_carry_the_same_kind() -> None:
+    """ADR-0266 §3, restating §2's rule over the value that now identifies a member:
+    *"A precedence rule between two members about one argument is a rule somebody
+    would have to remember at the comparison"* (arm 4(a))."""
+    with pytest.raises(ValidationError, match="same kind"):
         authorization(
             coverage=(
-                coverage_member("amount", fixed="60"),
-                coverage_member("amount", bound=money_bound()),
+                coverage_member(BoundKind.MONEY, bound=money_bound("40")),
+                coverage_member(BoundKind.MONEY, bound=money_bound()),
             )
         )
+
+
+def test_a_row_carrying_two_members_of_different_kinds_is_constructible() -> None:
+    """ADR-0266 §3's rule is one **per kind** and not one per row (arm 4(a)).
+
+    The control beside the refusal above: a ``MONEY`` member beside a ``TERMS`` one
+    is two statements about two different things the user said, and nobody has to
+    remember a precedence between them.
+    """
+    row = authorization(
+        coverage=(
+            coverage_member(BoundKind.MONEY, bound=money_bound()),
+            coverage_member(BoundKind.TERMS, bound=terms_bound("refundable")),
+        )
+    )
+    assert {member.kind for member in row.coverage} == {BoundKind.MONEY, BoundKind.TERMS}
 
 
 # --- §2: the three bound kinds, and every other shape refused ----------------
@@ -160,11 +181,7 @@ def test_no_two_members_of_one_row_name_the_same_argument() -> None:
 #: enumeration, written once so the two directions of the validator's rule are
 #: tested against one statement of it rather than two.
 _ARGUMENTS_OF: Final[dict[BoundKind, dict[str, object]]] = {
-    BoundKind.MONEY: {
-        "currency": "GBP",
-        "currency_argument": "currency",
-        "maximum": Decimal("60"),
-    },
+    BoundKind.MONEY: {"currency": "GBP", "maximum": Decimal("60")},
     BoundKind.PERIOD: {
         "starts_at": AUTHORIZATION_PROPOSED_AT,
         "ends_at": LATER,
@@ -195,7 +212,6 @@ def test_a_bound_carrying_an_argument_its_kind_does_not_take_is_refused(
     ("kind", "missing"),
     [
         (BoundKind.MONEY, "currency"),
-        (BoundKind.MONEY, "currency_argument"),
         (BoundKind.MONEY, "maximum"),
         (BoundKind.PERIOD, "starts_at"),
         (BoundKind.PERIOD, "ends_at"),
@@ -211,6 +227,29 @@ def test_a_bound_missing_an_argument_its_kind_takes_is_refused(
     del stated[missing]
     with pytest.raises(ValidationError, match="states its"):
         ValueBound.model_validate({"kind": kind, **stated})
+
+
+@pytest.mark.parametrize("kind", [BoundKind.PERIOD, BoundKind.TERMS])
+def test_a_bound_of_another_kind_carrying_maximum_exclusive_is_refused(kind: BoundKind) -> None:
+    """ADR-0266 §3: the flag is ``MONEY``-only, and a ``bool`` is not ``None``.
+
+    Stated as its own refusal because the stray-argument sweep cannot see it: every
+    other field of a kind it does not belong to is absent as ``None``, and a flag
+    withdrawing a ``maximum`` the bound does not state records nothing (arm 6(b)).
+    """
+    with pytest.raises(ValidationError, match="no maximum_exclusive"):
+        ValueBound.model_validate({"kind": kind, **_ARGUMENTS_OF[kind], "maximum_exclusive": True})
+
+
+def test_a_money_bound_defaults_to_an_inclusive_ceiling_and_states_a_strict_one() -> None:
+    """ADR-0266 §3: *"a ceiling the user stated strictly is representable as one"*.
+
+    **Arm 5 stands verbatim under the new field**, which is the sweep's own finding:
+    ``maximum_exclusive`` defaults to ``False``, so every bound written before this
+    decision reads exactly as it did.
+    """
+    assert money_bound("100").maximum_exclusive is False
+    assert money_bound("100", maximum_exclusive=True).maximum_exclusive is True
 
 
 def test_a_money_bound_takes_an_optional_minimum_and_refuses_one_above_its_maximum() -> None:
@@ -359,7 +398,7 @@ def test_a_period_bounds_zone_and_a_resolutions_zone_are_two_facts() -> None:
     re-read.
     """
     member = coverage_member(
-        "stay_from",
+        BoundKind.PERIOD,
         bound=period_bound(timezone="Europe/London"),
         basis=authorization_basis(
             resolution=ValueResolution(
@@ -419,37 +458,45 @@ def test_an_empty_coverage_is_constructible_on_a_path_one_proposal() -> None:
     assert authorization(coverage=()).coverage == ()
 
 
-def test_a_coverage_member_naming_a_system_supplied_argument_is_not_constructible() -> None:
-    """§3: *"A row's coverage names no system-supplied argument"* (arm 68).
+def test_a_declaration_declaring_a_system_supplied_key_at_a_kind_is_not_constructible() -> None:
+    """ADR-0266 §7, restating §3's protection one field over (arms 68, 6(b)).
 
-    The row embeds the declaration whole, so both facts are on the row — a **model
-    validator**, by §1's division of refusals.
+    **The rule is preserved and its carrier moved.** §3 made a row whose coverage
+    names a system-supplied argument not constructible by reading
+    ``CoverageMember.argument``, which no longer exists; a system-supplied key being
+    declarable at **no** kind is what keeps *"a user is never asked to approve an
+    idempotency key"* true — no member can be met against one, on either route.
     """
-    declared = AUTHORIZATION_TOOL.model_copy(update={"system_supplied": ("idempotency_key",)})
-    with pytest.raises(ValidationError, match="names no system-supplied argument"):
-        authorization(
-            tool=declared,
-            coverage=(coverage_member("idempotency_key", fixed="abc"),),
+    with pytest.raises(ValidationError, match="name no key it fills itself"):
+        AUTHORIZATION_TOOL.model_copy(update={"system_supplied": ()}).model_validate(
+            {
+                **AUTHORIZATION_TOOL.model_dump(),
+                "system_supplied": ("locale",),
+                "bounded_arguments": (
+                    {"argument": "locale", "kind": "terms", "currency_argument": None},
+                ),
+            }
         )
 
 
-def test_a_money_bound_and_a_fixed_currency_member_of_one_row_must_agree() -> None:
-    """§2, arm 18: *"a row that bounds sixty pounds and fixes the currency to
-    something else is not a record of anything the user said"*."""
-    with pytest.raises(ValidationError, match=r"fixes .* to that same currency"):
-        authorization(
-            coverage=(
-                coverage_member("amount", bound=money_bound(currency="GBP")),
-                coverage_member("currency", fixed="KWD"),
-            )
+def test_a_declaration_filling_the_currency_key_itself_declares_no_money_argument() -> None:
+    """ADR-0266 §7's refusal read over **both** keys a ``BoundedArgument`` names.
+
+    §7 states it over the entry *"naming no key of that declaration's own
+    ``system_supplied``"*, and a currency key the system fills is as much a value
+    the user never stated as the amount's. The restrictive direction ADR-0254 §2
+    asks for: it costs a declaration and never authorises a call.
+    """
+    with pytest.raises(ValidationError, match="name no key it fills itself"):
+        ToolDefinition.model_validate(
+            {
+                **AUTHORIZATION_TOOL.model_dump(),
+                "system_supplied": ("currency",),
+                "bounded_arguments": (
+                    {"argument": "amount", "kind": "money", "currency_argument": "currency"},
+                ),
+            }
         )
-    agreeing = authorization(
-        coverage=(
-            coverage_member("amount", bound=money_bound(currency="GBP")),
-            coverage_member("currency", fixed="GBP"),
-        )
-    )
-    assert len(agreeing.coverage) == 2
 
 
 def test_the_destination_set_takes_adr_0193s_canonical_tuple_by_the_same_validator() -> None:
@@ -517,7 +564,7 @@ def test_moving_a_subject_field_moves_the_digest(name: str) -> None:
     row = authorization()
     moved = {
         "goal": "goal-0002",
-        "coverage": (coverage_member("amount", fixed="60"),),
+        "coverage": (coverage_member(BoundKind.TERMS, fixed="refundable"),),
     }[name]
     other = Authorization.model_validate({**row.model_dump(), name: moved})
     assert other.subject_digest != row.subject_digest
@@ -633,8 +680,8 @@ def test_a_fixed_value_of_json_null_is_not_representable_and_leaves_the_argument
     """§2 closes the field list at ``fixed: FrozenJsonValue | None``.
 
     ``None`` is that field's spelling of *"states a bound instead"*, so an act that
-    fixed JSON ``null`` mints **no member** — and §3's per-argument rule then leaves
-    that argument **uncovered**, which is the fail-closed direction: the user is
+    fixed JSON ``null`` mints **no member** — and the argument it would have covered
+    is then left **uncovered**, which is the fail-closed direction: the user is
     asked about the concrete call.
 
     Recorded as a test rather than left to be discovered, because the alternative
@@ -642,7 +689,7 @@ def test_a_fixed_value_of_json_null_is_not_representable_and_leaves_the_argument
     for and it is not available.
     """
     with pytest.raises(ValidationError, match="fixes a value or states a bound"):
-        coverage_member("note", fixed=None)
+        CoverageMember(kind=BoundKind.TERMS, fixed=None, basis=authorization_basis())
 
 
 def test_an_authorization_round_trips_through_json_in_every_disposition() -> None:

@@ -373,6 +373,13 @@ def _met_on_argument_route(
     **An argument the request does not carry is not covered**, whichever shape the
     member takes: an act that fixed a value authorised a call *carrying* it.
 
+    **§7's exactly-one rule is taken here and in one place**, so every caller gets
+    it: where the declaration declares no argument at the member's kind, or declares
+    **more than one**, this route meets the member against nothing — *"no default
+    kind, no inference from a value's JSON type, no schema keyword and no fallback
+    to an exact comparison"*. Two declarations at one kind would need a precedence
+    rule at the comparison, which is the rule ADR-0254 §2 refuses to have.
+
     Args:
         member: The row's member, of the kind ``declared`` declares.
         declared: The one argument this declaration declares at that kind.
@@ -381,6 +388,8 @@ def _met_on_argument_route(
     Returns:
         Whether the argument route meets this member.
     """
+    if declared_at(subject.tool, member.kind) != declared:
+        return False
     if declared.argument not in subject.parameters:
         return False
     value = subject.parameters[declared.argument]

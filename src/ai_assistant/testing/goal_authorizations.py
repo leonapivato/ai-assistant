@@ -131,10 +131,11 @@ AUTHORIZATION_GOAL: Final = "goal-0001"
 #: exactly as it would without the classification and every argument is
 #: user-facing. A case about that field raises it on a copy of this.
 #:
-#: **And it declares ``amount`` at ``MONEY``** (ADR-0266 §7), which is what gives
-#: the scripted ``MONEY`` member an argument route to be met on at all: a member
-#: names no argument, so a declaration declaring none meets it nowhere. A case about
-#: an undeclared argument raises it on a copy of this.
+#: **And it declares ``amount`` at ``MONEY`` and ``site`` at ``TERMS``** (ADR-0266
+#: §7), which is what gives a scripted member an argument route to be met on at all:
+#: a member names no argument, so a declaration declaring none meets it nowhere, and
+#: a request carrying an argument declared at no kind is covered only through a
+#: quote. A case about either raises it on a copy of this.
 AUTHORIZATION_TOOL: Final = ToolDefinition(
     id="book_site",
     capability="book_site",
@@ -149,6 +150,7 @@ AUTHORIZATION_TOOL: Final = ToolDefinition(
     idempotency=Idempotency.NONE,
     bounded_arguments=(
         BoundedArgument(argument="amount", kind=BoundKind.MONEY, currency_argument="currency"),
+        BoundedArgument(argument="site", kind=BoundKind.TERMS),
     ),
 )
 

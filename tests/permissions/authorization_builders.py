@@ -76,8 +76,10 @@ OTHER_SITE = "https://other.example/book"
 
 ENDPOINT = "test://endpoint/one"
 
-#: A declaration whose ``parameters_schema`` **names** three of the arguments a
-#: booking carries and admits the rest. ADR-0254 §4 lets a ruling's reason name a
+#: A declaration whose ``parameters_schema`` **names** four of the arguments a
+#: booking carries and admits the rest, and which declares ``stay_from`` at
+#: ``PERIOD`` beside the canonical fake's own two bounded arguments (ADR-0266 §7).
+#: ADR-0254 §4 lets a ruling's reason name a
 #: key *"only where the declaration's ``parameters_schema`` itself names that key"*
 #: — ADR-0145 §8's rule, on the ground that *"a key can be data"* — so both halves
 #: of that rendering need a declaration that declares something and admits
@@ -92,9 +94,18 @@ DECLARED_TOOL: ToolDefinition = ToolDefinition.model_validate(
                 "amount": {"type": "string"},
                 "currency": {"type": "string"},
                 "refundable_only": {"type": "boolean"},
+                "stay_from": {"type": "string"},
             },
             "additionalProperties": True,
         },
+        # **A third bounded argument, at the one kind ``site`` and ``amount`` leave
+        # free** (ADR-0266 §7): a declaration declaring two arguments at one kind
+        # meets **no** member of that kind, so the rendering arms that need a member
+        # the request omits need a kind nothing else occupies.
+        "bounded_arguments": (
+            *AUTHORIZATION_TOOL.model_dump()["bounded_arguments"],
+            {"argument": "stay_from", "kind": "period", "currency_argument": None},
+        ),
     }
 )
 
@@ -111,7 +122,21 @@ SEARCH_CANONICAL = "https://search.example.com:443"
 #: the capability, so route (c)'s eligibility is about the **binding** rather than
 #: about a second declaration's severity.
 SEARCH_TOOL: ToolDefinition = ToolDefinition.model_validate(
-    {**AUTHORIZATION_TOOL.model_dump(), "id": "web_search", "capability": "web_search"}
+    {
+        **AUTHORIZATION_TOOL.model_dump(),
+        "id": "web_search",
+        "capability": "web_search",
+        # **``query`` is the one argument a search act bounds, and ``origin`` is the
+        # system's** (ADR-0266 §7, ADR-0247 §1). A declaration declaring two
+        # arguments at one kind meets **no** member of that kind, and a search
+        # carries both keys — so one of them has to be the other thing §3 already
+        # provides for. At the configured provider the origin comes from
+        # ``Settings`` and ``orchestration`` fills it; the user never states it,
+        # which is exactly what ``system_supplied`` names, and it is why *"a user is
+        # never asked to approve"* it.
+        "system_supplied": ("origin",),
+        "bounded_arguments": ({"argument": "query", "kind": "terms", "currency_argument": None},),
+    }
 )
 
 

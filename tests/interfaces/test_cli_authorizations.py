@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     AuthorizationProjection,
     AuthorizationSettlement,
     AuthorizationView,
+    BoundKind,
     CoverageView,
     ToolDefinition,
 )
@@ -72,7 +73,7 @@ def _view(**overrides: object) -> AuthorizationView:
         "goal_statement": STATEMENT,
         "tool": AUTHORIZATION_TOOL,
         "coverage": (
-            CoverageView(argument="amount", bound=money_bound("60"), span="under sixty pounds"),
+            CoverageView(kind=BoundKind.MONEY, bound=money_bound("60"), span="under sixty pounds"),
         ),
         "expires_at": AUTHORIZATION_EXPIRES_AT,
         "live": True,
@@ -89,11 +90,16 @@ def test_the_confirmation_says_what_answering_would_leave_standing(output: Strin
     And the **span beside each**, because ADR-0254 §8 makes both halves survive: someone
     reading *"under sixty pounds"* beside a bound of GBP 60 can check the working before
     they answer rather than only after.
+
+    **Each member is named by its kind** (ADR-0266 §9's §11 scope): *this kind of
+    value is fixed at that value*, or *bounded by that limit*, where the argument key
+    used to stand. A member names no argument, so a surface naming one would be
+    inventing it.
     """
     projection = AuthorizationProjection(
         coverage=(
-            CoverageView(argument="amount", bound=money_bound("60"), span="under sixty pounds"),
-            CoverageView(argument="site", fixed="A", span="the one by the lake"),
+            CoverageView(kind=BoundKind.MONEY, bound=money_bound("60"), span="under sixty pounds"),
+            CoverageView(kind=BoundKind.TERMS, fixed="A", span="the one by the lake"),
         ),
         expires_at=AUTHORIZATION_EXPIRES_AT,
     )
@@ -102,9 +108,9 @@ def test_the_confirmation_says_what_answering_would_leave_standing(output: Strin
 
     rendered = _flat(output.getvalue())
     assert "standing authority" in rendered
-    assert "up to 60 GBP" in rendered
+    assert "the amount: up to 60 GBP" in rendered
     assert "under sixty pounds" in rendered
-    assert "site: fixed at A" in rendered
+    assert "the terms: fixed at A" in rendered
     assert "the one by the lake" in rendered
     assert "2026-09-13 21:00 UTC" in rendered
 
@@ -150,7 +156,7 @@ def test_the_question_names_no_identifier(output: StringIO) -> None:
     cli._render_confirmation_authorization(
         AuthorizationProjection(
             coverage=(
-                CoverageView(argument="amount", bound=money_bound(), span="up to fifty pounds"),
+                CoverageView(kind=BoundKind.MONEY, bound=money_bound(), span="up to fifty pounds"),
             ),
             expires_at=row.expires_at,
         )
@@ -173,7 +179,7 @@ def test_the_projection_is_rendered_before_the_answer_is_collected(output: Strin
         "h-1",
         authorization=AuthorizationProjection(
             coverage=(
-                CoverageView(argument="amount", bound=money_bound(), span="up to fifty pounds"),
+                CoverageView(kind=BoundKind.MONEY, bound=money_bound(), span="up to fifty pounds"),
             ),
             expires_at=AUTHORIZATION_EXPIRES_AT,
         ),
@@ -203,7 +209,7 @@ async def test_the_listing_renders_the_goal_by_statement_and_offers_the_withdraw
             goal=GOAL,
             coverage=(
                 coverage_member(
-                    "amount",
+                    BoundKind.MONEY,
                     bound=money_bound("50"),
                     basis=authorization_basis(span="up to fifty pounds"),
                 ),
@@ -277,10 +283,12 @@ def test_every_bound_kind_renders_as_its_own_statement(output: StringIO) -> None
     """
     cli._render_coverage(
         (
-            CoverageView(argument="amount", bound=money_bound("60"), span="under sixty"),
-            CoverageView(argument="when", bound=period_bound(), span="this weekend"),
+            CoverageView(kind=BoundKind.MONEY, bound=money_bound("60"), span="under sixty"),
+            CoverageView(kind=BoundKind.PERIOD, bound=period_bound(), span="this weekend"),
             CoverageView(
-                argument="terms", bound=terms_bound("refundable", "flexible"), span="cancellable"
+                kind=BoundKind.TERMS,
+                bound=terms_bound("refundable", "flexible"),
+                span="cancellable",
             ),
         ),
         indent="  ",
@@ -293,6 +301,33 @@ def test_every_bound_kind_renders_as_its_own_statement(output: StringIO) -> None
     assert "one of: refundable, flexible" in rendered
 
 
+def test_a_strict_ceiling_is_said_strictly_and_never_as_an_inclusive_one(
+    output: StringIO,
+) -> None:
+    """ADR-0266 §3: *"under 100"* and *"at most 100"* stopped being one value.
+
+    **The two render differently or the screen misstates the authority.** A rendering
+    saying *"up to"* for both shows the owner a limit a cent wider than the one they
+    are about to establish — and this is the one surface §11 exists to make the
+    working checkable on, so the permissive direction here is exactly the one ADR-0254
+    §2's asymmetry names.
+    """
+    cli._render_coverage(
+        (
+            CoverageView(
+                kind=BoundKind.MONEY,
+                bound=money_bound("100", maximum_exclusive=True),
+                span="under 100 euros",
+            ),
+        ),
+        indent="  ",
+    )
+
+    rendered = _flat(output.getvalue())
+    assert "the amount: under 100 GBP" in rendered
+    assert "up to" not in rendered
+
+
 def test_a_money_bound_with_a_floor_states_both_ends(output: StringIO) -> None:
     """§2's ``MONEY`` kind carries an optional ``minimum``, and a rendering that dropped
     it would understate what the act permitted.
@@ -300,7 +335,7 @@ def test_a_money_bound_with_a_floor_states_both_ends(output: StringIO) -> None:
     cli._render_coverage(
         (
             CoverageView(
-                argument="amount",
+                kind=BoundKind.MONEY,
                 bound=money_bound("60", minimum="10"),
                 span="between ten and sixty",
             ),
@@ -424,7 +459,7 @@ def test_an_act_that_opened_two_authorities_is_announced_as_two(output: StringIO
                 tool=rail,
                 coverage=(
                     CoverageView(
-                        argument="amount", bound=money_bound("50"), span="fifty for the train"
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="fifty for the train"
                     ),
                 ),
             ),
@@ -433,7 +468,9 @@ def test_an_act_that_opened_two_authorities_is_announced_as_two(output: StringIO
                 tool=hotels,
                 coverage=(
                     CoverageView(
-                        argument="amount", bound=money_bound("100"), span="a hundred for the hotel"
+                        kind=BoundKind.MONEY,
+                        bound=money_bound("100"),
+                        span="a hundred for the hotel",
                     ),
                 ),
             ),

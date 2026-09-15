@@ -72,6 +72,7 @@ from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationOrigin,
     AuthorizationSettlement,
+    BoundKind,
 )
 from ai_assistant.testing.goal_authorizations import (
     authorization,
@@ -624,7 +625,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         assert [row.id for row in await store.standing(GOAL)] == ["a2"]
@@ -664,16 +665,27 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
     async def test_a_correction_may_replace_a_fixed_value_the_row_already_fixed(
         self, store: GoalAuthorizationStore
     ) -> None:
-        """§5: the owner's *"make it Sunday"*, and the user is not asked to repeat it."""
+        """§5: the owner's *"make it Sunday"*, and the user is not asked to repeat it.
+
+        **Stated over the ``kind`` the act constrained** (ADR-0266 §3), where it used
+        to be stated over an argument key: the member records that the user fixed a
+        *date*, and which argument of which declaration carries it is read at the
+        comparison. ADR-0254 §20's arm 14 stands exactly as written — *"actually,
+        make it Sunday"* is ``DATE_FROM_CONTEXT``'s and ADR-0266 §4 leaves that
+        reading untouched.
+        """
         await store.record(
-            established(id="a1", coverage=(coverage_member("stay_from", fixed="2026-09-19"),))
+            established(
+                id="a1",
+                coverage=(coverage_member(BoundKind.PERIOD, fixed="2026-09-19"),),
+            )
         )
         await store.record(
             established(
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("stay_from", fixed="2026-09-20"),),
+                coverage=(coverage_member(BoundKind.PERIOD, fixed="2026-09-20"),),
             )
         )
         assert [row.id for row in await store.standing(GOAL)] == ["a2"]
@@ -688,7 +700,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         assert [row.id for row in await store.standing(GOAL)] == ["a2"]
@@ -699,10 +711,6 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
             pytest.param(lambda: money_bound("80"), id="raised-maximum"),
             pytest.param(lambda: money_bound("60", minimum="5"), id="lowered-minimum"),
             pytest.param(lambda: money_bound("60", currency="EUR"), id="changed-currency"),
-            pytest.param(
-                lambda: money_bound("60", currency_argument="ccy"), id="moved-currency-argument"
-            ),
-            pytest.param(period_bound, id="changed-kind"),
         ],
     )
     async def test_a_correction_that_would_widen_a_money_bound_is_refused(
@@ -710,15 +718,24 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
     ) -> None:
         """§5, arm 15: *"A widening of any kind takes path (i) and is confirmed"*.
 
-        A changed currency or currency argument is neither a narrowing nor a
-        widening — it **re-denominates** what the bound is about — and takes path
-        (i) with the rest.
+        A changed currency is neither a narrowing nor a widening — it
+        **re-denominates** what the bound is about — and takes path (i) with the
+        rest.
+
+        **Two cases this list used to carry have moved rather than gone** (ADR-0266
+        §9). A moved ``currency_argument`` is not a widening of anything any more:
+        ADR-0266 §3 takes that key off the bound, because which argument carries an
+        amount's currency is a fact about a **declaration** and not about an act. And
+        a changed **kind** is no longer refused here but one layer earlier — a member
+        and its bound now agree by construction (§3) — so the store sees a correction
+        of a kind the superseded row carries no member of, which is the addition
+        :meth:`test_a_correction_changing_the_kind_of_a_member_is_refused` states.
         """
         assert callable(widened)
         await store.record(
             established(
                 id="a1",
-                coverage=(coverage_member("amount", bound=money_bound("60", minimum="10")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60", minimum="10")),),
             )
         )
         await _refuses(
@@ -727,7 +744,92 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=widened()),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=widened()),),
+            ),
+        )
+
+    async def test_a_correction_setting_maximum_exclusive_at_an_equal_ceiling_narrows(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0266 §3, arm 4(a): *"setting it narrows"*.
+
+        *"at most 100"* corrected to *"under 100"* **withdraws** the endpoint, so
+        every amount the correction permits the superseded row permitted too and
+        path (ii) writes it.
+        """
+        await store.record(
+            established(
+                id="a1", coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("100")),)
+            )
+        )
+        await store.record(
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(
+                    coverage_member(
+                        BoundKind.MONEY, bound=money_bound("100", maximum_exclusive=True)
+                    ),
+                ),
+            )
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a2"]
+
+    async def test_a_correction_clearing_maximum_exclusive_at_an_equal_ceiling_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0266 §3, arm 4(a): *"clearing it widens"* — **no row written and no
+        standing route**.
+
+        The reverse of the arm above, and the one a numeric comparison alone cannot
+        see: *"under 100"* corrected to *"at most 100"* adds a call at exactly ``100``
+        that the live row refused, so it is a widening ADR-0254 §5 refuses and the act
+        asks on path (i). **A lane that compared ``maximum`` alone would read it as no
+        change** and establish a wider authority with no confirmation, which is the
+        permissive direction §2's asymmetry names.
+        """
+        await store.record(
+            established(
+                id="a1",
+                coverage=(
+                    coverage_member(
+                        BoundKind.MONEY, bound=money_bound("100", maximum_exclusive=True)
+                    ),
+                ),
+            )
+        )
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("100")),),
+            ),
+        )
+        assert [row.id for row in await store.standing(GOAL)] == ["a1"]
+
+    async def test_a_correction_changing_the_kind_of_a_member_is_refused(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """§5, arm 15's *"changed kind"* limb, restated where the store can see it.
+
+        *"A change of ``kind`` is not a narrowing, whatever the two bounds permit"* —
+        the kinds are compared by different readings (§4) and a claim that one is
+        inside another is a comparison this corpus does not establish. Since ADR-0266
+        §3 a member and its bound agree by construction, so the correction the store
+        is offered is a member of a kind the superseded row carries **none** of: an
+        addition, refused, with the ``MONEY`` member it dropped refused beside it.
+        """
+        await store.record(established(id="a1"))
+        await _refuses(
+            store,
+            established(
+                id="a2",
+                supersedes="a1",
+                proposed_at=AT + timedelta(minutes=5),
+                coverage=(coverage_member(BoundKind.PERIOD, bound=period_bound()),),
             ),
         )
 
@@ -739,7 +841,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         await store.record(
             established(
                 id="a1",
-                coverage=(coverage_member("amount", bound=money_bound("60", minimum="10")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60", minimum="10")),),
             )
         )
         await _refuses(
@@ -748,7 +850,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("60")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("60")),),
             ),
         )
 
@@ -758,7 +860,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         """§5, arm 15: *"add Bob"* — an added term is a widening."""
         await store.record(
             established(
-                id="a1", coverage=(coverage_member("terms", bound=terms_bound("flexible")),)
+                id="a1", coverage=(coverage_member(BoundKind.TERMS, bound=terms_bound("flexible")),)
             )
         )
         await store.record(
@@ -766,7 +868,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("terms", bound=terms_bound("flexible")),),
+                coverage=(coverage_member(BoundKind.TERMS, bound=terms_bound("flexible")),),
             )
         )
         await _refuses(
@@ -775,7 +877,9 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a3",
                 supersedes="a2",
                 proposed_at=AT + timedelta(minutes=10),
-                coverage=(coverage_member("terms", bound=terms_bound("flexible", "refundable")),),
+                coverage=(
+                    coverage_member(BoundKind.TERMS, bound=terms_bound("flexible", "refundable")),
+                ),
             ),
         )
 
@@ -787,7 +891,9 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
             established(
                 id="a1",
                 coverage=(
-                    coverage_member("stay_from", bound=period_bound(starts_at=AT, ends_at=EXPIRES)),
+                    coverage_member(
+                        BoundKind.PERIOD, bound=period_bound(starts_at=AT, ends_at=EXPIRES)
+                    ),
                 ),
             )
         )
@@ -799,7 +905,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 proposed_at=AT + timedelta(minutes=5),
                 coverage=(
                     coverage_member(
-                        "stay_from",
+                        BoundKind.PERIOD,
                         bound=period_bound(starts_at=AT, ends_at=EXPIRES + timedelta(days=30)),
                     ),
                 ),
@@ -810,7 +916,16 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         self, store: GoalAuthorizationStore
     ) -> None:
         """§5, arm 15, arm 47: *"add insurance"* — path (ii) refuses it at
-        construction, and §6's bar is what then refuses the dispatch."""
+        construction, and §6's bar is what then refuses the dispatch.
+
+        **Restated as a member of a kind the row carries none of** (ADR-0266 §9's
+        mechanism (i)): ADR-0254 §5's *"naming an argument no member covers"* limb is
+        read as *an argument the row would not cover under §7's condition 6 once the
+        correction is applied*, and a term the superseded row states nothing about is
+        exactly that. Its force is unchanged and only its test moved. ADR-0266 §9
+        says so of arm 47 by name: *"add insurance"* is a term, and §4 leaves that
+        reading untouched.
+        """
         await store.record(established(id="a1"))
         await _refuses(
             store,
@@ -819,8 +934,8 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
                 coverage=(
-                    coverage_member("amount", bound=money_bound()),
-                    coverage_member("insurance", fixed=True),
+                    coverage_member(BoundKind.MONEY, bound=money_bound()),
+                    coverage_member(BoundKind.TERMS, fixed="insurance"),
                 ),
             ),
         )
@@ -834,8 +949,8 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
             established(
                 id="a1",
                 coverage=(
-                    coverage_member("amount", bound=money_bound()),
-                    coverage_member("site", fixed="A"),
+                    coverage_member(BoundKind.MONEY, bound=money_bound()),
+                    coverage_member(BoundKind.TERMS, fixed="A"),
                 ),
             )
         )
@@ -845,7 +960,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             ),
         )
 
@@ -853,15 +968,24 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         self, store: GoalAuthorizationStore
     ) -> None:
         """§1: it replaces a fixed value the row **fixed**, or narrows a bound the row
-        **bounded**; turning one shape into the other is neither motion."""
-        await store.record(established(id="a1", coverage=(coverage_member("amount", fixed="60"),)))
+        **bounded**; turning one shape into the other is neither motion.
+
+        **Stated at ``TERMS`` where it used to be stated at a money argument**: a
+        ``MONEY`` member fixes nothing at all since ADR-0266 §3 — an amount carries no
+        currency on a fixed member, so such a member states an amount nothing can
+        denominate — and the property this arm demonstrates is about the two
+        **shapes** rather than about which kind holds them.
+        """
+        await store.record(
+            established(id="a1", coverage=(coverage_member(BoundKind.TERMS, fixed="flexible"),))
+        )
         await _refuses(
             store,
             established(
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("60")),),
+                coverage=(coverage_member(BoundKind.TERMS, bound=terms_bound("flexible")),),
             ),
         )
 
@@ -884,7 +1008,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
                 expires_at=narrowed,
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         held = await store.resolve("a2")
@@ -908,7 +1032,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
                 expires_at=EXPIRES + timedelta(hours=1),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             ),
         )
 
@@ -926,7 +1050,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
                 expires_at=narrowed,
-                coverage=(coverage_member("amount", bound=money_bound("50")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("50")),),
             )
         )
         await _refuses(
@@ -936,7 +1060,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 supersedes="a2",
                 proposed_at=AT + timedelta(minutes=10),
                 expires_at=narrowed + timedelta(hours=1),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             ),
         )
 
@@ -1187,7 +1311,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a3",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=6),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         assert (
@@ -1211,7 +1335,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         await store.settle("a2", to=AuthorizationDisposition.REVOKED, settled_at=NOW)
@@ -1624,7 +1748,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
                 id="a2",
                 supersedes="a1",
                 proposed_at=AT + timedelta(minutes=5),
-                coverage=(coverage_member("amount", bound=money_bound("40")),),
+                coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("40")),),
             )
         )
         held = await store.resolve("a2")

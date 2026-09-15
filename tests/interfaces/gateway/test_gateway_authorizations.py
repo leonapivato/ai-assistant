@@ -24,6 +24,7 @@ from ai_assistant.core.types import (
     Authorization,
     AuthorizationSettlement,
     AuthorizationView,
+    BoundKind,
     CanonicalDestination,
     ToolDefinition,
 )
@@ -69,7 +70,7 @@ def _engine(*, lapsed: bool = False) -> FakeAssistantEngine:
             goal=GOAL,
             coverage=(
                 coverage_member(
-                    "amount",
+                    BoundKind.MONEY,
                     bound=money_bound("50"),
                     basis=authorization_basis(span="up to fifty pounds"),
                 ),
@@ -223,19 +224,30 @@ def test_a_fixed_value_crosses_as_text_so_a_large_integer_is_not_a_double() -> N
     A JSON number read by ``JSON.parse`` becomes a double, so an integer above ``2**53``
     would reach the person **changed** — and a rendering showing a value the record does
     not hold is worse than one showing none.
+
+    **The act is restated at a kind the validation carries, and the hazard is the
+    same one** (ADR-0266 §9's mechanism (iii)). A member's ``fixed`` is now validated
+    against its ``kind``: a ``TERMS`` one is a JSON **string**, so an integer above
+    ``2**53`` is no longer constructible here at all and the class of value that
+    motivated this rule is closed one level up. What is still constructible — and
+    still reaches ``JSON.parse`` — is a fixed value whose **characters** are that
+    integer, which must arrive as text and never as a number the page parses back.
     """
-    exact = 9007199254740993
+    exact = "9007199254740993"
     row = opening_act(
         id="auth-1",
         goal=GOAL,
         coverage=(
-            coverage_member("count", fixed=exact, basis=authorization_basis(span="that many")),
+            coverage_member(
+                BoundKind.TERMS, fixed=exact, basis=authorization_basis(span="that many")
+            ),
         ),
     )
 
     view = _authorization_view(_rendered_view(row))
 
-    assert view["coverage"][0]["fixed"] == str(exact)
+    assert view["coverage"][0]["fixed"] == exact
+    assert view["coverage"][0]["kind"] == "terms"
     assert view["coverage"][0]["bound"] is None
     assert view["coverage"][0]["span"] == "that many"
 
@@ -249,24 +261,49 @@ def test_every_bound_kind_crosses_with_every_field_the_page_branches_on() -> Non
         id="auth-1",
         goal=GOAL,
         coverage=(
-            coverage_member("amount", bound=money_bound("60", minimum="10")),
-            coverage_member("when", bound=period_bound()),
-            coverage_member("terms", bound=terms_bound("refundable", "flexible")),
+            coverage_member(BoundKind.MONEY, bound=money_bound("60", minimum="10")),
+            coverage_member(BoundKind.PERIOD, bound=period_bound()),
+            coverage_member(BoundKind.TERMS, bound=terms_bound("refundable", "flexible")),
         ),
     )
 
     coverage = _authorization_view(_rendered_view(row))["coverage"]
 
     money, period, terms = coverage
+    assert [one["kind"] for one in coverage] == ["money", "period", "terms"]
     assert money["bound"]["kind"] == "money"
     assert money["bound"]["maximum"] == "60"
     assert money["bound"]["minimum"] == "10"
     assert money["bound"]["currency"] == "GBP"
+    # **Whether the ceiling itself is permitted crosses with the figure** (ADR-0266
+    # §3): a page holding only the number would render "under 100" as "up to 100".
+    assert money["bound"]["maximum_exclusive"] is False
     assert period["bound"]["kind"] == "period"
     assert period["bound"]["starts_at"].endswith("+00:00")
     assert period["bound"]["timezone"] == "Europe/London"
     assert terms["bound"]["kind"] == "terms"
     assert terms["bound"]["terms"] == ["refundable", "flexible"]
+
+
+def test_a_strict_ceiling_crosses_as_one_and_is_told_apart_from_an_inclusive_one() -> None:
+    """ADR-0266 §3: ``maximum_exclusive`` is a fact about the bound and crosses.
+
+    The control beside the ``False`` above. *"under 100"* and *"at most 100"* carry the
+    same ``maximum``, so a translator dropping this field would send two different
+    authorities as one — and the page has nothing to recover it from.
+    """
+    row = opening_act(
+        id="auth-1",
+        goal=GOAL,
+        coverage=(
+            coverage_member(BoundKind.MONEY, bound=money_bound("100", maximum_exclusive=True)),
+        ),
+    )
+
+    coverage = _authorization_view(_rendered_view(row))["coverage"]
+
+    assert coverage[0]["bound"]["maximum"] == "100"
+    assert coverage[0]["bound"]["maximum_exclusive"] is True
 
 
 def test_the_declaration_crosses_by_its_identifier_and_its_description() -> None:
