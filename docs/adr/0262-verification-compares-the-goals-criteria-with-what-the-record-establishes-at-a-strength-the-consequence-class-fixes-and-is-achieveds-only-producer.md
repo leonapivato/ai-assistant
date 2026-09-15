@@ -1,6 +1,6 @@
 # 262. Verification compares the goal's criteria with what the goal's own records establish, at a strength the consequence class fixes, and it is the only producer of `GoalStatus.ACHIEVED`
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with one further conjunct on its satisfying and contradicting tests: the charge the act reported agrees with the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in the limb *"the guarantee does not cover a capability whose acts make a charge"* alone — it covers one, for a deployment that declares where its acts report a charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope three records already take there reaching one further
@@ -78,6 +78,45 @@
   booking **discharged** is not a clause made false; the two Protocol strengthenings are the move
   ADR-0261 §12 already ruled owes ADR-0250 §9 no record; and the one `TurnOutcome` widening is the
   move ADR-0242 §9 made and recorded nothing for.
+
+- **Partially superseded: 2026-09-15 by ADR-0271 — two scopes, §2's `MONEY` clause and §7's gate
+  statement. Nothing else in this ADR.** **The first** is §2's clause ruling that *"a criterion whose
+  confirmed member is a `MONEY` one is `unestablished`"* and that *"no criterion about an amount is
+  ever `met` here and no goal resting on one reaches `ACHIEVED`"*. Its stated ground is that *"the
+  charge is not an operand this decision has"* — the quote a dispatch was proved against being
+  recorded nowhere ([#2409](https://github.com/leonapivato/ai-assistant/issues/2409)) — and the
+  superseding decision **lands that operand**, pinning the quote `ActionPolicy.decide` took the
+  evidence route over to the dispatch, by value, on the ruling that dispatch was allowed by. Such a
+  criterion is then **met**, **unmet** or **unestablished** on §2's own machinery, its satisfying and
+  contradicting tests each gaining **one conjunct**: a charge read from the bound step's own stored
+  output, at a key the operative declaration names, whose currency equals the pinned quote's byte for
+  byte, whose amount is not greater than the pinned quote's, and which satisfies the confirmed
+  member. **§2's `BoundKind.MONEY` limb of its `unestablished` list goes with the clause**; its five
+  other limbs, its authorising rows, its confirmed member, its bound steps, its operative
+  declaration, its grouping by `parameters_digest`, its ambiguity rule, its *"no fourth result
+  exists"*, its *"a `FAILED` bound step is never decisive"* and every no-model-operand clause bind
+  entire, and the new conjunct is stated **inside** them. The clause's closing *"No lane reads this
+  as licence to compare a charge against a ceiling, a quote or anything else"* is **kept in the
+  direction it was written**: the comparison is against the **pinned** quote and only then against
+  the member, never against a ceiling alone and never against a quote the goal's tuple holds now.
+  **The second** is §7's statement that *"the guarantee does not cover a capability whose acts make a
+  charge"*, whose ground is the same missing operand: it **does** cover one, and a deployment wiring
+  such a capability does a **third** thing as part of wiring it beside §7's two — it declares where
+  its acts report a charge, a declaration carrying no such key satisfying this guarantee for no
+  `MONEY` criterion at all. **§7's other two obligations are unchanged**, its count of **seven**
+  conditions stands with none added and none removed — ADR-0267 §6's provider-side hold, condition
+  (7), binding exactly that class — and its *"ratification is not implementation"* is true of the
+  superseding decision on the day it ratifies. **Three further places where the replaced reading is
+  available are left standing and are named so that no reader takes them for the scope**: §2a's
+  unmarked ground that a `MONEY` member *"is proved against a quote **before** the act"* and that
+  this decision adds no *post-hoc* comparison stays true of **this** document; §9's reassignment
+  entry is **fired** rather than falsified, a booking discharged not being a clause made false, which
+  is §10's own test; and §12's arm asserting that *"a `MONEY` criterion is `unestablished` whatever
+  else holds"* is **restated** by the implementing lane under the new conjunct — an agreeing charge
+  yielding `VERIFIED`, a disagreeing one `PARTIAL` — its property, its other criteria and its rung-2
+  case unmoved. **Every other clause of this ADR binds entire**, §§1, 2a, 3-6, 8, 10, 11 and 13
+  included: the report's two fields and its fixed statements, which the superseding decision reports
+  the finding through and neither widens nor renames.
 
 ## Context
 
