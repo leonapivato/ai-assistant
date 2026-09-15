@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
-  — **eight narrowly stated scopes; §9 shows the working for each and ADR-0254's own `Status`
+  — **nine narrowly stated scopes; §9 shows the working for each and ADR-0254's own `Status`
   line carries them in full. §1's proposal completeness**: the condition that a proposed row's
   coverage *"is complete for this request"* is restated over §7's test — the row the proposal
   would write satisfies **condition 6**, condition 6 alone because a proposal is written
@@ -28,8 +28,24 @@
   stated ground does not reach it and the `CONFIRM` stands. **§9 clause (ii)**: *"an argument the
   act's own words bear on"* is given its mechanical test — kind agreement, never numeric fit and
   never a model's nomination. **§8's and §10's resolution enumeration, in the closure at three
-  alone**: a fourth `ResolutionRule`, **`STATED_BOUND`**, which §19 books by name. **Every other
-  clause of all eight sections binds entire**, §9 naming them section by section.
+  alone**: a fourth `ResolutionRule`, **`STATED_BOUND`**, which §19 books by name. **§9 clause
+  (iii)'s *"an argument no member names"* limb**, both times it is stated, restated
+  as *an argument the row does not cover under §7's condition 6* — a member naming none, the
+  ratified limb would make route (d) unreachable altogether — its force unchanged and every other
+  limb binding entire. **Every other clause of all nine sections binds entire**, §9 naming them
+  section by section.
+- **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md)
+  — **one scope, and it is a count.** §15 item 19 enumerates what §13's rule requires before a
+  consequential capability is wired and closes that enumeration in terms, at six. §11 adds a
+  **seventh**, binding any capability reachable through route (d) with a member this decision
+  mints: a mechanical test of the polarity of the clause a span was taken from, or a span contract
+  that makes a span unable to carry a polarity its surrounding text does not. A reader holding
+  only item 19 wires an integration after six and is wrong — *"avoid these prices — under 100
+  euros"* mints a ceiling the user's own words refuse, so route (d) can `ALLOW` inside an
+  authority they never gave — and **the gate's existing guarantees do not reach it**, verification
+  reporting the completed charge and cancellation compensating the attempt while neither makes the
+  pre-execution permission decision valid, which is §13's own test. §13's rule binds verbatim, its
+  own two prerequisites are unchanged, and what grows is the gate's total.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -567,9 +583,9 @@ Sunday price is `170` is covered by nothing and the user is asked.
 
 ADR-0082 §1's test is applied to the earlier ADR's **text** and is shown rather than asserted:
 *"Would a reader holding only the earlier ADR now act differently, or read one of its clauses more
-widely than it now holds?"* **Two documents come out yes** — ADR-0254 in eight scopes and
-ADR-0016 in one; every other ADR cited comes out **no** and takes none, which ADR-0082 §1 requires
-as firmly.
+widely than it now holds?"* **Three documents come out yes** — ADR-0254 in nine scopes, ADR-0016 in
+one and ADR-0255 in one count; every other ADR cited comes out **no** and takes none, which
+ADR-0082 §1 requires as firmly.
 
 **ADR-0254 §1 — in the proposal's completeness condition alone.** It reads that the coverage is
 *"**complete for this request**: every **user-facing** argument of the request (§3) is named by a
@@ -625,13 +641,27 @@ other conjunct, `PERIOD` and `TERMS` whole, the no-float and no-naive-instant ru
 totality-and-refusal clause, the `reason` discipline, and the no-schema clause, which §7 cites as
 binding it.
 
+**ADR-0254 §9 clause (iii) — in its *"an argument no member names"* limb alone, both times it is
+stated.** That clause rules that where the concrete action introduces what the coverage does not
+hold — *"a cost above a `maximum`, a term outside a named set, a destination outside the set, an
+argument no member names"* — *"the request reaches no route (d) and the user is asked"*, and it
+states the same limb again on §6's bar for a live row. **A member names no argument once §3 above
+lands, so every argument of every request is one no member names and route (d) is unreachable
+altogether** — the mirror of §1's inert proposal, and the reason this limb cannot simply be left
+standing. It is restated as **an argument the row does not cover under §7's condition 6**, which
+keeps the limb's whole force — an argument the coverage cannot reach still asks, and still on
+§6's bar where a live row exists — and moves only its test. **Every other limb of clause (iii)
+binds entire**: the material-ambiguity rule with ADR-0250 §6's three conditions and no fewer, the
+cost above a `maximum`, the term outside a named set and the destination outside the set, each
+still reaching no route (d) whatever the interpretation said. **Clause (i) and §9's discard rule
+bind entire.**
+
 **ADR-0254 §9 clause (ii) — in the test of *"bear on"* alone.** The clause states the property
 and no procedure, so a reader holding only §9 either invents a test or, as #2373 did, stops.
 **Its test is kind agreement between the constraint and the
 thing the member is proved against** — a quote, which is a price and so meets a `MONEY` member
 and no other, or a `BoundedArgument` at the member's own kind — and never numeric fit, a model's
-nomination or a schema. **The clause's prohibitions bind entire and are not
-narrowed**, and so do clauses (i) and (iii) and §9's discard rule.
+nomination or a schema. **The clause's prohibitions bind entire and are not narrowed.**
 
 **ADR-0254 §6 — in the lineage-discharge clause alone, and in the narrowing direction.** That
 clause discharges ADR-0181 §5's floor for a request a live row covers *"in full"*, on the ground
@@ -661,12 +691,22 @@ tuple makes the **opposite** claim to the one §1 refuses. **The exception is th
 field on this one argument**, no lane reading the two records together as licence to default a
 third, and every other clause of §1 binds entire.
 
-**And the ones that come out no, several of them deliberately.** **ADR-0249** takes **no** record:
-this decision adds no field to `Goal` and none to `GoalElement`, and §7 is relied on rather than
-narrowed — its span check is a containment test, and §4's clause and negation refusals are
-further refusals of **this** decision's own reading rather than changes to it. **ADR-0255** takes
-**no** record: §15 item 19's gate enumeration is untouched, because every prerequisite the quote
-raises belongs to the decision that lands the quote (§10) and this one adds none. **ADR-0252** is
+**ADR-0255 §15 item 19 — and it is a count.** That item enumerates what §13's rule requires
+before a consequential capability is wired and closes the enumeration in terms, at **six** since
+ADR-0265 §6 added the sixth. §11 adds a **seventh**: a mechanical test of the polarity of the
+clause a span was taken from, binding any capability reachable through route (d) with a member
+this decision mints. A reader holding only item 19 wires an integration after six and is wrong —
+*"avoid these prices — under 100 euros"* mints a `100` ceiling the user's own words refuse, so
+route (d) can `ALLOW` inside an authority they never gave — and **the gate's existing guarantees
+do not reach it**, verification reporting the completed charge and cancellation compensating the
+attempt while **neither makes the pre-execution permission decision valid**, which is §13's own
+test. §13's rule binds verbatim and its own contribution is unchanged; what grows is the gate's
+total. **Every other clause of §15 and every other section of ADR-0255 stand entire.**
+
+**And the ones that come out no, deliberately.** **ADR-0249** takes **no** record: this decision
+adds no field to `Goal` and none to `GoalElement`, and §7 is relied on rather than narrowed — its
+span check is a containment test, and §4's clause and negation refusals are further refusals of
+**this** decision's own reading rather than changes to it. **ADR-0252** is
 read and **not moved**: §1's no-content rule, its two bases and verdict vocabularies, §6's four
 tests, §7's conflict rule, §11's digest and §§12-13 are untouched, and §6 records why the carrier
 question is the booked decision's. **ADR-0253** is superseded in nothing: this decision adds no
@@ -810,6 +850,20 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
   6(a)'s with-a-quote limbs are shipped there**, against that decision's carrier and never against
   a double standing in for it.
 
+> **Normative — this decision adds a *seventh* prerequisite to the production-deployment gate,
+> so that a reader does not take ADR-0255 §15 item 19's six for the whole.** **No consequential
+> capability whose authorisation can be reached through route (d) with a member this decision
+> minted is wired until a mechanical test of the polarity of the clause a span was taken from is
+> implemented and demonstrated**, or a span contract that makes a span unable to carry a polarity
+> its surrounding text does not. §4's clause rule and its ceiling-only table narrow that class and
+> close no part of it whole — *"avoid these prices — under 100 euros"* still mints a `100`
+> ceiling — and the residue is a property of **ADR-0249 §7's containment check and ADR-0254 §8's
+> basis**, both ratified and both consumed here rather than created. **The gate's existing
+> guarantees do not reach it**: verification reports a completed charge the user refused and
+> cancellation compensates the attempt, and **neither makes the pre-execution permission decision
+> valid**, which is ADR-0255 §13's own test. Booking the closure (§10) says who takes it; this
+> clause says nothing rides on it meanwhile.
+
 > **Normative — L1 lands before L2, and both are briefed on this decision alone.** Neither reads
 > a quote: L1's evidence route is met by nothing until the quote decision lands a carrier, and
 > L2 mints members from the goal. So a row carrying a non-empty `coverage` becomes writable as
@@ -888,7 +942,9 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
    `currency_argument`, where a `PERIOD` or `TERMS` one carries one, or where `argument` equals
    `currency_argument`; a `ValueBound` is not constructible where `maximum_exclusive` is set
    beside an absent `maximum`; and a `CoverageMember` is not constructible carrying a `MONEY`
-   `fixed`, or a `PERIOD` or `TERMS` `fixed` that kind's reading refuses.
+   `fixed`, a `PERIOD` or `TERMS` `fixed` that kind's reading refuses, or a `bound` whose `kind`
+   differs from the member's — **every unequal pair of the three kinds**, beside one equal pair
+   of each that is.
 7. **The mint reads the goal alone, the three refusals, and the discard.** The same goal mints
    the same members against two different requests, two different plans and two different
    declarations — including one declaring nothing; an element whose `id` is `None`, one whose
@@ -905,9 +961,10 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
 the corpus without it can write no row carrying a non-empty `coverage` at all, and would either
 leave ADR-0254 §20's Lane 2 stopped where #2373 stopped it or invent an association no clause
 authorises — the standing authority §9 clause (ii) exists to prevent (ADR-0070 §1). **It is a
-partial supersession of exactly two documents** (ADR-0070 §3) — ADR-0254 in **eight** scopes and
-ADR-0016 in **one** — and the `Status` line of each names its scopes **without an `ADR-NNNN` token
-inside the parentheses**, so ADR-0070 §4's extraction invariant holds. Against every other ADR it
+partial supersession of exactly three documents** (ADR-0070 §3) — ADR-0254 in **nine** scopes,
+ADR-0016 in **one** and ADR-0255 in **one count** — and the `Status` line of each names its
+scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
+invariant holds. Against every other ADR it
 cites it is a **stacked addition**. **The records land in the same change as this document**
 (ADR-0082 §7), and nothing else in either is edited — no Decision text is rewritten, which
 ADR-0070 §1 forbids.
