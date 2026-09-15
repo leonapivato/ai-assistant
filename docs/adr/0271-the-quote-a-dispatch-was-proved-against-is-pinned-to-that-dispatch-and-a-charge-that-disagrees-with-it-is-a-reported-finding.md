@@ -23,7 +23,10 @@ disagrees with it is a reported finding
   is not a handle on an individual displaced quote, and the claim is not made**"*, with §10 booking
   what would need one *"if that record needs a handle the pair cannot give"*. This record needs no
   handle at all, carrying the `ActionQuote` **by value**, so §10's entry is **fired and answered no**
-  — a booking discharged and not a clause made false — and §1 stays true read whole. **ADR-0254,
+  — a booking discharged and not a clause made false — and §1 stays true read whole. **§3 is
+  likewise untouched**: its `QuotedOutput` states a key *"whose value is the **whole charge the act
+  will make**"*, so this decision mints `ChargedOutput` for the retrospective fact rather than
+  reusing a type whose accepted meaning is prospective (§2). **ADR-0254,
   ADR-0192, ADR-0266, ADR-0270, ADR-0249 and ADR-0016 are each reached and none is moved.** §7 states
   the test for every ADR this decision reaches and shows the working at each.
 
@@ -135,23 +138,36 @@ producer, no freshness rule and no coverage condition.
 
 ### 2. The charge: where an act reports it, and where it is never read from
 
-> **Normative.** `core/types.py`'s **`ToolDefinition` gains one field, `charged_output:
-> QuotedOutput | None` defaulting to `None`** — the key of this declaration's output carrying **the
-> whole amount an invocation of it charged**, and the key carrying that amount's ISO-4217 code.
-> **The type is ADR-0267 §3's, reused and not restated**: it names two keys at depth one and
-> refuses them equal, and it states nothing about tense, so a second shape would be ADR-0253 §6's
-> *"the one spelling of that"* broken for no gain. **A declaration carrying `None` reports no
-> charge ever**, so no `MONEY` criterion resting on its acts is `met` — the fail-closed default, and
-> ADR-0016 §1's *"Declared, not inferred"*. This is a **BREAKING** contract change to
-> `core/types.py` under golden rule 5 and is flagged as one.
+> **Normative.** `core/types.py` gains **`ChargedOutput`**, a frozen model with `extra="forbid"`
+> whose fields are exactly two: **`amount`**, an `EncodableText` naming a key of the step's `output`
+> at depth **one**, whose value is **the whole amount that invocation charged**; and **`currency`**,
+> an `EncodableText` naming the key at depth one carrying that amount's ISO-4217 code. **A model
+> validator refuses `amount` equal to `currency`.** Depth is one and no lane adds an addressing
+> syntax to either — ADR-0267 §3's rule, stated once more where it governs. And **`ToolDefinition`
+> gains one field, `charged_output: ChargedOutput | None` defaulting to `None`**, the whole of what
+> a declaration says about where an act reports what it charged. **A declaration carrying `None`
+> reports no charge ever**, so no `MONEY` criterion resting on its acts is `met` — the fail-closed
+> default, and ADR-0016 §1's *"Declared, not inferred"*. Both are **BREAKING** contract changes to
+> `core/types.py` under golden rule 5 and are flagged as such.
 
-> **Normative — it is a second field beside `quoted_output` and never that field read again.**
-> `quoted_output` names where a **price on offer** is read, and ADR-0267 §4's mint appends a quote
-> from it; reading a charge there would make **the acting step's own appended reading** the operand,
-> which is the defect #2409 names. **No lane reads `quoted_output` as a charge, reads
-> `charged_output` as a quote, mints an `ActionQuote` from a charge, or appends anything to the
-> goal's `quotes` on this decision's authority.** A declaration may carry both, one or neither, and
-> the two are compared against each other by nothing.
+> **Normative — it is its own type and not `QuotedOutput` reused, and the reason is that the two
+> name different facts.** ADR-0267 §3 defines `QuotedOutput.amount` as a key *"whose value is the
+> **whole charge the act will make**"* — a **prospective** price on offer, from which §4's mint
+> appends an `ActionQuote`. A charge is **retrospective**, and one output may carry both: an
+> estimate at one key and a settled total at another. **Reusing the type would make one of those two
+> readings wrong at every declaration that carries both** — selecting the estimate hides the very
+> mismatch this decision exists to report, and selecting the total makes the type's own accepted
+> meaning false. **So ADR-0267 §3 is left binding entire and this decision takes no scope on it**;
+> the price of that is one `core` type of identical shape and different semantics, which is
+> ADR-0251 §3's *"one carrier for two facts"* refused rather than paid for twice.
+
+> **Normative — the two fields are read for their own fact and never for each other's.** **No lane
+> reads `quoted_output` as a charge, reads `charged_output` as a quote, mints an `ActionQuote` from
+> a charge, appends anything to the goal's `quotes` on this decision's authority, or defaults either
+> field from the other.** Reading a charge at `quoted_output` would make **the acting step's own
+> appended reading** the operand, which is the defect #2409 names. A declaration may carry both, one
+> or neither; where it carries both they may name the same key or different ones, and **no clause
+> compares them, requires them to agree, or refuses either on the other's account**.
 
 > **Normative — the charge is read at the comparison, from the bound step's own stored `output`,
 > under the declaration pinned to the act that ran.** The operative declaration is ADR-0262 §2's —
@@ -166,32 +182,47 @@ producer, no freshness rule and no coverage condition.
 > **Normative — every failure of that reading yields no charge, and nothing is repaired, coerced,
 > defaulted or substituted.** A declaration with no `charged_output`, an `output` that is not an
 > object, a missing key at either name, a value of any refused shape: each yields **no charge**, and
-> §3 leaves the criterion `unestablished` in consequence. **No lane substitutes
+> §3 leaves the criterion `unestablished` in consequence. **A yield of no charge raises nothing**:
+> a string `Decimal` refuses — `"not-a-number"`, an empty string — and a string it **accepts** whose
+> value is **not finite** — `"NaN"`, `"Infinity"`, `"-Infinity"`, in any case — each leave the
+> comparison with no charge rather than with an exception, the second pair being the one a natural
+> implementation reaches by accident because `Decimal` constructs them without complaint, exactly as
+> ADR-0267 §4 states its own `bool`-is-an-`int` hazard. **No lane substitutes
 > `ToolDefinition.cost`, `ToolInvocation.incurred_cost`, a quote, a ceiling or a zero** —
 > ADR-0192 §5's *"never money the tool moved"* is the reason the invocation row is not the operand,
 > and a charge this system supplied is a charge no provider reported.
 
 ### 3. The comparison, and the finding it produces
 
-> **Normative — the charge test, taken over a bound step of a criterion whose confirmed member's
-> `kind` is `MONEY`, and over no other step of any criterion.** The test **holds** where the step's
+> **Normative — the charge test, taken over a `SUCCEEDED` bound step of a criterion whose confirmed
+> member's `kind` is `MONEY`, and over no other step of any criterion.** It is **not taken over a
+> step in any other status**, so ADR-0262 §2's *"a `FAILED` bound step is never decisive"* is
+> untouched by it. The test **holds** where the step's
 > pinned `PermissionDecision` carries a `proved_quote` (§1), a charge reads under §2, and **all
 > three** conjuncts hold: the charge's **currency equals the pinned quote's `currency` byte for
 > byte**, no conversion, no fold and no register consulted, exactly as ADR-0254 §4's `MONEY` reading
 > compares one; the charge's **amount is not greater than the pinned quote's `amount`**; and that
 > amount **satisfies the confirmed member** under ADR-0254 §3's fixed comparison or §4's `MONEY`
 > reading, taken at the quote's own currency. It **fails** where a charge reads and some conjunct
-> does not hold. It is **not taken at all** where there is no `proved_quote`, no `charged_output`,
-> or no charge reads.
+> does not hold. It is **not taken at all** where the step is not `SUCCEEDED`, where there is no
+> `proved_quote`, where the operative declaration carries no `charged_output`, or where no charge
+> reads.
 
-> **Normative — that test is one further conjunct on ADR-0262 §2's own two, for such a criterion
-> and for no other, and no other clause of §2 moves.** A bound step is **satisfying** where §2's
-> own satisfying test holds **and** the charge test holds; **contradicting** where §2's own
-> contradicting test holds **or** the charge test fails; and **neither** where the charge test is
-> not taken, whatever §2's own tests say. §2's grouping of bound steps into **calls** by
-> `ActionRequest.parameters_digest`, its satisfying/contradicting/**ambiguous** rule over a call,
-> its three results, its *"no fourth result exists"* and its *"a `FAILED` bound step is never
-> decisive"* all bind entire and are what this conjunct is stated inside.
+> **Normative — ADR-0262 §2's classification of a bound step is restated for such a criterion as
+> **three ordered limbs**, total and disjoint by construction, and no other clause of §2 moves.**
+> Taken in this order and stopping at the first that holds, a bound step is: **(1) contradicting**
+> where §2's own contradicting test holds, **or** where the charge test **fails**; **(2)
+> satisfying** where §2's own satisfying test holds **and** the charge test **holds**; **(3)
+> neither**, in every remaining case — which is where the charge test was **not taken** over a step
+> §2 would otherwise have called satisfying, and every case §2 already called neither. **The order
+> is the whole of the answer to a step that would qualify twice**, and it is ordered this way
+> because a step whose own tool's declaration refuses its output is contradicting on the record's
+> own evidence, which the absence of a readable charge neither supplies nor erases. §2's grouping of
+> bound steps into **calls** by `ActionRequest.parameters_digest`, its
+> satisfying/contradicting/**ambiguous** rule over a call, its three results, its *"no fourth result
+> exists"* and its *"a `FAILED` bound step is never decisive"* all bind entire and are what these
+> limbs are stated inside — **a `FAILED` step reaches limb 3 in every case**, the charge test being
+> taken over a `SUCCEEDED` step alone.
 
 > **Normative — a charge that disagrees is the finding, and the finding is a report and never a
 > prevention.** It is reported as the criterion's own result reaching the user by the route
@@ -348,8 +379,9 @@ producer, no freshness rule and no coverage condition.
 > needs no handle, carrying the quote by value (§1). A booking **discharged** is not a clause made
 > false, which is ADR-0262's own test for the documents that book subjects into it, and under
 > ADR-0089 §3 the passage is unmarked ground supplying no obligation in any case. **No sentence of
-> ADR-0267 becomes false or over-wide**, so this is a **stacked addition**, recorded here and
-> nowhere else (ADR-0082 §1) — and ADR-0082 §1's own rule that *"the test controls, not the label"*
+> ADR-0267 becomes false or over-wide** — **§3's `QuotedOutput` conspicuously not**, §2 minting
+> `ChargedOutput` rather than widening a type §3 defines over *"the whole charge the act **will
+> make**"* — so this is a **stacked addition**, recorded here and nowhere else (ADR-0082 §1) — and ADR-0082 §1's own rule that *"the test controls, not the label"*
 > is why the record is declined rather than written for tidiness.
 
 > **Normative — no record is owed against ADR-0254, §15's and §16's clauses included, and the
@@ -388,8 +420,9 @@ producer, no freshness rule and no coverage condition.
 
 > **Normative.** This ADR is ratified and merged as its own PR before anything implements against
 > it (ADR-0015, golden rule 5), and it is implemented in **three lanes and no fourth**. **P1**, the
-> `core` record: `PermissionRuling.proved_quote` with its validator and `ToolDefinition.charged_output`,
-> in `core/types.py`, and nothing else. **P2**, the pin: `permissions` setting `proved_quote` at the
+> `core` record: `ChargedOutput` with its validator, `ToolDefinition.charged_output` and
+> `PermissionRuling.proved_quote` with its validator, in `core/types.py`, and nothing else.
+> **`ChargedOutput` is a type and not a Protocol** and owes no triad of its own. **P2**, the pin: `permissions` setting `proved_quote` at the
 > ruling, from the read condition 6's evidence route was proved over. **P3**, the verification read:
 > §2's charge reading and §3's conjunct inside ADR-0262's comparison, in the subsystem that
 > decision's own lane cut puts it in. **No lane wires a consequential capability**, registers a
@@ -397,7 +430,8 @@ producer, no freshness rule and no coverage condition.
 
 > **Normative — the lanes are briefed in that order and each waits on real operands.** P1 is briefed
 > after **ADR-0266's L1** (`ActionRequest.intended_action`, `CoverageMember.kind`) and **ADR-0267's
-> Q1** (`ActionQuote`, `QuotedOutput`, `GoalQuotes`), without which neither field is typeable. P2 is
+> Q1** (`ActionQuote`, `QuotedOutput`, `GoalQuotes`), without which `proved_quote` is not typeable
+> and `ChargedOutput` has no `quoted_output` beside it to be distinguished from. P2 is
 > briefed after P1 and after **ADR-0270's lane**, whose `CoverageAnswers` answer is where condition
 > 6's evidence route is taken. P3 is briefed after P2 and after **ADR-0262's own L1**, whose
 > comparison it adds a conjunct to. **Where a dependency is not in its base, that lane is not
@@ -426,12 +460,17 @@ producer, no freshness rule and no coverage condition.
 2. **The pin is a value and not a pointer.** A quote appended to the goal after the ruling leaves the
    pinned value **unchanged**, and a comparison over the pinned decision reads the earlier reading —
    the arm that fails an implementation which re-selects by act and digest at read time.
-3. **The charge reading is total and fail-closed.** Over one stored output, `charged_output` naming
-   `amount` and `currency`: a JSON string, a JSON integer, a JSON **float**, a JSON **boolean**, a
-   negative value, a missing key, a non-object output, `"usd"` and `"EURO"` — the first two yield a
-   charge and the rest yield **none**, and a declaration carrying **no** `charged_output` yields
-   none. **A `bool` is not an `int` here**, the arm failing an implementation written as an `int`
-   instance test.
+3. **The charge reading is total and fail-closed, and nothing in it raises.** Over one stored
+   output, `charged_output` naming `amount` and `currency`: a JSON string, a JSON integer, a JSON
+   **float**, a JSON **boolean**, a negative value, a missing key, a non-object output, `"usd"` and
+   `"EURO"` — the first two yield a charge and the rest yield **none**, and a declaration carrying
+   **no** `charged_output` yields none. **A `bool` is not an `int` here**, the arm failing an
+   implementation written as an `int` instance test. **And the amount strings a `Decimal` mishandles
+   are driven by name**: `"not-a-number"` and `""`, which `Decimal` **refuses**, and `"NaN"`,
+   `"Infinity"` and `"-Infinity"`, which it **accepts** as non-finite values — each yields **no
+   charge and raises nothing**, the arm that fails both an implementation letting an
+   `InvalidOperation` escape into verification and one that compares a non-finite amount against a
+   quote.
 4. **The comparison and the finding.** Against a pin at `"120"`/`"EUR"` under a member bounded at
    `150`/`EUR`: a charge of `"120"` and a charge of `"100"` each **hold** the test; `"130"` **fails**
    it though it is under the ceiling — the mismatch the ruling calls a finding; `"120"`/`"USD"`
@@ -477,7 +516,7 @@ turn says the criterion was not established rather than reporting a success.
 act has run by the time the comparison is taken. What binds spending stays ADR-0266 §7's proof
 **before** the act, and ADR-0267 §6's provider-side hold stays the seventh gate condition, unmet.
 
-**What becomes harder.** `core/types.py` gains two fields, both BREAKING, and three lanes queue
+**What becomes harder.** `core/types.py` gains one type and two fields, all BREAKING, and three lanes queue
 behind five other decisions' lanes — the cost golden rule 5 makes visible. A deployment wiring a
 charging capability now declares a third thing, and a declaration that omits it satisfies this
 guarantee for nothing, which is a silence a reader must know to look for. And a user shown a

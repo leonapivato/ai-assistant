@@ -1,7 +1,7 @@
 # 267. A quote is a record the goal holds in order, read from the output its declaration names,
 and no local check proves it still true
 
-- Status: Partially superseded by ADR-0262 (one scope, in §10's first entry: the clause naming *"A10's verification of the charge afterwards, which is a finding rather than a prevention"*, in the application to which decision performs that verification alone — it is the decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no operand for the comparison; the first dated note below states it in full) and ADR-0270 (one scope, in §7's selection clause and in one limb of it: the limb naming the component that writes the row as the selector and that write's own read as the source — the governing quote is selected by `permissions` inside condition 6's answer, over the read that answer was proved on, and the writer records what the answer carries; §2's order, the no-comparison rule, the write-once and never-edited rules, the absence rule over the three write paths and the provenance clause all bind entire; the second dated note below states it in full) and ADR-0271 (one scope, in §1's unmarked ground beside the no-eighth-field clause and in one limb of it: the sentence *"A later record naming one quote — a verification finding, say — names it by the act and the digest"* — that pair selects the governing quote for that pair at the instant it is read, which a later append displaces, so a dispatch's pin carries the quote by value and names it by nothing; §1's decision to mint no identifier is upheld and reached by a different route, and §10's *"An identifier of a quote's own"* entry is fired and answered no; the third dated note below states it in full)
+- Status: Partially superseded by ADR-0262 (one scope, in §10's first entry: the clause naming *"A10's verification of the charge afterwards, which is a finding rather than a prevention"*, in the application to which decision performs that verification alone — it is the decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no operand for the comparison; the first dated note below states it in full) and ADR-0270 (one scope, in §7's selection clause and in one limb of it: the limb naming the component that writes the row as the selector and that write's own read as the source — the governing quote is selected by `permissions` inside condition 6's answer, over the read that answer was proved on, and the writer records what the answer carries; §2's order, the no-comparison rule, the write-once and never-edited rules, the absence rule over the three write paths and the provenance clause all bind entire; the second dated note below states it in full)
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
@@ -118,32 +118,6 @@ and no local check proves it still true
   of this ADR binds entire** — §5's seam, §6's freshness rule, §7's `QuoteView` and its
   `AuthorizationProjection` transcription, and §11's assignment of `quoted`'s population to ADR-0254
   §20's Lane 2, which now writes it from that answer.
-
-- **Partially superseded: 2026-09-15 by ADR-0271 — one scope, in §1's unmarked ground beside the
-  no-eighth-field clause and in one limb of it. Nothing else in this ADR.** That ground reads *"A
-  later record naming one quote — a verification finding, say — names it by the act and the digest,
-  which under §2's order select **the governing** quote for that pair: the one every comparison of
-  this decision reads, so an identifier would be a second handle on the value they all address."*
-  **The limb naming how such a record identifies its quote is replaced.** The superseding decision is
-  the verification finding §10 anticipates, and the pair does not serve it: it selects **the
-  governing** quote at the instant of the read, so a quote appended after the dispatch silently moves
-  what the record means, and §2's elision can drop the reading entirely. **The record therefore
-  carries the `ActionQuote` by value** — on the ruling the dispatch was allowed by, reaching the
-  durable `PermissionDecision` by the path `from_request` already takes — which is ADR-0021 §1's
-  *"There is no name left to rebind"* one record over. **§1's conclusion is upheld and reached by a
-  different route**: no identifier is minted, no eighth field is added, and §10's entry — *"An
-  identifier of a quote's own, and any record that names one … Fired by the decision that records a
-  verification finding against the quote it contradicts, **if that record needs a handle the pair
-  cannot give**"* — is **fired and answered no**, so it is discharged rather than contradicted and
-  no record is owed against §10. Under ADR-0089 §3 the replaced sentence is unmarked ground and
-  supplied no obligation; what it supplied was a **reading**, and a reader holding only §1 builds
-  this record by the pair and builds it wrong, which is why ADR-0082 §1's test comes out
-  supersession. **§1 otherwise binds entire** — its seven fields, its no-eighth-field clause, the
-  four facts the comparison reads, the totality obligation, the digest rule, the bound-to-the-act
-  rule and the `plan`/`read_from`/`read_at` no-reader clause — and **so does every other section of
-  this ADR**: §3's declaration, §4's mint, §5's seam, §6's freshness rule and its seventh gate
-  condition, and §7's *"`quoted` is provenance"* conspicuously so, the pinned quote being a
-  **different** record from `Authorization.quoted` and read by nothing that reads it.
 
 ## Context
 
