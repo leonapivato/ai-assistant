@@ -1,6 +1,6 @@
 # 269. A `serves` link is checked against every revision the goal holds, not the one current at the append
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md)
   — **one scope, and it is one refusal conjunct of §5, stated there and once more as an arm.
