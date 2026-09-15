@@ -840,6 +840,23 @@ attempt (ADR-0250 §12's third act) and reaches `VERIFY` with the **then-current
 > statement that could be falsified by a commit taken after it was composed is one this decision
 > does not write.
 
+> **Normative — what a refused `commit_attempt` leaves on the surface is a silence, and the cost is
+> stated here rather than discovered.** §4 returns `attempt_report` **absent** on that turn, so
+> **no fixed statement is rendered at all** — the reply the stage already composed is what the user
+> reads, and it stands **as composed**. **That reply is not falsified by the refusal**: the stage
+> was given the comparison's own two values, the clause above fixes that every statement and the
+> instruction behind it speak of the comparison alone, and the comparison **was** made and its
+> result does not move. What the user does not get is the outcome word beside it, which is a
+> **silence rather than a false claim** and is the fail-closed direction — a surface asserting an
+> outcome for a turn whose attempt did not end would be the claim this decision refuses. **The next
+> turn that engages the goal compares afresh against the then-current criteria and renders the
+> statement for what is then true** (§5's residual, and ADR-0250 §12's third act opening the
+> attempt it compares) — **a correction that is a fresh comparison and never a replay of this
+> one**. **No lane re-renders the refused turn's statement, stores it for a later turn, retracts
+> the reply, appends a second message, or reports the refusal to the user as a fault**: the ground
+> moved under a comparison, which the record already shows, and `assistant goals` is where a user
+> reads how the goal stands.
+
 **The offer is in the reply rather than on the surface, and the reason is the binding it buys.**
 The owner's addendum of 2026-09-13 states the mechanism: the reply ends *"Shall I try again
 later?"*, and the next turn's bare *"Yes"* **binds to the goal by reply reference** (ADR-0250 §3's
@@ -1490,7 +1507,14 @@ are ordered only by each other.
    write, the status write is refused, **nothing further is written and no second call is made**,
    the turn does not fail, and the attempt still reads `ENDED`/`VERIFIED` under an open goal — the
    arm that fails against a retrying implementation, which would write `ACHIEVED` over a criterion
-   the comparison never saw.
+   the comparison never saw. **And the paired refusal one commit earlier**: where the
+   `commit_attempt` §4 names is refused after the reply was composed, **nothing further is
+   written** — no second commit, no `set_goal_status` call — the turn does not fail, the reply that
+   already went is **not** re-rendered or retracted, `attempt_report` comes back `None` so **no
+   fixed statement is rendered on that turn** (§6), and **the next turn that engages the goal runs
+   its own comparison and renders its own statement** — the arm that fails against an
+   implementation replaying the stored verdict, and the one that pins the cost §6 names to a
+   silence rather than to a false outcome word.
 10. **The report, on both surfaces (L4, L5).** Each of the six members produces its own fixed
     statement, on the CLI and in the browser, **beside the reply and never in place of it**;
     `continues` is `True` on exactly `PARTIAL`, `FAILED` and `UNCERTAIN` over an open goal and
