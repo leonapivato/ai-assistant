@@ -500,9 +500,22 @@ hard case for the property a forecast has purely — *"its entries lie ahead of 
 > integration an egress registration and no registry entry — and an unequal one is refused.
 > (3) `PermissionDecision.authorises` is **re-evaluated against that same detached copy**
 > rather than trusted from construction. **Every subsequent step reads the revalidated copy
-> and never the argument**; a failure at any of the three raises `ToolBindingError` and is
-> **no outcome of the read**, carrying no `ForecastRefusal` and no disposition; and the
-> order is part of the rule, for ADR-0029 §2's own stated reason. §4's construction-time
+> and never the argument**; a failure at any of the three raises `ToolBindingError`,
+> carries **no `ForecastRefusal`** because it is no outcome of the read, and **is recorded
+> by the servicing as `BINDING_FAILED`** — §8's member for a stage before the send, folding
+> to `UNAVAILABLE` and establishing no contact; and the order is part of the rule, for
+> ADR-0029 §2's own stated reason.
+>
+> **ADR-0148 §6's own pre-transmit refusals are that same class, and this ADR gives them no
+> separate vocabulary.** Its four conditions, and its re-read after the
+> credential is in hand which *"discards the credential without transmitting unless the
+> record is still active, the identity still equals the one the binding carries and the
+> revision equals the one read before the credential read"*, each refuse **before any byte
+> is transmitted**: each yields no `ForecastOutcome` and no `ForecastRefusal`, and each is
+> recorded `BINDING_FAILED`. **None of them is a `PROVIDER_REFUSED`** — §5 and §10 close
+> that member's producers at a response the provider gave — so the concurrent-reprovision
+> interleaving ADR-0148 §6 exists for reaches this seam **classified**, and reaches it on
+> the no-contact side. §4's construction-time
 > validator *"catches the honest mistake at the point it is made"*; these are what hold
 > against a deliberate one, and **a validly authorised call naming another declaration is
 > exactly what (2) exists for**.
@@ -848,15 +861,14 @@ lies, never that the report is accurate.
 > admit. The disposition carries no value saying which, and it does not need to: the contact
 > question is answered by the arrival, not by the cause.
 >
-> **No credential-change producer is recorded here, and that is why this member is
-> `REACHED` and not `INDETERMINATE`.** ADR-0148 §6's account-changed limbs *"discarded the
-> credential and wrote nothing to any channel — none was opened"*, so that producer alone
-> could have put a pre-send path under this member and forced the least-claiming direction;
-> §12's reference provider presents no credential to an outside service, so no producer of
-> this member here is a pre-send one.
-> §14 defers it, and **the lane that adds a credentialed provider owes this partition its
-> round**: a pre-send producer under this member would make `REACHED` wrong, and that lane
-> either gives the path a disposition of its own or re-decides this clause.
+> **The credential-change path is a `BINDING_FAILED` and never a `PROVIDER_REFUSED`, which
+> is what keeps this member `REACHED`.** ADR-0148 §6's re-read after the credential is in
+> hand discards it *"without transmitting"*, so no channel is opened and no octet arrives;
+> §6 above records it `BINDING_FAILED`, which this partition already places before the
+> send. **A pre-send producer under `PROVIDER_REFUSED` would make `REACHED` wrong**, and
+> the way that is prevented is by closing that member's producers at a response the
+> provider gave rather than by asserting no such path exists. **No lane classifies a
+> refusal this system made as one the provider made**, whatever stage it happened at.
 >
 > A call whose disposition is `NOT_CONFIGURED`, `NO_BUDGET`, `BINDING_FAILED`,
 > `RULING_CONFIRM`, `RULING_DENY`, `RULING_UNAVAILABLE` or `SPEND_REFUSED` establishes
@@ -1127,7 +1139,12 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   the forecaster's own registered declaration, **which `authorises` would otherwise pass**;
 >   and one whose decision does not authorise the detached copy. An implementation trusting
 >   the validator that ran at construction fails all three, and one that runs them after
->   opening the channel fails the ordering they are asserted in.
+>   opening the channel fails the ordering they are asserted in. **Each is asserted through
+>   to the turn**: `BINDING_FAILED` in the audit, `UNAVAILABLE` in `forecast_not_read`, and
+>   **no** contact — because a path recording nothing would leave §10's `None` saying the
+>   provider answered. **And ADR-0148 §6's interleaving is asserted with them**: a
+>   reprovisioning landing between the credential read and the re-read discards the
+>   credential, opens no channel, and records the same three.
 > - **(i) The deadline that actually expires, and the one request §3 allows.** A production
 >   forecaster whose exchange is suspended past a **positive** `timeout` **returns**
 >   `DEADLINE_EXPIRED`, raises no `CancelledError` outward, opens no second channel, and
@@ -1258,13 +1275,6 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
   per-turn record, which would need its own ADR amending a clause stated against it.
 - **Geocoding.** Turning a place name into a coordinate is a second destination and a
   second registration. Fired by the lane that needs the bullet above.
-- **The credential-change producer of `PROVIDER_REFUSED`.** §10 records that member for a
-  response the provider gave and this system refused, and for nothing else, because §12's
-  reference provider presents no credential to an outside service and an arm over a
-  production component cannot reach a path no production component has. Fired by the
-  **first credentialed forecast provider**, whose lane adds the producer to §10's
-  partition and its arm to §13(h). The member itself is
-  **not** deferred and needs no widening: it is reachable today.
 - **Open-Meteo, and every other keyless source.** §12's L1 provider is the reference one;
   the **intended first *real* provider is Open-Meteo** — free, its response carrying the
   RFC 9110 `Date` field §5's declared instant already reads, its daily table naming its
