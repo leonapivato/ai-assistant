@@ -6462,6 +6462,7 @@ async def test_the_prompt_states_that_this_replys_own_actions_extend_the_space()
     assert "CONTINUED by the `actions` you are sending in THIS reply" in block
     assert "`A3`" in block, "the worked continuation past a printed block"
     assert "never `A01`, `A+1`, `a1` or `A 1`" in block, "and the grammar's own boundary"
+    assert "no space before or after it" in block, "including the two the field would trim"
 
 
 async def test_the_prompt_is_unconditional_on_a_goal_that_intends_nothing() -> None:
@@ -6682,14 +6683,12 @@ async def test_a_step_action_the_planner_cannot_resolve_still_crosses(label: str
     decidable here: §4's supply "runs on past the brief" into this same reply's
     ``actions``, which this seam does not count against the goal it cannot see.
 
-    **``"A1 "`` and ``" A1"`` are not in the table and could not be**, because
-    :data:`~ai_assistant.core.types.Identifier` is non-blank **and stripped**: a
-    ``PlanStep`` carrying ``"A1 "`` *is* one carrying ``"A1"``, so the ordinary path
-    never carries the spelling at all. That normalisation is pinned in ``core``'s own
-    terms beside the loop's arm for the same table
-    (``test_the_field_normalises_a_bordering_space_before_any_loop_sees_it``), and
-    asserting it a third time here would be this seam claiming a property of a type it
-    does not own.
+    **``"A1 "`` and ``" A1"`` are not in this table because they are refused rather
+    than crossed**, which is the arm below: ``PlanStep.intended_action`` is an
+    ``Identifier`` and ``Identifier`` **strips**, so those two would reach the loop as
+    the valid label ``"A1"`` and resolve. Refusing them is therefore not a second
+    parser of the label space — it is the one check only this seam can make, because
+    after construction the spelling the model wrote no longer exists.
     """
     output = await _shaped_output(_shaped_reply([_step(action=label)]))
 
@@ -6711,6 +6710,32 @@ async def test_a_step_action_that_is_not_a_string_is_an_extraction_failure(bad: 
     which is :func:`_step_shape`'s one rule over one more key.
     """
     await _refused(_shaped_reply([_step(action=bad)]))
+
+
+@pytest.mark.parametrize("label", ["A1 ", " A1", "\tA1", "A1\n", " banana "])
+async def test_a_step_action_a_bordering_space_would_repair_is_refused(label: str) -> None:
+    """ADR-0265 §10 arm 4's two whitespace spellings, closed where they are still visible.
+
+    ``PlanStep.intended_action`` is an :data:`~ai_assistant.core.types.Identifier` and
+    ``Identifier`` is non-blank **and stripped**, so a step constructed with ``"A1 "``
+    *is* one carrying ``"A1"`` — the loop's parser, which §4 makes the authority, never
+    sees what the model wrote and resolves the valid label it was handed instead. Arm 4
+    names both spellings in a table every member of which "resolves to nothing and is
+    refused … rather than parsed, repaired or case-folded", and a type that quietly
+    turns one of them into a **valid** label is that repair performed a layer down.
+
+    So the refusal is taken here, at the one point the difference still exists — §4's
+    own argument for closing the window "at the store as well as at the loop". It is a
+    test of the value rather than of the grammar, which is why ``" banana "`` is in the
+    table beside the two: it is refused for the bordering space and not for being no
+    label, and the arm above is what says an unbordered ``banana`` still crosses.
+
+    **The loop's own arm is not this one and neither replaces the other**: it asserts
+    that the loop refuses both spellings when a caller reaching past the field's
+    validator produces them, which is the window a faulty caller opens. This one is
+    about the ordinary path, which this lane is what opens.
+    """
+    await _refused(_shaped_reply([_step(action=label)]))
 
 
 async def test_a_step_naming_no_action_carries_none() -> None:

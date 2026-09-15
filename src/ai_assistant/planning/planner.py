@@ -1386,7 +1386,8 @@ block printed under "What this goal already intends to do" in the next message, 
 order you wrote them — so where that block prints two and you send one, yours is \
 `A3`, and where it prints nothing and you send two, they are `A1` and `A2`. A \
 label is the capital letter `A` followed by the position in decimal digits, with \
-no padding and no sign: `A1` and `A12`, never `A01`, `A+1`, `a1` or `A 1`. A step \
+no padding and no sign: `A1` and `A12`, never `A01`, `A+1`, `a1` or `A 1`, and no \
+space before or after it. A step \
 naming an act that is not in that space REFUSES the whole plan, so name one you \
 can count. Most steps name none — a step that reads something, composes \
 something, or is not an attempt at an act this goal intends leaves `action` out \
@@ -2617,21 +2618,43 @@ def _step_action(raw: object, *, ordinal: int) -> str:
     claim would be scoped to nothing" — and :func:`_step_verifies` refuses the same
     spelling one key over, where an explicit ``null`` would silently drop a predicate.
 
+    **And a bordering space is the second, for the same reason one level down.**
+    :data:`~ai_assistant.core.types.Identifier` is non-blank **and stripped**, so
+    ``PlanStep.intended_action`` normalises ``" A1"`` and ``"A1 "`` into ``"A1"`` at
+    construction and the loop's parser — which §4 makes the authority — never sees the
+    spelling the model actually wrote. §10 arm 4 names both in the table every member of
+    which "resolves to nothing and is refused … rather than parsed, repaired or
+    case-folded", and a normalisation that silently turns one of them into a **valid**
+    label is that repair performed by a type rather than by a parser. This seam is the
+    only place the difference is still visible, so it is refused here — §4's own
+    argument for closing the window at the store as well as at the loop, since "the
+    unresolved state exists only between the planner's return and the loop's
+    substitution, and a window is closed at the store rather than trusted to close
+    itself".
+
+    **That is a test of the value's shape and still not of the label's grammar.** It
+    asks whether what the model wrote is what the loop will read, which is decidable
+    here and nowhere else; it says nothing about which ordinals are in range, and
+    ``" banana "`` is refused here for exactly the reason ``"A1 "`` is rather than
+    because either is or is not a label.
+
     A non-string is refused here rather than at ``PlanStep`` for the repair turn's sake
     alone: the field would refuse an integer anyway, and what this adds is a message
     naming the step and the key instead of a validator's rendering of the whole model.
-    A blank string is left to :data:`~ai_assistant.core.types.Identifier`, which refuses
-    it, because that is a ``core`` rule and restating it here would make two.
+    A blank string is caught by the same clause, since stripping changes it, and by
+    :data:`~ai_assistant.core.types.Identifier` behind it.
 
     Args:
         raw: The ``action`` the step carried.
         ordinal: The declaring step's own 1-based position, for the repair turn.
 
     Returns:
-        The label, exactly as the model wrote it, for the loop to resolve.
+        The label, exactly as the model wrote it and unchanged by any normalisation
+        the field would apply, for the loop to resolve.
 
     Raises:
-        _ExtractionError: If ``action`` is ``null`` or is not a string.
+        _ExtractionError: If ``action`` is ``null``, is not a string, or carries
+            leading or trailing whitespace.
     """
     if raw is None:
         msg = (
@@ -2644,6 +2667,13 @@ def _step_action(raw: object, *, ordinal: int) -> str:
         msg = (
             f"the step at position {ordinal} has an 'action' that is not a string: an "
             f"action is named by its printed label, such as 'A1'"
+        )
+        raise _ExtractionError(msg)
+    if raw != raw.strip():
+        msg = (
+            f"the step at position {ordinal} has an 'action' with leading or trailing "
+            f"whitespace: a label is the letter 'A' and its digits and nothing else, "
+            f"and a bordering space is not trimmed for you"
         )
         raise _ExtractionError(msg)
     return raw
