@@ -157,6 +157,7 @@ if TYPE_CHECKING:
         ExecutionState,
         FeedbackEvent,
         FetchOutcome,
+        ForecastOutcome,
         FrozenJsonMapping,
         Goal,
         GoalAbandonment,
@@ -3576,6 +3577,273 @@ class WebSearcher(Protocol):
                 seam did not itself issue, and a cancellation that interrupted the
                 call completes the ledger claim with the declaration's
                 ``interrupted_outcome`` and an ``UNKNOWN`` cost before it re-raises.
+        """
+        ...
+
+
+@runtime_checkable
+class Forecaster(Protocol):
+    """Asks one configured outside source what it says about the days ahead.
+
+    The **forecast** seam (ADR-0260 §1, §4): it proposes the act — an
+    :class:`~ai_assistant.core.types.ActionRequest` carrying its own declaration —
+    and, once that act has been authorised, performs it and returns one record per
+    day the provider's answer described. Named for its product role, as every
+    Protocol here is: the role is *asking a configured outside source what it says
+    about the days ahead*.
+
+    **Three members, and the split between the first two is :class:`WebSearcher`'s**
+    (§4). :meth:`request` is the proposal and reaches no authorisation conclusion;
+    :meth:`read` takes a :class:`~ai_assistant.core.types.ToolCall`, whose own
+    validator has already run ADR-0021 §1's ``authorises``, so **an unauthorised
+    forecast read is unconstructable at the type level** — ``ToolInvoker.invoke``'s
+    guarantee obtained without ``ToolInvoker``. Between them stand the binder, the
+    policy and the trail, none of which this contract names (§6).
+
+    **The ask carries nothing, and that is this kind's whole safety mechanism**
+    (§3). :meth:`read` takes no query, no window, no place and no coordinate: the
+    place is the deployment's own configured place and the horizon is the
+    forecaster's own bound, so **no place crosses the planning seam in either
+    direction** and a caller able to widen the read does not exist. That is
+    ADR-0093 §10's rule honoured rather than worked around, at a seam that does take
+    a call.
+
+    **It is not a** :class:`Reader` (§1). ``Reader`` is untouched: its
+    no-arguments rule, ADR-0095's placement ruling and every clause governing
+    ``readers/`` bind exactly as they do today, ``ai_assistant.readers`` gains
+    nothing from this decision, and no lane widens ``Reader.read``, adds an argument
+    to it or adds a member to it. **It is not a** :class:`ContextProvider` either:
+    ADR-0252 §3 rules that no facet produces an evidence row and ADR-0096 §3 bars
+    one from a carried-over reading, and a forecast read's whole purpose is the
+    evidence row it writes.
+
+    **It is not a registered tool, and the route is closed at the type rather than
+    by a rule** (§1). The integration is registered at the egress seam against the
+    configured connection and in **no** ``ToolRegistry``, exactly as ADR-0231 §5
+    registers the search: absent from :meth:`ToolRegistry.capabilities` and
+    :meth:`ToolRegistry.all_tools`, unreachable by any plan step, and un-invocable
+    through :class:`ToolInvoker`. ADR-0208 §1 is satisfied by not being a tool, and
+    ADR-0170 §5a's "a tool's result is a JSON payload with no per-span provenance"
+    is not approached.
+
+    **No member takes a store, a supply, a policy, a trail or a record** (§4). Not a
+    :class:`~ai_assistant.core.types.MemoryRecord`, not a :class:`MemoryStore`, not
+    an :class:`ActionPolicy`, not an :class:`AuditTrail`, not a
+    :class:`RecipientGrants` — and **no later lane adds one that does**.
+
+    **A ``Forecaster`` holds the credential and this contract never carries one**
+    (§4). Any ``Secrets`` read is at ``SecretScope.INTEGRATION`` *inside*
+    :meth:`read`, after the checks §6 names have passed — ADR-0148 §7's positional
+    gate with one word changed — and it is the read ADR-0148 §6's third pre-transmit
+    condition obliges, under the slot the connection record names. No credential
+    crosses this seam in either direction. **This seam claims no exemption from the
+    connection model and decides no new connection shape**: the provider is
+    provisioned by the explicit user act ADR-0149 §4 requires, supplying an identity
+    and a credential.
+
+    **Neither acting member raises for a source reason** (§4). A failed transport,
+    an expired deadline, an over-large response, a provider that answered something
+    else, an unattested response and one describing no usable day are
+    :class:`~ai_assistant.core.types.ForecastRefusal` members and never exceptions,
+    for :class:`Fetcher`'s and :class:`WebSearcher`'s reason: a closed refusal
+    enumeration makes the non-yield a value the audit can count and the turn can
+    ignore, where an exception would make ADR-0226 §5's degradation posture the
+    servicer's problem to catch correctly at every call site. ADR-0260 adds **no**
+    error class to ``core/errors.py``.
+
+    **It carries no lifecycle member, deliberately** (§4), exactly as
+    :class:`Fetcher` and :class:`WebSearcher` do: a concrete forecaster holding an
+    opened resource exposes a ``close``, and ``app/composition.py`` registers that
+    ``close`` among the resources it has opened (ADR-0042 §2). The contract keeps
+    saying what a forecast read *is* and not who shuts one down.
+
+    **A BREAKING contract change under golden rule 5**, landing with its shared
+    conformance suite and its canonical fake in :mod:`ai_assistant.testing`
+    (``CONTRIBUTING.md`` -> "Adding a Protocol").
+
+    Cancelling either acting member is governed by this module's cancellation clause
+    (ADR-0060), with the one consequence §4 spells out because it is where a
+    conforming-looking implementation could satisfy every other clause and still get
+    it wrong: a call cancelled from outside while suspended re-raises
+    ``CancelledError`` and is converted into neither an outcome nor a refusal.
+    """
+
+    @property
+    def name(self) -> str:
+        """The identity of the **configured source** this forecaster serves.
+
+        In :attr:`Reader.name`'s, :attr:`Fetcher.name`'s and
+        :attr:`WebSearcher.name`'s own form — a ``str``, which keeps #667's
+        one-identifier-contract question exactly where it is — and it is what a
+        minted record's
+        :attr:`~ai_assistant.core.types.Attestation.reported_by` carries and what
+        ADR-0252 §1's ``source`` field carries (ADR-0260 §4, §9).
+
+        **The attested source is the forecast source instance** — "the owner's
+        forecast" — and never a vendor, never an origin, never a URL, never a
+        credential and **never a place** (ADR-0092 §3, ADR-0260 §4). What it reports
+        is *what this provider's forecast says for these days now*: not that the
+        weather will be so, not that the forecast is accurate, and not that anything
+        it names has happened.
+
+        **Stable across calls, non-blank, and a value
+        :data:`~ai_assistant.core.types.Identifier` accepts unchanged** —
+        ``name.strip() == name``. The stability is :attr:`Fetcher.name`'s clause for
+        its reason: an identity that moved under a turn would scatter one source's
+        records across two ``reported_by`` values no later fold could bring back
+        together. The stripping clause is this seam's own and is stated rather than
+        left implicit because §5 requires ``reported_by`` and this value to be
+        **equal**: ``reported_by`` is typed ``Identifier``, which refuses a blank
+        value *and strips the one it accepts*, so a forecaster naming itself
+        ``" forecast "`` would be conforming and yet mint a record whose
+        ``reported_by`` is ``"forecast"`` — an equality this ADR asserts that no
+        implementation could then satisfy.
+        """
+        ...
+
+    async def request(self) -> ActionRequest | None:
+        """Propose the forecast read this deployment's configuration would make.
+
+        **It takes no arguments, and that is the decision rather than an omission**
+        (ADR-0260 §3, §4). There is no parameter through which a caller could name a
+        place, widen a horizon or compose a window, so the failure mode ADR-0231 §1
+        is built against is unreachable rather than forbidden. No later lane adds
+        one without the ADR that decides it.
+
+        **It reads no store, mints no identifier, opens no channel and reaches no
+        authorisation conclusion** (§4, §6). Everything between this member and
+        :meth:`read` — the binding, the ruling, the audit record and the
+        construction of the ``ToolCall`` — belongs to the caller, and an
+        implementation deciding any of it here would be answering a question the
+        policy has not been asked.
+
+        Returns:
+            The request to rule on — carrying this forecaster's own declaration as
+            :attr:`~ai_assistant.core.types.ActionRequest.tool`, the arguments its
+            own registered schema declares, and ``None`` for ``step_id``,
+            ``execution_id`` and ``egress_binding`` (a forecast decision has no plan
+            step and no execution, §6, and the binding is derived by
+            :class:`EgressBinder` and accepted from nobody). Or ``None`` where the
+            deployment has configured no forecast provider, **which is a
+            configuration fact and never a failure** — it is what the servicing
+            records as ``NOT_CONFIGURED`` and what
+            :attr:`~ai_assistant.core.types.CarriedProvenance.forecast_reach` is
+            computed from.
+
+        Raises:
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside while suspended (ADR-0060, ADR-0260 §4).
+        """
+        ...
+
+    async def read(self, call: ToolCall, /, *, timeout: timedelta) -> ForecastOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2); a caller wrapping this in `asyncio.timeout` cancels the forecaster mid-await and cannot classify its own expiry
+        """Perform the authorised forecast read, and mint what its answer describes.
+
+        **It takes a ``ToolCall`` and never an ``ActionRequest``**, so an
+        unauthorised forecast read is unconstructable at the type level (ADR-0260
+        §4). Construction is the first line and not the only one: §6 requires this
+        member to perform ADR-0029 §2's three pre-execution checks **itself, in that
+        order** — revalidate and detach the call; compare its definition for
+        equality against the forecaster's **own registered declaration**, the
+        authoritative original here, standing where ADR-0029 §2 puts the registry's,
+        because this integration has an egress registration and no registry entry;
+        and re-evaluate ``PermissionDecision.authorises`` against that same detached
+        copy. Every subsequent step reads the revalidated copy and never the
+        argument, and a failure at any of the three raises
+        :class:`~ai_assistant.core.errors.ToolBindingError`, carrying **no**
+        ``ForecastRefusal`` because it is no outcome of the read.
+
+        **What else the implementation owes, in ADR-0260's own order**: the
+        invocation deadline ``timeout`` states (ADR-0241 §1); ADR-0148 §6's
+        one-step credential read, its four pre-transmit conditions and its post-read
+        discard; the **one** provider request §3 allows; and §5's transcription and
+        minting. Only the deadline is visible in this signature, which is why §6
+        states the rest.
+
+        **One ask is one read** (§3). No implementation issues two provider requests
+        for one call, follows a link out of a response, requests a further page,
+        re-issues with a different window, or retries a refused or failed request:
+        there is no pagination, no depth and no traversal of any kind, on **any**
+        outcome.
+
+        **The bound is the caller's and there is no spelling for "unbounded"**
+        (ADR-0241 §1). ``timeout`` is required, has no default and admits no
+        ``None``, so every call declares one. How long a turn may wait is a property
+        of the turn, so the figure is a parameter rather than a forecaster's
+        property, and ADR-0260 §11 adds no second deadline figure of its own.
+
+        **The deadline is enforced inside this member** (ADR-0241 §2), never by a
+        decorating ``Forecaster`` a composition root interposes and never by a caller
+        wrapping this call in ``asyncio.timeout``: an outer cancellation cannot
+        classify its own expiry without performing the cancellation-to-outcome
+        conversion the clause below forbids.
+
+        **The parameter is a duration and nothing else, and no lane widens it**
+        (ADR-0241 §1): not a deadline instant, not a clock, not a budget object, not
+        a policy, not a horizon and not a carrier for a second value.
+
+        Args:
+            call: The authorised call, whose ``request`` carries this forecaster's
+                declaration and the arguments its schema declares, and whose
+                ``decision`` is the recorded ``ALLOW`` that authorises them. Read
+                only through the revalidated copy the implementation makes of it,
+                never as handed.
+            timeout: How long this call may take over the stages above. **Required,
+                keyword-only, and strictly positive** (ADR-0241 §1). The annotation
+                is not the enforcement, so an implementation checks the value: see
+                ``Raises`` below.
+
+        Returns:
+            One outcome carrying records **or** a refusal, never both and never
+            neither — a condition
+            :class:`~ai_assistant.core.types.ForecastOutcome` enforces itself. A
+            successful read mints **one record per day the provider's answer
+            covers** and §5 keeps, in the order the provider returned them and at
+            most ``forecast_max_days`` of them taken **from the front**; each is
+            ``SEMANTIC``, ``EXTERNAL``-sourced, carries empty ``evidence``, empty
+            ``topics``, no ``about_person``, a **fully open** ``validity``, and an
+            :class:`~ai_assistant.core.types.Attestation` whose ``reported_by`` is
+            this forecaster's :attr:`name`, whose ``reported_at`` is the instant
+            **the provider's response declared**, and whose
+            :class:`~ai_assistant.core.types.ReportedExtent` is the day that record
+            is about, computed from the day the provider named and the UTC offset
+            the provider's own response declared for it — **and from nothing else**
+            (§5, ADR-0117 §2, ADR-0092 §3).
+
+            **An expiry of ``timeout`` is
+            :attr:`~ai_assistant.core.types.ForecastRefusal.DEADLINE_EXPIRED`** and
+            never
+            :attr:`~ai_assistant.core.types.ForecastRefusal.TRANSPORT_FAILED`
+            (ADR-0241 §4): it is returned like every other member and raised for no
+            source reason. Classification keys on **this** deadline having fired and
+            never on catching an exception type, so a ``TimeoutError`` an upstream
+            library raises for its own reasons inside the bound stays
+            ``TRANSPORT_FAILED`` (ADR-0241 §7).
+
+        Raises:
+            ValueError: If ``timeout`` is not a ``timedelta``, or is not strictly
+                positive — refused **before** the call is revalidated, before any
+                credential is read and before any channel is opened (ADR-0241 §1,
+                ADR-0260 §4). Zero and negative durations are refused rather than
+                read as instantly expired, for ADR-0029 §4's reason: expiry is
+                delivered at an await point, so an implementation reading "expired"
+                as "do not call" would be making a promise the event loop does not
+                keep.
+            ToolBindingError: If the call does not survive revalidation, carries a
+                definition unequal to this forecaster's registered original, or is
+                not authorised by its decision (ADR-0029 §2, ADR-0260 §6). **No
+                credential is read and no channel is opened for any of them**, and
+                none carries a ``ForecastRefusal``: the servicing records
+                ``BINDING_FAILED``, which establishes no contact. ADR-0148 §6's own
+                pre-transmit refusals are different and are **returned**, as
+                :attr:`~ai_assistant.core.types.ForecastRefusal.PROVIDER_REFUSED` —
+                one fault classified two ways at two seams is what ADR-0264 §13's
+                third arm exists to catch.
+            CancelledError: Re-raised unchanged when the call is cancelled from
+                outside while suspended, and converted into neither an outcome nor a
+                refusal (ADR-0060, ADR-0260 §4). **Never converted into
+                ``DEADLINE_EXPIRED``** (ADR-0241 §7): a cancellation this seam did
+                not itself issue is not its expiry.
         """
         ...
 

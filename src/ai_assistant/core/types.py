@@ -8068,12 +8068,12 @@ class ReadKind(StrEnum):
     count is deliberately not written out here: it has moved three times, and a
     figure in prose is a claim that goes stale silently.
 
-    **The third, fourth and fifth members are additive entries** under ADR-0226
-    §1's own licence — ADR-0230 §1's, ADR-0231 §1's and ADR-0240 §1's — and each is
-    an entry rather than a second seam: none adds a second request object, a second
-    servicing site, a second budget or a second audit. ADR-0226 §2's membership
-    sentence — "The enumeration's two members are ``SIGHTED_QUERY`` and
-    ``CITATION_HOP``" — is what those three ADRs amend, in that one respect each;
+    **Every member after the second is an additive entry** under ADR-0226 §1's own
+    licence — ADR-0230 §1's, ADR-0231 §1's, ADR-0240 §1's and ADR-0260 §2's — and
+    each is an entry rather than a second seam: none adds a second request object, a
+    second servicing site, a second budget or a second audit. ADR-0226 §2's
+    membership sentence — "The enumeration's two members are ``SIGHTED_QUERY`` and
+    ``CITATION_HOP``" — is what those ADRs amend, in that one respect each;
     §2's statement of what each named kind *is*, its at-most-one-ask-of-each-kind
     rule and its closure against un-ADR'd additions all bind entire.
 
@@ -8142,6 +8142,35 @@ class ReadKind(StrEnum):
     issues two store calls for one ask, splits an ask across axes into several
     calls, re-issues a call with a different window, or repairs, widens or narrows
     the ask it was given; there is no pagination and no traversal of any kind."""
+
+    FORECAST_READ = "forecast_read"
+    """One read of the deployment's **own configured** forecast provider, for the
+    place that deployment configured and for the days ahead its own bound admits
+    (ADR-0260 §2, §3).
+
+    **The ask carries no argument at all** — no query, no labels, no entry and no
+    structure — which is this kind's whole safety mechanism and a property of the
+    type rather than a rule an implementation is trusted to keep. A planner cannot
+    name where a forecast is read for, so the failure mode ADR-0231 §1 is built
+    against — a planner-writable field carrying covered content to an egress seam —
+    is **unreachable rather than forbidden**.
+
+    **The namer is the operator's configuration for the place and the source's own
+    answer for the days** (§3). The model points outward and names **nothing at
+    all**; no coordinate, no place name, no record identifier, no label and no
+    address crosses the seam in either direction.
+
+    **One ask is one read, which is this kind's bound** (§2). No implementation
+    issues two provider requests for one ask, follows a link out of a response,
+    requests a further page, re-issues with a different window, retries a refused or
+    failed request inside the turn, or repairs, widens or narrows the ask it was
+    given; there is no pagination, no depth and no traversal of any kind.
+
+    **A sixth member rather than a widening of** :attr:`WEB_SEARCH` (§2). A search
+    is one search whose query is composed from the turn's own utterance; a forecast
+    read composes nothing, and the two do not reach the same records — a search
+    mints transcriptions carrying no structural axis, where a forecast mints records
+    that each declare an extent (§9)."""
 
 
 #: ADR-0226 §6's cap on how many labels one ``CITATION_HOP`` ask may name.
@@ -8307,8 +8336,9 @@ class ReadAsk(BaseModel):
     A discriminated union rather than one model per kind: a ``SIGHTED_QUERY`` ask
     carries a non-blank ``query`` and nothing else, a ``CITATION_HOP`` ask carries
     one or two ``labels`` and nothing else, a ``LOCAL_FILE`` ask carries one
-    non-blank ``entry`` and nothing else, a ``WEB_SEARCH`` ask carries **none of
-    the four**, and a ``STRUCTURED_READ`` ask carries a ``structure``, no
+    non-blank ``entry`` and nothing else, a ``WEB_SEARCH`` ask and a
+    ``FORECAST_READ`` ask each carry **none of the four** (ADR-0260 §3), and a
+    ``STRUCTURED_READ`` ask carries a ``structure``, no
     ``labels``, no ``entry`` and **optionally** a ``query`` (ADR-0240 §2). **Each of
     those conditions is enforced here rather than by a caller** (§4) — an emission
     that fails any of them is not a request ADR-0226 admits, and the planner that
@@ -8338,6 +8368,13 @@ class ReadAsk(BaseModel):
     seam, "where it would depend on a model's compliance and on a reviewer
     noticing". There is no such field, so there is nothing to comply with — and no
     later lane adds one without the ADR that decides it.
+
+    **A ``FORECAST_READ`` ask is that same arm reached by a second kind** (ADR-0260
+    §3). It carries no query, no labels, no entry and no structure, this model gains
+    no field for it either, and the place it reads for is the deployment's own
+    configured place — so no coordinate and no place name crosses the planning seam
+    in either direction, and its horizon is the forecaster's own bound rather than a
+    caller's.
 
     **``entry`` is a field of its own rather than a reuse of ``labels``, because
     the two name different sequences** (ADR-0230 §1). A ``CITATION_HOP`` label is
@@ -8379,8 +8416,9 @@ class ReadAsk(BaseModel):
             other kind does, and that a ``query`` may ride beside it.
 
     Note:
-        A ``WEB_SEARCH`` ask has no attribute of its own, which is ADR-0231 §1's
-        decision rather than an omission from this list.
+        Neither a ``WEB_SEARCH`` ask nor a ``FORECAST_READ`` ask has an attribute of
+        its own, which is ADR-0231 §1's and ADR-0260 §3's decision rather than an
+        omission from this list.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -8437,7 +8475,9 @@ class ReadAsk(BaseModel):
         nobody chose.
         """
         if self.kind is ReadKind.WEB_SEARCH:
-            self._nothing_at_all()
+            self._nothing_at_all(ReadKind.WEB_SEARCH)
+        elif self.kind is ReadKind.FORECAST_READ:
+            self._nothing_at_all(ReadKind.FORECAST_READ)
         elif self.kind is ReadKind.LOCAL_FILE:
             self._only_an_entry()
         elif self.kind is ReadKind.SIGHTED_QUERY:
@@ -8448,34 +8488,46 @@ class ReadAsk(BaseModel):
             self._only_labels()
         return self
 
-    def _nothing_at_all(self) -> None:
-        """A ``WEB_SEARCH`` ask carries no argument at all (ADR-0231 §1).
+    def _nothing_at_all(self, kind: ReadKind) -> None:
+        """An empty-ask kind carries no argument at all (ADR-0231 §1, ADR-0260 §3).
 
         "A ``WEB_SEARCH`` ask carries no ``query``, no ``labels`` and no ``entry``.
         ``ReadAsk`` gains **no field** for this kind, and no later lane adds one
         without the ADR that decides it. A ``WEB_SEARCH`` ask states its kind and
-        nothing else."
+        nothing else." ADR-0260 §3 states the same of a ``FORECAST_READ`` ask in the
+        same words and calls it "``WEB_SEARCH``'s arm applied to a sixth member", so
+        this is **one arm reached by two kinds** rather than two copies of one rule:
+        a second statement of it is a place the two could drift apart, and both
+        decisions describe the identical condition.
 
         **Every one of the four is refused separately**, because each would be a
         different mistake with a different fix: a ``query`` is a planner composing
-        what §3 gives the composer, and ``labels``, an ``entry`` and a ``structure``
-        are arguments of other kinds arriving under this one's name. A single
-        "carries no argument" message would name none of them.
+        what ADR-0231 §3 gives the composer — or, on a forecast read, a window
+        ADR-0260 §3 gives the operator's configuration — and ``labels``, an ``entry``
+        and a ``structure`` are arguments of other kinds arriving under this one's
+        name. A single "carries no argument" message would name none of them.
+
+        **The kind is named in each message** rather than spelled once, so the four
+        refusals a ``FORECAST_READ`` earns are four refusals about a
+        ``FORECAST_READ`` and not about a search.
+
+        Args:
+            kind: The empty-ask kind being validated, which each message names.
 
         Raises:
             ValueError: If a query, labels, an entry or a structure ride on the ask.
         """
         if self.query is not None:
-            msg = "a web_search ask must not carry a query"
+            msg = f"a {kind.value} ask must not carry a query"
             raise ValueError(msg)
         if self.labels:
-            msg = "a web_search ask must not carry labels"
+            msg = f"a {kind.value} ask must not carry labels"
             raise ValueError(msg)
         if self.entry is not None:
-            msg = "a web_search ask must not carry an entry"
+            msg = f"a {kind.value} ask must not carry an entry"
             raise ValueError(msg)
         if self.structure is not None:
-            msg = "a web_search ask must not carry a structure"
+            msg = f"a {kind.value} ask must not carry a structure"
             raise ValueError(msg)
 
     def _only_an_entry(self) -> None:
@@ -10536,6 +10588,399 @@ class SearchNotServiced(StrEnum):
     A statement for it says the lookup produced nothing the turn could use, **naming no
     cause and no act** — and, for a response that was refused after it arrived, it does
     **not** say that no request was made (ADR-0242 §6, §9)."""
+
+
+# --- tools: what one forecast read produced (ADR-0260 §4, §5) ----------------
+# The `Forecaster` seam's return value and its refusal vocabulary, and the
+# user-facing fold of the servicing's disposition. `core`'s because all three cross
+# that seam (ADR-0260 §8); `ForecastDisposition` — the servicer's own account — is
+# `orchestration`'s and lives there.
+
+
+class ForecastRefusal(StrEnum):
+    """Why a forecast read produced no record (ADR-0260 §4, §5).
+
+    A **closed** enumeration with exactly six members, each valued by its
+    lower-cased name. The vocabulary is **added to and never renamed**, and no
+    implementation, setting or later lane adds a seventh without the ADR that
+    decides it — ADR-0221 §5's pattern for its own reason: a vocabulary that grows
+    by implementation grows without anyone having decided what the new member
+    means.
+
+    **Every member is returned and none is raised** (§4).
+    :meth:`~ai_assistant.core.protocols.Forecaster.read` raises for no source
+    reason, so a non-yield is a value the audit can count and the turn can ignore
+    rather than an exception every call site must catch correctly. That is
+    :class:`SearchRefusal`'s posture at a second seam, and ADR-0260 adds **no**
+    error class to ``core/errors.py`` for it.
+
+    **There is no member for a spend refusal, and that is deliberate** (§4, §6).
+    This vocabulary names what a *read* produced; the stages the seam never sees —
+    no registration, no budget, no derivable binding, no ``ALLOW``, no admission —
+    are the servicing's own account, which ADR-0260 §8 puts in
+    ``ai_assistant.orchestration.reads``.
+
+    **A refusal names a class and carries nothing else** — no place, no coordinate,
+    no origin, no provider message, no day, no exception type. The whole value is
+    one of these members, so there is nowhere for one to sit.
+    """
+
+    TRANSPORT_FAILED = "transport_failed"
+    """The channel could not be opened, verified or continued (ADR-0191 §1).
+
+    A statement about this system's own reach — a refused connection, a TLS
+    failure, a channel closed mid-response — and never about what the provider
+    said, which is :attr:`PROVIDER_REFUSED`. A redirect belongs here too: a
+    forecast read follows none and makes no second request (ADR-0260 §3).
+
+    An **upstream** ``TimeoutError`` raised inside the bound for the transport's
+    own reasons is this member and never :attr:`DEADLINE_EXPIRED` (ADR-0241 §7)."""
+
+    DEADLINE_EXPIRED = "deadline_expired"
+    """The bound the caller handed this call expired before it answered (§4).
+
+    ADR-0241 §1's ``timeout`` covers the seam's own work — the revalidation, the
+    credential read, the channel, the response read and the transcription. So this
+    member says the seam stopped waiting on the stages it owns; it does not say the
+    provider stopped working, and **no caller assumes the request did not leave**
+    (ADR-0029 §4's cooperative limit).
+
+    **A disposition and never a retry** (ADR-0260 §3). An interrupted read is not
+    re-run on the turn that asked for it: *one ask is one read*, absolutely."""
+
+    RESPONSE_TOO_LARGE = "response_too_large"
+    """The response passed ``forecast_max_response_bytes`` (ADR-0260 §11).
+
+    The read stopped one octet past the bound, the channel was closed, **nothing
+    was parsed** and no record was minted. Distinct from
+    :attr:`PROVIDER_REFUSED` because the provider may have answered perfectly
+    well: what happened is that this system declined to buy the answer. It
+    **establishes a contact** all the same (§10), because the octets it was decided
+    from had already arrived."""
+
+    PROVIDER_REFUSED = "provider_refused"
+    """The provider answered something a forecast cannot be read from, **or**
+    ADR-0148 §6 refused before a byte was transmitted (ADR-0260 §6).
+
+    Two causes under one member, and no value separates them: a non-success
+    status, a body that is not the shape the provider documents, and each of
+    ADR-0148 §6's four pre-transmit conditions — an unconnectable reference, a
+    record recorded for another identity, a record that moved across the
+    credential read, and a slot the keyring holds nothing under.
+
+    **It therefore establishes nothing either way about a contact** (§10, ADR-0264
+    §13's third arm read at this seam): a site holding this member cannot tell
+    whether octets arrived, and ADR-0264 §1 ranks silence above a false claim."""
+
+    UNATTESTED = "unattested"
+    """The response declared no report instant, or none that can be read (§5).
+
+    ADR-0092 §3 binds as written: ``reported_at`` is the instant the provider's own
+    response declares, and there is **no substitute** — not the instant we sent,
+    not the instant we received, not a clock this system read. A value in that
+    position which cannot be read as one is not a declared instant, so it lands
+    here rather than licensing a fallback.
+
+    **It establishes a contact** (§10): this system reaches it only from octets the
+    provider's channel had already returned."""
+
+    NO_RESULT = "no_result"
+    """The response described no day, or ADR-0260 §5 dropped every one it did.
+
+    One member for both, because an operator acts on neither: the read reached the
+    provider, was attested, and yielded nothing this system will carry. §5's drops
+    — a day missing a documented field, supplying one as ``null`` or as a type the
+    documented format does not admit; a day whose transcription passes
+    ``forecast_max_day_chars``; a day whose declared offset is absent or
+    unreadable; and a day the response names more than once, dropped in every one
+    of its rows — all end here where they take the last day with them.
+
+    **It maps to no ``ForecastDisposition``** (§8): a read that reached the provider
+    and was answered is a completed servicing whose returned count is zero, which
+    ADR-0226 §9 already records."""
+
+
+class ForecastNotRead(StrEnum):
+    """What a user is told about a forecast their turn did not read (ADR-0260 §10).
+
+    A **closed** enumeration of exactly **six** members, each valued by its
+    lower-cased name, declared in the order below — **which is also the precedence
+    order ADR-0242 §7 applies** where a turn holds more than one servicing that
+    recorded a disposition. The vocabulary is *added to and never renamed*, and no
+    implementation or later ADR adds a seventh without the ADR that decides it.
+
+    **It is the fold of ADR-0260 §8's twelve dispositions and is non-injective by
+    design**, which is ADR-0242 §8's shape for its own reason: the surface is told a
+    class, never a cause. Seven dispositions the user has no act for fold onto
+    :attr:`UNAVAILABLE`, which names none.
+
+    **It lives in ``core`` and** ``ForecastDisposition`` **does not**, and the split
+    is the boundary rather than a preference: this member crosses the wire on
+    :attr:`TurnOutcome.forecast_not_read`, which is what makes a surface able to
+    name the act deterministically (ADR-0260 §8, §10).
+
+    **A class and nothing else.** No member carries, and no rendering built from one
+    carries, a destination, a host, an origin, a provider name, a connection
+    reference, an account identity, a place, a coordinate, a day, a count, a
+    monetary figure, a duration, a ``Settings`` field name, a
+    ``ForecastDisposition`` value, a record id or a decision id (ADR-0260 §8, §10).
+    The whole value is one of these members, so there is nowhere for one to sit.
+
+    **And no statement rendered for a member says that performing the act it names
+    will make the next read happen, or why a ruling was not an ``ALLOW``**
+    (ADR-0242 §9's bar, binding word for word).
+    """
+
+    NOT_CONFIGURED = "not_configured"
+    """This deployment configured no forecast provider (ADR-0260 §10).
+
+    A statement for it says a forecast source is not configured in this deployment
+    and that it is an operator setting, **naming no user act** — there is none, and
+    naming one that cannot help is worse than naming none."""
+
+    AUTHORISATION_AWAITED = "authorisation_awaited"
+    """The read was ruled ``CONFIRM``, so it was put to the user as a question.
+
+    **It asserts exactly two things, both established**: that a ``CONFIRM`` was
+    recorded rather than the read made, and that a decision is recorded. It asserts
+    nothing about which floor fired and nothing about what answering will achieve.
+
+    A statement for it names ``assistant decisions`` as where the decision is read.
+    **No park is minted for a forecast read** (ADR-0260 §11), so the question is a
+    recorded decision and never a resumable one."""
+
+    SPEND_EXHAUSTED = "spend_exhausted"
+    """A monetary ceiling or an undetermined accounted total refused it.
+
+    ADR-0194 and ADR-0236 own the ceilings themselves; this member is the rendering
+    of an outcome those decisions produce and never a decision about one. A
+    statement for it names an operator setting and no user act."""
+
+    DECLINED = "declined"
+    """The policy ruled ``DENY`` on the request (ADR-0260 §10).
+
+    Something that happened to the request rather than an act that is available: a
+    statement for it says the read was declined when it was ruled on, and names no
+    floor, no threshold and no ``Settings`` field.
+
+    **A later read does not clear it** (§10): a turn that was denied and then
+    answered still reports this member, because the user was told about a read this
+    turn did not make and a second read does not unmake it."""
+
+    INTERRUPTED = "interrupted"
+    """The read was begun and stopped before it answered (ADR-0260 §10).
+
+    ADR-0241's ``DEADLINE_EXPIRED`` and that member alone. A statement for it says
+    the read was begun and stopped, naming no duration, no bound and no ``Settings``
+    field."""
+
+    UNAVAILABLE = "unavailable"
+    """Every other way a servicing put no forecast record into the supply.
+
+    Seven of ADR-0260 §8's twelve dispositions fold here — ``NO_BUDGET``,
+    ``BINDING_FAILED``, ``RULING_UNAVAILABLE``, ``TRANSPORT_FAILED``,
+    ``RESPONSE_TOO_LARGE``, ``PROVIDER_REFUSED`` and ``UNATTESTED`` — and the user
+    has an act for none of them.
+
+    **A contact and this member ride together where both hold** (§10, ADR-0264 §8):
+    a ``RESPONSE_TOO_LARGE`` or an ``UNATTESTED`` reached the provider and yielded
+    nothing usable, so the turn says both. A statement for it says the read
+    produced nothing the turn could use, **naming no cause and no act**, and for a
+    response that was refused after it arrived it does **not** say that no request
+    was made."""
+
+
+def _check_minted_by_a_forecast(
+    record: MemoryRecord, *, reported_at: datetime | None, reported_by: str
+) -> None:
+    """Refuse a record ADR-0260 §5's minting clause would not have produced.
+
+    Written out here rather than inside :class:`ForecastOutcome`'s validator so that
+    each condition is one branch a reader can find, and so that the validator itself
+    stays one statement of the exactly-one rule — which is
+    :func:`_check_minted_by_a_search`'s own division and not a second one.
+
+    **Every condition is decidable over this record's own fields.** None reaches for
+    a bound, a clock, a store or a configuration: ``forecast_max_days``,
+    ``forecast_max_day_chars`` and ``forecast_max_response_bytes`` are ``Settings``
+    the *configured* forecaster enforces (ADR-0260 §4), so this model carries none of
+    them and validates identically in every deployment.
+
+    Args:
+        record: One record the outcome carries.
+        reported_at: The outcome's own report instant.
+        reported_by: The ``reported_by`` the outcome's **first** record carried,
+            which every later one must equal — a shared value rather than the
+            forecaster's own ``name``, which this value cannot check, holding no
+            forecaster (ADR-0260 §4).
+
+    Raises:
+        ValueError: If the record is not ``SEMANTIC``, is not ``EXTERNAL``-sourced,
+            carries evidence, carries topics, carries an ``about_person``, carries a
+            validity window that is not fully open, is attested to another instant,
+            is attested to another source, or declares no bounded extent.
+    """
+    if record.kind != "semantic":
+        msg = f"a forecast read mints SEMANTIC records; got a {record.kind!r} one"
+        raise ValueError(msg)
+    provenance = record.provenance
+    if provenance.source is not MemorySource.EXTERNAL:
+        msg = f"a forecast read mints EXTERNAL-sourced records; got {provenance.source}"
+        raise ValueError(msg)
+    if provenance.evidence:
+        # ADR-0260 §5: `evidence` is empty. A minted record is supply for one turn and
+        # resolves in no store (§11), so a citation on it would point at nothing a
+        # later reader could reach.
+        msg = "a forecast read mints records carrying no evidence"
+        raise ValueError(msg)
+    if record.topics:
+        msg = "a forecast read mints records carrying no topics (ADR-0260 §5)"
+        raise ValueError(msg)
+    if record.about_person is not None:
+        msg = "a forecast read mints records carrying no about_person (ADR-0260 §5)"
+        raise ValueError(msg)
+    if record.validity.valid_from is not None or record.validity.valid_until is not None:
+        # ADR-0260 §5: "`validity` is fully open and no lane sets it to the day the
+        # record is about." ADR-0045 §2 makes the envelope window an operational
+        # property, and ADR-0252 §3 forbids reading it as coverage on any kind; a
+        # producer setting it to the forecast's own day would hand the prohibited
+        # fallback exactly the value it was written to refuse.
+        msg = (
+            "a forecast record's validity is fully open, and never the day it is "
+            "about (ADR-0260 §5, ADR-0045 §2)"
+        )
+        raise ValueError(msg)
+    attestation = provenance.attestation
+    if attestation is None or reported_at is None or attestation.reported_at != reported_at:
+        # The clause ADR-0092 §3 rests on: the record's instant is *the response's*,
+        # so a producer that reached for a clock of its own cannot construct the value
+        # at all. A record disagreeing with its outcome about when the source spoke is
+        # two answers in one value.
+        msg = (
+            "every record a forecast read mints is attested to the outcome's own "
+            "report instant (ADR-0260 §4, ADR-0092 §3)"
+        )
+        raise ValueError(msg)
+    if attestation.reported_by != reported_by:
+        msg = (
+            "every record a forecast read mints carries one shared reported_by "
+            f"(ADR-0260 §4); got {attestation.reported_by!r} beside {reported_by!r}"
+        )
+        raise ValueError(msg)
+    extent = attestation.extent
+    if extent is None or extent.extends_from is None or extent.extends_until is None:
+        # ADR-0260 §4: "carries an `extent` that is a constructible half-open
+        # interval". A day is bounded at both ends, so a ray is not one — and a record
+        # with no extent at all is the value ADR-0252 §3 would find nothing to compose
+        # a `supported` window from, which is the whole reason this decision was
+        # bought.
+        msg = (
+            "every record a forecast read mints declares a bounded half-open extent "
+            "over the day it is about (ADR-0260 §4, §5; ADR-0117 §2)"
+        )
+        raise ValueError(msg)
+
+
+class ForecastOutcome(BaseModel):
+    """What one forecast read produced: records, or a refusal (ADR-0260 §4).
+
+    **Exactly one of the two, enforced here rather than by a caller.** Neither both
+    nor neither: a value carrying both would be two answers wearing one outcome's
+    name, and one carrying neither would be an outcome a servicing could read as an
+    answered read — and would then report a provider the turn never reached.
+
+    **Every condition below is *structural* — over this value's own fields** — so
+    none of them reaches for a bound, a clock, a store or a configuration. That is
+    :class:`SearchOutcome`'s own shape and for its stated reason: conditions on the
+    model are decidable in any process and true of every ``Forecaster`` this system
+    ever wires, **the canonical fake included**.
+
+    **What is deliberately *not* enforced here is the producer's** (§4), not being
+    decidable over this value's own fields: ``confidence``'s figure,
+    ``derived_from_external``, ``placement``, the transcription, the extent's
+    agreement with the day the provider named, and ``reported_by``'s **equality with
+    the forecaster's own** ``name`` — which this outcome cannot check, holding no
+    forecaster. What it *can* check is that every record agrees with every other
+    about who reported them, and it does.
+
+    **It carries no count of the days §5 dropped** (§7). A drop count is a
+    within-ask fidelity fact, and ADR-0226 §9 refuses that class in terms; the
+    honest consequence — that a response this system thinned is not distinguishable
+    from one the provider gave thin — is ADR-0260 §14's deferral rather than a gap
+    this type fills.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reported_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The instant the provider's own response declared, on the provider's "
+            "own clock (ADR-0260 §5, ADR-0092 §3). Never the instant we sent, the "
+            "instant we received, or any clock this system read. ``None`` where the "
+            "read was refused."
+        ),
+    )
+    records: tuple[MemoryRecord, ...] = Field(
+        default=(),
+        description=(
+            "One record per day the provider's answer covered and §5 kept, in the "
+            "order the provider returned them (ADR-0260 §5). Empty where the read "
+            "was refused."
+        ),
+    )
+    refusal: ForecastRefusal | None = Field(
+        default=None,
+        description=(
+            "Why no record was produced (ADR-0260 §4). ``None`` where records "
+            "were. A **class** and nothing else: no place, no coordinate, no "
+            "origin, no day, no provider message."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _records_or_a_refusal(self) -> ForecastOutcome:
+        """Refuse an outcome that half-says two things (ADR-0260 §4).
+
+        Raises:
+            ValueError: If a refusal is paired with a record or a report instant,
+                or if no refusal is paired with no report instant or no record.
+        """
+        if self.refusal is not None:
+            if self.records:
+                msg = "a forecast outcome carries records or a refusal, never both"
+                raise ValueError(msg)
+            if self.reported_at is not None:
+                msg = "a refused forecast read declares no report instant"
+                raise ValueError(msg)
+            return self
+        if self.reported_at is None:
+            msg = "a forecast outcome that carries no refusal declares a report instant"
+            raise ValueError(msg)
+        if not self.records:
+            msg = "a forecast outcome carries records or a refusal, never neither"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _every_record_is_an_attested_external_semantic(self) -> ForecastOutcome:
+        """Refuse a record ADR-0260 §5 would not have minted.
+
+        Raises:
+            ValueError: If any record fails one of
+                :func:`_check_minted_by_a_forecast`'s conditions.
+        """
+        if not self.records:
+            return self
+        first = self.records[0].provenance.attestation
+        # The first record's own attestation is what the rest are compared against.
+        # `None` is refused by the check below with every other half-answer, so the
+        # fallback here is a value that cannot equal a well-formed `Identifier`
+        # rather than a second refusal path.
+        shared = "" if first is None else first.reported_by
+        for record in self.records:
+            _check_minted_by_a_forecast(record, reported_at=self.reported_at, reported_by=shared)
+        return self
 
 
 # --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
@@ -15250,7 +15695,27 @@ class EgressBinding(_OriginRecordedBindingBase):
             "member is not its first."
             " Taken from :attr:`CarriedProvenance.closed_loop` unchanged, which is "
             "ADR-0181 §3's carriage and ADR-0233 §4's shape stated over the same two "
-            "types for the same reason."
+            "types for the same reason. **It is not widened by ADR-0260 §6's second "
+            "configured provider**, which rides beside it as "
+            ":attr:`forecast_reach`: this field still means *this deployment's own "
+            "search* and nothing else, and a forecast read never sets it."
+        ),
+    )
+    forecast_reach: bool = Field(
+        default=False,
+        description=(
+            "Whether this request is a **forecast read at the configured forecast "
+            "provider** (ADR-0260 §6, §11), in :attr:`closed_loop`'s own shape and "
+            "for its own reason. Taken from "
+            ":attr:`CarriedProvenance.forecast_reach` unchanged, and **compared "
+            "inside** :meth:`PermissionDecision.authorises` by the whole-value "
+            "binding conjunct that already compares ``closed_loop`` — so a ruling "
+            "authorises only a request carrying the fact it was taken over, and no "
+            "lane compares this member separately or exempts it from that "
+            "comparison. **``False`` is the restrictive value and is what "
+            "``rebind`` leaves behind**: ADR-0260 §11 mints no park for a forecast "
+            "read, so no forecast binding is ever rebound and the default is the "
+            "correct value on that path."
         ),
     )
 
@@ -16103,7 +16568,37 @@ class CarriedProvenance(BaseModel):
             "required-with-no-default guards for a three-valued fact whose safe "
             "member is not its first."
             " The seam writes :attr:`EgressBinding.closed_loop` from this value "
-            "unchanged."
+            "unchanged. **It is not widened by ADR-0260 §6's second configured "
+            "provider**: that decision gives this carrier one more boolean, "
+            ":attr:`forecast_reach`, in this field's own shape, because a widening "
+            "would rewrite what stored rows assert and would supersede a clause "
+            "ADR-0247 §4 states as unchanged. This field still means *this "
+            "deployment's own search* and nothing else, and a forecast read never "
+            "sets it."
+        ),
+    )
+    forecast_reach: bool = Field(
+        default=False,
+        description=(
+            "Whether this request is a **forecast read at the configured forecast "
+            "provider** (ADR-0260 §6, §11): its kind is a forecast read and this "
+            "deployment holds a forecast registration, which ``orchestration`` "
+            "knows because ``Forecaster.request`` answered a proposal rather than "
+            "``None``. It is ``closed_loop``'s own shape one field along and is "
+            "**not** a widening of it — ``closed_loop`` keeps meaning *this "
+            "deployment's own search* and nothing else, because widening it would "
+            "rewrite what every stored row asserts (ADR-0247 §4). **Written by "
+            "``orchestration`` alone**, at the moment the request is built, from "
+            "values it holds as data it fetched; **discarded, never merged**, if "
+            "any producer emitted one; and no model output, request content or "
+            "provider answer contributes to it. **``False`` is the restrictive "
+            "value**, so a composition site that fails to compute it yields a "
+            "request that is not at the configured forecast provider and rules "
+            "exactly as ``origin/main`` rules today. The seam writes "
+            ":attr:`EgressBinding.forecast_reach` from this value unchanged, and "
+            "``EgressBinder.rebind`` transcribes nothing new for it — ADR-0260 §11 "
+            "mints **no park** for a forecast read, so no forecast binding is ever "
+            "rebound and ADR-0152 §7's closed transcription count is untouched."
         ),
     )
 
@@ -23364,13 +23859,20 @@ class OutboundReach(StrEnum):
 
 
 class OutboundDestination(StrEnum):
-    """A class of destination a turn contacted (ADR-0264 §5).
+    """A class of destination a turn contacted (ADR-0264 §5, ADR-0260 §10).
 
-    A **closed** enumeration of exactly **one** member, valued by its lower-cased
-    name, whose declaration order is also the order
+    A **closed** enumeration of exactly **two** members, valued by their
+    lower-cased names, whose declaration order is also the order
     :attr:`OutboundStatement.destinations` renders in. The vocabulary is *added to
-    and never renamed*, and no implementation or later ADR adds a second member
+    and never renamed*, and no implementation or later ADR adds a third member
     without the ADR that decides it.
+
+    **It closed at one and now closes at two, and only the count moved** (ADR-0260
+    §10). ADR-0264 §5 requires the addition in terms — "A later outbound seam adds
+    its own member with its own ADR. It does **not** render as
+    :attr:`SEARCH_PROVIDER` and does not render as nothing" — so
+    :attr:`FORECAST_PROVIDER` is that section working rather than a departure from
+    it, and it is appended, which changes no existing pairwise order.
 
     **A member is a class of destination and never a destination** (§5). No member
     names, encodes or is derived from a provider, a host, an account, a connection
@@ -23380,12 +23882,11 @@ class OutboundDestination(StrEnum):
     even an audit surface decode the ``authorised_subject`` on a row in front of
     the user who owns it.
 
-    **One member is the point rather than an embarrassment** (§5). The vocabulary
-    makes the next seam's addition cheap — a second member rather than a second
-    carrier minted from scratch — so the tuple is kept and ordered rather than
-    collapsed into the member's absence. A later outbound seam adds its own member
-    with its own ADR; it does **not** render as :attr:`SEARCH_PROVIDER` and does
-    not render as nothing.
+    **The tuple was kept and ordered while there was one member, and ADR-0260 §10
+    is what that bought** (§5). Adding the forecast seam's class cost a member
+    rather than a second carrier minted from scratch, and a turn that reached both
+    providers carries one statement naming both classes — neither displacing the
+    other, which is the asymmetry §10 exists to close.
     """
 
     SEARCH_PROVIDER = "search_provider"
@@ -23395,6 +23896,20 @@ class OutboundDestination(StrEnum):
     and the recipient they granted"*, so the class names what the owner already
     decided rather than a fact about this turn's routing. It carries no provider
     name, no host, no origin, no account identity and no connection reference."""
+
+    FORECAST_PROVIDER = "forecast_provider"
+    """The configured forecast provider (ADR-0260 §10).
+
+    ADR-0260 §6 makes the configured forecast provider the destination the owner
+    chose and the recipient they granted, exactly as ADR-0247 §1 does for the
+    search — a **separately** configured account and origin, compared against its
+    own pair and never against the search's. The class names what the owner already
+    decided rather than a fact about this turn's routing, and it carries no provider
+    name, no host, no origin, no account identity, no connection reference, no place
+    and no coordinate.
+
+    **It renders after** :attr:`SEARCH_PROVIDER` in ADR-0264 §5's own order, which
+    is this enumeration's declaration order and never encounter order."""
 
 
 class OutboundStatement(BaseModel):
@@ -23728,6 +24243,44 @@ class TurnOutcome(BaseModel):
             :attr:`search_not_serviced`, and where it does both are rendered, each in
             its own statement and neither read off the other: one says this turn reached
             outside itself, the other says what act would change what a lookup produced.
+        forecast_not_read: Which class of act would have let a forecast read this
+            turn did **not** make happen, or ``None`` where the servicing recorded no
+            ``ForecastDisposition`` at all (ADR-0260 §10). ADR-0260 is the decision
+            that added it, as ADR-0242 is :attr:`search_not_serviced`'s.
+
+            **``None`` means the servicing recorded no disposition, and means nothing
+            else**: a turn that serviced no forecast read, **and** a read the provider
+            answered — records or none. It is never read as "the provider answered",
+            and the outbound contact is never derived from it: this member is a
+            non-injective fold, so a site holding only it cannot compute the contact
+            and does not try (ADR-0264 §1).
+
+            **It carries the member the servicing computed, by value, and never a
+            second computation** (§10). No surface derives it from the plan, the
+            supply's length, the reply, the audit or a store read of its own, and no
+            component recomputes it downstream.
+
+            **Where a revising turn serviced more than one forecast read** the field
+            carries the **earliest-declared** member any servicing of the turn
+            recorded — :class:`ForecastNotRead`'s declaration order is that precedence
+            order (ADR-0242 §7). **A later read does not clear an earlier one's
+            member**: a turn that was denied and then answered still reports
+            :attr:`ForecastNotRead.DECLINED`.
+
+            **A widening rather than a change**, which is :attr:`recipient_grant`'s
+            move and :attr:`search_not_serviced`'s: a ``None``-defaulting member
+            alters neither ADR-0170 §4's three ``reply``-``None`` shapes nor its one
+            :attr:`reply_degraded` shape. In particular **this fact does not set**
+            :attr:`reply_degraded`: a turn that could not read a forecast still
+            composed the reply it composed.
+
+            **It rides beside** :attr:`search_not_serviced` **and beside**
+            :attr:`outbound_statement`, and none is read off another: a turn that
+            searched and read a forecast may carry all three, each in its own
+            statement (ADR-0264 §8, ADR-0260 §10).
+
+            **``SpokenTurn`` gains nothing**, and no lane adds a second field for this
+            fact anywhere (§10).
         search_not_serviced: Which class of act would have let a search this turn did
             **not** make happen, or ``None`` where it serviced every search it asked
             for and where it asked for none (ADR-0242 §9). ADR-0242 is the decision
@@ -23934,6 +24487,15 @@ class TurnOutcome(BaseModel):
         description=(
             "What this turn did about reaching outside this system, or ``None`` on a "
             "pass that neither established a contact nor composed a reply (ADR-0264 §7)."
+        ),
+    )
+    forecast_not_read: ForecastNotRead | None = Field(
+        default=None,
+        description=(
+            "Which class of act would have let a forecast read this turn did not "
+            "make happen, or ``None`` where the servicing recorded no "
+            "``ForecastDisposition`` at all — a turn that serviced no forecast read, "
+            "and a read the provider answered (ADR-0260 §10)."
         ),
     )
 

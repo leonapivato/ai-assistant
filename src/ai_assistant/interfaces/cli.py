@@ -7998,6 +7998,8 @@ def _outbound_destination(member: OutboundDestination) -> str:
     match member:
         case OutboundDestination.SEARCH_PROVIDER:
             return "the web search provider you have configured"
+        case OutboundDestination.FORECAST_PROVIDER:
+            return "the forecast provider you have configured"
         case _:  # pragma: no cover - exhaustive
             assert_never(member)
 

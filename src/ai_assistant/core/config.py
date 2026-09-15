@@ -399,6 +399,35 @@ def _only_a_real_number(value: object) -> object:
 _RealSetting = Annotated[float, BeforeValidator(_only_a_real_number)]
 
 
+def _only_a_real_number_or_absent(value: object) -> object:
+    """:func:`_only_a_real_number`, with absence admitted (ADR-0260 §11).
+
+    The same allowlist, for a ``float | None`` field. ``None`` is *unset* rather
+    than a malformed measurement, so it passes through before the allowlist is
+    consulted; everything else is judged exactly as it is on a required field, which
+    is what keeps ``forecast_latitude=True`` refused as the flag it is rather than
+    loaded as a coordinate one degree north of the equator.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is neither ``None`` nor one of the three accepted
+            forms.
+    """
+    return None if value is None else _only_a_real_number(value)
+
+
+#: An **optional** real-valued setting: :data:`_RealSetting`'s allowlist with
+#: absence admitted. Applied to every ``float | None``-typed field for the reason
+#: :data:`_RealSetting` is applied to every ``float`` one — the defect #500 closes
+#: is a property of the type rather than of any one field.
+_OptionalRealSetting = Annotated[float | None, BeforeValidator(_only_a_real_number_or_absent)]
+
+
 def _only_a_duration(value: object) -> object:
     """Refuse a value that is not a duration but would be coerced into one.
 
@@ -3872,6 +3901,175 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The configured forecast provider (ADR-0260 §11) --------------------
+    # **Nine fields, in `web_search_*`'s own shape field for field**, so that an
+    # operator configuring the second provider configures the same shape twice.
+    # ADR-0260 §6 makes this kind's authority rest on **its own** separately
+    # configured account and origin: a forecast request bound to the search
+    # provider's pair, or the reverse, takes no route at all, and every comparison
+    # is over recorded values.
+    #
+    # **The place is here and never on the ask** (§3). A `FORECAST_READ` ask carries
+    # no argument, so the configuration *is* the naming act: the coordinate is read
+    # by the composition root, held by the forecaster as its own configuration, and
+    # crosses the planning seam in neither direction. The honest cost, stated rather
+    # than glossed, is that one deployment reads one place; §14 defers a place the
+    # turn named and names what fires it.
+    #
+    # **The four are one pair of pairs** (§11). A connection and an origin with no
+    # coordinate would start a deployment whose `request` must answer a proposal it
+    # has no place to build, so the load-time refusal below covers every half-set
+    # combination of the four rather than each pair on its own.
+    forecast_connection: str | None = Field(
+        default=None,
+        description=(
+            "The connection reference the forecast read is registered against — a "
+            "handle the provisioner minted, read out of the connections listing. "
+            "Set it together with forecast_origin and both coordinates, or set "
+            "none of the four and no forecaster is built."
+        ),
+    )
+    forecast_origin: str | None = Field(
+        default=None,
+        description=(
+            "The one HTTPS origin the connected forecast account names, as "
+            "https://host[:port] (ADR-0260 §6). The forecaster pins the authorised "
+            "call to exactly this origin and opens a channel to no other. Set it "
+            "together with forecast_connection and both coordinates."
+        ),
+    )
+    forecast_latitude: _OptionalRealSetting = Field(
+        default=None,
+        ge=-90.0,
+        le=90.0,
+        allow_inf_nan=False,
+        description=(
+            "The latitude this deployment reads its forecast for, in degrees "
+            "(ADR-0260 §3, §11). A finite value from -90 to 90 inclusive; NaN and "
+            "either infinity are refused, because a coordinate that is not a place "
+            "would compose a request no provider documents an answer for. Set it "
+            "together with forecast_longitude, forecast_connection and "
+            "forecast_origin, or set none of the four."
+        ),
+    )
+    forecast_longitude: _OptionalRealSetting = Field(
+        default=None,
+        ge=-180.0,
+        le=180.0,
+        allow_inf_nan=False,
+        description=(
+            "The longitude this deployment reads its forecast for, in degrees "
+            "(ADR-0260 §3, §11). A finite value from -180 to 180 inclusive; NaN "
+            "and either infinity are refused. Set it together with "
+            "forecast_latitude, forecast_connection and forecast_origin, or set "
+            "none of the four."
+        ),
+    )
+
+    # --- What one forecast read costs this deployment (ADR-0260 §11) --------
+    # **`web_search_cost_per_call`'s own cross-field shape**, one provider along and
+    # for its reasons: two fields rather than one so that neither carries a grammar,
+    # the `forecast_` prefix rather than a bare one because this is the connected
+    # account's commercial fact rather than a bound the reader enforces, and `FREE`
+    # unreachable from here — an operator whose account bills them nothing states a
+    # zero figure with the currency they are denominated in.
+    #
+    # **Where the pair is unset the unknown-cost floor binds unchanged** (§11,
+    # ADR-0016 §4, ADR-0236 §4). That floor is a question about **cost** and not
+    # about destination trust, so §6's no-new-question clause is not in tension with
+    # it: a deployment that wants the read to run without a confirmation states the
+    # provider's cost, which for a free provider is zero in the currency it states.
+    forecast_cost_per_call: Decimal | None = Field(
+        default=None,
+        description=(
+            "What one forecast read costs this deployment, as the operator's own "
+            "figure (ADR-0260 §11, ADR-0236 §1). At least zero — a free tier is a "
+            "zero figure, not a FREE basis — finite, and countable under ADR-0194 "
+            "§1. Set it together with forecast_cost_currency, and only where a "
+            "forecast provider is configured. Unset, the declaration's cost is "
+            "UNKNOWN and the unknown-cost floor binds."
+        ),
+    )
+    forecast_cost_currency: str | None = Field(
+        default=None,
+        description=(
+            "ISO-4217 alphabetic code forecast_cost_per_call is denominated in "
+            "(ADR-0260 §11, ADR-0236 §2). Shape only, neither normalised nor "
+            "checked against the live register, and not required to equal "
+            "world_spend_currency. Set it together with forecast_cost_per_call: "
+            "unset, the declaration's cost is UNKNOWN."
+        ),
+    )
+
+    # --- What one forecast read may bring back (ADR-0260 §5, §11) -----------
+    # **Each in `search_max_results`', `search_max_result_chars`' and
+    # `search_max_response_bytes`' own shape, each shipping with a value** so that
+    # no deployment is unbounded by omission, and every domain closed so that a
+    # value outside it stops the deployment.
+    #
+    # **Three is the ceiling on days and the setting only narrows it** (§7). It is
+    # what keeps §7's servicing precedence true in *every* configuration, so no
+    # deployment can make one forecast read take more than three of ADR-0226 §6's
+    # budget of ten.
+    forecast_max_days: _IntegerSetting = Field(
+        default=3,
+        ge=1,
+        le=3,
+        description=(
+            "The most records one forecast read may mint, one per day the "
+            "provider's answer covers and in that order (ADR-0260 §5, §11). From 1 "
+            "to 3: three is §7's ceiling and this setting only narrows it. Where "
+            "more days survive §5's drops than this admits, the records minted are "
+            "the **first** that many."
+        ),
+    )
+    # **Counted on the quoted rendering, exactly as ADR-0230 §6 counts a fetched
+    # document** — `json.dumps` at its default `ensure_ascii=True`, its two
+    # delimiters included — and never on the source, for `search_max_result_chars`'
+    # reason: a ceiling on source characters would admit a day six or twelve times
+    # this long while claiming to admit this much (ADR-0222 §4).
+    #
+    # **A day beyond it is dropped whole, never truncated** (§5): the remaining days
+    # are minted, and a response every day of which is dropped yields
+    # `ForecastRefusal.NO_RESULT` rather than an empty success.
+    forecast_max_day_chars: _IntegerSetting = Field(
+        default=2048,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most characters one minted forecast record's content may carry, "
+            "counted on its quoted rendering (ADR-0260 §5, §11; ADR-0230 §6's "
+            "measure). Strictly greater than zero — a zero or negative bound is "
+            "refused rather than read as 'no limit'. A day beyond it is "
+            "**dropped**, never truncated, and its siblings are still minted."
+        ),
+    )
+    # **The transport's bound, and it is a different quantity from the one above.**
+    # ADR-0260 §11 counts it "over the octets taken off the channel" — the whole
+    # response, its status line and headers included — and enforces it "on the read
+    # itself and before any part of it is parsed", which is
+    # `search_max_response_bytes`' population word for word so that the two bounds
+    # mean the same thing at two seams.
+    #
+    # **A response at the bound is read and minted; one beyond it is abandoned and
+    # refused, never truncated** — `ForecastRefusal.RESPONSE_TOO_LARGE`. No
+    # implementation buffers a whole response and measures it afterwards, which
+    # would let a provider buy memory from a client that has already opened a
+    # channel; at most one octet past the bound is read, to detect that it was
+    # passed.
+    forecast_max_response_bytes: _IntegerSetting = Field(
+        default=1024 * 1024,
+        ge=1,
+        lt=2**63,
+        description=(
+            "The most octets one forecast response may take off the channel — its "
+            "status line and headers included — enforced on the read itself and "
+            "before any part of it is parsed (ADR-0260 §11). Strictly greater than "
+            "zero. A response beyond it is **abandoned and refused**, never "
+            "truncated."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
@@ -4152,7 +4350,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("world_spend_currency", "web_search_cost_currency")
+    @field_validator("world_spend_currency", "web_search_cost_currency", "forecast_cost_currency")
     @classmethod
     def _spend_currency_is_iso_4217_alphabetic(cls, value: str | None) -> str | None:
         """Require ADR-0194 §1's shape, or nothing at all.
@@ -4164,8 +4362,9 @@ class Settings(BaseSettings):
         to the empty string rather than to nothing, which is why the blank is
         refused here rather than read as unconfigured.
 
-        **``web_search_cost_currency`` is validated by this same validator and not
-        by a copy of it** (ADR-0236 §2): that section states the code's rule as
+        **``web_search_cost_currency`` and ``forecast_cost_currency`` are validated
+        by this same validator and not by copies of it** (ADR-0236 §2, ADR-0260
+        §11): that section states the code's rule as
         *"``ToolCost.currency``'s rule (ADR-0016 §4) and ``world_spend_currency``'s,
         and not a third one"*, and one decorator naming both fields is what makes
         that a property of the code rather than of two functions staying in step.
@@ -4213,12 +4412,17 @@ class Settings(BaseSettings):
         """
         return _checked_spend_amount(value, info.field_name, floor="positive")
 
-    @field_validator("web_search_cost_per_call")
+    @field_validator("web_search_cost_per_call", "forecast_cost_per_call")
     @classmethod
-    def _search_cost_is_countable_and_not_negative(
+    def _provider_cost_is_countable_and_not_negative(
         cls, value: Decimal | None, info: ValidationInfo
     ) -> Decimal | None:
-        """Require ADR-0236 §2's domain for the operator's per-call figure.
+        """Require ADR-0236 §2's domain for an operator's per-call figure.
+
+        **One decorator naming both provider fields, and not two functions staying
+        in step** (ADR-0260 §11). ADR-0260 gives the forecast provider "the same
+        pair, in the same domain" as the search's, so a second statement of §2's
+        domain would be a place the two could drift apart.
 
         Finite, at least zero, and countable under ADR-0194 §1 — **reusing**
         :func:`_checked_spend_amount` at the ceilings' own floor rather than
@@ -4269,7 +4473,12 @@ class Settings(BaseSettings):
         return self
 
     @field_validator(
-        "send_email_connection", "send_email_endpoint", "web_search_connection", "web_search_origin"
+        "send_email_connection",
+        "send_email_endpoint",
+        "web_search_connection",
+        "web_search_origin",
+        "forecast_connection",
+        "forecast_origin",
     )
     @classmethod
     def _is_not_blank(cls, value: str | None) -> str | None:
@@ -4399,6 +4608,92 @@ class Settings(BaseSettings):
             "account is connected; a per-call figure for a searcher no deployment builds "
             "is a value nothing reads (ADR-0236 §2), so set web_search_connection and "
             "web_search_origin as well or unset both cost fields"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_forecast_registration_is_whole_or_absent(self) -> Settings:
+        """Refuse a half-configured forecast provider (ADR-0260 §11, §13(b\u2032)).
+
+        **The four are one pair of pairs, and the refusal covers every half-set
+        combination of them.** ADR-0260 §11 makes ``forecast_connection`` and
+        ``forecast_origin`` a pair, ``forecast_latitude`` and
+        ``forecast_longitude`` a pair, and then binds the two pairs together: *"a
+        connection and an origin without a coordinate would start a deployment whose
+        ``request`` must answer a proposal it has no place to build"*. So a
+        connection with no origin, a latitude with no longitude, a coordinate with no
+        provider pair **and a whole provider pair with both coordinates unset** are
+        each a state the system cannot be in, and the quiet reading — starting and
+        being inert — is the unsafe one. "Later" here is a turn whose planner asked
+        for a forecast and whose forecaster was never built, which an operator would
+        read as the mechanism being inert rather than as their configuration having
+        half-landed.
+
+        **One refusal over the four rather than two pairwise ones**, because the
+        condition is over the four *together*: two pairwise validators would admit
+        exactly the combination §11 names as the reason the four are one rule.
+
+        Raises:
+            ValueError: If some of the four are set and some are not.
+        """
+        fields = (
+            "forecast_connection",
+            "forecast_origin",
+            "forecast_latitude",
+            "forecast_longitude",
+        )
+        supplied = tuple(name for name in fields if getattr(self, name) is not None)
+        if len(supplied) in {0, len(fields)}:
+            return self
+        missing = tuple(name for name in fields if getattr(self, name) is None)
+        msg = (
+            f"{', '.join(supplied)} is set and {', '.join(missing)} is not; configuring "
+            f"the forecast read needs the connected account it asks as, the one origin "
+            f"it asks, and the place it asks about, which are one configuration and not "
+            f"two (ADR-0260 §11) \u2014 so set {', '.join(missing)} as well, or unset "
+            f"{', '.join(supplied)} to leave no forecaster built"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_forecast_cost_is_whole_and_only_where_a_provider_is(self) -> Settings:
+        """Refuse half a per-call figure, and a figure nothing would read (ADR-0260 §11).
+
+        :meth:`_the_search_cost_is_whole_and_only_where_a_search_is`'s two refusals,
+        one provider along and for exactly its reasons. ``ToolCost`` needs an amount
+        *and* an ISO-4217 code for a ``PER_CALL`` basis, so a lone amount is a figure
+        denominated in nothing and a lone code is a register for no figure; and a
+        per-call figure for a forecaster no deployment builds is a value nothing
+        reads, because ``app/composition.py`` constructs no forecast integration at
+        all unless the four fields above are set.
+
+        Raises:
+            ValueError: If exactly one of the two is set, or if either is set while
+                no forecast provider is configured.
+        """
+        amount, currency = self.forecast_cost_per_call, self.forecast_cost_currency
+        if (amount is None) != (currency is None):
+            set_one = "forecast_cost_per_call" if currency is None else "forecast_cost_currency"
+            missing = "forecast_cost_currency" if currency is None else "forecast_cost_per_call"
+            msg = (
+                f"{set_one} is set and {missing} is not; a declared per-call cost needs "
+                f"both the figure and the ISO-4217 code it is denominated in "
+                f"(ADR-0236 §1, ADR-0260 §11), so set {missing} as well or unset "
+                f"{set_one} to leave the forecast read declaring an UNKNOWN cost"
+            )
+            raise ValueError(msg)
+        if amount is None:
+            return self
+        if self.forecast_connection is not None:
+            # The validator above has already refused every half-set combination of
+            # the four, so one of them being set establishes that all four are.
+            return self
+        msg = (
+            "forecast_cost_per_call and forecast_cost_currency are set and no forecast "
+            "provider is configured; a per-call figure for a forecaster no deployment "
+            "builds is a value nothing reads (ADR-0236 §2, ADR-0260 §11), so set "
+            "forecast_connection, forecast_origin, forecast_latitude and "
+            "forecast_longitude as well or unset both cost fields"
         )
         raise ValueError(msg)
 
