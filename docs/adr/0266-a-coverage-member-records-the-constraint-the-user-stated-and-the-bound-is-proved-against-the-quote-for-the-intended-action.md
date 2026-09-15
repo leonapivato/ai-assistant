@@ -2,63 +2,63 @@
 the quote for the intended action
 
 - Status: Proposed
-  — **twelve narrowly stated scopes, found by a sweep of that document rather than one at a
-  time; §9 shows the working for each and ADR-0254's own `Status` line carries them in full.
-  §1, in four limbs**: its **proposal-completeness** condition, that a proposed row's coverage
-  *"is complete for this request"*, is restated over §7's **condition 6** — condition 6 alone,
-  because a proposal is written `PROPOSED` and §3's condition 1 asks for a live row — the
-  ratified wording being stated over *"every user-facing argument … named by a member"*, which a
-  member no longer names; **path (ii)'s trigger**, which fires on a span *"naming an argument"* a
-  live row carries a member for, fires on a span minting a member of a **kind** it carries one
-  of; **path (iii)'s trigger and its per-declaration member selection**, since the mint reads the
-  goal and no declaration at all; and **path (iii)'s direct establishment, for a member this
-  decision mints alone** — a reading of the user's words the user has not seen is proposed, never
-  established. **§2's member shape**: `CoverageMember` carries a **`kind`** and no `argument`, so
-  it records *what the user stated* and never *which slot it fills*; with `argument` go §2's
-  depth-one clause, its no-two-members-name-one-argument rule (now **one member per kind**) and
-  `currency_argument`, **with two further limbs of §2's `MONEY` currency clause** — its
-  cross-member `fixed`-equals-`currency` refusal, not constructible once no member names an
-  argument, and its *"A call whose declaration carries no currency argument takes no `MONEY`
-  bound"* rule, which the owner's ruling of 2026-09-14 reverses — while the bound gains
-  **`maximum_exclusive`** and a `fixed` value is validated against the member's kind.
-  **`maximum` stays required and `minimum` stays optional**, §4 minting no floor. **§3's
-  condition 6 and its field count**: the set equality over argument **keys** and the
-  per-argument rule are replaced by **two routes** — a member is met against the **quote taken
-  for the step's intended action**, or against a declared argument at its kind, a `MONEY` member
-  needing the quote and the declared argument **as well** — the system-supplied validator's rule
-  being preserved by a refusal on a new declaration field, and `ToolDefinition` gaining **one**
-  further field, `bounded_arguments`, so *"`ToolDefinition` gains one field"* is over-narrow by
-  one. **§4's `MONEY` reading, in two limbs**: the currency is read off the quote or the
-  declaration, never the bound; and the `maximum` inequality is read strictly where
-  `maximum_exclusive` is set. **§5's widening clause, in two limbs**: at **equal** `maximum`,
-  clearing `maximum_exclusive` is a **widening** path (ii) refuses and setting it a narrowing,
-  which a numeric comparison alone cannot see; and its *"naming an argument no member covers"*
-  limb is restated over §7's condition 6. **§6's lineage-discharge clause, in the narrowing
-  direction alone**: ADR-0181 §5's floor is discharged only where every user-facing argument is
-  covered by a member on the **argument** route, never where §7's third conjunct let the quote's
-  digest cover an undeclared one — a digest proves the call is the one quoted, not one the user
-  bounded, so §6's stated ground does not reach it and the `CONFIRM` stands. **§9 clause (ii)**:
-  *"an argument the act's own words bear on"* is given its mechanical test — kind agreement,
-  never numeric fit and never a model's nomination. **§9 clause (iii)'s *"an argument no member
-  names"* limb**, both times it is stated, restated as *an argument the row does not cover under
-  §7's condition 6* — a member naming none, the ratified limb would make route (d) unreachable
-  altogether — its force unchanged and every other limb binding entire. **§8's and §10's
-  resolution enumeration, in the closure at three alone**: a fourth `ResolutionRule`,
-  **`STATED_BOUND`**, which §19 books by name. **§11's `CoverageView`**, whose required
-  `argument` field could be transcribed from nothing once a member carries none: it carries
-  **`kind`** in its place, its required `span` — the user's own words beside the values —
-  unchanged and load-bearing, since the user's assent to that rendering is where a stated bound
-  now gets its authority. **§16's roster, in three limbs**: `core/types.py` gains a
+  — **twelve narrowly stated scopes, found by a sweep of that document rather than one at a time; §9
+  shows the working for each and ADR-0254's own `Status` line carries them in full. §1, in four
+  limbs**: its **proposal-completeness** condition, that a proposed row's coverage *"is complete for
+  this request"*, is restated over §7's **condition 6** — condition 6 alone, because a proposal is
+  written `PROPOSED` and §3's condition 1 asks for a live row — the ratified wording being stated
+  over *"every user-facing argument … named by a member"*, which a member no longer names; **path
+  (ii)'s trigger**, which fires on a span *"naming an argument"* a live row carries a member for,
+  fires on a span minting a member of a **kind** it carries one of; **path (iii)'s trigger and its
+  per-declaration member selection**, since the mint reads the goal and no declaration at all; and
+  **path (iii)'s direct establishment, for a member this decision mints alone** — a reading of the
+  user's words the user has not seen is proposed, never established. **§2's member shape**:
+  `CoverageMember` carries a **`kind`** and no `argument`, so it records *what the user stated* and
+  never *which slot it fills*; with `argument` go §2's depth-one clause, its
+  no-two-members-name-one-argument rule (now **one member per kind**) and `currency_argument`,
+  **with two further limbs of §2's `MONEY` currency clause** — its cross-member
+  `fixed`-equals-`currency` refusal, not constructible once no member names an argument, and its *"A
+  call whose declaration carries no currency argument takes no `MONEY` bound"* rule, which the
+  owner's ruling of 2026-09-14 reverses — while the bound gains **`maximum_exclusive`** and a
+  `fixed` value is validated against the member's kind. **`maximum` stays required and `minimum`
+  stays optional**, §4 minting no floor. **§3's condition 6 and its field count**: the set equality
+  over argument **keys** and the per-argument rule are replaced by **two routes** — a member is met
+  against the **quote taken for the step's intended action**, or against a declared argument at its
+  kind, a `MONEY` member needing the quote and the declared argument **as well** — the
+  system-supplied validator's rule being preserved by a refusal on a new declaration field, and
+  `ToolDefinition` gaining **one** further field, `bounded_arguments`, so *"`ToolDefinition` gains
+  one field"* is over-narrow by one. **§4's `MONEY` reading, in two limbs**: the currency is read
+  off the quote or the declaration, never the bound; and the `maximum` inequality is read strictly
+  where `maximum_exclusive` is set. **§5's widening clause, in two limbs**: at **equal** `maximum`,
+  clearing `maximum_exclusive` is a **widening** path (ii) refuses and setting it a narrowing, which
+  a numeric comparison alone cannot see; and its *"naming an argument no member covers"* limb is
+  restated over §7's condition 6. **§6's lineage-discharge clause, in the narrowing direction
+  alone**: ADR-0181 §5's floor is discharged only where every user-facing argument is covered by a
+  member on the **argument** route, never where §7's third conjunct let the quote's digest cover an
+  undeclared one — a digest proves the call is the one quoted, not one the user bounded, so §6's
+  stated ground does not reach it and the `CONFIRM` stands. **§9 clause (ii)**: *"an argument the
+  act's own words bear on"* is given its mechanical test — kind agreement, never numeric fit and
+  never a model's nomination. **§9 clause (iii)'s *"an argument no member names"* limb**, both times
+  it is stated, restated as *an argument the row does not cover under §7's condition 6* — a member
+  naming none, the ratified limb would make route (d) unreachable altogether — its force unchanged
+  and every other limb binding entire. **§8's and §10's resolution enumeration, in the closure at
+  three alone**: a fourth `ResolutionRule`, **`STATED_BOUND`**, which §19 books by name. **§11's
+  `CoverageView`**, whose required `argument` field could be transcribed from nothing once a member
+  carries none: it carries **`kind`** in its place, its required `span` — the user's own words
+  beside the values — unchanged and load-bearing, since the user's assent to that rendering is where
+  a stated bound now gets its authority. **§16's roster, in three limbs**: `core/types.py` gains a
   **fourteenth** type, `BoundedArgument`, and a **sixth and seventh** field,
-  `ToolDefinition.bounded_arguments` and `ActionRequest.intended_action`; and
-  *"`PermissionDecision` gains no field"* gains one, `intended_action`, without which a decision
-  recorded for one act authorises a request for another. **§20, in eight of the arms its own
-  landed lanes ship**: arm 10's `currency_argument` reading; arms 8, 47, 53 and 54's *"names that
-  argument in no member"* and condition-6-over-key-sets readings; arm 15's and arm 20's limbs
-  restated with §5 and §9; and arm 14's record fixing an entity and terms in one row, which
-  one-member-per-kind refuses — each **restated over the new shape by L1 and none dropped**,
-  while **arm 5 stands verbatim**, `maximum_exclusive` defaulting to `False`. **Every other
-  clause of all twelve sections binds entire**, §9 naming them section by section.
+  `ToolDefinition.bounded_arguments` and `ActionRequest.intended_action`; and *"`PermissionDecision`
+  gains no field"* gains one, `intended_action`, without which a decision recorded for one act
+  authorises a request for another. **§20's arm enumeration, scoped as a class rather than a list**:
+  every arm of its seventy-one whose statement reads the contract §§3-7 change, which five named
+  mechanisms decide — a member *naming an argument*; a bound's `currency_argument` and its
+  cross-member refusal; a row carrying two members of one **kind** or a `fixed` value the kind
+  validation refuses; a `MONEY` member met **without a quote**, and `ResolutionRule`'s closure at
+  three; and a **path-(iii) opening act** minted from a stated bound. §9 lists the arms each
+  reaches. **Each is restated over the new shape by the lane that owns it and none is dropped**, and
+  §9 records the arms the sweep cleared with their ground, arm 5 among them. **Every other clause of
+  all twelve sections binds entire**, §9 naming them section by section.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -153,9 +153,9 @@ from nowhere concrete, the carrier and the producer being the **quote decision**
 
 > **Normative.** A coverage member is minted from a **`GoalElement` of the goal's *current*
 > interpretation's `constraints` whose `ground` is `USER_STATED`**, and from nothing else. Its
-> `span` is the member's `span`; the act and the resolution are §2's. **No other value of this
-> system mints one** — not a `criteria` or a `conditions` element, not the interpretation's
-> `outcome`, not a plan step, not an evidence row, not a quote, not a memory and not a preference.
+> `span` is the member's; the act and the resolution are §2's. **No other value of this system mints
+> one** — not a `criteria` or a `conditions` element, not the interpretation's `outcome`, not a plan
+> step, not an evidence row, not a quote and not a memory.
 
 > **Normative — a `FROM_EVIDENCE` element and an `INFERRED` element mint nothing, and the type is
 > why rather than a rule to remember.** ADR-0249 §1's validator admits `USER_STATED` with a `span`
@@ -165,16 +165,16 @@ from nowhere concrete, the carrier and the producer being the **quote decision**
 > this states a consequence of two ratified types rather than a third refusal.
 
 > **Normative — the three other exclusions, each a consequence of a ratified clause rather than a
-> new refusal.** **`criteria` and `conditions` mint nothing**: a criterion states what success
-> would be and a condition when a step may run (ADR-0249 §1, ADR-0253 §7), while ADR-0254 §1's path
-> (iii) says where a bound lives in terms — *"the bound is an element of its `constraints`"*. **The
+> new refusal.** **`criteria` and `conditions` mint nothing**: a criterion states what success would
+> be and a condition when a step may run (ADR-0249 §1, ADR-0253 §7), while ADR-0254 §1's path (iii)
+> says where a bound lives in terms — *"the bound is an element of its `constraints`"*. **The
 > interpretation's own `outcome` mints nothing**, carrying no identity: ADR-0249 §7 retains it by
 > copying `outcome`, `outcome_ground` and `outcome_span` forward byte for byte, so two revisions
 > carrying one outcome are indistinguishable from two that restated it and §2's act could not be
 > named. **And the *current* interpretation alone**: an element a later revision neither retained
-> nor replaced is not in it (*"omission is removal"*), and minting from an earlier revision's tuple
-> would restore a constraint the user's own later words removed. The history is walked **only** to
-> find the act (§2), never to find a candidate.
+> nor replaced is not in it (*"omission is removal"*), and minting from an earlier revision would
+> restore a constraint the user's own later words removed. The history is walked **only** to find
+> the act (§2).
 
 ### 2. The act, the span and the resolution: what the basis is filled from, and when it refuses
 
@@ -381,17 +381,16 @@ completeness condition would refuse the proposal carrying it.
 > **`IntendedAction`** (ADR-0265 §1) it was taken for, by `id`; the **arguments it was quoted
 > over**, as the digest below compares; an **amount** and its **currency**, the amount in the form
 > ADR-0254 §4's `MONEY` reading accepts and that reading's ISO-4217 code; and the **step output it
-> was read from**, provenance compared by nothing. **The amount
-> is the whole charge the act will make and never a component of it** — not a fee, not a deposit,
-> not a per-unit rate, not one leg of a transfer — because §7 proves the user's ceiling against
-> it and against nothing else: a quote of a €1 fee for a €200 transfer satisfies a €150 ceiling
-> while the act breaches it. **That is an obligation on the quote decision** (§10), and a record
-> stating a component is not a quote under this interface rather than a conforming one. **A quote
-> states a price and nothing of any other kind**, so it carries no `BoundKind` and needs none:
-> §7's evidence route is `MONEY`-only for that reason. The quotes of one goal are **totally
-> ordered**, so a second reading of one price is legible as a **refresh** of the first rather than
-> as a second act of the user — ADR-0252 §7's *"a refresh supersedes the row it displaces"*, which
-> §7's governing-quote rule is taken under.
+> was read from**, provenance compared by nothing. **The amount is the whole charge the act will
+> make and never a component of it** — not a fee, not a deposit, not a per-unit rate, not one leg of
+> a transfer — because §7 proves the user's ceiling against it and against nothing else: a quote of
+> a €1 fee for a €200 transfer satisfies a €150 ceiling while the act breaches it. **That is an
+> obligation on the quote decision** (§10), and a record stating a component is not a quote under
+> this interface rather than a conforming one. **A quote states a price and nothing of any other
+> kind**, so it carries no `BoundKind`: §7's evidence route is `MONEY`-only for that reason. The
+> quotes of one goal are **totally ordered**, so a second reading of one price is legible as a
+> **refresh** of the first rather than as a second act of the user — ADR-0252 §7's *"a refresh
+> supersedes the row it displaces"*, which §7's governing-quote rule is taken under.
 
 > **Normative — this decision states that interface and nothing else about a quote.** No type, no
 > field of any existing model, no store member, no Protocol, no bound on how many a goal holds, no
@@ -426,17 +425,17 @@ completeness condition would refuse the proposal carrying it.
 
 > **Normative.** **`ToolDefinition` gains one field, `bounded_arguments: tuple[BoundedArgument,
 > ...]`**, possibly empty, **defaulting to the empty tuple**, duplicate-free on `argument`, and
-> naming **no key of that declaration's own `system_supplied`** — refused at construction. It is
-> the whole of what a declaration says about which of its arguments takes an amount, a period or
-> a named term. **Declaring a money argument is a safeguard and not a requirement** — the owner's
-> ruling makes the quote the primary route at every tool — so a declaration omitting one keeps its
-> user's ceiling proved against the quote and forgoes only the second comparison, at the cost §10
-> books. **The refusal is what preserves ADR-0254 §3's system-supplied protection after the
-> validator stating it is gone**: that section made a row whose coverage names a system-supplied
-> argument not constructible by reading `CoverageMember.argument`, which no longer exists, so a
-> system-supplied key being declarable at no kind is what keeps *"a user is never asked to approve
-> an idempotency key"* true one field over. This is a **BREAKING** contract
-> change to `core/types.py` under golden rule 5 and is flagged as one.
+> naming **no key of that declaration's own `system_supplied`** — refused at construction. It is the
+> whole of what a declaration says about which of its arguments takes an amount, a period or a named
+> term. **Declaring a money argument is a safeguard and not a requirement** — the owner's ruling
+> makes the quote the primary route at every tool — so a declaration omitting one keeps its ceiling
+> proved against the quote and forgoes only the second comparison, at the cost §10 books. **The
+> refusal is what preserves ADR-0254 §3's system-supplied protection after the validator stating it
+> is gone**: that section made a row whose coverage names a system-supplied argument not
+> constructible by reading `CoverageMember.argument`, which no longer exists, so a system-supplied
+> key being declarable at no kind is what keeps *"a user is never asked to approve an idempotency
+> key"* true one field over. This is a **BREAKING** contract change to `core/types.py` under golden
+> rule 5 and is flagged as one.
 
 > **Normative.** **`ActionRequest` gains `intended_action`, an `Identifier | None` defaulting to
 > `None`** — the `IntendedAction` (ADR-0265 §1) the step this request serves is an attempt at,
@@ -473,10 +472,9 @@ completeness condition would refuse the proposal carrying it.
 > price"*, which is feasibility rather than a restriction on the tool.
 >
 > **A fault is never an absence.** Where the read behind §6's quotes fails, the request is treated
-> as **not covered** and the fault is reported; **no implementation converts a fault into an
-> absence of quotes** and none falls through to the argument route, which is the distinction
-> ADR-0254 already draws between `AuthorizationError` and absence and is what lets a ruling say
-> *no record* rather than *a record that did not cover*.
+> as **not covered** and the fault is reported; **no implementation converts a fault into an absence
+> of quotes** and none falls through to the argument route — ADR-0254's own distinction between
+> `AuthorizationError` and absence.
 
 > **Normative — the argument route, available only where the declaration declares, and it never
 > stands in for a quote.** A member of kind *k* is met by it where the declaration carries
@@ -494,7 +492,7 @@ completeness condition would refuse the proposal carrying it.
 > charge"*. A `PERIOD` or a `TERMS` member — which §4 mints none of — is met by this route alone.
 > **Where a value is supplied into a declared money argument as a safeguard, its source is the
 > member's own `maximum` and there is no other**; which declarations admit such a fill is booked
-> (§10), and until then the two declarations are disjoint by the refusal above.
+> (§10).
 
 > **Normative — ADR-0254 §3's condition 6 is restated, and it keeps both its directions.** An
 > `Authorization` satisfies condition 6 for an `ActionRequest` where **all three** hold: **every
@@ -556,10 +554,10 @@ site for Saturday at `120`/`EUR` over *(site, dates, party)* — which it must, 
 condition being unsatisfiable until it has — and the authorisation phase proposes the row and asks
 **once**: the projection renders *up to 150 euros*, the horizon ADR-0256 §1's ladder yielded, and
 the user's own words beside them. **Yes establishes the row**; the booking request carries the same
-intended action and the same three arguments, the digest matches, `120 ≤ 150`, route (d) `ALLOW`s
-and **no second question is put**. *"Make it Sunday"* replans and the re-quote is `135`: that quote
-governs, `135 ≤ 150`, and **still no question**; a Sunday price of `170` is covered by nothing and
-the user is asked. **One confirmation, in the phase the owner named** — and had §4 read the
+intended action and the same three arguments, the digest matches, `120 ≤ 150`, and route (d)
+`ALLOW`s with **no second question**. *"Make it Sunday"* replans and the re-quote is `135`: that
+quote governs, `135 ≤ 150`, and **still no question**; a Sunday price of `170` is covered by nothing
+and the user is asked. **One confirmation, in the phase the owner named** — and had §4 read the
 polarity of that first turn wrongly, the wrong ceiling would have been on the screen the user
 answered, which is the whole of why the reading needs no rule about the words around the span.
 
@@ -578,15 +576,15 @@ answered, which is the whole of why the reading needs no rule about the words ar
 > audit chain is unprovenanced.
 
 > **Normative — a model contributes exactly one thing to this decision, and it is the span.** An
-> interpretation element's span is checked against that turn's own utterance by ADR-0249 §7, and
-> §4 bounds what a differently chosen one can do in two ways. **The first is total: what a span
-> mints is a `PROPOSED` member the user is shown and answers**, so a span chosen wrongly produces
-> a ceiling on the screen rather than an authority in the store, and the user's no is the whole
-> refusal. **The second is that the table mints a ceiling or nothing**, so a form it does not
-> carry is refused rather than guessed at. **Nothing else a model produces reaches any input of
-> §§1-5 or §7** as a selector or a written value: the argument a member meets is the
-> **declaration's** (§7) and the identifiers are the loop's. **A model names no argument key, no
-> currency key and no identifier anywhere in this decision.**
+> element's span is checked against that turn's own utterance by ADR-0249 §7, and §4 bounds what a
+> differently chosen one can do in two ways. **The first is total: what a span mints is a `PROPOSED`
+> member the user is shown and answers**, so a span chosen wrongly produces a ceiling on the screen
+> rather than an authority in the store, and the user's no is the whole refusal. **The second is
+> that the table mints a ceiling or nothing**, so a form it does not carry is refused rather than
+> guessed at. **Nothing else a model produces reaches any input of §§1-5 or §7** as a selector or a
+> written value: the argument a member meets is the **declaration's** (§7) and the identifiers are
+> the loop's. **A model names no argument key, no currency key and no identifier anywhere in this
+> decision.**
 
 ### 9. What this records against earlier ADRs, clause by clause, under ADR-0082 §1
 
@@ -609,18 +607,17 @@ to remove. §7 restates it over condition 6; its purpose, disposition and cost a
 a **live** row of that goal already carries a member for"*; it is restated as *a later recorded turn
 whose span mints a member of a **kind** a live row of that goal already carries a member of*, its
 liveness requirement, its transcription list and its `origin` rule binding entire. **Path (iii)'s
-trigger and its per-declaration member selection** fire on a turn *"whose span states a fixed value
-or a bound **over an argument of the request being built**"* and rule that *"A row carries members
-for the arguments of its **own** declaration that the act's words bear on, and for no others"*. §5
-above makes the mint read the goal and **no declaration at all**, so members are not selected per
-declaration and two rows of one act carry the same members; §1's own *"up to fifty pounds for the
-train and a hundred for the hotel"* illustration now **mints nothing**, one member per kind reaching
-both `MONEY` constraints. **The limb gets no replacement selection rule** — there is none, and §10
-books the reading that would need one. **And path (iii)'s direct establishment, for a member this
-decision mints alone**: it writes `ESTABLISHED` with `confirmation` unset, and §4 forbids a
-`STATED_BOUND` member from reaching such a row — **which adds no refusal to §10's three ratified
-resolutions** and leaves path (iii) as inert as it is today. **Every other clause of §1 binds
-entire**: the three write paths themselves, the row written before the question is put, the
+trigger and its per-declaration member selection** fire on a span stating a value *"over an argument
+of the request being built"* and rule that *"A row carries members for the arguments of its **own**
+declaration that the act's words bear on"*. §5 above makes the mint read the goal and **no
+declaration at all**, so members are not selected per declaration and two rows of one act carry the
+same members; §1's own *"up to fifty pounds for the train and a hundred for the hotel"* illustration
+now **mints nothing**, one member per kind reaching both `MONEY` constraints. **The limb gets no
+replacement selection rule** — there is none, and §10 books the reading that would need one. **And
+path (iii)'s direct establishment, for a member this decision mints alone**: it writes `ESTABLISHED`
+with `confirmation` unset, and §4 forbids a `STATED_BOUND` member there — **which adds no refusal to
+§10's three ratified resolutions** and leaves path (iii) as inert as today. **Every other clause of
+§1 binds entire**: the three write paths themselves, the row written before the question is put, the
 never-edited coverage, the conditional supersession and §1's other proposal conditions.
 
 **ADR-0254 §2 — in the member's shape and in two further limbs of its `MONEY` currency clause.** §2
@@ -633,11 +630,11 @@ and the quote, gives `maximum` an **exclusivity flag** and validates a `fixed` v
 kind; `maximum` stays required and `minimum` stays optional, §4 minting no floor. **Its depth-one
 clause goes with the field it governs** and is stated once more on `BoundedArgument.argument` (§7).
 **Two further limbs of the `MONEY` currency clause go with `currency_argument`, and the sweep found
-them**: its cross-member refusal — *"Where a record carries a `MONEY` bound and also a `fixed`
-member naming that same `currency_argument`, the fixed value equals the bound's `currency`"* — is
-not constructible once no member names an argument; and its *"**A call whose declaration carries no
-currency argument takes no `MONEY` bound**"* rule is **reversed** by the owner's ruling of
-2026-09-14, such a call taking one and proving it against the quote. **Its no-inference limb is kept
+them**: its cross-member refusal — that a `fixed` member naming the bound's own `currency_argument`
+*"equals the bound's `currency`"* — is not constructible once no member names an argument; and its
+*"**A call whose declaration carries no currency argument takes no `MONEY` bound**"* rule is
+**reversed** by the owner's ruling of 2026-09-14, such a call taking one and proving it against the
+quote. **Its no-inference limb is kept
 and restated one field over**: §7 infers no association from a field name, a type, a schema keyword
 or a neighbour, and reads a currency key only where a `BoundedArgument` declares it. A reader
 holding only §2 authors a member claiming to know which slot it fills, records *"under 100"* as a
@@ -651,17 +648,16 @@ user-facing arguments and the row's coverage name the same set of keys"*, with a
 *"where the row carries a member naming it"*, and §3 ties the two as *"the whole of condition 6"*.
 §7 replaces that whole with two routes and three conjuncts, keeping both of its directions in
 substance. A reader holding only §3 builds a comparison in which a price must be an argument of the
-call, refusing every booking whose price is a consequence of the site and the dates — the failure
-the owner's ruling of 2026-09-14 names. With the `argument` field goes the validator making a row
-whose coverage names a system-supplied argument not constructible; **its rule is preserved** by §7's
-refusal on `bounded_arguments`. And `ToolDefinition` gains **one** further field,
-`bounded_arguments` (§7), so *"`ToolDefinition` gains **one** field"* is over-narrow by one, and a
-reader implementing from §3's inventory alone authors a declaration no member can ever be held
-against. **Every other clause binds entire**: conditions 1-5 — condition 3's by-value declaration
-comparison conspicuously so — the user-facing classification and its empty default, the
-fill-before-the-fit-test and `parameters_digest` clauses, the seam/policy split, the
-coverage-never-widens rule, the resolved-reference clause with its *"a value a tool produced can
-satisfy a bound and can never supply one"* arm, and §7's canonical encoding.
+call, refusing every booking whose price is a consequence of the site and the dates. With the
+`argument` field goes the validator making a row whose coverage names a system-supplied argument not
+constructible; **its rule is preserved** by §7's refusal on `bounded_arguments`. And
+`ToolDefinition` gains **one** further field, `bounded_arguments` (§7), so *"`ToolDefinition` gains
+**one** field"* is over-narrow by one, and a reader implementing from §3's inventory alone authors a
+declaration no member can ever be held against. **Every other clause binds entire**: conditions 1-5
+— condition 3's by-value declaration comparison conspicuously so — the user-facing classification
+and its empty default, the fill-before-the-fit-test and `parameters_digest` clauses, the seam/policy
+split, the coverage-never-widens rule, the resolved-reference clause with its *"a value a tool
+produced can satisfy a bound and can never supply one"* arm, and §7's canonical encoding.
 
 **ADR-0254 §4 — in two limbs of the `MONEY` reading.** Its **currency conjunct** reads *"the request
 carries, at the bound's `currency_argument`, a JSON string equal to the bound's `currency`"*, and
@@ -713,15 +709,14 @@ own kind — never numeric fit, a nomination or a schema. **Its prohibitions bin
 stated.** That clause rules that where the concrete action introduces what the coverage does not
 hold — *"a cost above a `maximum`, a term outside a named set, a destination outside the set, an
 argument no member names"* — *"the request reaches no route (d) and the user is asked"*, and states
-the same limb again on §6's bar for a live row. **A member names no argument once §3 lands, so
-every argument of every request is one no member names and route (d) is unreachable altogether** —
-the mirror of §1's inert proposal. It is restated as **an argument the row does not cover under §7's condition 6**, which keeps its
-whole force — such an argument still asks, and still on §6's bar where a live row exists — and moves
-only its test. **Every other
-limb of clause (iii) binds entire**: the material-ambiguity rule with ADR-0250 §6's three
-conditions and no fewer, the cost above a `maximum`, the term outside a named set and the
-destination outside the set, each still reaching no route (d). **Clause (i) and §9's discard rule
-bind entire.**
+the same limb again on §6's bar for a live row. **A member names no argument once §3 lands, so every
+argument of every request is one no member names and route (d) is unreachable altogether** — the
+mirror of §1's inert proposal. It is restated as **an argument the row does not cover under §7's
+condition 6**, which keeps its whole force — such an argument still asks, and still on §6's bar
+where a live row exists — and moves only its test. **Every other limb of clause (iii) binds
+entire**: the material-ambiguity rule with ADR-0250 §6's three conditions and no fewer, the cost
+above a `maximum`, the term outside a named set and the destination outside the set, each still
+reaching no route (d). **Clause (i) and §9's discard rule bind entire.**
 
 **ADR-0254 §8 and §10 — in the resolution enumeration's closure alone.** Both state
 `ResolutionRule` *"closed at exactly three members"*; §4 adds `STATED_BOUND`. **This is the
@@ -744,8 +739,8 @@ would not render. **`CoverageView` carries `kind`, a `BoundKind`, in its place**
 fields, its two-shape rule and its **required `span`** unchanged — and that span is what §4 rests
 on, §11's own *"a user reading "under sixty pounds" beside a bound of GBP 60 can check the working
 before they answer"* being exactly the mechanism this decision makes the authority.
-**`AuthorizationProjection` and `AuthorizationView` gain no member and lose none.** **Every other
-clause of §11 binds entire**: the rendered-from-the-proposed-row rule and its restart recovery, the
+**`AuthorizationProjection` and `AuthorizationView` are unchanged.** **Every other clause of §11
+binds entire**: the rendered-from-the-proposed-row rule and its restart recovery, the
 possibly-empty coverage, the one-carrier-for-both argument, the rendering bar, and
 `TurnOutcome.authorizations` — whose *"two rows of one act may carry different bounds for an
 argument of the same name"* is stale as §1's illustration is and, being unmarked reason beside a
@@ -766,19 +761,30 @@ the lane attribution of every roster entry, the `core/protocols.py` and `core/er
 *"`core/config.py` gains nothing at all"*, the `PROTOCOL_VERSION` clause and the
 transcribe-the-ruling-whole rule, which is how `intended_action` reaches the record.
 
-**ADR-0254 §20 — in eight of the arms its own landed lanes ship, and in no other clause.** §20
-obliges its lanes to ship the arms enumerated under it, and its Lanes 1 and 3 have landed, so those
-arms are tests in the tree. **Eight are stated over the contract §§3-7 above change**: arm 10 reads
-`bound.currency_argument`, which no bound carries; arms 8, 47, 53 and 54 turn on a record *"naming
-that argument in no member"* and on condition 6 over **key sets**; arm 15's *"naming an argument no
-member covers"* limb and arm 20's *"a member for an argument the act never mentioned"* limb are §5's
-and §9's, restated above; and arm 14's *"make it Sunday"* record fixes an entity **and** terms in
-one row, which one member per kind refuses. **Each is restated over the new shape by L1 and none is
-dropped**: the property each demonstrates is unchanged and only the value it is stated over moves,
-and a reader holding only §20 ships a suite that will not construct. **Two the sweep checked and cleared**: **arm 5** stands verbatim, `maximum_exclusive` defaulting to
-`False` so a bound without it behaves exactly as that arm says; and **arm 14's `TERMS` and `PERIOD`
-members stay constructible**, §2 admitting them and §4 minting none being two different things. **Every other clause of §20 binds entire**: its lane cut, its
-ordering and its every other arm.
+**ADR-0254 §20 — in its arm enumeration, stated as the class rather than as a list, because the list
+is long and a partial one is what two review rounds each found wrong.** §20 obliges its lanes to
+ship the seventy-one arms enumerated under it; Lanes 1 and 3 have landed, so those arms are tests in
+the tree. **The scope is every arm whose statement reads the contract §§3-7 change, and the change
+reaches it by exactly five mechanisms**, each named so the set is decidable rather than enumerated
+from memory: **(i)** a member *naming an argument*, and condition 6 over **key sets** — arms 8, 15,
+20, 47, 53, 54, 59 and 68; **(ii)** a bound's `currency_argument`, and the cross-member refusal that
+a `fixed` member naming it equals the bound's `currency` — arms 10 and 18; **(iii)** a row carrying
+two members of one **kind**, or a `fixed` value the kind validation now refuses — arms 1, 7, 14, 18,
+48 and 64, whose records fix an entity **and** terms, or hold a bare number; **(iv)** a `MONEY`
+member treated as **met without a quote**, and `ResolutionRule`'s closure at three — arms 31, 34,
+44, 45, 46, 49, 57, 60, 66, 67 and 70; and **(v)** a **path-(iii) opening act** minted from a stated
+bound, which §4 forbids — arms 64 and 65, whose *"you may spend up to fifty pounds on this"* is
+exactly this decision's reading. **Every arm reached by one of the five is restated over the new
+shape by the lane that owns it and none is dropped**: the property each demonstrates is unchanged
+and only the value it is stated over moves — the arms of mechanism (iv) mostly keep their outcome
+and gain a quote, and the two of (v) become path-(i) proposals answered once. A reader holding only
+§20 ships a suite that will not construct. **And the arms the sweep checked and cleared, recorded
+with the ground**: **arm 5** stands verbatim, `maximum_exclusive` defaulting to `False`; **arm
+21**'s basis refusals and **arm 35**'s roster assertions are negative and stay true under
+`CoverageView`'s new field; **arm 12**'s `TERMS` set, **arm 11**'s half-open `PERIOD` and **arm
+6**'s float refusal test §4's readings, unmoved; and **`TERMS` and `PERIOD` members stay
+constructible**, §2 admitting a kind and §4 minting none being two different things. **§20's lane
+cut, its wire clause and its dependency clause bind entire.**
 
 **ADR-0016 §1 — in one scope**, and it is the scope ADR-0254 §18 already took there reaching one
 further field: the model declaration, and the required-field clause applied to `bounded_arguments`
@@ -789,8 +795,7 @@ and forgoes only the second check, at the recorded cost that an amount-bearing a
 declared is compared against no member. The exception is taken because requiring the field would
 oblige every declaration and fixture in the tree to write `()`, and because a required field would
 refuse every `PermissionDecision` written before it. **The exception is this one further field on
-this one argument**, no lane reading the two records together as licence to default a third, and
-every other clause of §1 binds entire.
+this one argument**, and every other clause of §1 binds entire.
 
 **And the ones that come out no, deliberately.** **ADR-0255** takes **no** record: §15 item 19's
 gate enumeration is untouched, because §4's proposal rule closes the span-polarity residual at the
@@ -816,9 +821,9 @@ superseded.
 > each carries the condition that fires it.
 
 - **Where a quote is carried, what records one, and how a policy obtains one — the whole of the
-  quote's machinery.** §6 states the four facts §7 reads and states no carrier: no type, no field
-  of any model, no store member, no Protocol, no bound on how many a goal holds, no expiry, and no
-  rule about which component mints one or from what. **Nor whether a quote is still true when the
+  quote's machinery.** §6 states the four facts §7 reads and no carrier: no type, no field of any
+  model, no store member, no Protocol, no bound, no expiry and no rule about which component mints
+  one. **Nor whether a quote is still true when the
   act is performed**, nor what freshness wiring a consequential capability through this route
   therefore requires. **This is the largest thing this decision does not settle**, and until it
   lands §7's evidence route has no operand: every `MONEY` member is unmet, §1's completeness
@@ -833,12 +838,11 @@ superseded.
   supplied as a spending safeguard is the member's own `maximum` (§7), and `bounded_arguments` and
   `system_supplied` being disjoint, no such fill is constructible today. `PlanStep.id` is
   **refused** as the client reference: `_step_ids_are_unique` guarantees uniqueness *"within a
-  plan"* alone. **And which such keys are per-call identity rather than inputs a price depends
-  on**: §3's three examples are not one kind — an idempotency key is identity, a **locale** is a
-  price input — and **this decision draws no line, so §6 excludes nothing from the digest**, at the
-  cost that a declaration filling any of them is covered by no quote and asks; excluding them by
-  kind would let a quote taken under one locale authorise a charge priced under another. Fired by
-  the decision that mints an opaque per-call reference, and by the one that classifies such a key.
+  plan"* alone. **And which such keys are per-call identity rather than inputs a price depends on**:
+  §3's three examples are not one kind — an idempotency key is identity, a **locale** is a price
+  input — and **this decision draws no line, so §6 excludes nothing from the digest**, at the cost
+  that a declaration filling any of them is covered by no quote and asks. Fired by the decision that
+  mints an opaque per-call reference, and by the one that classifies such a key.
 - **What pins an *undeclared* user-facing argument to the user's own act, beyond the quote's
   digest.** §7's third conjunct proves the call is the one **quoted**, not that the user chose each
   quoted argument, and `IntendedAction` cannot close the gap — ADR-0265 §1 gives it *"no fourth
@@ -849,12 +853,11 @@ superseded.
   by the decision that gives an intended action a parameter identity.
 - **What a confirmation renders about a charge, and what an approval given without one covers.**
   Where no quote governs, condition 6 fails, route (d) covers nothing and route (a) asks — and the
-  question the user answers carries the tool and the parameters and **no price**, no clause of
-  this or any ratified decision rendering one. So an approval there is an approval of a call whose
-  charge the user was not shown, and **the ceiling they stated is proved against nothing**; it
-  authorises that one call and establishes no standing authority (§4). This decision makes it no
-  worse and closes none of it. Fired by **the quote decision** (#2387), which lands the carrier a
-  confirmation could render.
+  question the user answers carries the tool and the parameters and **no price**, no clause of this
+  or any ratified decision rendering one. So an approval there is an approval of a call whose charge
+  the user was not shown, and **the ceiling they stated is proved against nothing**; it authorises
+  that one call and establishes no standing authority (§4), and this decision makes it no worse.
+  Fired by **the quote decision** (#2387), which lands the carrier a confirmation could render.
 - **Whether a standing authority is scoped to one intended action.** ADR-0254 §3 keys a row on the
   **goal** and the **declaration** and this decision leaves conditions 1-5 entire, so a ceiling
   confirmed while one intended action was being quoted covers a **second** act of the same goal
@@ -865,23 +868,21 @@ superseded.
   Fired by the decision that gives an `Authorization` an action scope — which would supersede §3's
   conditions 1-5 and add a field to a ratified stored type — or by one stating a budget over a goal.
 - **A stated floor, a negated ceiling, and every other form the table does not carry.** §4's four
-  forms are the whole reading, so *"at least 150 euros"*, *"never spend over 100 euros"*, *"no more
-  than 100 euros"* and *"not over 100 euros"* mint nothing and the act asks. **A negation is an
-  inversion a rule would have to perform on the user's behalf**, and every rule that tried — a
-  vocabulary, an adjacency bar, a whole-clause requirement — was found wrong in the next round; a
-  **floor** additionally needs a fact neither the span nor the kind carries, telling a bound on
-  what the user **pays** from one on what they **receive**. Fired by the decision stating the
-  wider reading with its own totality argument, and for a floor by the one stating what a floor is
-  proved against.
+  forms are the whole reading, so *"at least 150 euros"*, *"never spend over 100 euros"* and *"no
+  more than 100 euros"* mint nothing and the act asks. **A negation is an
+  inversion a rule would have to perform on the user's behalf**, and every rule that tried was found
+  wrong in the next round; a **floor** additionally needs a fact neither the span nor the kind
+  carries, telling a bound on what the user **pays** from one on what they **receive**. Fired by the
+  decision stating the wider reading with its own totality argument, and for a floor by the one
+  stating what a floor is proved against.
 - **Minting a `TERMS` member from an act, and minting a `PERIOD` one.** §4 mints neither, so a
   term the user named and a period they gave are covered by nothing and every call resting on one
   asks. **The ground is §7's rather than a judgement about polarity**: a quote states a price and
   nothing else, so a member of either kind could be proposed and never **met**, and §1's
-  completeness condition would refuse the proposal carrying one. Fired by the decision that gives
-  such a member something to be proved against, and for `PERIOD` additionally by the reader that
-  turns *"Sunday"* into a half-open interval, which **owes ADR-0254 §8's two-zones rule**: such a
-  member's `timezone` is the configured zone as the act's turn read it, never the resolution's own
-  record of it.
+  completeness condition would refuse it. Fired by the decision that gives such a member something
+  to be proved against, and for `PERIOD` additionally by the reader that turns *"Sunday"* into a
+  half-open interval, which **owes ADR-0254 §8's two-zones rule**: such a member's `timezone` is the
+  configured zone as the act's turn read it, never the resolution's own record of it.
 - **A `FROM_SHOWN_RECORD` basis for a coverage member**, which needs an element carrying both a
   span and the record its reference resolved to, and ADR-0249 §1 admits none. Fired by the
   decision that gives an element that shape.
@@ -898,17 +899,16 @@ superseded.
 
 ### 11. The lane cut, and the arms this decision owes
 
-> **Normative.** This decision is implemented in **two lanes and no third**: **L1**, the contract
-> in `core/types.py` **together with the comparison in `permissions`**; and **L2**, the mint in
+> **Normative.** This decision is implemented in **two lanes and no third**: **L1**, the contract in
+> `core/types.py` **together with the comparison in `permissions`**; and **L2**, the mint in
 > `orchestration`. **L1 is two packages and it is one change**: `permissions/_coverage.py` and
 > `permissions/goal_authorizations.py` read `CoverageMember.argument` and
 > `ValueBound.currency_argument`, L1 removes both, and **no compatibility representation is
 > available** (ADR-0084 §3's exact-match posture), so a tree carrying the new shape beside the old
 > comparison conforms to nothing — ADR-0252 §17's shape for a contract lane whose consumer the
-> change forces. **No lane wires a consequential capability** or
-> enables anything in a production deployment (ADR-0254 §17 as ADR-0255 §13 leaves it), and **no
-> lane writes an `Authorization`**. **The bullets below assign each lane its surface and its arms,
-> and no lane is complete without what it is assigned there.**
+> change forces. **No lane wires a consequential capability** (ADR-0254 §17 as ADR-0255 §13 leaves
+> it) and **no lane writes an `Authorization`**. **The bullets below assign each lane its surface
+> and its arms, and no lane is complete without what it is assigned there.**
 
 > **Normative — the wire moves, the export does not, and the stored shapes are read rather than
 > assumed.** **`PROTOCOL_VERSION` moves by exactly one, in L1**, and `wire/envelope.py`'s log
@@ -938,15 +938,14 @@ superseded.
   `CoverageMember`'s `kind`, its kind-validated `fixed` and the removal of `argument`;
   `ValueBound`'s `maximum_exclusive` and the removal of `currency_argument`;
   `ResolutionRule.STATED_BOUND`; `BoundedArgument` and `ToolDefinition.bounded_arguments`;
-  **`CoverageView`'s `kind` in place of its `argument`** (§9); `ActionRequest.intended_action`
-  and **`PermissionDecision`'s transcription of it with `authorises`' sixth conjunct** (§7);
+  **`CoverageView`'s `kind` in place of its `argument`** (§9); `ActionRequest.intended_action` and
+  **`PermissionDecision`'s transcription of it with `authorises`' sixth conjunct** (§7);
   `PROTOCOL_VERSION` with `wire/envelope.py`'s log entry; and §7's two routes, its condition 6 and
-  its lineage narrowing in `permissions/_coverage.py`. **It also restates ADR-0254 §20's arms 8,
-  10, 14, 15, 20, 47, 53 and 54 over the new shape and drops none** (§9). **The evidence route is
-  implemented and is met by no quote**, this decision landing no carrier for one — so every
-  `MONEY` member is unmet, every request carrying an undeclared user-facing argument is uncovered,
-  and the act asks. **`core/protocols.py` is not touched and no Protocol changes**, so no triad is
-  owed. Arms 2(b), 3(b), 4(a), 6(a)'s no-quote limbs and 6(b).
+  its lineage narrowing in `permissions/_coverage.py`. **L1 and L2 between them restate every
+  ADR-0254 §20 arm §9's five mechanisms reach, each in the lane that owns it, dropping none.** **The
+  evidence route is implemented and is met by no quote**, this decision landing no carrier — so
+  every `MONEY` member is unmet and the act asks. **`core/protocols.py` is not touched**, so no
+  triad is owed. Arms 2(b), 3(b), 4(a), 6(a)'s no-quote limbs and 6(b).
 - **L2 — the mint and the request builder, in `orchestration` alone.** §1's candidate selection,
   §2's act and its four refusals, §4's reading, its refusals and its path-(i)-only rule, and §5's
   one-per-kind refusal and goal-only read; **and setting `ActionRequest.intended_action` from the
@@ -993,24 +992,25 @@ superseded.
 3. **Only ceilings, the endpoints, and what a mis-chosen span actually produces.**
    **3(a) mints**, the element's span being the string given: `"under 100 euros"` → `maximum` `100`
    **with** `maximum_exclusive`; `"at most 100 euros"` → the same without it; `"up to 150 euros"` →
-   an inclusive `maximum` of `150`; and `"Under 100 Euros."` → the first of these, case and one
-   trailing stop normalising away. **3(a) mints nothing from a question** — `"under 100 euros?"`
-   and `"Under 100 Euros?"` each carry a `?` and are refused before any other step — **and
-   nothing** from `"at least 150 euros"`, `"more than 150 euros"`, `"over 150 euros"`, `"never
-   spend over 100 euros"`, `"no more than 100 euros"`, `"not over 100 euros"`, `"not exactly 100
-   euros"` and `"never spending over 100 euros"`, none being a form of the table.
-   **And what a wrongly chosen span produces is a proposal and never an authority**: the span
-   `"under 100 euros"` of `"avoid booking hotels under 100 euros"` mints a `MONEY` ceiling of
-   `100`, the row carrying it is written **`PROPOSED`**, its `CoverageView` renders that bound
-   **beside that span**, a `DECLINED` settlement establishes nothing, and **no row of that goal and
-   declaration stands `ESTABLISHED`** afterwards — the same over `"avoid these prices — under 100
-   euros"`, while the same shape over `"up to 150 euros"` of `"Book Riverside if it is dry
-   Saturday, up to 150 euros"` **is** established by a yes. **No path-(iii) opening act carries a
-   `STATED_BOUND` member in any case.** **3(b):** against an exclusive `maximum` of `100` a value
-   of exactly `"100"` does **not** satisfy and against an inclusive one it does. **Both halves are
-   parameterised over the whole of §4's closed reading and not over its illustrations** — every one
-   of the four forms, every currency word and symbol in **both** orders, mixed case, runs of tabs
-   and spaces, and `99.50` as well as `100`.
+   an inclusive `maximum` of `150`; `"Under 100 Euros."` and `"under 100 euros!"` → the first of
+   these, case and **one** trailing stop or bang normalising away; and `"under 100 euros!!"`,
+   `"under 100 euros.."` and `"under 100 euros.!"` mint **nothing**, exactly one trailing character
+   being trimmed. **3(a) mints nothing from a question** — `"under 100 euros?"` and `"Under 100
+   Euros?"` each carry a `?` and are refused before any other step — **and nothing** from `"at least
+   150 euros"`, `"more than 150 euros"`, `"over 150 euros"`, `"never spend over 100 euros"`, `"no
+   more than 100 euros"`, `"not over 100 euros"`, `"not exactly 100 euros"` and `"never spending
+   over 100 euros"`, none being a form of the table. **And what a wrongly chosen span produces is a
+   proposal and never an authority**: the span `"under 100 euros"` of `"avoid booking hotels under
+   100 euros"` mints a `MONEY` ceiling of `100`, the row carrying it is written **`PROPOSED`**, its
+   `CoverageView` renders that bound **beside that span**, a `DECLINED` settlement establishes
+   nothing, and **no row of that goal and declaration stands `ESTABLISHED`** afterwards — the same
+   over `"avoid these prices — under 100 euros"`, while the same shape over `"up to 150 euros"` of
+   `"Book Riverside if it is dry Saturday, up to 150 euros"` **is** established by a yes. **No
+   path-(iii) opening act carries a `STATED_BOUND` member in any case.** **3(b):** against an
+   exclusive `maximum` of `100` a value of exactly `"100"` does **not** satisfy and against an
+   inclusive one it does. **Both halves are parameterised over the whole of §4's closed reading and
+   not over its illustrations** — every one of the four forms, every currency word and symbol in
+   **both** orders, mixed case, runs of tabs and spaces, and `99.50` as well as `100`.
 4. **One member per kind, and the exclusivity ordering at an equal ceiling.** **4(a):** an
    `Authorization` carrying two `MONEY` members is not constructible and one carrying a `MONEY` and
    a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
@@ -1081,12 +1081,12 @@ superseded.
 **A reader acts differently, so this is a decision and not a clarification.** A reader holding the
 corpus without it can write no row carrying a non-empty `coverage`, and would either leave ADR-0254
 §20's Lane 2 stopped where #2373 stopped it or invent an association no clause authorises — the
-standing authority §9 clause (ii) exists to prevent (ADR-0070 §1). **It is a partial supersession
-of exactly two documents** (ADR-0070 §3) — ADR-0254 in **twelve** scopes and ADR-0016 in **one** —
-and the `Status` line of each names its scopes **without an `ADR-NNNN` token inside the
-parentheses**, so ADR-0070 §4's extraction invariant holds. **The twelve were found by one sweep
-and not one review round at a time**, and §9 records with its ground each clause the sweep examined
-and **cleared** — §6's bar, §11's `TurnOutcome.authorizations` reason, §20's arms 5 and 14. **The
+standing authority §9 clause (ii) exists to prevent (ADR-0070 §1). **It is a partial supersession of
+exactly two documents** (ADR-0070 §3) — ADR-0254 in **twelve** scopes and ADR-0016 in **one** — and
+the `Status` line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**,
+so ADR-0070 §4's extraction invariant holds. **The twelve were found by one sweep and not one review
+round at a time**, and §9 records with its ground each clause the sweep examined and **cleared** —
+§6's bar, §11's `TurnOutcome.authorizations` reason, and §20's arms 5, 6, 11, 12, 21 and 35. **The
 records land in the same change as this document** (ADR-0082 §7), and nothing else in either is
 edited — no Decision text is rewritten, which ADR-0070 §1 forbids.
 
