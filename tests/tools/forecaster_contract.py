@@ -41,8 +41,10 @@ subject exhibit are absent and are the concrete forecaster's arms instead:
 * **That §5's drop rules drop what they say.** A day named twice, a day whose offset is
   undeclared, a day over the content bound — none is expressible over a subject whose
   documented response format this suite has never seen.
-* **That §6's three pre-execution checks run before the credential.** A generic suite
-  holds no doubles to look at.
+* **That §6's three pre-execution checks reach no credential and open no channel.**
+  A generic suite holds no doubles to look at. That the checks **refuse** is asserted
+  here, because §6 puts them on ``read`` itself; the *ordering* — before the credential
+  read and before any channel — is each implementation's own arm.
 * **That the declaration is absent from every ``ToolRegistry``.** A property of a
   *composition*, asserted in the wiring's own test where it can be broken.
 
@@ -56,19 +58,34 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import ValidationError
 
+from ai_assistant.core.errors import ToolBindingError
 from ai_assistant.core.protocols import Forecaster
-from ai_assistant.core.types import ForecastOutcome, ForecastRefusal, MemorySource
+from ai_assistant.core.types import (
+    ActionRequest,
+    CostBasis,
+    ForecastOutcome,
+    ForecastRefusal,
+    Idempotency,
+    MemorySource,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
+    Reversibility,
+    RiskLevel,
+    ToolCall,
+    ToolCost,
+    ToolDefinition,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.types import ToolCall, ToolDefinition
     from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The bound every case here passes unless it is about the bound (ADR-0241 §1).
@@ -110,6 +127,37 @@ _MISATTRIBUTED = (
 _NO_EXTENT = (
     "every record a forecast read mints declares a bounded half-open extent over the day "
     "it is about (ADR-0260 §5, ADR-0117 §2). Got {got!r}"
+)
+
+
+#: When the decision the foreign-declaration case carries was taken. Any instant; what
+#: the case is about is the declaration, not the clock.
+_DECIDED_AT: Final = datetime(2026, 9, 4, 11, 30, tzinfo=UTC)
+
+#: A **valid** declaration that is not any forecaster's, for §6's second check. Its
+#: safety fields are deliberately the mildest this repository admits: the case is about
+#: the comparison against the forecaster's own registered original and not about a
+#: declaration a policy would refuse, and a ``ToolCall`` for it is constructible because
+#: its own decision authorises its own request.
+_SOMETHING_ELSE: Final = ToolDefinition(
+    id="not_a_forecast",
+    capability="something_else",
+    description="An act no forecaster registered.",
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.REVERSIBLE,
+    side_effecting=False,
+    reads=(),
+    writes=(),
+    discloses=(),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NATURAL,
+    parameters_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {"note": {"type": "string"}},
+        "required": ["note"],
+        "additionalProperties": False,
+    },
 )
 
 
@@ -612,6 +660,56 @@ class ForecasterContract:
         assert outcome.refusal is refusal
         assert outcome.records == ()
         assert outcome.reported_at is None
+
+    # --- the three checks before the send (ADR-0260 §6) ---------------------
+
+    async def test_a_call_mutated_after_construction_is_refused(self) -> None:
+        """§6's first check, over every implementation: revalidated and **detached**.
+
+        "So a mutation landed after construction cannot survive into the read."
+        ``frozen=True`` refuses ``call.request = …`` and does nothing about
+        ``call.__dict__["request"] = …``, and that bypass is inside this repository's
+        threat model rather than outside it (ADR-0018 §3). An implementation trusting
+        the validator that ran at construction answers the substituted call.
+
+        **A suite clause because §6 puts the checks on ``read``**, not on one
+        implementation of it: a fake that answered a call production would refuse would
+        let a consumer's test pass over an exchange no deployment can have. What each
+        implementation *additionally* owes — that no credential is read and no channel
+        is opened — is its own arm, since a generic suite holds no doubles to look at.
+        """
+        subject = await self.reading(1)
+        rewritten = subject.call.request.model_copy(
+            update={"parameters": {"nothing": "this schema declares"}}
+        )
+        subject.call.__dict__["request"] = rewritten
+
+        with pytest.raises(ToolBindingError):
+            await subject.forecaster.read(subject.call, timeout=subject.timeout)
+
+    async def test_a_call_carrying_another_declaration_is_refused(self) -> None:
+        """§6's second check: compared against the forecaster's **own** declaration.
+
+        The authoritative original here, standing where ADR-0029 §2 puts the registry's,
+        because this integration has an egress registration and no registry entry. The
+        call below is **valid and authorised** — its own decision was recorded over its
+        own request, so the third check would pass it — which is exactly what the second
+        exists to catch: a definition the policy never ruled on, reaching a seam that
+        holds a credential.
+        """
+        subject = await self.reading(1)
+        foreign = ActionRequest(tool=_SOMETHING_ELSE, parameters={"note": "not a forecast"})
+        decision = PermissionDecision.from_request(
+            foreign,
+            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="a different act"),
+            id="d-not-a-forecast",
+            decided_at=_DECIDED_AT,
+        )
+
+        with pytest.raises(ToolBindingError):
+            await subject.forecaster.read(
+                ToolCall(request=foreign, decision=decision), timeout=subject.timeout
+            )
 
     async def test_a_cancelled_read_is_delivered_onward_unchanged(self) -> None:
         """ADR-0060 through this seam: a cancellation is never absorbed (§4).
