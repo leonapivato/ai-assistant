@@ -66,6 +66,24 @@ the **condition label** it came back carrying with the id that label resolves to
 a fourth value: a planner names a position in a sequence it was rendered or returned, and
 this package supplies the name of the thing named. No identifier crosses the seam in
 either direction, in either act.
+
+**ADR-0265 adds two more, and both are that same act again.** §2 has ``orchestration``
+mint an :class:`~ai_assistant.core.types.IntendedAction` for each
+:class:`~ai_assistant.core.types.ProposedAction` a call returned, resolving each of its
+``serves`` **labels** to the ``GoalElement.id`` it names (:func:`recorded_actions`) —
+"ADR-0253 §9's rule decides which [sequence], and this decision states no second rule",
+which is why the letter is a parameter of :func:`_named_elements` and not three bodies.
+§4 then has the loop replace each
+:attr:`~ai_assistant.core.types.PlanStep.intended_action` **action label** with the id
+of the action it selects (:func:`_substituted_actions`). The two dispositions differ and
+the asymmetry is §3's: a ``serves`` label that resolves to nothing is **dropped** and
+the action recorded anyway, because it "gates nothing"; an action label that resolves to
+nothing **refuses the plan**, because it "scopes an effect claim".
+
+**Nothing in this module claims an effect, checks a reuse or retries one** (ADR-0265
+§6, §7). It mints an identity and resolves the references to it; what a claim keyed on
+that identity owes is another decision's, and no clause here is authority for
+dispatching a step, refusing one, or reading an effect row.
 """
 
 from __future__ import annotations
@@ -81,6 +99,7 @@ from ai_assistant.core.types import (
     GoalElement,
     GoalInterpretation,
     Ground,
+    IntendedAction,
     ProposedElement,
 )
 from ai_assistant.orchestration.reads import resolve_label
@@ -96,15 +115,18 @@ if TYPE_CHECKING:
         MemoryRecord,
         PlanInterpretation,
         PlanStep,
+        ProposedAction,
         ProposedUnderstanding,
     )
 
 __all__ = [
+    "ACTIONS_LETTER",
     "CONDITIONS_LETTER",
     "CONSTRAINTS_LETTER",
     "CRITERIA_LETTER",
     "EVIDENCE_LETTER",
     "RecordedUnderstanding",
+    "recorded_actions",
     "recorded_revision",
     "resolved_evidence_row",
     "resolved_ordinal",
@@ -117,6 +139,31 @@ __all__ = [
 CONSTRAINTS_LETTER: Final = "C"
 CRITERIA_LETTER: Final = "S"
 CONDITIONS_LETTER: Final = "D"
+
+#: ADR-0265 §4's fifth label space, over ``GoalBrief.actions``: "the label of the action
+#: at 1-based index *n* of ``GoalBrief.actions`` is the ASCII string ``A`` followed by
+#: *n* in **ASCII** decimal digits ``0``-``9``, with no padding and no sign".
+#:
+#: **``A`` is not ``M``, ``F``, ``C``, ``S``, ``D``, ``E`` or ``G``** — the seven letters
+#: this corpus has already spent — so no lane spells this space with one of them and no
+#: later lane spells another space ``A``.
+#:
+#: **One label space and not two**, where a condition label needs the two-case rule §9
+#: gives it: ``Goal.intended_actions`` is not revised but appended to, and §2's ordering
+#: records this call's actions **before** the plan's labels are resolved, so "the action
+#: label indexes ``GoalBrief.actions`` extended by this call's ``PlannerOutput.actions``
+#: in order" is the goal's own tuple read after the minting, with nothing to map.
+ACTIONS_LETTER: Final = "A"
+
+#: Which tuple of a revision each of ADR-0249 §9's three letters names. It is the letter
+#: read as a **sequence selector** rather than as a discriminator between three
+#: near-identical bodies, which is what lets one resolution serve a ``retains``, a
+#: condition label and an ADR-0265 §3 ``serves`` entry alike.
+_TUPLES_BY_LETTER: Final[Mapping[str, str]] = {
+    CONSTRAINTS_LETTER: "constraints",
+    CRITERIA_LETTER: "criteria",
+    CONDITIONS_LETTER: "conditions",
+}
 
 #: ADR-0252 §10's fourth label space, over the ``evidence`` sequence ADR-0249 §7 put on
 #: the same seam: "the label of the digest at 1-based index *n* of ``Planner.plan``'s
@@ -748,6 +795,129 @@ def _positions(group: Sequence[GoalElement | None]) -> tuple[int | None, ...]:
     return tuple(mapped)
 
 
+def recorded_actions(
+    goal: Goal,
+    proposed: Sequence[ProposedAction],
+    *,
+    understanding: ProposedUnderstanding | None,
+    positions: Mapping[str, tuple[int | None, ...]],
+    id_factory: Callable[[], str],
+) -> tuple[IntendedAction, ...]:
+    """Mint one :class:`IntendedAction` per proposal, resolving its links (§2, §3).
+
+    **``orchestration`` mints the ``id``, once, at the instant the action is first
+    recorded** (ADR-0265 §2), and this is that instant. A
+    :class:`~ai_assistant.core.types.ProposedAction` carries **no id** — "a planner
+    names no identifier and mints none" — so a value a model wrote is discarded
+    structurally rather than by a rule someone remembered, exactly as a revision
+    number is. **No later revision re-mints one**, and "the only route to a new
+    ``IntendedAction`` is a ``ProposedAction`` recorded by"
+    ``PlanStore.record_intended_actions``.
+
+    **``serves`` resolves by ADR-0253 §9's rule, unchanged, and this decision states no
+    second one** (§3). Each entry is a ``C``, ``S`` or ``D`` label of the sequence in
+    force on this call — the understanding's own tuples where it proposed one, the
+    brief's where it did not (:func:`_named_elements`) — and is replaced by the
+    :attr:`~ai_assistant.core.types.GoalElement.id` that label resolves to. **No
+    identifier crosses the seam in either direction.**
+
+    **A label that resolves to nothing is dropped and the action is recorded anyway**
+    (§3). An ordinal outside the range, a value that is not such a label, a label
+    naming an element ADR-0249 §7 dropped, and a label naming an element carrying no
+    ``id`` each resolve to nothing and are omitted; the surviving links keep their
+    proposed order. **An action all of whose labels drop is recorded with an empty
+    ``serves`` and is a well-formed intended action** — not a refusal, and not a
+    degraded record. The asymmetry against §4's refusal for a step's action label is
+    exact: "``serves`` gates nothing, so losing an entry costs legibility; a step's
+    action label scopes an effect claim, so losing one would cost a dispatch nothing
+    could recognise".
+
+    **Nothing here derives an action, compares two by their ``serves``, or reads a
+    link's staleness** (§1, §3). The record is minted because a planner proposed it,
+    and ``serves`` is provenance: it "links, and never identifies".
+
+    **The bound is the store's** (§1, §5). This function mints what it was handed;
+    ``record_intended_actions`` refuses a minting that would carry the goal past
+    ``MAX_INTENDED_ACTIONS``, refuses it **whole**, and is the one authority for that
+    figure. A second check here would be a second authority that can drift from it.
+
+    Args:
+        goal: The goal **after this call's understanding, if any, was recorded**, so
+            its current revision holds the elements a ``serves`` label resolves to and
+            the ids they were minted with a moment earlier.
+        proposed: What this call proposed, in the order it proposed it. Empty means the
+            planner proposes no new intended action, which is "the semantically correct
+            answer for a planner that knows nothing of this envelope" and is never read
+            as an error, a degradation or an instruction to re-plan.
+        understanding: What this same call proposed, or ``None``. It is what decides
+            which sequence a ``serves`` label indexes, and no other value does.
+        positions: Which position of the recorded tuple each **proposed** position
+            produced (:class:`RecordedUnderstanding`). Empty where no understanding was
+            recorded, and unread there.
+        id_factory: Mints each action's ``id``. Required and undefaulted for
+            :func:`recorded_revision`'s reason one record over: the minter is
+            ``orchestration``, and an id that arrived from anywhere else would be an
+            identity no component could vouch for.
+
+    Returns:
+        One :class:`~ai_assistant.core.types.IntendedAction` per proposal, in the
+        proposed order, each carrying the links that resolved and nothing else.
+    """
+    named: dict[str, tuple[GoalElement | None, ...]] = {}
+
+    def elements(letter: str) -> tuple[GoalElement | None, ...]:
+        """The sequence one letter indexes on this call, resolved at most once."""
+        if letter not in named:
+            named[letter] = _named_elements(
+                goal, letter, understanding=understanding, positions=positions
+            )
+        return named[letter]
+
+    return tuple(
+        IntendedAction(
+            id=id_factory(),
+            intent=action.intent,
+            serves=tuple(
+                resolved
+                for label in action.serves
+                if (resolved := _resolved_link(label, elements)) is not None
+            ),
+        )
+        for action in proposed
+    )
+
+
+def _resolved_link(
+    label: str, elements: Callable[[str], tuple[GoalElement | None, ...]]
+) -> str | None:
+    """Resolve one ``serves`` label to the id of the element it names, or to nothing.
+
+    **The letter decides which sequence, and every other way of failing lands alike**
+    (§3). A label carrying none of ADR-0249 §9's three letters resolves to nothing
+    without a sequence being consulted at all; one carrying a letter is an ordinal into
+    that letter's sequence and resolves by :func:`resolved_ordinal`, which refuses a
+    zero-padded ordinal, one below 1, one beyond the tuple's length and one of more
+    digits than any sequence could have. An element the loop dropped, and one carrying
+    no ``id``, resolve to nothing on the far side of that.
+
+    Args:
+        label: What the planner named. Model-supplied text, treated as a label and
+            never as an identifier (ADR-0228 §8).
+        elements: How to reach one letter's sequence, resolved at most once per letter.
+
+    Returns:
+        The element's identifier, or ``None``.
+    """
+    for letter in _TUPLES_BY_LETTER:
+        if not label.startswith(letter):
+            continue
+        group = elements(letter)
+        index = resolved_ordinal(label, letter, len(group))
+        element = None if index is None else group[index]
+        return None if element is None else element.id
+    return None
+
+
 def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and one parameter per sequence a value on it resolves against; every one is a distinct fact and a bundle would mint a type for an argument list
     plan: ActionPlan,
     *,
@@ -757,7 +927,7 @@ def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and on
     supply: Sequence[MemoryRecord],
     minted: Collection[str],
 ) -> ActionPlan:
-    """Substitute each condition label for an element id, or refuse the plan (§9).
+    """Substitute each label the plan carries for an id, or refuse it (§9, ADR-0265 §4).
 
     **"The loop resolves the label, once, and the planner never does"** (ADR-0253 §9).
     Every :attr:`~ai_assistant.core.types.StepCondition.about` and every
@@ -768,6 +938,13 @@ def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and on
     after this same call's understanding has been recorded and its element ids minted,
     after ADR-0249 §8's ``targets_revision`` stamp, and before the plan is persisted,
     driven or interpreted.
+
+    **ADR-0265 §4's** :attr:`~ai_assistant.core.types.PlanStep.intended_action` **is
+    resolved in the same act** (:func:`_substituted_actions`), because §2's step (d)
+    names the three together and for the same reason: a label the loop left standing is
+    a value the store would have to read as an identifier. It resolves against the
+    goal's ``intended_actions`` as this call's own minting (step (b)) left them, and
+    refuses the plan where it resolves to nothing.
 
     **Which sequence a label indexes is decided by the envelope and by nothing else**
     (§9). Where the call returned an ``understanding``, the label indexes **that
@@ -809,9 +986,11 @@ def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and on
 
     Args:
         plan: The plan this call returned, already stamped (ADR-0249 §8).
-        goal: The goal **as it stands after this call's understanding was recorded**,
-            so ``interpretation[-1]`` is the revision the plan targets and the one
-            whose elements carry the ids substituted in.
+        goal: The goal **as it stands after this call's understanding and its actions
+            were recorded** (ADR-0265 §2's steps (a) and (b)), so
+            ``interpretation[-1]`` is the revision the plan targets and the one whose
+            elements carry the ids substituted in, and ``intended_actions`` is the
+            sequence an ``A`` label indexes.
         understanding: What this same call proposed, or ``None`` where it proposed no
             change. It is what decides which sequence is in force, and no other value
             does.
@@ -825,21 +1004,56 @@ def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and on
             ADR-0231 §16 rules *"resolves in no store"*.
 
     Returns:
-        The plan with every condition label replaced by the id it resolves to, or the
-        plan itself where it named none.
+        The plan with every condition label and every action label replaced by the id
+        it resolves to, or the plan itself where it named none of either.
 
     Raises:
-        PlanningError: If any label resolves to nothing, or an interpretation carrying
-            a ``record`` names one this call did not pass.
+        PlanningError: If any condition label or action label resolves to nothing, or
+            an interpretation carrying a ``record`` names one this call did not pass.
     """
     _refuse_an_unpassed_record(plan, supply=supply, minted=minted)
+    substituted = _substituted_conditions(
+        plan, goal=goal, understanding=understanding, positions=positions
+    )
+    # ADR-0265 §4's own substitution, taken in the same act and immediately after: §2's
+    # step (d) resolves "each `StepCondition.about`, each `PlanInterpretation.settles`
+    # and each `PlanStep.intended_action`" together, "before any other component
+    # observes the plan". Ordering the condition labels first keeps ADR-0253 §9's
+    # refusal exactly where it was on every plan that names no action.
+    return _substituted_actions(substituted, goal=goal)
+
+
+def _substituted_conditions(
+    plan: ActionPlan,
+    *,
+    goal: Goal,
+    understanding: ProposedUnderstanding | None,
+    positions: Mapping[str, tuple[int | None, ...]],
+) -> ActionPlan:
+    """Substitute each ``D`` label for an element id, or refuse the plan (ADR-0253 §9).
+
+    Args:
+        plan: The plan this call returned, already stamped.
+        goal: The goal after this call's understanding was recorded.
+        understanding: What this same call proposed, or ``None``.
+        positions: Which position of the recorded tuple each proposed position produced.
+
+    Returns:
+        The plan with every condition label replaced, or the plan itself where it named
+        none.
+
+    Raises:
+        PlanningError: If any condition label resolves to nothing.
+    """
     labels = frozenset(
         [condition.about for step in plan.steps for condition in step.when]
         + [one.settles for one in plan.interpretations]
     )
     if not labels:
         return plan
-    elements = _named_conditions(goal, understanding=understanding, positions=positions)
+    elements = _named_elements(
+        goal, CONDITIONS_LETTER, understanding=understanding, positions=positions
+    )
     resolved: dict[str, str] = {}
     unresolved: list[str] = []
     for label in sorted(labels):
@@ -868,33 +1082,118 @@ def substituted_plan(  # noqa: PLR0913 — the plan, the goal it targets, and on
     )
 
 
-def _named_conditions(
+def _substituted_actions(plan: ActionPlan, *, goal: Goal) -> ActionPlan:
+    """Substitute each step's ``A`` label for an intended action id, or refuse (§4).
+
+    **"The loop resolves it once"** (ADR-0265 §4), "under ADR-0253 §9's identical
+    discipline — taken by the loop, taken once, immediately on return, in place of
+    whatever came back". A planner *selects* from the supply the brief rendered and
+    never invents: it "mints no action here and names no identifier".
+
+    **The sequence is the goal's own ``intended_actions``, read after this call's
+    minting** (§4). "The action label indexes ``GoalBrief.actions`` extended by this
+    call's ``PlannerOutput.actions`` in order, and that is the whole of it" — and §2's
+    ordering records this call's actions at step (b), before this substitution at step
+    (d), so that extended sequence **is** the tuple this function reads. There is no
+    two-case rule and no ``positions`` map: ``Goal.intended_actions`` is appended to
+    rather than revised, so no member of it was ever dropped on the way in.
+
+    **An action label that resolves to nothing refuses the plan** (§4). An ordinal
+    outside the range, and every value that is not such a label — ``A0``, ``A01``,
+    ``A+1``, ``a1``, ``A 1``, ``A1 ``, a non-ASCII digit, ``banana`` — resolves to
+    nothing through :func:`resolved_ordinal`, which parses this space exactly as it
+    parses the other four and so repairs, pads and case-folds nothing. The plan is not
+    handed to ``save_plan``, no step of it is dispatched and no interpretation of it is
+    performed. **No lane drops the field instead**, because "a step whose action was
+    dropped is a step whose effect claim would be scoped to nothing" — the fail-open
+    direction ADR-0253 §9 refuses for a dropped condition for the same reason.
+
+    §4's third unresolvable population, "a label naming an action carrying no ``id``",
+    has no case here and needs none: :attr:`IntendedAction.id` is required, so a member
+    of this tuple carrying none is not constructible.
+
+    Args:
+        plan: The plan, with its condition labels already substituted.
+        goal: The goal as it stands **after** this call's actions were recorded.
+
+    Returns:
+        The plan with every step's action label replaced by the id it resolves to, or
+        the plan itself where no step named one.
+
+    Raises:
+        PlanningError: If any action label resolves to nothing.
+    """
+    labels = frozenset(
+        step.intended_action for step in plan.steps if step.intended_action is not None
+    )
+    if not labels:
+        return plan
+    actions = goal.intended_actions
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+    for label in sorted(labels):
+        index = resolved_ordinal(label, ACTIONS_LETTER, len(actions))
+        if index is None:
+            unresolved.append(label)
+        else:
+            resolved[label] = actions[index].id
+    if unresolved:
+        msg = (
+            f"plan {plan.id} names {', '.join(unresolved)}, which "
+            f"{'resolves' if len(unresolved) == 1 else 'resolve'} to no intended "
+            f"action of goal {plan.goal_id}, which holds {len(actions)}: a label that "
+            f"resolves to nothing refuses the plan, which is neither saved nor driven "
+            f"(ADR-0265 §4)"
+        )
+        raise PlanningError(msg)
+    return plan.model_copy(
+        update={
+            "steps": tuple(
+                step
+                if step.intended_action is None
+                else step.model_copy(update={"intended_action": resolved[step.intended_action]})
+                for step in plan.steps
+            )
+        }
+    )
+
+
+def _named_elements(
     goal: Goal,
+    letter: str,
     *,
     understanding: ProposedUnderstanding | None,
     positions: Mapping[str, tuple[int | None, ...]],
 ) -> tuple[GoalElement | None, ...]:
-    """The sequence a ``D`` label indexes on this call, one entry per position (§9).
+    """The sequence one letter's label indexes on this call, one entry per position (§9).
 
     Where the call proposed an understanding, the sequence is **that understanding's
-    own ``conditions``** and each position holds the element it produced in the
-    recorded revision, or ``None`` where ADR-0249 §7 dropped it. Where it proposed
-    none, the sequence is the brief's, which ``GoalBrief.of`` projects one-for-one from
-    the goal's current revision — so the revision's own tuple is that same sequence
-    with nothing dropped and nothing to map.
+    own** tuple and each position holds the element it produced in the recorded
+    revision, or ``None`` where ADR-0249 §7 dropped it. Where it proposed none, the
+    sequence is the brief's, which ``GoalBrief.of`` projects one-for-one from the
+    goal's current revision — so the revision's own tuple is that same sequence with
+    nothing dropped and nothing to map.
+
+    **The letter is a parameter because ADR-0265 §3 reads all three.** ADR-0253 §9's
+    condition label reads one; a ``ProposedAction.serves`` entry is "a ``C``, ``S`` or
+    ``D`` label of the sequence in force on that call", resolved by "ADR-0253 §9's
+    rule … and this decision states no second rule". One body is what makes that one
+    rule rather than two agreeing ones.
 
     Args:
         goal: The goal after this call's understanding, if any, was recorded.
+        letter: Which of ADR-0249 §9's three letters the label carries.
         understanding: What this call proposed, or ``None``.
         positions: The proposal-to-revision correspondence.
 
     Returns:
         One entry per label position: the element it names, or ``None``.
     """
-    recorded = goal.interpretation[-1].conditions
+    name = _TUPLES_BY_LETTER[letter]
+    recorded: tuple[GoalElement, ...] = getattr(goal.interpretation[-1], name)
     if understanding is None:
         return recorded
-    produced = positions.get("conditions", ())
+    produced = positions.get(name, ())
     return tuple(
         None if kept is None or kept >= len(recorded) else recorded[kept] for kept in produced
     )
