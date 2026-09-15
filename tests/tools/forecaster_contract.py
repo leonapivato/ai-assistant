@@ -38,9 +38,18 @@ subject exhibit are absent and are the concrete forecaster's arms instead:
   arbitrary provider fail, so it pins that each class is *returned* rather than raised,
   and not that ``TRANSPORT_FAILED`` is reached from a refused connection or
   ``UNATTESTED`` from a response declaring no instant.
-* **That §5's drop rules drop what they say.** A day named twice, a day whose offset is
-  undeclared, a day over the content bound — none is expressible over a subject whose
-  documented response format this suite has never seen.
+* **That §5's drop rules drop what they say.** A day whose offset is undeclared, a day
+  over the content bound, a day whose transcribed span carries a line break — none is
+  expressible over a subject whose documented response format this suite has never seen.
+  **The duplicate rule is the exception, and it is here**: its consequence is stateable
+  without seeing a response at all — a provider that names one day and only that day,
+  twice, has described no day once, so §5 drops both rows and the read yields
+  ``NO_RESULT``. It is here because ADR-0260 §13(b-prime) names it as the clause an
+  implementation gets wrong by *ordering* (capping before it counts), and because a
+  canonical fake that minted the first of the two rows is scriptable into a state no
+  response can put a production forecaster in — which is a consumer's suite passing over
+  an answer no deployment can produce. What each implementation still owes its own arms
+  is which days survive beside a duplicate, and both encounter orders.
 * **That §6's three pre-execution checks reach no credential and open no channel.**
   A generic suite holds no doubles to look at. That the checks **refuse** is asserted
   here, because §6 puts them on ``read`` itself; the *ordering* — before the credential
@@ -100,6 +109,17 @@ _WAIT_SECONDS: Final = 5.0
 _OVER_THE_COUNT = (
     "a forecast read mints at most the `forecast_max_days` it was configured with "
     "(ADR-0260 §5, §11). Configured for {bound}, got {count}"
+)
+
+#: What a failure of the duplicate case means (ADR-0260 §5, §13(b-prime)). A forecaster
+#: that minted anything from a response naming one day twice has preferred one of the
+#: provider's rows over another, which is the one thing §5's duplicate clause forbids in
+#: terms — and the shape §13(b-prime) says an implementation reaches by capping before it
+#: counts.
+_KEPT_A_DUPLICATE = (
+    "a day the provider names more than once is dropped in every one of its rows, so a "
+    "response naming one day twice and no other yields NO_RESULT (ADR-0260 §5). Got "
+    "{count} record(s)"
 )
 
 #: What a failure of the attestation case means (ADR-0260 §5, ADR-0092 §3). The record's
@@ -236,6 +256,19 @@ class ForecasterContract:
         applied — so a harness asked for more than the count it configured must prepare a
         subject that was offered them, and let the subject drop the excess. A harness that
         clipped ``days`` itself would be answering the question this suite is asking.
+
+        Called once per case that needs it, so each gets a fresh subject.
+        """
+        raise NotImplementedError
+
+    async def naming_one_day_twice(self) -> ScriptedRead:
+        """Override with a subject whose provider names **one** day, twice, and no other.
+
+        Both rows are the provider's own and neither is malformed: what makes them
+        droppable is only that they name one day between them. A harness that prepared
+        two *different* days, or a day beside a malformed row, would be answering a
+        different question — so the subject's whole response is the duplicate pair, and
+        the case can then assert the refusal rather than count records.
 
         Called once per case that needs it, so each gets a fresh subject.
         """
@@ -572,6 +605,31 @@ class ForecasterContract:
             bound=bound, count=len(outcome.records)
         )
         assert outcome.records
+
+    async def test_a_day_named_twice_is_dropped_in_every_one_of_its_rows(self) -> None:
+        """§5: "A day the response names more than once is dropped in **every one of its
+        rows**".
+
+        "Whether they agree or conflict: the response has not described that day once,
+        and preferring one row over another would be this system deciding what the
+        provider said." **That is not a deduplication** — nothing is merged and no row is
+        preferred — so a provider naming one day twice and no other has described no day,
+        and the read yields ``NO_RESULT`` rather than one record.
+
+        **Asserted over the refusal and not over a record count**, which is what makes it
+        stateable for every implementation: an implementation that kept the first row
+        would answer with one record, and one that merged them would answer with one
+        record too, so the surviving member tells both apart from the clause without this
+        suite knowing what either row said.
+        """
+        subject = await self.naming_one_day_twice()
+
+        outcome = await subject.forecaster.read(subject.call, timeout=subject.timeout)
+
+        assert outcome.refusal is ForecastRefusal.NO_RESULT, _KEPT_A_DUPLICATE.format(
+            count=len(outcome.records)
+        )
+        assert outcome.records == ()
 
     async def test_every_minted_record_is_an_attested_external_semantic(self) -> None:
         """§5's minting clause, every conjunct a suite can read off a record.

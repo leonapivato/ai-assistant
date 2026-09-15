@@ -136,6 +136,17 @@ class TestFakeForecasterContract(ForecasterContract):
         forecaster, call = await _prepared(days=_days(days))
         return ScriptedRead(forecaster=forecaster, call=call)
 
+    async def naming_one_day_twice(self) -> ScriptedRead:
+        # Two well-formed scripted rows naming one day between them, and nothing else:
+        # both are short enough for the content bound and each would be minted alone, so
+        # what drops them is only that the script named their day twice.
+        script = (
+            forecast_day(2026, 9, 5, offset=timedelta(hours=1), content="one"),
+            forecast_day(2026, 9, 5, offset=timedelta(hours=1), content="the other"),
+        )
+        forecaster, call = await _prepared(days=script)
+        return ScriptedRead(forecaster=forecaster, call=call)
+
     async def refusing(self, refusal: ForecastRefusal) -> ScriptedRefusal:
         forecaster, call = await _prepared(refusal=refusal)
         return ScriptedRefusal(forecaster=forecaster, call=call, timeout=A_BOUND)
@@ -485,6 +496,101 @@ async def test_the_fake_caps_what_survived_and_not_what_was_scripted() -> None:
     outcome = await forecaster.read(call, timeout=A_BOUND)
 
     assert [record.content for record in outcome.records] == ["fine"]
+
+
+async def test_the_fake_drops_every_row_of_a_day_the_script_named_twice() -> None:
+    """ADR-0260 §5: "A day the response names more than once is dropped in **every one of
+    its rows**".
+
+    Asserted over the canonical fake because the obligation is the *contract's*: a fake
+    that minted the first of two rows naming one day would be scriptable into a state no
+    response can put the production forecaster in, and a consumer's suite would pass over
+    an answer no deployment can produce. The siblings are still minted, which is what
+    makes this a drop rather than a failure.
+    """
+    first = forecast_day(2026, 9, 5, content="one")
+    again = forecast_day(2026, 9, 5, content="the other")
+    sibling = forecast_day(2026, 9, 6, content="fine")
+
+    forecaster, call = await _prepared(days=(first, sibling, again))
+    outcome = await forecaster.read(call, timeout=A_BOUND)
+
+    assert [record.content for record in outcome.records] == ["fine"]
+
+
+async def test_the_fake_drops_a_day_named_twice_in_two_declared_offsets() -> None:
+    """§5's key is the day the provider **named**, not the instant that day starts at.
+
+    The two rows lie in different offsets, so their extents differ by an hour and a fake
+    keying on :attr:`ScriptedDay.extent` would count two days and mint both — the clause
+    read backwards. The production forecaster reads its key off the row's own ``date``
+    field, independently of the offset, and this is that property at the canonical fake.
+    """
+    here = forecast_day(2026, 9, 5, offset=timedelta(hours=1), content="one")
+    there = forecast_day(2026, 9, 5, offset=timedelta(hours=2), content="the other")
+
+    forecaster, call = await _prepared(days=(here, there))
+    outcome = await forecaster.read(call, timeout=A_BOUND)
+
+    assert outcome.refusal is ForecastRefusal.NO_RESULT
+    assert outcome.records == ()
+
+
+async def test_the_fake_drops_a_duplicate_that_sits_beyond_its_cap() -> None:
+    """ADR-0260 §13(b-prime): the duplicate drop is **before** the cap.
+
+    "An implementation capping before it looks for duplicates mints the first row and
+    passes every arm that keeps the duplicate inside the cap." Four days and a cap of
+    three: the second naming of the first day sits fourth, so a fake that sliced first
+    would never see it and would mint a day its script described twice.
+    """
+    script = (
+        forecast_day(2026, 9, 5, content="d0"),
+        forecast_day(2026, 9, 6, content="d1"),
+        forecast_day(2026, 9, 7, content="d2"),
+        forecast_day(2026, 9, 5, content="d0 again"),
+    )
+
+    forecaster, call = await _prepared(days=script, max_days=3)
+    outcome = await forecaster.read(call, timeout=A_BOUND)
+
+    assert [record.content for record in outcome.records] == ["d1", "d2"]
+
+
+async def test_the_fake_counts_a_named_day_before_it_drops_on_the_content_bound() -> None:
+    """§5's duplicate clause meeting its content clause, which are two drops and one day.
+
+    The oversized row is dropped on its own account and still **named** its day, so the
+    ordinary row is a second description of a day the script described twice. A fake
+    applying the content bound before counting the names would keep the ordinary one,
+    which is this system preferring one of the provider's rows over another.
+    """
+    ordinary = forecast_day(2026, 9, 5, content="short")
+    oversized = forecast_day(2026, 9, 5, content="x" * (_SMALL_CONTENT_BOUND + 1))
+    sibling = forecast_day(2026, 9, 6, content="fine")
+
+    forecaster, call = await _prepared(days=(ordinary, oversized, sibling))
+    outcome = await forecaster.read(call, timeout=A_BOUND)
+
+    assert [record.content for record in outcome.records] == ["fine"]
+
+
+def test_a_scripted_day_whose_extent_is_not_its_named_day_is_unconstructable() -> None:
+    """The pair is one fact, so a script cannot put a day's content outside its own day.
+
+    ADR-0260 §5 computes an extent "from the day the provider named and the UTC offset the
+    provider's own response declared for it, and from nothing else" — so the two fields
+    are recoverable from each other and a mismatch is a record placing a day somewhere its
+    own date does not lie. Refused at construction, because a fake that took it would mint
+    evidence ADR-0252 §3 would compose a window from that no response can produce.
+    """
+    elsewhere = forecast_day(2026, 9, 9).extent
+
+    with pytest.raises(ValueError, match="ADR-0260"):
+        ScriptedDay(content="misplaced", extent=elsewhere, named=(2026, 9, 5))
+
+    with pytest.raises(ValueError, match="calendar"):
+        ScriptedDay(content="no such day", extent=elsewhere, named=(2026, 2, 30))
 
 
 def test_the_default_answer_is_three_dated_days_each_declaring_its_own_offset() -> None:

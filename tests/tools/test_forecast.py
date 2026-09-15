@@ -1614,6 +1614,18 @@ class TestForecastEgressContract(ForecasterContract):
         forecaster, call = await self._prepared(channels=[answering(*rows)])
         return ScriptedRead(forecaster=forecaster, call=call)
 
+    async def naming_one_day_twice(self) -> ScriptedRead:
+        # Two well-formed rows of the documented format naming one day between them, and
+        # nothing else: each would be minted alone — distinct contents, both inside the
+        # small content bound — so what drops them is only that the response named their
+        # day twice.
+        rows = [
+            day(date="2026-09-05", conditions="c0"),
+            day(date="2026-09-05", conditions="c1"),
+        ]
+        forecaster, call = await self._prepared(channels=[answering(*rows)])
+        return ScriptedRead(forecaster=forecaster, call=call)
+
     async def refusing(self, refusal: ForecastRefusal) -> ScriptedRefusal:
         forecaster, call = await self._refusing(refusal)
         # ADR-0241 §4's member is the one a *bound* reaches rather than a script, so the
