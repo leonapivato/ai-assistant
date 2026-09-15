@@ -235,6 +235,29 @@ async def test_the_listing_renders_no_identifier_but_the_revocation_handle(
     assert row.subject_digest not in shown
 
 
+async def test_the_panel_labels_the_goal_with_what_the_listing_returned(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0254 §11: the **engine** reads the goal's statement and the surface renders
+    *that*.
+
+    The goal listing this panel is opened from is a page of summaries fetched earlier, so
+    a statement revised in between would leave the panel labelling this goal's authorities
+    with the goal's previous outcome — a divergence no test can see while both values are
+    seeded the same. Here they are seeded **differently**, and what is on screen is the
+    one the listing operation answered with. Adversarial review, round 1, ``blocker``.
+    """
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        drive.engine.goal_statements[GOAL_ID] = "Book the campsite — now for six people."
+
+        await _open_authorities(drive)
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("now for six people")
+        assert OUTCOME not in await panel.inner_text()
+
+
 async def test_a_goal_with_nothing_standing_says_so_rather_than_showing_a_blank(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
@@ -324,6 +347,66 @@ async def test_a_withdrawal_that_moves_nothing_reports_what_the_store_found(
         await expect(said).to_contain_text("nothing was withdrawn")
         await expect(said).to_contain_text("declining it")
         assert await said.evaluate("(node) => node.className") == "notice"
+
+
+async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """ADR-0254 §11's handle is put in front of the owner *at the act*, so the act taken
+    there has to report there.
+
+    The panel's own slot is inside a section an owner who has never opened it cannot
+    see — and before this fix, pressing an announcement's control mutated the store and
+    wrote the settlement into that invisible node: the act working and the owner told
+    nothing, which is the opposite of §11's reason for carrying the handle at all.
+    Adversarial review, round 1, ``blocker``.
+
+    **The panel is never opened in this case**, deliberately: that is the state the
+    defect lived in.
+    """
+    rail = ToolDefinition.model_validate(AUTHORIZATION_TOOL.model_dump() | {"id": "rail"})
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.hold_authorization(
+            opening_act(id="auth-train", goal=GOAL_ID, tool=rail), goal_statement=STATEMENT
+        )
+        drive.engine.authorizations = (_view("auth-train", rail, money_bound("50")),)
+        await drive.page.fill("#utterance", "up to fifty for the train")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+        asked = _answering(drive, accept=True)
+
+        await drive.page.click("#answer-body button:has-text('Withdraw this')")
+        await asyncio.wait_for(asked, timeout=10)
+
+        beside = drive.page.locator("#answer-body .authorization-said")
+        await expect(beside).to_be_visible()
+        await expect(beside).to_contain_text("Withdrawn.")
+        await expect(drive.page.locator("#authorizations")).to_be_hidden()
+        assert [name for name, _ in drive.engine.calls if "authoriz" in name] == [
+            "revoke_authorization"
+        ]
+
+
+async def test_a_withdrawal_from_an_announcement_that_moves_nothing_reports_beside_it(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The same, on the refusal: a settlement that moved nothing is still a settlement
+    the owner is owed, and it is owed where they took the act.
+    """
+    rail = ToolDefinition.model_validate(AUTHORIZATION_TOOL.model_dump() | {"id": "rail"})
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        drive.engine.authorizations = (_view("auth-nobody", rail, money_bound("50")),)
+        await drive.page.fill("#utterance", "up to fifty for the train")
+        await drive.page.click("#ask-button")
+        await drive.page.wait_for_selector("#answer:not([hidden])")
+        asked = _answering(drive, accept=True)
+
+        await drive.page.click("#answer-body button:has-text('Withdraw this')")
+        await asyncio.wait_for(asked, timeout=10)
+
+        beside = drive.page.locator("#answer-body .authorization-said")
+        await expect(beside).to_be_visible()
+        await expect(beside).to_contain_text("no record of that id")
 
 
 # --- §11 at the question -------------------------------------------------------

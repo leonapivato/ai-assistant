@@ -553,6 +553,24 @@ class StepDisposition:
             The channel is declared with the carrier it feeds so that the writer, when
             it lands, announces by filling this rather than by growing a second
             mechanism.
+        proposed: The `Authorization` this drive wrote ``PROPOSED`` against the recorded
+            `CONFIRM` — ADR-0254 §1's path (i) — or ``None`` where it proposed none.
+
+            **Carried rather than read back, because the read would be fallible work
+            after the park is durable.** ADR-0244 §1 states in terms that a turn whose
+            step parks *"does not park, is not suspended and does not fail"*, and
+            :meth:`Engine._confirmation`'s own contract is that *"no fallible work
+            remains between parking the step and offering its token"* (#287). A store
+            read taken there could raise **after** ``→ AWAITING_APPROVAL`` was
+            committed, stranding a parked step without a continuation — so the row
+            travels on the disposition instead, from the one place that already holds
+            it. §11's projection is a **transcription** of this row, so nothing is lost
+            by carrying the row rather than re-resolving it.
+
+            The recovery path has no disposition to carry one and reads the store
+            instead, which is where a store fault is already part of the operation's
+            contract (:meth:`Engine._recovered_confirmation`). Adversarial review,
+            round 1, ``blocker``.
     """
 
     disposition: Disposition
@@ -565,6 +583,7 @@ class StepDisposition:
     establishing: EstablishingAnswer | None = None
     outbound: OutboundReach | None = None
     opened: tuple[Authorization, ...] = ()
+    proposed: Authorization | None = None
 
 
 type Ruled = Callable[[PermissionDecision], Awaitable[None]]
@@ -911,9 +930,19 @@ class StepRunner:
             # A `CONFIRM` is the one outcome that parks the step: it is committed
             # `PENDING → AWAITING_APPROVAL` with `bound_tool`, durably, and
             # `resume` takes the human's answer when it arrives (ADR-0037 §4).
+            # ADR-0254 §11's projection is rendered from this row, and the read is taken
+            # **here** — before the park below is durable — rather than at the
+            # rendering, where it would be fallible work after the commit (see
+            # `StepDisposition.proposed`).
+            proposed = await self._proposed_row(decision.id)
             queued = await self._queue_for_approval(state, step, tool.id)
             return StepDisposition(
-                Disposition.AWAITING_CONFIRMATION, queued, decision.id, tool.id, decision=decision
+                Disposition.AWAITING_CONFIRMATION,
+                queued,
+                decision.id,
+                tool.id,
+                decision=decision,
+                proposed=proposed,
             )
         # A `DENY` is recorded in one commit, straight from `PENDING`
         # (ADR-0037 §5, ADR-0041). The policy refused on its own authority with
@@ -1768,6 +1797,49 @@ class StepRunner:
             authorization_id=row.id,
             supersedes=row.supersedes is not None,
         )
+
+    async def _proposed_row(self, confirmation_id: str) -> Authorization | None:
+        """The row :meth:`_propose` just wrote against this `CONFIRM`, or ``None``.
+
+        **Read here rather than at the rendering, because of where the park is.**
+        :meth:`Engine._confirmation`'s standing contract is that *"no fallible work
+        remains between parking the step and offering its token"* (#287) — everything
+        that could raise happens before ``run`` commits ``AWAITING_APPROVAL``, so a
+        parked step is never stranded without a continuation. A store read taken while
+        assembling the confirmation would sit on the wrong side of that line, and on the
+        read path it would make an already-parked turn fail, which ADR-0244 §1 forbids
+        in terms. So the read is taken on **this** side of the park and travels on the
+        disposition. Adversarial review, round 1, ``blocker``.
+
+        **Keyed by the derived id and through §16's** ``resolve`` (issue #2375), which
+        is the mechanism :func:`~ai_assistant.orchestration.authorizing.
+        authorization_id_for` exists for: one `CONFIRM` proposes at most one row, so no
+        store signature is added, no page is walked and no ordering is assumed.
+
+        **A fault costs the disclosure and never the turn.** ADR-0254 §1 already rules
+        the outcome of proposing no row — *"`Confirmation.authorization` is absent
+        (§11), and the answer establishes nothing"* — and a row that was written but
+        could not be read back is the same state from the surface's side. The refusal is
+        logged **by class and by no value** (ADR-0145 §8), the store's messages being
+        about rows rather than about arguments.
+
+        Args:
+            confirmation_id: The recorded ``CONFIRM``'s own id.
+
+        Returns:
+            The row, or ``None`` where none was proposed or the store could not answer.
+        """
+        if self._authorizations is None:
+            return None
+        try:
+            return await self._authorizations.resolve(authorization_id_for(confirmation_id))
+        except AuthorizationError as exc:
+            _log.warning(
+                "authorization_projection_unread",
+                confirmation_id=confirmation_id,
+                refused_by=type(exc).__name__,
+            )
+            return None
 
     async def _settle(
         self, confirmed: PermissionDecision, resolving: PermissionDecision, *, approved: bool
