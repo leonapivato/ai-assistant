@@ -16,6 +16,7 @@ from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationSettlement,
+    BoundKind,
     Goal,
     GoalInterpretation,
     Ground,
@@ -167,7 +168,12 @@ async def _over(
 
 
 def test_a_coverage_view_transcribes_the_member_and_carries_the_span_alone() -> None:
-    """§11: the argument, the fixed value or the bound, and the user's own words.
+    """§11: the **kind**, the fixed value or the bound, and the user's own words.
+
+    **The kind stands where the argument key used to** (ADR-0266 §9's §11 scope): a
+    member records what the user stated and never which slot it fills, so a required
+    ``argument`` would have to be transcribed from nothing and no projection would be
+    constructible for any member at all.
 
     **And nothing of the basis but the span**: the act it rests on, the rule that
     resolved it, the ``now`` that was read and the record it resolved to are provenance
@@ -176,19 +182,19 @@ def test_a_coverage_view_transcribes_the_member_and_carries_the_span_alone() -> 
     row = authorization(
         coverage=(
             coverage_member(
-                "amount",
+                BoundKind.MONEY,
                 bound=money_bound("60"),
                 basis=authorization_basis(span="under sixty pounds"),
             ),
             coverage_member(
-                "site", fixed="A", basis=authorization_basis(span="the one by the lake")
+                BoundKind.TERMS, fixed="A", basis=authorization_basis(span="the one by the lake")
             ),
         )
     )
 
     views = coverage_views(row)
 
-    assert [one.argument for one in views] == ["amount", "site"]
+    assert [one.kind for one in views] == [BoundKind.MONEY, BoundKind.TERMS]
     assert views[0].bound is not None
     assert views[0].bound.maximum == Decimal("60")
     assert views[0].fixed is None
@@ -574,24 +580,32 @@ async def test_a_goal_the_plan_store_does_not_hold_is_an_empty_answer() -> None:
 
 
 async def test_each_coverage_view_in_the_listing_carries_the_members_span() -> None:
-    """§20 arm 61's last clause, over all three bound kinds and a fixed value."""
+    """§20 arm 61's last clause, over all three bound kinds.
+
+    **Three members and not four**, which is ADR-0266 §3 rather than a narrowing of
+    the arm: no two members of one row carry the same kind, so a row states at most
+    one thing about an amount, one about a period and one about a set of terms. The
+    property the arm demonstrates — that every member's span reaches the listing, in
+    the record's own order — is unchanged.
+    """
     operations, store, _ = await _over()
     await _settled(
         store,
         coverage=(
             coverage_member(
-                "amount", bound=money_bound("60"), basis=authorization_basis(span="under sixty")
+                BoundKind.MONEY,
+                bound=money_bound("60"),
+                basis=authorization_basis(span="under sixty"),
             ),
             coverage_member(
-                "when", bound=period_bound(), basis=authorization_basis(span="this weekend")
+                BoundKind.PERIOD,
+                bound=period_bound(),
+                basis=authorization_basis(span="this weekend"),
             ),
             coverage_member(
-                "terms",
+                BoundKind.TERMS,
                 bound=terms_bound("refundable"),
                 basis=authorization_basis(span="only if I can cancel"),
-            ),
-            coverage_member(
-                "site", fixed="A", basis=authorization_basis(span="the one by the lake")
             ),
         ),
     )
@@ -602,7 +616,11 @@ async def test_each_coverage_view_in_the_listing_carries_the_members_span() -> N
         "under sixty",
         "this weekend",
         "only if I can cancel",
-        "the one by the lake",
+    ]
+    assert [one.kind for one in view.coverage] == [
+        BoundKind.MONEY,
+        BoundKind.PERIOD,
+        BoundKind.TERMS,
     ]
 
 
@@ -696,12 +714,12 @@ async def test_an_act_that_opened_two_authorities_announces_two() -> None:
     train = opening_act(
         id="auth-train",
         tool=AUTHORIZATION_TOOL.model_copy(update={"id": "rail"}),
-        coverage=(coverage_member("amount", bound=money_bound("50")),),
+        coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("50")),),
     )
     hotel = opening_act(
         id="auth-hotel",
         tool=AUTHORIZATION_TOOL.model_copy(update={"id": "hotels"}),
-        coverage=(coverage_member("amount", bound=money_bound("100")),),
+        coverage=(coverage_member(BoundKind.MONEY, bound=money_bound("100")),),
     )
     operations, _, _ = await _over()
 

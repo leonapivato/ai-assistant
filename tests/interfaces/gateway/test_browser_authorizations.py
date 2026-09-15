@@ -31,6 +31,7 @@ from playwright.async_api import expect
 from ai_assistant.core.types import (
     AuthorizationProjection,
     AuthorizationView,
+    BoundKind,
     CoverageView,
     GoalStatus,
     GoalSummary,
@@ -97,7 +98,7 @@ def _view(row_id: str, tool: ToolDefinition, bound: ValueBound) -> Authorization
         id=row_id,
         goal_statement=STATEMENT,
         tool=tool,
-        coverage=(CoverageView(argument="amount", bound=bound, span="what you said"),),
+        coverage=(CoverageView(kind=BoundKind.MONEY, bound=bound, span="what you said"),),
         expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
         live=True,
     )
@@ -124,12 +125,12 @@ def _seed(drive: Drive, *, lapsed: bool = False) -> None:
             goal=GOAL_ID,
             coverage=(
                 coverage_member(
-                    "amount",
+                    BoundKind.MONEY,
                     bound=money_bound("50"),
                     basis=authorization_basis(span="up to fifty pounds"),
                 ),
                 coverage_member(
-                    "terms",
+                    BoundKind.TERMS,
                     bound=terms_bound("refundable"),
                     basis=authorization_basis(span="only if I can cancel"),
                 ),
@@ -206,12 +207,55 @@ async def test_the_listing_puts_what_one_goal_authorises_on_the_screen(
         panel = drive.page.locator("#authorizations")
         await expect(panel).to_contain_text(STATEMENT)
         await expect(panel).to_contain_text(AUTHORIZATION_TOOL.id)
-        await expect(panel).to_contain_text("amount: up to 50 GBP")
+        await expect(panel).to_contain_text("the amount: up to 50 GBP")
         await expect(panel).to_contain_text('from what you said: "up to fifty pounds"')
-        await expect(panel).to_contain_text("terms: one of: refundable")
+        await expect(panel).to_contain_text("the terms: one of: refundable")
         await expect(panel).to_contain_text("It still stands")
         await expect(panel).to_contain_text("id: auth-1")
         await expect(panel.get_by_role("button", name="Withdraw this")).to_be_visible()
+    assert complaints == []
+    assert thrown == []
+
+
+@pytest.mark.parametrize("viewport", _VIEWPORTS)
+async def test_a_strict_ceiling_is_on_the_screen_as_one_and_never_as_an_inclusive_one(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """ADR-0266 §3, driven: *"under 100"* and *"at most 100"* stopped being one value.
+
+    **A page that said "up to" for both would show the owner a limit a cent wider than
+    the one they hold** — the permissive direction ADR-0254 §2's asymmetry names, on
+    the surface §11 exists to make the working checkable on. Driven rather than
+    asserted over the bytes because what is at issue is the sentence a person reads.
+    """
+    complaints: list[str] = []
+    thrown: list[str] = []
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.page.on("pageerror", lambda error: thrown.append(str(error)))
+        drive.page.on("console", lambda message: _note(message, complaints))
+        drive.engine.goal_summaries = [_summary()]
+        drive.engine.hold_authorization(
+            opening_act(
+                id="auth-1",
+                goal=GOAL_ID,
+                coverage=(
+                    coverage_member(
+                        BoundKind.MONEY,
+                        bound=money_bound("100", maximum_exclusive=True),
+                        basis=authorization_basis(span="under 100 euros"),
+                    ),
+                ),
+                expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
+            ),
+            goal_statement=STATEMENT,
+        )
+
+        await _open_authorities(drive)
+
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("the amount: under 100 GBP")
+        await expect(panel).to_contain_text('from what you said: "under 100 euros"')
+        assert "up to" not in await panel.inner_text()
     assert complaints == []
     assert thrown == []
 
@@ -726,12 +770,12 @@ async def test_a_record_whose_id_carries_a_control_character_is_still_restated(
                 "tool_description": AUTHORIZATION_TOOL.description,
                 "coverage": [
                     {
-                        "argument": "amount",
+                        "kind": "money",
                         "fixed": None,
                         "bound": {
                             "kind": "money",
                             "currency": "GBP",
-                            "currency_argument": "currency",
+                            "maximum_exclusive": False,
                             "maximum": "50",
                             "minimum": None,
                             "starts_at": None,
@@ -891,12 +935,12 @@ async def test_a_malformed_bound_is_reported_rather_than_rendered(
                 "tool_description": AUTHORIZATION_TOOL.description,
                 "coverage": [
                     {
-                        "argument": "amount",
+                        "kind": "money",
                         "fixed": None,
                         "bound": {
                             "kind": "money",
                             "currency": None,
-                            "currency_argument": None,
+                            "maximum_exclusive": False,
                             "maximum": None,
                             "minimum": None,
                             "starts_at": None,
@@ -951,12 +995,12 @@ async def test_a_bound_carrying_another_kinds_field_is_reported(
                 "tool_description": AUTHORIZATION_TOOL.description,
                 "coverage": [
                     {
-                        "argument": "amount",
+                        "kind": "money",
                         "fixed": None,
                         "bound": {
                             "kind": "money",
                             "currency": "GBP",
-                            "currency_argument": "currency",
+                            "maximum_exclusive": False,
                             "maximum": "50",
                             "minimum": None,
                             "starts_at": None,
@@ -1011,12 +1055,12 @@ async def test_a_period_bound_without_its_zone_is_reported_rather_than_rendered(
                 "tool_description": AUTHORIZATION_TOOL.description,
                 "coverage": [
                     {
-                        "argument": "when",
+                        "kind": "period",
                         "fixed": None,
                         "bound": {
                             "kind": "period",
                             "currency": None,
-                            "currency_argument": None,
+                            "maximum_exclusive": False,
                             "maximum": None,
                             "minimum": None,
                             "starts_at": "2026-08-29T00:00:00+00:00",
@@ -1099,7 +1143,7 @@ async def test_the_confirmation_says_what_answering_would_leave_standing(
             authorization=AuthorizationProjection(
                 coverage=(
                     CoverageView(
-                        argument="amount", bound=money_bound("50"), span="up to fifty pounds"
+                        kind=BoundKind.MONEY, bound=money_bound("50"), span="up to fifty pounds"
                     ),
                 ),
                 expires_at=AUTHORIZATION_NOW + timedelta(hours=1),
@@ -1111,7 +1155,7 @@ async def test_the_confirmation_says_what_answering_would_leave_standing(
 
         row = drive.page.locator("#confirmation-list .confirmation-row")
         await expect(row).to_contain_text("Answering yes also leaves a standing authority")
-        await expect(row).to_contain_text("amount: up to 50 GBP")
+        await expect(row).to_contain_text("the amount: up to 50 GBP")
         await expect(row).to_contain_text('from what you said: "up to fifty pounds"')
         above = await drive.page.evaluate(_PROJECTION_IS_ABOVE_THE_CONTROL)
         assert above is True
@@ -1126,7 +1170,9 @@ _PROJECTION_IS_ABOVE_THE_CONTROL = """
 () => {
   const row = document.querySelector('#confirmation-list .confirmation-row');
   const lines = [...row.querySelectorAll('p')].filter(
-    (one) => one.textContent.includes('standing authority') || one.textContent.includes('amount:')
+    (one) =>
+      one.textContent.includes('standing authority') ||
+      one.textContent.includes('the amount:')
   );
   const control = row.querySelector('button');
   const top = control.getBoundingClientRect().top;

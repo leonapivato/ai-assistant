@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     AuthorizationSettlement,
     AuthorizationView,
     BoundAccount,
+    BoundKind,
     Confirmation,
     CoverageView,
     SecretName,
@@ -148,7 +149,11 @@ def test_the_settlement_vocabulary_carries_nothing_beyond_its_four_members() -> 
 
 def _view(**overrides: Any) -> dict[str, Any]:
     """The keyword arguments of a well-formed :class:`CoverageView`."""
-    return {"argument": "amount", "bound": money_bound(), "span": "up to sixty pounds"} | overrides
+    return {
+        "kind": BoundKind.MONEY,
+        "bound": money_bound(),
+        "span": "up to sixty pounds",
+    } | overrides
 
 
 def test_a_coverage_view_fixes_a_value_or_states_a_bound_and_never_both() -> None:
@@ -174,12 +179,13 @@ def test_a_coverage_view_requires_the_span() -> None:
 
 
 @pytest.mark.parametrize("model", [AuthorizationProjection, AuthorizationView])
-def test_no_projection_carries_two_views_of_one_argument(model: type[BaseModel]) -> None:
-    """ADR-0254 §2's rule, transcribed rather than restated.
+def test_no_projection_carries_two_views_of_one_kind(model: type[BaseModel]) -> None:
+    """ADR-0254 §2's rule as ADR-0266 §3 restates it, transcribed rather than restated.
 
-    §2 forbids two members of one record naming one argument, and §11 makes these views
-    a *transcription* of that record's coverage — so a projection carrying two views for
-    one argument is a mis-transcription and the shape a reading surface would need a
+    §2 forbids two members of one record being about one thing the user said — the
+    **kind**, once a member names no argument — and §11 makes these views a
+    *transcription* of that record's coverage, so a projection carrying two views of
+    one kind is a mis-transcription and the shape a reading surface would need a
     precedence rule to render.
     """
     twice = (CoverageView(**_view()), CoverageView(**_view(span="and no more than sixty")))
@@ -191,7 +197,7 @@ def test_no_projection_carries_two_views_of_one_argument(model: type[BaseModel])
             "tool": AUTHORIZATION_TOOL,
             "live": True,
         }
-    with pytest.raises(ValidationError, match="name the same argument"):
+    with pytest.raises(ValidationError, match="carry the same kind"):
         model(**common)
 
 

@@ -8264,11 +8264,18 @@ def test_the_act_is_offered_in_the_panel_and_named_in_a_reply() -> None:
 def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     """ADR-0254 §2 gives every kind a required set, and a bag test admits none of them.
 
-    A money bound whose amount, currency and currency key are all ``null`` passed a
-    field-by-field optional test and rendered as ``up to null``; a terms bound with an
-    empty set rendered as ``one of:``. Those are states ``ValueBound`` itself refuses, so
-    a page presenting them shows a limit the record does not carry. Adversarial review,
+    A money bound whose amount and currency are both ``null`` passed a field-by-field
+    optional test and rendered as ``up to null``; a terms bound with an empty set
+    rendered as ``one of:``. Those are states ``ValueBound`` itself refuses, so a page
+    presenting them shows a limit the record does not carry. Adversarial review,
     round 5, ``major``.
+
+    **``currency_argument`` is gone and ``maximum_exclusive`` stands in its place**
+    (ADR-0266 §3): which key carries the currency is the declaration's and never the
+    bound's, while whether the ceiling itself is permitted is a fact about the bound
+    that the sentence reads — so the required set moves rather than shrinks. A money
+    bound arriving without it would render *"under 100"* as *"up to 100"*, which is a
+    limit a cent wider than the record's.
 
     **An unknown kind still reports rather than refusing the whole view**, which is
     ``boundSentence``'s own arrangement for a hub at another version.
@@ -8278,7 +8285,11 @@ def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     assert 'bound.kind === "money"' in reader
     assert "isText(bound.maximum)" in reader
     assert "isText(bound.currency)" in reader
-    assert "isText(bound.currency_argument)" in reader
+    assert 'typeof bound.maximum_exclusive === "boolean"' in reader
+    # And a flag belonging to the money shape is refused on the other two, which is
+    # the `absent` rule reaching a field a `null` test cannot see (a `bool` is not
+    # `null`).
+    assert reader.count("bound.maximum_exclusive !== true") == 2
     assert 'bound.kind === "period"' in reader
     assert "isText(bound.starts_at)" in reader
     assert "isText(bound.ends_at)" in reader

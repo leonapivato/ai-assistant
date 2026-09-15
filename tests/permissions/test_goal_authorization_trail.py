@@ -35,6 +35,7 @@ from ai_assistant.core.errors import InvalidAuthorisationError
 from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationSettlement,
+    BoundKind,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -65,8 +66,11 @@ def established(**overrides: object) -> Authorization:
     scripted: dict[str, object] = {
         "id": "a1",
         "coverage": (
-            coverage_member("site", fixed=SITE),
-            coverage_member("amount", bound=money_bound("60")),
+            # **Two members of two kinds** (ADR-0266 §3), which is what a row may
+            # carry: one per kind and no two of one. The fixed one is stated at
+            # ``TERMS`` because that is the kind whose reading compares a string.
+            coverage_member(BoundKind.TERMS, fixed=SITE),
+            coverage_member(BoundKind.MONEY, bound=money_bound("60")),
         ),
     }
     scripted.update(overrides)
@@ -673,7 +677,9 @@ class TestTheAccountAndDestinationChecksAreNotThePayloadComparison:
         from authorization_builders import account_member  # noqa: PLC0415 — one case needs it
 
         row = established(
-            id="a3", destinations=(account_member(),), coverage=(coverage_member("x", fixed=1),)
+            id="a3",
+            destinations=(account_member(),),
+            coverage=(coverage_member(BoundKind.TERMS, fixed="x"),),
         )
         held = _Trail(path, row)
         settled = await held.authorizations.resolve("a3")
