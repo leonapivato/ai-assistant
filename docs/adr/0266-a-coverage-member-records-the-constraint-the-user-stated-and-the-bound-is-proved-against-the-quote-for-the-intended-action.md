@@ -34,18 +34,6 @@
   ratified limb would make route (d) unreachable altogether — its force unchanged and every other
   limb binding entire. **Every other clause of all nine sections binds entire**, §9 naming them
   section by section.
-- **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md)
-  — **one scope, and it is a count.** §15 item 19 enumerates what §13's rule requires before a
-  consequential capability is wired and closes that enumeration in terms, at six. §11 adds a
-  **seventh**, binding any capability reachable through route (d) with a member this decision
-  mints: a mechanical test of the polarity of the clause a span was taken from, or a span contract
-  that makes a span unable to carry a polarity its surrounding text does not. A reader holding
-  only item 19 wires an integration after six and is wrong — *"avoid these prices — under 100
-  euros"* mints a ceiling the user's own words refuse, so route (d) can `ALLOW` inside an
-  authority they never gave — and **the gate's existing guarantees do not reach it**, verification
-  reporting the completed charge and cancellation compensating the attempt while neither makes the
-  pre-execution permission decision valid, which is §13's own test. §13's rule binds verbatim, its
-  own two prerequisites are unchanged, and what grows is the gate's total.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -242,20 +230,25 @@ the request's `tool` against the row's **by value** and this decision leaves it 
 established about one declaration covers a call made under another in no case — the rebinding #54
 closed, unweakened. What a member survives is an argument renamed inside one declaration, and §1's
 write-before-the-question rule is untouched, a member needing **no argument when it is written**.
-### 4. The reading: how a span becomes a value or a bound, and it is total at every step
+### 4. The reading: how a span becomes a bound, and it is total at every step
 
 > **Normative — `core/types.py` gains a fourth `ResolutionRule`, `STATED_BOUND`, taking neither
 > argument.** The span is read **as a bound**. ADR-0254 §19 books *"A fourth `ResolutionRule`"*
 > by name and this decision is what fires it; §10's other three are untouched and are still the
 > only readings that produce a **value**.
 
+> **Normative — the span is the act's whole recorded utterance, and a proper part of one mints
+> nothing.** Fold both to lower case, collapse runs of ASCII whitespace to one space and trim one
+> trailing `.`, `!` or `?` from each — normalisation *"part of the resolution … recorded with
+> it"* (ADR-0254 §10), never applied at the comparison. **No member of any kind is minted unless
+> the element's `span`, so normalised, is **equal** to the act's own `TurnResult.utterance` so
+> normalised** — equal as a whole string, not contained in it. A model chooses the span; where it
+> chooses a proper part, this decision reads nothing and the act asks.
+
 > **Normative — the `STATED_BOUND` table is closed, is stated here whole, and is the entire
-> reading.** The span is matched **in full** — after ASCII case-folding and collapsing runs of
-> ASCII whitespace to one space, which is normalisation *"part of the resolution … recorded with
-> it"* (ADR-0254 §10) and never applied at the comparison — against exactly these forms, in
-> which `<amount>` is a decimal figure ADR-0254 §4's `MONEY` reading accepts together with one
-> word of the currency table below, in either order:
->
+> reading.** The normalised utterance is matched **in full** against exactly these forms, in which
+> `<amount>` is a decimal figure ADR-0254 §4's `MONEY` reading accepts together with one word of
+> the currency table below, in either order:
 >
 > - **exclusive** — `under <amount>`, `below <amount>`;
 > - **inclusive** — `<not> over <amount>`, `<not> above <amount>`, `<not> more than <amount>`,
@@ -271,75 +264,39 @@ write-before-the-question rule is untouched, a member needing **no argument when
 > 100"* excludes it.
 >
 > The currency table is `euro`/`euros`/`eur`/`€` → `EUR`, `dollar`/`dollars`/`usd`/`$` → `USD`,
-> `pound`/`pounds`/`gbp`/`£` → `GBP`. **A span matching no form mints no member**, and no lane
-> adds a form, a currency or a language without its own ratified decision.
+> `pound`/`pounds`/`gbp`/`£` → `GBP`. **An utterance matching no form mints no member**, and no
+> lane adds a form, a currency or a language without its own ratified decision.
 
 > **Normative — `<not>` is adjacent to its comparator, and the admitted prefix is closed at two
 > tokens.** `<not>` is **one** token of the negation vocabulary — closed at `not`, `never`, `no`,
 > `without`, `don't`, `doesn't`, `didn't`, `won't` and `can't` — optionally followed by **exactly
 > one** token of the spending vocabulary — closed at `spend`, `pay`, `go`, `charge` and `cost` —
 > and by **nothing else** before the comparator. **Every member of both vocabularies is a whole
-> token under the normalisation stated above**, which folds case and collapses whitespace and
-> splits nowhere else, so the contractions are listed as the words they are and no clause asks a
-> reader to find `n't` inside `don't`. So *"never spend over 100 euros"* matches `<not> over
-> <amount>` and mints a **`maximum`** of `100`, which is the owner's own illustration of this
-> rule, and the inversion is the user's own arithmetic rather than a direction read into words
-> that do not carry one. **Everything else the negation might govern mints nothing**: *"never
-> notify me about charges over 100 euros"* carries four tokens between the negation and the
-> comparator and is not a spending ceiling; *"not 100 euros"* and *"not exactly 100 euros"* state
-> no direction at all; a **second** negation token inside the prefix takes the span out of every
-> form; and an inflected spending word (*"never spending over 100 euros"*) is not a member of the
-> closed set.
->
-> **The negated rows read because their own negation is inside the span they match**, which the
-> clause below is stated over.
+> token under the normalisation above**, so the contractions are listed as the words they are and
+> no clause asks a reader to find `n't` inside `don't`. *"Never spend over 100 euros"* therefore
+> matches `<not> over <amount>` and mints an **inclusive `maximum`** of `100`, which is the
+> owner's own illustration, the inversion being the user's arithmetic rather than a direction read
+> into words that do not carry one. **Everything else the negation might govern mints nothing**:
+> *"never notify me about charges over 100 euros"* carries four tokens between the negation and
+> the comparator; *"not 100 euros"* and *"not exactly 100 euros"* state no direction; a **second**
+> negation token inside the prefix takes the utterance out of every form; and an inflected
+> spending word (*"never spending over 100 euros"*) is not a member of the closed set.
 
-> **Normative — the span must be a whole clause of the act's utterance, and a proper part of one
-> mints nothing.** Fold and tokenise the act's own recorded utterance as above, then split it into
-> **clauses** at every `,`, `;`, `!`, `?`, at an em or en dash, and at a `.` that does **not**
-> stand between two ASCII digits — the exception being what keeps *"under 99.50 euros"* one
-> clause rather than two — discarding empty segments and trimming each. **No member of any kind
-> is minted unless the element's `span`, folded the
-> same way, is equal to exactly one of those clauses** — equal as a whole string, not contained in
-> one — **and that clause occurs exactly once in the utterance.** Two equal clauses admit two
-> conforming answers and `GoalElement.span` is **text and not an offset**, so nothing on the
-> record says which the model meant; a span equal to no clause is a **proper part** of one, and a
-> proper part carries whatever polarity the rest of its clause supplies.
+**Equality is what makes the polarity total, and it is the answer eleven review rounds of
+narrowing did not reach.** A model chooses the span, and every intermediate rule — a negation
+vocabulary, a bar on any negation before the span, a requirement that the span be a whole clause —
+was narrower than the class, because **each left text around the span that the rule had to
+understand and could not**: *"avoid booking hotels under 100 euros"* states a **floor** in a word
+no vocabulary carries, and its substring reads as a ceiling of `100`. **With equality there is no
+such text.** The reading is taken over the entire turn the user wrote and matched in full, so a
+form matches or nothing is minted. The Alternatives record the four narrowings this replaces.
 
-**What the clause rule closes, stated plainly because nine review rounds have found a new
-instance of one class each time.** An earlier draft refused only the truncations a closed negation
-vocabulary could see and argued that whatever survived was harmless *because a ceiling can only
-restrict*. **That argument is false**: *"avoid booking hotels under 100 euros"* states a **floor**
-in a word no vocabulary carries, and its substring *"under 100 euros"* reads as a ceiling of `100`
-— permission to spend in exactly the region the user excluded. A ceiling is safe only where the
-clause it came from was about a ceiling, which is a property **of the clause and not of the
-substring**, so requiring the span to *be* a clause closes every truncation of one. The cost is
-that a bound inside a longer clause mints nothing and the act asks — *"I want somewhere nice and
-under 150 euros please"* is one clause and matches no form — while *"Book Riverside if it is dry
-Saturday, up to 150 euros"* still reads.
-
-> **Normative — the polarity a *neighbouring* clause supplies is not established by any rule of
-> this decision, and the residual is stated rather than closed.** The reading above establishes
-> the polarity of the clause the span **is**; **nothing in this decision establishes the polarity
-> an earlier clause supplies to a later one except through the negation vocabulary**, so
-> *"avoid these prices — under 100 euros"* mints an exclusive `maximum` of `100` though its first
-> clause refuses exactly that region. **No lane closes this by extending the vocabulary**: *avoid*
-> admits *skip*, *steer clear of* and *rather not*, each of which the next enumeration misses, and
-> every narrowing this decision has tried has been narrower than the class. **What bounds it is
-> §7 and §11, not §4**: a member so minted can only ever **restrict what a call may cost** within
-> the figure the user themselves uttered, it discharges ADR-0181 §5's lineage floor in no case
-> (§7), and no lane of this decision wires a consequential capability at all (§11). §10 books the
-> closure with what fires it, and **ADR-0249 §7 owns it** — its span check is a containment test,
-> never a check of what the model meant, and that is the clause this residual belongs to.
-
-> **Normative — a negation standing before the span's clause refuses every reading, not only this
-> table's.** **No member of any kind is minted where any token of the negation vocabulary appears
-> anywhere in the utterance before the clause the span is equal to**, folded and tokenised as
-> above. The clause rule already makes a span carry its own clause's polarity; this refuses the
-> case where an earlier clause governs a later one, and it is deliberately blunt — it refuses
-> *"I'm not fussy — spend under 100 euros"* along with the rest, which costs a question. **The
-> bar is over every reading of this section**, which matters for the readings §10 books as much
-> as for this one.
+**What it costs, stated rather than discovered.** A bound stated inside a longer turn mints
+nothing and the act asks — including the owner's own *"Book Riverside if it is dry Saturday, up to
+150 euros"*, whose money words are not the whole of it. What mints is a turn that **is** the
+bound. That is narrow, it is the restrictive direction ADR-0254 §2 asks for, §10 books the
+widening, and **it closes the polarity residual outright** — so this decision adds no condition to
+ADR-0255 §15 item 19's gate and takes no record against that ADR.
 
 > **Normative — a strict word mints a strict bound, and the endpoint is never widened.**
 > *"under 100 euros"* mints `maximum` `100` with `maximum_exclusive`, so a call at exactly `100`
@@ -357,13 +314,12 @@ Saturday, up to 150 euros"* still reads.
 > **no** `evidence_id`, so none carries both a span and the record its reference resolved to. §10
 > books the other two with what fires each.
 
-**Minting only a ceiling is the second narrowing, and it is about what a *whole clause* can do.**
-A floor and a term are the readings a wrong one **grants** in: *"avoid sending to Alice"* is one
-clause, and a `TERMS` member fixing *"Alice"* would cover a declaration at exactly the recipient
-the user forbade — the clause rule cannot help, the clause itself saying *avoid*. **A ceiling
-minted from a clause matching one of the forms carries that form's own direction.** The cost is
-stated rather than hidden: a term, a period and a floor each mint nothing and every act resting on
-one asks. §10 books all three.
+**Minting only a ceiling is the second narrowing, and it bounds what a wrong *whole* utterance
+can do.** Equality makes the polarity total for the forms the table carries; minting only ceilings
+is why a form the table does **not** carry is safe to refuse rather than guess at. A floor and a
+term are the readings a wrong one **grants** in — a `TERMS` member fixing *"Alice"* would cover a
+declaration at exactly the recipient a user forbade — so a term, a period and a floor each mint
+nothing and every act resting on one asks. §10 books all three.
 
 ### 5. One member per kind, and the mint reads the goal and nothing else
 
@@ -503,9 +459,16 @@ reason the two are separated, and what the Alternatives record.
 > request carries **any** user-facing argument the declaration declares at no kind — **at least
 > one member of the row is met through the evidence route**, whose digest pins every argument the
 > request carries. **A key a `BoundedArgument` names as its `currency_argument` is not such an
-> argument**: it is consumed by that declaration's own `MONEY` member, whose §4 comparison reads
-> the request's value there, so a declaration carrying an amount and its currency is covered
-> without a quote being needed for the currency key alone. A member met by no route leaves the
+> argument — but only where the comparison that consumes it was actually taken.** It is exempt
+> where the request carries a value at that `BoundedArgument`'s own `argument`, the row carries a
+> `MONEY` member, and that member is met on the argument route against it, whose §4 comparison
+> reads the currency key there and so examines it. **In every other case the currency key is an
+> ordinary user-facing argument the declaration declares at no kind**: a request carrying the
+> currency and no amount, or one whose row carries no `MONEY` member, leaves it compared by
+> nothing, so the third conjunct reaches it and the request is uncovered without a quote. An
+> unconditional exemption would let `{"currency": "EUR"}` and `{"currency": "USD"}` both pass an
+> empty row — exactly the omission-reading-as-consent this condition refuses. A member met by no
+> route leaves the
 > request uncovered, which is §3's second direction — *"an act that fixed `refundable_only` to
 > `true` authorised a call **carrying** that value"* — and an argument the row cannot meet leaves
 > it uncovered, which is §3's first. **There is no default, no wildcard and no omission that reads
@@ -571,10 +534,11 @@ Sunday price is `170` is covered by nothing and the user is asked.
 
 > **Normative — a model contributes exactly one thing to this decision, and it is the span.** An
 > interpretation element's span is checked against that turn's own utterance by ADR-0249 §7, and
-> §4 bounds what a differently chosen one can do in three ways: **the span must equal a whole
-> clause of that utterance**, so its polarity is the clause's rather than a substring's; **no
-> reading is taken where a negation stands in an earlier clause**; and **the table mints a ceiling
-> or nothing**. §10 books what remains. **Nothing else a model produces reaches any input of
+> §4 bounds what a differently chosen one can do in two ways, and the first is total: **the span
+> must equal that utterance**, so a differently chosen one is not read at all and the polarity a
+> rule sees is the polarity of the whole turn the user wrote; and **the table mints a ceiling or
+> nothing**, so a form it does not carry is refused rather than guessed at.
+> **Nothing else a model produces reaches any input of
 > §§1-5 or §7** as a selector or a written value: the argument a member meets is the
 > **declaration's** (§7) and the identifiers are the loop's. **A model names no argument key, no
 > currency key and no identifier anywhere in this decision.**
@@ -583,9 +547,9 @@ Sunday price is `170` is covered by nothing and the user is asked.
 
 ADR-0082 §1's test is applied to the earlier ADR's **text** and is shown rather than asserted:
 *"Would a reader holding only the earlier ADR now act differently, or read one of its clauses more
-widely than it now holds?"* **Three documents come out yes** — ADR-0254 in nine scopes, ADR-0016 in
-one and ADR-0255 in one count; every other ADR cited comes out **no** and takes none, which
-ADR-0082 §1 requires as firmly.
+widely than it now holds?"*
+**Two documents come out yes** — ADR-0254 in nine scopes and ADR-0016 in one; every other ADR
+cited comes out **no** and takes none, which ADR-0082 §1 requires as firmly.
 
 **ADR-0254 §1 — in the proposal's completeness condition alone.** It reads that the coverage is
 *"**complete for this request**: every **user-facing** argument of the request (§3) is named by a
@@ -691,19 +655,10 @@ tuple makes the **opposite** claim to the one §1 refuses. **The exception is th
 field on this one argument**, no lane reading the two records together as licence to default a
 third, and every other clause of §1 binds entire.
 
-**ADR-0255 §15 item 19 — and it is a count.** That item enumerates what §13's rule requires
-before a consequential capability is wired and closes the enumeration in terms, at **six** since
-ADR-0265 §6 added the sixth. §11 adds a **seventh**: a mechanical test of the polarity of the
-clause a span was taken from, binding any capability reachable through route (d) with a member
-this decision mints. A reader holding only item 19 wires an integration after six and is wrong —
-*"avoid these prices — under 100 euros"* mints a `100` ceiling the user's own words refuse, so
-route (d) can `ALLOW` inside an authority they never gave — and **the gate's existing guarantees
-do not reach it**, verification reporting the completed charge and cancellation compensating the
-attempt while **neither makes the pre-execution permission decision valid**, which is §13's own
-test. §13's rule binds verbatim and its own contribution is unchanged; what grows is the gate's
-total. **Every other clause of §15 and every other section of ADR-0255 stand entire.**
-
-**And the ones that come out no, deliberately.** **ADR-0249** takes **no** record: this decision
+**And the ones that come out no, deliberately.** **ADR-0255** takes **no** record: §15 item
+19's gate enumeration is untouched, §4's equality rule closing the polarity residual outright
+rather than binding it, and no other prerequisite this decision raises belongs to that gate.
+**ADR-0249** takes **no** record: this decision
 adds no field to `Goal` and none to `GoalElement`, and §7 is relied on rather than narrowed — its
 span check is a containment test, and §4's clause and negation refusals are further refusals of
 **this** decision's own reading rather than changes to it. **ADR-0252** is
@@ -761,14 +716,13 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
   asks. Fired by a decision that can tell a bound on what the user **pays** from one on what they
   **receive** — which needs a fact neither the span nor the kind carries — and which then states
   what a floor is proved against.
-- **The polarity a neighbouring clause supplies, which §4's last clause states and does not
-  close.** *"Avoid these prices — under 100 euros"* mints a ceiling of `100` though its first
-  clause refuses that region, and no enumeration of refusal words reaches the next spelling of
-  *avoid*. **ADR-0249 §7 owns it**: its span check is a containment test, never a check of what
-  the model meant. Fired by the decision that gives an element a polarity the loop can read, or
-  that constrains how a span is chosen — and that decision states, too, whether wiring a
-  consequential capability through a member minted from a span requires closing it first, which
-  is a condition of ADR-0255 §15 item 19's gate and not a clause of this decision.
+- **Reading a bound stated inside a longer turn.** §4 admits only a span equal to the act's whole
+  utterance, so *"Book Riverside if it is dry Saturday, up to 150 euros"* mints nothing and the
+  act asks. That is what makes the polarity total, and the widening is not available until
+  something can establish the polarity of a **part** of an utterance from the rest of it — which
+  is **ADR-0249 §7's** question, its span check being a containment test and never a check of
+  what the model meant. Fired by the decision that gives an element a polarity the loop can read,
+  or that constrains how a span is chosen.
 - **Minting a `TERMS` member from an act, and minting a `PERIOD` one.** §4 mints neither, so a
   term the user named and a period they gave are covered by nothing and every call resting on one
   asks — the same residual above, in the kinds where a wrong polarity **grants** rather than
@@ -850,20 +804,6 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
   6(a)'s with-a-quote limbs are shipped there**, against that decision's carrier and never against
   a double standing in for it.
 
-> **Normative — this decision adds a *seventh* prerequisite to the production-deployment gate,
-> so that a reader does not take ADR-0255 §15 item 19's six for the whole.** **No consequential
-> capability whose authorisation can be reached through route (d) with a member this decision
-> minted is wired until a mechanical test of the polarity of the clause a span was taken from is
-> implemented and demonstrated**, or a span contract that makes a span unable to carry a polarity
-> its surrounding text does not. §4's clause rule and its ceiling-only table narrow that class and
-> close no part of it whole — *"avoid these prices — under 100 euros"* still mints a `100`
-> ceiling — and the residue is a property of **ADR-0249 §7's containment check and ADR-0254 §8's
-> basis**, both ratified and both consumed here rather than created. **The gate's existing
-> guarantees do not reach it**: verification reports a completed charge the user refused and
-> cancellation compensates the attempt, and **neither makes the pre-execution permission decision
-> valid**, which is ADR-0255 §13's own test. Booking the closure (§10) says who takes it; this
-> clause says nothing rides on it meanwhile.
-
 > **Normative — L1 lands before L2, and both are briefed on this decision alone.** Neither reads
 > a quote: L1's evidence route is met by nothing until the quote decision lands a carrier, and
 > L2 mints members from the goal. So a row carrying a non-empty `coverage` becomes writable as
@@ -889,29 +829,27 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
    will mint — is met by a `MONEY` quote in no case and by a `MONEY`-declared argument in none,
    whatever number either carries, and a `MONEY` member is met at a `TERMS`-declared argument in
    none.
-3. **Only ceilings, the endpoints, and the refusals — and the span is a whole clause or it mints
-   nothing.** **3(a) mints**, as whole utterances: `"under 100 euros"` → `maximum` `100` **with**
-   `maximum_exclusive`; `"at most 100 euros"` → the same without it; `"never spend over 100
-   euros"` and `"don't spend over 100 euros"` → an **inclusive** `maximum` of `100`; and the span
-   `"up to 150 euros"` of `"Book Riverside if it is dry Saturday, up to 150 euros"` → an inclusive
-   `maximum` of `150`, that span being a whole clause. **3(a) mints nothing** from `"at least 150
-   euros"`, `"more than 150 euros"` or `"over 150 euros"`, no form of the table admitting them;
-   from `"never notify me about charges over 100 euros"`, `"not exactly 100 euros"` or `"never
-   spending over 100 euros"`; from the span `"under 100 euros"` of **`"avoid booking hotels under
-   100 euros"`** — the case refuting any a-ceiling-can-only-restrict argument, the user having
-   stated a **floor** — nor from the spans `"over 100 euros"` of `"avoid spending over 100
-   euros"`, `"under 100 euros"` of `"not under 100 euros"`, `"over 100 euros"` of `"under no
-   circumstances spend over 100 euros"`, `"Alice"` of `"do not send to Alice"` or `"Sunday"` of
-   `"do not book Sunday"`, **each a proper part of its clause rather than equal to one**, refused
-   over **every** reading and not the table's alone; from the span `"spend under 100 euros"` of
-   `"I'm not fussy, spend under 100 euros"`, a whole clause refused by the negation in the clause
-   before it; and from `"under 100 euros"` of `"under 100 euros, under 100 euros"`, that clause
-   occurring **twice** with no occurrence named. **3(b):** against an exclusive `maximum` of `100`
-   a value of exactly `"100"` does **not** satisfy and against an inclusive one it does. **Both
-   halves are parameterised over the whole of §4's closed reading and not over its illustrations**
-   — every one of the seven forms, every currency word and symbol in **both** orders, mixed case,
-   runs of tabs and spaces, and `99.50` as well as `100` — an implementation reading only the
-   cases named here passing a non-parameterised arm while refusing inputs the table admits.
+3. **Only ceilings, the endpoints, and the span is the whole utterance or nothing is minted.**
+   **3(a) mints**, each the act's whole utterance with the element's span equal to it: `"under 100
+   euros"` → `maximum` `100` **with** `maximum_exclusive`; `"at most 100 euros"` → the same
+   without it; `"up to 150 euros"` → an inclusive `maximum` of `150`; `"never spend over 100
+   euros"` and `"don't spend over 100 euros"` → an **inclusive** `maximum` of `100`; and
+   `"Under 100 Euros."` → the first of these, case and one trailing stop normalising away.
+   **3(a) mints nothing** from the whole utterances `"at least 150 euros"`, `"more than 150
+   euros"`, `"over 150 euros"`, `"never notify me about charges over 100 euros"`, `"not exactly
+   100 euros"` and `"never spending over 100 euros"`, none being a form of the table; and
+   **nothing from any span that is a proper part of its utterance**, whatever that part matches —
+   `"up to 150 euros"` of `"Book Riverside if it is dry Saturday, up to 150 euros"`; `"under 100
+   euros"` of **`"avoid booking hotels under 100 euros"`**, of `"avoid these prices — under 100
+   euros"` and of `"not under 100 euros"`; `"over 100 euros"` of `"under no circumstances spend
+   over 100 euros"` and of `"avoid spending over 100 euros"`; `"Alice"` of `"do not send to
+   Alice"`; and `"Sunday"` of `"do not book Sunday"` — the *avoid* and negation cases being the
+   ones eleven review rounds reached by a different route each time, all closed here by one
+   refusal. **3(b):** against an exclusive `maximum` of `100` a value of exactly `"100"` does
+   **not** satisfy and against an inclusive one it does. **Both halves are parameterised over the
+   whole of §4's closed reading and not over its illustrations** — every one of the seven forms,
+   every currency word and symbol in **both** orders, mixed case, runs of tabs and spaces, and
+   `99.50` as well as `100`.
 4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
    constructible, and one carrying a `MONEY` and a `TERMS` member is. **4(b):** a goal carrying
    two `USER_STATED` constraints that each read as `MONEY` mints **neither**, and one carrying a
@@ -961,10 +899,9 @@ and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than 
 the corpus without it can write no row carrying a non-empty `coverage` at all, and would either
 leave ADR-0254 §20's Lane 2 stopped where #2373 stopped it or invent an association no clause
 authorises — the standing authority §9 clause (ii) exists to prevent (ADR-0070 §1). **It is a
-partial supersession of exactly three documents** (ADR-0070 §3) — ADR-0254 in **nine** scopes,
-ADR-0016 in **one** and ADR-0255 in **one count** — and the `Status` line of each names its
-scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction
-invariant holds. Against every other ADR it
+partial supersession of exactly two documents** (ADR-0070 §3) — ADR-0254 in **nine** scopes and
+ADR-0016 in **one** — and the `Status` line of each names its scopes **without an `ADR-NNNN`
+token inside the parentheses**, so ADR-0070 §4's extraction invariant holds. Against every other ADR it
 cites it is a **stacked addition**. **The records land in the same change as this document**
 (ADR-0082 §7), and nothing else in either is edited — no Decision text is rewritten, which
 ADR-0070 §1 forbids.
@@ -1006,24 +943,23 @@ A request carrying any argument the declaration declares at no kind is covered o
 price of keeping *"no omission reads as consent"* once arguments stop being named by members. The
 digest is exact and excludes nothing, so a quoting read and a booking that differ by any key,
 **a system-supplied one included**, never match: a declaration that fills an idempotency key is
-covered by no quote at all until §10's classification lands. And §4 reads a **whole clause** and
-seven forms in one language, so a bound stated inside a longer clause, in another language or in
-words mints nothing.
+covered by no quote at all until §10's classification lands. And **§4 reads a whole utterance and
+seven forms in one language**, so a bound stated inside a longer turn, in another language or in
+words mints nothing — by a wide margin the narrowest thing in this decision, and the price of a
+polarity no surrounding text can invert.
 
-**Two residuals are stated rather than closed, and §10 books both.** §7's third conjunct proves
-the call is the one **quoted**, not that the user chose each quoted argument, so a replan that
-changes an undeclared argument beside the one the user spoke to is covered where its re-quote is
-inside the ceiling — the owner's ruling applied (*"make it Sunday" → re-quote 135 → no new
-prompt*), with the ceiling still binding what such a call may cost and **§7 refusing the lineage
-discharge to it**, so a tainted request asks. And §4 establishes the polarity of the clause a span
-**is** and never the polarity a neighbouring clause supplies, so *"avoid these prices — under 100
-euros"* mints a ceiling of `100`; **no enumeration of refusal words closes that**, ADR-0249 §7
-owns it, and what bounds it meanwhile is that such a member can only restrict what a call costs,
-discharges no lineage floor, and rides in no wired capability (§11).
+**One residual is stated rather than closed, and §10 books it.** §7's third conjunct proves the
+call is the one **quoted**, not that the user chose each quoted argument, so a replan that changes
+an undeclared argument beside the one the user spoke to is covered where its re-quote is inside
+the ceiling — the owner's ruling applied (*"make it Sunday" → re-quote 135 → no new prompt*),
+with the ceiling still binding what such a call may cost and **§7 refusing it the lineage
+discharge**, so a tainted request asks. **The span-polarity class is not among the residuals**:
+§4's equality rule closes it outright, which is why this decision takes no record against
+ADR-0255's wiring gate and adds no condition to it.
 
 **These are the cases that would falsify the design.** A deployment where users state bounds
-inside longer clauses, so route (d) is never reached — the practical falsifier, and the one to
-measure first. A quoting read and a booking whose argument sets differ by a key, so the digest
+inside longer turns, so route (d) is never reached — the practical falsifier by a distance, and
+the one to measure first. A quoting read and a booking whose argument sets differ by a key, so the digest
 never matches and every act asks. A declaration whose sole `MONEY` argument is an amount the user
 **receives**. And a quote decision settling on a carrier these four facts cannot be read off.
 
@@ -1053,12 +989,16 @@ constraint. What this decision fixes is the owner's substance — the quote is r
 investigation, for the intended action, before the authorisation phase compares it** — which
 holds whichever carrier that decision picks.
 
-**Refusing only the negations a closed vocabulary spells, and arguing that a ceiling cannot
-hurt.** Rounds 4-10's answer, refuted on *"avoid booking hotels under 100 euros"*: a substring
-reading as a ceiling can be carved out of a clause stating a **floor**. §4 answers by narrowing
-the input rather than widening the vocabulary — the span must **be** a clause — which is a
-removal, and removals are what have worked here. **Extending the vocabulary instead** is declined
-in §4's last clause: *avoid* admits *skip* and *steer clear of*, and the residual is booked.
+**Every intermediate narrowing of the span rule, and there were four.** A closed negation
+vocabulary; then a bar on any negation before the span; then a requirement that the span be a
+whole **clause**; then a production-gate prerequisite to contain what was left. Each was narrower
+than the class, and review found a new instance of it in eleven consecutive rounds — *"not under
+100 euros"*, *"under no circumstances spend over 100 euros"*, *"avoid spending over 100 euros"*,
+*"avoid booking hotels under 100 euros"*, *"avoid these prices — under 100 euros"*. The reason is
+one reason: **each left text around the span that the rule had to understand and could not**.
+Requiring equality removes the text rather than the misreadings, and with it the gate condition
+and the ADR-0255 record that contained them. It is the third removal in this decision's history
+and the third one that worked.
 
 **A planner nomination of the (element, argument) pair, verified by code.** Declined because the
 pairing is per *(element, declaration)*, so it cannot live on `GoalElement` and would have to live
