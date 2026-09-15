@@ -241,6 +241,7 @@ def request(
     *,
     tool: ToolDefinition = TOOL,
     goal: str | None = GOAL,
+    act: str | None = None,
     **parameters: FrozenJson,
 ) -> ActionRequest:
     """A request carrying ``bound``, its spans' arguments and ``parameters``.
@@ -252,6 +253,11 @@ def request(
 
     ``goal`` defaults to :data:`GOAL` and is set to ``None`` by the case that asks
     what a request carrying none reaches (arm 9).
+
+    ``act`` fills ``intended_action`` — the act this request is an attempt at, which
+    is what selects the quote ADR-0266 §7's evidence route is taken against
+    (ADR-0265 §1). It defaults to ``None``, which that route meets in no case, so a
+    case about a quote has to say which act it is about.
     """
     listed: dict[str, list[str]] = {}
     single: dict[str, str] = {}
@@ -293,6 +299,7 @@ def request(
         parameters=carried,
         egress_binding=described,
         goal=goal,
+        intended_action=act,
     )
 
 

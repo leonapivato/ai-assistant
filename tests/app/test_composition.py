@@ -686,10 +686,10 @@ def _thresholds(calls: list[dict[str, object]]) -> list[dict[str, object]]:
     :func:`_policy_grant_seam` is where the seam itself is asserted, once,
     :func:`_policy_configured_search` is where ADR-0247 §2's configured search
     destination is — the second dependency this list exists to keep out of a
-    mapping test — and :func:`_policy_authorization_seam` is ADR-0254 §6's, the
-    third.
+    mapping test — :func:`_policy_authorization_seam` is ADR-0254 §6's, the
+    third, and :func:`_policy_quote_seam` is ADR-0267 §5's, the fourth.
     """
-    lifted = {"grants", "configured_search", "authorizations"}
+    lifted = {"grants", "configured_search", "authorizations", "quotes"}
     return [{name: value for name, value in call.items() if name not in lifted} for call in calls]
 
 
@@ -732,6 +732,12 @@ def _policy_authorization_seam(calls: list[dict[str, object]]) -> object:
     """The one ``authorizations`` argument the builder constructed the policy with."""
     assert len(calls) == 1, calls
     return calls[0]["authorizations"]
+
+
+def _policy_quote_seam(calls: list[dict[str, object]]) -> object:
+    """The one ``quotes`` argument the builder constructed the policy with."""
+    assert len(calls) == 1, calls
+    return calls[0]["quotes"]
 
 
 def _trail_authorization_seam(calls: list[dict[str, object]]) -> object:

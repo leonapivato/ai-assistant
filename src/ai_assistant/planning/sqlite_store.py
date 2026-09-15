@@ -38,7 +38,12 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
+from ai_assistant.core.errors import (
+    ActiveExecutionError,
+    AuthorizationError,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     ActionPlan,
@@ -67,6 +72,7 @@ from ai_assistant.planning.goals import (
     engaged,
     invalidated,
     minted,
+    quoted,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
     refuse_a_superseded_plan,
@@ -75,6 +81,7 @@ from ai_assistant.planning.goals import (
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
     revalidated_minting,
+    revalidated_quote_minting,
     revalidated_revision,
     revalidated_row_ids,
     settled,
@@ -88,6 +95,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import (
+        ActionQuote,
+        ActionQuoteMinting,
         AttemptTransition,
         GoalCandidates,
         GoalRevision,
@@ -152,18 +161,33 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: **No lane invents an intended action for a stored goal** (§5): "an act nothing
 #: declared is an act no claim was ever scoped to, and minting one would state a
 #: history the row does not hold".
-_SCHEMA_VERSION = 5
+#: **Version 6 is ADR-0267 §11's migration, and it is version 5's shape one decision
+#: over: a migration that rewrites no row and creates no table.** A version 5 ``goals``
+#: blob still **decodes** — ``Goal.quotes`` is a defaulted empty tuple and
+#: ``Goal.quotes_elided`` a defaulted ``0``, so "a ``Goal`` written before Q1 decodes
+#: with ``quotes`` empty and ``quotes_elided`` ``0``" — and no column beside the blob is
+#: added, because a quote is read out of the blob and never queried for. **So the marker
+#: moves for the reading in the other direction**, which is the one ADR-0049 §1 wrote it
+#: for: this code writes goal blobs carrying ``quotes`` and ``quotes_elided``, and an
+#: older build's ``extra="forbid"`` refuses them — so a store this code has written must
+#: announce itself as newer, or that build meets the refusal at a *decode* of a single
+#: record rather than at the open. A version that did not move would leave §1's loud
+#: refusal nothing to refuse on.
+#: **No lane invents a quote for a stored goal or back-fills one onto a stored row**
+#: (ADR-0267 §11): "a price nothing read is a price no record holds".
+_SCHEMA_VERSION = 6
 
-#: The versions a database this code can upgrade carries. Four members since ADR-0265:
+#: The versions a database this code can upgrade carries. Five members since ADR-0267:
 #: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
-#: ADR-0250 §9's and version 4 is ADR-0252 §13's. Only the first needs its ``goals``
-#: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all four** gain
-#: whichever of the :data:`_GOAL_COLUMNS` they lack and whichever record tables they do
-#: not hold, which ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier
-#: store holds a question or an evidence row. **Version 4 needs nothing else at all**:
-#: ADR-0265 adds no column and no table, and every row it holds decodes unchanged with
-#: an empty ``intended_actions``.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4})
+#: ADR-0250 §9's, version 4 is ADR-0252 §13's and version 5 is ADR-0265 §5's. Only the
+#: first needs its ``goals`` blobs rewritten
+#: (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all five** gain whichever of the
+#: :data:`_GOAL_COLUMNS` they lack and whichever record tables they do not hold, which
+#: ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier store holds a
+#: question or an evidence row. **Versions 4 and 5 need nothing else at all**: ADR-0265
+#: and ADR-0267 each add no column and no table, and every row either holds decodes
+#: unchanged with an empty ``intended_actions`` and an empty ``quotes``.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -1635,6 +1659,98 @@ class SqlitePlanStore:
                 (updated.model_dump_json(), updated.id),
             )
         return updated
+
+    async def record_quote(self, minting: ActionQuoteMinting) -> Goal:
+        """Append one quote to a goal, compare-and-swap (ADR-0267 §2).
+
+        The read, the comparison and the write all run inside one ``BEGIN IMMEDIATE``
+        transaction, so a second writer that read the same version cannot also commit —
+        it reads the advanced version and is refused. That is ADR-0014 §5's discipline
+        on the construction ADR-0049 §1 already uses, and it is what ADR-0267 §4's
+        ordering claim rests on: **a refused write is never rebased**, so every quote a
+        goal holds was appended against the version the read that produced it observed.
+
+        **The refusal runs before the ``UPDATE``**, inside that same transaction, so a
+        minting the store refuses writes nothing.
+        :func:`~ai_assistant.planning.goals.quoted` states that refusal — and the
+        elision — once for both conforming stores.
+
+        **The command is revalidated before the first ``await``**, which is both
+        ADR-0023 §2's obligation and this method's ADR-0065 snapshot.
+
+        **Only the blob is written.** ADR-0250 §1's two engagement columns are unmoved
+        by a quote, ``conversation_id`` is never rewritten, and ADR-0252 §13's evidence
+        elision count moves only where an evidence row is dropped — ``quotes_elided``
+        living inside the blob beside the tuple it counts for.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, or if the quote's ``intended_action`` is not the ``id``
+                of a member of that goal's ``intended_actions``.
+        """
+        command = revalidated_quote_minting(minting)
+        async with self._lock:
+            return await _run_to_completion(self._record_quote_sync, command)
+
+    def _record_quote_sync(self, minting: ActionQuoteMinting) -> Goal:
+        what = f"record a quote on goal {minting.goal_id!r}"
+        with self._transaction(what) as conn:
+            stored = self._goal_for_write(
+                conn, minting.goal_id, minting.expected_version, "quote against"
+            )
+            updated = quoted(stored, minting.quote)
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return updated
+
+    async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
+        """That goal's quotes naming that action, in the goal's own order (§5).
+
+        This store satisfies :class:`~ai_assistant.core.protocols.GoalQuotes`
+        **structurally**, so the composition root hands one object to both seams while a
+        policy annotated with the narrow face cannot name ``record_quote``.
+
+        **It selects nothing and compares nothing** (ADR-0267 §5): the filter is the two
+        identifiers, the order is the blob's own tuple order, and the caller takes the
+        last member. A goal this store does not hold answers an **empty** tuple.
+
+        **A fault is not an absence, and this is where that rule is actually tested**
+        (§5). Every failure of the read — the file gone, the database corrupt, the blob
+        undecodable — raises :class:`~ai_assistant.core.errors.AuthorizationError`, and
+        **no implementation converts one into an empty tuple**: the request is then not
+        covered, ADR-0254 §6's bar is taken, and no standing route is taken at all. A
+        driver exception or an ``OSError`` crossing this seam would reach a policy that
+        contracts neither, so both are chained as the cause of the class the seam
+        declares. **No new error class is minted.**
+
+        Args:
+            goal: The goal the request being ruled on belongs to.
+            intended_action: The act the request is an attempt at.
+
+        Returns:
+            That action's quotes, oldest first, possibly empty.
+
+        Raises:
+            AuthorizationError: If the store cannot be read, or a stored goal cannot be
+                decoded.
+        """
+        try:
+            async with self._lock:
+                row = await _run_to_completion(self._read_one, "goals", goal)
+            stored = None if row is None else _decode_goal(row)
+        except (sqlite3.Error, OSError, PlanningError, ValidationError) as exc:
+            msg = (
+                f"the quotes of goal {goal!r} could not be read: a fault is not an "
+                f"absence, so the request is not covered and no standing route is "
+                f"taken (ADR-0267 §5)"
+            )
+            raise AuthorizationError(msg) from exc
+        if stored is None:
+            return ()
+        return tuple(quote for quote in stored.quotes if quote.intended_action == intended_action)
 
     # --- engagement, status and the candidate set (ADR-0250 §§1, 2, 9) -----
 

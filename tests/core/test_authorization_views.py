@@ -107,14 +107,20 @@ def test_every_projection_forbids_an_extra_field(model: type[BaseModel]) -> None
     assert model.model_config.get("frozen") is True
 
 
-def test_the_projection_carries_exactly_two_members_and_no_identifier() -> None:
-    """ADR-0254 §11: ``coverage`` and ``expires_at``, and nothing else at all.
+def test_the_projection_carries_exactly_three_members_and_no_identifier() -> None:
+    """ADR-0254 §11 as ADR-0267 §7 leaves it: ``coverage``, ``expires_at`` and ``quote``.
 
-    **It names no identifier**, which is the whole of the difference between this type
-    and :class:`AuthorizationView`: a confirmation is about a row the user has not
-    established, so there is nothing yet to withdraw and no handle to carry.
+    **A third since ADR-0267 §7**, which partially supersedes §11's field list in that
+    limb alone: *"A confirmation that renders a ceiling without the figure the act was
+    quoted at is not a confirmation of that charge"*.
+
+    **It still names no identifier**, which is the whole of the difference between this
+    type and :class:`AuthorizationView`: a confirmation is about a row the user has not
+    established, so there is nothing yet to withdraw and no handle to carry — and
+    :class:`~ai_assistant.core.types.QuoteView` carries no digest, no intended action,
+    no plan, no step and no goal id, so the new member does not smuggle one in.
     """
-    assert set(AuthorizationProjection.model_fields) == {"coverage", "expires_at"}
+    assert set(AuthorizationProjection.model_fields) == {"coverage", "expires_at", "quote"}
     assert "id" not in AuthorizationProjection.model_fields
 
 
@@ -279,6 +285,11 @@ def test_an_empty_coverage_is_constructible(model: type[BaseModel]) -> None:
     transcription.
     """
     common: dict[str, Any] = {"coverage": (), "expires_at": AUTHORIZATION_EXPIRES_AT}
+    if model is AuthorizationProjection:
+        # ADR-0267 §7 makes ``quote`` required with no default, so absence is a fact
+        # about the row rather than a caller's omission. Every row this tree writes
+        # carries ``quoted`` ``None``, its producer being ADR-0254 §20's Lane 2.
+        common |= {"quote": None}
     if model is AuthorizationView:
         common |= {
             "id": "auth-1",

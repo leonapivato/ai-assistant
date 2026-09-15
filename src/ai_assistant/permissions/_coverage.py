@@ -11,10 +11,11 @@ ADR-0266 §7 replaces it with **two routes** and three conjuncts:
 
 * the **evidence route**, ``MONEY``-only — the member is proved against the
   **quote taken for the step's intended action**, whose arguments digest equals
-  this request's. **This tree holds no quotes** (:func:`_met_through_evidence`),
-  so every ``MONEY`` member is unmet here and every act carrying a stated ceiling
-  asks: ADR-0266 §11's own arithmetic, and ADR-0267 §11's Q1 is the lane that
-  supplies the operand.
+  this request's. ADR-0267 supplies the operand: the quotes reach these functions
+  as an argument, read once per ruling by the policy through
+  :meth:`~ai_assistant.core.protocols.GoalQuotes.for_action` and **keyed on the
+  goal and the act**, so the selection of the governing one — the last member of
+  what comes back — is taken here and in one place (§5).
 * the **argument route**, available only where the declaration itself declares an
   argument at the member's kind (``ToolDefinition.bounded_arguments``). A
   ``MONEY`` member needs the **evidence** route in every case and this one **as
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import (
+        ActionQuote,
         ActionRequest,
         Authorization,
         BoundedArgument,
@@ -154,6 +156,23 @@ class CoverageSubject(NamedTuple):
     all the way down** (:data:`_PARAMETERS`), because a top-level copy would leave
     every nested value shared with the caller."""
 
+    parameters_digest: str
+    """``request.parameters_digest``: the one value ADR-0266 §7's evidence route
+    compares an :class:`~ai_assistant.core.types.ActionQuote`'s own against.
+
+    **The request's own property and never a second canonicalisation** (ADR-0267 §1).
+    ``ActionRequest`` computes it *"here rather than supplied by a caller"* over
+    ADR-0021 §1's encoding, and the quote carries the quoting request's value of that
+    same property — so the two sides of the comparison are one encoding computed in
+    one place. Recomputing it from :attr:`parameters` here would be the second
+    canonicalisation that produces *"a false mismatch at one end and a **false match**
+    at the other"*.
+
+    **Read before the suspension with the rest of the subject** (ADR-0065), because the
+    seam the quotes come back from is a durable read: a policy that digested the
+    arguments it read on the way in and compared them on the way out would be ruling
+    about two requests."""
+
     account: BoundAccount | None
     """The binding's connected account — §3's condition 4 — and ``None`` exactly
     where the request carries no ``egress_binding`` at all."""
@@ -195,6 +214,7 @@ def coverage_subject(request: ActionRequest) -> CoverageSubject:
         intended_action=request.intended_action,
         tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
         parameters=_PARAMETERS.validate_python(request.parameters),
+        parameters_digest=request.parameters_digest,
         account=(
             None
             if binding is None
@@ -313,8 +333,10 @@ def declared_at(tool: ToolDefinition, kind: BoundKind) -> BoundedArgument | None
     return declared[0] if len(declared) == 1 else None
 
 
-def _met_through_evidence(member: CoverageMember, subject: CoverageSubject) -> bool:
-    """ADR-0266 §7's evidence route — **and no quote reaches it in this tree**.
+def _met_through_evidence(  # noqa: PLR0911 — one return per conjunct ADR-0266 §7 states
+    member: CoverageMember, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+) -> bool:
+    """ADR-0266 §7's evidence route, over the quotes the policy read for this act.
 
     §7 meets a ``MONEY`` member here where all three hold: the request carries an
     ``intended_action``; **the governing quote** — of the quotes available to the
@@ -323,28 +345,69 @@ def _met_through_evidence(member: CoverageMember, subject: CoverageSubject) -> b
     satisfies the member, with §4's currency conjunct taken **at the quote's own
     currency** and at no key of the request.
 
-    **The last two conjuncts have no operand here, and that is ADR-0266 §11 rather
-    than an omission.** §6 states the quote as an interface and lands no carrier —
-    *"no type, no field of any existing model, no store member, no Protocol"* — and
-    assigns the carrier, the producer and the read to the quote decision, which is
-    ADR-0267 (§5's ``GoalQuotes.for_action``, wired in here by that decision's Q1).
-    So **every ``MONEY`` member is unmet**, ADR-0254 §1's completeness condition
-    proposes no row, and the one call is asked about by route (a). That is
-    fail-closed and conforming (ADR-0084 §3), and it is the arithmetic ADR-0266 §11
-    states rather than leaving the next lane to discover.
+    **The selection is here and in one place, and the seam does none of it**
+    (ADR-0267 §5). ``GoalQuotes.for_action`` is *"keyed and never asked"*: it filters
+    by the goal and the act and evaluates no predicate, returning that action's quotes
+    *"in the order the goal holds them"*, and **``permissions`` takes the last member
+    of what comes back**. A store that selected would be a second place the governing
+    rule lives, and the first conforming implementation to read it differently would be
+    right in one of them.
+
+    **The act is re-read off the governing quote, and that is §7's own selection
+    rather than a second keying.** §7 selects *"of the quotes available to the policy
+    (§6) that name **that** action, the one **latest** in §6's order"*, so naming the
+    act is part of the selection and not merely part of the seam's filter. Taking it
+    here as well makes the reading **total over its arguments** — this module's own
+    posture, *"everything the comparison needs is in its arguments"* — rather than
+    resting the whole proof on a caller having keyed correctly, and it fails in the
+    closed direction.
+
+    **An earlier quote is consulted in no case** (§7). A re-quote is a refresh of one
+    fact and the current price is the later reading, so a request returning to
+    arguments a superseded quote was taken over is **uncovered and the act asks**
+    rather than reviving a reading the re-quote displaced. Nothing here scans the
+    tuple for a matching digest: the last member is read, and it either matches or the
+    member is unmet.
+
+    **The digest is compared and never recomputed** (ADR-0267 §1). Both sides are
+    ``ActionRequest.parameters_digest`` — the quote carries the quoting request's
+    value, the subject carries this one's — so **every argument of the quoting call is
+    inside it, system-supplied keys included**, and a quoting call and an acting call
+    differing in **any** key are covered by no quote and ask.
+
+    **A ``MONEY`` member always carries a bound**, so §7's *"ADR-0254 §3's fixed
+    comparison or §4's ``MONEY`` reading"* has one live limb here: ADR-0266 §3 refuses
+    a ``MONEY`` ``fixed`` outright — *"an amount carries no currency on a fixed member,
+    so nothing could denominate it"* — and the type is what makes that true rather than
+    a branch below.
+
+    **The amount reading is** :func:`_within` **and is the argument route's own**, so
+    the two routes cannot disagree about where an endpoint lies:
+    ``maximum_exclusive`` is read strictly, and no reading rounds, quantises, nudges or
+    relaxes an endpoint in either direction. **The quote's amount needs no JSON
+    typing**: :class:`~ai_assistant.core.types.ActionQuote` admits only a finite,
+    non-negative ``Decimal``, so the float, boolean, non-finite and negative refusals
+    §4 takes over a request's raw value are taken at the record's own construction.
 
     **No member of any other kind is met by this route in any case**: a quote states
     a price and carries no other value, so there is nothing for a ``PERIOD`` or a
     ``TERMS`` member to be compared against.
 
     **A fault is never an absence.** Where the read behind the quotes fails, the
-    request is treated as **not covered** and the fault is reported; no
-    implementation converts a fault into an absence of quotes, and none falls
-    through to the argument route. There is no such read here to fail.
+    request is treated as **not covered** and the fault is reported; no implementation
+    converts a fault into an absence of quotes, and none falls through to the argument
+    route. That happens at the seam rather than here — the policy takes ADR-0254 §6's
+    bar and never calls this — which is why an empty ``quotes`` here means exactly
+    *the goal holds no quote for this act*.
 
     Args:
         member: The row's member.
         subject: The one observation of the request this ruling is decided over.
+        quotes: That goal's quotes naming the request's intended action, **in the order
+            the goal holds them**, as the one seam read returned them. Empty where the
+            goal holds none, where the request carries no act, and where this policy
+            holds no seam at all — each of which leaves every ``MONEY`` member unmet,
+            which is the fail-closed direction.
 
     Returns:
         Whether the evidence route meets this member.
@@ -353,9 +416,19 @@ def _met_through_evidence(member: CoverageMember, subject: CoverageSubject) -> b
         return False
     if subject.intended_action is None:
         return False
-    # **The governing quote, and there is none**: this is the single seam ADR-0267's
-    # Q1 fills, and nothing else about §7 moves when it does.
-    return False
+    if not quotes:
+        return False
+    governing = quotes[-1]
+    if governing.intended_action != subject.intended_action:
+        return False
+    if governing.arguments_digest != subject.parameters_digest:
+        return False
+    bound = member.bound
+    if bound is None:  # pragma: no cover — ADR-0266 §3 refuses a MONEY fixed member
+        return False
+    if governing.currency != bound.currency:
+        return False
+    return _within(bound, governing.amount)
 
 
 def _met_on_argument_route(
@@ -397,7 +470,9 @@ def _met_on_argument_route(
     return _satisfies(member.bound, value, declared, subject)
 
 
-def _member_defects(member: CoverageMember, subject: CoverageSubject) -> tuple[CoverageDefect, ...]:
+def _member_defects(
+    member: CoverageMember, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+) -> tuple[CoverageDefect, ...]:
     """Every way ``member`` is not met over this request — empty where it is.
 
     ADR-0266 §7's first conjunct, **and the account of its failure in the same
@@ -421,13 +496,14 @@ def _member_defects(member: CoverageMember, subject: CoverageSubject) -> tuple[C
     Args:
         member: The row's member.
         subject: The one observation of the request this ruling is decided over.
+        quotes: That goal's quotes naming the request's intended action, oldest first.
 
     Returns:
         The defects this member met, ordered as the routes are read.
     """
     found: list[CoverageDefect] = []
     declared = declared_at(subject.tool, member.kind)
-    if member.kind is BoundKind.MONEY and not _met_through_evidence(member, subject):
+    if member.kind is BoundKind.MONEY and not _met_through_evidence(member, subject, quotes):
         # **The quote is the primary proof and a declared argument never stands in
         # for it** (ADR-0266 §7). Reported even where a declared amount sits inside
         # the ceiling, because that is what happened: the price the act will make was
@@ -478,7 +554,9 @@ def _examined_currency_keys(row: Authorization, subject: CoverageSubject) -> fro
     )
 
 
-def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDefect, ...]:
+def uncovered(
+    row: Authorization, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+) -> tuple[CoverageDefect, ...]:
     """Every way ADR-0266 §7's **condition 6** fails over this pair, told apart.
 
     Empty exactly where :func:`covers_arguments` answers ``True``, which is what
@@ -507,6 +585,8 @@ def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDef
     Args:
         row: The live record the one ``live_for`` read returned.
         subject: The one observation of the request this ruling is decided over.
+        quotes: That goal's quotes naming the request's intended action, **in the order
+            the goal holds them**, as the one ``for_action`` read returned them.
 
     Returns:
         The failures, ordered by :class:`CoverageFailure` and then by subject, so a
@@ -517,7 +597,7 @@ def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDef
     # **The first conjunct** — every member of the row is met, by the two routes,
     # and a member met by neither reports both failures rather than the first.
     for member in row.coverage:
-        found.update(_member_defects(member, subject))
+        found.update(_member_defects(member, subject, quotes))
     carried = user_facing(subject)
     declared = {one.argument: one for one in subject.tool.bounded_arguments}
     # **The second** — every user-facing argument the declaration declares is covered
@@ -530,9 +610,11 @@ def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDef
             found.add(CoverageDefect(key, CoverageFailure.REFUSED))
     # **The third** — an argument the declaration declares at no kind needs a member
     # met through the evidence route, whose digest pins every argument the request
-    # carries. There is no such member here (:func:`_met_through_evidence`).
+    # carries.
     undeclared = carried - set(declared) - _examined_currency_keys(row, subject)
-    if undeclared and not any(_met_through_evidence(member, subject) for member in row.coverage):
+    if undeclared and not any(
+        _met_through_evidence(member, subject, quotes) for member in row.coverage
+    ):
         found.update(CoverageDefect(key, CoverageFailure.UNNAMED) for key in undeclared)
     return tuple(sorted(found, key=lambda defect: (defect.failure.value, defect.subject)))
 
@@ -618,7 +700,9 @@ def account_of(defects: Sequence[CoverageDefect], tool: ToolDefinition) -> str:
     return "; ".join(clauses)
 
 
-def covers_arguments(row: Authorization, subject: CoverageSubject) -> bool:
+def covers_arguments(
+    row: Authorization, subject: CoverageSubject, quotes: Sequence[ActionQuote]
+) -> bool:
     """ADR-0254 §3's **condition 6** as ADR-0266 §7 restates it, alone (§6's bar).
 
     **Stated in both of §3's directions, because an omission is a change as much as
@@ -645,11 +729,12 @@ def covers_arguments(row: Authorization, subject: CoverageSubject) -> bool:
     Args:
         row: The live record the one ``live_for`` read returned.
         subject: The one observation of the request this ruling is decided over.
+        quotes: That goal's quotes naming the request's intended action, oldest first.
 
     Returns:
         Whether condition 6 holds over that pair.
     """
-    return not uncovered(row, subject)
+    return not uncovered(row, subject, quotes)
 
 
 def covers_on_argument_route(row: Authorization, subject: CoverageSubject) -> bool:
@@ -702,7 +787,7 @@ def covers_on_argument_route(row: Authorization, subject: CoverageSubject) -> bo
     return True
 
 
-def covers(row: Authorization, subject: CoverageSubject) -> bool:
+def covers(row: Authorization, subject: CoverageSubject, quotes: Sequence[ActionQuote]) -> bool:
     """ADR-0254 §3's conditions **3, 4, 5 and 6** — the policy's half of coverage.
 
     Conditions **1 and 2** and the **id half** of condition 3 are
@@ -730,6 +815,7 @@ def covers(row: Authorization, subject: CoverageSubject) -> bool:
     Args:
         row: The live record the one ``live_for`` read returned.
         subject: The one observation of the request this ruling is decided over.
+        quotes: That goal's quotes naming the request's intended action, oldest first.
 
     Returns:
         Whether the row covers the request **in full**, which is what ADR-0254 §6's
@@ -741,7 +827,7 @@ def covers(row: Authorization, subject: CoverageSubject) -> bool:
         return False
     if any(member not in row.destinations for member in subject.destinations):
         return False
-    return covers_arguments(row, subject)
+    return covers_arguments(row, subject, quotes)
 
 
 def _satisfies(
@@ -758,7 +844,7 @@ def _satisfies(
     return _satisfies_terms(bound, value)
 
 
-def _satisfies_money(  # noqa: PLR0911 — one return per conjunct ADR-0254 §4 states
+def _satisfies_money(
     bound: ValueBound, value: FrozenJson, declared: BoundedArgument, subject: CoverageSubject
 ) -> bool:
     """ADR-0254 §4's ``MONEY`` reading, with the currency conjunct over the request.
@@ -792,7 +878,7 @@ def _satisfies_money(  # noqa: PLR0911 — one return per conjunct ADR-0254 §4 
     **boolean** is refused with it: ``bool`` is an ``int`` in Python and ``True``
     would otherwise read as one.
     """
-    if declared.currency_argument is None or bound.maximum is None:  # pragma: no cover — the model
+    if declared.currency_argument is None:  # pragma: no cover — the model
         return False
     stated = subject.parameters.get(declared.currency_argument)
     if not isinstance(stated, str) or stated != bound.currency:
@@ -804,6 +890,30 @@ def _satisfies_money(  # noqa: PLR0911 — one return per conjunct ADR-0254 §4 
     except InvalidOperation, ValueError:
         return False
     if not amount.is_finite() or amount < 0:
+        return False
+    return _within(bound, amount)
+
+
+def _within(bound: ValueBound, amount: Decimal) -> bool:
+    """Whether ``amount`` lies inside a ``MONEY`` bound's endpoints (ADR-0254 §4).
+
+    **One statement, read by both of ADR-0266 §7's routes**, so a figure the evidence
+    route admits and one the argument route admits cannot come apart at an endpoint.
+
+    **``maximum_exclusive`` is read strictly and no endpoint is ever widened**
+    (ADR-0266 §3): *"under 100 euros"* does not cover a call at exactly ``100``, *"at
+    most 100 euros"* does, and no reading rounds, quantises, nudges or relaxes an
+    endpoint in either direction — the difference is a cent in the direction that
+    authorises a call the user did not authorise.
+
+    Args:
+        bound: The member's ``MONEY`` bound.
+        amount: The amount to read, already finite and not negative.
+
+    Returns:
+        Whether the amount is within the bound.
+    """
+    if bound.maximum is None:  # pragma: no cover — the model
         return False
     if amount > bound.maximum or (bound.maximum_exclusive and amount == bound.maximum):
         return False

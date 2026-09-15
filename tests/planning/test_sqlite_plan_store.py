@@ -26,6 +26,7 @@ from plan_store_contract import (
     _claim,
     _goal,
     _plan,
+    _quote,
     _revision,
 )
 from pydantic import ValidationError
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     ActionPlan,
+    ActionQuoteMinting,
     AttemptTransition,
     EvidenceApplicability,
     EvidenceBasis,
@@ -154,6 +156,9 @@ _SYNC_METHODS = {
     # its write are one `BEGIN IMMEDIATE`, so it is its own lock site rather than a
     # caller of one above.
     "record_intended_actions": "_record_intended_actions_sync",
+    # ADR-0267 §2's member, likewise a compare-and-swap: its read, its comparison and
+    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site.
+    "record_quote": "_record_quote_sync",
 }
 
 
@@ -948,6 +953,41 @@ async def test_every_transaction_path_opens_and_closes_exactly_one(tmp_path: Pat
                 IntendedActionMinting(
                     goal_id="g1",
                     actions=(IntendedAction(id="ia2", intent="book the room"),),
+                    expected_version=0,
+                )
+            ),
+            closes="ROLLBACK",
+        )
+        # ADR-0267 §2's member, both ways out of the block: an append that commits and
+        # a refusal that must still reach a ROLLBACK rather than abandon the
+        # transaction open on the shared connection.
+        await recorded(
+            "record_quote",
+            lambda: store.record_quote(
+                ActionQuoteMinting(
+                    goal_id="g1",
+                    quote=_quote(),
+                    expected_version=2,
+                )
+            ),
+        )
+        await recorded(
+            "record_quote (refused: an action the goal does not hold)",
+            lambda: store.record_quote(
+                ActionQuoteMinting(
+                    goal_id="g1",
+                    quote=_quote(action="ia-unknown"),
+                    expected_version=3,
+                )
+            ),
+            closes="ROLLBACK",
+        )
+        await recorded(
+            "record_quote (refused: stale version)",
+            lambda: store.record_quote(
+                ActionQuoteMinting(
+                    goal_id="g1",
+                    quote=_quote(),
                     expected_version=0,
                 )
             ),
@@ -3371,6 +3411,69 @@ def _version_4_database(path: Path) -> None:
         conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
 
 
+def _version_5_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0265 and before ADR-0267.
+
+    The **previous** version, which is the one ADR-0267 §11's migration is stated over.
+    Built from the version 4 shape and then carried forward by hand, so the file this
+    test opens is the one the previous release actually wrote rather than a fresh one
+    relabelled. ADR-0265 added no table and no column, so the marker is the whole of
+    the difference.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_4_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+
+
+async def test_a_version_5_plan_store_reads_its_goals_with_no_quotes(
+    tmp_path: Path,
+) -> None:
+    """ADR-0267 §11's last clause, over the **previous** version's stored shape.
+
+    "A ``Goal`` written before Q1 decodes with ``quotes`` empty and ``quotes_elided``
+    ``0``", and "**no lane invents a quote for a stored goal or back-fills one onto a
+    stored row**: a price nothing read is a price no record holds."
+
+    **The migration adds no table and no column**, which is version 5's own shape one
+    decision over: a quote rides inside the ``goals`` blob, ``Goal.quotes`` is a
+    defaulted empty tuple and ``quotes_elided`` a defaulted ``0``, so the stored blob
+    decodes unrewritten. **What moves is the marker alone**, and it moves for the
+    reading in the other direction — this code writes blobs an older build's
+    ``extra="forbid"`` refuses, and ADR-0049 §1's loud refusal of a **newer** label is
+    what a version that did not move would leave that build nothing to fire.
+    """
+    path = tmp_path / "plans.db"
+    _version_5_database(path)
+    with sqlite3.connect(path) as conn:
+        before = conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0]
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert goal.statement == "relocate to Lisbon", "the blob is read, not rewritten"
+        assert goal.quotes == (), "and nothing is invented for it"
+        assert goal.quotes_elided == 0, "a store that has dropped nothing says so"
+        assert await store.for_action("g1", "ia1") == (), "an absence and never a fault"
+
+        export = await store.export()
+        assert export.schema_version == 14
+        assert export.goals[0].quotes == ()
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "6",
+        )
+        assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
+            "the migration converts nothing: the blob is the one the previous release wrote"
+        )
+
+
 async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
     tmp_path: Path,
 ) -> None:
@@ -3409,7 +3512,7 @@ async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT data FROM goals WHERE id = 'g1'").fetchone()[0] == before, (
             "the migration converts nothing: the blob is the one the previous release wrote"
@@ -3454,7 +3557,7 @@ async def test_a_version_3_plan_store_gains_the_evidence_table_and_its_counter(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         assert conn.execute("SELECT COUNT(*) FROM goal_evidence").fetchone() == (0,)
         assert conn.execute("SELECT evidence_elided FROM goals").fetchall() == [(0,)]
@@ -3505,7 +3608,7 @@ async def test_a_version_2_plan_store_is_taken_the_whole_way_to_the_current_shap
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(goals)").fetchall()}
         assert {"conversation_id", "last_engaged_in", "evidence_elided"} <= columns
@@ -3630,7 +3733,7 @@ async def test_a_pre_decision_plan_store_upgrades_and_stays_exportable(
         # 3, because every pass runs inside the one setup transaction and the marker is
         # stamped last.
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
-            "5",
+            "6",
         )
 
 

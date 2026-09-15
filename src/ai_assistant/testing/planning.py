@@ -37,12 +37,15 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_ACTION_QUOTES,
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
     MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    ActionQuote,
+    ActionQuoteMinting,
     AssociationVerdict,
     AttemptPhase,
     AttemptState,
@@ -184,6 +187,32 @@ def _revalidated_revision(revision: GoalRevision) -> GoalRevision:
     except ValidationError as exc:
         subject = getattr(revision, "goal_id", "<no goal>")
         msg = f"the revision for goal {subject!r} is not a valid command: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _revalidated_quote_minting(minting: ActionQuoteMinting) -> ActionQuoteMinting:
+    """Rebuild ``minting`` as a validated, detached command, or refuse it (ADR-0267 §2).
+
+    :func:`_revalidated_minting`'s reason one command over: ``model_copy(update=...)``
+    skips validators (ADR-0023 §2), so a ``quote`` can arrive carrying a non-finite
+    amount, a lowercase currency or a digest that is not lowercase 64-character hex —
+    every one of which the record's own model refuses at construction and none of which
+    a store trusting the object would see.
+
+    Args:
+        minting: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return ActionQuoteMinting.model_validate(minting.model_dump())
+    except ValidationError as exc:
+        subject = getattr(minting, "goal_id", "<no goal>")
+        msg = f"the quote minting for goal {subject!r} is not a valid command: {exc}"
         raise PlanningError(msg) from exc
 
 
@@ -1148,6 +1177,98 @@ class FakePlanStore:
             )
             self._goals[updated.id] = updated
             return updated.model_copy(deep=True)
+
+    async def record_quote(self, minting: ActionQuoteMinting) -> Goal:
+        """Append one quote to a goal, compare-and-swap (ADR-0267 §2).
+
+        Re-implemented here rather than imported from ``ai_assistant.planning``, for
+        the reason this module's docstring gives: importing it would pull in the very
+        subsystem the fake stands in for, and a fake that decided conformance by calling
+        the code it stands in for would report every implementation conformant. The
+        shared ``PlanStoreContract`` is what holds the two statements honest.
+
+        **One refusal, and it runs before the append** — a quote whose
+        ``intended_action`` is not the ``id`` of a member of the goal's
+        ``intended_actions`` at the instant of the append, writing nothing, on
+        ``PlanningError`` and not the stale-write class. **Nothing else is tested**: not
+        the amount, not the currency, not the digest, and **no test of whether this
+        quote refreshes an earlier one**, which is position in the tuple and not a
+        predicate — so an append of a quote equal to the one already last is accepted
+        and leaves two members.
+
+        **The bound is an elision and not a refusal** (§2): an append past
+        :data:`~ai_assistant.core.types.MAX_ACTION_QUOTES` drops from the **front**,
+        oldest first, and advances ``quotes_elided`` by exactly as many as it dropped.
+        Because members go from the front alone, within any action the last quote is the
+        last to go, so **no elision can make an earlier reading govern**.
+
+        **The command is revalidated on the first executed line**, which is both
+        ADR-0023 §2's obligation and this method's ADR-0065 snapshot.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, or if the quote's ``intended_action`` is not the ``id``
+                of a member of that goal's ``intended_actions``.
+        """
+        command = _revalidated_quote_minting(minting)
+        async with self._resource.held():
+            stored = self._goal_for_write_locked(
+                command.goal_id, command.expected_version, "quote against"
+            )
+            if command.quote.intended_action not in {
+                action.id for action in stored.intended_actions
+            }:
+                msg = (
+                    f"goal {command.goal_id} holds no intended action "
+                    f"{command.quote.intended_action}: a quote is keyed by the act it "
+                    f"was read for, and the store refuses one naming an action the goal "
+                    f"does not hold, writing nothing (ADR-0267 §2)"
+                )
+                raise PlanningError(msg)
+            appended = (*stored.quotes, command.quote)
+            dropped = max(0, len(appended) - MAX_ACTION_QUOTES)
+            updated = _revalidated_goal(
+                stored.model_copy(
+                    update={
+                        "quotes": appended[dropped:],
+                        "quotes_elided": stored.quotes_elided + dropped,
+                        "version": stored.version + 1,
+                    }
+                ),
+                what="recording a quote",
+            )
+            self._goals[updated.id] = updated
+            return updated.model_copy(deep=True)
+
+    async def for_action(self, goal: str, intended_action: str) -> tuple[ActionQuote, ...]:
+        """That goal's quotes naming that action, in the goal's own order (§5).
+
+        This fake satisfies :class:`~ai_assistant.core.protocols.GoalQuotes`
+        **structurally**, exactly as the production store does, so a composition wiring
+        one object to both seams is exercised here too.
+
+        **It selects nothing and compares nothing** (ADR-0267 §5): the filter is the two
+        identifiers and the order is ``Goal.quotes``' own. A goal this fake does not
+        hold answers an **empty** tuple. It never raises — the fault limb is
+        :class:`FakeGoalQuotes`' and the production store's.
+
+        Args:
+            goal: The goal the request being ruled on belongs to.
+            intended_action: The act the request is an attempt at.
+
+        Returns:
+            That action's quotes, oldest first, possibly empty, detached.
+        """
+        async with self._resource.held():
+            stored = self._goals.get(goal)
+            if stored is None:
+                return ()
+            return tuple(
+                quote.model_copy(deep=True)
+                for quote in stored.quotes
+                if quote.intended_action == intended_action
+            )
 
     def _goal_for_write_locked(self, goal_id: str, expected: int, what: str) -> Goal:
         """Read a goal for a compare-and-swap write; the caller holds the resource.

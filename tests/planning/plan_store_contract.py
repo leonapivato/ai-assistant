@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -32,12 +33,15 @@ from ai_assistant.core.errors import (
     StaleExecutionError,
 )
 from ai_assistant.core.types import (
+    MAX_ACTION_QUOTES,
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
     MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    ActionQuote,
+    ActionQuoteMinting,
     AttemptEffort,
     AttemptKind,
     AttemptOutcome,
@@ -92,6 +96,16 @@ if TYPE_CHECKING:
     from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: The arguments digest every scripted quote carries. A fixed, well-formed
+#: ``Sha256Hex``: the store compares it against nothing (ADR-0267 §2), so what matters
+#: here is only that the record is constructible and round-trips.
+_QUOTE_DIGEST = "a" * 64
+
+#: When a scripted quote was read. Fixed, because **no clause orders quotes by it**
+#: (§1): the tuple's position is the order, and a store that sorted by this would be
+#: the second implementation of §2's rule.
+_QUOTE_READ_AT = datetime(2026, 1, 2, tzinfo=UTC)
 
 #: The two engagement instants ADR-0250's arms order goals by. Distinct and both
 #: after ``_WHEN``, so "engaged later" is a fact about the values rather than about
@@ -295,6 +309,26 @@ def _minting(
     return IntendedActionMinting(
         goal_id=goal_id, actions=actions, expected_version=expected_version
     )
+
+
+def _quote(
+    *, action: str = "ia1", amount: str = "120", currency: str = "EUR", digest: str = _QUOTE_DIGEST
+) -> ActionQuote:
+    """One quote for ``action``, at the shape ADR-0267 §1 declares."""
+    return ActionQuote(
+        intended_action=action,
+        arguments_digest=digest,
+        amount=Decimal(amount),
+        currency=currency,
+        plan="p1",
+        read_from=StepOutputRef(step="s1", field="price"),
+        read_at=_QUOTE_READ_AT,
+    )
+
+
+def _quote_minting(quote: ActionQuote, *, goal_id: str = "g1", version: int) -> ActionQuoteMinting:
+    """The command that appends ``quote`` to ``goal_id`` (ADR-0267 §2)."""
+    return ActionQuoteMinting(goal_id=goal_id, quote=quote, expected_version=version)
 
 
 def _acting_plan(
@@ -2720,6 +2754,255 @@ class PlanStoreContract:
         assert held is not None
         assert held.intended_actions == filled.intended_actions, "nothing of the three landed"
         assert held.version == filled.version
+
+    # --- ADR-0267 §11 arm 2: the store's write, its refusals and its elision ---
+
+    async def test_record_quote_appends_and_advances_the_version(self, store: PlanStore) -> None:
+        """ADR-0267 §2: the member appends one quote and advances ``Goal.version``.
+
+        And the tuple's order **is** the total order ADR-0266 §6 requires: a goal
+        carrying quotes for two actions returns them oldest first, the **last** naming
+        an action is the governing one, and appending a second for one action leaves
+        the first in place and unmarked (§4's *"no lane marks, supersedes, invalidates,
+        edits or removes the quote it displaced"*).
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+
+        first = await store.record_quote(_quote_minting(_quote(amount="120"), version=1))
+        assert [one.amount for one in first.quotes] == [Decimal("120")]
+        assert first.version == 2
+        assert first.quotes_elided == 0
+
+        other = await store.record_quote(
+            _quote_minting(_quote(action="ia2", amount="80"), version=2)
+        )
+        later = await store.record_quote(_quote_minting(_quote(amount="135"), version=3))
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.quotes == later.quotes
+        assert [one.intended_action for one in held.quotes] == ["ia1", "ia2", "ia1"]
+        assert other.quotes[1].amount == Decimal("80")
+        governing = [one for one in held.quotes if one.intended_action == "ia1"][-1]
+        assert governing.amount == Decimal("135")
+        assert held.quotes[0].amount == Decimal("120"), "the displaced quote is unmarked"
+
+    async def test_record_quote_refuses_a_stale_expected_version(self, store: PlanStore) -> None:
+        """§2: the write is compare-and-swap, and a stale one writes **nothing**.
+
+        The class is the one ``StaleExecutionError`` occupies, which is what tells a
+        caller to re-read — and ADR-0267 §4 then forbids the **minter** from rebasing
+        on that answer, which is a rule about the mint and not about this store.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.record_quote(_quote_minting(_quote(), version=1))
+
+        with pytest.raises(StaleExecutionError):
+            await store.record_quote(_quote_minting(_quote(amount="9"), version=1))
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert [one.amount for one in held.quotes] == [Decimal("120")]
+        assert held.version == 2
+
+    async def test_two_quote_writes_dispatched_together_leave_one_loser(
+        self, store: PlanStore
+    ) -> None:
+        """§2's compare-and-swap, driven **concurrently** rather than in sequence.
+
+        ``record_intended_actions``' own arm one member over, and for its reason: a
+        sequential pair establishes that the second caller reads an advanced version,
+        while only a concurrent pair establishes that the read, the comparison and the
+        write are one indivisible step. **The ordering claim of §4 rests on this**:
+        because a refused write is never rebased, every quote a goal holds was appended
+        against the version the read that produced it observed.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        results = await asyncio.gather(
+            store.record_quote(_quote_minting(_quote(amount="120"), version=1)),
+            store.record_quote(_quote_minting(_quote(amount="170"), version=1)),
+            return_exceptions=True,
+        )
+
+        winners = [one for one in results if isinstance(one, Goal)]
+        losers = [one for one in results if isinstance(one, StaleExecutionError)]
+        assert len(winners) == 1, f"expected exactly one winner, got {results}"
+        assert len(losers) == 1, f"expected exactly one stale loser, got {results}"
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert len(held.quotes) == 1, "the loser appended nothing"
+        assert held.version == 2
+
+    async def test_record_quote_refuses_an_action_the_goal_does_not_hold(
+        self, store: PlanStore
+    ) -> None:
+        """§2's one refusal, **against a control naming an action that is**.
+
+        It takes ``PlanningError`` and not the stale-write class: it is an invariant
+        breach at the current version rather than a lost race, so "a caller that
+        re-read and retried would re-raise for ever".
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+
+        with pytest.raises(PlanningError) as refused:
+            await store.record_quote(_quote_minting(_quote(action="ia-unknown"), version=1))
+        assert not isinstance(refused.value, StaleExecutionError), "an invariant breach"
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.quotes == (), "the refusal wrote nothing"
+        assert held.version == 1
+
+        control = await store.record_quote(_quote_minting(_quote(action="ia1"), version=1))
+        assert len(control.quotes) == 1
+
+    async def test_record_quote_refuses_an_unknown_goal(self, store: PlanStore) -> None:
+        """§2: the member refuses a goal the store does not hold, as every other goal
+        write does and with the class ADR-0249 §12 gives ``save_goal``."""
+        with pytest.raises(PlanningError):
+            await store.record_quote(_quote_minting(_quote(), version=0))
+
+    async def test_record_quote_refuses_a_malformed_command(self, store: PlanStore) -> None:
+        """§2's command is revalidated before anything is read (ADR-0023 §2).
+
+        ``model_copy(update=...)`` **skips validators**, so a caller can hand in a
+        minting whose ``quote`` carries a non-finite amount — which the record's own
+        model refuses at construction and which a store trusting the object would
+        store. The refusal is a ``PlanningError`` at the member's boundary rather than
+        a ``ValidationError`` escaping a Protocol that contracts neither.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        malformed = _quote_minting(_quote(), version=1).model_copy(
+            update={"quote": _quote().model_copy(update={"amount": Decimal("NaN")})}
+        )
+
+        with pytest.raises(PlanningError) as refused:
+            await store.record_quote(malformed)
+        assert not isinstance(refused.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.quotes == ()
+
+    async def test_an_append_past_the_bound_elides_exactly_one_from_the_front(
+        self, store: PlanStore
+    ) -> None:
+        """§2: the bound is an **elision** and not a refusal, and the count discloses it.
+
+        Appending to a goal already holding ``MAX_ACTION_QUOTES`` drops **exactly one**
+        from the front and advances ``quotes_elided`` by one. Silent truncation is not
+        available (ADR-0086 §4), and the count never decreases.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        version = 1
+        for index in range(MAX_ACTION_QUOTES):
+            version = (
+                await store.record_quote(_quote_minting(_quote(amount=str(index)), version=version))
+            ).version
+
+        full = await store.get_goal("g1")
+        assert full is not None
+        assert len(full.quotes) == MAX_ACTION_QUOTES
+        assert full.quotes_elided == 0
+
+        elided = await store.record_quote(_quote_minting(_quote(amount="999"), version=version))
+        assert len(elided.quotes) == MAX_ACTION_QUOTES
+        assert elided.quotes_elided == 1
+        assert elided.quotes[0].amount == Decimal("1"), "the oldest went, and one only"
+        assert elided.quotes[-1].amount == Decimal("999")
+
+    async def test_an_elision_drops_an_actions_only_quote_and_then_its_oldest_of_two(
+        self, store: PlanStore
+    ) -> None:
+        """§2: "an elision either leaves the governing quote where it was, or leaves
+        that action with no quote at all".
+
+        Both limbs in one history. ``ia2``'s only quote is the oldest member, so the
+        append that overflows drops it and that action is left with **none** — ADR-0266
+        §7 then leaves the request uncovered and the act asks. The next append drops
+        ``ia1``'s **oldest of two and more**, and its governing quote is left exactly
+        where it was: **no elision can make an earlier reading govern**, because
+        members go from the front alone and within any action the last quote is the
+        last to go.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1"), _intended("ia2")))
+        version = (
+            await store.record_quote(_quote_minting(_quote(action="ia2", amount="80"), version=1))
+        ).version
+        for index in range(MAX_ACTION_QUOTES - 1):
+            version = (
+                await store.record_quote(
+                    _quote_minting(_quote(action="ia1", amount=str(index)), version=version)
+                )
+            ).version
+
+        overflowed = await store.record_quote(
+            _quote_minting(_quote(action="ia1", amount="900"), version=version)
+        )
+        assert [one for one in overflowed.quotes if one.intended_action == "ia2"] == [], (
+            "the action whose only quote was the oldest is left with none"
+        )
+        assert overflowed.quotes_elided == 1
+        held_for_ia1 = [one for one in overflowed.quotes if one.intended_action == "ia1"]
+        assert held_for_ia1[0].amount == Decimal("0"), "ia1 has lost nothing yet"
+        assert held_for_ia1[-1].amount == Decimal("900")
+
+        again = await store.record_quote(
+            _quote_minting(_quote(action="ia1", amount="901"), version=overflowed.version)
+        )
+        assert again.quotes_elided == 2
+        after = [one for one in again.quotes if one.intended_action == "ia1"]
+        assert after[0].amount == Decimal("1"), "the oldest of ia1's own went"
+        assert after[-1].amount == Decimal("901"), "the governing one is the latest read"
+
+    async def test_an_append_equal_to_the_last_quote_is_accepted_and_leaves_two(
+        self, store: PlanStore
+    ) -> None:
+        """§2: the store makes **no test of its own** about a refresh.
+
+        "A refresh is position in the tuple and not a predicate, so there is nothing
+        for a store to evaluate", and §4's equality is the **minter's** re-read and
+        never the store's. So an append of a quote equal to the one already last is
+        accepted, leaves two members, and leaves the governing quote carrying the same
+        amount and currency as before.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        first = await store.record_quote(_quote_minting(_quote(), version=1))
+        again = await store.record_quote(_quote_minting(_quote(), version=first.version))
+
+        assert len(again.quotes) == 2
+        assert again.quotes[0] == again.quotes[1]
+        assert again.quotes[-1].amount == Decimal("120")
+        assert again.quotes[-1].currency == "EUR"
+
+    async def test_delete_goal_removes_the_quotes_with_the_goal(self, store: PlanStore) -> None:
+        """§2: "``delete_goal``'s cascade reaches a quote because it is inside the goal".
+
+        One of the three obligations §2 says come free with putting the record on the
+        goal rather than in rows beside it — asserted rather than assumed, because a
+        row store would have needed a cascade written by hand. The export is read as
+        well as the goal, because a quote surviving a deletion would have to survive
+        **somewhere**, and the export is where a row store's rows would show.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.record_quote(_quote_minting(_quote(), version=1))
+
+        await store.delete_goal("g1")
+
+        assert await store.get_goal("g1") is None
+        exported = await store.export()
+        assert [goal.id for goal in exported.goals] == []
 
     async def test_a_serves_entry_goes_stale_and_is_neither_repaired_nor_re_checked(
         self, store: PlanStore

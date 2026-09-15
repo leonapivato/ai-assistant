@@ -83,7 +83,7 @@ from ai_assistant.testing.cancellation import SuspendableResource
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import FrozenJsonValue
+    from ai_assistant.core.types import ActionQuote, FrozenJsonValue
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: When a scripted row is proposed. Fixed, so ordering assertions are about the
@@ -310,6 +310,7 @@ def authorization(  # noqa: PLR0913 — one knob per Authorization field a suite
     supersedes: str | None = None,
     disposition: AuthorizationDisposition = AuthorizationDisposition.PROPOSED,
     settled_at: datetime | None = None,
+    quoted: ActionQuote | None = None,
 ) -> Authorization:
     """A scripted :class:`~ai_assistant.core.types.Authorization` (ADR-0254 §1).
 
@@ -337,6 +338,10 @@ def authorization(  # noqa: PLR0913 — one knob per Authorization field a suite
         settled_at: When it was last settled; supplied automatically for a row
             written already ``ESTABLISHED`` with no confirmation, which is what
             paths (ii) and (iii) require and what a caller most often forgets.
+        quoted: The governing quote the row was proposed against (ADR-0267 §7).
+            ``None`` — the default — is every row this tree writes, the field's
+            producer being ADR-0254 §20's Lane 2 (ADR-0267 §11); the knob is here so
+            that lane's arms and Q1's shape arms have one builder rather than two.
 
     Returns:
         The row.
@@ -359,6 +364,7 @@ def authorization(  # noqa: PLR0913 — one knob per Authorization field a suite
         supersedes=supersedes,
         disposition=disposition,
         settled_at=settled_at,
+        quoted=quoted,
     )
 
 

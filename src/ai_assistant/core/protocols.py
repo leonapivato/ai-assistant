@@ -112,6 +112,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ActionPlan,
+        ActionQuote,
+        ActionQuoteMinting,
         ActionRequest,
         AnswerOutcome,
         AttemptTransition,
@@ -4566,6 +4568,17 @@ class PlanStore(Protocol):
     strengthened by the same decision's refusal of a goal opened carrying an intended
     action.
 
+    **One further member carries ADR-0267's quote, and that is a sixth BREAKING
+    contract change under golden rule 5** (ADR-0267 §2): :meth:`record_quote` appends
+    one :class:`~ai_assistant.core.types.ActionQuote` to a goal. It is a **command and
+    not a snapshot** on ADR-0014 §5's argument unchanged — it takes an
+    :class:`~ai_assistant.core.types.ActionQuoteMinting` and never a whole ``Goal`` —
+    and it is **compare-and-swap** on the discipline every goal write here already
+    keeps. **Its bound is an elision and not a refusal**, which is the opposite remedy
+    to :meth:`record_intended_actions`', and ADR-0267 §2 gives the reason: what vanishes
+    where ADR-0265 §1 refuses one is the scope of an at-most-once claim, while *"a
+    dropped quote costs a question"*.
+
     **And that member's ``serves`` refusal narrows once, which is a fifth BREAKING
     contract change under golden rule 5** (ADR-0269 §1). :meth:`record_intended_actions`
     checks a ``serves`` value against **every revision the goal holds** rather than
@@ -4750,6 +4763,62 @@ class PlanStore(Protocol):
                 is one the goal already holds, if the minting would carry the goal past
                 ``MAX_INTENDED_ACTIONS``, or if a ``serves`` value is not the ``id`` of
                 an element of any revision the goal holds.
+        """
+        ...
+
+    async def record_quote(self, minting: ActionQuoteMinting) -> Goal:
+        """Append one quote to a goal and return it (ADR-0267 §2).
+
+        **One member, and a BREAKING contract change under golden rule 5.** It appends
+        one :class:`~ai_assistant.core.types.ActionQuote` to the named goal's
+        ``quotes``, applies the elision below, advances ``Goal.version``, and returns
+        the stored goal.
+
+        **The write is compare-and-swap and the store takes a command, not a
+        snapshot**: ADR-0014 §5's discipline binds unchanged and ADR-0249 §12's
+        statement of it is adopted whole — the member succeeds only where the stored
+        ``Goal.version`` still equals ``minting.expected_version``, a stale write raises
+        the ``StaleExecutionError`` class executions already occupy, and **the read, the
+        comparison and the write are one indivisible step** with no separate read on
+        which a decision is taken.
+
+        **The bound is an elision and not a refusal** (§2), which is the opposite
+        remedy to :meth:`record_intended_actions`'. An append that would carry the goal
+        past :data:`~ai_assistant.core.types.MAX_ACTION_QUOTES` **drops members from the
+        front**, oldest first, and advances ``Goal.quotes_elided`` by exactly as many as
+        it dropped. **Silent truncation is not available** (ADR-0086 §4) and the count
+        never decreases. **An elision never revives a superseded quote**: members go
+        from the front alone, so within any action the **last** quote is the last to go
+        — an elision either leaves the governing quote where it was or leaves that
+        action with no quote at all, in which case ADR-0266 §7 leaves the request
+        uncovered and the act **asks**. A dropped quote costs a question, where a
+        dropped identity would be "a duplicate booking nobody could detect afterwards".
+
+        **It validates nothing about the number and refuses one thing** (§2). It refuses
+        a ``quote`` whose ``intended_action`` is not the ``id`` of a member of that
+        goal's ``intended_actions`` **at the instant of the append**, writing nothing,
+        on ``PlanningError`` — the class ADR-0249 §12 gives ``save_goal`` for a goal
+        whose id it already holds, because this is an invariant breach at the current
+        version rather than a lost race. **It applies no other test**: not the amount,
+        not the currency, not the digest, not the provenance, and **no test of whether
+        this quote refreshes an earlier one** — a refresh is position in the tuple and
+        not a predicate, so there is nothing for a store to evaluate and no second place
+        the rule could live.
+
+        **It compares no instant and orders nothing by ``read_at``** (§1, §2). What
+        keeps position and reading in step is ADR-0267 §4's rule that an append is made
+        in the step that took its read, never a test at the write — so an append of a
+        quote **equal to the one already last** is accepted and leaves two members, §4's
+        equality being the **minter's** re-read and never the store's.
+
+        Returns:
+            The goal as stored after the append.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, or if the quote's ``intended_action`` is not the ``id``
+                of a member of that goal's ``intended_actions``.
         """
         ...
 
@@ -8225,6 +8294,84 @@ class GoalAuthorizations(Protocol):
                 not none of them. The policy's fault clause then takes §6's bar, so
                 an integrity failure asks rather than authorising a request neither
                 row covers.
+        """
+        ...
+
+
+class GoalQuotes(Protocol):
+    """The quotes one goal holds for one intended action, in order (ADR-0267 §5).
+
+    **The policy's face onto the price a ``MONEY`` ceiling is proved against**, and the
+    narrow one. ADR-0266 §7's evidence route meets a ``MONEY`` member against the
+    **governing quote** for the request's intended action, and this is the whole of how
+    ``permissions`` obtains one.
+
+    **It is keyed and never asked** (§5). :meth:`for_action` filters by the two
+    identifiers, which are facts the policy holds, and evaluates **no** predicate: it
+    does not select the governing quote, does not compare a digest, does not compare an
+    amount and does not read a ``CoverageMember``. **``permissions`` takes the last
+    member of what comes back**, which is ADR-0266 §7's *"One implementation, in
+    ``permissions``"* kept whole — a store that selected would be a second place the
+    governing rule lives, and the first conforming implementation to read it
+    differently would be right in one of them.
+
+    **The keying is the narrow face** :class:`GoalAuthorizations` **is.** A policy is
+    handed this and never :class:`PlanStore`, so it cannot name ``record_quote``. The
+    quotes live inside the ``Goal``, so ``planning``'s store answers this member and the
+    composition root passes the concrete — golden rule 1 rather than an exception to it,
+    since ``permissions`` names only the ``core`` Protocol and a conforming store
+    satisfies this one **structurally**.
+
+    **One member, and no lane adds a second** (§5).
+
+    **A fault is not an absence, and the direction is** :class:`GoalAuthorizations`'
+    (§5). A :meth:`for_action` that cannot answer raises
+    :class:`~ai_assistant.core.errors.AuthorizationError` and **no implementation
+    converts it into an empty tuple**. The request is then **not covered**, ADR-0254
+    §6's bar is taken, no standing route is taken at all, and the ruling is the
+    ``CONFIRM`` the request would have drawn had the user authorised nothing. **No new
+    error class is minted**, and no lane falls through to the argument route.
+
+    Cancelling :meth:`for_action` is governed by this module's cancellation clause
+    (ADR-0060). Its input-observation clause (ADR-0065) is **vacuous** here: both
+    arguments are ``str``.
+    """
+
+    async def for_action(
+        self, goal: Identifier, intended_action: Identifier
+    ) -> tuple[ActionQuote, ...]:
+        """That goal's quotes naming that action, **in the order the goal holds them**.
+
+        Possibly empty, and an empty tuple means exactly that: the goal holds no quote
+        for that action. **Never that the store could not be read** — that is the
+        raise below, and the two are different facts about what the user authorised.
+
+        **It selects nothing and compares nothing** (ADR-0267 §5). The order is
+        ``Goal.quotes``' own, which ADR-0267 §2 makes *"the total order ADR-0266 §6
+        requires"*; the caller takes the **last** member as the governing quote. No
+        implementation reorders, de-duplicates, filters by digest, filters by currency,
+        drops a quote for its age or returns only the last.
+
+        **It is durable-store I/O and is ``async``** on ``CLAUDE.md``'s own rule, as
+        :meth:`GoalAuthorizations.live_for` is. **It reads no clock**: nothing in
+        ADR-0267 expires a quote, and §6 is explicit that no lane *"computes a validity
+        window from ``read_at``"*.
+
+        Args:
+            goal: The goal the request being ruled on belongs to —
+                ``ActionRequest.goal``, which ``orchestration`` sets. A request carrying
+                ``None`` never reaches this seam at all.
+            intended_action: The act this request is an attempt at —
+                ``ActionRequest.intended_action``. A request carrying ``None`` never
+                reaches this seam either, being met by the evidence route in no case.
+
+        Returns:
+            A detached snapshot of that action's quotes, oldest first, possibly empty.
+
+        Raises:
+            AuthorizationError: If the store cannot be read. **No implementation
+                converts this into an empty tuple**: the request is then not covered,
+                §6's bar is taken, and the fault is reported.
         """
         ...
 
