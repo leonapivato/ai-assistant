@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _AUTHORIZATION_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -107,7 +108,7 @@ from ai_assistant.core.types import (
     TurnReference,
     UtcInstant,
 )
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing import AUTHORIZATION_GOAL, FakeAssistantEngine, opening_act
 
 #: The per-turn budget the two ``converse`` entries take. A fixed figure rather than a
 #: clock reading: nothing in the cases that pass it turns on the duration.
@@ -535,6 +536,13 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine(max_payload_bytes=_SPEND_LIMIT)
         engine.trail = ledger
         engine.spend = ledger
+        return engine
+
+    @pytest.fixture
+    async def overfull_authorizations(self) -> AssistantEngine:
+        """The fake at a limit one standing row's view cannot fit inside."""
+        engine = FakeAssistantEngine(max_payload_bytes=_AUTHORIZATION_LIMIT)
+        engine.hold_authorization(opening_act(goal=AUTHORIZATION_GOAL))
         return engine
 
     @pytest.fixture

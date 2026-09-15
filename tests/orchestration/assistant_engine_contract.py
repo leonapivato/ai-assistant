@@ -161,6 +161,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.disclosure import speakable_notification_triple
 from ai_assistant.orchestration.payloads import _encode, project
 from ai_assistant.testing import (
+    AUTHORIZATION_GOAL,
     Disclosure,
     FakeAuditTrail,
     FakeSourceReadTrail,
@@ -985,6 +986,12 @@ class SpendSubject:
 #: without claiming the state is remote, and what a suite can arrange cheaply is
 #: the limit rather than the ten thousand rows a genuinely large total needs.
 _SPEND_LIMIT: Final = 64
+
+#: A payload limit one ``AuthorizationView`` cannot fit inside, for ADR-0254 §11's
+#: unpaged listing. Small rather than realistic, for :data:`_SPEND_LIMIT`'s reason: the
+#: listing takes no ``limit`` and nothing bounds a goal's rows, so what a suite can
+#: arrange cheaply is the frame rather than the thousands of rows a real one needs.
+_AUTHORIZATION_LIMIT: Final = 64
 
 #: The reporting currency every spend fixture here is configured in.
 SPEND_CURRENCY: Final = "USD"
@@ -5965,6 +5972,36 @@ class AssistantEngineContract(ABC):
         """
         with pytest.raises(ValueError, match=r"\w"):
             await getattr(engine, call)("  ")
+
+    async def test_an_authorization_listing_too_large_for_the_frame_is_refused_whole(
+        self, overfull_authorizations: AssistantEngine
+    ) -> None:
+        """The unpaged listing's declared ``OversizedValueError``, exercised.
+
+        ``standing_authorizations`` takes no ``limit`` because *"a truncated answer to
+        'what do I authorise' is a false answer rather than a partial one"* — so the
+        listing that will not fit the frame has to be refused **whole**, and the
+        surface declares ``OversizedValueError`` for it. Without this the declaration
+        is a formality: dropping the result measurement, paging the answer or
+        truncating it would each leave every other case in this file green, because
+        they all read a listing of zero rows or of very few.
+
+        ``overfull_spending``'s shape one operation over, and asserted over every
+        implementation for ADR-0085 §3's reason: a wire client has to refuse what the
+        engine refuses, and the refusal has to survive the crossing as the same class.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_authorizations.standing_authorizations(AUTHORIZATION_GOAL)
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_authorizations(self) -> AssistantEngine:
+        """A subject holding a listing for :data:`AUTHORIZATION_GOAL` its limit refuses.
+
+        One ``ESTABLISHED`` row is enough at :data:`_AUTHORIZATION_LIMIT`: what the
+        suite arranges cheaply is the limit, not the thousands of rows a genuinely
+        oversized listing would need.
+        """
 
     async def test_the_authorization_listing_takes_no_limit(self, engine: AssistantEngine) -> None:
         """ADR-0254 §11: *"It takes no ``limit``"*, for ``standing_recipient_grants``'
