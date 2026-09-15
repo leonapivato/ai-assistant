@@ -39,6 +39,13 @@ binding this declaration to a specific one, which is
 :class:`~ai_assistant.tools.egress_binder.EgressRegistration`'s job and
 :func:`~ai_assistant.tools.builtin.build_web_search_integration`'s act.
 
+**The response-reading parts that are not about searching live one module over**
+(:mod:`ai_assistant.tools.http_reading`): the RFC 9110 ``Date`` field a response
+declares its own instant in, and the bounded JSON decode. ADR-0231 §10 and ADR-0260
+§5 state the *same* rule over that instant, so it is implemented once and read from
+both. :data:`MAX_JSON_DEPTH` is re-exported here because it was this module's public
+name first and the boundary case that keeps the figure honest reads it by that name.
+
 **Two arguments, and the origin is one of them for a reason ADR-0231 §5 states.**
 ADR-0148 §8's third floor refuses an ``ALLOW`` where a request carries no canonical
 destination set, and the set is derived from spans whose argument declares a
@@ -56,7 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
@@ -100,6 +107,7 @@ from ai_assistant.tools.egress import (
     MalformedHttpResponseError,
 )
 from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
+from ai_assistant.tools.http_reading import MAX_JSON_DEPTH, declared_instant, decoded_object
 from ai_assistant.tools.invocation import expiry_failure
 from ai_assistant.tools.registry import checked_timeout, revalidated_call
 
@@ -308,10 +316,6 @@ _SNIPPET_FIELD: Final = "description"
 #: ``NO_RESULT`` where the honest answer is that the provider answered something else.
 _PROVIDER_OK: Final = 200
 
-#: RFC 9110 §5.6.7's ``Date`` field, lowercased as :class:`HttpsResponse` lowercases a
-#: field name. See :func:`_declared_instant` for why the instant is read from here.
-_DATE_FIELD: Final = "date"
-
 #: The ASCII line breaks ADR-0231 §10 drops a result for carrying at any position in
 #: any of its three spans.
 _LINE_BREAKS: Final = frozenset("\n\r")
@@ -342,22 +346,6 @@ _IMF_MONTHS: Final = (
 
 #: How long an IMF-fixdate is: ``Sun, 06 Nov 1994 08:49:37 GMT``.
 _IMF_LENGTH: Final = 29
-
-#: How deeply a documented response may nest. Public, so the boundary case that keeps
-#: this figure honest reads it rather than restating it. The provider's answer is an object
-#: holding an object holding an array of objects — four levels — so a bound two orders
-#: of magnitude above that refuses nothing a documented answer carries while sitting
-#: far below the depth at which ``json``'s scanner exhausts the interpreter's stack.
-MAX_JSON_DEPTH: Final = 100
-
-#: The octets that open a JSON structure, and those that close one.
-_JSON_OPENERS: Final = frozenset(b"[{")
-_JSON_CLOSERS: Final = frozenset(b"]}")
-
-#: The two octets that decide where a JSON string ends, and so which brackets are
-#: structure and which are a third party's words (:func:`_too_deep`).
-_QUOTE: Final = ord('"')
-_BACKSLASH: Final = ord("\\")
 
 #: RFC 3986 §2.3's unreserved set, the characters a request target may carry
 #: unescaped. Everything else this integration writes into one is percent-encoded
@@ -416,177 +404,6 @@ def _refused(refusal: SearchRefusal) -> SearchOutcome:
     return SearchOutcome(refusal=refusal)
 
 
-def _declared_instant(headers: Sequence[tuple[str, str]]) -> datetime | None:
-    """The instant the provider's own response declares, or ``None`` (ADR-0231 §10).
-
-    **Where it is read from, and what makes it the provider's own statement.**
-    ADR-0231 §10 obliges the implementing lane to say both, "for the provider the
-    owner chose". It is RFC 9110 §5.6.7's ``Date`` field, which §6.6.1 defines as "the
-    date and time at which the message was originated" — a value the origin server
-    writes from its own clock, about its own act of answering, before the response
-    leaves it. That is the reading §10's own prose contemplates: "An HTTPS response
-    from an origin server that has a clock carries the instant it was generated." It
-    is **not** the instant this system sent the request, not the instant it received
-    the response, and not a value derived from either; nothing on this path reads a
-    clock at all.
-
-    **Strict IMF-fixdate, and the obsolete formats are not read.** RFC 9110 §5.6.7
-    requires a sender to generate that one format and forbids it generating another,
-    and ADR-0231 §10 rules that "a value carried in that position which cannot be read
-    as an instant is not a declared one". So an RFC 850 or ``asctime`` spelling lands
-    with a malformed one — the fail-closed direction, which mints nothing rather than
-    attesting to a value read under a rule the sender was told not to use. The parse
-    is written out rather than taken from ``strptime``, whose ``%a`` and ``%b`` read
-    the process locale: a hub started under a non-English locale would otherwise
-    refuse every well-formed date on that machine and nowhere else.
-
-    Args:
-        headers: The response's fields, names already lowercased.
-
-    Returns:
-        The instant, or ``None`` where the field is absent, appears more than once, or
-        carries a value this format does not admit.
-    """
-    values = [value for field, value in headers if field == _DATE_FIELD]
-    if len(values) != 1:
-        # Two `Date` fields declare two instants, so the response declares none this
-        # integration will pick between — ADR-0231 §10's "no substitute" read at the
-        # one place a client could invent one by taking the first.
-        return None
-    value = values[0]
-    if len(value) != _IMF_LENGTH:
-        return None
-    day, comma, rest = value[:3], value[3:5], value[5:]
-    if day not in _IMF_DAYS or comma != ", ":
-        return None
-    stamp, space, zone = rest[:20], rest[20:21], rest[21:]
-    if space != " " or zone != "GMT":
-        return None
-    return _imf_stamp(stamp)
-
-
-def _imf_stamp(stamp: str) -> datetime | None:
-    """The ``dd Mmm yyyy hh:mm:ss`` half of an IMF-fixdate, as a UTC instant.
-
-    Args:
-        stamp: Exactly twenty characters, already split out by
-            :func:`_declared_instant`.
-
-    Returns:
-        The instant, or ``None`` where any field is not the fixed-width decimal the
-        format states — a two-digit day, a named month, a four-digit year and three
-        two-digit time fields, separated exactly as the format separates them.
-    """
-    separators = ((2, " "), (6, " "), (11, " "), (14, ":"), (17, ":"))
-    if any(stamp[position] != character for position, character in separators):
-        return None
-    month = stamp[3:6]
-    if month not in _IMF_MONTHS:
-        return None
-    fields = (stamp[0:2], stamp[7:11], stamp[12:14], stamp[15:17], stamp[18:20])
-    if not all(field.isdigit() and field.isascii() for field in fields):
-        return None
-    day, year, hour, minute, second = (int(field) for field in fields)
-    try:
-        return datetime(year, _IMF_MONTHS.index(month) + 1, day, hour, minute, second, tzinfo=UTC)
-    except ValueError:
-        # A day the month does not have, or a time field out of range. `isdigit`
-        # admits the digits; only the calendar can refuse the value, and a date that
-        # names no determinate instant is one ADR-0231 §10 treats exactly as it
-        # treats a malformed string.
-        return None
-
-
-def _decoded_object(body: bytes) -> dict[str, FrozenJson] | None:
-    """The response body as a UTF-8 JSON object, or ``None`` where it is not one.
-
-    Args:
-        body: The response's octets, as the exchange read them under its bound.
-
-    **A response the decoder cannot descend is one of the shapes, and it is refused
-    here rather than left to leave.** ``json``'s scanner descends one level per open
-    bracket, so a *well-formed* body nested deeply enough exhausts the interpreter's
-    stack instead of failing to parse — which is reachable well inside
-    ``search_max_response_bytes``' default megabyte, and is therefore a response a
-    provider can actually send. ADR-0231 §17 says this member raises for no source
-    reason, and a body a provider sent is exactly a source reason.
-
-    **The guard is a bound on the nesting rather than a caught ``RecursionError``**,
-    and that is the difference between refusing and hoping: a stack that has already
-    overflowed is not one an ``except`` clause can be relied on to unwind, which is
-    what the first attempt at this discovered. So the depth is counted off the octets
-    **before** the decoder is entered, and a body past the bound is refused without
-    being parsed at all — the same posture ADR-0231 §5 takes for the response bound
-    one seam over, where "nothing is parsed" is what makes an over-large response
-    yield no value.
-
-    Returns:
-        The object, or ``None`` where the octets are not UTF-8, are not JSON, are
-        nested past :data:`MAX_JSON_DEPTH`, or are JSON that is not an object. All
-        four are one operator fact — the provider answered something this integration
-        does not read — so they are one answer rather than four.
-    """
-    if _too_deep(body):
-        return None
-    try:
-        decoded = json.loads(body.decode("utf-8"))
-    except ValueError:
-        # `ValueError` and not the two concrete classes: `UnicodeDecodeError` and
-        # `json.JSONDecodeError` are both subclasses of it, and naming the base keeps
-        # a third `ValueError` from this one call from leaving a member that returns
-        # refusals.
-        return None
-    return decoded if isinstance(decoded, dict) else None
-
-
-def _too_deep(body: bytes) -> bool:
-    r"""Whether ``body`` nests structures past what this integration will decode.
-
-    Counted over the octets rather than over a parse, because the point is to decide it
-    **before** the decoder is entered: see :func:`_decoded_object`.
-
-    **String-aware, and that is the whole of the correctness here.** A bracket inside a
-    JSON string is a character in a third party's words and not a structure — ADR-0231
-    §10 transcribes such a span **verbatim** — so a counter that read one would refuse
-    a result whose title happens to carry brackets, which is a drop §10 does not admit.
-    And it fails in the other direction too: a ``]`` inside an earlier string would
-    *decrement* the running depth, so a crafted response could carry a real nesting
-    this bound was meant to catch and pass under it. Both lenses of round 3 found the
-    pair, and both are the same defect.
-
-    Only two escapes matter for finding where a string ends: ``\\`` and ``\"``, and
-    treating any ``\`` as consuming the next octet handles both. **UTF-8 makes the
-    scan safe over octets**: no byte of a multi-byte sequence is below ``0x80``, so
-    neither ``"`` nor ``\`` nor a bracket can appear inside one.
-
-    Args:
-        body: The response's octets.
-
-    Returns:
-        Whether the running structural depth ever passes :data:`MAX_JSON_DEPTH`.
-    """
-    depth = 0
-    in_string = False
-    escaped = False
-    for octet in body:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif octet == _BACKSLASH:
-                escaped = True
-            elif octet == _QUOTE:
-                in_string = False
-        elif octet == _QUOTE:
-            in_string = True
-        elif octet in _JSON_OPENERS:
-            depth += 1
-            if depth > MAX_JSON_DEPTH:
-                return True
-        elif octet in _JSON_CLOSERS:
-            depth -= 1
-    return False
-
-
 def _provider_results(body: bytes) -> tuple[Mapping[str, FrozenJson], ...] | None:
     """The documented response's result list, or ``None`` where it is another shape.
 
@@ -610,7 +427,7 @@ def _provider_results(body: bytes) -> tuple[Mapping[str, FrozenJson], ...] | Non
         The results, in the order the provider returned them — possibly empty — or
         ``None`` where the response is not the documented shape.
     """
-    decoded = _decoded_object(body)
+    decoded = decoded_object(body)
     if decoded is None:
         return None
     group = decoded.get(_PROVIDER_GROUP_KEY)
@@ -1728,7 +1545,7 @@ class WebSearchEgress:
         results = _provider_results(response.body)
         if results is None:
             return _refused(SearchRefusal.PROVIDER_REFUSED)
-        reported_at = _declared_instant(response.headers)
+        reported_at = declared_instant(response.headers)
         if reported_at is None:
             # ADR-0231 §10, ADR-0092 §3: "A response that declares **no** instant mints
             # **no record**", and a value that cannot be read as an instant "is not a
