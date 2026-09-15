@@ -555,6 +555,81 @@ async def test_the_same_goal_re_opened_mid_withdrawal_still_shows_what_the_act_d
         assert [name for name, _ in drive.engine.calls].count("revoke_authorization") == 1
 
 
+async def test_a_record_whose_id_carries_a_control_character_is_still_restated(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """The act finds its rows by comparing the value, not by building a selector from it.
+
+    ``Identifier`` refuses only a blank and requires a UTF-8 encoding — ADR-0018 §2
+    declined the visible-text tightening and issue #62 still holds the control-character
+    question open — so ``id`` may carry ``U+0000``. ``CSS.escape`` maps that to
+    ``U+FFFD``, which is a *lossy* escape rather than a failing one: a selector built
+    from such an id matches nothing, and the row the store has just settled goes on
+    reading *"still stands"* beside a live control — the state round 7 closed, reached
+    through the escape. Adversarial review, round 8, ``major``.
+
+    Driven through the **payload**, because no builder in ``ai_assistant.testing`` mints
+    an id like this and the subject is what the page does with one that arrives.
+    """
+    handle = "auth\x00one"
+    listing = {
+        "authorizations": [
+            {
+                "id": handle,
+                "goal_statement": STATEMENT,
+                "tool_id": AUTHORIZATION_TOOL.id,
+                "tool_description": AUTHORIZATION_TOOL.description,
+                "coverage": [
+                    {
+                        "argument": "amount",
+                        "fixed": None,
+                        "bound": {
+                            "kind": "money",
+                            "currency": "GBP",
+                            "currency_argument": "currency",
+                            "maximum": "50",
+                            "minimum": None,
+                            "starts_at": None,
+                            "ends_at": None,
+                            "timezone": None,
+                            "terms": None,
+                        },
+                        "span": "up to fifty pounds",
+                    }
+                ],
+                "expires_at": "2026-09-13T21:00:00+00:00",
+                "live": True,
+            }
+        ]
+    }
+
+    async def rows(one: Route) -> None:
+        await one.fulfill(status=200, content_type="application/json", body=json.dumps(listing))
+
+    async def settled(one: Route) -> None:
+        await one.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"settlement": "settled"}),
+        )
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.route("**/authorizations", rows)
+        await drive.page.route("**/authorization/revoke", settled)
+        await _open_authorities(drive)
+        _answering(drive, accept=True)
+
+        await drive.page.click("#authorization-list button:has-text('Withdraw this')")
+
+        row = drive.page.locator("#authorization-list .notification-row")
+        await expect(row).to_contain_text("You withdrew this.")
+        await expect(row.locator("button")).to_have_count(0)
+        assert "still stands" not in await row.inner_text()
+        # And one entry, not a second one built because the first could not be found.
+        await expect(drive.page.locator("#authorizations .authorization-said")).to_have_count(1)
+
+
 async def test_a_second_press_while_the_first_is_out_reaches_the_hub_once(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
