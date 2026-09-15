@@ -657,34 +657,43 @@ courtesy to the report; it is what makes A8's guarantee reachable at all.**
 > **`StaleExecutionError`** — the class that means *re-read and recompute*, which is exactly the
 > caller's correct response. This is a **strengthening of a member that already exists**, on
 > ADR-0255 §3's own footing, and it is the shape ADR-0261 §3 uses for the same race one member
-> over. **`commit_attempt` gains no other conjunct**, every other `AttemptTransition` is untouched
-> — `→ CANCELLED` most of all, which ADR-0261 §2's act takes over exactly the outstanding steps
-> this one refuses — and **no lane reads it as a general outcome check.**
+> over. **Every other `AttemptTransition` is untouched** — `→ CANCELLED` most of all, which
+> ADR-0261 §2's act takes over exactly the outstanding steps this one refuses — and **no lane reads
+> it as a general outcome check.**
 
-**The conjunct closes the race by removing the claimable step rather than by racing it, and that
-is why it reaches `PENDING` and `AWAITING_APPROVAL` too.** A `commit_transition` writes an
-`ExecutionState` and **does not advance `GoalAttempt.version`**, so the attempt's own
-compare-and-swap cannot see a claim land: an engine that read a step `PENDING`, compared the
-criteria, and then committed would record a terminal attempt — and possibly a `VERIFIED` one — over
-a step a concurrent driver had meanwhile taken `PENDING → RUNNING → SUCCEEDED`, whose answer the
-comparison never saw and which could have made a criterion **unmet**. A conjunct testing only
-`RUNNING` and `INDETERMINATE` would not catch that, because by the time it runs the step is
-`SUCCEEDED`. **The status set narrows the window and does not close it, and saying which is this section's
-honest half.** ADR-0014 §4's graph admits a `→ RUNNING` claim only from `PENDING` or
-`AWAITING_APPROVAL`, so where the caller's read found every step `SUCCEEDED`, `FAILED` or
-`SKIPPED` **no step of the attempt is claimable at all**, and a step of a **new** execution is
-unreachable because putting one on the attempt is a `commit_attempt` append (ADR-0249 §12) that
-advances `GoalAttempt.version`, which the ending transition's own `expected_version` refuses.
-**What is left is exactly one interleaving**: `FAILED` is outside `TERMINAL_STEP_STATUSES` *"(it
-may still be retried)"*, so a `FAILED → RUNNING → SUCCEEDED` retry landing entirely between the
-comparison and the commit is admitted by the graph and by the conjunct alike. **No driver in this
+> **Normative — and the ending transition carries the versions the comparison was computed
+> against, which is what closes the window the status set only narrows.** **`AttemptTransition`
+> gains `execution_versions`**, a possibly-empty `tuple[tuple[Identifier, int], ...]` defaulting to
+> the empty tuple, each pair an execution id and the **`ExecutionState.version` the caller read**
+> when it computed the comparison, duplicate-free in its ids. **`PlanStore.commit_attempt` refuses
+> a `to_state` of `ENDED` with `StaleExecutionError`, in the same indivisible step as the write,
+> where any pair names an execution the attempt does not name, or names one whose stored `version`
+> is not the one the pair carries** — and it is the **`ENDED`** limb alone that reads the field:
+> every other transition ignores it, `→ CANCELLED` included, so ADR-0261 §2's act is unaffected
+> whatever it passes. **The engine passes a pair for every execution the attempt names**, which is
+> exactly the set §4's comparison read; **an empty tuple is a conforming transition and refuses
+> nothing**, which is what keeps every `commit_attempt` caller this decision does not touch —
+> a phase stamp, an effort counter, an append — writing exactly as it does today. **No lane reads
+> the field as a claim check, a general optimistic lock, or a licence to re-read and retry**: the
+> engine's answer to a refusal is §4's no-second-bite rule.
+
+**Two conjuncts because the race has two halves, and neither is redundant.** A
+`commit_transition` writes an `ExecutionState` and **does not advance `GoalAttempt.version`**, so
+the attempt's own compare-and-swap cannot see a claim land: an engine that read a step `PENDING`,
+compared the criteria, and then committed would record a terminal attempt — possibly a `VERIFIED`
+one — over a step a concurrent driver had meanwhile taken `PENDING → RUNNING → SUCCEEDED`, whose
+answer the comparison never saw and which could have made a criterion **unmet**. **The status set
+refuses that on sight** and reaches `PENDING` and `AWAITING_APPROVAL` for it, a set testing only
+`RUNNING` and `INDETERMINATE` being silent by the time it runs. **What the status set alone would
+not close is the retry**: `FAILED` is outside `TERMINAL_STEP_STATUSES` *"(it may still be
+retried)"*, so a `FAILED → RUNNING → SUCCEEDED` retry landing entirely between the comparison and
+the commit leaves every step terminal at both instants and the set silent. **No driver in this
 corpus performs it** — ADR-0255 §2 rules the walk *"passes over"* a `FAILED` step — but resting the
-contract on that would make `PlanStore` non-extensible, so it is **stated rather than relied on**.
-**What closes it is a version comparison and nothing weaker**: the ending transition carrying each
-named execution's `ExecutionState.version` as the caller read it, with `commit_attempt` refusing
-where any has advanced. **That field is not landed here** and §9 books it with what fires it,
-beside the question §2a leaves open — both decide what this phase may treat as established, and
-two decisions landing two shapes on `AttemptTransition` is the collision one ADR avoids.
+contract on that would make `PlanStore` non-extensible. **The version pairs close it**, because
+that retry advanced the `ExecutionState.version` the caller passed, and they close the appended
+step too by the same arithmetic the attempt's own `expected_version` already refuses (ADR-0249
+§12). **Neither conjunct subsumes the other**: the versions say nothing about a step nobody has
+moved yet, and the statuses say nothing about a step moved twice.
 
 **The cost is one turn and is bounded by an act that already runs.** An attempt whose walk stopped
 leaving a step `PENDING` — ADR-0255 §2's `AMBIGUOUS_CAPABILITY`, `INVALID_PARAMETERS` and
@@ -889,10 +898,11 @@ right about it, and it is the last place the count can be stated before somebody
 ### 8. The `core` surface, the wire, the stored shapes, and the export
 
 > **Normative — what `core/types.py` gains.** **Two models** — `AttemptReport`, with exactly two
-> fields (§6), and `CriterionCheck`, with exactly two (§2); and **four fields** — `check` on
-> `GoalElement` and on `ProposedElement` (§2), `postconditions` on `ToolDefinition` (§2), and
-> `attempt_report` on `TurnOutcome` (§6). **Nothing else** — **no new enumeration**, no new
-> constant, no `Settings` field, and no widening of `Goal`, `GoalInterpretation`, `GoalAttempt`,
+> fields (§6), and `CriterionCheck`, with exactly two (§2); and **five fields** — `check` on
+> `GoalElement` and on `ProposedElement` (§2), `postconditions` on `ToolDefinition` (§2),
+> `execution_versions` on `AttemptTransition` (§4), and `attempt_report` on `TurnOutcome` (§6).
+> **Nothing else** — **no new enumeration**, no new constant, no `Settings` field, and no widening
+> of `Goal`, `GoalInterpretation`, `GoalAttempt`,
 > `StepTransition`, `StepExecution`, `ExecutionState`, `ActionPlan`, `PlanStep`, `GoalEvidence`,
 > `GoalBrief`, `BriefElement`, `EvidenceDigest`, `ActionRequest`, `PermissionDecision` or
 > `IntendedAction`. **`AttemptOutcome`, `GoalStatus`, `AttemptState`, `AttemptPhase`,
@@ -900,17 +910,17 @@ right about it, and it is the last place the count can be stated before somebody
 > class.**
 
 > **Normative — `ToolDefinition` gaining a field is not a migration and not a second wire ground.**
-> A definition is **constructed at registration** from a tool's own code or from an MCP server's
-> declaration (ADR-0016 §5, ADR-0147) and is **held by no store, written to no export and carried
-> by no frame**: `ActionRequest` and `PermissionDecision` reference a definition by `id` and a
-> digest rather than embedding one, and neither gains a field here. So **no lane migrates,
-> back-fills or re-registers a definition**, one written before this decision registers with
-> `postconditions` empty — which is the fail-closed claim §2 states — and **no tool in this tree
-> declares one until its own integration does**, the lanes of this decision registering none (§7).
+> A definition is **constructed at registration** (ADR-0016 §5, ADR-0147) and is held by no store,
+> written to no export and carried by no frame — `ActionRequest` and `PermissionDecision` reference
+> one by `id` and a digest rather than embedding it, and neither gains a field here. So **no lane
+> migrates, back-fills or re-registers a definition**, one written before this decision registers
+> with `postconditions` empty, and **no tool in this tree declares one until its own integration
+> does** (§7).
 
 > **Normative — what any Protocol gains: two strengthenings and nothing else.**
 > `PlanStore.set_goal_status` gains §5's single `→ ACHIEVED` limb and `PlanStore.commit_attempt`
-> gains §4's single `→ ENDED` limb, each with its `planning` implementation. **No member is added
+> gains §4's `→ ENDED` limb — one limb in **two conjuncts**, the live-step set and the execution
+> versions, refused by one class — each with its `planning` implementation. **No member is added
 > to any Protocol, no argument is added to any existing member, `commit_transition` gains no
 > conjunct, `save_plan` gains none, `Planner.plan`'s signature does not move, and no new Protocol
 > is created** — so **no new conformance suite and no new canonical fake is owed**, and the
@@ -1032,13 +1042,6 @@ right about it, and it is the last place the count can be stated before somebody
   intended action a parameter identity, or by one that admits a postcondition comparing an output
   against the call's own arguments — which would owe ADR-0253 §4's no-path-language rule its own
   argument, an argument reference being exactly the substitution language ADR-0014 §7 withheld.
-- **The execution-version comparison the ending commit needs** (§4). **Not decided, and the field
-  is not landed here**: `AttemptTransition` carrying each named execution's `ExecutionState.version`
-  as the caller read it, with `commit_attempt` refusing where any has advanced. §4 states why the
-  status conjunct is insufficient and why no weaker argument works. **It is booked with the fork
-  above rather than separately**, because both decide what this phase may treat as established and
-  two decisions landing two shapes on `AttemptTransition` is the collision one ADR avoids. Fired
-  by that decision.
 - **A verification that calls a model.** **Not decided, and §2 states why not rather than leaving
   it to be inferred**: establishing a goal's achievement is the `ACHIEVED` write's prerequisite,
   and ADR-0249 §7 forbids a model clearing one. What a model supplies is the **declaration** — a
@@ -1095,17 +1098,13 @@ header states each in full.
   of an element whose ground does not resolve, its no-identifier-crosses-the-seam clause and its
   **interpretation-is-the-model's asymmetry** each stay true, the last being what §2 reasons from.
 - **ADR-0016 §1** — *yes*, in one scope: **its `ToolDefinition` model declaration together with
-  its required-field clause, in the application to `postconditions` alone**. A reader holding only
-  §1 authors a definition stating **nothing about what its own success establishes**, and §2 of
-  this decision has then nothing to select: every criterion bound to that tool is unestablished,
-  and the verification ADR-0255 §12 books here has no operand for any act at all. **The exception
-  to the required-field clause is recorded on its own ground and not on a borrowed one** (header):
-  this field is read **after** the act by the verification phase alone and by no permission
-  decision, so the clause's subject — *"every field that a permission decision depends on"* — does
-  not reach it, and the empty tuple is fail-closed besides. **Nothing else of §1 fails the test**:
-  every other field stays required, `frozen=True` and its audit-record argument, `description`'s
-  non-blank refusal and the registry's detached-snapshot discipline each stay true word for word,
-  and a reader holding only §1 refuses every definition it refuses today.
+  its required-field clause, in the application to `postconditions` alone**, which the header
+  states in full. A reader holding only §1 authors a definition stating **nothing about what its
+  own success establishes**, and §2 has then nothing to select: every criterion bound to that tool
+  is unestablished, and the verification ADR-0255 §12 books here has no operand for any act at all.
+  **Nothing else of §1 fails the test**: every other field stays required, `frozen=True` and its
+  audit-record argument, `description`'s non-blank refusal and the registry's detached-snapshot
+  discipline each stay true word for word.
 
 **Every other ADR this decision reaches owes no record**, and the entries below are the whole of
 them, each decided by the same test.
@@ -1213,10 +1212,11 @@ them, each decided by the same test.
 
 - **L1 — `core` (with `wire`, `planning` and `testing`).** `ToolDefinition.postconditions` with
   its `OUTPUT_PRESENT` refusal; `CriterionCheck` with its two fields; `GoalElement.check` and
-  `ProposedElement.check` with the new-element shape in ADR-0249 §7's validator; `AttemptReport`; `TurnOutcome.attempt_report`; the docstrings
+  `ProposedElement.check` with the new-element shape in ADR-0249 §7's validator;
+  `AttemptTransition.execution_versions`; `AttemptReport`; `TurnOutcome.attempt_report`; the docstrings
   naming this ADR; `PROTOCOL_VERSION` **+1** with its `wire/envelope.py` log entry;
   `PlanExport.schema_version` **+1**; **§5's `→ ACHIEVED` conjunct on `PlanStore.set_goal_status`
-  and §4's `→ ENDED` conjunct on `PlanStore.commit_attempt`**, each with its `planning`
+  and §4's `→ ENDED` conjuncts on `PlanStore.commit_attempt`**, each with its `planning`
   implementation, the shared conformance suite cases and the canonical fake in
   `ai_assistant.testing` (§12, arm 8). **This is the lane that moves the wire**, and it lands
   alone — golden rule 5, and `CONTRIBUTING.md` → "Adding a Protocol" for the suite and the fake
@@ -1323,11 +1323,15 @@ them, each decided by the same test.
    ***`commit_attempt`***: a `→ ENDED` transition is refused with `StaleExecutionError` and
    **writes nothing** where any step of any execution the attempt names stands `PENDING`,
    `AWAITING_APPROVAL`, `RUNNING` or `INDETERMINATE`, and is accepted where every such step stands
-   `SUCCEEDED`, `FAILED` or `SKIPPED`. **And the two interleavings it exists for**: a step
-   `PENDING` when the caller read it and **claimed** before the commit is refused; and an execution
+   `SUCCEEDED`, `FAILED` or `SKIPPED`. **And the three interleavings it exists for**: a step
+   `PENDING` when the caller read it and **claimed** before the commit is refused; an execution
    **appended** to the attempt after the caller read it advances `GoalAttempt.version`, so the
-   transition is refused on its `expected_version` — the pair that shows the argument is
-   exhaustive without a version list on the transition.
+   transition is refused on its `expected_version`; and a step **`FAILED`** when the caller read
+   it, taken `RUNNING` and `SUCCEEDED` before the commit — every step terminal at both instants
+   and the status conjunct silent — refused on `execution_versions`, the arm that fails against an
+   implementation carrying the field and not comparing it. **And the field's own limbs**: a pair
+   naming an execution the attempt does not name is refused, an **empty** tuple refuses nothing,
+   and a `→ CANCELLED` transition carrying a stale pair still commits.
    **`→ CANCELLED` and every other `AttemptTransition` are unaffected**, ADR-0261 §3's own
    `(CANCELLED, UNCERTAIN)` case asserted to still commit over an `INDETERMINATE` step.
    ***`set_goal_status`***: an `→ ACHIEVED` write is refused with `StaleExecutionError` and **writes
