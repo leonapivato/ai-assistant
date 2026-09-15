@@ -64,8 +64,8 @@ backstop, and an offered change carries the price its acceptance authorises
   — **one scope. §1's bound clause, in the direction of the bound alone**, and with it that
   decision's title: *"**A row written on this rung is bounded by the turn-retention window in
   force at its own write, measured from `proposed_at`, and by nothing longer**"* stays true as an
-  **upper** bound and stops being the horizon — such a row now ends at the **earlier** of that
-  instant and its goal's closure. A reader holding only that decision reads the window as when
+  **upper** bound and stops being the horizon — such a row is ended by a closing act of its goal
+  where one reaches it, and lapses on that instant where none does. A reader holding only that decision reads the window as when
   the authority ends, and would report a live authority over a finished request for the rest of
   it. **Every other clause binds entire and several are what this rests on**: §1's rung, its
   `proposed_at`-only read, its no-new-reader rule and its illustrative list of rows that outlive
@@ -284,9 +284,9 @@ decision by another route.
 > strictly before the closing write**, and on the `ABANDONED` path that closing write is
 > `PlanStore.close_goal_abandoned` (ADR-0261 §2), whose three writes stay one indivisible step
 > and gain nothing here. **The order is what makes the ending total rather than best-effort**:
-> from the instant `end_for_goal` returns, no row of that goal stands `PROPOSED` or
-> `ESTABLISHED` and none can be recorded, so the closing write cannot be raced by an
-> establishment. **Taken after the status write it would be exactly that race**, and no lane
+> from the instant `end_for_goal` returns, and for as long as the record it wrote stands, no row
+> of that goal stands `PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write
+> cannot be raced by an establishment. **Taken after the status write it would be exactly that race**, and no lane
 > reverses it.
 
 > **Normative — what each failure leaves, and the closing act compensates nothing.** **Where
@@ -307,8 +307,9 @@ decision by another route.
 > whose first reads both found the goal open at version *v* fence at *v* alike, so a compensation
 > carrying *v* clears the record the act that actually closed the goal stands on, leaving a closed
 > goal unfenced and a stale turn able to record under it. **That is the state this decision exists
-> to make unreachable, and the compensation is the only way to reach it**, so the compensation
-> goes rather than the fence. **The cost is asymmetric in the safe direction** — compensating
+> to close, and the compensation would reach it on the ordinary closing path** — not in a booked
+> residual (§8, §9) but every time a closing write failed — so the compensation goes, not the
+> fence. **The cost is asymmetric in the safe direction** — compensating
 > risks an authority under a closed goal, not compensating costs questions under an open one.
 > **No lane restores it under any name**, a repair call, a best-effort clear or a retry included.
 
@@ -463,8 +464,14 @@ decision by another route.
 > paths (i) and (iii) at the instant the row is written, from `Settings.episode_retention` and
 > `proposed_at`; `Settings` gains nothing; a correction takes no rung of the ladder; §3's `None`
 > case still writes no row at all; and §5's narrowing correction is untouched. **What is
-> subordinated is only the claim that the window is the horizon**: a row is now bounded by the
-> **earlier** of its own `expires_at` and its goal's closure.
+> subordinated is only the claim that the window is the horizon**: a row standing when a closing
+> act of its goal runs is ended by that act, so its own `expires_at` is an **upper** bound and
+> not the horizon. **The bound is stated over the act and not over the two instants**, which is
+> §2's meaning read one section on: a row the closing act never reached — written after it, or
+> under a closure that predates this decision (§9) — is **not** ended by it and lapses on its own
+> `expires_at` exactly as ADR-0256 ratifies, which is §8's booked residual and §9's
+> prospectivity bound respectively. **A lane reading this as "the earlier of two instants" has
+> read a rule this decision does not state**, and would owe a sweep no clause here licenses.
 
 > **Normative — no instant is moved, shortened, recomputed or re-read, and the row ends by a
 > disposition alone.** ADR-0254 §12's *"the expiry is taken once, when the row is written, and
@@ -656,8 +663,8 @@ each limb below the answer is yes, and the sentence that becomes false or over-w
 5. **ADR-0256 §1's bound clause, in the direction of the bound alone**, and with it that
    decision's title: *"**A row written on this rung is bounded by the turn-retention window in
    force at its own write, measured from `proposed_at`, and by nothing longer**"* stays true as an
-   **upper** bound and stops being the horizon — such a row now ends at the earlier of that
-   instant and its goal's closure. A reader holding only ADR-0256 reads the window as when the
+   **upper** bound and stops being the horizon — such a row is ended by a closing act of its
+   goal where one reaches it, and lapses on that instant where none does. A reader holding only ADR-0256 reads the window as when the
    authority ends and would report a live authority over a finished request for the rest of it.
    **Every other clause of ADR-0256 binds entire and several are what this rests on**: §1's rung
    and its `proposed_at`-only read, its no-new-reader rule and its illustrative list of rows that
@@ -923,9 +930,10 @@ and the ratification flip is one line and no other byte (ADR-0165).
 sentence the owner's ruling is written in and which the corpus could not previously express: the
 row comes into being when the user answers, covers every call of that request the quote sits
 under, and ends in the write that finishes the request. A user opening the listing of a finished
-booking sees no authority, because they hold none. And the campsite walkthrough M33 runs becomes
-checkable end to end — book, verify, close, and the ceiling is gone — rather than ending with a
-standing authority nobody intended and nothing retires.
+booking sees no authority, because they hold none — on a database this store closed the goal in,
+the three residuals below being where that sentence stops. And the campsite walkthrough M33 runs
+becomes checkable end to end — book, verify, close, and the ceiling is gone — rather than ending
+with a standing authority nobody intended and nothing retires.
 
 **What becomes harder, and each is a question asked rather than a call authorised.** Every
 request after a goal closes asks, including one the user experiences as a small amendment:
@@ -939,21 +947,31 @@ a coupling worth watching and one nothing here can hide.
 
 **What is disclosed rather than closed.** The ending is **two writes in two stores**, and the
 fence is what makes the first of them total rather than best-effort: from the instant
-`end_for_goal` returns, no row of that goal stands `PROPOSED` or `ESTABLISHED` and none can be
-recorded, so the closing write cannot be raced. What the two writes still leave is a **failure
-between them**: the goal is open, its authorities gone, its fence standing and every call of it
-asking until the user abandons and reopens it — fail-closed, disclosed, compensated by nothing
-and repaired by no sweep (§1, §8). The act does **not** clear the fence there, because a
-compensation cannot tell an orphaned fence from one a concurrent closing act is standing on, and
-the failure it would buy is the one the fence exists to prevent. Between a reopen's `ACTIVE`
-write and its `clear_closure` a turn is refused a row and asks, which is the same direction, and
-a failure of either reopen call leaves the same open-and-fenced state with the same repair. A
-call already claimed when its goal closes is ADR-0254 §13's residual window unchanged and A9's to
-close — a **cross-store** race the fence does not reach and does not claim to. And a `clear`
-erases the fences with the rows, so after one a delayed write for a closed goal succeeds against
-a store that holds nothing else either (§1). Every one of these costs a question rather than an
-authority — the `clear` case costing the record itself, at the user's own instruction — the only
-asymmetry this decision trades on.
+`end_for_goal` returns, and for as long as the record it wrote stands, no row of that goal stands
+`PROPOSED` or `ESTABLISHED` and none can be recorded, so the closing write cannot be raced. **The residuals divide, and the division is the
+honest summary**: most cost a question, and three can leave an authority.
+
+**Those that cost a question.** A failure between the two writes leaves the goal open, its
+authorities gone, its fence standing and every call of it asking until the user abandons and
+reopens it — compensated by nothing and repaired by no sweep (§1, §8), because a compensation
+cannot tell an orphaned fence from one a concurrent closing act is standing on. Between a
+reopen's `ACTIVE` write and its `clear_closure` a turn is refused a row and asks. And where a
+closure under this decision had run, a failure of either reopen call leaves that same
+open-and-fenced state with the same repair. A call already claimed when its goal closes is
+ADR-0254 §13's residual window unchanged and A9's to close — a **cross-store** race the fence
+does not reach and does not claim to.
+
+**Those that can leave an authority, stated rather than rounded away.** On a **pre-decision
+database** (§9) the ending is prospective: a row whose goal closed before this decision is never
+ended, and a reopen whose `end_for_goal` then fails leaves it `ESTABLISHED` and covering calls
+until its own `expires_at` — fail-**open**, bounded by the retention window that was its only
+bound before, and no worse than what this decision improves on. A **`record` begun before a
+closure and admitted after a reopen** has cleared the fence writes a live row carrying an
+authority given for the ended request, which §8 books to A9 rather than closing. And a **`clear`**
+erases the fences with the rows, so a delayed write for a closed goal afterwards succeeds —
+against a store the user has emptied of everything else, at their own instruction. **None of the
+three is created here**: each is a state the corpus already reached, narrowed rather than widened
+by this decision, and each is named with what would close it.
 
 **These are the cases that would falsify the design.** A workflow in which the user genuinely
 expects one authority to span several requests — a trip planned as five bookings under one
@@ -997,13 +1015,14 @@ closed goal with nothing left to end it. One call in one step has none of the th
 **End the rows and leave the goal unfenced, disclosing the race as a residual.** Rejected, and
 it is the shape two review rounds rejected with it. The decision's whole claim is that an
 authorisation ends with its goal; a version of it that ends *the rows the closing act happened to
-see* is a materially weaker decision, it makes §1's universal and ADR-0256's *earlier of the two*
+see* is a materially weaker decision, it makes §1's universal and §3's subordination of the window
 both unsatisfiable, and it leaves a row of a finished request able to cover a call of the same
 goal after a reopen. The fence is one record on one key in one store, refused against by one
 member, and it buys the claim outright.
 
 **Write the status first and end the rows after.** Rejected: its residual is an `ESTABLISHED` row
-under a closed goal, which is the exact state this decision exists to make unreachable, and
+under a closed goal, which this decision exists to close and which it would reach on every
+closure rather than in a booked residual, and
 ADR-0261 §2's live-attempt conjunct is stated over `ABANDONED` alone, so an `ACHIEVED` goal may
 still carry a claimable attempt for it to cover.
 
