@@ -102,6 +102,32 @@ _SHORT_BOUND: Final = timedelta(milliseconds=50)
 #: here is a hang, and a hang is what this suite exists to catch.
 _WAIT_SECONDS: Final = 5.0
 
+
+class _LyingBound(timedelta):
+    """A bound of :data:`_SHORT_BOUND`'s duration whose own arithmetic cannot be trusted.
+
+    ``isinstance`` admits a subclass, and an implementation that opened its window from
+    ``timeout.total_seconds()`` would open one that never closes — the spelling for
+    "unbounded" ADR-0241 §1 says the contract does not have, reached through a value that
+    passes every check on its face. The three fields ``timedelta`` itself carries are
+    untouched, so the duration this states is :data:`_SHORT_BOUND`'s.
+    """
+
+    __slots__ = ()
+
+    def total_seconds(self) -> float:
+        """Report a duration no deadline could fire at.
+
+        Returns:
+            Infinity, which is what an implementation reading the object rather than its
+            fields would hand ``asyncio.timeout``.
+        """
+        return float("inf")
+
+
+#: One instance, since it is immutable and every case uses it the same way.
+_LYING_BOUND: Final = _LyingBound(milliseconds=50)
+
 #: What a failure of the day-count case means, in one place (ADR-0260 §5, §11). A
 #: forecaster that minted more than it was configured for is one whose contribution to
 #: ADR-0226 §6's budget of ten is a figure the operator did not set, which is the reason
@@ -486,6 +512,36 @@ class ForecasterContract:
     constructed_only_with_a_provider: bool = False
 
     @pytest.mark.optional_obligation
+    async def test_a_bound_whose_own_arithmetic_lies_is_still_enforced(self) -> None:
+        """ADR-0241 §1: the bound is the duration the value carries, not what it reports.
+
+        **A suite clause for the same reason the domain case above is one**: "there is
+        always a bound" is a claim about every ``Forecaster`` this system wires, and the
+        annotation is not the enforcement — the value crosses a Protocol boundary from a
+        possibly untyped caller, and ``isinstance`` admits a subclass. An implementation
+        opening its window from ``timeout.total_seconds()`` opens one that never closes,
+        which is the spelling for "unbounded" §1 says the contract does not have.
+
+        Driven through the same lever the expiry case uses, because what fails an
+        implementation here is a read that is *not* terminated: the subject is held at its
+        suspension well past the duration the bound carries, and an implementation that
+        trusted the object would still be waiting.
+        """
+        subject = await self.gated()
+        gate = subject.arm()
+        call = asyncio.ensure_future(subject.forecaster.read(subject.call, timeout=_LYING_BOUND))
+        await gate.reached()
+
+        await asyncio.sleep(_SHORT_BOUND.total_seconds() * 3)
+        gate.release()
+
+        outcome = await asyncio.wait_for(call, _WAIT_SECONDS)
+        assert outcome.refusal is ForecastRefusal.DEADLINE_EXPIRED, (
+            "a bound is the duration `timedelta`'s own fields carry, so a subclass whose "
+            f"`total_seconds` lies states 50ms and not forever (ADR-0241 §1). "
+            f"Got: {outcome.refusal!r}"
+        )
+
     async def test_request_answers_none_where_no_provider_is_configured(self) -> None:
         """§4: ``request`` returns ``None`` "where the deployment has configured no
         forecast provider".

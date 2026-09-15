@@ -593,6 +593,67 @@ def test_a_scripted_day_whose_extent_is_not_its_named_day_is_unconstructable() -
         ScriptedDay(content="no such day", extent=elsewhere, named=(2026, 2, 30))
 
 
+async def test_a_timeout_error_this_fake_did_not_raise_is_not_its_expiry() -> None:
+    """ADR-0241 §7: classification keys on whether *this* deadline fired.
+
+    The production seam says so in terms — "a ``TimeoutError`` an upstream library raised
+    for its own reasons leaves it ``False``, and that is the transport's failure rather
+    than this seam's expiry" — and the canonical fake owes the same rule, because a
+    consumer asserting that its ``DEADLINE_EXPIRED`` branch is reached would otherwise be
+    asserting over a fault in its own arrangement.
+
+    ``id_factory`` is the one callable a consumer writes that this fake runs inside its
+    window, so it is the whole of the reachable surface. The fault leaves as itself:
+    unwrapped, unannotated, and with no outcome invented for it.
+    """
+
+    def raising() -> str:
+        raise TimeoutError("the consumer's own callable, not this fake's deadline")
+
+    forecaster, call = await _prepared(days=_days(1), id_factory=raising)
+
+    with pytest.raises(TimeoutError, match="the consumer's own callable"):
+        await forecaster.read(call, timeout=A_BOUND)
+
+
+async def test_a_bound_whose_own_arithmetic_lies_states_the_duration_it_carries() -> None:
+    """ADR-0241 §1's bound is read off ``timedelta``'s own fields, not off the object.
+
+    ``isinstance`` admits a subclass, and this fake opens its window from the duration
+    *after* the call is recorded — so a subclass whose ``total_seconds`` raises would
+    leave a recorded call with no outcome at all, and one returning ``inf`` would disable
+    the deadline the contract says there always is. The production seam's guard snapshots
+    the three fields for exactly this reason, and a canonical fake that did not would take
+    a bound it could not enforce.
+    """
+
+    class Lying(timedelta):
+        __slots__ = ()
+
+        def total_seconds(self) -> float:
+            raise RuntimeError("a bound that cannot be asked how long it is")
+
+    forecaster, call = await _prepared(days=_days(1))
+
+    outcome = await forecaster.read(call, timeout=Lying(seconds=30))
+
+    assert [record.content for record in outcome.records] == ["d0"]
+
+
+def test_a_scripted_day_whose_year_overflows_the_calendar_is_refused_as_a_value() -> None:
+    """The refusal is a ``ValueError`` for every tuple the calendar has no day for.
+
+    A year of ten thousand digits reaches ``datetime`` as an ``OverflowError`` rather
+    than a ``ValueError``, and a message interpolating it would raise a second, unrelated
+    error out of the first — ``repr`` refuses an integer past
+    ``sys.get_int_max_str_digits()``. So the cause is rendered and the value is not.
+    """
+    with pytest.raises(ValueError, match="calendar"):
+        ScriptedDay(
+            content="no such year", extent=forecast_day(2026, 9, 5).extent, named=(10**5000, 1, 1)
+        )
+
+
 def test_the_default_answer_is_three_dated_days_each_declaring_its_own_offset() -> None:
     """ADR-0260 §12: "It answers with **dated days, each declaring the UTC offset it is
     in**".
