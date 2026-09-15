@@ -158,6 +158,24 @@
   to *"Every field that a permission decision depends on is required"* taken on this section's own
   test applied afresh: absent asserts the opposite of the claim §1 refuses, since a declaration
   naming no quoted output yields no quote and every act proved through one asks.
+- **Partially superseded: 2026-09-15 by ADR-0262 — §1's `ToolDefinition` model declaration and its
+  required-field clause, in the application to one further field. Nothing else in this ADR.** The
+  model gains `postconditions`, a possibly-empty `tuple[StepVerification, ...]` defaulting to the
+  empty tuple, declared by whoever registers the tool and stating what a **successful** invocation
+  establishes about its own output — a reservation id is present, a `status` equals `confirmed`.
+  That decision's verification against a goal's criteria holds an act's stored output against the
+  **whole** tuple the pinned definition carries, every member having to hold, and authors no
+  predicate of its own; so a reader holding only §1 authors a definition against which nothing can
+  be held, and every criterion resting on that tool is unestablished for want of an operand. The
+  default is an exception to *"Every field that a permission decision depends on is required"*
+  taken on **the clause's own subject** rather than on the three exceptions recorded above: this
+  field is not one a permission decision depends on at all, being read **after** the act by the
+  verification phase alone and by no policy, gate or bar, and the empty tuple is fail-closed
+  besides — a declaration that declares nothing verifies nothing, and such a goal never reaches
+  `GoalStatus.ACHIEVED`. Every other clause of §1 binds entire, §2's ordering of the declarations
+  is read by that decision's strength ladder and moved by nothing, and §§3-7 are untouched, §4's
+  `parameters_schema` included: the new declaration is a field **beside** that schema and never a
+  keyword inside it, for the hazard already recorded here.
 
 
 ## Context
