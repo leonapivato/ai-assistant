@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationSettlement,
@@ -290,6 +291,61 @@ def test_a_row_that_is_not_established_is_never_live(
     assert is_live(row, AUTHORIZATION_NOW) is False
 
 
+# --- the clock is guarded (ADR-0026 §2, §4) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [datetime(2026, 9, 13, 10, 0), None],  # noqa: DTZ001 — a naive reading is the subject
+    ids=["naive", "not-an-instant"],
+)
+async def test_a_non_conforming_clock_reading_is_the_stages_own_error(reading: object) -> None:
+    """ADR-0026 §2's wrapper and §4's translation, on both operations.
+
+    ``core/errors.py`` defines no error for `orchestration`, so §4 gives the failure to
+    the **stage**. Without the guard a naive reading reaches the listing as a bare
+    ``TypeError`` from an aware/naive comparison and the revocation as a raw store
+    validation failure — neither of which any contract here declares, and neither of
+    which a caller's ``except (AssistantError, TransportError)`` boundary catches.
+    Adversarial and architecture review, round 1, ``blocker``.
+    """
+    store = FakeGoalAuthorizationStore()
+    plans = FakePlanStore()
+    await plans.save_goal(_goal())
+    await store.record(opening_act(id="auth-1"))
+    operations = AuthorizationOperations(
+        authorizations=store,
+        plans=plans,
+        now=lambda: reading,  # type: ignore[arg-type, return-value]
+    )
+
+    with pytest.raises(PlanningError, match="non-conforming"):
+        await operations.standing_authorizations(AUTHORIZATION_GOAL)
+    with pytest.raises(PlanningError, match="non-conforming"):
+        await operations.revoke_authorization("auth-1")
+
+
+async def test_a_non_conforming_clock_writes_nothing() -> None:
+    """The refusal is taken **before** the store is reached, so a revocation that could
+    not stamp an instant has not settled a row either.
+    """
+    store = FakeGoalAuthorizationStore()
+    plans = FakePlanStore()
+    await plans.save_goal(_goal())
+    await store.record(opening_act(id="auth-1"))
+    operations = AuthorizationOperations(
+        authorizations=store,
+        plans=plans,
+        now=lambda: datetime(2026, 9, 13, 10, 0),  # noqa: DTZ001 — naive is the subject
+    )
+
+    with pytest.raises(PlanningError):
+        await operations.revoke_authorization("auth-1")
+
+    (held,) = await store.export()
+    assert held.disposition is AuthorizationDisposition.ESTABLISHED
+
+
 # --- the confirmation projection, read back (ADR-0254 §11; issue #2375) ------
 
 
@@ -406,6 +462,19 @@ async def test_the_listing_never_renders_another_goals_row() -> None:
     listed = await operations.standing_authorizations(AUTHORIZATION_GOAL)
 
     assert [one.id for one in listed] == ["auth-mine"]
+
+
+async def test_the_liveness_reading_is_taken_even_where_the_listing_is_empty() -> None:
+    """The guard is unconditional, which is ``grantable_decisions``' shape one seam over.
+
+    A reading reached only on the populated branch is one a non-conforming clock slips
+    past on every empty answer, and ADR-0026 §4's translation would then be true of some
+    calls and not others.
+    """
+    operations, _, clock = await _over()
+
+    assert await operations.standing_authorizations(AUTHORIZATION_GOAL) == ()
+    assert clock.readings == 1
 
 
 async def test_a_goal_the_plan_store_does_not_hold_is_an_empty_answer() -> None:

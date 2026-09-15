@@ -3876,6 +3876,11 @@ _FAULT_PANELS: Final = frozenset(
         "connection-log",
         "observation",
         "authorizations",
+        # ADR-0254 §11's announcement lives in a **reply**, so the withdrawal it offers
+        # reports where it was taken: the panel's own slot is inside a section an owner
+        # who never opened it cannot see, and a settlement written there is the act
+        # working and the owner told nothing. Adversarial review, round 1, ``blocker``.
+        "answer",
     }
 )
 
@@ -8182,6 +8187,37 @@ def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_
 
     goals = "".join(_functions(script)[name] for name in ("readGoals", "withdrawClarification"))
     assert "/authorization/revoke" not in goals
+
+
+def test_the_two_withdrawal_acts_differ_only_in_where_they_report() -> None:
+    """ADR-0254 §11's withdrawal, offered from two places and reporting into both.
+
+    **Two act functions and not one with a panel argument**, because #1429's census
+    holds that every ``fault`` call names its panel with a **literal**: a variable target
+    is exactly how a condition ends up in a slot the owner is not looking at. The cost is
+    two near-identical bodies, and what this pins is that they stay near-identical —
+    differing in where the sentence goes, where the fault goes, and whether the listing
+    re-reads itself, and in nothing else.
+
+    The ceremony is shared outright (:js:func:`confirmWithdrawal`), because a second
+    wording of what the act does not do is the drift this module exists to catch.
+    """
+    functions = _functions(_code("app.js"))
+    panel = functions["revokeAuthorization"]
+    reply = functions["revokeAnnouncedAuthorization"]
+
+    for one in (panel, reply):
+        assert "confirmWithdrawal(view)" in one
+        assert '"/authorization/revoke",' in one
+        assert "{ authorization_id: view.id }" in one
+        assert "AUTHORIZATION_SETTLEMENT_WORDS, done.settlement" in one
+        assert "headerHalf()" in one
+        assert "showBootstrap()" in one
+
+    assert panel.count('"authorizations"') == 3, "clear, relay, and the transport fault"
+    assert "listAuthorizations(authorizedGoal, true)" in panel
+    assert reply.count('"answer"') == 3, "clear, relay, and the transport fault"
+    assert "listAuthorizations" not in reply, "a reply is not replaced by a panel"
 
 
 def test_every_settlement_member_has_a_sentence_on_the_page() -> None:

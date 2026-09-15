@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
     AnswerKind,
+    AuthorizationSettlement,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -5913,6 +5914,83 @@ class AssistantEngineContract(ABC):
         either way.
         """
         assert await engine.revoke_recipient_grant("g-nothing-holds") is None
+
+    # --- ADR-0254 §11's two operations, over every implementation ------------
+    #
+    # A listing and a revocation, and §16 calls that roster complete. They are here
+    # rather than only in `orchestration`'s own module because ADR-0085 §3 makes the
+    # promoted surface *substitutable*: what `Engine`, `FakeAssistantEngine` and
+    # `HubClient` answer has to be the same, and the two that cannot be reached in a
+    # bare fixture — a row this store holds — are asserted at their **empty** state,
+    # which is exactly where the three most easily disagree.
+
+    async def test_the_authorization_listing_answers_empty_rather_than_refusing(
+        self, engine: AssistantEngine
+    ) -> None:
+        """A goal holding no authority is the ordinary state and never an error.
+
+        ADR-0254 §11 makes a goal the plan store does not hold an **empty answer
+        rather than a raise**, and a goal that holds no ``ESTABLISHED`` row the same;
+        neither is distinguishable here and neither should be. And it is a **tuple**,
+        on ADR-0085 §3b's rule: a caller that mutated a returned listing has changed
+        nothing about the engine's state and may believe otherwise.
+        """
+        assert await engine.standing_authorizations("goal-nothing-holds") == ()
+
+    async def test_revoking_an_authorization_no_store_holds_is_a_result(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§16: *"an unknown id is a result and never a raise"*.
+
+        ``NO_SUCH_AUTHORIZATION`` is the store's own word for it, returned **unmapped**
+        — a second three-valued vocabulary for one fact would be the second carrier
+        ADR-0150 is named after — and this is
+        ``test_a_refusal_is_a_result_and_not_an_exception``'s rule on the one operation
+        ADR-0254 adds that can refuse.
+        """
+        settled = await engine.revoke_authorization("auth-nothing-holds")
+
+        assert settled is AuthorizationSettlement.NO_SUCH_AUTHORIZATION
+
+    @pytest.mark.parametrize("call", ["standing_authorizations", "revoke_authorization"])
+    async def test_a_blank_authorization_identifier_is_refused_locally(
+        self, engine: AssistantEngine, call: str
+    ) -> None:
+        """Both identifier arguments undergo ``Identifier`` validation (ADR-0085 §3c).
+
+        "Before any I/O", so a wire client refuses the same values without a round trip
+        — the obligation is inherited from ``AssistantEngine``'s own second clause
+        rather than restated by ADR-0254, and this is where it is checked on the two
+        arguments that decision adds.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await getattr(engine, call)("  ")
+
+    async def test_the_authorization_listing_takes_no_limit(self, engine: AssistantEngine) -> None:
+        """ADR-0254 §11: *"It takes no ``limit``"*, for ``standing_recipient_grants``'
+        stated reason — *"a truncated answer to 'what do I authorise' is a false answer
+        rather than a partial one"*.
+
+        Asserted over the **Protocol's** signature rather than over an implementation,
+        because what §11 forbids is the parameter existing at all: an implementation
+        that accepted one and ignored it would pass every behavioural case here.
+        """
+        taken = set(inspect.signature(AssistantEngine.standing_authorizations).parameters)
+
+        assert taken == {"self", "goal_id"}
+
+    async def test_the_revocation_takes_only_the_record_it_withdraws(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§11: revocation is **whole**.
+
+        *"No operation narrows a record, re-scopes one, extends one or edits one in
+        place"*, so there is no second argument through which a caller could express a
+        narrowing — and none through which a remote caller could substitute a subject.
+        """
+        taken = set(inspect.signature(AssistantEngine.revoke_authorization).parameters)
+
+        assert taken == {"self", "authorization_id"}
 
     async def test_an_act_on_a_decision_the_trail_does_not_hold_is_refused(
         self, engine: AssistantEngine

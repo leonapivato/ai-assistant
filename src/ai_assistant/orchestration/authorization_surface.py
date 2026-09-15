@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationProjection,
@@ -176,11 +178,45 @@ class AuthorizationOperations:
                 does not hold is an empty answer rather than a raise.
             now: The injected clock (ADR-0026). **Read exactly once per listing**
                 (§16), because a listing reading an advancing clock per row could
-                answer over a set true at no real instant (ADR-0193 §9).
+                answer over a set true at no real instant (ADR-0193 §9). **Wrapped
+                here**, which is where :func:`~ai_assistant.core.clock.checked_clock`
+                says to put it — at the constructor that stores it — so no caller can
+                install one this object then reads unguarded.
         """
         self._authorizations = authorizations
         self._plans = plans
-        self._now = now
+        self._clock = checked_clock(now, owner="AuthorizationOperations")
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the reading stage's own error (ADR-0026 §4).
+
+        ``core/errors.py`` defines no error for `orchestration`, so §4 gives the failure
+        to the **stage**: this is
+        :meth:`~ai_assistant.orchestration.recipient_grants.RecipientGrantOperations.
+        _now`'s translation one seam over, and it is what makes the ``PlanningError``
+        each operation's docstring declares true rather than aspirational. Without it a
+        naive reading reaches the listing as a bare ``TypeError`` from an aware/naive
+        comparison, and the revocation as a raw store validation failure — neither of
+        which any contract here declares. Adversarial and architecture review, round 1,
+        ``blocker``.
+
+        **The guard covers the reading and not the invocation** (ADR-0026 §2). An
+        exception the injected callable raises *itself* propagates unwrapped — that is
+        the clock's own failure, already carrying its own type and cause — and only a
+        :class:`~ai_assistant.core.clock.ClockReadingError` is translated.
+
+        Returns:
+            The reading.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming one —
+                naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = f"the authorization operations' clock returned a non-conforming reading: {exc}"
+            raise PlanningError(msg) from exc
 
     async def projection_for(self, confirmation_id: str, /) -> AuthorizationProjection | None:
         """The projection a recorded `CONFIRM` carries, or ``None`` where it proposes none.
@@ -236,11 +272,17 @@ class AuthorizationOperations:
             AuthorizationError: If the authorization store could not be read.
             PlanningError: If the plan store could not be read.
         """
+        # **The reading is taken first and unconditionally**, which is
+        # `RecipientGrantOperations.grantable_decisions`' own shape one seam over: it
+        # "reads the clock once for the whole window, so the reading happens whether or
+        # not a row carries an expiry". A guard reached only on the populated branch is
+        # one a non-conforming clock slips past on every empty answer, and ADR-0026 §4's
+        # translation would then be true of some calls and not others.
+        reading = self._now()
         goal = await self._plans.get_goal(goal_id)
         if goal is None:
             return ()
         rows = await self._authorizations.standing(goal_id)
-        reading = self._now()
         return tuple(
             view_of(row, goal_statement=goal.statement, live=is_live(row, reading)) for row in rows
         )

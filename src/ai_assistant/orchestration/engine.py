@@ -94,6 +94,7 @@ import structlog
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
+    AuthorizationError,
     ConfigurationError,
     ConversationStoreError,
     MemoryStoreError,
@@ -195,6 +196,7 @@ from ai_assistant.core.types import (
     rests_on_recorded_external_content,
     secret_value,
 )
+from ai_assistant.orchestration.authorization_surface import projection_of
 from ai_assistant.orchestration.composing import ComposedReply
 from ai_assistant.orchestration.disclosure import (
     BoundedAudienceSupply,
@@ -7732,7 +7734,23 @@ class Engine:
         operations = self._authorization_operations
         if operations is None:
             return None
-        return await operations.projection_for(confirmation_id)
+        try:
+            return await operations.projection_for(confirmation_id)
+        except AuthorizationError as exc:
+            # **A fault costs the disclosure and never the listing.** ADR-0254 §16
+            # closes `AssistantEngine` at *"two members on an existing Protocol and no
+            # other change to it"*, so `pending_confirmations` may not begin raising a
+            # class its contract does not declare. What is lost is the standing half of
+            # one recovered question — the state issue #2378 describes, reached only on
+            # a store that cannot be read — and the live path never reaches it at all,
+            # the row travelling on the disposition there. Logged **by class and by no
+            # value** (ADR-0145 §8).
+            _log.warning(
+                "authorization_projection_unread",
+                confirmation_id=confirmation_id,
+                refused_by=type(exc).__name__,
+            )
+            return None
 
     async def _announced_authorizations(
         self, disposition: StepDisposition
@@ -13330,17 +13348,19 @@ class Engine:
         (#287). The parameters are the driven step's own, carried as data for the
         adapter to escape per target (ADR-0042 §4).
 
-        **ADR-0254 §11's projection is read back here and is never recomputed.** The
-        row was written ``PROPOSED`` before this question was put, so what the user
-        is shown is a rendering of a durable record — the same coverage, the same
-        bounds and the same ``expires_at`` the row carries. It is read by the id
-        derived from this decision (issue #2375), which is why **a restart between
-        the question and the answer renders the same projection**
-        (:meth:`_recovered_confirmation`), and why nothing here re-runs §12's ladder
-        or re-reads the goal's ``deadline``. **Absence is the answer where §1's four
-        proposal conditions did not hold**, and a stage holding no authorization
-        store proposes none, so the projection is absent for every confirmation on
-        such a deployment.
+        **ADR-0254 §11's projection is transcribed from the row the disposition
+        carries, and no store is read here.** The row was written ``PROPOSED`` before
+        this question was put and before the park was committed, and
+        :attr:`~ai_assistant.orchestration.runner.StepDisposition.proposed` is what
+        carries it across — so what the user is shown is a rendering of a durable
+        record (the same coverage, the same bounds, the same ``expires_at``) and the
+        sentence above stays literally true: **no fallible work remains between
+        parking the step and offering its token**. A read taken here would sit on the
+        wrong side of that line. Adversarial review, round 1, ``blocker``.
+
+        Nothing here re-runs §12's ladder or re-reads the goal's ``deadline``, and
+        **absence is the answer where §1's four proposal conditions did not hold** —
+        including on a deployment wiring no authorization store, which proposes none.
         """
         recorded = disposition.decision
         if recorded is None:  # pragma: no cover — StepRunner always sets it on this branch
@@ -13377,7 +13397,9 @@ class Engine:
             # route it names, and is resumed exactly as it is today. No clause of
             # ADR-0244 reaches a step's park.
             read=None,
-            authorization=await self._authorization_projection(recorded.id),
+            authorization=(
+                None if disposition.proposed is None else projection_of(disposition.proposed)
+            ),
         )
 
     async def _recovered_confirmation(
@@ -13408,8 +13430,11 @@ class Engine:
             # every assembly site, and gains ``read`` ``None``.
             read=None,
             # ADR-0254 §11's recovery clause in terms: "A restart between the question
-            # and the answer recovers the row and renders the same projection". It is
-            # the same read as the live path's, keyed on the same decision id.
+            # and the answer recovers the row and renders the same projection". This is
+            # the one site that **reads** the store for it, because a recovered park has
+            # no disposition to carry the row across a process boundary — and it is a
+            # site where reading is safe: nothing is parked by this call, and the park it
+            # renders was committed by a run that has long since returned.
             authorization=await self._authorization_projection(confirmed.id),
         )
 
@@ -13476,12 +13501,21 @@ class Engine:
             # step**, and nothing more. ``WEB_SEARCH`` is the one kind this decision
             # parks; §20 defers the rest by name with what fires them.
             read=ReadKind.WEB_SEARCH,
-            # ADR-0254 §11, and on this population it is ordinarily **absent**: §1's
-            # second proposal condition is an ``egress_binding`` on the recorded
-            # request, and the projection is read back by the decision's own id either
-            # way, so a park whose `CONFIRM` did propose a row renders it and one whose
-            # `CONFIRM` did not renders nothing. No branch here decides which.
-            authorization=await self._authorization_projection(recorded.id),
+            # ADR-0254 §11, and on this population it is **always** absent — which is a
+            # fact about the writer rather than a choice made here. The only writer of an
+            # `Authorization` is `orchestration` (§15), and the only site that proposes
+            # one is `StepRunner._propose`, which a read park reaches by no path: a
+            # servicing parks through `ParkedReadOperations` and drives no plan step. So
+            # answering a read establishes no standing authority, and `None` says exactly
+            # that (ADR-0178 §4).
+            #
+            # **And nothing is read here to discover it.** ADR-0244 §1 states in terms
+            # that the parking turn "does not park, is not suspended and does not fail",
+            # and this method's own contract is that it "reads nothing" for that reason —
+            # a store read taken after the servicing has parked can raise between the
+            # park and the reply, taking down a turn that had already composed its
+            # answer. Adversarial review, round 1, ``blocker``.
+            authorization=None,
         )
 
     def _handle_for_park(self, park_id: str) -> str:

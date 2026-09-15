@@ -121,6 +121,7 @@ from ai_assistant.memory import traces as memory_traces
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.memory.health import StoreHealthReader
 from ai_assistant.orchestration import (
+    AuthorizationOperations,
     ComposingStage,
     ConnectionOperations,
     ConsolidationStage,
@@ -1073,6 +1074,22 @@ async def _recipient_grant_operations(now: Clock) -> None:
     ).grantable_decisions(limit=1)
 
 
+async def _authorization_operations(now: Clock) -> None:
+    """The operations read the clock to judge a row's liveness (ADR-0254 §11, §16).
+
+    Driven through the **listing**, which is the cheaper of the two reads and the one a
+    surface reaches first: §16 has ``standing`` evaluate no liveness and report none, so
+    the caller compares — and takes **one** reading for the whole listing (ADR-0193 §9),
+    which happens whether or not the goal holds a row. The other read is the instant a
+    revocation stamps, behind the same guard.
+    """
+    await AuthorizationOperations(
+        authorizations=FakeGoalAuthorizationStore(),
+        plans=FakePlanStore(now=lambda: _AWARE),
+        now=now,
+    ).standing_authorizations("goal-1")
+
+
 async def _parked_read_operations(now: Clock) -> None:
     """The operations read the clock to judge a park's lifetime (ADR-0244 §5, §6).
 
@@ -1241,6 +1258,11 @@ SEAMS = [
     # — behind one guard, and translated to `orchestration`'s own error for
     # ``RecipientGrantOperations``' reason exactly.
     Seam("ParkedReadOperations", _parked_read_operations, PlanningError),
+    # ADR-0254 §11 and §16's two clock reads — the listing's one-per-listing liveness
+    # instant and the instant a revocation stamps — behind one guard, and translated to
+    # `orchestration`'s own error for ``RecipientGrantOperations``' reason exactly.
+    # Adversarial and architecture review of that decision's Lane 3, round 1, ``blocker``.
+    Seam("AuthorizationOperations", _authorization_operations, PlanningError),
     # The canonical fake's own reading of the same act, guarded at the **read**
     # because `recipient_grant_clock` is a public lever a consumer's test replaces —
     # so a wrap at construction would be discarded by the next assignment. It
