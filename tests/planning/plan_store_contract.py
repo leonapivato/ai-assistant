@@ -2313,6 +2313,65 @@ class PlanStoreContract:
         with pytest.raises(PlanningError):
             await store.save_goal(Goal.model_construct())
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            (),
+            "ia1",
+            None,
+            7,
+            {"ia1": True},
+            (7,),
+            (_intended("ia1"), _intended("ia1")),
+        ],
+        ids=[
+            "an-empty-minting",
+            "a-string-whose-tuple-is-its-characters",
+            "a-falsey-none",
+            "not-a-container",
+            "a-mapping",
+            "a-member-that-is-not-an-action",
+            "two-members-under-one-id",
+        ],
+    )
+    async def test_a_minting_mutated_past_its_validators_is_refused(
+        self, store: PlanStore, malformed: object
+    ) -> None:
+        """The command is **checked and not trusted**, and the goal is left alone (§5).
+
+        ADR-0023 §2: "``model_copy(update=...)`` skips validators (a pydantic property
+        no type can close), so the invariant holds *at the validation boundary*, and **a
+        write that reaches past it must re-validate**." Every shape here is one
+        :class:`IntendedActionMinting` refuses at construction and one a caller can put
+        back — and each fails differently if the store trusts it: an **empty** command
+        advances ``Goal.version`` while minting nothing, a **string** is ``("i", "a",
+        "1")`` and leaks an ``AttributeError`` where this contract names
+        ``PlanningError``, and **two members under one id** breach §1's
+        one-id-per-member invariant inside a single append — "a case the store's refusal
+        of an id the goal **already holds** does not reach".
+
+        This is ``test_a_revision_whose_invalidates_is_not_a_tuple_is_refused``'s case
+        one command over, and the assertion that matters is the second one: the goal's
+        ``intended_actions`` **and** its ``version`` are byte-for-byte what they were, so
+        a refusal is never a write that happened to raise.
+        """
+        await store.save_goal(_goal())
+        await store.record_intended_actions(_minting(_intended("held")))
+        before = await store.get_goal("g1")
+        assert before is not None
+
+        with pytest.raises(PlanningError):
+            await store.record_intended_actions(
+                _minting(_intended("ia9"), expected_version=1).model_copy(
+                    update={"actions": malformed}
+                )
+            )
+
+        after = await store.get_goal("g1")
+        assert after is not None
+        assert after.intended_actions == before.intended_actions
+        assert after.version == before.version
+
     async def test_record_intended_actions_refuses_an_unknown_goal(self, store: PlanStore) -> None:
         """§5: the member refuses a goal the store does not hold, as every other goal
         write does and with the class ADR-0249 §12 gives ``save_goal``."""
