@@ -99,10 +99,15 @@ decision** … already-governed shapes."*
 and no relaxation reachable by anything that is not a forecast read at the configured
 provider. **§14 names everything it does not settle, each with what fires it.**
 
-The owner's ruling of 2026-09-14 fixes the reference provider: **Open-Meteo**, free and
-keyless, configured the way the search provider is. No vendor is named in any normative
-clause — §6's authority is stated over *the configured provider* — and §12 records what L1
-delivers.
+The owner's ruling of 2026-09-14 named **Open-Meteo** — free and keyless — as the intended
+provider, with a mock behind the same contract acceptable *"if the real reader turns out
+not to be simple"*. **It is not simple, for a reason that is the corpus's rather than the
+provider's**: a source needing no credential has no connection shape here at all, because
+ADR-0148 §6's third pre-transmit condition obliges the callable to read *"under the slot
+that record names"* and ADR-0149 §4 lets only the user's own act supply one. So **L1
+delivers the reference provider** (§12), Open-Meteo is §14's and gated on #2396, and no
+vendor is named in any normative clause — §6's authority is stated over *the configured
+provider*.
 
 ### The tree, read rather than assumed, at `origin/main` `8dbfddf0`
 
@@ -288,19 +293,18 @@ which §14 defers with what fires it.
 > and `read` stand the binder, the policy and the trail, none of which this contract
 > names.
 
-> **Normative.** **A `Forecaster` holds the credential where there is one, and this
-> contract never carries one.** Any `Secrets` read is at `SecretScope.INTEGRATION`,
-> *inside* `read`, after the checks §6 names have passed — ADR-0148 §7's positional gate
-> with one word changed. **A keyless provider reads no credential at all**, and that is a
-> property of the registration rather than an exemption: no credential value is in a
-> binding (ADR-0148 §6), so nothing about the ruling, the trail or the resumability
-> changes either way. **A keyless provider is still provisioned as a connection like any
-> other, and this ADR gives it no exemption**: §6's binding needs the ACTIVE record
-> `Settings.forecast_connection` names, ADR-0148 §6's and ADR-0149 §3's shape for that
-> record is untouched, and its credential slot is one the forecaster never reads rather
-> than one that does not exist. **A credential-free connection representation is
-> explicitly not decided here** — it would amend ADR-0148, ADR-0149 and ADR-0151 in
-> `tools/`, which is another decision in another lane, and no clause of this ADR needs it.
+> **Normative.** **A `Forecaster` holds the credential, and this contract never carries
+> one.** Any `Secrets` read is at `SecretScope.INTEGRATION`, *inside* `read`, after the
+> checks §6 names have passed — ADR-0148 §7's positional gate with one word changed — and
+> it is the read **ADR-0148 §6's third pre-transmit condition obliges**, under the slot the
+> connection record names. No credential value is in a binding (ADR-0148 §6), so nothing
+> about the ruling, the trail or the resumability differs here from any other integration.
+> **This seam claims no exemption from the connection model and decides no new connection
+> shape**: the forecast provider is provisioned by the explicit user act ADR-0149 §4
+> requires, supplying an identity and a credential, and §6's binding needs the ACTIVE
+> record `Settings.forecast_connection` names. **A source needing no credential at all is
+> a shape this corpus does not have**, and §14 defers it by name with the issue that owns
+> it.
 
 > **Normative.** `core/types.py` gains **`ForecastOutcome`**, a frozen model refusing
 > mutation and unknown fields, carrying exactly `records: tuple[MemoryRecord, ...]`,
@@ -848,7 +852,8 @@ lies, never that the report is accurate.
 > `REACHED` and not `INDETERMINATE`.** ADR-0148 §6's account-changed limbs *"discarded the
 > credential and wrote nothing to any channel — none was opened"*, so that producer alone
 > could have put a pre-send path under this member and forced the least-claiming direction;
-> §12's provider is keyless and reads no credential at all, so no such path exists here.
+> §12's reference provider presents no credential to an outside service, so no producer of
+> this member here is a pre-send one.
 > §14 defers it, and **the lane that adds a credentialed provider owes this partition its
 > round**: a pre-send producer under this member would make `REACHED` wrong, and that lane
 > either gives the path a disposition of its own or re-decides this clause.
@@ -924,8 +929,8 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > (ADR-0016 §4, ADR-0236 §1, §4), which ADR-0247 §9 keeps untouched and this ADR does not
 > approach. That floor is a question about **cost** and not about destination trust, so
 > §6's no-new-question clause is not in tension with it; a deployment that wants the read
-> to run without one states the provider's cost, which for a keyless free provider is zero
-> in the currency it states.
+> to run without one states the provider's cost, which for a free provider is zero in the
+> currency it states.
 
 > **Normative.** `CarriedProvenance`, and so `EgressBinding`, gains **one boolean,
 > `forecast_reach`**, defaulting to `False` — in `closed_loop`'s own shape and for its own
@@ -1011,13 +1016,24 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 > ADR has not named**; no lane re-drives the mechanism on a live hub, and the deployment
 > owed after L1 is the dispatcher's act.
 
-> **Normative.** **L1 delivers the real provider.** Open-Meteo is keyless and free, so
-> there is no quota and no credential; its response carries the RFC 9110 `Date` field the
-> search seam's declared-instant rule already reads (§5); and its daily table names its
-> days and declares the UTC offset they are in, which is what §5's extent is computed from.
-> **A mock behind the same `Forecaster` contract is the fallback and changes no clause of
-> this ADR** — delivered instead only where the real provider cannot be registered against
-> a connection reference with no credential to hold, and the lane says which and why.
+> **Normative.** **L1 delivers the reference provider, behind the `Forecaster` contract
+> and bound like every other integration.** It is registered against a connection the user
+> provisioned by ADR-0149 §4's explicit act, supplying an identity and a credential the
+> reference provider **accepts and does not use**, and it performs ADR-0148 §6's four
+> pre-transmit conditions whole. **The first *real* provider is not this lane's**: §14
+> names the intended one and what gates it.
+
+> **Normative.** **The reference provider's behaviour is honest, because it is the M33
+> walkthrough's forecast half until a real one lands** (#2255). It answers with **dated
+> days, each declaring the UTC offset it is in**, so §5's `ReportedExtent` is computed
+> from the provider's own declared values and from nothing of ours; it **refuses on a
+> connection that is not the bound one**, so §6's conditions and §13(d) have a subject;
+> and it **expires on demand**, so §13(i)'s deadline arm runs against a real suspension
+> rather than a simulated one. **What it may not do is stand in for a clause**: it answers
+> as a provider answers, and every §5 outcome — a day missing a documented field, a day
+> whose offset is undeclared, a response declaring no instant, a day named twice — is
+> reachable through it, because an arm over a production component cannot assert what no
+> production component can produce.
 
 ### 13. The arms this decision owes
 
@@ -1059,8 +1075,9 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   for that day and mints its siblings, asserted over agreeing rows and conflicting ones
 >   alike **and with the second occurrence placed beyond `forecast_max_days`**, because an
 >   implementation capping before it looks for duplicates mints the first row and passes
->   every arm that keeps the duplicate inside the cap; a response every day of which is so dropped mints nothing
->   and yields `NO_RESULT`; and a response declaring no instant, and one carrying an
+>   every arm that keeps the duplicate inside the cap; a response every day of which is so
+>   dropped mints nothing and yields `NO_RESULT`; and a response declaring no instant,
+>   and one carrying an
 >   unreadable value in that position, each mint **no record** and yield `UNATTESTED`. In
 >   none of them does any minted value equal a clock the test controls.
 > - **(b′) The refusals at the boundaries.** A `ForecastOutcome` carrying a record that is
@@ -1243,10 +1260,22 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
   second registration. Fired by the lane that needs the bullet above.
 - **The credential-change producer of `PROVIDER_REFUSED`.** §10 records that member for a
   response the provider gave and this system refused, and for nothing else, because §12's
-  provider is keyless and an arm over a production component cannot reach a path no
-  production component has. Fired by the **first credentialed forecast provider**, whose
-  lane adds the producer to §10's partition and its arm to §13(h). The member itself is
+  reference provider presents no credential to an outside service and an arm over a
+  production component cannot reach a path no production component has. Fired by the
+  **first credentialed forecast provider**, whose lane adds the producer to §10's
+  partition and its arm to §13(h). The member itself is
   **not** deferred and needs no widening: it is reachable today.
+- **Open-Meteo, and every other keyless source.** §12's L1 provider is the reference one;
+  the **intended first *real* provider is Open-Meteo** — free, its response carrying the
+  RFC 9110 `Date` field §5's declared instant already reads, its daily table naming its
+  days and declaring the UTC offset they are in — and it is **not decided here**, because
+  it needs no credential and **no connection shape in this corpus carries an identity
+  without one**: ADR-0148 §6's third pre-transmit condition obliges the callable to read
+  *"under the slot that record names"*, and ADR-0149 §4 lets **only** the user's own act
+  supply a credential, in the same act that supplies the identity. Fired by the decision
+  that adds that shape, scoped in **#2396** — a slotless ACTIVE record, the user act
+  supplying an identity alone, and §6's third condition reading *"where it names one"* —
+  which is a `tools/` decision and **no clause of this ADR is cited toward it**.
 - **The booking integration**, a `tools/` integration at ADR-0154's seam and its own
   decision under ADR-0016/ADR-0018. Fired by #2255's M33 walkthrough lane.
 - **Autonomous web research (C-WEB)** and **milestone 32's bounded fetch**. ADR-0247 §9's
