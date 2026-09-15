@@ -99,6 +99,7 @@ from ai_assistant.orchestration.goals import RaisedSubject, taken_question
 from ai_assistant.orchestration.interpretation import (
     recorded_actions,
     recorded_revision,
+    rendered_actions,
     substituted_plan,
 )
 from ai_assistant.orchestration.reads import (
@@ -1134,9 +1135,20 @@ def _brief_of(goal: Goal, open_question: str | None) -> GoalBrief:
         The brief the planner receives.
     """
     projected = GoalBrief.of(goal)
-    if open_question is None:
+    update: dict[str, object] = {}
+    # ADR-0265 §4's projection, which §9 puts in "L2 — the loop, in `orchestration`
+    # alone" on ADR-0252 §11's "projected by `orchestration` alone". `GoalBrief.of`
+    # lands the field's shape and renders none of it, exactly as it renders no
+    # `open_questions` — so this is the same division one field over, and this method
+    # is the one place both are filled.
+    actions = rendered_actions(goal)
+    if actions:
+        update["actions"] = actions
+    if open_question is not None:
+        update["open_questions"] = (open_question,)
+    if not update:
         return projected
-    return projected.model_copy(update={"open_questions": (open_question,)})
+    return projected.model_copy(update=update)
 
 
 def _advanced(
