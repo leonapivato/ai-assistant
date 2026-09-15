@@ -147,6 +147,7 @@ from ai_assistant.core.types import (
     GoalStatus,
     GoalSummary,
     IngestSummary,
+    IntendedActionMinting,
     LearnDecision,
     LearnOutcome,
     MemoryDecisionKind,
@@ -262,7 +263,7 @@ from ai_assistant.orchestration.speech import (
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -335,7 +336,7 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.destination_trust import DestinationTrustOperations
     from ai_assistant.orchestration.grants import GrantOperations
     from ai_assistant.orchestration.ingestion import IngestionReport, IngestionStage
-    from ai_assistant.orchestration.loop import LearningLoop, RecordedGoal
+    from ai_assistant.orchestration.loop import LearningLoop, MintedActions, RecordedGoal
     from ai_assistant.orchestration.observation import ObservationRunReport, ObservationStage
     from ai_assistant.orchestration.parked_reads import ParkedReadOperations
     from ai_assistant.orchestration.questions import QuestionStage
@@ -626,6 +627,24 @@ def _horizon(now: datetime, retention: timedelta) -> datetime:
     if retention > now - _INSTANT_FLOOR:
         return _INSTANT_FLOOR
     return now - retention
+
+
+def _minted_after(record: RecordedGoal, written: int) -> tuple[MintedActions, ...]:
+    """The mintings that belong after ``written`` of this turn's revisions (ADR-0265 §2).
+
+    §2 records a call's actions immediately after that same call's understanding, so a
+    turn's writes interleave rather than batching. :attr:`MintedActions.after` is the
+    figure the loop stamped at the moment it minted, and this is the one place it is
+    read.
+
+    Args:
+        record: What the loop decided about this turn's goal.
+        written: How many revisions have been written so far.
+
+    Returns:
+        The mintings to write now, in the order the turn made them.
+    """
+    return tuple(minting for minting in record.mintings if minting.after == written)
 
 
 def _utcnow() -> datetime:
@@ -9870,6 +9889,16 @@ class Engine:
         returned. Trying one and catching the other's refusal would turn a genuine
         duplicate-id fault into a silent append.
 
+        **ADR-0265's minting takes neither route and has its own member** (§2, §5), and
+        it is the same division one record over. An intended action "must survive every
+        revision that does not mention it", so minting "does not ride on
+        ``record_interpretation``" — and it does not ride on ``save_goal`` either, which
+        **refuses** a goal opened carrying one. Both routes therefore end in
+        :meth:`_record_actions`, and on a goal the store already holds the two kinds of
+        write **interleave** in the order the turn made them (:func:`_minted_after`),
+        because §2 records a call's actions after that same call's revision and a
+        ``serves`` link is checked against the current interpretation at the append.
+
         ``None`` is unreachable from any path this component drives — every
         ``RespondedTurn`` the loop returns carries a record — and is accepted rather
         than asserted away so that a caller's double cannot turn a missing carrier
@@ -9884,26 +9913,91 @@ class Engine:
             kept here.
 
         Raises:
-            PlanningError: As ``save_goal`` and ``record_interpretation`` raise it —
-                including where the store already holds a goal under that id, which
-                ADR-0249 §12 makes a refusal rather than an upsert.
-            StaleExecutionError: As ``record_interpretation`` raises it, where the
-                stored ``Goal.version`` has moved on since the loop read it (§12).
+            PlanningError: As ``save_goal``, ``record_interpretation`` and
+                ``record_intended_actions`` raise it — including where the store
+                already holds a goal under that id, which ADR-0249 §12 makes a refusal
+                rather than an upsert, and where a minting would carry the goal past
+                ``MAX_INTENDED_ACTIONS`` (ADR-0265 §5).
+            StaleExecutionError: As ``record_interpretation`` and
+                ``record_intended_actions`` raise it, where the stored ``Goal.version``
+                has moved on since the loop read it (§12).
         """
         if record is None:  # pragma: no cover — every RespondedTurn carries a record
             return 0
         if record.opened:
-            await self._plans.save_goal(record.goal)
-            return record.goal.version
+            # ADR-0265 §1, §2: "the goal's opening write mints none", and ``save_goal``
+            # **refuses** a goal opened carrying an intended action — so the opening
+            # write carries the interpretation chain alone and every action this turn
+            # minted follows it through the one member §2 makes their only route. The
+            # loop's own copy keeps them, because that is the sequence this turn's `A`
+            # labels already resolved against (§4); what is stripped is this write's
+            # argument and nothing else.
+            await self._plans.save_goal(record.goal.model_copy(update={"intended_actions": ()}))
+            return await self._record_actions(record, record.mintings, record.goal.version)
         # §12: the version the loop computed against, then the version each write
         # returns — read from the store's own answer rather than incremented here, so
         # the token stays the store's and a second authority cannot drift from it.
         expected = record.goal.version
+        written = 0
         for interpretation in record.revisions:
+            # ADR-0265 §2's per-call ordering, made durable: a call's actions are
+            # recorded **after** its own revision, so the mintings standing before this
+            # revision are the ones earlier calls took. Batching every minting after
+            # every revision would refuse a link a later call's restatement made stale —
+            # `record_intended_actions` checks each `serves` against the **current**
+            # interpretation at the append, and §3 makes a stale link truthful rather
+            # than a reason to refuse anything.
+            expected = await self._record_actions(record, _minted_after(record, written), expected)
             stored = await self._plans.record_interpretation(
                 GoalRevision(
                     goal_id=record.goal.id,
                     interpretation=interpretation,
+                    expected_version=expected,
+                )
+            )
+            expected = stored.version
+            written += 1
+        return await self._record_actions(record, _minted_after(record, written), expected)
+
+    async def _record_actions(
+        self, record: RecordedGoal, mintings: Sequence[MintedActions], expected: int
+    ) -> int:
+        """Append each minting to the goal, one compare-and-swap apiece (ADR-0265 §5).
+
+        **One ``record_intended_actions`` call per planner call that minted**, because
+        §5 makes the member itself all-or-nothing and appends "two actions minted on one
+        turn … in one call, so the two-rooms case takes one compare-and-swap and not
+        two". Splitting a call's actions across two writes would make the two-rooms case
+        two claims the store could interleave, which is the partial record §2 refuses.
+
+        **The version is the store's own answer**, carried exactly as
+        :meth:`_save_goal` carries it across revisions: each write returns the goal it
+        stored, and the next is computed against that. Nothing here increments a count.
+
+        **The refusals are the store's and are not caught** (§5). A minting past
+        ``MAX_INTENDED_ACTIONS``, an ``id`` the goal already holds and a ``serves`` value
+        naming no element of the current interpretation each raise ``PlanningError`` and
+        write nothing — and what the turn then does is A7's and A9's, which is ADR-0253
+        §9's own division for a refused plan.
+
+        Args:
+            record: What the loop decided about this turn's goal.
+            mintings: The mintings to write here, in the order the turn made them.
+            expected: The version the first of them is computed against.
+
+        Returns:
+            The version the goal stands at afterwards.
+
+        Raises:
+            PlanningError: As ``record_intended_actions`` raises it.
+            StaleExecutionError: As ``record_intended_actions`` raises it, where the
+                stored ``Goal.version`` has moved on since the write before it.
+        """
+        for minting in mintings:
+            stored = await self._plans.record_intended_actions(
+                IntendedActionMinting(
+                    goal_id=record.goal.id,
+                    actions=minting.actions,
                     expected_version=expected,
                 )
             )

@@ -9,9 +9,12 @@ the planner seam's ``A`` block and its strict extraction are **L3's**. So arms
 here would mean writing a second statement of the loop's substitution in test code and
 then asserting the test against it, which certifies nothing about the system.
 
-**The brief's ``actions`` projection is L2's too** (§9), so what is asserted of it here
-is its **shape** — the field, its bound and ``BriefAction``'s containment — and that
-``GoalBrief.of`` fills none of it.
+**The brief's ``actions`` projection is L2's** (§9), and it lands in ``GoalBrief.of``
+because ADR-0249 §9 makes that method "the one projection site in the system". Its arms
+are asserted here, beside the shape L1 landed, for that reason and no other: they are
+statements about a ``core`` classmethod over a hand-built goal, and nothing about them
+reaches a loop. What a *turn* renders and resolves — §10 arms 1(b), 2, 3 and 4 — is
+``tests/orchestration/test_engine_intended_actions.py``'s.
 
 What is here is **arm 7** whole, **arm 6**'s round trip and its export limb, and the
 type-level half of **arm 1(a)** — that two intended actions of one goal are two
@@ -35,6 +38,7 @@ from ai_assistant.core.types import (
     EvidenceHistory,
     Goal,
     GoalBrief,
+    GoalElement,
     GoalInterpretation,
     GoalStatus,
     Ground,
@@ -79,6 +83,11 @@ def _goal(*, actions: tuple[IntendedAction, ...] = (), **revision: object) -> Go
 def _action(action_id: str = "ia1", *, serves: tuple[str, ...] = ()) -> IntendedAction:
     """One intended action, with ``serves`` as a tuple of element ids."""
     return IntendedAction(id=action_id, intent="book the room", serves=serves)
+
+
+def _element(element_id: str, text: str) -> GoalElement:
+    """One element of a revision, carrying the id a ``serves`` value names it by."""
+    return GoalElement(id=element_id, text=text, ground=Ground.INFERRED)
 
 
 # --- §10 arm 7: the reservation, and it is wider than the canonical labels ----
@@ -347,24 +356,112 @@ def test_a_goal_written_before_this_decision_decodes_with_no_intended_actions() 
 # --- §4: what the brief renders, and what it does not -----------------------
 
 
-def test_the_projection_renders_no_action_and_filling_it_is_l2s() -> None:
-    """§9 puts "the ``GoalBrief.actions`` projection with its live-link rendering" in
-    "L2 — the loop, in ``orchestration`` alone", and names L1's list without it.
+def test_the_brief_renders_one_action_per_member_in_the_tuples_own_order() -> None:
+    """§4: ``actions`` holds "one entry per member of ``Goal.intended_actions`` in that
+    tuple's own order", so ``A1`` names the **first-minted** action on both sides of the
+    seam.
 
-    So what L1 lands is the **shape** — the field, its bound and ``BriefAction``'s
-    containment — and :meth:`GoalBrief.of` fills none of it, exactly as it fills no
-    ``open_questions``. An action-free brief is well-formed rather than degraded
-    (§1: "the goal's opening write mints none"), which is ADR-0249 §9's own posture
-    toward an element-free one, so nothing here is a degraded rendering waiting to be
-    repaired — it is the rendering until L2 lands.
+    The order is the whole of the label scheme, and it is the record's own rather than
+    any sort this projection applies: §1 makes the tuple append-only and oldest first,
+    and a projection that reordered it would make ``A1`` name a different act on two
+    calls of one turn.
     """
-    intending = _goal(actions=(_action("ia1", serves=("e1",)),))
+    goal = _goal(
+        actions=(
+            IntendedAction(id="ia1", intent="book the first room"),
+            IntendedAction(id="ia2", intent="book the second room"),
+        )
+    )
 
-    brief = GoalBrief.of(intending)
+    brief = GoalBrief.of(goal)
+
+    assert [action.intent for action in brief.actions] == [
+        "book the first room",
+        "book the second room",
+    ]
+
+
+def test_the_brief_renders_a_link_as_the_label_of_the_element_it_names() -> None:
+    """§4: a ``BriefAction.serves`` carries ``C``/``S``/``D`` **labels** and "never an
+    identifier".
+
+    All three tuples in one brief, because the letter is what keeps the three spaces
+    apart (ADR-0249 §9): an element id resolves to the label of **its own** tuple, and
+    the second element of ``criteria`` is ``S2`` and never ``C2``.
+    """
+    goal = _goal(
+        actions=(
+            IntendedAction(id="ia1", intent="book the room", serves=("e-c2", "e-s1", "e-d1")),
+        ),
+        constraints=(_element("e-c1", "under 200 a night"), _element("e-c2", "near the station")),
+        criteria=(_element("e-s1", "a confirmation arrives"),),
+        conditions=(_element("e-d1", "the trip happens"),),
+    )
+
+    [action] = GoalBrief.of(goal).actions
+
+    assert action.serves == ("C2", "S1", "D1"), "the proposed order, each in its own space"
+    assert all(not label.startswith("A") for label in action.serves), (
+        "§4: `A` is the action's own space and is not spelled over an element"
+    )
+
+
+def test_a_link_to_an_element_the_current_revision_does_not_hold_is_not_rendered() -> None:
+    """§3, §4: a stale link is "truthful and harmless", and the brief shows the link
+    "where it is still true and shows nothing where it is not".
+
+    This is arm 2's rendering limb at the type level — the state a restatement leaves,
+    where ADR-0253 §7 minted the reworded element a **new** id and §3 leaves the action
+    naming the one it was minted against. **The record is not rewritten, not recomputed,
+    not dropped and not refreshed**: the omission is a fact about this projection alone.
+    """
+    goal = _goal(
+        actions=(
+            IntendedAction(id="ia1", intent="book the room", serves=("e-old", "e-c1")),
+            IntendedAction(id="ia2", intent="book the other room", serves=("e-old",)),
+        ),
+        constraints=(_element("e-c1", "near the station"),),
+    )
+
+    first, second = GoalBrief.of(goal).actions
+
+    assert first.serves == ("C1",), "the surviving link alone, the stale one gone"
+    assert second.serves == (), "and an action whose every link is stale renders none"
+    assert second.intent == "book the other room", "which is a live action, not a dropped one"
+    assert goal.intended_actions[1].serves == ("e-old",), "and the record is untouched"
+
+
+def test_an_element_carrying_no_id_is_named_by_no_link() -> None:
+    """A ``GoalElement`` recorded before ADR-0253 §7 carries no ``id`` (§7, §12).
+
+    Nothing can name it, so nothing renders for it — and the elements **after** it keep
+    their own ordinals, because the label is a position in the revision's tuple and not
+    a count of the elements that happen to be nameable.
+    """
+    goal = _goal(
+        actions=(IntendedAction(id="ia1", intent="book the room", serves=("e-c2",)),),
+        constraints=(
+            GoalElement(text="recorded before ADR-0253", ground=Ground.INFERRED),
+            _element("e-c2", "near the station"),
+        ),
+    )
+
+    [action] = GoalBrief.of(goal).actions
+
+    assert action.serves == ("C2",), "the second constraint is C2 however the first was recorded"
+
+
+def test_a_goal_that_intends_nothing_projects_a_brief_carrying_no_action() -> None:
+    """§1, §4: "a brief carrying no actions is well-formed rather than degraded".
+
+    §1 makes that every goal at the moment it is opened — "the goal's opening write
+    mints none" — so this is the shape of every brief of every turn that opens a goal,
+    and ADR-0249 §9's posture toward an element-free brief unchanged.
+    """
+    brief = GoalBrief.of(_goal(constraints=(_element("e-c1", "near the station"),)))
 
     assert brief.actions == ()
     assert brief.status is GoalStatus.ACTIVE
-    assert intending.intended_actions[0].serves == ("e1",), "and the record is untouched"
 
 
 def test_a_planner_output_proposing_actions_carries_them_beside_the_plan() -> None:

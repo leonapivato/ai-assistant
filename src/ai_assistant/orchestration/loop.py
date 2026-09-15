@@ -96,7 +96,11 @@ from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.disclosure import BoundedAudienceSupply
 from ai_assistant.orchestration.evidence import composed_row, digests, ordered_history
 from ai_assistant.orchestration.goals import RaisedSubject, taken_question
-from ai_assistant.orchestration.interpretation import recorded_revision, substituted_plan
+from ai_assistant.orchestration.interpretation import (
+    recorded_actions,
+    recorded_revision,
+    substituted_plan,
+)
 from ai_assistant.orchestration.reads import (
     SearchFooting,
     SearchServicer,
@@ -130,9 +134,11 @@ if TYPE_CHECKING:
         EvidenceDigest,
         FeedbackEvent,
         GoalEvidence,
+        IntendedAction,
         ParkedRead,
         PermissionDecision,
         PlannerOutput,
+        ProposedAction,
         ProposedUnderstanding,
         ReadAskOutcome,
         SourceListing,
@@ -198,11 +204,52 @@ class RecordedGoal:
             :attr:`opened` is true**, because those already ride on :attr:`goal` and a
             second copy would be two records of one fact. At most one per planner call,
             so at most two on a turn that revised (ADR-0228 §3).
+        mintings: The intended actions this turn minted, in the order it minted them
+            (ADR-0265 §2). **Not empty where :attr:`opened` is true**, which is where
+            this parts company with :attr:`revisions` and is the contract's own doing:
+            ``save_goal`` **refuses** a goal opened carrying an intended action —
+            "the goal's opening write mints none" — so a minting rides on
+            ``record_intended_actions`` on both routes, and the opening write carries
+            the interpretation chain alone. They ride on :attr:`goal` as well, because
+            that is the sequence this turn's own ``A`` labels resolved against (§4).
     """
 
     goal: Goal
     opened: bool = True
     revisions: tuple[GoalInterpretation, ...] = ()
+    mintings: tuple[MintedActions, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class MintedActions:
+    """One planner call's intended actions, and where they sit in the turn's writes.
+
+    **A minting is one compare-and-swap and never two** (ADR-0265 §5): "two actions
+    minted on one turn are appended in one call, so the two-rooms case takes one
+    compare-and-swap and not two", and it is **all-or-nothing** — a proposal the bound
+    or a bad ``serves`` refuses records none of itself. One of these values is therefore
+    one ``record_intended_actions`` call, and a turn's two planner calls produce two.
+
+    **It carries no** ``expected_version``, and that is ADR-0249 §12's discipline rather
+    than an omission. The token is the store's: each write returns the version the next
+    is computed against, so a loop that stamped one here would be a second authority
+    that can drift from it. What travels instead is :attr:`after`, which says **where**
+    in the turn's sequence of writes this one belongs, and ``Engine`` supplies the
+    version the write before it returned.
+
+    Attributes:
+        actions: What this call minted, in the order it proposed them — each already
+            carrying its ``id`` and its resolved ``serves`` (ADR-0265 §2, §3). Never
+            empty: a call proposing no action produces no value here at all.
+        after: How many of :attr:`RecordedGoal.revisions` this minting follows, which
+            is §2's per-call ordering made durable — a call's revision is recorded
+            **before** its actions, so a minting whose ``serves`` names an element that
+            call's own revision minted is written after it. ``0`` on every minting of
+            a goal this turn **opened**, whose revisions all ride on the opening write.
+    """
+
+    actions: tuple[IntendedAction, ...]
+    after: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2283,6 +2330,11 @@ class LearningLoop:
             () if continuing_attempt is not None else (AttemptPhase.UNDERSTAND,)
         )
         recorded: tuple[GoalInterpretation, ...] = ()
+        # ADR-0265 §2: what this turn has minted, in the order it minted it — one
+        # value per planner call that proposed an action, and empty on every turn
+        # whose planner proposed none, which is every turn until L3 lands the seam
+        # that emits them (§9).
+        mintings: tuple[MintedActions, ...] = ()
         # ADR-0231 §16: the ids of the records this turn's searches minted, which
         # "resolve in no store" — so a `FROM_EVIDENCE` ground naming one is dropped
         # (§7). Accumulated across the turn's servicings and empty on every turn that
@@ -2453,6 +2505,22 @@ class LearningLoop:
             evidence=evidence_rows,
             at=turn_at,
             raised_by=raised_by,
+            brief=brief,
+            open_question=open_question,
+        )
+        # ADR-0265 §2's step (b), immediately after step (a) and before the stamp: this
+        # call's actions, each minted an id and its `serves` resolved against the
+        # sequence in force on this call. An action serving an element **this same
+        # call** proposed resolves to the id the line above minted, which is what makes
+        # "book two rooms" on the turn the user says it the ordinary shape rather than
+        # an exotic one.
+        goal, mintings, brief = self._minted(
+            goal,
+            produced.actions,
+            understanding=produced.understanding,
+            positions=positions,
+            mintings=mintings,
+            after=len(recorded),
             brief=brief,
             open_question=open_question,
         )
@@ -2796,6 +2864,20 @@ class LearningLoop:
                 brief=brief,
                 open_question=open_question,
             )
+            # ADR-0265 §2's step (b) again, on the same terms as the first call's:
+            # the second call's actions are recorded after its own understanding and
+            # before its plan is stamped, so a turn's two calls each mint in §2's
+            # order rather than the turn minting once at its end.
+            goal, mintings, brief = self._minted(
+                goal,
+                revised.actions,
+                understanding=revised.understanding,
+                positions=positions,
+                mintings=mintings,
+                after=len(recorded),
+                brief=brief,
+                open_question=open_question,
+            )
             plan = _stamped(
                 revised.plan,
                 targets_revision=goal.revision,
@@ -2877,7 +2959,7 @@ class LearningLoop:
             # site that persists a plan today. That is the shape ADR-0242 §7 already
             # uses, and it is what keeps ADR-0228 §5's prohibition intact: no lane
             # gives `LearningLoop` a `PlanStore`.
-            goal=RecordedGoal(goal=goal, opened=opened, revisions=recorded),
+            goal=RecordedGoal(goal=goal, opened=opened, revisions=recorded, mintings=mintings),
             # ADR-0249 §5, §6: the attempt as this loop leaves it, and the phases it
             # stamped on the way — persisted at the same site as the goal and the
             # plans, and **after** them, because `open_attempt` refuses an attempt whose
@@ -3706,6 +3788,95 @@ class LearningLoop:
             recorded if opened else (*recorded, revision),
             _brief_of(moved, open_question),
             understood.positions,
+        )
+
+    def _minted(  # noqa: PLR0913 — the goal, what the planner proposed, what the turn has minted so far, and one parameter per thing a `serves` label resolves against; every one is a distinct fact and a bundle would mint a type for an argument list
+        self,
+        goal: Goal,
+        actions: Sequence[ProposedAction],
+        *,
+        understanding: ProposedUnderstanding | None,
+        positions: Mapping[str, tuple[int | None, ...]],
+        mintings: tuple[MintedActions, ...],
+        after: int,
+        brief: GoalBrief,
+        open_question: str | None,
+    ) -> tuple[Goal, tuple[MintedActions, ...], GoalBrief]:
+        """Record one planner call's intended actions onto the goal (ADR-0265 §2).
+
+        **Step (b) of §2's ordering, and it runs on every call** — "on every
+        ``PlannerOutput`` a planner returns, ``orchestration`` (a) records this call's
+        ``understanding``, if any, minting its element ids; (b) records this call's
+        ``actions``, minting an ``id`` for each and resolving its ``serves`` (§3)".
+        It sits between :meth:`_recorded` and :func:`_stamped` for that reason: a
+        ``serves`` label naming an element **this same call** proposed resolves to the
+        id that call's revision minted a line earlier, which is the ordinary shape of
+        "book two rooms" on the turn the user says it.
+
+        **Empty ``actions`` records none, raises nothing and re-plans nothing** (§2).
+        That is "the semantically correct answer for a planner that knows nothing of
+        this envelope and for every turn that acts on an intent the goal already
+        holds", and no path here reads it as an error, a degradation or an instruction
+        to re-plan — which is what lets this lane land before the seam that emits the
+        key (§9's "L2 tolerates an envelope carrying no ``action`` key").
+
+        **Appended in memory here and persisted at ADR-0249 §11's site**, exactly as a
+        revision is: this loop holds no ``PlanStore`` and gains none (ADR-0228 §5). The
+        in-memory append is not a convenience — it is what §4's ``A`` labels index on
+        this same call, and what the brief a *second* call receives renders.
+
+        **Append-only, and nothing here edits, reorders or removes** (§1). A later
+        revision that restates, splits, merges or removes any element mints **no** new
+        intended action and changes no existing one, which falls out of this method
+        being reached only by a ``ProposedAction`` rather than by any comparison of an
+        interpretation with itself.
+
+        **No effect is claimed, no reuse is checked and nothing is retried** (§6, §7).
+        The record is minted and nothing reads it as an instruction to act: "an action
+        nothing has named in a plan sits in the record and causes nothing".
+
+        Args:
+            goal: The goal as this turn now holds it, **after** this call's
+                understanding was recorded.
+            actions: What the planner proposed on this call, in its own order.
+            understanding: What this same call proposed, or ``None`` — what decides
+                which sequence a ``serves`` label indexes (ADR-0253 §9).
+            positions: Which position of the recorded tuple each proposed position
+                produced, so a link to a surviving element is not dropped because a
+                sibling's ground failed to resolve.
+            mintings: What this turn has minted so far.
+            after: How many revisions this turn has recorded through
+                ``record_interpretation`` at this instant, which is where this minting
+                sits among the turn's writes (:class:`MintedActions`).
+            brief: The brief this call received, returned unchanged where nothing was
+                minted so that the value is re-projected once per minting rather than
+                once per call.
+            open_question: The text of the goal's open question, where one stands
+                (ADR-0250 §8), so that a re-projected brief carries it exactly as the
+                one this call received did.
+
+        Returns:
+            The goal with this call's actions appended, what this turn has minted, and
+            the brief a next call would receive — carrying ADR-0265 §4's ``A`` labels
+            over the extended tuple.
+        """
+        if not actions:
+            return goal, mintings, brief
+        minted = recorded_actions(
+            goal,
+            actions,
+            understanding=understanding,
+            positions=positions,
+            # §2: `orchestration` mints the id, from the loop's own factory — the same
+            # one every other identifier this turn authors comes from, so a test that
+            # pins ids pins these too and nothing mints its own.
+            id_factory=self._id_factory,
+        )
+        moved = goal.model_copy(update={"intended_actions": (*goal.intended_actions, *minted)})
+        return (
+            moved,
+            (*mintings, MintedActions(actions=minted, after=after)),
+            _brief_of(moved, open_question),
         )
 
     def _goal_from(self, request: str, *, conversation_id: str | None) -> Goal:
