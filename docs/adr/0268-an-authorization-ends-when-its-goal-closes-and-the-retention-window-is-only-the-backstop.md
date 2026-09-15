@@ -74,7 +74,7 @@ backstop, and an offered change carries the price its acceptance authorises
   §4's rendering and its refusal of a `source` member; §5's narrowing correction; and **§6
   entire**, whose *"No row is moved, shortened or settled by anything that happens to the act's
   own record"* is stated over the **act's record** and is reached by no clause of this decision —
-  what ends a row here is the **goal's** status, which is neither an episode nor a conversation.
+  what ends a row here is a **closing act of its goal**, which is neither an episode nor a conversation.
   §§7-11 stand as they are.
 - **Partially supersedes** [ADR-0250](0250-a-turn-finds-its-goal-before-it-plans-and-a-material-ambiguity-becomes-one-durable-question-bound-to-that-goal.md)
   — **one scope.** **§13's enumeration of what a reopen does, in that enumeration alone**:
@@ -198,15 +198,20 @@ decision by another route.
 
 ### 1. A goal that closes ends every authorization of it and admits no more, in one step
 
-> **Normative — the ending, the set it is stated over, and the trigger.** **A goal that reaches
-> a closed `GoalStatus` — `ACHIEVED` or `ABANDONED`, ADR-0250 §1's own division and no wider set
-> — ends every `Authorization` of that goal standing `PROPOSED` or `ESTABLISHED`**, a live row
-> and a lapsed one alike, each settled **`GOAL_CLOSED`** (§2) at the instant of the closing act;
-> **and in the same indivisible step the goal is recorded closed to the authorization store, so
-> that no row of it comes into being while that record stands.** **The ending is stated over the
-> set and never over one row**: a goal whose plan reached two declarations holds two rows under
-> ADR-0254 §1's per-declaration uniqueness, and an act that ended one would leave the other
-> standing under a closed goal.
+> **Normative — the ending, the set it is stated over, and the trigger.** **A *closing act* of a
+> goal — an act whose write moves it to a closed `GoalStatus`, `ACHIEVED` or `ABANDONED`,
+> ADR-0250 §1's own division and no wider set — ends every `Authorization` of that goal standing
+> `PROPOSED` or `ESTABLISHED`**, a live row and a lapsed one alike, each settled **`GOAL_CLOSED`**
+> (§2) at the instant of the act; **and in the same indivisible step the goal is recorded closed
+> to the authorization store, so that no row of it comes into being while that record stands.**
+> **The trigger is the act and not the status the goal ends up holding**, which is what makes the
+> ending total: the ending is taken **before** the status write (below), so a closing write that
+> then fails leaves rows this decision has ended under a goal that is still open — stated here,
+> truthful under §2's meaning, and the reason §3 states the backstop over the rows no closing act
+> ends rather than over the goals that never close. **The ending is stated over the set and never
+> over one row**: a goal whose plan reached two declarations holds two rows under ADR-0254 §1's
+> per-declaration uniqueness, and an act that ended one would leave the other standing under a
+> closed goal.
 
 > **Normative — `BLOCKED` ends nothing, and this decision reaches no other status write.**
 > ADR-0250 §1 rules `BLOCKED` **open**, on ADR-0249 §4's ground that it means *"this objective
@@ -677,8 +682,8 @@ each limb below the answer is yes, and the sentence that becomes false or over-w
    untouched; §4's rendering and its refusal of a `source` member; §5's narrowing correction; and
    **§6 entire**, whose *"No row is moved, shortened or settled by anything that happens to the
    act's own record"* is stated over the **act's record** and is reached by no clause of this
-   decision — what ends a row here is the **goal's** status, which is neither an episode nor a
-   conversation. §§7-11 stand as they are.
+   decision — what ends a row here is a **closing act of its goal**, which is neither an episode
+   nor a conversation. §§7-11 stand as they are.
 
 6. **ADR-0250 §13's enumeration of what a reopen does, in that enumeration alone**:
    *"Reopening writes `GoalStatus.ACTIVE` through `PlanStore.set_goal_status` (§9), opens a new
@@ -933,8 +938,10 @@ and the ratification flip is one line and no other byte (ADR-0165).
 
 **What becomes possible.** An authorisation can be said to be *for a request*, which is the
 sentence the owner's ruling is written in and which the corpus could not previously express: the
-row comes into being when the user answers, covers every call of that request the quote sits
-under, and ends in the write that finishes the request. A user opening the listing of a finished
+row comes into being on one of ADR-0254 §1's write paths — a proposal the user answers on path
+(i), which is where the quote sits, or an opening act on path (iii), which is `ESTABLISHED` at
+once and carries no `quoted` (ADR-0267) and no question — covers every call of that request, and
+is ended by the act that finishes it. A user opening the listing of a finished
 booking sees no authority, because they hold none — on a database this store closed the goal in,
 the three residuals below being where that sentence stops. And the campsite walkthrough M33 runs
 becomes checkable end to end — book, verify, close, and the ceiling is gone — rather than ending
@@ -1019,13 +1026,13 @@ between the read and the last settlement, for the partial failure — some rows 
 and because a loop can fence nothing: a row recorded after it has passed would stand under a
 closed goal with nothing left to end it. One call in one step has none of the three.
 
-**End the rows and leave the goal unfenced, disclosing the race as a residual.** Rejected, and
-it is the shape two review rounds rejected with it. The decision's whole claim is that an
-authorisation ends with its goal; a version of it that ends *the rows the closing act happened to
-see* is a materially weaker decision, it makes §1's universal and §3's subordination of the window
-both unsatisfiable, and it leaves a row of a finished request able to cover a call of the same
-goal after a reopen. The fence is one record on one key in one store, refused against by one
-member, and it buys the claim outright.
+**End the rows and leave the goal unfenced, disclosing the race as a residual.** Rejected, and it
+is the shape two review rounds rejected with it. The decision's whole claim is that an
+authorisation is ended by the act that closes its goal; a version of it that ends *the rows the
+closing act happened to see* is a materially weaker decision, it makes §1's universal and §3's
+subordination of the window both unsatisfiable, and it leaves a row of a finished request able to
+cover a call of the same goal after a reopen. The fence is one record on one key in one store,
+refused against by one member, and it buys the claim outright.
 
 **Write the status first and end the rows after.** Rejected: its residual is an `ESTABLISHED` row
 under a closed goal, which this decision exists to close and which it would reach on every
