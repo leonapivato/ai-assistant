@@ -3,72 +3,53 @@
 - Status: Proposed
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **seven narrowly stated scopes, and §9 shows the working for each. §1's proposal
-  completeness**: the condition that a proposed row's coverage *"is complete for this request"*
-  is restated over §7's test — the row the proposal would write satisfies **condition 6** for this
+  completeness**: the condition that a proposed row's coverage *"is complete for this request"* is
+  restated over §7's test — the row the proposal would write satisfies **condition 6** for this
   request, condition 6 alone because a proposal is written `PROPOSED` and §3's condition 1 asks
-  for a live row — because
-  the ratified wording is stated over *"every user-facing argument … named by a member"* and a
-  member names none, so no row carrying a non-empty coverage could otherwise be proposed at all;
-  its purpose, its disposition and its cost are unchanged. **§2's member shape**: a
-  `CoverageMember` stops carrying an `argument` and carries a **`kind`** instead, so a member
-  records *what the user stated* and never *which slot it fills*; with it go §2's depth-one
-  clause, its no-two-members-name-one-argument rule (which becomes **one member per kind**), its
-  `currency_argument` field on a `MONEY` bound, while the bound gains **`maximum_exclusive`** so
-  that a ceiling the user stated strictly stops being recorded as an inclusive one. **`maximum`
-  stays required and `minimum` stays optional**, exactly as ratified: §4 mints only ceilings, so
-  no floor is minted through this decision at all. **§3's condition 6 and its field count**: the
-  set equality
-  over argument **keys** and the per-argument rule that reads a member *"naming it"* are replaced
-  by **two routes** — a member is met against the **quote recorded for the step's intended
-  action**, or, where the declaration declares an argument at the member's kind, against that
-  argument — and each endpoint names exactly one: a `MONEY` **`maximum`** needs the quote, and the
-  declared argument **as well** where one exists; the validator refusing a member
-  that names a system-supplied argument goes with the field it read, its rule preserved by a
-  refusal on a new declaration field; and `ToolDefinition` gains **two** further fields,
-  `bounded_arguments` and `quoted_outputs`, so §3's *"`ToolDefinition` gains one field"* is
-  over-narrow by two. **§4's `MONEY` reading, in two limbs**: the currency is read off the
-  **quote** on the evidence route and off the **declaration** on the argument route, never off the
-  bound; and its `maximum` inequality is read strictly where `maximum_exclusive` is set. **§9 clause
-  (ii)**: *"an argument the act's own words bear on"* is given its mechanical test — agreement
-  between the constraint's kind and the kind of the thing it is proved against, never numeric fit
-  and never a model's nomination. **§8's and §10's resolution enumeration, in the closure at three
-  alone**: a fourth `ResolutionRule`, **`STATED_BOUND`**, which §19 books by name. Every other
-  clause of all seven sections binds entire, several load-bearing here: §1's three write paths,
-  its write-before-the-question rule and its other three proposal conditions; §2's
+  for a live row — because the ratified wording is stated over *"every user-facing argument …
+  named by a member"* and a member names none, so no row carrying a non-empty coverage could
+  otherwise be proposed at all; its purpose, its disposition and its cost are unchanged. **§2's
+  member shape**: a `CoverageMember` stops carrying an `argument` and carries a **`kind`**
+  instead, so a member records *what the user stated* and never *which slot it fills*; with it go
+  §2's depth-one clause, its no-two-members-name-one-argument rule (which becomes **one member per
+  kind**) and its `currency_argument` field on a `MONEY` bound, while the bound gains
+  **`maximum_exclusive`** so that a ceiling the user stated strictly stops being recorded as an
+  inclusive one. **`maximum` stays required and `minimum` stays optional**, exactly as ratified:
+  §4 mints only ceilings, so no floor is minted through this decision at all. **§3's condition 6
+  and its field count**: the set equality over argument **keys** and the per-argument rule that
+  reads a member *"naming it"* are replaced by **two routes** — a member is met against the
+  **quote taken for the step's intended action**, or, where the declaration declares an argument
+  at the member's kind, against that argument — and each endpoint names exactly one: a `MONEY`
+  **`maximum`** needs the quote, and the declared argument **as well** where one exists; the
+  validator refusing a member that names a system-supplied argument goes with the field it read,
+  its rule preserved by a refusal on a new declaration field; and `ToolDefinition` gains **one**
+  further field, `bounded_arguments`, so §3's *"`ToolDefinition` gains one field"* is over-narrow
+  by one. **§4's `MONEY` reading, in two limbs**: the currency is read off the **quote** on the
+  evidence route and off the **declaration** on the argument route, never off the bound; and its
+  `maximum` inequality is read strictly where `maximum_exclusive` is set. **§9 clause (ii)**:
+  *"an argument the act's own words bear on"* is given its mechanical test — agreement between the
+  constraint's kind and the kind of the thing it is proved against, never numeric fit and never a
+  model's nomination. **§8's and §10's resolution enumeration, in the closure at three alone**: a
+  fourth `ResolutionRule`, **`STATED_BOUND`**, which §19 books by name. Every other clause of all
+  seven sections binds entire, several load-bearing here: §1's three write paths, its
+  write-before-the-question rule and its other three proposal conditions; §2's
   two-shapes-and-no-third rule and its `BoundKind` vocabulary; §3's conditions 1-5, its
   user-facing classification, its no-omission-reads-as-consent rule and its canonical encoding;
   §4's totality and its three readings; §8's basis; §9's clauses (i) and (iii) and its discard
   rule; §10's three ratified resolutions; §13's recheck-at-`decide` and its no-cached-verdict
   rule, which §7 below is taken under; and §15's writer clauses.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
-  — **one scope, in §1, and it is the scope already recorded there reaching two further fields**:
+  — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
-  `bounded_arguments` and `quoted_outputs` alone. A reader holding only §1 authors a definition
-  that declares no argument's kind and no output a quote may be read at, so no member can meet any
-  argument of it on the argument route and no completed read of it becomes a quote. The
+  `bounded_arguments` alone. A reader holding only §1 authors a definition that declares no
+  argument's kind, so no member can meet any argument of it on the argument route. The
   empty-tuple default is an exception to *"Every field that a permission decision depends on is
   required"* on the same grounds already recorded for `system_supplied` — it makes the
   **opposite** claim to the one §1 refuses, since a declaration that declares nothing is met on
   that route nowhere. **The exception is this one further field on this one argument**, and no
   lane reads the two records together as licence to default a third safety field.
-- **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
-  — **one scope, in §1's `Goal` declaration alone**, and it is the scope the intended-action
-  decision already took there reaching two further fields: `Goal` gains **`quotes`** and
-  **`quotes_elided`** (§6). A reader holding only §1 authors a goal with no place for a quote, so
-  §7's evidence route has no operand and a `MONEY` member is met nowhere. Every other clause binds
-  entire, and §2's bounded-history construction is the one §6's elision reuses.
-- **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md)
-  — **one scope, and it is a count.** §15 item 19 enumerates what §13's rule requires before a
-  consequential capability is wired and closes that enumeration in terms, at six conditions. §11
-  adds a **seventh**, binding a capability whose authorisation can be reached through the evidence
-  route: a quote's freshness at the moment of dispatch, and a classification telling a per-call
-  identity key from a system-supplied input a price depends on. A reader holding only item 19
-  wires an integration after six and is wrong — a quote true when it was read and false when the
-  call was made authorises an over-bound charge, and **the gate's existing guarantees do not reach
-  it**, because verification reports the completed overcharge and cancellation compensates the
-  attempt while neither makes the pre-execution permission decision valid. §13's rule itself binds
-  verbatim and its own contribution to the gate is unchanged; what grows is the gate's total.
 - Date: 2026-09-15
+
 ## Context
 
 ### Where this comes from
@@ -122,21 +103,30 @@ no `CONFIRM` — the failure direction §9's three clauses exist to close, and #
 asymmetry (*"a model is a safe denier and an unsafe allower"*) is the corpus's own statement of
 why a guess is not available here.
 
+### The tree, read rather than assumed, at `origin/main` `8dbfddf0`
 
-### The tree, read rather than assumed, at `origin/main` `32968830`
+ADR-0254's Lane 1 and Lane 3 have landed and so has ADR-0254 §20's route-(d) wiring. `core/types.py`
+carries `Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
+`ValueResolution`, `ResolutionRule` and `ToolDefinition.system_supplied`; `CoverageMember` carries
+`argument` and `ValueBound`'s `MONEY` arm carries `currency_argument` and a **required**
+`maximum`, all three of which this decision changes; `canonical_json_bytes` is public and is the
+one encoding; `Sha256Hex` is the digest shape and `ActionRequest.parameters_digest` is computed
+rather than supplied; `ActionRequest` carries `goal`, `step_id`, `execution_id` and
+`egress_binding` and **no `intended_action`**; `permissions/_coverage.py` carries `covers`,
+`covers_arguments` and a private `_argument_is_covered`; `ToolDefinition` declares nothing about
+what kind of value an argument takes; and **`IntendedAction`, `Goal.intended_actions` and
+`PlanStep.intended_action` are ratified in ADR-0265 and are in no lane's tree yet**, so this
+decision is written against that contract and not against code.
 
-ADR-0254's Lane 1 has landed. `core/types.py` carries `Authorization`, `CoverageMember`,
-`ValueBound`, `BoundKind`, `AuthorizationBasis`, `ValueResolution`, `ResolutionRule` and
-`ToolDefinition.system_supplied`; `CoverageMember` carries `argument` and `ValueBound`'s `MONEY`
-arm carries `currency_argument` and a **required** `maximum`, all three of which this decision
-changes; `canonical_json_bytes` is public and is the one encoding; `Sha256Hex` is the digest shape
-and `ActionRequest.parameters_digest` is computed rather than supplied;
-`permissions/_coverage.py` carries `covers`, `covers_arguments` and a private
-`_argument_is_covered` with `_satisfies`, `_satisfies_money`, `_satisfies_period` beside it;
-`InterpretedOutput` carries `execution_id`, `step_id` and `field`; `GoalInterpretation` carries
-`raised_by`; and `ActionPlan`'s `_step_ids_are_unique` raises *"plan step ids must be unique
-within a plan"*. Nothing in the tree mints a `CoverageMember`, nothing records a quote, and
-`ToolDefinition` declares nothing about what kind of value an argument takes.
+**`Authorization` rows are written today, and every one of them carries an empty `coverage` — the
+fact §6's migration clause rests on, re-read at this base rather than carried forward.**
+`orchestration/runner.py` calls `proposed_authorization` and records what it returns, and
+`app/composition.py` constructs the `SqliteGoalAuthorizationStore`, so a deployment does hold
+rows. But `orchestration/authorizing.py` builds every one of them with `coverage=()` and returns
+`None` for any request carrying a user-facing argument — the vacuous-completeness gate #2373
+names — and **no `CoverageMember` is constructed anywhere in `src/` outside the canonical fake**
+(`testing/goal_authorizations.py`). So no stored row holds a member of any shape, and nothing
+records a quote.
 
 ### What this ADR is not allowed to settle
 
@@ -144,8 +134,13 @@ It decides what a member **records**, how a span **becomes** one, and **what a m
 against** — and nothing beyond that. It leaves ADR-0254 §3's conditions 1-5 and §§5, §6, §7
 exactly as they stand, §12's expiry as ADR-0256 §1 leaves it, and §11's projection and every
 surface untouched; it opens no route, relaxes no floor, lowers no threshold and moves no ruling.
-ADR-0252's `GoalEvidence` is read and is **not** moved: §6 states why a quote is a record of its
-own rather than a field of that row.
+
+**And it does not decide where a quote is carried, what records one, or how a policy obtains
+one.** §6 states the four facts a quote must supply and reads them from nowhere concrete; the
+carrier, the producer and the face a policy holds are the **quote decision**'s, booked in §10 with
+what fires it. ADR-0252's `GoalEvidence` is read and is **not** moved: §6 states why, and that
+reading is a constraint on the booked decision rather than a choice taken here.
+
 ## Decision
 
 ### 1. The candidate act is a `USER_STATED` constraint of the goal, and there is no second source
@@ -238,9 +233,10 @@ to construct at the moment a call needed it.
 > **Normative — ADR-0254 §4's `MONEY` comparison is restated over the one flag and in no other
 > respect.** The amount satisfies the bound where it is **less than** `maximum` if
 > `maximum_exclusive` and **less than or equal to** it otherwise; the `minimum` conjunct is
-> unmoved. Every other conjunct of that reading is unmoved — the `Decimal`-accepting shapes, the finite-and-not-negative refusal,
-> the no-float rule and the currency conjunct §7 relocates — and **`PERIOD` stays half-open and
-> `TERMS` stays equality of stated characters**, neither flag reaching either.
+> unmoved. Every other conjunct of that reading is unmoved — the `Decimal`-accepting shapes, the
+> finite-and-not-negative refusal, the no-float rule and the currency conjunct §7 relocates — and
+> **`PERIOD` stays half-open and `TERMS` stays equality of stated characters**, neither flag
+> reaching either.
 
 **Why the argument key was the defect rather than the rule that chose it.** A value that *fits*
 an argument is not a value the act's words *bear on*, so no rule selecting an argument at the mint
@@ -285,46 +281,43 @@ written**.
 > `pound`/`pounds`/`gbp`/`£` → `GBP`. **A span matching no form mints no member**, and no lane
 > adds a form, a currency or a language without its own ratified decision.
 
-**Reading only ceilings is what makes a model-chosen span safe in the direction that matters, and
-it is the whole answer to a defect four review rounds kept finding.** A planner selects the span,
-and a proper substring can carry a different comparator from the sentence it was taken out of:
-*"not under 100 euros"* yields *"under 100 euros"*, *"under no circumstances spend over 100
-euros"* yields *"over 100 euros"*, *"avoid spending over 100 euros"* the same — and no rule over a
-closed vocabulary can recognise *avoid*. What **can** be made total is the **direction**: where the
-only bound this reading mints is a ceiling, every one of those truncations either mints nothing or
-mints a **restriction bounded by a figure the user themselves uttered**, and none of them mints an
-authority to spend where the user set a floor. **A floor is not a spending protection** in any
-case — it constrains what the user receives, which §7 shows this system cannot tell from what it
-pays — so removing the capability costs a question and closes a class of inversion that adding
-rules did not. §10 books the floor with what fires it.
-
 > **Normative — `<not>` is adjacent to its comparator, and the admitted prefix is closed at two
 > tokens.** `<not>` is **one** token of the negation vocabulary — closed at `not`, `never`, `no`,
-> `n't` and `without` — optionally followed by **exactly one** token of the spending vocabulary —
-> closed at `spend`, `pay`, `go`, `charge` and `cost` — and by **nothing else** before the
-> comparator. So *"never spend over 100 euros"* matches `<not> over <amount>` and mints a
-> **`maximum`** of `100`, which is the owner's own illustration of this rule, and the inversion is
-> the user's own arithmetic rather than a direction read into words that do not carry one.
-> **Everything else the negation might govern mints nothing**: *"never notify me about charges
-> over 100 euros"* carries four tokens between the negation and the comparator and is not a
-> spending ceiling; *"not 100 euros"* and *"not exactly 100 euros"* state no direction at all; a
-> **second** negation token inside the prefix takes the span out of every form; and an inflected
-> spending word (*"never spending over 100 euros"*) is not a member of the closed set.
+> `without`, `don't`, `doesn't`, `didn't`, `won't` and `can't` — optionally followed by **exactly
+> one** token of the spending vocabulary — closed at `spend`, `pay`, `go`, `charge` and `cost` —
+> and by **nothing else** before the comparator. **Every member of both vocabularies is a whole
+> token under the normalisation stated above**, which folds case and collapses whitespace and
+> splits nowhere else, so the contractions are listed as the words they are and no clause asks a
+> reader to find `n't` inside `don't`. So *"never spend over 100 euros"* matches `<not> over
+> <amount>` and mints a **`maximum`** of `100`, which is the owner's own illustration of this
+> rule, and the inversion is the user's own arithmetic rather than a direction read into words
+> that do not carry one. **Everything else the negation might govern mints nothing**: *"never
+> notify me about charges over 100 euros"* carries four tokens between the negation and the
+> comparator and is not a spending ceiling; *"not 100 euros"* and *"not exactly 100 euros"* state
+> no direction at all; a **second** negation token inside the prefix takes the span out of every
+> form; and an inflected spending word (*"never spending over 100 euros"*) is not a member of the
+> closed set.
 >
 > **The negated rows read because their own negation is inside the span they match**, which the
-> paragraph below is stated over.
+> clause below is stated over.
+
+> **Normative — a negation standing before the span refuses every reading, not only this table's,
+> and the test is determinable on one occurrence or it refuses.** Take the act's own recorded
+> utterance and the element's `span`, both folded and tokenised as above. **Where the span's token
+> sequence occurs in that utterance more than once, no member of any kind is minted** — two
+> occurrences admit two conforming answers, one negated and one not, and `GoalElement.span` is
+> **text and not an offset**, so nothing on the record says which occurrence the model meant.
+> **Where it occurs exactly once, no member of any kind is minted if any token preceding that
+> occurrence is a token of the negation vocabulary.** Where it occurs not at all the element mints
+> nothing in any case, ADR-0254 §8 requiring a span *"inside that turn's stored utterance"*.
 >
-> **A negation anywhere before the span refuses every reading, not only this table's.** **No
-> member of any kind is minted from an element whose `span` is preceded, anywhere in the act's
-> own recorded utterance, by a token of the negation vocabulary**, folded and tokenised as above.
 > A model chooses the span and a truncation can drop the word that reverses it: *"do not spend
 > under 100 euros"* would otherwise mint a ceiling from *"under 100 euros"*. **The bar is over
 > every reading of this section** — which matters for the readings §10 books as much as for this
 > one — it is deliberately blunt, and it refuses *"I'm not fussy — spend under 100 euros"* along
 > with them, which costs a question. **It closes only what this vocabulary can see**: a refusal
-> spelled *avoid*, *skip* or *rather not* leaves the truncation readable, which is why the clause
-> below mints only a ceiling and why §10 books the two readings a ceiling's argument cannot
-> protect.
+> spelled *avoid*, *skip* or *rather not* leaves the truncation readable, which is why this
+> section mints only a ceiling and why §10 books what a ceiling's own direction cannot protect.
 
 > **Normative — a strict word mints a strict bound, and the endpoint is never widened.**
 > *"under 100 euros"* mints `maximum` `100` with `maximum_exclusive`, so a call at exactly `100`
@@ -342,18 +335,24 @@ rules did not. §10 books the floor with what fires it.
 > **no** `evidence_id`, so none carries both a span and the record its reference resolved to. §10
 > books the other two with what fires each.
 
-**Minting only a ceiling is what makes a model-chosen span safe, and it is the answer to a class
-five review rounds kept finding.** A planner selects the span, and a proper substring can carry a
-different polarity from the sentence it came out of. §4's negation bar catches every refusal this
-vocabulary spells, and it cannot catch *avoid*, *skip* or *rather not* — so *"avoid sending to
-Alice"* would have yielded the span *"Alice"*, an `AS_STATED` `TERMS` member fixing it, and a
-declaration whose sole `TERMS` argument is its recipient covered at exactly the recipient the user
-forbade. The same span in *"avoid Sunday"* would have yielded a `PERIOD` member authorising
-Sunday. **A ceiling has no such reading**: whatever substring is chosen, a `maximum` bounded by a
-figure the user themselves uttered can only restrict what a call may cost, so the polarity
-question stops being one a rule has to answer. What that costs is stated rather than hidden — a
-term the user named and a period they gave mint nothing, and every act resting on one asks.
-
+**Minting only a ceiling is what makes a model-chosen span safe, and it is the whole answer to a
+class five review rounds kept finding.** A planner selects the span, and a proper substring can
+carry a different polarity from the sentence it came out of: *"not under 100 euros"* yields
+*"under 100 euros"*, *"under no circumstances spend over 100 euros"* yields *"over 100 euros"*,
+and *"avoid spending over 100 euros"* the same — the first two caught by the negation bar above,
+the third by nothing, because *avoid* is semantic and no rule over a closed vocabulary recognises
+it. What **can** be made total is the **direction**. Had this section read every kind, *"avoid
+sending to Alice"* would have yielded the span *"Alice"*, an `AS_STATED` `TERMS` member fixing it,
+and a declaration whose sole `TERMS` argument is its recipient covered at exactly the recipient
+the user forbade; the same span in *"avoid Sunday"* would have yielded a `PERIOD` member
+authorising Sunday. **A ceiling has no such reading**: whatever substring is chosen, a `maximum`
+bounded by a figure the user themselves uttered can only restrict what a call may cost, and none
+of these truncations mints an authority to spend where the user set a floor. **A floor is not a
+spending protection** in any case — it constrains what the user *receives*, which §7 shows this
+system cannot tell from what it *pays*. So removing the capability costs a question and closes a
+class of inversion that adding rules did not, and what it costs is stated rather than hidden: a
+term the user named and a period they gave mint nothing, and every act resting on one asks. §10
+books the floor, the period and the term, each with what fires it.
 
 ### 5. One member per kind, and the mint reads the goal and nothing else
 
@@ -368,152 +367,38 @@ term the user named and a period they gave mint nothing, and every act resting o
 > **Normative — the mint reads the goal's own current interpretation, its retained history and,
 > for §4's truncation test alone, the act's own recorded utterance — and nothing else.** **No
 > request, no plan, no step, no declaration, no registry, no quote and no clock**, and no turn but
-> the one the basis already names, which ADR-0254 §1 re-reads at the write in any case. A member is therefore the same value whatever call was
-> being built when the row was written, which is what makes *"the authorization records the
-> constraint as the user stated it"* true of the record and not merely of its intent — and it is
+> the one the basis already names, which ADR-0254 §1 re-reads at the write in any case. A member
+> is therefore the same value whatever call was being built when the row was written, which is
+> what makes *"the authorization records the constraint as the user stated it"* true of the record
+> and not merely of its intent — and it is
 > why no plan a model produced can shape the **content** of an authority, at any path, by any
 > route.
 
-### 6. The quote: what the investigation records, and how one is minted
+### 6. What a `MONEY` ceiling is proved against: the quote, stated as an interface and read from nowhere concrete
 
-> **Normative.** `core/types.py` gains **`ActionQuote`**, a frozen model with `extra="forbid"`
-> whose fields are exactly seven: **`intended_action`**, an `Identifier`, the `IntendedAction`
-> (ADR-0265 §1) this quote is for; **`attempt_id`**, an `Identifier` naming the attempt that
-> recorded it, which is `GoalEvidence.attempt_id`'s field one record over and for its reason;
-> **`arguments_digest`**, a `Sha256Hex`, the arguments it was quoted over; **`kind`**, a
-> `BoundKind`; **`value`**, a `FrozenJsonValue`, the quoted value in the **same** form an
-> argument of a request carries it in; **`currency`**, an `EncodableText | None`; and
-> **`read_from`**, an `InterpretedOutput` naming the step output the value was taken from. A **model validator** admits `currency` on `MONEY` alone — required
-> there, absent otherwise — and **refuses a `value` of JSON `null`**, which is the spelling of
-> *"no value"* on every other carrier in this corpus and would be a quote that quotes nothing.
+> **Normative — a quote supplies exactly four facts, and this decision states no carrier for
+> them.** A **quote** is a record of a price this system read, and §7 is written over four facts
+> alone: the **`IntendedAction`** (ADR-0265 §1) it was taken for, by `id`; the **arguments it was
+> quoted over**, as the digest §7 compares; an **amount** and its **currency**, the amount in the
+> form ADR-0254 §4's `MONEY` reading accepts and the currency as that reading's ISO-4217 code;
+> and the **step output it was read from**, which is provenance and is compared by nothing. The
+> quotes of one goal are **totally ordered**, so that a second reading of one price is legible as
+> a **refresh** of the first rather than as a second act of the user — ADR-0252 §7's *"a refresh
+> supersedes the row it displaces"*, which §7's last-governs rule is taken under. **This decision
+> states that interface and nothing else about a quote**: no type, no field of any existing model,
+> no store member, no Protocol, no bound on how many a goal holds, no rule about which component
+> records one, no expiry and no face by which a policy obtains one. Those are the **quote
+> decision**'s, booked in §10 with what fires it, and **no lane of this decision authors any of
+> them**.
 
-> **Normative — the quoted value is carried and the reading is ADR-0254 §4's, unaltered.** A
-> quote is compared by the readings that already compare an argument, over a value in the
-> encoding `ActionRequest.parameters_digest` is taken over, so **no second comparison and no
-> second canonicalisation is written** (ADR-0145 §2, ADR-0150). `read_from` is provenance and is
-> compared by nothing: it is ADR-0253 §8's `InterpretedOutput` reused rather than a second
-> carrier for one fact, and it resolves for exactly as long as the goal does.
+**Why the carrier is booked rather than decided here.** The owner's ruling of 2026-09-14 names
+`GoalEvidence` as the quote's carrier, and ADR-0252 §1 makes that hard: such a row *"carries no
+content"*, its `EvidenceBasis` is closed at two members neither of which admits a typed value read
+from a step's output, and its `verdict` vocabulary is fixed per basis, while a quote is exactly a
+second copy of what was read. **That is a finding about the carrier, not about the proof**, so it
+is handed to the booked decision as a constraint rather than answered here — which is the whole
+reason the two are separated. The Alternatives record what the separation cost and bought.
 
-> **Normative.** `Goal` gains **`quotes`**, a possibly-empty `tuple[ActionQuote, ...]`, **oldest
-> first and append-only**, and **`quotes_elided`**, an `int` `ge=0`. **No lane edits a member in
-> place or reorders the tuple.** The tuple is bounded by **`MAX_ACTION_QUOTES`**, a `Final[int]`
-> of `core/types.py` valued at **64** — `MAX_GOAL_EVIDENCE`'s figure, for a record of the same
-> goal with the same durability — and a minting that would carry the goal past it **drops the
-> oldest** quotes in the same indivisible step and advances `quotes_elided` by the number
-> dropped.
-
-**The bound elides where ADR-0265 §1's refuses, because a dropped quote fails nothing silently:**
-§7's route finds none, the member is met by nothing and **the user is asked**.
-
-> **Normative — the *declaration* says where a quoted value is in its own output, and no plan
-> does.** `core/types.py` gains **`QuotedOutput`**, a frozen model with `extra="forbid"` carrying
-> exactly **`kind`** (a `BoundKind`), **`field`** (an `EncodableText | None`, a key of that tool's
-> output at depth one, absent meaning the whole output) and **`currency_field`** (an
-> `EncodableText | None`, `MONEY` only, required there and absent otherwise). **`ToolDefinition`
-> gains `quoted_outputs: tuple[QuotedOutput, ...]`**, possibly empty, defaulting to the empty
-> tuple, carrying **at most one member per `kind`** — refused at construction otherwise. This is
-> a **BREAKING** contract change to a `core` type under golden rule 5 and is flagged as one.
-
-> **Normative — `orchestration` mints the quote from a completed step's own output, and no model
-> contributes any part of it.** After a step completes whose **declaration** carries a
-> `QuotedOutput` and whose `PlanStep` names an **`intended_action`**, `orchestration` mints one
-> `ActionQuote` per declared member: `intended_action` the step's, `attempt_id` the attempt the
-> step ran under, `kind` the `QuotedOutput`'s, **`value` read at its `field` of that step's stored
-> output** and `currency` at its `currency_field`, `read_from` composed exactly as ADR-0253 §8
-> composes an `InterpretedOutput` — `execution_id` from the execution it read, `step_id` and
-> `field` from the step and the declaration — and **`arguments_digest` taken over that step's own
-> request's user-facing arguments**. **A step naming no `intended_action` mints nothing**, and so
-> does a declaration carrying no `quoted_outputs`. **Where the field is absent from the output,
-> where the value there is JSON `null`, where a `MONEY` quote has no value at `currency_field` or
-> the value there is not a JSON string, or where the value at `field` is not a shape §4's reading
-> of that kind accepts, no quote is minted** and nothing is recorded.
-
-**Which output carries a price is a fact about the tool, and putting it on the declaration is what
-takes the model out of the quote entirely.** An earlier draft let the **plan** name the field, and
-round 6 showed what that buys: against an output `{"price": "200", "stars": 4, "currency":
-"EUR"}`, a planner naming `stars` produces a quote of `4`, which satisfies a `150` ceiling and
-authorises the `200` purchase — a number of the right *shape* in the wrong *slot*, which no
-validator of shape can catch and which ADR-0254 §3's *"can satisfy … and can never supply"* arm
-does **not** cover, because the harm is a too-small value rather than a too-large one. The
-declaration is where every other such fact already lives (`system_supplied`, `bounded_arguments`),
-it is authored by the integration rather than proposed per turn, and with it §8's writer clause is
-absolute again: **no model output reaches any input of a quote**.
-
-
-> **Normative — the digest is one encoding restricted to one key set, and not a second
-> canonicalisation.** `arguments_digest` is `sha256` over the canonical JSON encoding
-> `ActionRequest.parameters_digest` is taken over, **restricted to the keys the declaration
-> classifies user-facing** (ADR-0254 §3). System-supplied keys are excluded because
-> `orchestration` fills them **per call** — an idempotency key differs between the quoting read
-> and the booking by construction — so a digest over every argument could never match and the
-> route would be inert. Nothing else is excluded: **an extra user-facing argument, a missing one
-> and a changed one each change the digest**, which is the owner's rule that the quote covers the
-> booking only where *"the step's arguments are the ones that were quoted"*.
-
-> **Normative.** `PlanStore` gains **one** member, `async` and returning a detached snapshot like
-> every other, and this is a **BREAKING** contract change under golden rule 5:
-> **`record_quotes(minting: ActionQuoteMinting) -> Goal`** — appends one or more quotes to the
-> named goal's `quotes`, performs the elision above, advances `version`, and returns the stored
-> goal. `core/types.py` gains **`ActionQuoteMinting`**, a frozen command carrying exactly
-> `goal_id`, `quotes` (a **non-empty** `tuple[ActionQuote, ...]`) and the `expected_version` it
-> was computed against; the write is **compare-and-swap** and the store takes a command and never
-> a snapshot, which is ADR-0014 §5's discipline and ADR-0265 §5's statement of it unaltered.
-> **It refuses a command naming a goal the store does not hold, one whose `intended_action` is
-> not the `id` of a member of that goal's own `intended_actions`, one whose `attempt_id` is not an
-> attempt of that goal, and one whose `read_from` does not resolve to a completed step execution
-> of the named `attempt_id` itself — `execution_id` a member of that attempt's own
-> `execution_ids` (ADR-0255 §3) and `step_id` a step of it — **and one whose `read_from` names a
-> step whose own `intended_action` is not the quote's**, so a quote can never be read under one
-> act and offered under another. That is the window ADR-0265 §4 closes at the store for a plan,
-> closed here for every reference a quote carries and with the same error class, and it is what
-> makes the export closure and the deletion cascade true rather than asserted: every identifier on
-> a quote resolves inside the goal the quote rides in, so ADR-0014 §5's rule is satisfied by
-> construction and `delete_goal` leaves nothing dangling.
->
-> **What the store cannot check is `orchestration`'s, and the division is stated rather than
-> assumed.** The plan store holds no concrete `ActionRequest` for a completed step —
-> `PlanStep.parameters` predate the resolved references and the system-supplied fill — and no
-> snapshot of the `ToolDefinition` the call was made under; consulting a registry would give the
-> store lane a collaborator it does not have and would validate against a declaration that may
-> since have been re-issued. So **the store checks the references above and nothing derived**, and
-> the `value`, the `currency`, the `arguments_digest` and the declaration's `QuotedOutput` are
-> `orchestration`'s, computed from the execution it has just read and the declaration that call
-> was made under, under §8's sole-writer clause and exactly as every other minted record of this
-> corpus is (ADR-0265 §5). **A caller reaching past `orchestration` is outside the writer clause
-> and is a fault rather than a case**, which is the posture ADR-0254 §15 takes for every value it
-> names.
-
-> **Normative — the wire, the export, the stored shapes and the migration, and it is ADR-0265
-> §5's clause one record over.** **`PROTOCOL_VERSION` moves by exactly one, in the lane that lands
-> the `core` surface**, and `wire/envelope.py`'s log gains an entry naming this ADR and the
-> reason: `Goal` gains two fields and `ToolDefinition` gains two, `Goal` is carried on
-> `TurnResult.goal`, both set `extra="forbid"`, and `wire/codec.py` renders a model by
-> `model_dump()`, so the shape change makes a hub's turn undecodable by a client at the previous
-> version. **`PlanExport` gains no member and
-> `schema_version` moves for the record's shape alone**, on ADR-0039 §10's own mechanism, because
-> a quote rides **inside `Goal`** which `PlanExport.goals` already carries — so ADR-0014 §5's
-> closure rule is satisfied by construction and `delete_goal`'s cascade reaches a quote because it
-> is inside the goal. **Every stored row stays readable and the migration is an addition with a
-> total default**: a `Goal` written before this decision decodes with `quotes` empty and
-> `quotes_elided` `0`, and a `ToolDefinition` with `quoted_outputs` empty, which is a conforming
-> declaration rather than a degraded one. **A stored `Authorization` is the one case that is not
-> an addition, and it is stated here rather than left to the lane**: a row written before this
-> decision carries `CoverageMember.argument` and may carry `ValueBound.currency_argument`, both
-> now forbidden extras, so such a row **decodes with its `coverage` dropped to empty and is
-> retained** — readable as the audit record it is and covering nothing, which is the fail-closed
-> direction, since a stored member whose `kind` cannot be derived from what it holds must not be
-> guessed at. **No lane invents a quote for a stored goal**, because a price nothing read is a
-> price no record holds.
-
-**A quote is a record of its own rather than a field of a `GoalEvidence` row, and the reason is
-that decision's own text.** ADR-0252 §1 rules that *"A `GoalEvidence` carries no content"* and is
-*"never a second copy of what was read"*, closes `EvidenceBasis` at **two** members neither of
-which admits a typed value read from a step's output, and fixes a `verdict` vocabulary per basis.
-A quote is exactly a second copy of what was read, deliberately, because a comparison cannot be
-taken against a count — and carrying it there would supersede four limbs of one ratified section
-to reuse sufficiency, conflict and digest machinery that is about **propositions**, which a price
-is not. What the quote takes from that decision is its **principle**, in §7's last-governs rule:
-*"a refresh supersedes the row it displaces"*.
 ### 7. The two routes, and what covers a request
 
 > **Normative.** `core/types.py` gains **`BoundedArgument`**, a frozen model with
@@ -524,8 +409,11 @@ is not. What the quote takes from that decision is its **principle**, in §7's l
 > `TERMS` with none — and refuses `argument` equal to `currency_argument`. **`ToolDefinition`
 > gains one field, `bounded_arguments: tuple[BoundedArgument, ...]`**, possibly empty,
 > **defaulting to the empty tuple**, duplicate-free on `argument`, and naming **no key of that
-> declaration's own `system_supplied`** — refused at construction. This is a **BREAKING**
-> contract change to a `core` type under golden rule 5 and is flagged as one.
+> declaration's own `system_supplied`** — refused at construction. **`ActionRequest` gains
+> `intended_action`, an `Identifier | None` defaulting to `None`** — the step's own, which is
+> `ActionRequest.goal`'s shape one field over and is how a request says which act it is an attempt
+> at. Both are **BREAKING** contract changes to `core` types under golden rule 5 and are flagged
+> as such.
 
 > **Normative — that refusal is what preserves ADR-0254 §3's system-supplied protection after
 > the validator that stated it is gone.** That section makes a row whose coverage names a
@@ -534,48 +422,40 @@ is not. What the quote takes from that decision is its **principle**, in §7's l
 > it on the argument route**, and *"a user is never asked to approve an idempotency key"* holds
 > by construction one field over.
 
-> **Normative — what the policy is given, and it is keyed rather than asked.**
-> `core/protocols.py` gains **`GoalQuotes`**, carrying
-> **`async for_action(goal: Identifier, intended_action: Identifier, attempt: Identifier) ->
-> tuple[ActionQuote, ...]`** and nothing else — the face a policy holds, returning the quotes of
-> that goal naming that action **and recorded under that attempt**, in `Goal.quotes`'s own order,
-> and the empty tuple where there are none. It is `async` and returns a **detached snapshot**,
-> which is ADR-0097 §3's discipline every member of `GoalAuthorizations` and `PlanStore` already
-> keeps, and it is `GoalAuthorizations`' construction one record over (ADR-0254 §16, ADR-0193
-> §1): a narrow face the composition root wires, so the policy names a Protocol and never a
-> store. **`ActionRequest` gains `intended_action` and `attempt`, each an `Identifier | None`
-> defaulting to `None`** — the step's own and the attempt it is dispatched under, which is
-> `ActionRequest.goal`'s shape two fields over.
+> **Normative — the evidence route, and a member is met by it where all four hold.** The request
+> carries an `intended_action`; a quote available to the policy (§6) names **that** action and
+> carries the member's **kind**; the quote's quoted arguments are **this request's** user-facing
+> arguments, compared by the digest below; and the quote's amount satisfies the member under
+> ADR-0254 §3's fixed comparison or §4's bounded readings, with a `MONEY` bound's **currency
+> conjunct taken at the quote's own currency** and at no key of the request. **Where more than one
+> quote satisfies the first three, the one latest in §6's order governs** — a re-quote is a
+> refresh of one fact and the later reading is the current price, which is not a precedence rule
+> between two acts of the user. **Where no quote satisfies them the member is not met**, the
+> request is uncovered, and the user is asked or the act is investigated first — the owner's
+> *"no quote → cannot prove the price"*, which is feasibility rather than a restriction on the
+> tool.
 >
-> **A fault is never an absence.** The member **raises `AuthorizationError`** where its backing
-> read fails and returns the empty tuple **only** where the goal holds no matching quote, and
-> **no implementation converts a fault into an empty tuple**; a cancellation propagates as it
-> does through every other member. A policy that meets the fault treats the request as **not
-> covered** and reports the fault rather than falling through to the argument route — the same
-> distinction ADR-0254 draws between `AuthorizationError` and absence, which is what lets a
-> ruling say *no record* rather than *a record that did not cover*.
-
-> **Normative — the evidence route, and a member is met by it where all five hold.** The request
-> carries an `intended_action` and an `attempt`; a quote of the row's `goal` names **that** action
-> and carries **that** `attempt_id`; the quote's `kind` equals the member's; the quote's
-> `arguments_digest` equals the digest of **this request's** user-facing arguments, taken exactly
-> as §6 takes it; and the quote's `value` satisfies the member under ADR-0254 §3's fixed
-> comparison or §4's bounded readings, with a `MONEY` bound's **currency conjunct taken at the
-> quote's own `currency`** and at no key of the request. **Where two quotes match on action, kind and digest, the one latest in `Goal.quotes`
-> governs** — a re-quote is a refresh of one fact and the later reading is the current price,
-> which is ADR-0252 §8's principle and is not a precedence rule between two acts of the user.
->
-> **The attempt conjunct is what bounds a quote's age, and there is no figure.** A quote recorded
-> under an earlier attempt satisfies nothing, however recent it looks: an attempt is one unit of
-> work with its own investigation, so a price read under a previous one is a price this attempt
-> has not read. **No clause invents a duration, a `Settings` field or a per-request freshness
-> parameter** — ADR-0252 §6 refuses to invent one for evidence and ADR-0096 §3 states why — and
-> what remains inside one attempt is the residual §10 books.
+> **A fault is never an absence.** Where the read behind §6's quotes fails, the request is treated
+> as **not covered** and the fault is reported; **no implementation converts a fault into an
+> absence of quotes** and none falls through to the argument route, which is the distinction
+> ADR-0254 already draws between `AuthorizationError` and absence and is what lets a ruling say
+> *no record* rather than *a record that did not cover*.
 >
 > **A quote states what the act will cost, and nothing this decision mints states what the user
 > will receive.** §4 reads only ceilings, for exactly that reason: kind agreement cannot tell a
 > price the user pays from one they are paid, and a charge satisfying a floor would be the
 > permissive direction — *"receive at least 150"* admitting a charge of 200.
+
+> **Normative — the digest is one encoding restricted to one key set, and not a second
+> canonicalisation.** The arguments a quote was taken over are compared as `sha256` over the
+> canonical JSON encoding `ActionRequest.parameters_digest` is taken over, **restricted to the
+> keys the declaration classifies user-facing** (ADR-0254 §3), on both sides of the comparison.
+> System-supplied keys are excluded because `orchestration` fills them **per call** — an
+> idempotency key differs between the quoting read and the booking by construction — so a digest
+> over every argument could never match and the route would be inert. Nothing else is excluded:
+> **an extra user-facing argument, a missing one and a changed one each change the digest**, which
+> is the owner's rule that the quote covers the booking only where *"the step's arguments are the
+> ones that were quoted"*.
 
 > **Normative — the argument route, and it is available only where the declaration declares.** A
 > member of kind *k* is met by it where the declaration carries **exactly one** `BoundedArgument`
@@ -606,10 +486,11 @@ is not. What the quote takes from that decision is its **principle**, in §7's l
 > argument the request carries. **A key a `BoundedArgument` names as its `currency_argument` is
 > not such an argument**: it is consumed by that declaration's own `MONEY` member, whose §4
 > comparison reads the request's value there, so a declaration carrying an amount and its currency
-> is covered without a quote being needed for the currency key alone. A member met by no route leaves the request uncovered, which is
-> §3's second direction — *"an act that fixed `refundable_only` to `true` authorised a call
-> **carrying** that value"* — and an argument the row cannot meet leaves it uncovered, which is
-> §3's first. **There is no default, no wildcard and no omission that reads as consent.**
+> is covered without a quote being needed for the currency key alone. A member met by no route
+> leaves the request uncovered, which is §3's second direction — *"an act that fixed
+> `refundable_only` to `true` authorised a call **carrying** that value"* — and an argument the
+> row cannot meet leaves it uncovered, which is §3's first. **There is no default, no wildcard and
+> no omission that reads as consent.**
 >
 > **The third conjunct is what keeps an undeclared argument from going unexamined**, and it is
 > §3's first direction preserved rather than relaxed. Without it a row fixing `subject` to
@@ -640,74 +521,64 @@ is not. What the quote takes from that decision is its **principle**, in §7's l
 > owner's ruling names the **price**, which is proved against the quote and against no argument of
 > the call. **One implementation, in `permissions`**, and §5's mint runs none of it.
 
-**The worked case, end to end, because the rule is easier to check against one.** *"Book
-Riverside if it is dry Saturday, up to 150 euros."* The constraint mints one member — `MONEY`,
-`maximum` `150`, `EUR`, inclusive — and nothing else; the goal holds one intended action. The
-investigation quotes the site for Saturday and the quoting step declares its `quotes`, so a quote
-is recorded: that action, that attempt, `MONEY`, `120`, `EUR`, over the digest of *(site, dates,
-party)*. At authorisation the booking request carries the same action, the same attempt and the
-same three arguments, the digest matches, and `120 ≤ 150` — the request is covered, route (d)
-`ALLOW`s, and **no question is put**. The verification phase confirms the charge afterwards and a
-mismatch is a reported finding, which is A10's (§10). *"Make it Sunday"* replans, the
-investigation re-quotes at `135`, and the new quote's digest is the Sunday arguments': the
-Saturday quote covers nothing now, the Sunday one does, and **still no question is put** — the
-owner's *"a clear later instruction … can supply authorization for that change"*. A site whose
-Sunday price is `170` is covered by nothing, and the user is asked about that concrete call.
+**The worked case, because the rule is easier to check against one.** *"Book Riverside if it is
+dry Saturday, up to 150 euros."* The constraint mints one member — `MONEY`, `maximum` `150`,
+`EUR`, inclusive — and nothing else. The investigation quotes the site for Saturday, so a quote
+for the goal's intended action is available at `120`/`EUR` over the arguments *(site, dates,
+party)*; the booking request carries the same action and the same three arguments, the digest
+matches, `120 ≤ 150`, route (d) `ALLOW`s and **no question is put**. Verification confirms the
+charge afterwards and a mismatch is a reported finding, which is A10's (§10). *"Make it Sunday"*
+replans and the re-quote is `135` over the Sunday arguments: the Saturday quote covers nothing
+now, the Sunday one does, and **still no question is put**. A site whose Sunday price is `170` is
+covered by nothing, and the user is asked about that concrete call.
 
 ### 8. Writer clauses, and what no model does
 
-> **Normative.** **`orchestration` mints every coverage member and every quote, and nothing else
-> does.** No `ActionPolicy`, no `ToolRegistry`, no store, no reader, no interface adapter, no tool
-> and no model **constructs, writes or repairs** one. **The distinction the clause turns on is
-> between construction and source.** `orchestration` alone **constructs and writes** a quote; the
-> **declaration** alone says which output field and which currency field it is read at; and the
-> **facts quoted** are the tool's own returned output and the concrete request's user-facing
-> arguments, which is what a quote is *for*. **No plan and no model names the field**, and no
-> component but `orchestration` writes the record. This is ADR-0254 §15's writer clause reaching
-> the values §5 and §6 add.
+> **Normative.** **`orchestration` mints every coverage member, and nothing else does.** No
+> `ActionPolicy`, no `ToolRegistry`, no store, no reader, no interface adapter, no tool and no
+> model **constructs, writes or repairs** one. This is ADR-0254 §15's writer clause reaching the
+> values §§1-5 add, and it is unqualified because every input the mint reads is on the goal
+> already (§5).
 
 > **Normative — no durable value of this decision is ever taken from a model, and the list is
 > exact.** A planner envelope carrying a **`CoverageMember`**, a **`ValueBound`**, an
-> **`AuthorizationBasis`**, a `BoundKind`, an argument key, a **`BoundedArgument`**, a
-> **`QuotedOutput`**, an **`ActionQuote`**, an `arguments_digest`, an `attempt_id` or an
-> **`InterpretedOutput`** has those values **discarded silently** — not an error, not a park, not
-> a degradation of the turn — which is ADR-0254 §9's posture extended to exactly the values this
-> decision adds, and for its stated reason: a value a model wrote into a durable audit chain is
-> unprovenanced.
+> **`AuthorizationBasis`**, a `BoundKind`, an argument key or a **`BoundedArgument`** has those
+> values **discarded silently** — not an error, not a park, not a degradation of the turn — which
+> is ADR-0254 §9's posture extended to exactly the values this decision adds, and for its stated
+> reason: a value a model wrote into a durable audit chain is unprovenanced.
 
 > **Normative — a model contributes exactly one thing to this decision, and it is the span.** An
 > interpretation element's span is checked against that turn's own utterance by ADR-0249 §7, and
-> §4 bounds what a differently chosen one can do in two ways: **its table mints a ceiling or
-> nothing**, so no truncation yields an authority in the direction the user did not give; and **no
-> reading of §4 is taken at all where a negation stands before the span**, which is what stops
-> *"do not send to Alice"* from minting a `TERMS` member fixing `"Alice"`. Neither closes the
-> class whole, and §10 books what remains. **Nothing else a model produces reaches any input of
-> §4, §5, §6 or §7** as a **selector or a written value**: the field a quote is read at is the
-> **declaration's** (§6), the argument a member meets is the declaration's (§7), and the
-> identifiers are the loop's. A step's `parameters` are a planner's, and they reach a quote only
-> as the **subject** of its `arguments_digest` — the arguments the call was quoted over, which is
-> the fact the digest exists to pin rather than an input that chooses anything. **A model names no
-> argument key, no output field, no currency key and no identifier anywhere in this decision.**
+> §4 bounds what a differently chosen one can do in three ways: **its table mints a ceiling or
+> nothing**, so no truncation yields an authority in the direction the user did not give; **no
+> reading is taken at all where a negation stands before the span**; and **no reading is taken
+> where the span occurs in the utterance more than once**, so the test that decides the second is
+> never taken over an occurrence nobody named. None of the three closes the class whole, and §10
+> books what remains. **Nothing else a model produces reaches any input of §§1-5 or §7** as a
+> selector or a written value: the argument a member meets is the **declaration's** (§7) and the
+> identifiers are the loop's. **A model names no argument key, no currency key and no identifier
+> anywhere in this decision.**
 
 ### 9. What this records against earlier ADRs, clause by clause, under ADR-0082 §1
 
 ADR-0082 §1's test is applied to the earlier ADR's **text** and is shown rather than asserted:
 *"Would a reader holding only the earlier ADR now act differently, or read one of its clauses more
-widely than it now holds?"* **Four documents come out yes** — ADR-0254 in seven scopes, ADR-0016
-in one, ADR-0249 in one and ADR-0255 in one count; every other ADR cited comes out **no** and
-takes none, which ADR-0082 §1 requires as firmly.
+widely than it now holds?"* **Two documents come out yes** — ADR-0254 in seven scopes and
+ADR-0016 in one; every other ADR cited comes out **no** and takes none, which ADR-0082 §1 requires
+as firmly.
 
 **ADR-0254 §1 — in the proposal's completeness condition alone.** It reads that the coverage a
 proposed row would carry is *"**complete for this request**: every **user-facing** argument of the
 request (§3) is named by a member … **or** the request carries no user-facing argument at all"*.
 A member names no argument once §3 below lands, so it would be satisfiable only by its second limb
 and **no row carrying a non-empty coverage could ever be proposed** — the inert outcome this
-decision exists to remove. §7 restates it as *the row the proposal would write satisfies condition
-6 for this request*: **condition 6 and not the whole of `covers`**, because a proposal is written
-`PROPOSED` and §3's condition 1 asks for a **live** row, so a test over the whole could never pass
-at a proposal. Its purpose, disposition and cost are unchanged. **Every other clause of §1 binds
-entire** — the three write paths, the row written before the question is put, the never-edited
-coverage, the path-(iii) recipient precondition and the other three proposal conditions.
+decision exists to remove, and the one the tree is in today (§Context). §7 restates it as *the row
+the proposal would write satisfies condition 6 for this request*: **condition 6 and not the whole
+of `covers`**, because a proposal is written `PROPOSED` and §3's condition 1 asks for a **live**
+row, so a test over the whole could never pass at a proposal. Its purpose, disposition and cost
+are unchanged. **Every other clause of §1 binds entire** — the three write paths, the row written
+before the question is put, the never-edited coverage, the path-(iii) recipient precondition and
+the other three proposal conditions.
 
 **ADR-0254 §2 — in the member's shape.** §2 declares `CoverageMember`'s fields *"exactly:
 `argument`, an `EncodableText`; `fixed`; `bound`; and `basis`"*, states *"`argument` is a key name
@@ -718,11 +589,11 @@ and the currency it is denominated in"*, and makes `maximum` required. §3 above
 the declaration and the quote, and gives `maximum` an **exclusivity flag**; `maximum` stays
 required and `minimum` stays optional, exactly as ratified, §4 minting no floor at all. A reader
 holding only §2 authors a member that claims to know which slot it fills and records *"under
-100"* as a bound a call at exactly 100 satisfies. **Every other clause binds entire**: the two-shapes validator, `BoundKind`'s members
-and their vocabulary rule, the three kinds' own fields and refusals, the
-every-other-argument-is-fixed-only default, and the asymmetry argument that *"A comparison the
-system gets wrong in the permissive direction authorises a call the user did not authorise"* —
-which §§3, 4 and 7 are written to serve rather than to weaken.
+100"* as a bound a call at exactly 100 satisfies. **Every other clause binds entire**: the
+two-shapes validator, `BoundKind`'s members and their vocabulary rule, the three kinds' own fields
+and refusals, the every-other-argument-is-fixed-only default, and the asymmetry argument that *"A
+comparison the system gets wrong in the permissive direction authorises a call the user did not
+authorise"* — which §§3, 4 and 7 are written to serve rather than to weaken.
 
 **ADR-0254 §3 — in condition 6 and in the field count.** Condition 6 reads that *"the request's
 user-facing arguments and the row's coverage name the same set of keys"* and the per-argument rule
@@ -734,31 +605,30 @@ comparison in which a price must be an argument of the call, and refuses every b
 is a consequence of the site and the dates — the failure the owner's ruling of 2026-09-14 names.
 With the `argument` field goes the validator making a row whose coverage names a system-supplied
 argument not constructible; **its rule is preserved** by §7's refusal on `bounded_arguments`. And
-`ToolDefinition` gains **two** further fields — `bounded_arguments` (§7) and `quoted_outputs`
-(§6), the second being what lets any completed read become a quote at all — so *"`ToolDefinition`
-gains **one** field"* is over-narrow by two, and a reader implementing from §3's inventory alone
-authors a declaration no quote can ever be read from. **Every other clause binds entire**: conditions 1-5 — condition 3's by-value
-declaration comparison conspicuously so — the user-facing classification and its empty default,
-the fill-before-the-fit-test and `parameters_digest` clauses, the bar-stays-monotone clause, the
-seam/policy split, the coverage-never-widens rule, the ADR-0021 §5 monotonicity clauses, the
-resolved-reference clause with its *"can satisfy … and can never supply"* arm, and the canonical
-encoding §6 and §7 compare by.
+`ToolDefinition` gains **one** further field, `bounded_arguments` (§7), so *"`ToolDefinition`
+gains **one** field"* is over-narrow by one, and a reader implementing from §3's inventory alone
+authors a declaration no member can ever be held against. **Every other clause binds entire**:
+conditions 1-5 — condition 3's by-value declaration comparison conspicuously so — the user-facing
+classification and its empty default, the fill-before-the-fit-test and `parameters_digest`
+clauses, the bar-stays-monotone clause, the seam/policy split, the coverage-never-widens rule, the
+ADR-0021 §5 monotonicity clauses, the resolved-reference clause with its *"a value a tool produced can
+satisfy a bound and can never supply one"* arm, and the canonical encoding §7 compares by.
 
 **ADR-0254 §4 — in two limbs of the `MONEY` reading.** Its **currency conjunct** reads *"the
 request carries, at the bound's `currency_argument`, a JSON string equal to the bound's
 `currency`"*, and the bound no longer carries that key; §7 takes it at the `BoundedArgument`'s
-`currency_argument` or at the quote's own `currency`, its force unchanged. And its **two
-`maximum` inequality** is read strictly where `maximum_exclusive` is set — **its `minimum`
-conjunct is unmoved and binds entire** — a reader holding only
-§4 otherwise covering a call at exactly the endpoint the user excluded. **Every other clause binds
-entire**: the `MONEY` reading in every other conjunct, `PERIOD` and `TERMS` whole, the no-float
-and no-naive-instant rules, the totality-and-refusal clause, the `reason` discipline, and the
-no-schema clause, which §7 cites as binding it.
+`currency_argument` or at the quote's own currency, its force unchanged. And its **two `maximum`
+inequality** is read strictly where `maximum_exclusive` is set — **its `minimum` conjunct is
+unmoved and binds entire** — a reader holding only §4 otherwise covering a call at exactly the
+endpoint the user excluded. **Every other clause binds entire**: the `MONEY` reading in every
+other conjunct, `PERIOD` and `TERMS` whole, the no-float and no-naive-instant rules, the
+totality-and-refusal clause, the `reason` discipline, and the no-schema clause, which §7 cites as
+binding it.
 
 **ADR-0254 §9 clause (ii) — in the test of *"bear on"* alone.** The clause states the property and
 no procedure, so a reader holding only §9 has an obligation with no mechanical test and either
 invents one or, as #2373 did, stops. **Its test is kind agreement between the constraint and the
-thing the member is proved against** — the quote's `kind`, or the `BoundedArgument`'s — and never
+thing the member is proved against** — the quote's kind, or the `BoundedArgument`'s — and never
 numeric fit, a model's nomination or a schema. **The clause's prohibitions bind entire and are not
 narrowed**, and so do clauses (i) and (iii) and §9's discard rule.
 
@@ -771,52 +641,29 @@ entire**: §8's basis fields, its span check and its two-zones clause; §10's th
 resolutions, its no-memory-no-preference rule, its normalisation-at-the-mint rule and its *"A
 resolution the loop cannot take is not taken, and no member is minted"*.
 
-**ADR-0016 §1 — in one scope**, and it is the scope ADR-0254 §18 already took there reaching two
-further fields: the model declaration, and the required-field clause applied to
-`bounded_arguments` and `quoted_outputs`. The grounds are the clause's own reason, which does not reach this default —
-the empty tuple makes the **opposite** claim to the one §1 refuses. **The exception is these two
-further fields on this one argument**, and no lane reads the records together as licence to default
-a further safety field. Every other clause of §1 binds entire.
+**ADR-0016 §1 — in one scope**, and it is the scope ADR-0254 §18 already took there reaching one
+further field: the model declaration, and the required-field clause applied to
+`bounded_arguments` alone. The grounds are the clause's own reason, which does not reach this
+default — the empty tuple makes the **opposite** claim to the one §1 refuses. **The exception is
+this one further field on this one argument**, and no lane reads the records together as licence
+to default a further safety field. Every other clause of §1 binds entire.
 
-**ADR-0255 §15 item 19 — and it is a count.** That item enumerates what §13's rule requires before
-a consequential capability is wired and closes the enumeration in terms, at **six** since ADR-0265
-§6 added the sixth. §11 adds a **seventh**, in three limbs — a mechanical test of the polarity of the clause a span
-was taken from; an enforceable provider-side hold or a provider-side conditional execution that
-validates the quoted amount atomically with the act; and the identity/price-affecting split of a
-system-supplied key — and a reader holding only item 19 wires an integration after six and is
-wrong: the residuals are a **span whose polarity no rule can read** and a **quote that was true
-when it was read and false when the act was performed**, either of which lets route (d) authorise
-a call the user did not. **The gate's
-existing guarantees do not reach it** — verification reports the completed overcharge and
-cancellation compensates the attempt, and **neither makes the pre-execution permission decision
-valid**, which is §13's own test. §13's rule binds verbatim and its own contribution is unchanged;
-what grows is the gate's total.
-
-**ADR-0249 §1 — in the `Goal` declaration alone.** ADR-0265 §8 already recorded a scope there for
-`intended_actions`; this decision reaches it again for `quotes` and `quotes_elided`, and ADR-0070
-§4's precedence rule makes the later record govern the overlap. A reader holding only §1 authors a
-goal with no place for a quote, so §7's evidence route has no operand and a `MONEY` `maximum` is
-met nowhere. **Every other clause of §1 binds entire**, and §2's bounded-history construction is
-reused by §6's elision rather than restated.
-
-**And the ones that come out no.** **ADR-0254 §13** is the clause §7 is taken under — the recheck
-at `decide`, the no-cached-verdict rule and *"Coverage and sufficiency are two tests and neither
-clears the other"*, which stays true. **ADR-0252** is read and **not moved**: §1's no-content rule,
-its two bases and per-basis verdict vocabularies, §6's four tests, §7's conflict rule, §11's digest
-and §§12-13's store, retention and export are untouched, and §6 states why a quote is a record of
-its own instead. **ADR-0253** is superseded in nothing: §8's `InterpretedOutput` is reused
-**unaltered**, composed by the loop from the declaration's own field exactly as that section composes
-it from a `StepOutputRef`, so its *"No model supplies any of the three"* is honoured by the same
-construction, and this decision now adds **no** field to `PlanStep` at all, so §9's label-space
-count and resolve-once discipline are untouched and nothing of that ADR is reached.
-**ADR-0249 §7** is relied on and not narrowed: its span check is a containment test, and §4's
-truncation refusal is a further refusal of this decision's own reading rather than a change to it.
-**ADR-0265** is relied on entire. **ADR-0014 §5, ADR-0249 §12, ADR-0250 §9, ADR-0252 §12 and
-ADR-0265 §5** each widened `PlanStore` without enumerating it closed, so §6's member is a
-**stacked addition**, and §5's closure rule is satisfied by §6's reference refusals with
-`schema_version` moving on **ADR-0039 §10**'s own mechanism. **ADR-0021 §1** is relied on for the
-one canonical encoding; **ADR-0145 §2 and §9** for the hazards §6 and §7 avoid; **ADR-0029 §5** is
-relied on rather than superseded.
+**And the ones that come out no, several of them deliberately.** **ADR-0249** takes **no** record:
+this decision adds no field to `Goal` and none to `GoalElement`, and §7 is relied on rather than
+narrowed — its span check is a containment test, and §4's occurrence and negation refusals are
+further refusals of **this** decision's own reading rather than changes to it. **ADR-0255** takes
+**no** record: §15 item 19's gate enumeration is untouched, because every prerequisite the quote
+raises belongs to the decision that lands the quote (§10) and this one adds none. **ADR-0252** is
+read and **not moved**: §1's no-content rule, its two bases and per-basis verdict vocabularies,
+§6's four tests, §7's conflict rule, §11's digest and §§12-13's store, retention and export are
+untouched, and §6 records why the carrier question is the booked decision's rather than answered
+here. **ADR-0253** is superseded in nothing: this decision adds no field to `PlanStep`, so §7's
+enumeration, §9's label-space count and the resolve-once discipline are untouched. **ADR-0265** is
+relied on entire — `IntendedAction` and its `id` are read as that decision leaves them and nothing
+of it is narrowed. **ADR-0254 §13** is the clause §7 is taken under — the recheck at `decide`, the
+no-cached-verdict rule and *"Coverage and sufficiency are two tests and neither clears the
+other"*, which stays true. **ADR-0021 §1** is relied on for the one canonical encoding; **ADR-0145
+§2 and §9** for the hazards §7 avoids; **ADR-0029 §5** is relied on rather than superseded.
 
 ### 10. What this decision does not decide, by name, each with what fires it
 
@@ -824,6 +671,19 @@ relied on rather than superseded.
 > any of them. Each is named so that a reader cannot mistake this ADR's silence for a ruling, and
 > each carries the condition that fires it.
 
+- **Where a quote is carried, what records one, and how a policy obtains one — the whole of the
+  quote's machinery.** §6 states the four facts §7 reads and states no carrier: no type, no field
+  of `Goal` or of any other model, no store member, no Protocol, no bound on how many a goal
+  holds, no expiry, and no rule about which component mints one or from what. **Nor whether a
+  quote is still true when the act is performed** — a provider may move a price with no newer
+  reading taken, and a quote that was true when it was read and false when the call was made
+  authorises an over-bound charge — **nor what freshness the wiring of a consequential capability
+  through this route therefore requires**, which is that decision's prerequisite to state and not
+  this one's. §6 records one constraint that decision inherits: a quote is *"a second copy of what
+  was read"*, which ADR-0252 §1 refuses of a `GoalEvidence` row. **This is the largest thing this
+  decision does not settle**, and until it lands §7's evidence route has no operand, so no
+  `Authorization` this decision's members ride in covers a call. Fired by **the quote decision**,
+  tracked as issue **#2387**.
 - **Who supplies the value of a system-supplied argument.** ADR-0254 §3 requires `orchestration`
   to supply one and names an idempotency key, a client reference and a locale. **This decision
   states one source and lands no filler**: a value supplied into an argument as a spending
@@ -832,29 +692,16 @@ relied on rather than superseded.
   here** as the client reference — `_step_ids_are_unique` guarantees uniqueness *"within a plan"*
   alone and `Identifier` guarantees no opacity. Fired by the decision that mints a dedicated
   opaque per-call reference.
-- **Whether a quote is still true when the act is performed.** §7 bounds a quote to the attempt
-  that recorded it and invents no duration; a provider may move a price with no newer quote
-  appended, and the detached read leaves a newer appended quote unseen — the **quote-to-claim
-  window**, the shape ADR-0255 §13 already names for an evidence refresh. Neither is closable from
-  inside this system, so **§11 makes closing the first a prerequisite of the gate** and names the
-  local claim-time revalidation that closes the second. Fired by the decision that gives an
-  integration a hold or a conditional execution, and by the one that closes §13's window.
+- **Which system-supplied keys a price depends on.** §7 takes the digest over the **user-facing**
+  arguments alone, because a system-supplied key is filled per call and a digest over an
+  idempotency key could never match twice. ADR-0254 §3's three examples are not one kind: an
+  idempotency key and a client reference are per-call identity, and a **locale** is an input a
+  price can depend on, so a digest that ignores it can match across two prices. **This decision
+  draws no line between them.** Fired by the decision that classifies a system-supplied key.
 - **A stated floor.** §4 reads only ceilings, so *"at least 150 euros"* mints nothing and the act
   asks. Fired by a decision that can tell a bound on what the user **pays** from one on what they
   **receive** — which needs a fact neither the span nor the kind carries — and which then states
   what a floor is proved against.
-- **A declaration whose `quoted_outputs` names the wrong field.** §6 takes the field from the
-  declaration precisely so that no per-turn value chooses it, but an integration author who names
-  a discount where the price is will mint quotes of the discount. That is an integration defect of
-  the same class as a wrong `system_supplied` or a wrong `risk_level`, and this decision adds no
-  mechanism against it. Fired by whatever the corpus decides about verifying a declaration's own
-  claims.
-- **Which system-supplied keys a price depends on.** §6 takes the digest over the **user-facing**
-  arguments alone, because a system-supplied key is filled per call and a digest over an
-  idempotency key could never match twice. ADR-0254 §3's three examples are not one kind: an
-  idempotency key and a client reference are per-call identity, and a **locale** is an input a
-  price can depend on. **This decision draws no line between them, and §11 makes drawing it a
-  prerequisite of the gate.** Fired by the decision that classifies a system-supplied key.
 - **Minting a `TERMS` member from an act, and minting a `PERIOD` one.** §4 mints neither, so a
   term the user named and a period they gave are covered by nothing and every call resting on one
   asks. What stops both is the same thing: a span a model chose carries no polarity a rule can
@@ -870,86 +717,73 @@ relied on rather than superseded.
   decision that gives an element that shape.
 - **Any widening of §4's table** — a form it does not list (bare *"less than"* among them), a
   currency it does not name, a language other than English, a figure written in words, a bound on
-  a count. It refuses rather than guessing. Fired by a decision stating the wider reading and its
-  own totality argument.
-- **A fourth `BoundKind`**, so that an argument which is neither an amount, a period nor a named
-  term can be declared and met on the argument route; and **which of two constraints of one kind
-  the user meant**, which §5 refuses rather than choosing. Each fired by the decision that
-  supplies what it names.
-- **What the verification phase does with a quote.** The owner's ruling makes the actual charge
-  confirmed after the act and a mismatch *"a reported finding"*; **no clause here verifies
-  anything, compares a charge, or writes a finding**, and `AttemptPhase.VERIFY` is A10's by
-  ADR-0255 §17's assignment. Fired by that decision, which this one gives a typed quoted value to
-  compare against.
-- **Coverage's other conditions, expiry and every surface.** ADR-0254 §3's conditions 1-5, §§5-7,
-  §12's ladder as ADR-0256 §1 leaves it, and §11's projection: untouched, and this decision adds
-  no field any of them renders.
-
+  a count; and **a fourth `BoundKind`**, so that an argument which is neither an amount, a period
+  nor a named term can be declared and met on the argument route; and **which of two constraints
+  of one kind the user meant**, which §5 refuses rather than choosing. It refuses rather than
+  guessing in every case. Each fired by the decision stating the wider reading and its own
+  totality argument.
+- **What the verification phase does with a quote, and coverage's other conditions.** The owner's
+  ruling makes the actual charge confirmed after the act and a mismatch *"a reported finding"*;
+  **no clause here verifies anything, compares a charge, or writes a finding**, and
+  `AttemptPhase.VERIFY` is A10's by ADR-0255 §17's assignment. ADR-0254 §3's conditions 1-5, §§5-7,
+  §12's ladder as ADR-0256 §1 leaves it, and §11's projection are likewise untouched, and this
+  decision adds no field any of them renders. Fired by A10, and by the decisions those clauses
+  already name.
 
 ### 11. The lane cut, and the arms this decision owes
 
-> **Normative.** This decision is implemented in **four lanes**, in this order, **each one
-> subsystem plus its tests**, and **no lane wires a consequential capability** or enables anything
-> in a production deployment — ADR-0254 §17's rule as ADR-0255 §13 leaves it binds all four.
-> **No lane writes an `Authorization`**: ADR-0254 §20's Lane 2 does that, is briefed after all
-> four merge, and is what #2373 unblocks.
+> **Normative.** This decision is implemented in **three lanes**, **each one subsystem plus its
+> tests**, and **no lane wires a consequential capability** or enables anything in a production
+> deployment — ADR-0254 §17's rule as ADR-0255 §13 leaves it binds all three. **No lane writes an
+> `Authorization`**: ADR-0254 §20's Lane 2 does that, is briefed after L1 and L2 merge, and is
+> what #2373 unblocks.
 
-> **Normative — this decision adds a seventh prerequisite to the production-deployment gate, so
-> that a reader does not take ADR-0255 §15 item 19's six for the whole.** **No consequential
-> capability whose authorisation can be reached through route (d) with a member this decision
-> minted is wired until three things are implemented and demonstrated**, and the first binds
-> whether or not the evidence route is involved: **a mechanical test of the polarity of the clause
-> a span was taken from**, or a span contract that makes a truncation unable to carry a different
-> polarity from its sentence. §4's negation bar and its ceiling-only table narrow that class and
-> close no part of it whole — *"avoid spending under 100 euros"* still yields the span *"under 100
-> euros"* and a ceiling of `100` — and the residue is a property of **ADR-0249 §7's containment
-> check and ADR-0254 §8's basis**, both ratified and both consumed here rather than created:
-> closing it is that decision's, not this one's, and until it is taken nothing consequential rides
-> on a member minted from a span. The other two bind a capability reached through the evidence
-> route: a quote's **validity at the moment the act is
-> performed** — an **enforceable provider-side hold**, or a **provider-side conditional execution
-> that validates the quoted amount atomically with the act itself**, and nothing weaker. **A local
-> compare-and-swap is not one of them**, and the distinction is what round 6 found: a store
-> transaction observes only stored values, so a provider price that moved without a newer quote
-> being appended leaves the local check passing and the over-bound charge made. A claim-time
-> revalidation of the selected quote inside `PlanStore`'s own step **does** close the stored
-> quote-to-claim race §10 books, and is worth taking for that, but it is **not** a proof of the
-> quote's current validity and no lane may offer it as one; elapsed-time proximity and an
-> unenforced expiry are neither. And a **classification telling a per-call identity key from a
-> system-supplied input a price depends on**, the latter bound into §6's digest.
+> **Normative — the wire moves, the export does not, and the stored shapes are read rather than
+> assumed.** **`PROTOCOL_VERSION` moves by exactly one, in L1**, and `wire/envelope.py`'s log
+> gains an entry naming this ADR and the reason: `ToolDefinition` gains `bounded_arguments` and a
+> declaration crosses the promoted surface **inside a `PermissionDecision`**, that model sets
+> `extra="forbid"` and `wire/codec.py` renders a model by `model_dump()`, so a defaulted member is
+> still a shape change and a hub at the new version fails a client at the old. **`ActionRequest`
+> crosses no frame**, which is the ground ADR-0254's own Lane 2 entry states, so
+> `intended_action` adds no second reason. **`PlanExport` gains no member and `schema_version`
+> does not move**: no record this decision adds rides inside a goal or a plan.
 >
-> **The gate's existing guarantees reach none of the three**: verification reports a completed
-> overcharge and cancellation compensates an attempt, and **neither makes the
-> pre-execution permission decision valid**, which is §13's own test.
+> **No stored row is migrated, edited or dropped, and the reason is a fact about the tree rather
+> than a claim about the shape.** `CoverageMember` is a **stored** value — it rides inside an
+> `Authorization` — so the loss of `argument` would be a breaking decode for any row that held a
+> member. **No row holds one.** Every `Authorization` a deployment can hold is written by
+> `orchestration/authorizing.py`, which sets `coverage=()` on every row it builds and proposes
+> none at all for a request carrying a user-facing argument; no `CoverageMember` is constructed
+> anywhere in `src/` outside the canonical fake. An empty tuple decodes identically under the new
+> shape, so **L1's change reaches no stored member, and no lane writes a migration, an inert
+> representation or a repair.** A `ToolDefinition` stored or transmitted before this decision
+> decodes with `bounded_arguments` empty, which is a conforming declaration rather than a degraded
+> one. **L1 re-takes that reading at its own base and states what it found**; were a row to hold a
+> member by then, the lane stops and the erasure is ADR-0254 §20's Lane 2's to state, not a repair
+> invented inside L1.
 
-- **L1 — the contract, in `core` alone**, and it is a **triad**: `CoverageMember`'s `kind` and
-  the removal of `argument`; `ValueBound`'s `MONEY` reshape and the removal of
-  `currency_argument`; `ResolutionRule.STATED_BOUND`; `BoundedArgument` and
-  `ToolDefinition.bounded_arguments`; `QuotedOutput` and `ToolDefinition.quoted_outputs`;
-  `ActionQuote`, `Goal.quotes`, `Goal.quotes_elided`, `MAX_ACTION_QUOTES`, `ActionQuoteMinting`,
-  `ActionRequest.intended_action` and `ActionRequest.attempt`; **both Protocol changes with the
-  conformance work each obliges** — the new **`GoalQuotes`** with its shared conformance suite and
-  its canonical fake in `ai_assistant.testing`, and **`PlanStore.record_quotes`** with that
-  Protocol's existing suite and `InMemoryPlanStore` extended in the same change, which
-  `CONTRIBUTING.md` and golden rule 5 make one unit of work; and **`PROTOCOL_VERSION`,
-  `wire/envelope.py`'s log entry and `PlanExport.schema_version`** (§6), this being the one lane
-  that is that ground. Arms 4(a), 5(a), 5(b) and 7(b).
-- **L2 — the production stores, in the plan-store implementations alone.**
-  `record_quotes` in the durable store with its compare-and-swap, its four refusals and §6's
-  elision; the stored-shape migration §6 states, **reaching the `Authorization` rows as well**;
-  and the **production `GoalQuotes` implementation**, whose rows are the `quotes` of the goal the
-  store already holds, each run against the suites L1 landed. No arm of its own.
-- **L3 — the comparison, in `permissions` alone.** §7's two routes and its restatement of
-  condition 6 in `permissions/_coverage.py`, with each currency conjunct read where §7 puts it.
-  Arms 1(b), 2(b), 3(b), 6 and 7(a).
-- **L4 — the mints, in `orchestration` alone.** §1's candidate selection, §2's act and its four
-  refusals, §4's reading and its refusals, §5's one-per-kind refusal and goal-only read, and
-  §6's quote mint from a completed step's output, with the derived values §6 assigns it. Arms 1(a), 2(a), 3(a), 4(b), 5(c) and 8.
+- **L1 — the contract, in `core/types.py` alone.** `CoverageMember`'s `kind` and the removal of
+  `argument`; `ValueBound`'s `maximum_exclusive` and the removal of `currency_argument`;
+  `ResolutionRule.STATED_BOUND`; `BoundedArgument` and `ToolDefinition.bounded_arguments`;
+  `ActionRequest.intended_action`; and `PROTOCOL_VERSION` with `wire/envelope.py`'s log entry.
+  **`core/protocols.py` is not touched and no Protocol changes**, so no triad is owed and none is
+  invented. Arms 4(a) and 6(b).
+- **L2 — the mint, in `orchestration` alone.** §1's candidate selection, §2's act and its four
+  refusals, §4's reading and its refusals, and §5's one-per-kind refusal and goal-only read. Arms
+  1(a), 2(a), 3(a), 4(b) and 7.
+- **L3 — the comparison, in `permissions` alone.** §7's two routes, its digest, and its
+  restatement of condition 6 in `permissions/_coverage.py`, with each currency conjunct read where
+  §7 puts it. Arms 1(b), 2(b), 3(b), 5 and 6(a).
 
-> **Normative — L1 lands before L2, L2 before L3 and L3 before L4**, and no later lane's arm is
-> demonstrated against an earlier lane's absence.
+> **Normative — L1 lands before L2 and before L3, and L3 is briefed only after the quote decision
+> (§10) has landed a carrier.** §7's primary route reads a quote, and a lane cannot demonstrate a
+> comparison whose principal operand no type carries; L3's arms are written against that
+> decision's carrier and are not written against a fake standing in for it. **L1 and L2 are
+> briefed on this decision alone** — they mint members from the goal and read no quote — so a row
+> carrying a non-empty `coverage` becomes writable as soon as they land, which is what #2373
+> asked for.
 
-> **Normative.** **The four lanes ship the eight arms below, each over controlled fakes, and no
+> **Normative.** **The three lanes ship the seven arms below, each over controlled fakes, and no
 > lane is complete without the arms it is assigned.** Every arm states a correction as a
 > **subsequent turn**, on the owner's sequencing ruling of 2026-09-13, and none is demonstrated
 > against a live integration.
@@ -958,62 +792,44 @@ relied on rather than superseded.
    `USER_STATED` constraint with span `"up to 150 euros"` mints exactly one member — `kind`
    `MONEY`, `maximum` `Decimal("150")`, no `minimum`, `currency` `"EUR"`, `resolution`
    `STATED_BOUND`, basis naming the revision's `raised_by` and that span — and **no second member
-   of any kind**. **1(b):** against a quote for the request's intended action at `"120"`/`"EUR"`
-   over the request's own arguments, the request is covered; at `"170"` it is not.
+   of any kind**. **1(b):** against a quote for the request's `intended_action` at `"120"`/`"EUR"`
+   over the request's own arguments, the request is covered; at `"170"` it is not; and with **no**
+   quote for that action it is not covered however small the declared arguments are.
 2. **Kind agreement and not numeric fit — the review's own case.** **2(a):** a constraint with
    span `"4 stars"` mints **no member at all**: it matches no form of §4's table, and no other
    reading mints one. **2(b):** a `TERMS` member constructed directly — the shape a later decision
    will mint — is met by a `MONEY` quote in no case and by a `MONEY`-declared argument in none,
    whatever number either carries, and a `MONEY` member is met at a `TERMS`-declared argument in
    none.
-3. **Only ceilings, the endpoints, and the negation refusals.** **3(a):** span `"under 100 euros"`
+3. **Only ceilings, the endpoints, and the refusals.** **3(a):** span `"under 100 euros"`
    mints `maximum` `100` **with** `maximum_exclusive`, `"at most 100 euros"` mints it without, and
-   `"never spend over 100 euros"` mints an **inclusive** `maximum` of `100`. **Nothing at all** is
-   minted by `"at least 150 euros"`, `"more than 150 euros"` or `"over 150 euros"`, none of which
-   is a form of the table; by `"never notify me about charges over 100 euros"`, `"not exactly 100
-   euros"` or `"never spending over 100 euros"`; or by the span `"under 100 euros"` taken from the
-   utterance `"not under 100 euros"`, the span `"over 100 euros"` taken from `"under no
-   circumstances spend over 100 euros"`, the span `"Alice"` taken from `"do not send to Alice"`
-   and the span `"Sunday"` taken from `"do not book Sunday"` — the last four each refused by the
-   negation standing before the span, over **every** reading and not the table's alone.
-   **3(b):** against an exclusive `maximum` of `100` a value of exactly `"100"` does **not**
-   satisfy and against an inclusive one it does.
+   `"never spend over 100 euros"` and `"don't spend over 100 euros"` each mint an **inclusive**
+   `maximum` of `100`. **Nothing at all** is minted by `"at least 150 euros"`, `"more than 150
+   euros"` or `"over 150 euros"`, none of which is a form of the table; by `"never notify me about
+   charges over 100 euros"`, `"not exactly 100 euros"` or `"never spending over 100 euros"`; by
+   the span `"under 100 euros"` taken from the utterance `"not under 100 euros"`, the span `"over
+   100 euros"` taken from `"under no circumstances spend over 100 euros"`, the span `"Alice"`
+   taken from `"do not send to Alice"` and the span `"Sunday"` taken from `"do not book Sunday"`,
+   each refused by the negation standing before the span over **every** reading and not the
+   table's alone; or by the span `"under 100 euros"` taken from the utterance `"spend under 100
+   euros, and never spend under 100 euros"`, refused because the span occurs **twice** and no
+   occurrence is named. **3(b):** against an exclusive `maximum` of `100` a value of exactly
+   `"100"` does **not** satisfy and against an inclusive one it does.
 4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
    constructible, and one carrying a `MONEY` and a `TERMS` member is. **4(b):** a goal carrying
    two `USER_STATED` constraints that each read as `MONEY` mints **neither**, and one carrying a
    money ceiling beside a constraint no reading mints still mints the ceiling.
-5. **The quote, minted from a step's own output and from nothing else.** **5(a):** a
-   `ToolDefinition` carrying two `quoted_outputs` of one `kind` is not constructible, one carrying
-   a `MONEY` member with no `currency_field` is not constructible, and an `ActionQuote` whose
-   `value` is JSON `null` is not constructible. **5(b):** `record_quotes` appends, advances
-   `version`, elides the oldest past `MAX_ACTION_QUOTES` while advancing `quotes_elided`, and
-   **refuses whole** a stale `expected_version`, an unknown goal, a quote naming an action the
-   goal does not hold, one whose `attempt_id` is an attempt of another goal, one whose
-   `read_from` names an execution or step that is not a completed one, and one whose `read_from`
-   names a completed execution of **another attempt of the same goal**, of a step whose own
-   `intended_action` differs from the quote's. **It checks no derived value**, having neither the
-   concrete request nor the declaration the call was made under (§6); the mismatch cases belong to
-   5(c).
-   **5(c):** after a step whose declaration carries a `QuotedOutput` completes, the minted quote
-   carries the step's `intended_action`, the attempt it ran under, the value at the **declared**
-   field of that step's stored output, the currency at `currency_field`, a `read_from` naming that
-   execution and step, and an `arguments_digest` over that step's **user-facing** arguments alone.
-   **No quote is minted** where the step names no `intended_action`, where the declaration carries
-   no `quoted_outputs`, where the declared field is **absent** from the output, where its value is
-   JSON `null`, where a `MONEY` quote's `currency_field` value is absent or not a JSON string, or
-   where the value at `field` is a shape §4's reading of that kind refuses. And `orchestration`
-   writes **no** quote whose `value`, `currency` or `arguments_digest` differs from what it derives
-   from that execution and that declaration — the checks the store cannot make, demonstrated where
-   they are made.
-6. **The arguments are the ones quoted, and the worked case.** A request whose user-facing
+5. **The arguments are the ones quoted, and the worked case.** A request whose user-facing
    arguments equal the quoted ones is covered; one carrying **one extra** user-facing argument,
    one **missing** one, and one whose value differs are each **not** covered though the price is
-   unchanged; a request whose `intended_action` names a different action is not covered; and the
-   Sunday re-quote covers the Sunday arguments while the Saturday quote covers neither. Where two
-   quotes match on action, kind and digest, **the later in `Goal.quotes` governs**. A quote
-   recorded under an **earlier attempt** covers nothing, and a request carrying no `attempt` or no
-   `intended_action` is covered by no quote.
-7. **A filter is not a charge, and an undeclared argument needs no declaration.** **7(a):**
+   unchanged; a request whose `intended_action` names a different action, and one carrying **no**
+   `intended_action`, are covered by no quote; a **system-supplied** argument that differs between
+   the quoted arguments and the request changes nothing, the digest being taken over the
+   user-facing keys alone; and the Sunday re-quote covers the Sunday arguments while the Saturday
+   quote covers neither. Where two quotes match on action, kind and digest, **the later in §6's
+   order governs**, and a failing read leaves the request **not covered with the fault reported**,
+   never treated as an absence of quotes.
+6. **A filter is not a charge, and an undeclared argument needs no declaration.** **6(a):**
    against a declaration declaring `price` `MONEY` with `currency_argument` `"currency"`, a
    request satisfying that argument but covered by **no quote** is **not** covered; with a quote
    it is; and a request whose declared argument exceeds the bound is not covered though the quote
@@ -1021,26 +837,21 @@ relied on rather than superseded.
    route, and one declaring **none** is covered through the evidence route with its site and date
    arguments declared nowhere. A row whose every member is met on the **argument** route does
    **not** cover a request carrying a user-facing argument the declaration declares at no kind —
-   the `send_message` case, where a fixed `subject` must not cover a changed `body` — and a
-   `GoalQuotes` read that **raises** leaves the request not covered and the fault reported, never
-   an empty tuple. **7(b):** a declaration is **not constructible** where a
-   `BoundedArgument` names a key of its own `system_supplied`, where two name one `argument`,
-   where a `MONEY` one carries no `currency_argument`, where a `PERIOD` or `TERMS` one carries
-   one, and where `argument` equals `currency_argument`; and a `ValueBound` is not constructible
-   where an exclusivity flag is set beside an absent endpoint.
-8. **The mint reads the goal alone, the three refusals, and the discard.** The same goal mints
+   the `send_message` case, where a fixed `subject` must not cover a changed `body`. **6(b):** a
+   declaration is **not constructible** where a `BoundedArgument` names a key of its own
+   `system_supplied`, where two name one `argument`, where a `MONEY` one carries no
+   `currency_argument`, where a `PERIOD` or `TERMS` one carries one, and where `argument` equals
+   `currency_argument`; and a `ValueBound` is not constructible where `maximum_exclusive` is set
+   beside an absent `maximum`.
+7. **The mint reads the goal alone, the three refusals, and the discard.** The same goal mints
    the same members against two different requests, two different plans and two different
    declarations — including one declaring nothing; an element whose `id` is `None`, one whose
    carrying revision's `raised_by` is `None`, and one on a goal whose `interpretation_elided` is
    non-zero and whose oldest **retained** revision is its earliest carrier each mint nothing; and
    a `PlannerOutput` whose envelope carries **every value §8's discard list names** — a
-   `CoverageMember`, a `ValueBound`, an `AuthorizationBasis`, a `BoundKind`, an argument key, a
-   `BoundedArgument`, a **`QuotedOutput`**, an `ActionQuote`, an `arguments_digest`, an
-   `attempt_id` and an `InterpretedOutput` — leaves the recorded revision, the minted coverage and
-   the recorded quotes **byte-identical** to the same envelope without them, with the turn
-   completing and not failing. The `QuotedOutput` limb is the one to write first: an
-   implementation that admitted one would let a model name the output field a quote is read at,
-   which is the failure §6 moved that fact to the declaration to prevent.
+   `CoverageMember`, a `ValueBound`, an `AuthorizationBasis`, a `BoundKind`, an argument key and a
+   `BoundedArgument` — leaves the recorded revision and the minted coverage **byte-identical** to
+   the same envelope without them, with the turn completing and not failing.
 
 ### 12. This ADR classified, marked, and how it is ratified
 
@@ -1049,73 +860,76 @@ the corpus without it can write no row carrying a non-empty `coverage` at all, a
 leave ADR-0254 §20's Lane 2 stopped where #2373 stopped it or invent an association no clause
 authorises — the standing authority §9 clause (ii) exists to prevent (ADR-0070 §1).
 
-**It is a partial supersession of exactly four documents** (ADR-0070 §3) — ADR-0254 in **seven**
-scopes, ADR-0016 in **one**, ADR-0249 in **one** and ADR-0255 in **one count** — and the `Status`
-line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070
-§4's extraction invariant holds. Against every other ADR it cites it is a **stacked addition**.
-**The records land in the same change as this document** (ADR-0082 §7), and nothing else in any of
-the four is edited — no Decision text is rewritten, which ADR-0070 §1 forbids.
+**It is a partial supersession of exactly two documents** (ADR-0070 §3) — ADR-0254 in **seven**
+scopes and ADR-0016 in **one** — and the `Status` line of each names its scopes **without an
+`ADR-NNNN` token inside the parentheses**, so ADR-0070 §4's extraction invariant holds. Against
+every other ADR it cites it is a **stacked addition**. **The records land in the same change as
+this document** (ADR-0082 §7), and nothing else in either is edited — no Decision text is
+rewritten, which ADR-0070 §1 forbids.
 
 **This ADR is marked** under ADR-0089: every obligation it imposes is a `> **Normative.**`
 blockquote at column 0, unmarked text beside a mark supplies no obligation of its own, and quoted
 marks from other ADRs appear inside quotation marks in running prose. **It is a contract-surface
-change** — `CoverageMember` and `ValueBound` change shape, `ResolutionRule` gains a member, four
-types are added, `ToolDefinition`, `Goal` and `ActionRequest` each gain two fields, `PlanStore`
-gains a member and `GoalQuotes` is a new Protocol — so it owes **both** review lenses on one tree, which ADR-0015 §1 makes true
-of a prose-only PR. **It merges as its own PR, ratified, before anything implements against it**
-(golden rule 5); §11's lanes are briefed after it merges, and the ratification flip is one line
-and no other byte (ADR-0165).
+change** — `CoverageMember` and `ValueBound` change shape, `ResolutionRule` gains a member,
+`BoundedArgument` is added, and `ToolDefinition` and `ActionRequest` each gain a field — so it
+owes **both** review lenses on one tree, which ADR-0015 §1 makes true of a prose-only PR.
+`core/protocols.py` is **not** reached, so no Protocol triad is owed. **It merges as its own PR,
+ratified, before anything implements against it** (golden rule 5); §11's lanes are briefed after
+it merges, and the ratification flip is one line and no other byte (ADR-0165).
+
 ## Consequences
 
-**What becomes possible.** ADR-0254 §20's Lane 2 can be briefed: a row can carry a non-empty
-`coverage`, so route (d) has something to compare and the owner's *"a price change within an
-approved limit should remain covered"* has a mechanism. A ceiling the user stated once covers
-every later call whose quote sits under it, **at a tool that declares nothing about money at
-all**, and *"make it Sunday"* is answered by a re-quote rather than by a second question. A
-declared money argument is an **additional** comparison and never a substitute, because a
+**What becomes possible.** ADR-0254 §20's Lane 2 can be briefed as soon as L1 and L2 land: a row
+can carry a non-empty `coverage`, so the mint that #2373 stopped on exists and the record says
+what the user stated. Once the quote decision (§10) lands its carrier and L3 follows, a ceiling
+the user stated once covers every later call whose quote sits under it, **at a tool that declares
+nothing about money at all**, and *"make it Sunday"* is answered by a re-quote rather than by a
+second question — the owner's *"a price change within an approved limit should remain covered"*.
+A declared money argument is an **additional** comparison and never a substitute, because a
 `max_price` filter says nothing about the charge; the cost is that **an act with no quote is not
 covered and the user is asked**, which the owner names as feasibility rather than restriction and
 which is the fail-closed direction.
 
-**What becomes harder, and it is the honest cost.** A request carrying any argument the
-declaration declares at no kind is covered only where a member is met through the **evidence**
-route, so a tool with undeclared arguments and no quote asks on every call — the price of keeping
-*"no omission reads as consent"* once arguments stop being named by members. And the digest is
-exact, so a quoting read and a booking that spell one fact under two keys never match.
+**What this decision is worth without the other one, stated rather than assumed.** The member,
+the mint and the proof rule are decided here and are independently implementable: L1 and L2 need
+no quote, and route (d) gains a record that says what the user's own words fixed. What it does not
+yet gain is the ability to **prove** a money ceiling, because §7's primary route has no operand
+until the quote decision lands — so between these lanes and that one, a row carrying a `MONEY`
+member covers nothing and every such act asks. **That is the fail-closed direction and it is the
+honest cost of the split**: the alternative was one document carrying both, which is what §10's
+first booking records.
 
-**Two residuals are stated rather than closed, and §11 makes closing both a condition of wiring
-anything consequential through this route.** A quote is bound to the attempt that recorded it and
-to nothing finer, so a price that **moves inside one attempt** — or a newer quote appended between
-the policy's read and the claim — can leave a dispatch resting on a figure that is no longer true.
-And the digest binds the **user-facing** arguments alone, so a system-supplied input a price
-depends on, a **locale** where an idempotency key is per-call identity, leaves the digest equal
-though the price moved. Verification and cancellation do not answer either: they report and
-compensate afterwards, and **neither makes the permission decision valid when it is taken**.
+**What becomes harder.** A request carrying any argument the declaration declares at no kind is
+covered only where a member is met through the **evidence** route, so a tool with undeclared
+arguments and no quote asks on every call — the price of keeping *"no omission reads as consent"*
+once arguments stop being named by members. And the digest is exact, so a quoting read and a
+booking that spell one fact under two keys never match.
 
-**The reading is the narrow part.** §4's table has sixteen forms and three currencies: *"under 100
-euros"* reads, and so does the owner's own *"never spend over 100 euros"*; *"under a hundred
-euros"*, *"unter 100 Euro"* and *"max €100"* do not. **The negation is adjacent**, so *"never
-notify me about charges over 100 euros"* mints nothing; **a truncation of a negated form mints
-nothing**, so a planner cannot turn *"not under 100 euros"* into a ceiling; **the table is
-asymmetric on purpose**, bare *"less than 100 euros"* minting nothing; and **a strict word mints a
-strict bound**, which is why `ValueBound` gains `maximum_exclusive`.
+**Two residuals are stated rather than closed, and both are booked in §10.** The digest binds the
+**user-facing** arguments alone, so a system-supplied input a price depends on — a **locale**,
+where an idempotency key is per-call identity — leaves the digest equal though the price moved.
+And a model chooses the span: §4 bars only the refusals its negation vocabulary carries, so
+*"avoid spending over 100 euros"* still yields a ceiling of `100` rather than nothing. The
+ceiling-only table makes that second residual **restrictive in every instance** — the worst a
+truncation can do is bind the user to a figure they themselves uttered — which is why no `TERMS`
+or `PERIOD` member is minted by any path in this decision, and ADR-0249 §7 owns what is left.
 
-**And one residual is the loudest.** A model chooses the span, and §4 bars only the refusals this
-negation vocabulary carries; *"avoid sending to Alice"* still yields a `TERMS` member fixing
-*"Alice"*. The table's ceiling-only reading closes the money direction by construction, and
-ADR-0249 §7 owns what is left.
+**The reading is the narrow part, and every narrowing is a question asked rather than a call
+authorised.** §4's table carries three currencies and one language, so *"under a hundred euros"*,
+*"unter 100 Euro"* and *"max €100"* mint nothing; the negation must be adjacent, so *"never notify
+me about charges over 100 euros"* mints nothing; a truncation of a negated form and a span the
+utterance carries twice each mint nothing; the table is asymmetric on purpose, bare *"less than
+100 euros"* minting nothing; and a strict word mints a strict bound, which is why `ValueBound`
+gains `maximum_exclusive`.
 
 **These are the cases that would falsify the design.** A deployment where users state bounds the
 table does not carry, so route (d) is never reached. A quoting read and a booking whose argument
 sets differ by a key, so the digest never matches and every act asks — the practical falsifier,
-and the one to measure first. A goal whose investigation and whose act fall in **different
-attempts** as a matter of course, so the attempt conjunct refuses every quote. A declaration whose
-sole `MONEY` argument is an amount the user **receives**, where a ceiling stated about spending
-meets it on the argument route — which is why §4 mints no floor at all, and why the remaining case
-is the declaration author's. And a declaration whose `quoted_outputs` names the wrong field, which
-is an integration defect rather than a per-turn one, and which the tool's own author is the only
-party able to make.
-
+and the one to measure first. A declaration whose sole `MONEY` argument is an amount the user
+**receives**, where a ceiling stated about spending meets it on the argument route — which is why
+§4 mints no floor at all, and why the remaining case is the declaration author's. And a corpus in
+which the quote decision settles on a carrier this decision's four facts cannot be read off,
+which would make §7's evidence route unimplementable as written.
 
 ## Alternatives considered
 
@@ -1129,17 +943,28 @@ arguments refused every booking whose price is not a parameter, which is most of
 kind-typed member with no argument key survives; what is added is the route that proves the bound
 against what the act was quoted at.
 
-**Carrying the quote on a `GoalEvidence` row.** The shape the owner's ruling names, declined on
-ADR-0252's own text: that row *"carries no content"*, its `EvidenceBasis` is closed at two members
-neither of which admits a typed value read from a step's output, and its `verdict` vocabulary is
-fixed per basis — so carrying a quote there would supersede four limbs of one ratified section to
-reuse machinery a price has no use for. The quote is recorded where the ruling puts it — **by the
-investigation, for the intended action, before the authorisation phase compares it**.
+**Deciding the quote's carrier and its producer here, in the same document.** The draft this one
+was cut from, and it is declined on cost rather than on correctness. Carrying a quote record, its
+place on the `Goal`, its bound and elision, the declaration field naming which output a price is
+read at, a plan-store member to append one, a Protocol for the policy to read one and a gate
+prerequisite for a quote's freshness made the document supersede **four** documents and maintain
+seven synchronised statements of its own contract; ten review rounds at a churn ratio of 5.1 were
+spent on the carrier while the rule itself stayed three paragraphs. The
+proof rule and the machinery that feeds it are two decisions, they are reviewable separately, and
+§6 makes the seam explicit rather than implicit: four facts, an interface, and no carrier.
+
+**Carrying the quote on a `GoalEvidence` row.** The shape the owner's ruling names. It is not
+declined here — it is **not decided here**: §6 records the reading that makes it hard (that row
+*"carries no content"*, its `EvidenceBasis` is closed at two members neither of which admits a
+typed value read from a step's output, and its `verdict` vocabulary is fixed per basis) and hands
+it to the booked decision as a constraint. What this decision fixes is the owner's substance —
+the quote is recorded **by the investigation, for the intended action, before the authorisation
+phase compares it** — which holds whichever carrier that decision picks.
 
 **A planner nomination of the (element, argument) pair, verified by code.** Sound, and the
 direction four of round 1's nine findings pointed at. Declined because the pairing is per
 *(element, declaration)*, so it cannot live on `GoalElement` and would have to live on
-`PlanStep`, superseding ADR-0253's step enumeration and its seam and wire, ADR-0249 §7's
+`PlanStep`, superseding ADR-0253's step enumeration and its seam and wire, and ADR-0249 §7's
 envelope. **Asking the user to confirm the association** is foreclosed by ADR-0254 §1, which
 writes the path-(i) row **before** the question is put, so no member can rest on the answer.
 **Minting a `MONEY` bound from a bare figure**, with the direction fixed by the kind, was the
