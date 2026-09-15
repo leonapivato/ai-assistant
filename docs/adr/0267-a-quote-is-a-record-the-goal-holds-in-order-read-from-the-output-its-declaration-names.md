@@ -379,7 +379,8 @@ record of the same durability.
 > under an advanced `quotes_elided` is abandoned on the same ground**: a quote for that action may
 > have landed and been elided since, and an absence the minter cannot tell from an elision is not
 > proof that nothing displaced its reading (§2's elision drops from the front and counts what it
-> drops). A second refusal abandons the mint in the same way. **So no append ever puts an older
+> drops). A second refusal abandons the mint in the same way, and **an abandoned mint raises nothing
+> into the walk**: the step stays `SUCCEEDED` and the act asks. **So no append ever puts an older
 > reading after a
 > newer one for one action**, however turns interleave — ADR-0266 §7's *"An earlier quote is
 > consulted in no case"* held by the order of the writes rather than by a test at the store, which
@@ -923,10 +924,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    touched anything but that action's quotes; **appends nothing** where that action gained a
    **different** quote, the later reading still governing; **appends nothing** where it gained
    the **equal** one; and **appends nothing** where that action's quote landed and was then
-   **elided**, the absence being one `quotes_elided`'s advance forbids it to read as proof. No
-   interleaving leaves an older reading last, and no later pass over a stored
-   output mints at all. **And no `verifies` is read**: a `SUCCEEDED` step whose plan-declared
-   `verifies` predicate would **fail**
+   **elided**, the absence being one `quotes_elided`'s advance forbids it to read as proof; **and
+   where that authorised retry is itself refused stale it abandons**, raising nothing, taking no
+   third `record_quote` and leaving the goal as the winner left it. No interleaving leaves an older
+   reading last, and no later pass over a stored output mints at all. **And no `verifies` is
+   read**: a `SUCCEEDED` step whose plan-declared `verifies` predicate would **fail**
    over its own output mints exactly as one whose predicate holds, the mint evaluating no
    plan-carried value and adding no evaluation site to the two ADR-0255 §8 names.
 5. **The comparison, end to end, and it is ADR-0266's own.** Against a quote for the request's
