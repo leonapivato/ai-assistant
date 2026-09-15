@@ -2350,6 +2350,10 @@ def _disposition_phrase(disposition: ExchangeDisposition) -> str:  # noqa: C901,
             return "the step's arguments did not fit the declared schema of any capable tool"
         case ExchangeDisposition.STEP_EGRESS_UNBINDABLE:
             return "the outbound call could not be described, so nothing was asked or sent"
+        case ExchangeDisposition.STEP_EFFECT_ALREADY_CLAIMED:
+            return "this goal had already claimed the act, so nothing was dispatched"
+        case ExchangeDisposition.STEP_EFFECT_UNSCOPED:
+            return "the plan did not say which act the step was, so nothing was dispatched"
         case ExchangeDisposition.ROUTED_PERFORMED:
             return "the assistant performed the operation the user asked for"
         case ExchangeDisposition.ROUTED_AWAITING_CONFIRMATION:
