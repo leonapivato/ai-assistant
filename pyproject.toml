@@ -1617,6 +1617,10 @@ source_modules = [
     "ai_assistant.tools.destinations",
     "ai_assistant.tools.egress_binder",
     "ai_assistant.tools.egress_declaration",
+    # The response-reading parts ADR-0231 §10 and ADR-0260 §5 state one rule over:
+    # the RFC 9110 `Date` field and the bounded JSON decode. It opens nothing, and is
+    # bound here rather than exempted for the reason the two integrations below are.
+    "ai_assistant.tools.http_reading",
     "ai_assistant.tools.invocation",
     "ai_assistant.tools.provisioning",
     "ai_assistant.tools.registry",
