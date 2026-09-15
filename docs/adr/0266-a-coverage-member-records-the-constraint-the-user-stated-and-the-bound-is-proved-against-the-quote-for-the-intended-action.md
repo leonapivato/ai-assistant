@@ -111,9 +111,10 @@ the quote for the intended action
   ADR-0254 §15 obliges to write the row then cannot obtain the answer §7 itself makes that row's
   proposal conditional on, golden rule 1 forbidding the import that would
   ([#2401](https://github.com/leonapivato/ai-assistant/issues/2401)). The comparison is now taken at
-  `decide` at every dispatch **and** at `ActionPolicy.coverage_met` before a row is written, over
-  one implementation. **The one-implementation limb is kept and not weakened** — the new member is
-  that implementation's face rather than a second one — and the **no-cached-verdict limb binds
+  `decide` at every dispatch **and** at `CoverageAnswers.coverage_met` before a row is written, over
+  one implementation. **The one-implementation limb is kept and not weakened** — the new face is
+  that implementation's own, answered from the object that already answers `ActionPolicy`, rather
+  than a second implementation — and the **no-cached-verdict limb binds
   entire**, no answer that member returns being cached, carried to a dispatch or read by a later
   comparison. **And §11's lane-ordering clause, in its Lane-2 limb alone**: *"ADR-0254 §20's Lane 2
   is briefed after the quote decision (§10) rather than after these two"* now reads **after the
