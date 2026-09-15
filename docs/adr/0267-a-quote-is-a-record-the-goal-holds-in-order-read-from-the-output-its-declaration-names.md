@@ -374,10 +374,15 @@ record of the same durability.
 > answer lost — and the minter **stops silently**, appending nothing; that is the whole of how a
 > mint is idempotent and the whole of what a refused write is permitted to conclude. **Every other
 > outcome raises**: a different quote for that action, and no quote at all whether or not
-> `quotes_elided` has advanced, each **propagate the store's own refusal** — the class
-> `StaleExecutionError` occupies (§2), unswallowed and **untranslated**, no lane wrapping it in a
-> class of its own — and the walk stops under ADR-0255's own discipline rather than dispatching
-> against a reading the minter could not record.
+> `quotes_elided` has advanced, each **raise a `PlanningError` that is *not* a
+> `StaleExecutionError`**. **The store's refusal is not propagated as itself**, because that class
+> tells a caller to re-read and retry and **no re-read makes this write land** — the retry it
+> invites is the rebase this section forbids, and a caller obeying the class would break the
+> ordering claim below. **That is ADR-0255 §3's own shape and not a new one**: its two further
+> conjuncts already refuse on a `PlanningError` that is not a `StaleExecutionError`, for that same
+> reason. **No new error class is minted** — here or at §5's seam — and **nothing swallows the
+> failure**: the walk stops under ADR-0255's own discipline rather than dispatching against a
+> reading the minter could not record.
 > ADR-0148 §1's trade is taken here as §6 takes it, and **no lane re-reads a second time**: the one
 > re-read either recognises the mint's own committed write or raises.
 
@@ -549,9 +554,12 @@ lanes** (§11) — the question is booked in §10 with what fires it and with th
 holds it.
 
 > **Normative.** `core/types.py` gains **`QuoteView`**, a frozen model with `extra="forbid"` whose
-> fields are exactly three: **`amount`**, a `Decimal`; **`currency`**, an `EncodableText`; and
-> **`read_at`**, a `UtcInstant`. It carries **no** digest, no intended action, no plan, no step, no
-> goal id and no authorization id — ADR-0254 §11's renders-no-internal-value bar, unrelaxed.
+> fields are exactly three: **`amount`**, a `Decimal` that is **finite and not negative**;
+> **`currency`**, an `EncodableText`; and **`read_at`**, a `UtcInstant`. **The bound is restated
+> from §1 rather than assumed from the record it transcribes**, because a `QuoteView` crosses a
+> frame inside a `Confirmation` and its own model is the only guard a decoded one has. It carries
+> **no** digest, no intended action, no plan, no step, no goal id and no authorization id —
+> ADR-0254 §11's renders-no-internal-value bar, unrelaxed.
 
 > **Normative.** **`AuthorizationProjection` gains one member, `quote: QuoteView | None`, required
 > with no default**, **transcribed from the proposed row's `quoted`** — its three values, and
@@ -891,7 +899,8 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 1. **The record, and the four facts.** An `ActionQuote` is constructible at each of §1's shapes and
    round-trips through its own dump; it is **not** constructible carrying a non-finite or negative
    `amount`, an `arguments_digest` that is not lowercase 64-character hex, or an eighth field; and
-   a `QuoteView` carries no digest, no action and no identifier. **Zero is a price**: `Decimal("0")`
+   a `QuoteView` carries no digest, no action and no identifier, and is **not** constructible
+   carrying a negative or non-finite `amount` (§7). **Zero is a price**: `Decimal("0")`
    constructs, covers under any ceiling of its currency, and is no absence. **And the
    goal's order is the total order**: a goal carrying quotes for two actions returns them oldest
    first, the **last** naming an action is the governing one, and appending a second for one action
@@ -937,10 +946,10 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    barrier**: a mint whose write is refused stale re-reads **once**, takes no second
    `record_quote`, and **stops silently — appending nothing and raising nothing — where that
    action's last quote equals the one it is minting**, the goal left holding exactly one; while in
-   each of the other outcomes it **raises and appends nothing**, the raise being **the store's own
-   refusal propagated** — the class `StaleExecutionError` occupies, asserted as that class and not
-   as a `RuntimeError` or a wrapper the minter minted (§4) — and the goal left exactly as the
-   winner left it: where that action gained a **different** quote; where it has **none** and
+   each of the other outcomes it **raises and appends nothing**, the raise asserted as **a
+   `PlanningError` that is not a `StaleExecutionError`** — both halves, since a bare propagation
+   satisfies the first and is the retry-inviting class §4 refuses — and the goal left exactly as
+   the winner left it: where that action gained a **different** quote; where it has **none** and
    `quotes_elided` is unchanged, which is a concurrent advance touching some other field; and where
    its quote landed and was then **elided**, `quotes_elided` having advanced. **And the inverted
    schedule is the arm that pins commit order against read order** (§4): with the `120` reading
