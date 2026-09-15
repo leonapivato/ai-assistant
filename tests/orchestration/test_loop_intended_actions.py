@@ -694,13 +694,27 @@ def test_the_projection_renders_one_entry_per_member_in_the_tuples_own_order() -
     **It lives in ``orchestration`` and not on the value** (§9, ADR-0252 §11):
     ``GoalBrief.of`` lands the field's shape and renders none of it, exactly as it
     renders no ``open_questions``, and :func:`rendered_actions` is what fills it.
+
+    **The two actions are told apart by intent and by link**, so the assertion is about
+    the order and not merely the count: rendering them reversed would show the planner
+    the second-minted act as ``A1`` while :func:`_substituted_actions` resolved ``A1``
+    to the first — the two sides of the seam disagreeing about which act a label names,
+    which is the one failure §4's "in that tuple's own order" exists to forbid.
     """
-    goal = _goal_holding(_intended("ia-1"), _intended("ia-2"))
+    goal = _revision_holding(
+        IntendedAction(id="ia-1", intent=_FIRST_ROOM, serves=("e-c1",)),
+        IntendedAction(id="ia-2", intent=_SECOND_ROOM),
+        constraints=(_element("e-c1", "near the station"),),
+    )
 
     assert GoalBrief.of(goal).actions == (), "core lands the shape and renders none of it"
+
     rendered = rendered_actions(goal)
-    assert len(rendered) == 2
-    assert all(one.intent == _FIRST_ROOM for one in rendered), "the record's own order"
+
+    assert [(one.intent, one.serves) for one in rendered] == [
+        (_FIRST_ROOM, ("C1",)),
+        (_SECOND_ROOM, ()),
+    ], "the record's own order, member for member"
 
 
 def test_the_projection_renders_a_link_as_the_label_of_the_element_it_names() -> None:
