@@ -778,8 +778,29 @@ def minted(goal: Goal, actions: Sequence[IntendedAction]) -> Goal:
     holding **one** intended action". They are an ``id`` the goal already holds, a
     minting that would carry the goal past
     :data:`~ai_assistant.core.types.MAX_INTENDED_ACTIONS`, and a ``serves`` value that
-    is not the ``id`` of an element of the goal's **current** interpretation at the
-    instant of the append.
+    is not the ``id`` of an element of **any revision the goal's interpretation holds
+    at the instant of the append** (ADR-0269 §1).
+
+    **The third refusal is goal-wide and not current-instant**, which is ADR-0269 §1's
+    narrowing of ADR-0265 §5's third conjunct and a **BREAKING** contract change under
+    golden rule 5: "an implementation that keeps the current-instant refusal is
+    non-conforming". An element of the goal's **own earlier reading of itself** is
+    admitted, because ADR-0265 §3 already rules such a link "stale, truthful and
+    harmless"; what the conjunct still refuses is unchanged in kind — "a dangling or
+    foreign identifier", which is a fabricated value, an element of a **different**
+    goal, or an element of a revision this goal has elided.
+
+    **The test reads what the goal holds, and an elided revision is not held** (ADR-0269
+    §1). ADR-0249 §2 drops the oldest revisions on the write that would exceed
+    :data:`~ai_assistant.core.types.MAX_GOAL_INTERPRETATIONS`, and an ``id`` whose only
+    revision went with it resolves to nothing and is refused exactly as a fabricated one
+    is: nothing here reconstructs an elided revision, keeps a side index of dropped
+    element ids, or reads ``Goal.interpretation_elided`` to soften the refusal.
+
+    **The test is strictly wider, so nothing that was admitted is now refused**, and it
+    is still taken exactly once, at this append and never again: ADR-0265 §3 binds
+    entire, and no lane re-runs it over a stored action at read time, at projection
+    time, at dispatch or on a later revision.
 
     **None of the three takes the stale-write class** (§5). Each is an invariant
     breach at the current version rather than a lost race, and "a caller that re-read
@@ -804,7 +825,7 @@ def minted(goal: Goal, actions: Sequence[IntendedAction]) -> Goal:
     Raises:
         PlanningError: If an id is one the goal already holds, if the append would
             carry the goal past the bound, or if a ``serves`` value names no element of
-            the goal's current interpretation.
+            any revision the goal holds.
     """
     held = {action.id for action in goal.intended_actions}
     repeated = sorted({action.id for action in actions if action.id in held})
@@ -824,24 +845,27 @@ def minted(goal: Goal, actions: Sequence[IntendedAction]) -> Goal:
             f"(ADR-0265 §1, §5)"
         )
         raise PlanningError(msg)
-    current = {
+    # Every revision the goal **holds**, current and earlier alike (ADR-0269 §1). A
+    # revision ADR-0249 §2 has elided is not held and contributes nothing, which is what
+    # keeps an id whose only revision went with it refused.
+    held_elements = {
         element.id
-        for group in (
-            goal.interpretation[-1].constraints,
-            goal.interpretation[-1].criteria,
-            goal.interpretation[-1].conditions,
-        )
+        for revision in goal.interpretation
+        for group in (revision.constraints, revision.criteria, revision.conditions)
         for element in group
         if element.id is not None
     }
-    dangling = sorted({served for action in actions for served in action.serves} - current)
+    dangling = sorted({served for action in actions for served in action.serves} - held_elements)
     if dangling:
         msg = (
             f"the minting for goal {goal.id} serves {', '.join(dangling)}, which "
-            f"{'is' if len(dangling) == 1 else 'are'} not the id of an element of "
-            f"revision {goal.interpretation[-1].revision}: orchestration resolves each "
-            f"label against the sequence in force on that call, so at the append every "
-            f"entry names a current element (ADR-0265 §3, §5)"
+            f"{'is' if len(dangling) == 1 else 'are'} not the id of an element of any "
+            f"revision the goal holds (revisions "
+            f"{goal.interpretation[0].revision}-{goal.interpretation[-1].revision}): the "
+            f"conjunct is a membership test over every revision held at the append, so "
+            f"this goal's own superseded element is admitted and a dangling or foreign "
+            f"identifier — or one whose only revision has been elided — is not "
+            f"(ADR-0269 §1; ADR-0265 §3, §5)"
         )
         raise PlanningError(msg)
     return _revalidated(

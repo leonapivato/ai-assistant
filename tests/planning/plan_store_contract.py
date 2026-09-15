@@ -350,6 +350,29 @@ def _conditioned_goal(goal_id: str = "g1", *, element_id: str = "e1", revision: 
     return held.model_copy(update={"interpretation": (conditioned,)})
 
 
+def _conditioned_revision(revision: int, *, element_id: str) -> GoalInterpretation:
+    """One revision **restating** the condition afresh, under a new ``id``.
+
+    ADR-0253 §7 mints a new ``id`` for a restated element, which is what creates the
+    stale ``serves`` link in the first place (ADR-0265 §3) — so a sequence of these
+    leaves each earlier element retained by the goal and named by nothing current.
+    """
+    return GoalInterpretation(
+        revision=revision,
+        outcome="relocate to Lisbon in September",
+        outcome_ground=Ground.INFERRED,
+        recorded_at=_WHEN,
+        raised_by=f"t-{revision}",
+        conditions=(
+            GoalElement(
+                id=element_id,
+                text="the weather over the trip permits it",
+                ground=Ground.INFERRED,
+            ),
+        ),
+    )
+
+
 def _conditioned_plan(
     plan_id: str = "p1", *, about: str = "e1", targets_revision: int = 1
 ) -> ActionPlan:
@@ -2508,38 +2531,53 @@ class PlanStoreContract:
     async def test_a_minting_whose_second_action_serves_nothing_records_neither(
         self, store: PlanStore
     ) -> None:
-        """§10 arm 5's ``serves`` limb, "asserted over a **two-action** command whose
-        **second** action carries the bad value, so that the refusal is shown to be
-        all-or-nothing rather than a partial append".
+        """ADR-0269 §4 arm 3's first limb, on ADR-0265 §10 arm 5's shape: "a **two-action**
+        command whose **second** action carries the bad value, so that the refusal is
+        shown to be all-or-nothing rather than a partial append".
 
-        §5 states the check's one instant: "at the append every entry names an element
-        of the **current** interpretation, and a value that does not is a caller
-        reaching past ``orchestration`` with a dangling or foreign identifier".
+        The bad value is "an identifier of no element of **any** revision the goal
+        holds", which is ADR-0265 §5's "a caller reaching past ``orchestration`` with a
+        dangling or foreign identifier" read over ADR-0269 §1's wider test. The goal
+        holds **two** revisions here, and the first action's ``e1`` is the **superseded**
+        one — admitted on its own (arm 2) — so what refuses this command is ``nowhere``
+        alone and the all-or-nothing limb is what discards a legitimate action beside it.
         """
         await store.save_goal(_conditioned_goal(element_id="e1"))
+        await store.record_interpretation(
+            GoalRevision(
+                goal_id="g1",
+                interpretation=_conditioned_revision(2, element_id="e2"),
+                expected_version=0,
+            )
+        )
 
         with pytest.raises(PlanningError) as refusal:
             await store.record_intended_actions(
-                _minting(_intended("ia1", serves=("e1",)), _intended("ia2", serves=("nowhere",)))
+                _minting(
+                    _intended("ia1", serves=("e1",)),
+                    _intended("ia2", serves=("nowhere",)),
+                    expected_version=1,
+                )
             )
         assert not isinstance(refusal.value, StaleExecutionError)
 
         held = await store.get_goal("g1")
         assert held is not None
         assert held.intended_actions == (), "byte-for-byte what it was"
-        assert held.version == 0
+        assert held.version == 1, "and the version the revision left, unmoved"
 
     async def test_a_minting_serving_another_goals_element_records_neither(
         self, store: PlanStore
     ) -> None:
-        """§10 arm 5: "one naming an element of a **different** goal", on the same
-        two-action shape.
+        """ADR-0269 §4 arm 3's second limb, ADR-0265 §10 arm 5's other-goal limb binding
+        entire: "one naming an element of a **different** goal", on the same two-action
+        shape.
 
         The element exists — it is simply not this goal's — so the refusal is about the
-        **goal's own current interpretation** rather than about resolvability anywhere
-        in the store, which is what §5's "an element of the goal's **current**
-        interpretation" says and what a store comparing against every element it holds
-        would silently widen.
+        revisions **this goal** holds rather than about resolvability anywhere in the
+        store. ADR-0269 §1 widens the test across one goal's own history and not one
+        step further: "the identifier must still be an element this goal itself minted
+        and still holds, which no other goal's id and no fabricated value can be".
         """
         await store.save_goal(_conditioned_goal(element_id="e1"))
         await store.save_goal(_conditioned_goal("g2", element_id="e2"))
@@ -2554,6 +2592,135 @@ class PlanStoreContract:
         assert held is not None
         assert (held.intended_actions, held.version) == ((), 0)
 
+    async def test_a_minting_serving_an_older_retained_revisions_element_records(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0269 §4 arm 2: an element of an older **still-retained** revision is
+        admitted, at the store and without the loop, with revisions intervening.
+
+        ADR-0269 §1 makes the conjunct "a membership test over every revision the goal
+        holds at that instant — the current revision and every earlier one it still
+        holds alike", so the link ADR-0265 §3 already calls "stale, truthful and
+        harmless" is recorded rather than refused.
+
+        **The intervening revisions are the whole point of the arm**: each restates the
+        condition afresh, so ADR-0253 §7 mints it a new ``id`` every time and the value
+        served is the **oldest retained** element's — "not the current one and not the
+        one before it". An implementation that searched only the current revision, or
+        only the current and the one before it, "would pass every other arm here and
+        fail this one".
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        for revision, element in enumerate(("e2", "e3", "e4"), start=2):
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_conditioned_revision(revision, element_id=element),
+                    expected_version=revision - 2,
+                )
+            )
+        before = await store.get_goal("g1")
+        assert before is not None
+        assert [one.revision for one in before.interpretation] == [1, 2, 3, 4], "all retained"
+
+        minted = await store.record_intended_actions(
+            _minting(_intended("ia1", serves=("e1",)), expected_version=before.version)
+        )
+
+        assert minted.version == before.version + 1, "the goal's version advanced once"
+        held = await store.get_goal("g1")
+        assert held is not None
+        [action] = held.intended_actions
+        assert action.serves == ("e1",), "the oldest retained revision's id, unchanged"
+        assert "e1" not in {element.id for element in held.interpretation[-1].conditions}, (
+            "and it is not an element of the current revision, which is the point"
+        )
+
+    async def test_a_minting_serving_an_elided_revisions_element_records_neither(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0269 §4 arm 3's third limb: "an identifier whose only revision has been
+        elided past ``MAX_GOAL_INTERPRETATIONS``", on the same two-action shape.
+
+        §1: "The test reads what the goal holds, and an elided revision is not held." An
+        ``id`` whose only revision ADR-0249 §2 dropped "resolves to nothing and is
+        refused, exactly as a fabricated one is" — no store reconstructs an elided
+        revision, keeps a side index of dropped element ids, or reads
+        ``interpretation_elided`` to soften the refusal.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        for revision in range(2, MAX_GOAL_INTERPRETATIONS + 2):
+            await store.record_interpretation(
+                GoalRevision(
+                    goal_id="g1",
+                    interpretation=_conditioned_revision(revision, element_id=f"e{revision}"),
+                    expected_version=revision - 2,
+                )
+            )
+        before = await store.get_goal("g1")
+        assert before is not None
+        assert before.interpretation_elided == 1, "revision 1, and the element with it"
+        assert len(before.interpretation) == MAX_GOAL_INTERPRETATIONS
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.record_intended_actions(
+                _minting(
+                    _intended("ia1", serves=("e2",)),
+                    _intended("ia2", serves=("e1",)),
+                    expected_version=before.version,
+                )
+            )
+        assert not isinstance(refusal.value, StaleExecutionError)
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.intended_actions == (), "byte-for-byte what it was: neither recorded"
+        assert held.version == before.version
+
+    async def test_nothing_else_of_the_mintings_refusals_moved(self, store: PlanStore) -> None:
+        """ADR-0269 §4 arm 4: "Nothing else of ADR-0265 §5 moved", over one store.
+
+        An ``id`` the goal already holds is refused, a minting past
+        ``MAX_INTENDED_ACTIONS`` is refused **whole**, and a stale ``expected_version``
+        raises the **stale-write** class while the ``serves`` refusals of arm 3 do not —
+        ADR-0269 §1 keeps §5's error class and its all-or-nothing rule, and leaves the
+        conjunct "an invariant breach at the current version rather than a lost race".
+        Each of the three writes nothing.
+        """
+        await store.save_goal(_conditioned_goal(element_id="e1"))
+        opened = await store.record_intended_actions(_minting(_intended("ia1", serves=("e1",))))
+        assert opened.version == 1, "the admitted minting advanced it once"
+
+        with pytest.raises(PlanningError) as repeated:
+            await store.record_intended_actions(_minting(_intended("ia1"), expected_version=1))
+        assert not isinstance(repeated.value, StaleExecutionError), "an invariant breach"
+
+        filled = await store.record_intended_actions(
+            _minting(
+                *(_intended(f"ia{index}") for index in range(2, MAX_INTENDED_ACTIONS)),
+                expected_version=1,
+            )
+        )
+        assert len(filled.intended_actions) == MAX_INTENDED_ACTIONS - 1
+
+        with pytest.raises(PlanningError) as bound:
+            await store.record_intended_actions(
+                _minting(
+                    _intended("over-1"),
+                    _intended("over-2"),
+                    expected_version=filled.version,
+                )
+            )
+        assert not isinstance(bound.value, StaleExecutionError), "the bound is not a race"
+
+        with pytest.raises(StaleExecutionError):
+            await store.record_intended_actions(_minting(_intended("late"), expected_version=0))
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.intended_actions == filled.intended_actions, "nothing of the three landed"
+        assert held.version == filled.version
+
     async def test_a_serves_entry_goes_stale_and_is_neither_repaired_nor_re_checked(
         self, store: PlanStore
     ) -> None:
@@ -2561,10 +2728,10 @@ class PlanStoreContract:
         stale, truthful and harmless … the entry is not rewritten, not recomputed, not
         dropped and not refreshed", and "nothing re-checks it".
 
-        §5 is explicit that the conjunct "is checkable exactly once, and that instant is
-        the only one at which it is true by construction", so a later revision that
-        drops the element leaves the record exactly as it was — and a later minting
-        against that goal is not refused on account of the older action's stale link.
+        The conjunct is taken **exactly once, at the append, and never again** (ADR-0269
+        §1), so a later revision that drops the element leaves the record exactly as it
+        was — and a later minting against that goal is not refused on account of the
+        older action's stale link.
         """
         await store.save_goal(_conditioned_goal(element_id="e1"))
         await store.record_intended_actions(_minting(_intended("ia1", serves=("e1",))))

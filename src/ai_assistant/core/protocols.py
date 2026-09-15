@@ -4566,6 +4566,16 @@ class PlanStore(Protocol):
     strengthened by the same decision's refusal of a goal opened carrying an intended
     action.
 
+    **And that member's ``serves`` refusal narrows once, which is a fifth BREAKING
+    contract change under golden rule 5** (ADR-0269 §1). :meth:`record_intended_actions`
+    checks a ``serves`` value against **every revision the goal holds** rather than
+    against the one current at the append: no member is added, no signature moves, and
+    an implementation that keeps the current-instant refusal stops conforming — which is
+    what makes it breaking. It is strictly wider than what it replaces, so no stored
+    goal becomes non-conforming and no migration is owed; ``PROTOCOL_VERSION`` does not
+    move, because no ``core`` type gains, loses or narrows a field and no wire-carried
+    value changes validity (ADR-0269 §3).
+
     **The minting rides on no other write, and that is the asymmetry against the marks
     above** (ADR-0265 §2). An intended action "must survive every revision that does
     not mention it", so minting is **independent of revising**: it does not ride on
@@ -4682,30 +4692,49 @@ class PlanStore(Protocol):
         **Three refusals, and none of them takes the stale-write class.** The member
         refuses an ``id`` the goal **already holds**, a minting that would carry the
         goal past :data:`~ai_assistant.core.types.MAX_INTENDED_ACTIONS` (§1), and a
-        ``serves`` value that is not the ``id`` of an element of the goal's **current**
-        interpretation at the instant of the append — **writing nothing in any of the
-        three**. All three take ``PlanningError``, the class ADR-0249 §12 gives
-        ``save_goal`` for "a goal whose ``id`` the store already holds", because each
-        is an **invariant breach at the current version** rather than a lost race: "a
-        caller that re-read and retried would re-raise for ever".
+        ``serves`` value that is not the ``id`` of an element of **any revision the
+        goal's ``interpretation`` holds at the instant of the append** (ADR-0269 §1) —
+        **writing nothing in any of the three**. All three take ``PlanningError``, the
+        class ADR-0249 §12 gives ``save_goal`` for "a goal whose ``id`` the store
+        already holds", because each is an **invariant breach at the current version**
+        rather than a lost race: "a caller that re-read and retried would re-raise for
+        ever".
 
         **The append is all-or-nothing.** Where a minting carries *k* actions and any
         one of them is refused — by the bound, by an id the goal holds, or by a
-        ``serves`` value that resolves in no current element — **no action of that
-        minting is recorded**, not the first, not a prefix, and not the ones that would
-        have fit. "A partial record would leave *book two identical rooms* holding
-        **one** intended action", which is the two-rooms defect reached through the
-        capacity path.
+        ``serves`` value that resolves in no revision the goal holds — **no action of
+        that minting is recorded**, not the first, not a prefix, and not the ones that
+        would have fit. "A partial record would leave *book two identical rooms*
+        holding **one** intended action", which is the two-rooms defect reached through
+        the capacity path.
 
-        **The ``serves`` conjunct is checkable exactly once, and this is the instant.**
-        §2's ordering records this call's revision **before** its actions and §3
-        resolves each label against the sequence in force on that call, so at the
-        append every entry names an element of the current interpretation and "a value
-        that does not is a caller reaching past ``orchestration`` with a dangling or
-        foreign identifier". Afterwards an entry may go stale by §3's own rule and
-        **nothing re-checks it and nothing repairs it**: staleness is a truthful record
-        of an earlier revision, where a dangling id would be a warrant the goal could
-        never show.
+        **The ``serves`` conjunct is a goal-wide membership test, and that is a
+        BREAKING contract change under golden rule 5** (ADR-0269 §1). It reads the
+        current revision and **every earlier one the goal still holds alike**, so an
+        identifier of this goal's *own earlier reading of itself* is **admitted**:
+        ADR-0265 §3 already rules such a link "stale, truthful and harmless", and the
+        current-instant reading refused the minting of every turn that **opens** a goal
+        and then restates the element it minted against (#2414). **An implementation
+        that keeps the current-instant refusal is non-conforming** — no member is added
+        and no signature moves, and a behaviour a caller may rely on does. What the
+        conjunct refuses is unchanged in kind: "a caller reaching past ``orchestration``
+        with a dangling or foreign identifier" — a fabricated value, an element of a
+        **different** goal, or an element of a revision this goal has elided.
+
+        **"Holds" is literal, and an elided revision is not held** (ADR-0269 §1). An
+        ``id`` whose only revision ADR-0249 §2 has dropped resolves to nothing and is
+        refused exactly as a fabricated one is: no implementation reconstructs an elided
+        revision, keeps a side index of dropped element ids, or reads
+        ``Goal.interpretation_elided`` to soften the refusal.
+
+        **The test is strictly wider, so nothing that was admitted is now refused**: no
+        stored goal becomes non-conforming, no stored ``IntendedAction`` is re-checked
+        and no migration is owed. And it is **still taken exactly once, at the append,
+        and never again** — §3 binds entire, so no lane re-runs it over a stored action
+        at read time, at projection time, at dispatch or on a later revision. An entry
+        may go stale by §3's own rule and **nothing re-checks it and nothing repairs
+        it**: staleness is a truthful record of an earlier revision, where a dangling id
+        would be a warrant the goal could never show.
 
         **No lane elides an intended action to make room** (§1). A goal at the bound
         refuses and holds every action it held, because "an identity that can vanish is
@@ -4720,7 +4749,7 @@ class PlanStore(Protocol):
             PlanningError: If ``goal_id`` names no stored goal, if an action's ``id``
                 is one the goal already holds, if the minting would carry the goal past
                 ``MAX_INTENDED_ACTIONS``, or if a ``serves`` value is not the ``id`` of
-                an element of the goal's current interpretation.
+                an element of any revision the goal holds.
         """
         ...
 
