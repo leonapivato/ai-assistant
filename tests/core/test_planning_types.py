@@ -2057,7 +2057,13 @@ def test_an_attempt_carries_its_result_exactly_on_a_terminal_state() -> None:
 
 
 def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> None:
-    """§5, §6: six phases in order, seven states with two terminal, six outcomes."""
+    """§5, §6: six phases in order, seven states with two terminal, seven outcomes.
+
+    **The seventh outcome is ADR-0261 §3's ``CANCELLED``**, admitted by ADR-0249 §5's
+    own *"the vocabulary is added to and never renamed"* and owed because that
+    section's validator makes an outcome compulsory on a terminal state: an attempt a
+    user ended before it produced anything is none of the six.
+    """
     assert [one.value for one in AttemptPhase] == [
         "understand",
         "investigate",
@@ -2068,7 +2074,8 @@ def test_the_attempt_vocabularies_are_closed_at_what_the_decision_fixes() -> Non
     ]
     assert len(AttemptState) == 7
     assert {AttemptState.CANCELLED, AttemptState.ENDED} == TERMINAL_ATTEMPT_STATES
-    assert len(AttemptOutcome) == 6
+    assert len(AttemptOutcome) == 7
+    assert AttemptOutcome.CANCELLED.value == "cancelled"
     assert len(Ground) == 3
     assert len(EvidenceStanding) == 3
 
