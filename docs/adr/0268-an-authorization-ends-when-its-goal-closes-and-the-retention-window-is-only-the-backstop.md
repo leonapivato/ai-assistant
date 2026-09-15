@@ -457,9 +457,16 @@ does not take that decision by another route.
 > the fence down. **The compare-and-swap is what serialises two reopens**: `set_goal_status` advances
 > `Goal.version` and refuses a stale `expected_version` (ADR-0250 §9), so of two acts reopening one
 > goal exactly one writes `ACTIVE`, exactly one takes the pair, and the loser re-reads and finds a
-> goal that is open — which ADR-0250 §13 does not reopen. **Between the `ACTIVE` write and the clear
-> the goal is fenced**, so a turn reading it open in that instant is refused a row and **asks**, which
-> is the fail-closed direction. **No lane clears a fence anywhere else or on any other act**,
+> goal that is open — which ADR-0250 §13 does not reopen. **Where a fence already stood, the goal is
+> fenced from the `ACTIVE` write to the clear**, so a turn reading it open in that instant is
+> refused a row and **asks**, which is the fail-closed direction. **Where none stood there is no
+> fence to stand in that window, and the ending reaches what is written in it**: on a goal this
+> store was never told closed — §9's pre-decision database, or a store the user has `clear`ed since
+> — a row recorded between the `ACTIVE` write and the ending is ended `GOAL_CLOSED` with the rows
+> the closure never reached, and that turn's call asks. **It is the same fail-closed direction and
+> the same two conditions**, and costs a **question** rather than leaving an authority. **No lane
+> reorders the pair to close it**: an ending taken before the `ACTIVE` write is one a losing reopen
+> would take over the winner's rows, two acts reopening one goal reading it at the same version. **No lane clears a fence anywhere else or on any other act**,
 > `clear_closure` having exactly this one caller (§1).
 
 > **Normative — a failure of either reopen call leaves whatever the closure left, and the two cases
@@ -811,7 +818,8 @@ producer here.
 - **A viewing or export surface for the closure record.** §1 states why this decision adds none —
   ADR-0254 §16's export is over rows, the record carries no content, the identifier is the goal's —
   and **a reader holding ADR-0004 §6 to reach every retained datum reads it the other way**. This
-  decision states the record, its deletion under `clear` and its bound, and books the surface rather
+  decision states the record, its deletion under `clear` and its bound, names the drift from
+  `VISION.md`'s *"In Control"* principle as a drift, and books the surface rather
   than settling that reading. Fired by that reading being taken, or by an operator surface landing
   on this store (ADR-0254 §19).
 - **`GoalStatus.ACHIEVED`'s producer (A10) and `BLOCKED`'s (A3).** ADR-0249 §4 reserves both and
@@ -928,7 +936,11 @@ producer here.
 >    reopen — a first closure fenced at its version, a reopen then lifting that fence at a higher
 >    one, a **fresh** row recorded under the reopened goal — the first act's delayed `end_for_goal`
 >    at its **own** version answers **`0`**, leaves that row `ESTABLISHED` and **live**, and leaves
->    the fence **lifted**, a `record` for that goal still succeeding.
+>    the fence **lifted**, a `record` for that goal still succeeding. **And the unfenced reopen window
+>    is asserted rather than assumed**: reopening a goal the store holds **no** closure record of, a
+>    `record` between the `ACTIVE` write and the ending **succeeds** and that row is then ended
+>    `GOAL_CLOSED` with the rest — §2's stated cost, on a pre-decision database and a `clear`ed one
+>    alike.
 > 6. **The trail and the recheck.** A route-(d) `ALLOW` whose row is ended `GOAL_CLOSED` between
 >    `live_for` and `AuditTrail.record` is **refused** on ADR-0254 §7's disposition check, with no
 >    conjunct added; and `decide` over a goal whose rows are all `GOAL_CLOSED` reaches route (d) in
@@ -1035,7 +1047,8 @@ authority.
 authorities gone, its fence standing and every call of it asking until the user abandons and reopens
 it — compensated by nothing and repaired by no sweep (§1, §8), because a compensation cannot tell an
 orphaned fence from one a concurrent closing act is standing on. Between a reopen's `ACTIVE` write
-and its `clear_closure` a turn is refused a row and asks. And where a closure under this decision
+and its `clear_closure` a turn is refused a row and asks where a fence stood, and where none did
+(§2) a row it writes in that window is ended with the rest and its next call asks. And where a closure under this decision
 had run, a failure of either reopen call leaves that same open-and-fenced state with the same
 repair. A call already claimed when its goal closes is ADR-0254 §13's residual window unchanged and
 A9's to close — a **cross-store** race the fence does not reach and does not claim to.
