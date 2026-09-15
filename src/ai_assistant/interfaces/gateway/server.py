@@ -4622,7 +4622,11 @@ def _coverage_view(view: CoverageView) -> dict[str, Any]:
         The member, as the page receives it.
     """
     return {
-        "argument": view.argument,
+        # **The kind, where the argument key used to be** (ADR-0266 §9's §11 scope):
+        # a member records what the user stated and never which slot it fills, so
+        # there is no argument to transcribe and the page renders each member by
+        # what the act constrained.
+        "kind": view.kind.value,
         "fixed": None if view.fixed is None else _parameter_text(view.fixed),
         "bound": None if view.bound is None else _bound_view(view.bound),
         "span": view.span,
@@ -4651,7 +4655,11 @@ def _bound_view(bound: ValueBound) -> dict[str, Any]:
     return {
         "kind": bound.kind.value,
         "currency": bound.currency,
-        "currency_argument": bound.currency_argument,
+        # **Whether the ceiling itself is permitted crosses with it** (ADR-0266 §3).
+        # *"under 100"* and *"at most 100"* are two bounds, and a page holding only
+        # the figure would render the first as the second — showing the owner a
+        # limit a cent wider than the one they are about to establish.
+        "maximum_exclusive": bound.maximum_exclusive,
         "maximum": None if bound.maximum is None else str(bound.maximum),
         "minimum": None if bound.minimum is None else str(bound.minimum),
         "starts_at": None if bound.starts_at is None else bound.starts_at.isoformat(),

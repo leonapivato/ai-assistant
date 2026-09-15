@@ -52,6 +52,7 @@ from ai_assistant.permissions._coverage import (
     account_of,
     coverage_subject,
     covers,
+    covers_on_argument_route,
     uncovered,
 )
 
@@ -835,7 +836,7 @@ class ThresholdActionPolicy:
             )
         recipient: RecipientGrant | None = None
         consulted = False
-        if self._covers_in_full(subject, record):
+        if self._covers_in_full(subject, record, external=external):
             assert record is not None  # noqa: S101 — narrowing; the test is stated over it
             if record.origin is AuthorizationOrigin.OPENING_ACT:
                 # **The one exception to "route (d) answers with the grant seam
@@ -976,7 +977,9 @@ class ThresholdActionPolicy:
         return _Authority(barred=False, record=record, account=None)
 
     @staticmethod
-    def _covers_in_full(subject: CoverageSubject, record: Authorization | None) -> bool:
+    def _covers_in_full(
+        subject: CoverageSubject, record: Authorization | None, *, external: bool
+    ) -> bool:
         """Whether route (d) covers this request but for the opening-act recheck.
 
         **Route (d) is reachable on** :meth:`_only_the_disclosure_floor`'s **five
@@ -997,10 +1000,14 @@ class ThresholdActionPolicy:
           in no case.
         * **condition 3** — the binding does not carry
           ``planned_with_external_content``, **or** the row covers the request under
-          §3 **in full**. That second limb is ADR-0181 §5's floor **discharged**, and
-          it is subsumed by the coverage test rather than stated twice: route (d)
-          answers only where the row covers in full, so a tainted request the row
-          does not cover in full reaches no route at all. **Partial coverage still
+          §3 **in full** *and* covers every argument of it **on the argument route**.
+          That second limb is ADR-0181 §5's floor **discharged**, and ADR-0266 §7
+          narrows it: §6's stated ground is that the user's own fixed values and
+          permitted ranges leave nothing outside content could have steered, and
+          condition 6's **third conjunct** does not supply that ground — a quote's
+          digest proves the call is the one **quoted**, not one the user bounded. So
+          a tainted request whose coverage the evidence route supplied reaches no
+          route at all and **the floor binds unrelaxed**. **Partial coverage still
           asks.**
 
         The remaining condition — the recipient authority an **opening-act** row
@@ -1012,14 +1019,20 @@ class ThresholdActionPolicy:
             subject: The one pre-suspension observation of the request, which this
                 comparison is decided over (ADR-0065).
             record: The row the one ``live_for`` read returned, or ``None``.
+            external: Whether the binding carries ``planned_with_external_content``,
+                read before this ruling suspended, on which ADR-0266 §7's narrowing
+                of the lineage discharge turns.
 
         Returns:
-            Whether §3's six conditions hold over that pair and condition 4 holds
-            over the binding.
+            Whether §3's six conditions hold over that pair, condition 4 holds over
+            the binding, and — for a tainted request — every argument is covered on
+            the argument route.
         """
         if record is None or subject.coverage is not SpanCoverage.NOT_COVERED:
             return False
-        return covers(record, subject)
+        if not covers(record, subject):
+            return False
+        return not external or covers_on_argument_route(record, subject)
 
     def _only_the_disclosure_floor(
         self,

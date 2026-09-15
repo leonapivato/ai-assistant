@@ -1,9 +1,24 @@
-"""ADR-0254 §§3 and 4's coverage comparison, in one place (ADR-0254 §3, §4, §6).
+"""The coverage comparison, in one place (ADR-0254 §§3, 4, 6; ADR-0266 §7).
 
 Whether a live :class:`~ai_assistant.core.types.Authorization` covers a concrete
 :class:`~ai_assistant.core.types.ActionRequest`, and whether it covers the
 request's **arguments** alone — which is ADR-0254 §6's argument-authority bar,
 stated over §3's condition 6 and no other condition.
+
+**A member records what the user stated and never which slot it fills**
+(ADR-0266 §3), so condition 6 is no longer a set equality over argument keys.
+ADR-0266 §7 replaces it with **two routes** and three conjuncts:
+
+* the **evidence route**, ``MONEY``-only — the member is proved against the
+  **quote taken for the step's intended action**, whose arguments digest equals
+  this request's. **This tree holds no quotes** (:func:`_met_through_evidence`),
+  so every ``MONEY`` member is unmet here and every act carrying a stated ceiling
+  asks: ADR-0266 §11's own arithmetic, and ADR-0267 §11's Q1 is the lane that
+  supplies the operand.
+* the **argument route**, available only where the declaration itself declares an
+  argument at the member's kind (``ToolDefinition.bounded_arguments``). A
+  ``MONEY`` member needs the **evidence** route in every case and this one **as
+  well** where the declaration declares an amount — *"a filter is not a charge"*.
 
 **Module functions rather than methods**, so nothing here holds a store, a clock
 or a seam: everything the comparison needs is in its arguments, which is what
@@ -17,10 +32,11 @@ argument a reading refuses is a request the authorization does not cover, and th
 ruling is the one the policy's table reached without it.
 
 **No reading consults a schema to decide what an argument means, and there is no
-exception** (§4). Every fact a comparison needs is on the row or in the request:
-which key holds an amount, which key holds its currency, which zone a date is
-read in, which strings a term may take. ADR-0145 §1's schema check decides whether
-the call is well-formed and decides nothing about coverage.
+exception** (§4). Every fact a comparison needs is on the row, on the
+**declaration** or in the request: which key holds an amount and which key holds
+its currency are the declaration's (ADR-0266 §7), which zone a date is read in and
+which strings a term may take are the bound's. ADR-0145 §1's schema check decides
+whether the call is well-formed and decides nothing about coverage.
 
 **One canonical JSON encoding**, and it is
 :func:`~ai_assistant.core.types.canonical_json_bytes` — the encoding
@@ -31,7 +47,6 @@ disagree produce a false mismatch at one end and a **false match** at the other.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
@@ -43,6 +58,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import TypeAdapter
 
 from ai_assistant.core.types import (
+    PERIOD_DATE_TIME,
+    PERIOD_FULL_DATE,
     BoundAccount,
     BoundKind,
     CanonicalDestination,
@@ -58,6 +75,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionRequest,
         Authorization,
+        BoundedArgument,
         CoverageMember,
         FrozenJson,
         SpanCoverage,
@@ -116,6 +134,16 @@ class CoverageSubject(NamedTuple):
     """``request.goal``: which row ``live_for`` is asked for, and ``None`` where a
     request reaches route (d) in no case."""
 
+    intended_action: str | None
+    """``request.intended_action``: the act this request is an attempt at, which is
+    what selects the quote ADR-0266 §7's evidence route compares against.
+
+    **Carried across the suspension with the rest of the subject**, because it
+    selects the evidence the ``MONEY`` comparison is taken against: a policy that
+    read one act on the way in and another on the way out would prove a ceiling
+    against a price quoted for a different act. ``None`` is met by that route in no
+    case."""
+
     tool: ToolDefinition
     """The declaration by value — §3's condition 3 — and what :func:`user_facing`
     and :func:`account_of` read."""
@@ -165,6 +193,7 @@ def coverage_subject(request: ActionRequest) -> CoverageSubject:
     binding = request.egress_binding
     return CoverageSubject(
         goal=request.goal,
+        intended_action=request.intended_action,
         tool=ToolDefinition.model_validate(field_state(ToolDefinition, request.tool)),
         parameters=_PARAMETERS.validate_python(request.parameters),
         account=(
@@ -202,13 +231,17 @@ def user_facing(subject: CoverageSubject) -> frozenset[str]:
     return frozenset(subject.parameters) - frozenset(subject.tool.system_supplied)
 
 
-class ArgumentFailure(StrEnum):
-    """Which of ADR-0254 §4's **three** failures one argument's coverage met.
+class CoverageFailure(StrEnum):
+    """Which of ADR-0266 §7's failures one defect met, told apart.
 
-    *"The three failures are told apart, whichever way the key is rendered,
-    because they are different facts about what the user authorised and §3's
-    condition 6 keeps them apart."* A ruling that reduced them to one would tell a
-    user that their authority did not reach a call without saying in what way.
+    ADR-0254 §4's *"The three failures are told apart, whichever way the key is
+    rendered, because they are different facts about what the user authorised"*,
+    restated over §7's three conjuncts — **and a fourth is added, because §7
+    creates a failure the three cannot express**: a member whose kind nothing in
+    this call is proved against. Folding that into :attr:`REFUSED` would tell a
+    user that their ceiling was **breached** when in fact it was compared against
+    nothing, which is a different fact about what they authorised and the one this
+    tree produces most.
 
     Not a ``core`` type: ADR-0254 §16's roster is closed over what ``core`` gains,
     and this is a **rendering** detail of one policy's reason rather than a value
@@ -216,76 +249,299 @@ class ArgumentFailure(StrEnum):
     """
 
     UNNAMED = "unnamed"
-    """The row's coverage names this user-facing argument in **no** member."""
+    """The row's coverage covers this user-facing argument through no member.
+
+    Either the declaration declares it at a kind the row carries no member of, or
+    it declares it at no kind at all and no member of the row is met through the
+    evidence route — §7's second and third conjuncts, which fail the same way from
+    the user's side: nothing they recorded reaches this argument."""
 
     OMITTED = "omitted"
-    """A member names this argument and the request does not carry it.
+    """A member would be met against this declared argument and the call omits it.
 
     *"An act that fixed ``refundable_only`` to ``true`` authorised a call carrying
     that value, and a call that omits it is a different call"* — ADR-0145 inserts
     no schema default, so nothing downstream restores it."""
 
     REFUSED = "refused"
-    """A member names it and the comparison over its value was **unproven**."""
+    """A member covers it and the comparison over its value was **unproven**."""
+
+    UNPROVED = "unproved"
+    """A member of this **kind** is met by no route at all (§7's first conjunct).
+
+    The subject is the member's :class:`~ai_assistant.core.types.BoundKind` and not
+    an argument key, because there is no argument: a ``MONEY`` member with no
+    governing quote is proved against nothing, and a ``PERIOD`` or ``TERMS`` member
+    at a declaration declaring no argument at its kind has nothing to be compared
+    with. **Every ``MONEY`` member fails this way in this tree** (ADR-0266 §11), so
+    it is the ordinary reason a stated ceiling asks rather than an exotic one."""
 
 
 @dataclass(frozen=True, slots=True)
-class UncoveredArgument:
-    """One argument, and which of §4's three failures its coverage met."""
+class CoverageDefect:
+    """One way condition 6 failed, and what it was about.
 
-    argument: str
-    failure: ArgumentFailure
+    **Named for a defect rather than for an argument** because ADR-0266 §7's first
+    conjunct is about a **member**, which names no argument: :attr:`subject` is an
+    argument key for :attr:`CoverageFailure.UNNAMED`, ``OMITTED`` and ``REFUSED``,
+    and a ``BoundKind``'s value for ``UNPROVED``.
+    """
+
+    subject: str
+    failure: CoverageFailure
 
 
-def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[UncoveredArgument, ...]:
-    """Every way ADR-0254 §3's **condition 6** fails over this pair, told apart.
+def declared_at(tool: ToolDefinition, kind: BoundKind) -> BoundedArgument | None:
+    """The one argument this declaration declares at ``kind``, or ``None``.
+
+    ADR-0266 §7: the argument route is available where the declaration carries
+    **exactly one** ``BoundedArgument`` at the member's kind. **Where it declares
+    none, or declares more than one, no member of that kind is met by that route**
+    — no default kind, no inference from a value's JSON type, no schema keyword and
+    no fallback to an exact comparison. Two declarations of one kind would need a
+    precedence rule at the comparison, which is the rule ADR-0254 §2 refuses to
+    have.
+
+    Args:
+        tool: The declaration being ruled on.
+        kind: The member's kind.
+
+    Returns:
+        The sole declared argument at that kind, or ``None`` where there is not
+        exactly one.
+    """
+    declared = [one for one in tool.bounded_arguments if one.kind is kind]
+    return declared[0] if len(declared) == 1 else None
+
+
+def _met_through_evidence(member: CoverageMember, subject: CoverageSubject) -> bool:
+    """ADR-0266 §7's evidence route — **and no quote reaches it in this tree**.
+
+    §7 meets a ``MONEY`` member here where all three hold: the request carries an
+    ``intended_action``; **the governing quote** — of the quotes available to the
+    policy naming that action, the one latest in ADR-0266 §6's order, and no other
+    — has an arguments digest equal to this request's own; and that quote's amount
+    satisfies the member, with §4's currency conjunct taken **at the quote's own
+    currency** and at no key of the request.
+
+    **The last two conjuncts have no operand here, and that is ADR-0266 §11 rather
+    than an omission.** §6 states the quote as an interface and lands no carrier —
+    *"no type, no field of any existing model, no store member, no Protocol"* — and
+    assigns the carrier, the producer and the read to the quote decision, which is
+    ADR-0267 (§5's ``GoalQuotes.for_action``, wired in here by that decision's Q1).
+    So **every ``MONEY`` member is unmet**, ADR-0254 §1's completeness condition
+    proposes no row, and the one call is asked about by route (a). That is
+    fail-closed and conforming (ADR-0084 §3), and it is the arithmetic ADR-0266 §11
+    states rather than leaving the next lane to discover.
+
+    **No member of any other kind is met by this route in any case**: a quote states
+    a price and carries no other value, so there is nothing for a ``PERIOD`` or a
+    ``TERMS`` member to be compared against.
+
+    **A fault is never an absence.** Where the read behind the quotes fails, the
+    request is treated as **not covered** and the fault is reported; no
+    implementation converts a fault into an absence of quotes, and none falls
+    through to the argument route. There is no such read here to fail.
+
+    Args:
+        member: The row's member.
+        subject: The one observation of the request this ruling is decided over.
+
+    Returns:
+        Whether the evidence route meets this member.
+    """
+    if member.kind is not BoundKind.MONEY:
+        return False
+    if subject.intended_action is None:
+        return False
+    # **The governing quote, and there is none**: this is the single seam ADR-0267's
+    # Q1 fills, and nothing else about §7 moves when it does.
+    return False
+
+
+def _met_on_argument_route(
+    member: CoverageMember, declared: BoundedArgument, subject: CoverageSubject
+) -> bool:
+    """ADR-0266 §7's argument route, over one member and one declared argument.
+
+    The request carries a value at ``declared.argument`` and that value satisfies
+    the member under ADR-0254 §3's fixed comparison or §4's reading, with a ``MONEY``
+    bound's currency conjunct taken at ``declared.currency_argument`` **in the
+    concrete request** — which is what makes that currency key *covered* rather than
+    unexamined.
+
+    **An argument the request does not carry is not covered**, whichever shape the
+    member takes: an act that fixed a value authorised a call *carrying* it.
+
+    Args:
+        member: The row's member, of the kind ``declared`` declares.
+        declared: The one argument this declaration declares at that kind.
+        subject: The one observation of the request this ruling is decided over.
+
+    Returns:
+        Whether the argument route meets this member.
+    """
+    if declared.argument not in subject.parameters:
+        return False
+    value = subject.parameters[declared.argument]
+    if member.bound is None:
+        return canonical_json_bytes(value) == canonical_json_bytes(member.fixed)
+    return _satisfies(member.bound, value, declared, subject)
+
+
+def _member_defect(member: CoverageMember, subject: CoverageSubject) -> CoverageDefect | None:
+    """Why ``member`` is not met over this request — or ``None`` where it is.
+
+    ADR-0266 §7's first conjunct, **and the account of its failure in the same
+    computation**, so the predicate and the reason cannot disagree.
+
+    * A ``MONEY`` member needs the **evidence** route in every case, and the
+      argument route **as well** where the declaration declares an argument at
+      ``MONEY`` — both holding, because *"a ``max_price`` constrains what a search
+      returns and a transfer amount is one leg of a call"*.
+    * A ``PERIOD`` or a ``TERMS`` member is met by the argument route alone.
+    """
+    declared = declared_at(subject.tool, member.kind)
+    if member.kind is BoundKind.MONEY and not _met_through_evidence(member, subject):
+        # **The quote is the primary proof and a declared argument never stands in for
+        # it** (ADR-0266 §7). Reported as ``UNPROVED`` even where a declared amount
+        # sits inside the ceiling, because that is what happened: the price the act
+        # will make was compared against nothing.
+        return CoverageDefect(member.kind.value, CoverageFailure.UNPROVED)
+    if declared is None:
+        if member.kind is BoundKind.MONEY:  # pragma: no cover — no quote reaches here
+            # **§7 admits this**: the quote is the primary proof and the argument
+            # route an additional safeguard, so a declaration declaring no amount
+            # keeps its ceiling proved against the quote. Unreachable while no quote
+            # exists (ADR-0266 §11); it is the branch ADR-0267's Q1 turns on.
+            return None
+        # A ``PERIOD`` or ``TERMS`` member is met by the argument route alone, and
+        # this declaration declares no argument at its kind, or declares two.
+        return CoverageDefect(member.kind.value, CoverageFailure.UNPROVED)
+    if declared.argument not in subject.parameters:
+        return CoverageDefect(declared.argument, CoverageFailure.OMITTED)
+    if not _met_on_argument_route(member, declared, subject):
+        return CoverageDefect(declared.argument, CoverageFailure.REFUSED)
+    return None
+
+
+def _examined_currency_keys(row: Authorization, subject: CoverageSubject) -> frozenset[str]:
+    """The currency keys §7's conditional exemption reaches.
+
+    **A key a ``BoundedArgument`` names as its ``currency_argument`` is not an
+    argument the declaration declares at no kind — but only where the comparison
+    that consumes it was actually taken.** It is exempt where the request carries a
+    value at that ``BoundedArgument``'s own ``argument``, the row carries a ``MONEY``
+    member, and that member is met **on the argument route** against it, whose §4
+    comparison reads the currency key there.
+
+    **In every other case it is an ordinary user-facing argument the declaration
+    declares at no kind**: a request carrying the currency and no amount, or one
+    whose row holds no ``MONEY`` member, leaves it compared by nothing — so §7's
+    third conjunct reaches it and the request is uncovered without a quote. An
+    unconditional exemption would let ``{"currency": "EUR"}`` and
+    ``{"currency": "USD"}`` both pass an empty row.
+    """
+    money = next((member for member in row.coverage if member.kind is BoundKind.MONEY), None)
+    if money is None:
+        return frozenset()
+    return frozenset(
+        one.currency_argument
+        for one in subject.tool.bounded_arguments
+        if one.kind is BoundKind.MONEY
+        and one.currency_argument is not None
+        and one.argument in subject.parameters
+        and _met_on_argument_route(money, one, subject)
+    )
+
+
+def uncovered(row: Authorization, subject: CoverageSubject) -> tuple[CoverageDefect, ...]:
+    """Every way ADR-0266 §7's **condition 6** fails over this pair, told apart.
 
     Empty exactly where :func:`covers_arguments` answers ``True``, which is what
     keeps the predicate and the account of its failure one computation rather than
     two that can disagree.
+
+    The three conjuncts, each in one direction and neither dropped:
+
+    1. **Every member of the row is met**, by the two routes (:func:`_member_defect`).
+       A member met by no route leaves the request uncovered, which is ADR-0254 §3's
+       second direction — *"an act that fixed ``refundable_only`` to ``true``
+       authorised a call **carrying** that value"*.
+    2. **Every user-facing argument the declaration declares in a ``BoundedArgument``
+       is covered by the member of that argument's kind**, a request carrying no
+       member of that kind being uncovered — §3's first direction.
+    3. **Where the request carries any user-facing argument the declaration declares
+       at no kind, at least one member of the row is met through the evidence
+       route**, whose digest pins every argument the request carries. Without it a
+       row fixing ``subject`` to *"urgent"* would cover a later ``send_message``
+       carrying a different ``body``; with it the owner's booking case, whose
+       ``site``, ``dates`` and ``party`` are declared nowhere, is covered through its
+       quote while a tool with no quote and undeclared arguments asks.
+
+    **There is no default, no wildcard and no omission that reads as consent.**
 
     Args:
         row: The live record the one ``live_for`` read returned.
         subject: The one observation of the request this ruling is decided over.
 
     Returns:
-        The failures, ordered by :class:`ArgumentFailure` and then by argument name,
-        so a rendering of them is deterministic without the renderer sorting.
+        The failures, ordered by :class:`CoverageFailure` and then by subject, so a
+        rendering of them is deterministic without the renderer sorting.
     """
+    found: set[CoverageDefect] = set()
+    kinds = {member.kind: member for member in row.coverage}
+    # **The first conjunct** — every member of the row is met, by the two routes.
+    found.update(
+        defect
+        for defect in (_member_defect(member, subject) for member in row.coverage)
+        if defect is not None
+    )
     carried = user_facing(subject)
-    named = {member.argument: member for member in row.coverage}
-    defects = [UncoveredArgument(key, ArgumentFailure.UNNAMED) for key in carried - set(named)]
-    defects += [UncoveredArgument(key, ArgumentFailure.OMITTED) for key in set(named) - carried]
-    defects += [
-        UncoveredArgument(key, ArgumentFailure.REFUSED)
-        for key in carried & set(named)
-        if not _argument_is_covered(named[key], subject)
-    ]
-    return tuple(sorted(defects, key=lambda one: (one.failure.value, one.argument)))
+    declared = {one.argument: one for one in subject.tool.bounded_arguments}
+    # **The second** — every user-facing argument the declaration declares is covered
+    # by the member of that argument's kind, a row carrying none being uncovered.
+    for key in carried & set(declared):
+        at_kind = kinds.get(declared[key].kind)
+        if at_kind is None:
+            found.add(CoverageDefect(key, CoverageFailure.UNNAMED))
+        elif not _met_on_argument_route(at_kind, declared[key], subject):
+            found.add(CoverageDefect(key, CoverageFailure.REFUSED))
+    # **The third** — an argument the declaration declares at no kind needs a member
+    # met through the evidence route, whose digest pins every argument the request
+    # carries. There is no such member here (:func:`_met_through_evidence`).
+    undeclared = carried - set(declared) - _examined_currency_keys(row, subject)
+    if undeclared and not any(_met_through_evidence(member, subject) for member in row.coverage):
+        found.update(CoverageDefect(key, CoverageFailure.UNNAMED) for key in undeclared)
+    return tuple(sorted(found, key=lambda defect: (defect.failure.value, defect.subject)))
 
 
-#: What a ruling says about each of §4's three failures, in the order they are
-#: rendered. **No value, no bound, no record id and no digest**: a reason is carried
-#: on a durable ``PermissionDecision`` that holds ``parameters_digest`` and not
+#: What a ruling says about each of §7's failures, in the order they are rendered.
+#: **No value, no bound, no record id and no digest**: a reason is carried on a
+#: durable ``PermissionDecision`` that holds ``parameters_digest`` and not
 #: ``parameters``, and quoting a value would put into the trail exactly what that
 #: omission keeps out (ADR-0254 §4).
-_ACCOUNTS: Final[tuple[tuple[ArgumentFailure, str], ...]] = (
+_ACCOUNTS: Final[tuple[tuple[CoverageFailure, str], ...]] = (
     (
-        ArgumentFailure.UNNAMED,
+        CoverageFailure.UNNAMED,
         "the user's own recorded act for this goal covers no such argument",
     ),
     (
-        ArgumentFailure.OMITTED,
+        CoverageFailure.OMITTED,
         "this call omits an argument the user's own recorded act covers",
     ),
     (
-        ArgumentFailure.REFUSED,
+        CoverageFailure.REFUSED,
         "this call is outside what the user's own recorded act allows",
+    ),
+    (
+        CoverageFailure.UNPROVED,
+        "the user's own recorded act states a limit nothing about this call proves",
     ),
 )
 
 
-def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> str:
+def account_of(defects: Sequence[CoverageDefect], tool: ToolDefinition) -> str:
     """Render ADR-0254 §4's account of why coverage failed, for the user.
 
     **It never reproduces an argument's value, the bound, the record's id or its
@@ -294,13 +550,19 @@ def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> st
     about arguments *"renders any part of the parameters — neither a value nor a
     key"* except what *"the schema itself names"*, on the ground that *"a key can
     be data"* — a mapping the schema does not describe can be keyed by an address
-    or an identifier, and ADR-0254 §2's ``argument`` is a key of ``parameters``
-    with nothing requiring the schema to declare it.
+    or an identifier, and an argument key is a key of ``parameters`` with nothing
+    requiring the schema to declare it.
 
     So a key the schema declares is named; **a key it does not is counted rather
     than listed**, which is ADR-0145 §8's *"by keyword and location rather than by
     key"* read onto this message. Where several arguments fail, they are named in
     the **declaration's own schema order**.
+
+    **A ``CoverageFailure.UNPROVED`` defect's subject is a ``BoundKind`` and is
+    always named.** It is a member of a closed vocabulary this system minted, not a
+    key a caller influenced, so ADR-0145 §8's reason for withholding does not reach
+    it — and withholding it would leave the one failure this tree produces most
+    saying only that something was unproven, without saying what.
 
     Args:
         defects: :func:`uncovered`'s answer, non-empty.
@@ -315,8 +577,11 @@ def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> st
     order = {name: index for index, name in enumerate(declared)}
     clauses: list[str] = []
     for failure, phrase in _ACCOUNTS:
-        met = [one.argument for one in defects if one.failure is failure]
+        met = [one.subject for one in defects if one.failure is failure]
         if not met:
+            continue
+        if failure is CoverageFailure.UNPROVED:
+            clauses.append(phrase + ": " + ", ".join(sorted(met)))
             continue
         named = sorted((key for key in met if key in order), key=lambda key: order[key])
         hidden = len(met) - len(named)
@@ -333,30 +598,28 @@ def account_of(defects: Sequence[UncoveredArgument], tool: ToolDefinition) -> st
 
 
 def covers_arguments(row: Authorization, subject: CoverageSubject) -> bool:
-    """ADR-0254 §3's **condition 6**, and that condition alone (§6's bar).
+    """ADR-0254 §3's **condition 6** as ADR-0266 §7 restates it, alone (§6's bar).
 
-    *"The request's user-facing arguments and the row's coverage name the same set
-    of keys, and every user-facing argument of the request is covered by the
-    per-argument rule."*
+    **Stated in both of §3's directions, because an omission is a change as much as
+    an addition is.** An argument the row cannot cover leaves it uncovered — §3's
+    first direction — and a member met by no route leaves it uncovered too, which is
+    §3's second: an act that fixed ``refundable_only`` to ``true`` authorised a call
+    *carrying* that value, and a call that omits it is a different call. ADR-0145
+    inserts no schema default, so nothing downstream restores it, and the omission
+    would silently buy whatever the service does when the field is absent. **There
+    is no default, no wildcard, no "not sent therefore unconstrained" and no
+    omission that reads as consent.**
 
-    **Stated in both directions, because an omission is a change as much as an
-    addition is.** A user-facing argument the request carries that the row names in
-    no member is not covered — the direction §3 has always had. **And an argument
-    the row's coverage names that the request does not carry leaves condition 6
-    unsatisfied too**: an act that fixed ``refundable_only`` to ``true``
-    authorised a call *carrying* that value, and a call that omits it is a
-    different call. ADR-0145 inserts no schema default, so nothing downstream
-    restores it, and the omission would silently buy whatever the service does when
-    the field is absent. **There is no default, no wildcard, no "not sent therefore
-    unconstrained" and no omission that reads as consent.**
-
-    **The empty case holds vacuously** (§1, §3): a row with ``coverage=()`` and a
-    request carrying no user-facing argument name the same set — the empty one — so
-    condition 6 holds, and that is the one request such a row covers. A request
-    carrying system-supplied arguments and no others is such a request.
+    **The empty case holds vacuously** (§1, §3): a row with ``coverage=()`` has no
+    member to meet, and a request carrying no user-facing argument declares nothing
+    and leaves the third conjunct's set empty — so condition 6 holds, and that is
+    the one request such a row covers. A request carrying system-supplied arguments
+    and no others is such a request.
 
     **A system-supplied argument is not among them and never fires the bar**, which
-    is what keeps an implementation choice out of a question put to the user.
+    is what keeps an implementation choice out of a question put to the user — and
+    ``ToolDefinition.bounded_arguments`` names no such key, so none can be met by a
+    member either.
 
     Args:
         row: The live record the one ``live_for`` read returned.
@@ -366,6 +629,56 @@ def covers_arguments(row: Authorization, subject: CoverageSubject) -> bool:
         Whether condition 6 holds over that pair.
     """
     return not uncovered(row, subject)
+
+
+def covers_on_argument_route(row: Authorization, subject: CoverageSubject) -> bool:
+    """Whether every argument of this request is covered on the **argument** route.
+
+    **ADR-0266 §7's narrowing of ADR-0254 §6's lineage discharge, in the narrowing
+    direction alone.** §6 discharges ADR-0181 §5's floor for a request a live row
+    covers *"in full"*, on the ground that where every user-facing argument is
+    covered by *"the user's own fixed values and permitted ranges"*, outside content
+    *"cannot have steered anything the user did not bound"*. **The digest does not
+    supply that ground**: condition 6's third conjunct proves the call is the one
+    that was **quoted**, and both the quoted arguments and the quoting output passed
+    through a plan and a tool. A digest proves the call is the one quoted, not one
+    the user bounded.
+
+    So a request whose ``egress_binding`` carries ``planned_with_external_content``
+    is discharged **only** where this answers ``True``. **Where it is not, the floor
+    binds unrelaxed and the ruling is the ``CONFIRM`` the table reached** — §6's own
+    *"Partial coverage still asks"*, reached by one further case. Every other limb
+    of §6 binds entire.
+
+    **A currency key the argument route's own §4 comparison read is covered by it**,
+    which is §7's *"what makes that currency key **covered** rather than
+    unexamined"* — the same conditional exemption condition 6 takes, and not a
+    second rule.
+
+    **The empty case is discharged vacuously**: a request carrying no user-facing
+    argument has nothing outside content could have steered.
+
+    Args:
+        row: The live record the one ``live_for`` read returned.
+        subject: The one observation of the request this ruling is decided over.
+
+    Returns:
+        Whether every user-facing argument the request carries is covered by a
+        member on the argument route.
+    """
+    kinds = {member.kind: member for member in row.coverage}
+    declared = {one.argument: one for one in subject.tool.bounded_arguments}
+    exempt = _examined_currency_keys(row, subject)
+    for key in user_facing(subject):
+        if key in exempt:
+            continue
+        one = declared.get(key)
+        if one is None:
+            return False
+        member = kinds.get(one.kind)
+        if member is None or not _met_on_argument_route(member, one, subject):
+            return False
+    return True
 
 
 def covers(row: Authorization, subject: CoverageSubject) -> bool:
@@ -410,50 +723,46 @@ def covers(row: Authorization, subject: CoverageSubject) -> bool:
     return covers_arguments(row, subject)
 
 
-def _argument_is_covered(member: CoverageMember, subject: CoverageSubject) -> bool:
-    """ADR-0254 §3's per-argument rule, over one member.
-
-    The member is **fixed**, and the canonical JSON encoding of the argument's
-    value equals the canonical JSON encoding of ``fixed``, byte for byte; or the
-    member is **bounded**, and the argument satisfies the bound under §4's total,
-    fail-closed reading.
-
-    **An argument the request does not carry is not covered**, whichever shape the
-    member takes — which is condition 6's second direction reaching one member.
-    """
-    if member.argument not in subject.parameters:
-        return False
-    value = subject.parameters[member.argument]
-    if member.bound is None:
-        return canonical_json_bytes(value) == canonical_json_bytes(member.fixed)
-    return _satisfies(member.bound, value, subject)
-
-
-def _satisfies(bound: ValueBound, value: FrozenJson, subject: CoverageSubject) -> bool:
+def _satisfies(
+    bound: ValueBound, value: FrozenJson, declared: BoundedArgument, subject: CoverageSubject
+) -> bool:
     """ADR-0254 §4's reading of one argument against one bound.
 
     Total, and every failure is a refusal to cover rather than an exception.
     """
     if bound.kind is BoundKind.MONEY:
-        return _satisfies_money(bound, value, subject)
+        return _satisfies_money(bound, value, declared, subject)
     if bound.kind is BoundKind.PERIOD:
         return _satisfies_period(bound, value)
     return _satisfies_terms(bound, value)
 
 
-def _satisfies_money(bound: ValueBound, value: FrozenJson, subject: CoverageSubject) -> bool:
+def _satisfies_money(  # noqa: PLR0911 — one return per conjunct ADR-0254 §4 states
+    bound: ValueBound, value: FrozenJson, declared: BoundedArgument, subject: CoverageSubject
+) -> bool:
     """ADR-0254 §4's ``MONEY`` reading, with the currency conjunct over the request.
 
     The argument's value is a JSON **string** ``Decimal`` accepts, or a JSON
-    **integer**; the resulting ``Decimal`` is finite and not negative; it is at most
-    ``maximum`` and, where a ``minimum`` is carried, at least that; **and the
-    request carries, at the bound's ``currency_argument``, a JSON string equal to
-    the bound's ``currency`` byte for byte**.
+    **integer**; the resulting ``Decimal`` is finite and not negative; it is **less
+    than** ``maximum`` where ``maximum_exclusive`` is set and **at most** it
+    otherwise; where a ``minimum`` is carried, at least that; **and the request
+    carries, at the declaration's ``currency_argument``, a JSON string equal to the
+    bound's ``currency`` byte for byte**.
 
-    **The last conjunct is stated over the concrete request rather than over the
-    row**, so a row whose currency member says one thing and whose request says
-    another covers nothing rather than covering the wrong amount of the wrong
-    money; and a request carrying no value at that key is **not covered**.
+    **The currency key is the declaration's and no longer the bound's** (ADR-0266
+    §3, §7): the key carrying an amount's currency is a fact about a *declaration*,
+    not about an act, so it is read off the :class:`BoundedArgument` that declared
+    this argument. §4's conjunct is otherwise unmoved — **stated over the concrete
+    request rather than over the row**, so a row whose bound says one currency and
+    whose request says another covers nothing rather than covering the wrong amount
+    of the wrong money; and a request carrying no value at that key is **not
+    covered**.
+
+    **``maximum_exclusive`` is read strictly and no endpoint is ever widened**
+    (ADR-0266 §3): *"under 100 euros"* does not cover a call at exactly ``100``,
+    *"at most 100 euros"* does, and no reading rounds, quantises, nudges or relaxes
+    an endpoint in either direction — the difference is a cent in the direction that
+    authorises a call the user did not authorise.
 
     **A JSON floating-point value never satisfies a ``MONEY`` bound.** A binary
     float is not a price, and comparing one against a decimal bound is precisely
@@ -462,9 +771,9 @@ def _satisfies_money(bound: ValueBound, value: FrozenJson, subject: CoverageSubj
     **boolean** is refused with it: ``bool`` is an ``int`` in Python and ``True``
     would otherwise read as one.
     """
-    if bound.currency_argument is None or bound.maximum is None:  # pragma: no cover — the model
+    if declared.currency_argument is None or bound.maximum is None:  # pragma: no cover — the model
         return False
-    stated = subject.parameters.get(bound.currency_argument)
+    stated = subject.parameters.get(declared.currency_argument)
     if not isinstance(stated, str) or stated != bound.currency:
         return False
     if isinstance(value, bool) or not isinstance(value, str | int):
@@ -473,7 +782,9 @@ def _satisfies_money(bound: ValueBound, value: FrozenJson, subject: CoverageSubj
         amount = Decimal(value)
     except InvalidOperation, ValueError:
         return False
-    if not amount.is_finite() or amount < 0 or amount > bound.maximum:
+    if not amount.is_finite() or amount < 0:
+        return False
+    if amount > bound.maximum or (bound.maximum_exclusive and amount == bound.maximum):
         return False
     return bound.minimum is None or amount >= bound.minimum
 
@@ -502,27 +813,6 @@ def _satisfies_period(bound: ValueBound, value: FrozenJson) -> bool:
     return bound.starts_at <= instant < bound.ends_at
 
 
-#: RFC 3339 §5.6's ``full-date``, and nothing wider. ``date.fromisoformat`` admits
-#: more than this — the compact ``20260913`` and ISO week dates such as
-#: ``2026-W37-7`` — and ADR-0254 §4 admits *"a calendar date"* under the same
-#: grammar the date-time arm is stated in, so the wider forms are refused here.
-_FULL_DATE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-
-#: RFC 3339 §5.6's ``date-time``: ``full-date``, the ``T`` separator (that section's
-#: own case rule permits ``t``), ``partial-time`` with an optional fraction, and a
-#: ``time-offset`` that is ``Z``/``z`` or ``±HH:MM``.
-#:
-#: **Written out rather than delegated to** ``datetime.fromisoformat``, because that
-#: function implements **ISO 8601** and is strictly wider: it accepts *any* single
-#: character as the date/time separator — so ``2026-09-13X10:00:00+00:00`` parses —
-#: a colon-free offset (``+0000``), a comma as the fractional separator, and the
-#: compact and week-date forms. Each of those would be an argument ADR-0254 §4 does
-#: not admit **satisfying** a bound, which is the permissive direction and the one
-#: direction §4 refuses: *"the answer is not to round, to quantise or to pick a
-#: tolerance, it is to refuse and ask."*
-_DATE_TIME = re.compile(r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z")
-
-
 def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zone refuses
     text: str, zone: str | None
 ) -> datetime | None:
@@ -534,7 +824,7 @@ def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zon
     a string already known to be in the admitted grammar into a value, which is what
     keeps this reading exactly as wide as ADR-0254 §4 states it and no wider.
     """
-    if _FULL_DATE.match(text):
+    if PERIOD_FULL_DATE.match(text):
         if zone is None:  # pragma: no cover — a PERIOD bound's model requires one
             return None
         try:
@@ -571,7 +861,7 @@ def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zon
         if round_tripped != day:
             return None
         return start
-    if not _DATE_TIME.match(text):
+    if not PERIOD_DATE_TIME.match(text):
         return None
     # **RFC 3339 §5.6's own case rule permits a lower-case ``t`` and ``z``**, and
     # ``datetime.fromisoformat`` accepts the first and refuses the second. Upper-
@@ -600,13 +890,15 @@ def _satisfies_terms(bound: ValueBound, value: FrozenJson) -> bool:
 
 
 __all__ = [
-    "ArgumentFailure",
+    "CoverageDefect",
+    "CoverageFailure",
     "CoverageSubject",
-    "UncoveredArgument",
     "account_of",
     "coverage_subject",
     "covers",
     "covers_arguments",
+    "covers_on_argument_route",
+    "declared_at",
     "uncovered",
     "user_facing",
 ]

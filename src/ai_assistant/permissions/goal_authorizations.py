@@ -433,6 +433,39 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _money_narrows(later: ValueBound, earlier: ValueBound) -> bool:
+    """ADR-0254 §5's non-widening test over two ``MONEY`` bounds.
+
+    **Extracted so the ceiling's two facts are read together** (ADR-0266 §3): the
+    figure and whether the endpoint itself is permitted are one statement about what
+    the user allowed, and a comparison that read only the figure would admit a
+    correction that adds back the call the live row refused.
+    """
+    # A ``None`` on either side is unreachable — the model requires a ``MONEY``
+    # bound's ``currency`` and ``maximum`` — and the narrowing question is answered
+    # ``False`` for one all the same, which is the fail-closed direction and costs a
+    # confirmation rather than an assertion.
+    if later.currency != earlier.currency:
+        return False
+    if later.maximum is None or earlier.maximum is None or later.maximum > earlier.maximum:
+        return False
+    # **At an equal ceiling the flag is the whole of the difference** (ADR-0266 §3):
+    # clearing it admits a call at exactly the endpoint the live row refused, which
+    # is a widening however the two numbers compare.
+    if (
+        later.maximum == earlier.maximum
+        and earlier.maximum_exclusive
+        and not later.maximum_exclusive
+    ):
+        return False
+    # A lower bound the correction **drops** widens: every amount below the earlier
+    # minimum becomes permitted. One it **adds** narrows, and one it raises narrows;
+    # one it lowers widens.
+    if earlier.minimum is None:
+        return True
+    return later.minimum is not None and later.minimum >= earlier.minimum
+
+
 def _narrows(  # noqa: PLR0911 — one return per refusal, and each names a different widening
     later: ValueBound, earlier: ValueBound
 ) -> bool:
@@ -446,13 +479,23 @@ def _narrows(  # noqa: PLR0911 — one return per refusal, and each names a diff
     **A change of ``kind`` is not a narrowing**, whatever the two bounds permit:
     the kinds are compared by different readings (§4) and a claim that one of them
     is inside another is a comparison this corpus does not establish. Likewise a
-    change of ``currency``, of ``currency_argument`` or of a ``PERIOD``'s
-    ``timezone``: each re-denominates what the bound is *about* rather than
-    shrinking what it permits, so each takes path (i) and is confirmed.
+    change of ``currency`` or of a ``PERIOD``'s ``timezone``: each re-denominates
+    what the bound is *about* rather than shrinking what it permits, so each takes
+    path (i) and is confirmed.
+
+    **``maximum_exclusive`` is ordered rather than compared numerically** (ADR-0266
+    §3). At an **equal** ``maximum`` the flag is the whole of the difference:
+    **setting** it narrows — *"at most 100"* corrected to *"under 100"* withdraws
+    the endpoint — and **clearing** it **widens**, adding a call at exactly the
+    ceiling that the live row refused. So a clearing at an equal ``maximum`` is a
+    widening ADR-0254 §5 refuses: path (ii) writes no row, and the act asks and is
+    established by path (i) carrying ``supersedes``. A lane that compared
+    ``maximum`` alone would read it as no change and establish a wider authority
+    with no confirmation.
 
     Args:
-        later: The correcting row's bound for this argument.
-        earlier: The superseded row's bound for the same argument.
+        later: The correcting row's bound for this kind.
+        earlier: The superseded row's bound of the same kind.
 
     Returns:
         Whether every value ``later`` permits ``earlier`` permits too.
@@ -460,23 +503,7 @@ def _narrows(  # noqa: PLR0911 — one return per refusal, and each names a diff
     if later.kind is not earlier.kind:
         return False
     if later.kind is BoundKind.MONEY:
-        # A ``None`` on either side is unreachable — the model requires a ``MONEY``
-        # bound's ``currency``, ``currency_argument`` and ``maximum`` — and the
-        # narrowing question is answered ``False`` for one all the same, which is the
-        # fail-closed direction and costs a confirmation rather than an assertion.
-        if (later.currency, later.currency_argument) != (
-            earlier.currency,
-            earlier.currency_argument,
-        ):
-            return False
-        if later.maximum is None or earlier.maximum is None or later.maximum > earlier.maximum:
-            return False
-        # A lower bound the correction **drops** widens: every amount below the
-        # earlier minimum becomes permitted. One it **adds** narrows, and one it
-        # raises narrows; one it lowers widens.
-        if earlier.minimum is None:
-            return True
-        return later.minimum is not None and later.minimum >= earlier.minimum
+        return _money_narrows(later, earlier)
     if later.kind is BoundKind.PERIOD:
         if later.timezone != earlier.timezone:
             return False
@@ -496,19 +523,21 @@ def _member_defect(later: CoverageMember, earlier: CoverageMember | None) -> str
     """Why ``later`` is not a permitted correction of ``earlier`` — or ``None``.
 
     ADR-0254 §1's *"what path (ii) may change, and what it may never touch"*, per
-    argument, with §9 clause (ii)'s principle as the whole of the reason: **the
-    interpretation narrows what the act covers and can never widen it**.
+    **kind** (ADR-0266 §3, which is what now identifies a member), with §9 clause
+    (ii)'s principle as the whole of the reason: **the interpretation narrows what
+    the act covers and can never widen it**.
 
-    * A member the superseded row does not name at all is an **addition**, refused.
+    * A member of a kind the superseded row carries none of is an **addition**,
+      refused.
     * A member **byte-identical** to the superseded row's is carried forward, and
       that is the ordinary case for every argument the correction does not touch —
       its own basis included, so the record says which act each value came from.
-    * A member that **replaces a fixed value** for an argument the superseded row
-      already fixed is admitted, whatever the new value: this is *"make it
-      Sunday"*, and the act that states it is itself recorded.
-    * A member that **narrows a bound** for an argument the superseded row already
-      bounded is admitted; one that widens it, or that changes the bound's kind, is
-      refused.
+    * A member that **replaces a fixed value** of a kind the superseded row already
+      fixed is admitted, whatever the new value: this is *"make it Sunday"*, and the
+      act that states it is itself recorded.
+    * A member that **narrows a bound** of a kind the superseded row already bounded
+      is admitted; one that widens it is refused. **A bound of a different kind
+      cannot arise**, a member and its bound now agreeing by construction.
     * A member that turns a fixed value into a bound, or a bound into a fixed
       value, is **neither** of those two motions and is refused: it does not
       replace a value for an argument the row *fixed*, and it does not narrow a
@@ -516,14 +545,14 @@ def _member_defect(later: CoverageMember, earlier: CoverageMember | None) -> str
 
     Args:
         later: The correcting row's member.
-        earlier: The superseded row's member for the same argument, or ``None``
-            where it names none.
+        earlier: The superseded row's member of the same kind, or ``None`` where it
+            carries none.
 
     Returns:
         The refusal's reason, or ``None`` where the member is a permitted
         correction.
     """
-    key = later.argument
+    key = later.kind.value
     if earlier is None:
         return (
             f"a correction may not add a coverage member for {key!r}, which the row it "
@@ -989,15 +1018,17 @@ class SqliteGoalAuthorizationStore:
                 f"lengthens a horizon on any path but (i) (ADR-0256 §5)"
             )
             raise InvalidAuthorizationError(msg)
-        held = {member.argument: member for member in earlier.coverage}
+        held = {member.kind: member for member in earlier.coverage}
         for member in row.coverage:
-            defect = _member_defect(member, held.get(member.argument))
+            defect = _member_defect(member, held.get(member.kind))
             if defect is not None:
                 msg = (
                     f"authorization {row.id!r} corrects {earlier.id!r}: {defect} (ADR-0254 §1, §9)"
                 )
                 raise InvalidAuthorizationError(msg)
-        dropped = sorted(held.keys() - {member.argument for member in row.coverage})
+        dropped = sorted(
+            kind.value for kind in held.keys() - {member.kind for member in row.coverage}
+        )
         if dropped:
             msg = (
                 f"authorization {row.id!r} corrects {earlier.id!r} and drops its member "

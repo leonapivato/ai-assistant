@@ -14763,6 +14763,178 @@ def _system_supplied(value: tuple[str, ...]) -> tuple[str, ...]:
 # States facts and draws no conclusions — `permissions` does that (ADR-0016
 # §3). Every field a decision depends on is required, because a default is a
 # claim, and the natural default for a reach tuple is a false one.
+#
+# :class:`BoundKind` is declared here rather than beside :class:`ValueBound`
+# because ADR-0266 §7 gives it a second consumer — :class:`BoundedArgument`, which
+# :class:`ToolDefinition` carries and which is declared long before the
+# authorization section. That is the move this module's own comment above
+# :data:`Identifier` prescribes: *"A forward reference plus ``model_rebuild`` would
+# have kept the old position at the cost of making a `core` type depend on an
+# import-order side effect, so the primitive moved rather than the model."*
+# **Nothing about it changed** but the count of kinds it is read at.
+
+
+class BoundKind(StrEnum):
+    """Which kind of permitted range a :class:`ValueBound` states (ADR-0254 §2).
+
+    A **closed** enumeration of exactly **three** members, each valued by its
+    lower-cased name, and the vocabulary is *added to and never renamed*.
+
+    **Three kinds and not a general expression language, because the failure modes
+    are asymmetric** (§2). A comparison this system gets wrong in the permissive
+    direction authorises a call the user did not authorise, and that is
+    undetectable afterwards; one it gets wrong in the restrictive direction costs
+    a question. Each member below has a total order or a membership relation the
+    corpus already states somewhere, and each is compared without parsing anything
+    the user wrote.
+
+    **Every other argument is fixed-only** (§2). An argument whose bound would be
+    of any other kind — a count, a distance, a free-text field, a nested object, a
+    list, a boolean — takes a fixed value or no member at all, and **no lane adds a
+    fourth member without its own ratified decision**. That is ADR-0148 §2's
+    exactness default one axis over: where the corpus does not establish a total,
+    exact ordering over an argument's values, a range over it is a comparison it
+    cannot prove.
+    """
+
+    MONEY = "money"
+    """An amount denominated in a currency the record names (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.currency`, :attr:`ValueBound.currency_argument` and
+    :attr:`ValueBound.maximum`, and optionally :attr:`ValueBound.minimum`. The
+    owner's *"additional costs"*."""
+
+    PERIOD = "period"
+    """A half-open interval of instants, ``[starts_at, ends_at)`` (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.starts_at`, :attr:`ValueBound.ends_at` and
+    :attr:`ValueBound.timezone`. Half-open is ADR-0194 §1's own convention for a
+    period, adopted so the corpus has one. The owner's *"make it Sunday"*."""
+
+    TERMS = "terms"
+    """A named set a value must be a member of (ADR-0254 §2).
+
+    Carries :attr:`ValueBound.terms`. Membership is **equality of the stored
+    characters and nothing else**, which is ADR-0237 §3's rule for a
+    ``TopicLabel`` — *"No fold is applied and none is needed"* — read onto a set
+    the user named. The owner's *"materially different terms"*."""
+
+
+class BoundedArgument(BaseModel):
+    """What one argument of one declaration takes: a kind, not a value (ADR-0266 §7).
+
+    **The whole of what a declaration says about which of its arguments takes an
+    amount, a period or a named term.** A :class:`CoverageMember` records what the
+    user stated and names no argument (ADR-0266 §3), so this is the other half of
+    the argument route: a member of kind *k* is met against the request's value at
+    the argument a ``BoundedArgument`` declares at *k*, and nowhere else.
+
+    **Declaring a money argument is a safeguard and not a requirement.** The owner's
+    ruling of 2026-09-14 makes the **quote** the primary route at every tool — *"the
+    price is usually a consequence of those choices, not an argument the assistant
+    supplies"* — so a declaration omitting one keeps its ceiling proved against the
+    quote and forgoes only the second comparison. *"A filter is not a charge"*: a
+    ``max_price`` constrains what a search returns, so where one **is** declared the
+    ``MONEY`` member must satisfy it **as well** as the quote.
+
+    **No association is inferred from anything.** ADR-0254 §2's no-inference limb
+    stated one field over: not from a field name, a type, a schema keyword or a
+    neighbouring argument, and never from a value's JSON type or a schema keyword at
+    the comparison — ADR-0254 §4's *"No reading consults a schema to decide what an
+    argument means, and there is no exception"*.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    argument: EncodableText = Field(
+        description=(
+            "The key of ``ActionRequest.parameters`` this declares, at depth **one**: "
+            "never a dotted expression, an index, a wildcard or a selector, and **no "
+            "lane adds an addressing syntax**. ADR-0253 §6's rule for a "
+            "``StepOutputRef.field`` stated once more rather than re-derived, and for "
+            "its reason — a path language is a second thing to get wrong at the one "
+            "comparison that decides whether a call is authorised."
+        )
+    )
+    kind: BoundKind = Field(
+        description=(
+            "Which kind of value this argument takes, and so which kind of coverage "
+            "member may be met against it (ADR-0266 §7)."
+        )
+    )
+    currency_argument: EncodableText | None = Field(
+        default=None,
+        description=(
+            "``MONEY`` only, required there: the key of ``parameters`` that carries "
+            "this amount's currency. **It is the whole of the association between an "
+            "amount and the currency it is denominated in** — a fact about a "
+            "**declaration** rather than about an act, which is why ADR-0266 §3 takes "
+            "it off :class:`ValueBound`. ADR-0254 §4's currency conjunct is read here "
+            "on the argument route, **which is what makes that key covered rather than "
+            "unexamined**."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_kind_carries_its_own_currency_key_and_no_other(self) -> BoundedArgument:
+        """Admit exactly the two shapes ADR-0266 §7 names.
+
+        ``MONEY`` **with** a ``currency_argument``, or ``PERIOD`` or ``TERMS``
+        **with none** — an amount is the only kind §4's readings denominate, and a
+        currency key beside a period or a term is a value nothing reads. **And
+        ``argument`` never equals ``currency_argument``**: one key cannot carry both
+        the amount and the code it is denominated in, and a declaration claiming so
+        would have §4's currency conjunct compare an amount against a currency.
+
+        Raises:
+            ValueError: If a ``MONEY`` argument carries no ``currency_argument``, if
+                a ``PERIOD`` or ``TERMS`` one carries one, or if the two keys are
+                equal.
+        """
+        if self.kind is BoundKind.MONEY and self.currency_argument is None:
+            msg = (
+                f"a MONEY bounded argument names the key carrying its currency; "
+                f"{self.argument!r} names none, and §4 compares no amount without one "
+                f"(ADR-0266 §7)"
+            )
+            raise ValueError(msg)
+        if self.kind is not BoundKind.MONEY and self.currency_argument is not None:
+            msg = (
+                f"a {self.kind} bounded argument carries no currency_argument; "
+                f"{self.argument!r} is denominated in nothing (ADR-0266 §7)"
+            )
+            raise ValueError(msg)
+        if self.argument == self.currency_argument:
+            msg = (
+                f"a bounded argument's currency_argument names a second key; "
+                f"{self.argument!r} cannot carry both the amount and its currency "
+                f"(ADR-0266 §7)"
+            )
+            raise ValueError(msg)
+        return self
+
+
+def _bounded_arguments(value: tuple[BoundedArgument, ...]) -> tuple[BoundedArgument, ...]:
+    """Require ADR-0266 §7's duplicate-free rule over ``argument``.
+
+    Two declarations of one key would need a precedence rule at the comparison,
+    which is the shape ADR-0254 §2 refuses one type over. **Two declarations of one
+    *kind* are admitted and are not a defect**: §7 answers them by meeting no member
+    of that kind on the argument route at all, which is the restrictive direction
+    and a fact about the comparison rather than about the declaration.
+
+    Raises:
+        ValueError: If two entries name the same ``argument``.
+    """
+    named = [one.argument for one in value]
+    if len(set(named)) != len(named):
+        msg = (
+            "no two bounded arguments of one declaration name the same argument; a "
+            "precedence rule between them is one somebody would have to remember at the "
+            "comparison (ADR-0266 §7)"
+        )
+        raise ValueError(msg)
+    return value
 
 
 class ToolDefinition(BaseModel):
@@ -14831,6 +15003,28 @@ class ToolDefinition(BaseModel):
             "one ADR-0016 §1 refuses — an unclassified argument is user-facing, so a "
             "declaration that says nothing needs coverage for every argument and asks "
             "where it has none. It costs a question and can never authorise a call."
+        ),
+    )
+    bounded_arguments: Annotated[
+        tuple[BoundedArgument, ...], AfterValidator(_bounded_arguments)
+    ] = Field(
+        default=(),
+        description=(
+            "Which of this declaration's arguments take an amount, a period or a named "
+            "term, possibly empty and duplicate-free on ``argument`` (ADR-0266 §7). "
+            "**The whole of what a declaration says about that**, and the argument "
+            "route's only source: a coverage member names no argument, so a member is "
+            "met against a concrete value only where an entry here declares one at that "
+            "member's kind. **It names no key of this declaration's own "
+            "``system_supplied``** — which is what preserves ADR-0254 §3's protection "
+            'after the validator stating it is gone: *"a user is never asked to approve '
+            'an idempotency key"* stays true one field over, a system-supplied key '
+            "being declarable at no kind. **This is a second exception to this class's "
+            "required-field rule, recorded rather than argued away** (ADR-0266 §9's "
+            "ADR-0016 scope): the empty default makes the **opposite** claim to the one "
+            "ADR-0016 §1 refuses, since a declaration that declares nothing is met on "
+            "that route nowhere — it forgoes the second comparison and keeps the "
+            "primary one, the quote's."
         ),
     )
     parameters_schema: FrozenJsonMapping = Field(
@@ -14904,6 +15098,43 @@ class ToolDefinition(BaseModel):
                 raise ValueError(msg)
         elif self.idempotency_window is not None:
             msg = f"idempotency_window is only valid for a KEYED tool, not {self.idempotency}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _no_bounded_argument_names_a_system_supplied_key(self) -> ToolDefinition:
+        """Refuse declaring a kind for a key the system fills itself (ADR-0266 §7).
+
+        **This is what preserves ADR-0254 §3's system-supplied protection after the
+        validator stating it is gone.** That section made a row whose coverage names
+        a system-supplied argument not constructible by reading
+        ``CoverageMember.argument``, which no longer exists; a system-supplied key
+        being declarable at **no** kind is what keeps *"a user is never asked to
+        approve an idempotency key"* true one field over — no member can be met
+        against one, so none is ever rendered in a question about one.
+
+        **Read over both keys a ``BoundedArgument`` names**, the amount's and its
+        currency's. §7 states the refusal over the entry *"naming no key of that
+        declaration's own ``system_supplied``"*, and a currency key the system fills
+        is as much a value the user never stated as the amount's is. Refusing both is
+        the restrictive direction ADR-0254 §2 asks for: it costs a declaration that
+        wanted one, and it never authorises a call.
+
+        Raises:
+            ValueError: If a bounded argument names a key of ``system_supplied``.
+        """
+        supplied = set(self.system_supplied)
+        declared = {one.argument for one in self.bounded_arguments} | {
+            one.currency_argument
+            for one in self.bounded_arguments
+            if one.currency_argument is not None
+        }
+        named = sorted(declared & supplied)
+        if named:
+            msg = (
+                f"a declaration's bounded arguments name no key it fills itself; this one "
+                f"fills {', '.join(repr(key) for key in named)} (ADR-0266 §7)"
+            )
             raise ValueError(msg)
         return self
 
@@ -17210,6 +17441,24 @@ class ActionRequest(BaseModel):
             "fact on the durable record."
         ),
     )
+    intended_action: Identifier | None = Field(
+        default=None,
+        description=(
+            "The ``IntendedAction`` (ADR-0265 §1) the step this request serves is an "
+            "**attempt at**, by id. This is :attr:`goal`'s shape one field over, and it "
+            "is how a request says which act it is (ADR-0266 §7). ``orchestration`` "
+            "sets it from the plan "
+            "step the request serves, on every construction and resume path; no policy, "
+            "no seam, no interface adapter and no model output writes it. **A request "
+            "carrying ``None`` is met by ADR-0266 §7's evidence route in no case**, so "
+            "no ``MONEY`` member is met and the act asks — the fail-closed direction. "
+            "**Unlike :attr:`goal` it *is* transcribed onto "
+            ":class:`PermissionDecision`**, and ADR-0254 §16's stated ground for "
+            "declining the goal is what requires it: an intended action is precisely "
+            "what selects the quote the comparison was taken against, so it is not a "
+            "value the trail cannot compare."
+        ),
+    )
     step_id: DurableIdentifier | None = Field(
         default=None, description="The plan step this action belongs to, if any."
     )
@@ -17600,6 +17849,19 @@ class PermissionDecision(BaseModel):
             "exactly as ``step_id`` is."
         ),
     )
+    intended_action: Identifier | None = Field(
+        default=None,
+        description=(
+            "The ``IntendedAction`` (ADR-0265 §1) the request this decision was made "
+            "about is an **attempt at**, by id (ADR-0266 §7). Transcribed from the "
+            "request by :meth:`from_request`, never asserted by a caller. "
+            ":meth:`authorises` compares it, because ADR-0266's whole proof is that "
+            "the amount was quoted for **that** act — a decision that could not say "
+            "which act it was taken for would authorise a request that is an attempt "
+            "at another. A decision written before this field decodes carrying "
+            "``None``, which then matches only a request carrying none."
+        ),
+    )
     resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
     )
@@ -17712,6 +17974,7 @@ class PermissionDecision(BaseModel):
             decided_at=decided_at,
             step_id=request.step_id,
             execution_id=request.execution_id,
+            intended_action=request.intended_action,
             resolves=resolves,
             expires_at=expires_at,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
@@ -17822,6 +18085,12 @@ class PermissionDecision(BaseModel):
             decided_at=decided_at,
             step_id=confirmed.step_id,
             execution_id=confirmed.execution_id,
+            # **Transcribed with the rest of the subject, and accepted from no
+            # caller** (ADR-0235 §4, ADR-0266 §7): a resolving decision that lost the
+            # act the question was asked about would answer a request that is an
+            # attempt at another, which is the substitution `authorises`' sixth
+            # conjunct exists to refuse.
+            intended_action=confirmed.intended_action,
             resolves=confirmed.id,
             expires_at=None,
             egress_binding=None if binding is None else binding.model_copy(deep=True),
@@ -17914,6 +18183,18 @@ class PermissionDecision(BaseModel):
         send authorise a call that describes and destines nothing. ``None ==
         None`` is ``True``, so every request and decision in the tree today
         compares exactly as it did before this conjunct existed.
+
+        **``intended_action`` is the sixth conjunct, and it is the one value the
+        coverage was proved *through*** (ADR-0266 §7). Without it a decision taken
+        for one act would authorise a later request differing **only** in the act it
+        is an attempt at — and the whole of ADR-0266's proof is that the amount was
+        quoted *for that act*, so the value selecting the evidence would be the one
+        value the trail could not compare. It meets ADR-0016 §2's test for living on
+        the type exactly as ``execution_id`` does: an identifier on both records,
+        not a decision. It is ``None``-safe in both directions on that conjunct's own
+        reading — a **stored** decision written before this field decodes carrying
+        ``None`` and then authorises only a request carrying none, which is the
+        fail-closed direction and needs no migration to be true.
         """
         return (
             self.ruling.outcome is PermissionOutcome.ALLOW
@@ -17922,6 +18203,7 @@ class PermissionDecision(BaseModel):
             and request.step_id == self.step_id
             and request.execution_id == self.execution_id
             and request.egress_binding == self.egress_binding
+            and request.intended_action == self.intended_action
         )
 
     @model_validator(mode="after")
@@ -18802,52 +19084,6 @@ class RecipientGrantOutcome(BaseModel):
 # (ADR-0247 §1).
 
 
-class BoundKind(StrEnum):
-    """Which kind of permitted range a :class:`ValueBound` states (ADR-0254 §2).
-
-    A **closed** enumeration of exactly **three** members, each valued by its
-    lower-cased name, and the vocabulary is *added to and never renamed*.
-
-    **Three kinds and not a general expression language, because the failure modes
-    are asymmetric** (§2). A comparison this system gets wrong in the permissive
-    direction authorises a call the user did not authorise, and that is
-    undetectable afterwards; one it gets wrong in the restrictive direction costs
-    a question. Each member below has a total order or a membership relation the
-    corpus already states somewhere, and each is compared without parsing anything
-    the user wrote.
-
-    **Every other argument is fixed-only** (§2). An argument whose bound would be
-    of any other kind — a count, a distance, a free-text field, a nested object, a
-    list, a boolean — takes a fixed value or no member at all, and **no lane adds a
-    fourth member without its own ratified decision**. That is ADR-0148 §2's
-    exactness default one axis over: where the corpus does not establish a total,
-    exact ordering over an argument's values, a range over it is a comparison it
-    cannot prove.
-    """
-
-    MONEY = "money"
-    """An amount denominated in a currency the record names (ADR-0254 §2).
-
-    Carries :attr:`ValueBound.currency`, :attr:`ValueBound.currency_argument` and
-    :attr:`ValueBound.maximum`, and optionally :attr:`ValueBound.minimum`. The
-    owner's *"additional costs"*."""
-
-    PERIOD = "period"
-    """A half-open interval of instants, ``[starts_at, ends_at)`` (ADR-0254 §2).
-
-    Carries :attr:`ValueBound.starts_at`, :attr:`ValueBound.ends_at` and
-    :attr:`ValueBound.timezone`. Half-open is ADR-0194 §1's own convention for a
-    period, adopted so the corpus has one. The owner's *"make it Sunday"*."""
-
-    TERMS = "terms"
-    """A named set a value must be a member of (ADR-0254 §2).
-
-    Carries :attr:`ValueBound.terms`. Membership is **equality of the stored
-    characters and nothing else**, which is ADR-0237 §3's rule for a
-    ``TopicLabel`` — *"No fold is applied and none is needed"* — read onto a set
-    the user named. The owner's *"materially different terms"*."""
-
-
 #: The two keys an ordinary tz installation exposes that name the **host** rather
 #: than a zone. ``localtime`` is the machine's configured zone, copied or symlinked
 #: into the tz directory by the system; ``posixrules`` is a local copy of whatever
@@ -18939,6 +19175,35 @@ def _named_terms(value: tuple[str, ...]) -> tuple[str, ...]:
     return value
 
 
+#: RFC 3339 §5.6's ``full-date``, and nothing wider. ``date.fromisoformat`` admits
+#: more than this — the compact ``20260913`` and ISO week dates such as
+#: ``2026-W37-7`` — and ADR-0254 §4 admits *"a calendar date"* under the same
+#: grammar the date-time arm is stated in, so the wider forms are refused.
+#:
+#: **Here rather than in** ``permissions/_coverage.py``, **because two statements of
+#: one grammar may disagree.** ADR-0266 §3 validates a ``PERIOD`` member's ``fixed``
+#: against *"a value that reading accepts"*, and `core` depends on nothing, so a
+#: `permissions`-side copy could not be the one the contract is checked against.
+#: The comparison imports these; nothing re-spells them.
+PERIOD_FULL_DATE: Final[re.Pattern[str]] = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+#: RFC 3339 §5.6's ``date-time``: ``full-date``, the ``T`` separator (that section's
+#: own case rule permits ``t``), ``partial-time`` with an optional fraction, and a
+#: ``time-offset`` that is ``Z``/``z`` or ``±HH:MM``.
+#:
+#: **Written out rather than delegated to** ``datetime.fromisoformat``, because that
+#: function implements **ISO 8601** and is strictly wider: it accepts *any* single
+#: character as the date/time separator — so ``2026-09-13X10:00:00+00:00`` parses —
+#: a colon-free offset (``+0000``), a comma as the fractional separator, and the
+#: compact and week-date forms. Each of those would be an argument ADR-0254 §4 does
+#: not admit **satisfying** a bound, which is the permissive direction and the one
+#: direction §4 refuses: *"the answer is not to round, to quantise or to pick a
+#: tolerance, it is to refuse and ask."*
+PERIOD_DATE_TIME: Final[re.Pattern[str]] = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z"
+)
+
+
 class ValueBound(BaseModel):
     """A permitted range over one argument's value (ADR-0254 §2).
 
@@ -18949,10 +19214,12 @@ class ValueBound(BaseModel):
     type is what expresses the correspondence rather than a rule to remember."*
 
     **No comparison against it consults a schema** (§4). Every fact a reading
-    needs is on this value or in the request: which key holds an amount, which key
-    holds its currency, which zone a date is read in, which strings a term may
-    take. ADR-0145 §1's schema check decides whether a call is well-formed and
-    decides nothing about coverage.
+    needs is on this value, on the **declaration** or in the request: which zone a
+    date is read in and which strings a term may take are here; which key holds an
+    amount and which key holds its currency are the declaration's
+    (:class:`BoundedArgument`, ADR-0266 §7), a fact about a declaration rather than
+    about an act. ADR-0145 §1's schema check decides whether a call is well-formed
+    and decides nothing about coverage.
 
     **Normalisation is part of the resolution that minted this bound and is never
     applied at the comparison** (§10). Whatever normalising an act needed happened
@@ -18971,22 +19238,27 @@ class ValueBound(BaseModel):
             "register. ``ToolCost.currency``'s rule and not a second one."
         ),
     )
-    currency_argument: EncodableText | None = Field(
-        default=None,
-        description=(
-            "``MONEY`` only: the key of ``parameters`` that carries the currency for "
-            "this amount — a key name at depth one, exactly as "
-            ":attr:`CoverageMember.argument` is. **It is the whole of the association "
-            "between an amount and the currency it is denominated in**, and no lane "
-            "infers one from a field name, a type, a schema keyword or a neighbouring "
-            "argument (ADR-0254 §2, §4)."
-        ),
-    )
     maximum: Decimal | None = Field(
         default=None,
         description=(
             "``MONEY`` only: the greatest amount this bound permits, finite and not "
-            "negative. ``ToolCost``'s two refusals, reused rather than restated."
+            "negative. ``ToolCost``'s two refusals, reused rather than restated. "
+            "Whether the endpoint itself is permitted is :attr:`maximum_exclusive`'s."
+        ),
+    )
+    maximum_exclusive: bool = Field(
+        default=False,
+        description=(
+            "``MONEY`` only: whether :attr:`maximum` is **excluded** from what this "
+            'bound permits (ADR-0266 §3). *"under 100"* excludes ``100`` and *"at '
+            'most 100"* includes it, **so a ceiling the user stated strictly is '
+            "representable as one** and the two stop being one value. ADR-0254 §4's "
+            "reading is then *less than* ``maximum`` where this is set and *less than "
+            "or equal to* it otherwise, every other conjunct unmoved. **It is ordered "
+            "for §5's narrowing test**: at an equal ``maximum``, setting it narrows "
+            "and clearing it **widens**, so a path-(ii) correction that clears it is a "
+            "widening §5 refuses — a lane comparing ``maximum`` alone would read that "
+            "as no change and establish a wider authority with no confirmation."
         ),
     )
     minimum: Decimal | None = Field(
@@ -19071,11 +19343,23 @@ class ValueBound(BaseModel):
 
         Raises:
             ValueError: If an argument this kind does not take is present, if one
-                it takes is absent, if an amount is not finite or is negative, if
-                ``minimum`` exceeds ``maximum``, or if ``ends_at`` is not strictly
-                after ``starts_at``.
+                it takes is absent, if ``maximum_exclusive`` is set where there is
+                no ``maximum`` to exclude, if an amount is not finite or is
+                negative, if ``minimum`` exceeds ``maximum``, or if ``ends_at`` is
+                not strictly after ``starts_at``.
         """
-        money = ("currency", "currency_argument", "maximum", "minimum")
+        if self.maximum_exclusive and self.maximum is None:
+            # **Stated as its own refusal rather than left to the two rules that
+            # imply it** (ADR-0266 §3): a `bool` is not `None`, so the stray sweep
+            # below cannot see it, and a flag withdrawing an endpoint no bound
+            # carries states nothing about what is permitted. It is reachable only
+            # on a kind that takes no `maximum` at all, `MONEY` requiring one.
+            msg = (
+                f"a {self.kind} bound carries no maximum_exclusive; the flag withdraws a "
+                f"maximum this bound does not state (ADR-0266 §3)"
+            )
+            raise ValueError(msg)
+        money = ("currency", "maximum", "minimum")
         period = ("starts_at", "ends_at", "timezone")
         taken = {BoundKind.MONEY: money, BoundKind.PERIOD: period, BoundKind.TERMS: ("terms",)}[
             self.kind
@@ -19136,9 +19420,12 @@ class ValueBound(BaseModel):
 class ResolutionRule(StrEnum):
     """How a span became the value a coverage member carries (ADR-0254 §8, §10).
 
-    A **closed** enumeration of exactly **three** members, each valued by its
+    A **closed** enumeration of exactly **four** members, each valued by its
     lower-cased name, and the vocabulary is *added to and never renamed*.
-    **Exactly three resolutions exist and there is no fourth** (§10), each a total
+    **Exactly four resolutions exist and there is no fifth** — ADR-0254 §10's
+    closure at three as ADR-0266 §4 opens it, that section's *"A fourth
+    ``ResolutionRule``"* being a supersession ADR-0254 §19 books by name — each a
+    total
     function of inputs recorded on the turn the act rode.
 
     **No resolution reads memory, a preference, a prior goal, a prior turn's
@@ -19177,6 +19464,24 @@ class ResolutionRule(StrEnum):
     ADR-0249 §7 drops a ``FROM_EVIDENCE`` ground naming a search-minted record, on
     ADR-0231 §16's ruling that such an id *"resolves in no store"*."""
 
+    STATED_BOUND = "stated_bound"
+    """The span read as a **bound** — a ceiling the user stated (ADR-0266 §4).
+
+    Neither argument, its one input being the span the basis already names, which
+    ADR-0249 §7 checked against that turn's own utterance when the revision was
+    recorded. **The reading is closed at four forms** — ``under``/``below`` for a
+    strict ceiling, ``at most``/``up to`` for an inclusive one, each with a decimal
+    figure and one word of a three-currency table — so a floor, a negated ceiling, a
+    figure written in words and every kind but ``MONEY`` mint nothing and the act
+    asks.
+
+    **A member this resolution mints is ``PROPOSED`` and is never established from
+    the span alone** (ADR-0266 §4): the row is written before the question is put,
+    the projection renders the ceiling **beside the user's own words**, and the
+    answer settles it. That is what closes the class of mis-chosen spans no reading
+    rule could — *"avoid booking hotels under 100 euros"* proposes a ceiling of 100,
+    the user reads it beside what they said, answers no, and no authority exists."""
+
 
 class ValueResolution(BaseModel):
     """The rule and the inputs that turned a span into a value (ADR-0254 §8, §10).
@@ -19187,7 +19492,7 @@ class ValueResolution(BaseModel):
     survive, and neither is derivable from the other"* (§8) — a resolved value need
     not appear literally in the message, and the message is not thereby lost.
 
-    A model validator admits exactly the three shapes :class:`ResolutionRule` names
+    A model validator admits exactly the four shapes :class:`ResolutionRule` names
     and refuses every other, which is ``GoalElement``'s construction (ADR-0249 §1)
     applied here for its reason.
     """
@@ -19223,21 +19528,25 @@ class ValueResolution(BaseModel):
 
     @model_validator(mode="after")
     def _the_rule_carries_its_own_arguments_and_no_others(self) -> ValueResolution:
-        """Admit exactly the three shapes :class:`ResolutionRule` names (ADR-0254 §8).
+        """Admit exactly the four shapes :class:`ResolutionRule` names (§8).
 
-        Stated in both directions per rule: an ``AS_STATED`` resolution carrying
-        either argument is refused, a ``DATE_FROM_CONTEXT`` missing ``now`` or
-        ``timezone`` is refused, and a ``FROM_SHOWN_RECORD`` missing ``record`` is
-        refused. **A fourth shape is not constructible.**
+        Stated in both directions per rule: an ``AS_STATED`` or ``STATED_BOUND``
+        resolution carrying any argument is refused, a ``DATE_FROM_CONTEXT`` missing
+        ``now`` or ``timezone`` is refused, and a ``FROM_SHOWN_RECORD`` missing
+        ``record`` is refused. **A fifth shape is not constructible.**
 
         Raises:
             ValueError: If an argument this rule does not take is present, or one
                 it takes is absent.
         """
-        taken = {
+        taken: tuple[str, ...] = {
             ResolutionRule.AS_STATED: (),
             ResolutionRule.DATE_FROM_CONTEXT: ("now", "timezone"),
             ResolutionRule.FROM_SHOWN_RECORD: ("record",),
+            # **``STATED_BOUND`` takes neither argument** (ADR-0266 §4): its one
+            # input is the span the basis already names, so there is nothing further
+            # to record and a resolution carrying one is refused.
+            ResolutionRule.STATED_BOUND: (),
         }[self.rule]
         stray = [
             name
@@ -19314,12 +19623,17 @@ class CoverageMember(BaseModel):
     validator admits exactly those, so a member of any third kind is **not
     constructible**.
 
-    **``argument`` is a key name and never a path.** The depth is **one**: never a
-    dotted expression, an index, a wildcard or a selector, and **no lane adds an
-    addressing syntax**. That is ADR-0253 §6's rule for a ``StepOutputRef.field``
-    stated once more rather than re-derived, and for its reason — a path language
-    is a second thing to get wrong at the one comparison that decides whether a
-    call is authorised.
+    **It records the constraint and never the slot** (ADR-0266 §3). A member states
+    *what the user's words fixed or bounded* — an amount, a period, a named term —
+    and states **nothing about which argument of which declaration carries it**. The
+    argument key is the **declaration's** (``ToolDefinition.bounded_arguments``) or
+    the quote's, and it is read at the comparison rather than chosen at the mint:
+    *"a value that **fits** an argument is not one the act's words **bear on**"* — a
+    hotel's star rating has a number in it and would fit a price, while *"four
+    stars"* has no ``MONEY`` reading at all. **A member is still not portable across
+    tools**: ADR-0254 §3's condition 3 compares the request's ``tool`` against the
+    row's by value, left entire. What a member survives is an argument renamed
+    inside one declaration.
 
     **An interpretation fills a slot the act opened and never opens one** (§9
     clause (ii)). A resolution turns a span into a value *for an argument the act's
@@ -19331,19 +19645,24 @@ class CoverageMember(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    argument: EncodableText = Field(
+    kind: BoundKind = Field(
         description=(
-            "The key of ``ActionRequest.parameters`` this member is about, at depth "
-            "**one** (ADR-0254 §2)."
+            "Which kind of value the user's words fixed or bounded — an amount, a "
+            "period, a named term (ADR-0266 §3). **The whole of what a member says "
+            "about what it is about**: it names no argument, and ADR-0266 §7's two "
+            "routes decide what it is proved against at the comparison. It is also "
+            "what identifies a member within one row, no two carrying one kind."
         )
     )
     fixed: FrozenJsonValue | None = Field(
         default=None,
         description=(
             "The exact value the act fixed, or ``None`` where this member states a "
-            "bound instead. §3 compares it against the argument by the **canonical "
-            "JSON encoding** ``ActionRequest.parameters_digest`` is taken over, byte "
-            "for byte — one canonical form in this system and not a second."
+            "bound instead. ADR-0254 §3 compares it against the argument by the "
+            "**canonical JSON encoding** ``ActionRequest.parameters_digest`` is taken "
+            "over, byte for byte — one canonical form in this system and not a second. "
+            "**Validated against :attr:`kind`** (ADR-0266 §3), a ``MONEY`` one being "
+            "refused outright."
         ),
     )
     bound: ValueBound | None = Field(
@@ -19379,15 +19698,74 @@ class CoverageMember(BaseModel):
         """
         if self.fixed is not None and self.bound is not None:
             msg = (
-                f"a coverage member for {self.argument!r} fixes a value or states a bound, "
+                f"a coverage member of kind {self.kind} fixes a value or states a bound, "
                 f"never both; a precedence rule between them is one somebody would have to "
                 f"remember at the comparison (ADR-0254 §2)"
             )
             raise ValueError(msg)
         if self.fixed is None and self.bound is None:
             msg = (
-                f"a coverage member for {self.argument!r} fixes a value or states a bound; "
+                f"a coverage member of kind {self.kind} fixes a value or states a bound; "
                 f"one that does neither records nothing the user said (ADR-0254 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _the_value_is_one_this_kind_states(self) -> CoverageMember:
+        """Refuse a value the member's own ``kind`` does not read (ADR-0266 §3).
+
+        **A bound carries the member's kind**, and **a ``fixed`` value is validated
+        against it too** — *"without which arbitrary JSON could be labelled at a kind
+        and compared under a reading it does not fit"*.
+
+        * A ``MONEY`` ``fixed`` is **refused outright**: an amount carries no
+          currency on a fixed member, and ADR-0254 §4's ``MONEY`` reading compares
+          none without one, so such a member states an amount nothing can
+          denominate. Such an act mints a **bound** or nothing.
+        * A ``PERIOD`` ``fixed`` is a value that reading accepts — an RFC 3339
+          date-time carrying an offset, or a calendar date
+          (:data:`PERIOD_DATE_TIME`, :data:`PERIOD_FULL_DATE`, the one statement of
+          that grammar).
+        * A ``TERMS`` ``fixed`` is a JSON string, which is the only thing §4's
+          membership reading compares.
+
+        Raises:
+            ValueError: If a ``bound``'s kind differs from the member's, or if a
+                ``fixed`` value is not one this kind states.
+        """
+        if self.bound is not None:
+            if self.bound.kind is not self.kind:
+                msg = (
+                    f"a coverage member of kind {self.kind} states a bound of that kind, "
+                    f"got {self.bound.kind}; a member and its bound are one statement "
+                    f"about one thing the user said (ADR-0266 §3)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.kind is BoundKind.MONEY:
+            msg = (
+                "a MONEY coverage member states a bound and never a fixed value; an amount "
+                "carries no currency on a fixed member, so nothing could denominate it "
+                "(ADR-0266 §3)"
+            )
+            raise ValueError(msg)
+        if self.kind is BoundKind.PERIOD:
+            readable = isinstance(self.fixed, str) and bool(
+                PERIOD_FULL_DATE.match(self.fixed) or PERIOD_DATE_TIME.match(self.fixed)
+            )
+            if not readable:
+                msg = (
+                    "a PERIOD coverage member fixes a value ADR-0254 §4's reading accepts: "
+                    "an RFC 3339 date-time carrying an offset, or a calendar date "
+                    "(ADR-0266 §3)"
+                )
+                raise ValueError(msg)
+            return self
+        if not isinstance(self.fixed, str):
+            msg = (
+                "a TERMS coverage member fixes a JSON string, which is the only value §4's "
+                "membership reading compares (ADR-0266 §3)"
             )
             raise ValueError(msg)
         return self
@@ -19562,22 +19940,25 @@ class AuthorizationSettlement(StrEnum):
 
 
 def _coverage_tuple(value: tuple[CoverageMember, ...]) -> tuple[CoverageMember, ...]:
-    """Require ADR-0254 §2's rule that no two members name one argument.
+    """Require ADR-0266 §3's rule that no two members carry one ``kind``.
 
-    **A precedence rule between two members about one argument is a rule somebody
-    would have to remember at the comparison, and it is better not to have one**
-    (§2). The order is the record's own and is not sorted here: §3's comparison is
-    per argument and reads no order.
+    **ADR-0254 §2's no-two-members rule stated over the value that now identifies a
+    member**, and for that clause's own reason: *"A precedence rule between two
+    members about one argument is a rule somebody would have to remember at the
+    comparison, and it is better not to have one."* A member names no argument
+    (ADR-0266 §3), so its ``kind`` is what says which thing of the user's it is
+    about. The order is the record's own and is not sorted here: ADR-0266 §7's two
+    routes read no order.
 
     Raises:
-        ValueError: If two members name the same ``argument``.
+        ValueError: If two members carry the same ``kind``.
     """
-    named = [member.argument for member in value]
-    if len(set(named)) != len(named):
+    kinds = [member.kind for member in value]
+    if len(set(kinds)) != len(kinds):
         msg = (
-            "no two coverage members of one authorization name the same argument; a "
+            "no two coverage members of one authorization carry the same kind; a "
             "precedence rule between them is one somebody would have to remember at the "
-            "comparison (ADR-0254 §2)"
+            "comparison (ADR-0254 §2, ADR-0266 §3)"
         )
         raise ValueError(msg)
     return value
@@ -19832,62 +20213,6 @@ class Authorization(BaseModel):
             raise ValueError(msg)
         return self
 
-    @model_validator(mode="after")
-    def _coverage_names_no_system_supplied_argument(self) -> Authorization:
-        """Refuse a member naming a key the declaration fills itself (§3).
-
-        **A user is never asked to approve an idempotency key** — and never records
-        one either. The row embeds the declaration whole, so both facts are on the
-        row and this is a rule true of every state it is ever persisted in.
-
-        Raises:
-            ValueError: If a coverage member names a member of
-                ``tool.system_supplied``.
-        """
-        supplied = set(self.tool.system_supplied)
-        named = sorted({member.argument for member in self.coverage} & supplied)
-        if named:
-            msg = (
-                f"an authorization's coverage names no system-supplied argument; this "
-                f"declaration fills {', '.join(repr(key) for key in named)} itself "
-                f"(ADR-0254 §3)"
-            )
-            raise ValueError(msg)
-        return self
-
-    @model_validator(mode="after")
-    def _a_money_bound_and_a_fixed_currency_agree(self) -> Authorization:
-        """Refuse a row bounding one currency and fixing another (§2).
-
-        Where this row carries a ``MONEY`` bound and also a ``fixed`` member naming
-        that bound's own ``currency_argument``, the fixed value equals the bound's
-        ``currency``: *"a row that bounds sixty pounds and fixes the currency to
-        something else is not a record of anything the user said"*.
-
-        **A rule about two members of one row**, so it belongs here rather than on
-        :class:`CoverageMember`, which can see only itself.
-
-        Raises:
-            ValueError: If a ``MONEY`` bound's currency argument is fixed to
-                anything but that bound's own ``currency``.
-        """
-        fixed = {member.argument: member.fixed for member in self.coverage if member.bound is None}
-        for member in self.coverage:
-            bound = member.bound
-            if bound is None or bound.kind is not BoundKind.MONEY:
-                continue
-            key = bound.currency_argument
-            if key not in fixed:
-                continue
-            if fixed[key] != bound.currency:
-                msg = (
-                    f"an authorization bounding {member.argument!r} in {bound.currency!r} "
-                    f"fixes {key!r} to that same currency; a row that bounds one and fixes "
-                    f"another is not a record of anything the user said (ADR-0254 §2)"
-                )
-                raise ValueError(msg)
-        return self
-
     @property
     def subject_digest(self) -> Sha256Hex:
         """A fingerprint of what this row authorises (ADR-0254 §7).
@@ -19971,24 +20296,24 @@ class Authorization(BaseModel):
 
 
 def _coverage_view_tuple(value: tuple[CoverageView, ...]) -> tuple[CoverageView, ...]:
-    """Require ADR-0254 §2's one-member-per-argument rule of a projection too.
+    """Require ADR-0266 §3's one-member-per-kind rule of a projection too.
 
-    **Not a second rule — the first one, transcribed.** §2 forbids two members of
-    one record naming one argument, and §11 makes these views a *transcription* of
-    that record's coverage rather than a derivation of it. So a projection carrying
-    two views for one argument is not a value some other rule admits: it is a
-    mis-transcription, and the shape a reading surface would have to invent a
-    precedence rule to render.
+    **Not a second rule — the first one, transcribed.** ADR-0254 §2 as ADR-0266 §3
+    restates it forbids two members of one record carrying one ``kind``, and §11
+    makes these views a *transcription* of that record's coverage rather than a
+    derivation of it. So a projection carrying two views of one kind is not a value
+    some other rule admits: it is a mis-transcription, and the shape a reading
+    surface would have to invent a precedence rule to render.
 
     Raises:
-        ValueError: If two views name the same ``argument``.
+        ValueError: If two views carry the same ``kind``.
     """
-    named = [view.argument for view in value]
-    if len(set(named)) != len(named):
+    kinds = [view.kind for view in value]
+    if len(set(kinds)) != len(kinds):
         msg = (
-            "no two coverage views of one projection name the same argument; the record "
-            "they transcribe cannot carry two members for one argument either "
-            "(ADR-0254 §2, §11)"
+            "no two coverage views of one projection carry the same kind; the record "
+            "they transcribe cannot carry two members of one kind either "
+            "(ADR-0254 §2, §11, ADR-0266 §3)"
         )
         raise ValueError(msg)
     return value
@@ -19999,8 +20324,18 @@ class CoverageView(BaseModel):
 
     **One carrier for the question and for the listing**, and not one shape each.
     §11 puts the same three facts about a member in front of the user at both — the
-    argument, the fixed value or the bound, and the user's own words — so a second
-    view would be the two shapes of one fact ADR-0150 is named after.
+    kind of value the act constrained, the fixed value or the bound, and the user's
+    own words — so a second view would be the two shapes of one fact ADR-0150 is
+    named after.
+
+    **It carries a ``kind`` where it used to carry an argument key** (ADR-0266 §9's
+    §11 scope). A member records *what the user stated* and never *which slot it
+    fills* (ADR-0266 §3), so a required ``argument`` here would have to be
+    transcribed from nothing and no projection would be constructible for any member
+    at all — which is the confirmation ADR-0254 §1 puts before every path-(i) row
+    failing to render. **The ``span`` is what carries the weight it used to share**:
+    a stated bound's authority is the user's assent to *this rendering* (ADR-0266
+    §4), so the words the reading rests on are shown beside the value it produced.
 
     **The span is required and is on both surfaces**, because ADR-0254 §8's *"Both
     halves survive, and neither is derivable from the other"* is as true at the
@@ -20022,10 +20357,13 @@ class CoverageView(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    argument: EncodableText = Field(
+    kind: BoundKind = Field(
         description=(
-            "The key of ``ActionRequest.parameters`` this view is about, transcribed "
-            "from :attr:`CoverageMember.argument` (ADR-0254 §11)."
+            "Which kind of value the act constrained, transcribed from "
+            ":attr:`CoverageMember.kind` (ADR-0254 §11 as ADR-0266 §9 restates it). "
+            "**The listing renders each member by this** — *this kind of value is fixed "
+            "at that value*, or *this kind of value is bounded by that limit* — where "
+            "the argument key used to stand."
         )
     )
     fixed: FrozenJsonValue | None = Field(
@@ -20067,14 +20405,14 @@ class CoverageView(BaseModel):
         """
         if self.fixed is not None and self.bound is not None:
             msg = (
-                f"a coverage view for {self.argument!r} shows a fixed value or a bound, "
+                f"a coverage view of kind {self.kind} shows a fixed value or a bound, "
                 f"never both; a precedence rule between them is one somebody would have "
                 f"to remember at the rendering (ADR-0254 §2, §11)"
             )
             raise ValueError(msg)
         if self.fixed is None and self.bound is None:
             msg = (
-                f"a coverage view for {self.argument!r} shows a fixed value or a bound; "
+                f"a coverage view of kind {self.kind} shows a fixed value or a bound; "
                 f"one that shows neither renders nothing the user said (ADR-0254 §2, §11)"
             )
             raise ValueError(msg)
