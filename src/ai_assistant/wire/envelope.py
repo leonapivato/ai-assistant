@@ -1945,7 +1945,90 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — this lane mints no error class,
 #: and the two ADR-0254 mints are Lane 1's and cross no frame.
-PROTOCOL_VERSION: Final[int] = 45
+#:
+#: **46 since ADR-0265 §5**, and the ground is that section's own sentence:
+#: *"``PROTOCOL_VERSION`` moves by exactly one, in the lane that lands the ``core``
+#: surface, and ``wire/envelope.py``'s log gains an entry naming this ADR and the
+#: reason."* §5 fixes no integer, so the figure is whatever the tree holds when this
+#: lane lands plus one, and a lane that lands after this one re-bumps rather than
+#: reusing it.
+#:
+#: **It was written 45 and re-bumped to 46 on the rebase**, which is the entry above
+#: working rather than a correction to it. This lane branched at 44; ADR-0254 §20's
+#: Lane 3 landed 45 while it was in review, so its own *"a lane that lands after this
+#: one re-bumps rather than reusing the figure"* — ADR-0260 §11's instruction, carried
+#: forward by that entry — is what makes this 46. Nothing else about this move
+#: changes: the two carriers below are the same two, and neither is touched by what
+#: ADR-0254's lane landed.
+#:
+#: **The two shapes that actually cross are** :class:`~ai_assistant.core.types.GoalBrief`
+#: **and** :class:`~ai_assistant.core.types.PlanStep`, and the reason is worth stating
+#: because ADR-0265 §5 names a third that does not. That section reasons from "``Goal``
+#: is carried on ``TurnResult.goal``"; at this tree ``TurnResult.goal`` is a
+#: **``GoalBrief``** (ADR-0249 §11) and no frame carries a ``Goal`` at all — the
+#: correction is recorded on that ADR under ADR-0082 §1 and closes issue #2400. What
+#: crosses is this:
+#:
+#: * ``GoalBrief`` gains ``actions``, a defaulted empty ``tuple[BriefAction, ...]``
+#:   (ADR-0265 §4). ``TurnResult.goal`` is a ``GoalBrief``, ``wire/codec.py`` renders a
+#:   model by ``model_dump()``, and a ``TurnResult`` is what the promoted surface
+#:   returns from every turn call — so a hub at 45 emits ``"actions": []`` on **every**
+#:   turn it sends and a client at 44 fails it with ``extra_forbidden``. **A defaulted
+#:   member is still a shape change**, exactly as the entries at 39, 40, 42, 43 and 44
+#:   state of ``AttemptEffort.kind``, ``TurnOutcome``'s four,
+#:   ``PermissionRuling.authorised_goal``, ``outbound_statement`` and
+#:   ``forecast_not_read``.
+#: * ``PlanStep`` gains ``intended_action``, a ``None``-defaulting ``Identifier | None``
+#:   (ADR-0265 §4). A ``PlanStep`` rides inside ``ActionPlan``, which is
+#:   ``TurnResult.plan``, so a hub at 45 emits ``"intended_action": null`` on every step
+#:   of every plan it sends and a client at 44 refuses it on the same ground.
+#:
+#: :class:`~ai_assistant.core.types.BriefAction` is the one new model that crosses, and
+#: it is a **projection**: ADR-0265 §4's bar is the whole of what may sit in it — no
+#: ``IntendedAction.id``, no effect, no execution, no step, no outcome and no indication
+#: of whether the action has already been performed. Its ``serves`` carries the brief's
+#: own ``C``/``S``/``D`` **labels**, which are minted per call and persisted nowhere, so
+#: **no identifier crosses**. :class:`~ai_assistant.core.types.IntendedAction`,
+#: :class:`~ai_assistant.core.types.ProposedAction` and
+#: :class:`~ai_assistant.core.types.IntendedActionMinting` cross **no** frame:
+#: ``Goal`` is carried by no frame, ``PlannerOutput`` is an in-process return from
+#: ``Planner.plan``, and the minting is an argument to a ``PlanStore`` member. No row is
+#: minted in ADR-0087 §2c's scalar table — ``project`` already renders a ``str`` as
+#: itself.
+#:
+#: **No new enumeration member and no new vocabulary.** ADR-0265 adds no ``StrEnum``
+#: member anywhere, so nothing here is the narrower population the entry at 42
+#: distinguishes.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 44 and a peer at 45 refuse each other and say so.
+#:
+#: **The promoted method set does not move** and ADR-0177 §1's browser enumeration does
+#: not move: ADR-0265's L1 adds no method to the promoted ``AssistantEngine`` surface,
+#: removes none, and adds no gateway route.
+#:
+#: **Two stored-record versions move, and the migration is an addition with a total
+#: default** (ADR-0265 §5). **Both are re-checked against the moved base rather than
+#: carried over**: the entry above leaves the plan store's ``schema_version`` and
+#: ``PlanExport.schema_version`` untouched in terms, and the base holds them at **4**
+#: and **12**, so the figures below are one more than what is there rather than one
+#: more than what this lane branched from. ``PlanExport.schema_version`` moves **12 → 13** because
+#: ``Goal`` and ``PlanStep`` are both inside the export, and the plan store's
+#: ``schema_version`` moves **4 → 5** so that an older build meets ADR-0049 §1's loud
+#: refusal at the open rather than a decode failure at one record. Every stored row
+#: stays readable: "a ``Goal`` written before this decision decodes with
+#: ``intended_actions`` empty and a ``PlanStep`` with ``intended_action`` absent". The
+#: parked-read store's ``schema_version`` stays at **3** and
+#: ``ConversationExport.schema_version`` stays at **2**. The captured episode is
+#: untouched — ADR-0265 mints no ``Notification``, no notification kind and no delivery
+#: — and ``core.config.Settings`` gains nothing at all.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0265's L1 mints no error
+#: class and removes none.
+PROTOCOL_VERSION: Final[int] = 46
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

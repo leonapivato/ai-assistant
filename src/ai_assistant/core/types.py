@@ -6565,6 +6565,160 @@ class GoalInterpretation(BaseModel):
         return self
 
 
+#: ADR-0265 §4's action-label grammar: "the ASCII letter ``A`` followed by one or
+#: more **ASCII** decimal digits ``0``-``9`` and nothing else".
+#: :meth:`IntendedAction._an_id_is_never_an_action_label` is its one consumer, and
+#: the rule it enforces is a **disjointness** guarantee rather than a resolution
+#: rule — which is why it is **deliberately wider than the canonical labels §4
+#: renders**: ``A0``, ``A01`` and ``A007`` are each refused as ids though §4's
+#: resolution accepts none of them as a label. "An unsubstituted planner value can
+#: match no stored id, on any goal, ever" is the guarantee, and a reservation
+#: narrowed to the canonical spellings would not give it — "a faulty caller passing
+#: ``A01`` past the loop would meet a goal that could legitimately hold ``A01`` as an
+#: id".
+#:
+#: ``[0-9]`` and not a shorthand digit class, for :data:`_CONDITION_LABEL`'s own
+#: reason: the shorthand admits every Unicode decimal digit, and a label the renderer
+#: could not have produced is not a label this side has to keep an id away from.
+#:
+#: This is ADR-0253 §7's construction for ``D`` reused **without alteration** (§1),
+#: and ``A`` is not ``M``, ``F``, ``C``, ``S``, ``D``, ``E`` or ``G`` — the seven
+#: letters this corpus has already spent (§4).
+_ACTION_LABEL: Final = re.compile(r"A[0-9]+")
+
+
+class IntendedAction(BaseModel):
+    """One act a goal intends, minted once and never an instruction to act (§1).
+
+    **Exactly three fields, and it carries no fourth**: no capability, no tool, no
+    parameters, no step id, no plan id, no attempt, no instant, no status and no
+    count. What it carries is an :attr:`intent` in prose, **which no mechanism
+    compares**, and an :attr:`id`, **which every mechanism compares and nothing can
+    re-derive**.
+
+    **An identity is a minted record and is never derived** (§1). No lane computes an
+    intended action from a goal's elements, from a step's ``capability``, from its
+    ``parameters``, from a plan's shape, or from any comparison of two of them: the
+    record exists because ``orchestration`` wrote it (§2), and where it does not exist
+    there is no intended action. That is ADR-0255 §7's own refusal stated as a type —
+    "A driver that compared capability and parameters would be inventing an identity
+    nobody declared, and would refuse a legitimate second booking of two different
+    nights as readily as a duplicate" — and it is why the record carries **no
+    capability**: ADR-0253 §8 has already ruled that a plan's own spellings are not
+    durable declarations, since "a re-plan mints new step ids".
+
+    **It is a record of an intent and never an instruction to act** (§1). No lane
+    walks :attr:`Goal.intended_actions` and dispatches, plans, schedules or reports
+    from it. An action nothing has named in a plan sits in the record and causes
+    nothing; an action a plan named once and no later plan names again sits in the
+    record and causes nothing. The tuple is read by §4's :attr:`GoalBrief.actions`
+    projection and its label resolution, by §5's export, and by the effect claim §6
+    obliges, **and by nothing else**.
+
+    **The record carries no standing** (§1), and that is decided rather than deferred
+    by omission: nothing in ADR-0265 withdraws, cancels, completes or retires an
+    intended action, and the clause above is what makes an un-withdrawn one harmless.
+    §7 books withdrawal with what fires it rather than minting a two-member enum with
+    no producer for its second member.
+
+    Attributes:
+        id: This action's own identity, minted **once** by ``orchestration`` at the
+            instant the action is first recorded (§2) and never re-minted. A later
+            revision that restates, splits, merges or removes any element mints no new
+            intended action and changes no existing one; a later plan that names an
+            existing action by label mints none.
+        intent: What act this goal intends, in the system's own words.
+        serves: The :attr:`GoalElement.id` values this action was minted to serve
+            (§3). **Provenance and not the identity**: no lane derives an intended
+            action from it, compares two intended actions by it, gates a dispatch on
+            an entry, re-mints an action because an entry changed, or withdraws one
+            because every entry did. An entry naming an element not in the current
+            revision is **stale, truthful and harmless** — ADR-0253 §7 mints a new id
+            for a restated element, so a rewording leaves the action naming the
+            element it was minted against, and the entry "is not rewritten, not
+            recomputed, not dropped and not refreshed".
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="This action's own identity, minted once (§1, §2).")
+    intent: NonBlankEncodableText = Field(
+        description="The act this goal intends, in the system's own words."
+    )
+    serves: tuple[Identifier, ...] = Field(
+        default=(),
+        description=(
+            "The GoalElement.id values this action was minted to serve (ADR-0265 §3). "
+            "Provenance and never the identity; a stale entry is truthful and is "
+            "neither repaired nor read by any mechanism."
+        ),
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _an_id_is_never_an_action_label(cls, value: str) -> str:
+        """An action's ``id`` never matches §4's action-label grammar (§1).
+
+        :data:`Identifier` admits any non-blank encodable string, so without this rule
+        "an unsubstituted label could equal some action's id and pass §4's membership
+        check **as a reference to a different action**, silently scoping an effect
+        claim to the wrong act instead of refusing". **The disjointness is what makes
+        §4's store-side membership check exact.**
+
+        The grammar refused here is deliberately **wider** than the canonical labels
+        §4 renders: ``A0``, ``A01`` and ``A007`` are refused though the resolution
+        accepts none of them as a label, because the guarantee is disjointness from
+        every string a plan could still be carrying rather than from the resolvable
+        ones alone.
+
+        Args:
+            value: The proposed id.
+
+        Returns:
+            The id unchanged.
+
+        Raises:
+            ValueError: If the id matches the action-label grammar.
+        """
+        if _ACTION_LABEL.fullmatch(value) is not None:
+            msg = (
+                f"an intended action's id is never an action label, and {value!r} is "
+                f"one: the two spaces are disjoint so that a plan still carrying an "
+                f"unsubstituted label can match no action on any goal (ADR-0265 §1)"
+            )
+            raise ValueError(msg)
+        return value
+
+
+#: The most intended actions one goal holds (ADR-0265 §1).
+#:
+#: **A fixed constant and not a ``Settings`` field**, exactly as
+#: :data:`MAX_GOAL_INTERPRETATIONS` and :data:`MAX_TOPICS_PER_PROPOSAL` are not:
+#: ADR-0086 §1's reasoning for fixing its own bound in ``core`` binds — "a knob that
+#: raises the ceiling is a knob that re-opens it". **64 is**
+#: :data:`MAX_GOAL_EVIDENCE`'s figure, "for a record of the same goal with the same
+#: durability".
+#:
+#: **The tuple is bounded by a refusal and never by an elision** (§1). A minting that
+#: would carry a goal past it is refused **whole** by
+#: :meth:`~ai_assistant.core.protocols.PlanStore.record_intended_actions` (§5), and
+#: **no lane elides an intended action, for any reason, at any age**: ADR-0249 §2 may
+#: elide a revision and ADR-0252 §13 an evidence row because each leaves a count on
+#: the record and loses no identity, while "an identity that can vanish is not an
+#: identity" — the effect claim §6 obliges "would silently become fresh for an act the
+#: goal had already performed, which is a duplicate booking nobody could detect
+#: afterwards". So :attr:`GoalBrief.actions` is bounded by construction, no lane
+#: truncates it at the seam, and ADR-0086 §4's no-silent-truncation rule is satisfied
+#: by the refusal rather than by a disclosure.
+#:
+#: **The refusal exhausts a long-lived goal, and that is the direction chosen rather
+#: than an oversight** (§1). Nothing retires a completed action, so a recurring goal
+#: reaches the bound and stops, which §7 books and the Consequences name as a
+#: falsifier. ADR-0148 §1's third clause is the trade: "Refusing costs a recoverable
+#: error the user sees; proceeding costs a disclosure nobody can detect afterwards."
+MAX_INTENDED_ACTIONS: Final[int] = 64
+
+
 class Goal(BaseModel):
     """A durable objective the assistant is working toward (ADR-0014 §1, ADR-0249 §1).
 
@@ -6613,6 +6767,18 @@ class Goal(BaseModel):
             (ADR-0249 §2). A **count and never an identifier**, it never decreases,
             and a write that drops *k* elements advances it by *k*. Silent truncation
             is not available, on ADR-0086 §4's own ground.
+        intended_actions: The acts this goal intends, **oldest first and
+            append-only** (ADR-0265 §1). No lane edits a member in place, reorders the
+            tuple, removes a member, or writes two members carrying one ``id``. **The
+            goal's opening write mints none** — a goal is opened carrying revision 1
+            alone (ADR-0249 §3), which ``orchestration`` mints from the request
+            without a planner call — so it is empty on every goal at the moment it is
+            opened, and empty on every goal written before that decision. Its one
+            writer is
+            :meth:`~ai_assistant.core.protocols.PlanStore.record_intended_actions`,
+            and **no lane walks it and dispatches, plans, schedules or reports from
+            it**: it is read by :attr:`GoalBrief.actions`, by the export, and by the
+            effect claim ADR-0265 §6 obliges, and by nothing else.
         status: The goal's **overall disposition** — whether the objective stands,
             was reached, was given up, or cannot currently be reached — and never the
             state of any one attempt (ADR-0249 §4).
@@ -6661,6 +6827,15 @@ class Goal(BaseModel):
         default=0,
         ge=0,
         description="How many revisions this goal's history has dropped (ADR-0249 §2).",
+    )
+    intended_actions: tuple[IntendedAction, ...] = Field(
+        default=(),
+        description=(
+            "The acts this goal intends, oldest first and append-only (ADR-0265 §1). "
+            "Empty on every goal at the moment it is opened and on every goal written "
+            "before that decision. Never elided: a minting past MAX_INTENDED_ACTIONS "
+            "is refused whole rather than making room."
+        ),
     )
     status: GoalStatus = GoalStatus.ACTIVE
     provenance: Provenance
@@ -6728,6 +6903,42 @@ class Goal(BaseModel):
                 raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _each_intended_action_is_named_once(self) -> Goal:
+        """Refuse two intended actions of one goal sharing an ``id`` (ADR-0265 §1).
+
+        **Here rather than on** :class:`IntendedAction`, because "an element cannot see
+        the tuple it sits in" — ADR-0253 §1's own reason, and this corpus's standing
+        shape for an identity inside a container:
+        :meth:`GoalInterpretation._elements_are_stated_once` refuses the same thing one
+        record over, and ``ActionPlan`` refuses two steps sharing an id.
+
+        **It is the container's half of §1's append-only rule** — "no lane … writes two
+        members carrying one ``id``" — and it is not the whole of the mechanism: §5
+        puts a duplicate *within one command* on
+        :class:`IntendedActionMinting`'s own validator and a duplicate *against what the
+        goal already holds* on the store, "because neither id is stored when the command
+        is built". What this adds is that a write reaching past both — ADR-0023 §2's
+        ``model_copy(update=...)``, which skips validators — cannot leave a stored goal
+        holding an ambiguous identity, and an ambiguous identity is exactly what §6's
+        ``(goal, intended action, effect key)`` triple cannot be scoped against.
+
+        Raises:
+            ValueError: If two intended actions of this goal share an ``id``.
+        """
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for action in self.intended_actions:
+            (repeated if action.id in seen else seen).add(action.id)
+        if repeated:
+            msg = (
+                f"two intended actions of goal {self.id} share an id: "
+                f"{', '.join(sorted(repeated))}. An intended action's id is what an "
+                f"effect claim is scoped to, so a goal holds each once (ADR-0265 §1, §6)"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class GoalRevision(BaseModel):
     """The command that appends one interpretation revision to a goal (§12).
@@ -6760,6 +6971,75 @@ class GoalRevision(BaseModel):
         default=(),
         description="Evidence rows of this goal this revision marks INAPPLICABLE (ADR-0252 §9).",
     )
+
+
+class IntendedActionMinting(BaseModel):
+    """The command that appends intended actions to a goal (ADR-0265 §5).
+
+    **A command and not a snapshot**, on ADR-0014 §5's own argument as ADR-0249 §12
+    adopts it: "Had the store taken a whole ``ExecutionState``, any consumer of the
+    Protocol could commit ``PENDING → SUCCEEDED`` directly and the claim that
+    deterministic code owns state transitions (VISION §7) would rest on nobody
+    choosing to bypass it."
+
+    **Two actions minted on one turn are appended in one call**, so the two-rooms case
+    takes **one** compare-and-swap and not two — which is also what makes §2's
+    all-or-nothing rule expressible: "where a ``PlannerOutput`` proposes *k* actions
+    and the goal holds more than ``MAX_INTENDED_ACTIONS`` minus *k*,
+    ``record_intended_actions`` refuses and **no action of that proposal is
+    recorded**", because "a partial record would leave *book two identical rooms*
+    holding **one** intended action".
+
+    Attributes:
+        goal_id: The goal to append to.
+        actions: The actions to append, **non-empty** and in the order they are to be
+            appended. A command carrying none is not constructible: there is no such
+            thing as a minting that mints nothing, and a caller with nothing to record
+            makes no call (§2's empty ``PlannerOutput.actions`` "records none, raises
+            nothing and re-plans nothing").
+        expected_version: The :attr:`Goal.version` this minting was computed against.
+            The read, the comparison and the write are **one indivisible step**, and
+            there is no separate read on which a decision is taken.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier
+    actions: tuple[IntendedAction, ...] = Field(
+        description="The actions to append, non-empty and in append order (ADR-0265 §5)."
+    )
+    expected_version: int = Field(ge=0, description="The Goal.version this was computed against.")
+
+    @model_validator(mode="after")
+    def _mints_at_least_one_action_each_named_once(self) -> IntendedActionMinting:
+        """Refuse an empty minting and one naming an id twice (ADR-0265 §5).
+
+        The duplicate refusal closes "a case the store's refusal of an id the goal
+        **already holds** does not reach, because neither id is stored when the command
+        is built", so §1's one-id-per-member invariant "cannot be breached *inside* a
+        single append".
+
+        Raises:
+            ValueError: If the command carries no action, or two carrying one ``id``.
+        """
+        if not self.actions:
+            msg = (
+                f"a minting for goal {self.goal_id} carries at least one intended "
+                f"action: a command that mints nothing is not a minting (ADR-0265 §5)"
+            )
+            raise ValueError(msg)
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for action in self.actions:
+            (repeated if action.id in seen else seen).add(action.id)
+        if repeated:
+            msg = (
+                f"a minting for goal {self.goal_id} carries {', '.join(sorted(repeated))} "
+                f"twice: two actions of one command never share an id, which the store's "
+                f"refusal of an id the goal already holds cannot reach (ADR-0265 §5)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 #: How many goals a conversation's candidate set renders to the associator
@@ -7317,6 +7597,39 @@ class BriefElement(BaseModel):
     ground: Ground = Field(description="How it came to be known — the kind alone.")
 
 
+class BriefAction(BaseModel):
+    """One intended action as the planner is shown it (ADR-0265 §4).
+
+    **It carries the intent and the live links and nothing else**: no
+    :attr:`IntendedAction.id`, no effect, no execution, no step, no outcome and **no
+    indication of whether the action has already been performed**. ADR-0249 §9's
+    containment argument binds this value as it binds every other — "there is none on
+    the value to disclose" — and ADR-0255 §12's booking of whether an attempt's
+    executions are projected into the planner's input is untouched: ADR-0265 projects
+    none.
+
+    Attributes:
+        intent: What act the goal intends, in the system's own words.
+        serves: The ``C``/``S``/``D`` **labels** of the current revision this action
+            was minted to serve — **labels and never identifiers**. An entry whose
+            element is not in the current revision is **omitted from the rendering**,
+            "so the brief shows the link where it is still true and shows nothing where
+            it is not" (§4), and an action every one of whose links has gone stale
+            renders with ``serves`` empty.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: NonBlankEncodableText = Field(description="The act this goal intends.")
+    serves: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "The brief labels of the elements this action serves, stale links omitted "
+            "(ADR-0265 §4). Labels and never identifiers."
+        ),
+    )
+
+
 class GoalBrief(BaseModel):
     """The planner-facing projection of a goal (ADR-0249 §9).
 
@@ -7333,12 +7646,20 @@ class GoalBrief(BaseModel):
     elided revision, a superseded one, or a union of several. :meth:`of` is that
     projection, stated once so two surfaces cannot render it differently.
 
-    **The elements are labelled, and the scheme is ADR-0226 §3's applied to three
-    sequences**: the label of the element at 1-based index *n* of
+    **The elements are labelled, and the scheme is ADR-0226 §3's applied to four
+    sequences** (ADR-0265 §4, partially superseding ADR-0249 §9's sequence count and
+    its field enumeration): the label of the element at 1-based index *n* of
     :attr:`constraints` is ``C`` followed by *n* in decimal with no padding; of
     :attr:`criteria`, ``S`` followed by *n*; of :attr:`conditions`, ``D`` followed by
-    *n*. Both sides derive the label from the brief they hold and neither consults
-    the other, and **no label survives the call that rendered it**.
+    *n*; and of :attr:`actions`, ``A`` followed by *n* in **ASCII** decimal digits
+    ``0``-``9``, with no padding and no sign. Both sides derive the label from the
+    brief they hold and neither consults the other, and **no label survives the call
+    that rendered it**. Nothing else is an action label — not ``A01``, not ``A+1``,
+    not ``a1``, not a digit outside ``0``-``9``, and not a value carrying whitespace —
+    and each of those "resolves to nothing and is refused … rather than parsed,
+    repaired or case-folded", which is ADR-0253 §9's strict-extraction rule applied to
+    one more vocabulary. **``A`` is not ``M``, ``F``, ``C``, ``S``, ``D``, ``E`` or
+    ``G``**, the seven letters this corpus has already spent.
 
     **What ``goal_id`` is doing here, since the rule above forbids identifiers**
     (§9): it is not a record identifier in ADR-0228 §8's sense — it names the
@@ -7354,6 +7675,11 @@ class GoalBrief(BaseModel):
         constraints: What must hold, labelled ``C1``, ``C2``, ….
         criteria: What would establish it, labelled ``S1``, ``S2``, ….
         conditions: What it depends on, labelled ``D1``, ``D2``, ….
+        actions: The acts this goal intends, labelled ``A1``, ``A2``, … — **one entry
+            per member of** :attr:`Goal.intended_actions` **in that tuple's own
+            order** (ADR-0265 §4), so ``A1`` names the first-minted action on both
+            sides of the seam. Bounded by construction at
+            :data:`MAX_INTENDED_ACTIONS`, so no lane truncates it here.
         status: The goal's overall disposition.
         deadline: Its optional target date.
         open_questions: The **texts** of the goal's open questions — all a planner
@@ -7369,6 +7695,14 @@ class GoalBrief(BaseModel):
     constraints: tuple[BriefElement, ...] = Field(default=(), description="What must hold.")
     criteria: tuple[BriefElement, ...] = Field(default=(), description="What would establish it.")
     conditions: tuple[BriefElement, ...] = Field(default=(), description="What it depends on.")
+    actions: tuple[BriefAction, ...] = Field(
+        default=(),
+        description=(
+            "The acts this goal intends, labelled A1, A2, … — one entry per member of "
+            "Goal.intended_actions in that tuple's own order (ADR-0265 §4). Empty on "
+            "every brief of a goal that intends none."
+        ),
+    )
     status: GoalStatus = Field(
         default=GoalStatus.ACTIVE, description="The goal's overall disposition."
     )
@@ -7390,6 +7724,19 @@ class GoalBrief(BaseModel):
         :class:`ProposedUnderstanding`'s ``questions`` and no lane of that decision
         reads them, and what a raised question becomes is A2's.
 
+        **:attr:`actions` is projected here, and the stale links are dropped here**
+        (ADR-0265 §4). One entry per member of :attr:`Goal.intended_actions` in that
+        tuple's own order, each carrying the action's ``intent`` and the ``C``/``S``/``D``
+        **labels** of the elements of the **current** revision its ``serves`` names —
+        an entry naming an element this revision does not carry is omitted from the
+        rendering, and an action all of whose links have gone stale renders with
+        ``serves`` empty. It is projected **here** rather than at a caller for the
+        reason the elements are: this is "the one projection site in the system", so
+        "no lane projects a brief from an elided revision, from a superseded one, or
+        from a union of several" stays a property of there being one implementation.
+        **No** :attr:`IntendedAction.id` **crosses**: what a label indexes is this
+        tuple, and both sides derive it from the value they hold.
+
         Args:
             goal: The goal to project.
 
@@ -7401,6 +7748,16 @@ class GoalBrief(BaseModel):
             tuple(BriefElement(text=element.text, ground=element.ground) for element in group)
             for group in (current.constraints, current.criteria, current.conditions)
         )
+        labels = {
+            element.id: f"{letter}{ordinal}"
+            for letter, group in (
+                ("C", current.constraints),
+                ("S", current.criteria),
+                ("D", current.conditions),
+            )
+            for ordinal, element in enumerate(group, start=1)
+            if element.id is not None
+        }
         return cls(
             goal_id=goal.id,
             outcome=current.outcome,
@@ -7408,6 +7765,13 @@ class GoalBrief(BaseModel):
             constraints=shown[0],
             criteria=shown[1],
             conditions=shown[2],
+            actions=tuple(
+                BriefAction(
+                    intent=action.intent,
+                    serves=tuple(labels[served] for served in action.serves if served in labels),
+                )
+                for action in goal.intended_actions
+            ),
             status=goal.status,
             deadline=goal.deadline,
         )
@@ -9435,6 +9799,18 @@ class PlanStep(BaseModel):
     every step, and an invented predicate fails steps that succeeded and passes
     steps that did not, on a guess nobody recorded.
 
+    **And it may say which act of the goal it is an attempt at** (ADR-0265 §4,
+    partially superseding ADR-0253 §9's field count in that count alone).
+    :attr:`intended_action` is an :attr:`IntendedAction.id` of this plan's own goal,
+    resolved by the loop from an ``A`` label "under ADR-0253 §9's identical discipline
+    — taken by the loop, taken once, immediately on return, in place of whatever came
+    back". **A planner mints no action here and names no identifier**: a step "selects
+    from the supply the brief rendered, or names none". **A step naming none is held
+    to nothing** — a read step, a composition step and every step of every plan written
+    before that decision carry ``None``, "and that is a conforming plan rather than a
+    degraded one" — and **whether an effect-bearing dispatch must name one is decided
+    where the effect claim is taken** (ADR-0265 §6), which is not ADR-0265's.
+
     **Which of this is evaluated, and by whom.** §2's dependency rule — satisfied
     only on a ``SUCCEEDED`` producer whose ``verifies`` holds, failed by a ``FAILED``
     or ``SKIPPED`` one, and **stopping the branch** on an ``INDETERMINATE`` one
@@ -9494,6 +9870,19 @@ class PlanStep(BaseModel):
             "applied to all of them and evaluated at the moment of dispatch "
             "(ADR-0253 §5, ADR-0252 §6). None imposes none. Evidence never expires by "
             "itself, and no Settings figure or deployment flag supplies a default."
+        ),
+    )
+    intended_action: Identifier | None = Field(
+        default=None,
+        description=(
+            "The IntendedAction of this step's goal that this step is an attempt at, "
+            "or None where the step names none (ADR-0265 §4). The planner's step "
+            "object carries an A label; the loop resolves it once, in place of "
+            "whatever came back, and a label resolving to nothing refuses the plan. "
+            "PlanStore.save_plan refuses a value that is not the id of a member of "
+            "that goal's intended_actions. None is a conforming plan rather than a "
+            "degraded one, and is the value on every step of every plan written "
+            "before that decision."
         ),
     )
 
@@ -9862,12 +10251,81 @@ class ActionPlan(BaseModel):
                     raise ValueError(msg)
 
 
-class PlannerOutput(BaseModel):
-    """What one ``Planner.plan`` call returns (ADR-0249 §7).
+class ProposedAction(BaseModel):
+    """One intended action a planner proposes (ADR-0265 §2).
 
-    Exactly two fields, and the second is the whole of what this envelope adds: a
-    call decides the understanding and the plan **in one pass**, so the plan embodies
-    the understanding rather than predating it.
+    **Exactly two fields, and it carries no id**: "a planner names no identifier and
+    mints none, which is ADR-0228 §8's namer rule binding this field as it binds every
+    other". ``extra="forbid"`` is what refuses an ``id`` of any spelling rather than
+    discarding one, and ``orchestration`` mints the identity at the instant the action
+    is first recorded.
+
+    **A model may propose a new intended action only from the interpretation's own
+    elements, and never from a plan's convenience** (§2). A proposal is warranted
+    where the user's words require an act the goal does not already hold an action
+    for — "*book two identical rooms* warrants two because the user asked for two" —
+    and "a planner that splits one intended act across two steps for its own reasons
+    warrants none". That is ADR-0249 §7's asymmetry observed rather than extended:
+    interpretation is the model's, and **a count of acts the user asked for is
+    interpretation**.
+
+    **What a wrongly proposed action costs is a duplicate dispatch, and ADR-0265
+    contains it by no mechanism** (§2). Where a goal already holds a completed effect
+    under ``A1`` for key *K* and a later call wrongly mints ``A2``, §6's triple has no
+    row, the claim is fresh, and the effect is performed again. It is "the **exact
+    price of the requirement**": *an earlier booking must not count as fulfilling
+    "book another one"* obliges two deliberate acts with one key to be two claims, and
+    at the key nothing distinguishes two rooms asked for from one room asked for
+    twice. §6 adds a prerequisite to the deployment gate for exactly this, and §7 books
+    the containment with what fires it.
+
+    Attributes:
+        intent: The act this proposal would have the goal intend.
+        serves: The ``C``/``S``/``D`` **labels** of the brief or the understanding in
+            force on that call (§3) — ADR-0253 §9's rule decides which, and ADR-0265
+            states no second rule. ``orchestration`` replaces each with the
+            :attr:`GoalElement.id` it resolves to, "by the correspondence the loop
+            itself holds", and **no identifier crosses the seam in either direction**.
+            A label that resolves to nothing is **dropped and the action is recorded
+            anyway** — the asymmetry against §4's refusal for a step's action label is
+            exact, because "``serves`` gates nothing, so losing an entry costs
+            legibility; a step's action label scopes an effect claim, so losing one
+            would cost a dispatch nothing could recognise".
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: NonBlankEncodableText = Field(description="The act this proposal would intend.")
+    serves: tuple[EncodableText, ...] = Field(
+        default=(),
+        description=(
+            "The brief labels of the elements this action would serve (ADR-0265 §3). "
+            "Labels and never identifiers; one that resolves to nothing is dropped and "
+            "the action is recorded anyway."
+        ),
+    )
+
+
+class PlannerOutput(BaseModel):
+    """What one ``Planner.plan`` call returns (ADR-0249 §7, ADR-0265 §2).
+
+    Exactly **three** fields (ADR-0265 §2, partially superseding ADR-0249 §7's field
+    enumeration in the count alone), and the second and third are the whole of what
+    this envelope adds: a call decides the understanding and the plan **in one pass**,
+    so the plan embodies the understanding rather than predating it, and it may
+    **propose the acts the goal intends** — "a planner that cannot propose an intended
+    action cannot mint one and the record has no other author".
+
+    **:attr:`actions` rides here and never inside :class:`ProposedUnderstanding`, and
+    the reason is that decision's own completeness rule** (ADR-0265 §2). ADR-0249 §7
+    makes a revision "a complete statement of an understanding" and rules that an
+    element it "neither retains nor replaces is **not** in the new revision" —
+    **omission is removal**. An intended action must survive every revision that does
+    not mention it, "because surviving a restatement is the whole of what it is for",
+    so a carrier whose omission rule is removal is the one carrier it may not have.
+    Minting is therefore **independent of revising**: a turn may propose an action
+    without proposing an understanding, and an understanding that mentions no action
+    removes none.
 
     **``None`` means the planner proposed no change to the understanding**, and it is
     the semantically correct answer for a planner that knows nothing of this
@@ -9881,6 +10339,12 @@ class PlannerOutput(BaseModel):
     Attributes:
         plan: What the planner decided to do.
         understanding: What it proposes the system now understands, or ``None``.
+        actions: The intended actions it proposes the goal now holds, or empty.
+            **Empty means the planner proposes no new intended action** (ADR-0265 §2),
+            and it is the semantically correct answer for a planner that knows nothing
+            of this envelope and for every turn that acts on an intent the goal already
+            holds. No implementation reads an empty ``actions`` as an error, a
+            degradation or an instruction to re-plan.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9891,6 +10355,14 @@ class PlannerOutput(BaseModel):
         description=(
             "What the planner proposes the system now understands, or None where it "
             "proposed no change (ADR-0249 §7). None is never read as an error."
+        ),
+    )
+    actions: tuple[ProposedAction, ...] = Field(
+        default=(),
+        description=(
+            "The intended actions this call proposes (ADR-0265 §2). Empty means it "
+            "proposes none, and is never read as an error, a degradation or an "
+            "instruction to re-plan."
         ),
     )
 
@@ -12254,7 +12726,24 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 12 because ``ActionPlan`` and ``PlanStep`` change shape,
+    **``schema_version`` is 13 because ``Goal`` gains ``intended_actions`` and
+    ``PlanStep`` gains ``intended_action``** (ADR-0265 §5) — two independent grounds,
+    each sufficient on its own, reaching ``tuple[Goal, ...]`` and
+    ``tuple[ActionPlan, ...]``. ``PlanExport`` gains **no member**: an
+    :class:`IntendedAction` rides **inside** ``Goal``, which ``goals`` already carries,
+    so ADR-0014 §5's closure rule — "every ``goal_id``/``plan_id`` referenced by an
+    included record resolves within the same export" — is satisfied by construction and
+    is **extended by nothing**. The version moves "on ADR-0039 §10's own mechanism,
+    because ``Goal`` is inside the export and its shape changing is exactly what the
+    version exists to announce", and a defaulted field on a frozen model is still a
+    shape change to every document that carries it: ``model_dump()`` emits
+    ``intended_actions`` on every goal and ``intended_action`` on every step, which an
+    older reader's ``extra="forbid"`` refuses exactly as ``targets_revision`` is.
+    **It is a stored-record version and not a wire ground**: ``PlanExport`` crosses no
+    frame and is emitted by no peer, and ADR-0265 §5's ``PROTOCOL_VERSION`` move rests
+    on the two shapes that *do* cross.
+
+    **It was 12 because ``ActionPlan`` and ``PlanStep`` change shape,
     ``GoalElement`` changes shape inside a ``Goal``, and ``GoalEvidence`` gains
     ``interpreted_output``** (ADR-0253 §10) — four independent grounds, each
     sufficient on its own, reaching ``tuple[ActionPlan, ...]``, ``tuple[Goal, ...]``
@@ -12393,12 +12882,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[12] = Field(
-        default=12,
+    schema_version: Literal[13] = Field(
+        default=13,
         description=(
-            "Shape of this export, pinned to exactly 12 (ADR-0039 §10, ADR-0253 §10): an "
+            "Shape of this export, pinned to exactly 13 (ADR-0039 §10, ADR-0265 §5): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[12]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[13]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."

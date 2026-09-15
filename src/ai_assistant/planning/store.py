@@ -37,11 +37,14 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    minted,
     refuse_a_second_owner,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
+    refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
+    revalidated_minting,
     revalidated_plan,
     revalidated_revision,
     revalidated_row_ids,
@@ -65,6 +68,7 @@ if TYPE_CHECKING:
         GoalQuestion,
         GoalRevision,
         GoalStatus,
+        IntendedActionMinting,
         StepTransition,
         UtcInstant,
     )
@@ -215,6 +219,38 @@ class InMemoryPlanStore:
             self._evidence[row_id] = invalidated(
                 self._evidence[row_id], at_revision=command.interpretation.revision
             )
+        return updated.model_copy(deep=True)
+
+    async def record_intended_actions(self, minting: IntendedActionMinting) -> Goal:
+        """Append intended actions to a goal, compare-and-swap (ADR-0265 §5).
+
+        The read, the comparison and the write are one step: there is no ``await``
+        between reading the stored version and writing the appended goal, so nothing
+        can interleave and no decision is taken on a separate read. **Two actions
+        minted on one turn are appended in one call**, so the two-rooms case takes one
+        compare-and-swap and not two.
+
+        **The refusals run before the append**, so a minting that cannot record every
+        action it carries records none of them — not the first, not a prefix, and not
+        the ones that would have fit.
+
+        **The command is revalidated on the first executed line**, and everything after
+        reads the validated value rather than the caller's: ``model_copy(update=...)``
+        skips validators (ADR-0023 §2), so ``actions`` can arrive as a one-shot
+        iterator, as a string, or carrying two members under one ``id`` — the last
+        being the case §5's own validator exists to close.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, if an ``id`` is one the goal already holds, if the
+                append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
+                ``serves`` value names no element of the goal's current interpretation.
+        """
+        command = revalidated_minting(minting)
+        stored = self._goal_for_write(command.goal_id, command.expected_version, "mint against")
+        updated = minted(stored, command.actions)
+        self._goals[updated.id] = updated
         return updated.model_copy(deep=True)
 
     def _goal_for_write(self, goal_id: str, expected_version: int, what: str) -> Goal:
@@ -756,6 +792,13 @@ class InMemoryPlanStore:
         the export back.
 
 
+        **And every ``PlanStep.intended_action`` must already be the ``id`` of an
+        intended action of this plan's goal** (ADR-0265 §4), on the identical footing
+        and with the identical error class. The set is the goal's own tuple, which
+        ``targets_revision`` does not narrow — ``Goal.intended_actions`` "is not
+        revised: it is appended to" — and **a plan no step of which names an action is
+        not checked**.
+
         **And every ``StepCondition.about`` and ``PlanInterpretation.settles`` must
         already be an element id** (ADR-0253 §9), naming a **condition element** of
         the interpretation this plan's ``targets_revision`` names. It is the same
@@ -788,6 +831,7 @@ class InMemoryPlanStore:
             msg = f"plan {snapshot.id} refers to unknown goal {snapshot.goal_id}"
             raise PlanningError(msg)
         refuse_an_unsubstituted_condition(snapshot, held)
+        refuse_an_unsubstituted_action(snapshot, held)
         if snapshot.targets_revision is None:
             msg = (
                 f"plan {snapshot.id} carries no targets_revision: the unstamped state "

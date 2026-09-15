@@ -178,6 +178,7 @@ if TYPE_CHECKING:
         GrantScope,
         HeldNotification,
         Identifier,
+        IntendedActionMinting,
         LearnOutcome,
         MemoryDecision,
         MemoryIngestResult,
@@ -4553,6 +4554,69 @@ class PlanStore(Protocol):
         """
         ...
 
+    async def record_intended_actions(self, minting: IntendedActionMinting) -> Goal:
+        """Append intended actions to a goal and return it (ADR-0265 §5).
+
+        **One member, and a BREAKING contract change under golden rule 5.** It appends
+        one or more intended actions (:class:`~ai_assistant.core.types.IntendedAction`)
+        to the named goal's ``intended_actions``, advances ``Goal.version``, and returns the stored
+        goal.
+
+        **The write is compare-and-swap and the store takes a command, not a
+        snapshot**: ADR-0014 §5's discipline binds unchanged and ADR-0249 §12's
+        statement of it is adopted whole — the member succeeds only where the stored
+        ``Goal.version`` still equals ``minting.expected_version``, a stale write
+        raises the ``StaleExecutionError`` class executions already occupy, and **the
+        read, the comparison and the write are one indivisible step** with no separate
+        read on which a decision is taken. **Two actions minted on one turn are
+        appended in one call**, so the two-rooms case takes one compare-and-swap and
+        not two.
+
+        **Three refusals, and none of them takes the stale-write class.** The member
+        refuses an ``id`` the goal **already holds**, a minting that would carry the
+        goal past :data:`~ai_assistant.core.types.MAX_INTENDED_ACTIONS` (§1), and a
+        ``serves`` value that is not the ``id`` of an element of the goal's **current**
+        interpretation at the instant of the append — **writing nothing in any of the
+        three**. All three take ``PlanningError``, the class ADR-0249 §12 gives
+        ``save_goal`` for "a goal whose ``id`` the store already holds", because each
+        is an **invariant breach at the current version** rather than a lost race: "a
+        caller that re-read and retried would re-raise for ever".
+
+        **The append is all-or-nothing.** Where a minting carries *k* actions and any
+        one of them is refused — by the bound, by an id the goal holds, or by a
+        ``serves`` value that resolves in no current element — **no action of that
+        minting is recorded**, not the first, not a prefix, and not the ones that would
+        have fit. "A partial record would leave *book two identical rooms* holding
+        **one** intended action", which is the two-rooms defect reached through the
+        capacity path.
+
+        **The ``serves`` conjunct is checkable exactly once, and this is the instant.**
+        §2's ordering records this call's revision **before** its actions and §3
+        resolves each label against the sequence in force on that call, so at the
+        append every entry names an element of the current interpretation and "a value
+        that does not is a caller reaching past ``orchestration`` with a dangling or
+        foreign identifier". Afterwards an entry may go stale by §3's own rule and
+        **nothing re-checks it and nothing repairs it**: staleness is a truthful record
+        of an earlier revision, where a dangling id would be a warrant the goal could
+        never show.
+
+        **No lane elides an intended action to make room** (§1). A goal at the bound
+        refuses and holds every action it held, because "an identity that can vanish is
+        not an identity" — which is why this member's bound behaves unlike ADR-0249
+        §2's revision elision and ADR-0252 §13's evidence elision.
+
+        Returns:
+            The goal as stored after the append.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, if an action's ``id``
+                is one the goal already holds, if the minting would carry the goal past
+                ``MAX_INTENDED_ACTIONS``, or if a ``serves`` value is not the ``id`` of
+                an element of the goal's current interpretation.
+        """
+        ...
+
     async def record_evidence(
         self, evidence: GoalEvidence, /, *, supersedes: Sequence[str] = ()
     ) -> str:
@@ -5053,13 +5117,37 @@ class PlanStore(Protocol):
         requires. **A plan declaring no condition and no interpretation is not
         checked at all**, and is saved exactly as it always was.
 
+        **And every ``PlanStep.intended_action`` must be the ``id`` of a member of
+        ``Goal.intended_actions`` of the plan's own goal** (ADR-0265 §4). The window
+        is closed here for the reason the condition label's is, with the same error
+        class and on the same footing: "the unresolved state exists only between the
+        planner's return and the loop's substitution, and a window is closed at the
+        store rather than trusted to close itself". It is likewise a **strengthening
+        of an existing member** rather than a new one, on ADR-0249 §12's own
+        classification of ``commit_transition``'s added claim condition.
+
+        **Its disjointness is ADR-0253 §7's construction reused unaltered**
+        (ADR-0265 §1): an ``IntendedAction`` whose ``id`` matches the action-label
+        grammar is unconstructible, so a plan still carrying an unsubstituted ``"A1"``
+        matches no action on any goal, ever — rather than silently scoping an effect
+        claim to the wrong act. **A step naming no intended action is not checked**,
+        and is saved exactly as it always was: ``None`` is the value on every step of
+        every plan written before that decision.
+
+        **The set is the goal's, not the revision's.** ``Goal.intended_actions`` is
+        appended to rather than revised (ADR-0265 §4), so this conjunct reads the
+        goal's own tuple whole and ``targets_revision`` does not narrow it — which is
+        the one place it differs from the condition conjunct above.
+
         Raises:
             PlanningError: If the plan's ``goal_id`` names no stored goal, if its
                 ``supersedes`` names no stored plan, names this plan's own ``id``, or
                 names a plan under a different ``goal_id``, if its
-                ``targets_revision`` is still absent, or if a ``StepCondition.about``
+                ``targets_revision`` is still absent, if a ``StepCondition.about``
                 or a ``PlanInterpretation.settles`` is not the id of a condition
-                element of the revision the plan targets.
+                element of the revision the plan targets, or if a
+                ``PlanStep.intended_action`` is not the id of an intended action of
+                the plan's goal.
         """
         ...
 
