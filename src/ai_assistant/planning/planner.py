@@ -148,6 +148,7 @@ from ai_assistant.core.types import (
     Message,
     PlannerOutput,
     PlanStep,
+    ProposedAction,
     ProposedUnderstanding,
     ReadAsk,
     ReadKind,
@@ -235,6 +236,27 @@ _REQUEST_HEADING: Final = "This turn's request, in the user's own words:"
 _CONSTRAINTS_HEADING: Final = "What must hold for this goal, labelled C1, C2, …:"
 _CRITERIA_HEADING: Final = "What would establish this goal is met, labelled S1, S2, …:"
 _CONDITIONS_HEADING: Final = "What this goal depends on, labelled D1, D2, …:"
+
+#: The heading ADR-0265 §4's intended actions are printed under.
+#:
+#: **A fourth label space and a heading of its own**, on the three above's argument
+#: applied once more: §4 makes ``A``\ *n* an ordinal into ``GoalBrief.actions`` and
+#: rules that "``A`` is not ``M``, ``F``, ``C``, ``S``, ``D``, ``E`` or ``G``", so a
+#: planner that cannot see which sequence it is reading cannot name one correctly. The
+#: heading names the letter its bullets carry, for the reason ADR-0226 §3 gives the
+#: ``M`` labels: the label a model names must be the first token it read.
+#:
+#: **It says "already intends" because that is what the block holds and the whole of
+#: it.** The bullets are one entry per member of ``Goal.intended_actions`` (§4), and
+#: this call's own proposals extend the space without appearing here — the model is
+#: told that by :data:`_INTENDED_ACTION_GUIDANCE` rather than by a heading that would
+#: have to describe a sequence it is not printing.
+#:
+#: **And it says nothing about standing** (§1, §4). The brief carries "no indication of
+#: whether the action has already been performed", so a heading reading "still to do"
+#: or "outstanding" would assert from the prompt what the value deliberately does not
+#: carry.
+_ACTIONS_HEADING: Final = "What this goal already intends to do, labelled A1, A2, …:"
 
 #: The heading ADR-0249 §10's evidence digest is printed under.
 #:
@@ -1288,6 +1310,89 @@ null; a step's `when` and an interpretation's `settles` are about a CONDITION an
 nothing else, so `C1`, `S1` and null are wrong there."""
 
 
+#: ADR-0265's seam, asked for in the prompt: the envelope's ``actions`` and the step's
+#: ``action``.
+#:
+#: **One block and not two, because the two keys are one mechanism.** §4's supply is
+#: "``GoalBrief.actions`` extended by this call's own ``PlannerOutput.actions``, in
+#: order", so a model told how to name an act without being told that its own proposals
+#: extend the space it names into cannot write the ordinary two-rooms reply at all — the
+#: label it needs is for an act no printed block holds. Splitting them would put the two
+#: halves of one indexing rule in two places, which is the failure ADR-0253 §9 names for
+#: the condition label's two cases and answers the same way, in one closing paragraph.
+#:
+#: **It states what warrants a proposal, because §2 makes that the model's judgement and
+#: not this seam's.** "A count of acts the user asked for is interpretation": *"book two
+#: identical rooms" warrants two because the user asked for two*, and "a planner that
+#: splits one intended act across two steps for its own reasons warrants none". Both
+#: halves are stated, because the prompt that states only the first invites a proposal
+#: per step and the one that states only the second invites the single action the
+#: owner's own case refuses.
+#:
+#: **It states no bound.** §1 bounds ``Goal.intended_actions`` by a refusal at the store
+#: and "no lane elides an intended action, for any reason, at any age", so the figure is
+#: ``core``'s and the refusal is the store's; a prompt carrying it would spell a
+#: ``Final[int]`` a second time in prose that nothing checks against it, and a model
+#: cannot count what the goal holds beyond what the block above prints anyway.
+#:
+#: **It states the refusal a bad action label earns, and does not state one for a bad
+#: ``serves``**, which is §3's and §4's asymmetry rather than an omission: a label that
+#: resolves to nothing "refuses the plan" on a step and is "dropped and the action is
+#: recorded anyway" on a ``serves``, "because ``serves`` gates nothing … a step's action
+#: label scopes an effect claim". A prompt that levelled the two would either make a
+#: model fear a refusal that does not happen or leave it unwarned of the one that does.
+#:
+#: **And it tells the model to send no id**, which :data:`_PROMPT_CLOSING` already does
+#: for a step id and :data:`_PLAN_SHAPE_GUIDANCE` for an interpretation id. §2's "a
+#: planner names no identifier and mints none" is ADR-0228 §8's namer rule over one more
+#: field, and ``ProposedAction``'s ``extra="forbid"`` refuses one rather than discarding
+#: it, so a reply carrying one costs a repair round the prompt can prevent.
+_INTENDED_ACTION_GUIDANCE = """\
+Beside `steps`, either shape may carry `actions`: the acts THIS goal intends, as \
+you understand the user to have asked for them. Each entry says what the act is \
+and, optionally, which parts of the goal it is there to serve:
+
+ "actions": [{"intent": "book a room for the Lisbon trip",
+              "serves": ["C1", "S2"]},
+             {"intent": "book a second room for the Lisbon trip"}]
+
+Propose one where the user's words require an act this goal does not already \
+hold one for. Two acts the user asked for are TWO entries — "book two identical \
+rooms" is two, because they asked for two, and an earlier booking does not \
+fulfil "book another one". Splitting one act across several steps of your plan \
+is not two acts and warrants none. A turn that acts on something this goal \
+already intends proposes nothing: leave `actions` out, which is the ordinary \
+reply and never an error.
+
+`serves` names parts of this goal by the same labels a `when` entry uses, except \
+that a constraint and a criterion may be named too — `C1`, `S2`, `D1`. Where you \
+are sending an `understanding`, they are positions within that reply's own \
+lists; where you are not, they are the labels printed in the next message. It is \
+provenance and nothing more: it does not say what the act is, two acts serving \
+the same part are still two acts, and an act serving nothing you can name is \
+still a real act — send `serves` empty or leave it out. A label naming nothing is \
+dropped and the act is recorded anyway. Do not send an id; ids are assigned \
+downstream.
+
+A step may say which of this goal's intended acts it is an attempt at, as \
+`action`:
+
+  {"intent": "<as above>", "capability": "<as above>", "parameters": {},
+   "action": "A1"}
+
+Choose one from the acts in front of you; never invent one. The space is the \
+block printed under "What this goal already intends to do" in the next message, \
+`A1`, `A2`, …, CONTINUED by the `actions` you are sending in THIS reply, in the \
+order you wrote them — so where that block prints two and you send one, yours is \
+`A3`, and where it prints nothing and you send two, they are `A1` and `A2`. A \
+label is the capital letter `A` followed by the position in decimal digits, with \
+no padding and no sign: `A1` and `A12`, never `A01`, `A+1`, `a1` or `A 1`. A step \
+naming an act that is not in that space REFUSES the whole plan, so name one you \
+can count. Most steps name none — a step that reads something, composes \
+something, or is not an attempt at an act this goal intends leaves `action` out \
+altogether, and that is the ordinary step."""
+
+
 def _system_prompt(
     capabilities: Sequence[str], *, files_shown: bool, label_axes: Sequence[str] = ()
 ) -> str:
@@ -1336,6 +1441,19 @@ def _system_prompt(
     shape: it means no label is printed below, and ADR-0226 §3's rule — name only a
     label actually printed — already says what that leaves askable, without this
     function taking a second input to say it twice.
+
+    :data:`_INTENDED_ACTION_GUIDANCE` sits immediately **below** that block and
+    **above** the read-request run (ADR-0265 §4). Below, because it adds a sixth
+    optional key to the step shape that block has just described, and a reader meeting
+    ``action`` before the five has been given an addition to a shape they have not
+    seen. Above, because that run is the connected description named above and nothing
+    may be inserted into it. It is also **unconditional**, and the argument is
+    :data:`_LOCAL_FILE_GUIDANCE`'s run in the other direction: an empty ``A`` block
+    does **not** make the space unnameable, because §4's supply is the printed block
+    "extended by this call's own ``PlannerOutput.actions``", so a reply that proposes
+    two acts may name ``A1`` and ``A2`` on a goal that intends none — which is "book
+    two rooms" on the turn the user says it. There is therefore no deployment state and
+    no per-call state that makes this member unaskable, and no input to condition it on.
 
     :data:`_STRUCTURED_READ_GUIDANCE` sits below :data:`_WEB_SEARCH_GUIDANCE` on the
     same footing — it adds a fifth member to the request those blocks have described —
@@ -1401,6 +1519,11 @@ def _system_prompt(
         "",
         _PLAN_SHAPE_GUIDANCE,
         "",
+        # ADR-0265 §4: the sixth optional step key and the envelope member whose own
+        # entries extend the space that key names, so it is read after the block that
+        # described the step shape and before the connected read-request run.
+        _INTENDED_ACTION_GUIDANCE,
+        "",
         _READ_REQUEST_GUIDANCE,
         "",
         _ACT_RECORD_GUIDANCE,
@@ -1452,13 +1575,30 @@ class _ExtractionError(Exception):
     whose ``understanding`` could not be read has said what shape it meant and has got
     that shape right; what it got wrong is one optional member beside it. Presenting
     both shapes there would ask a model to re-decide a judgement that was never in
-    question, which is the defect #1315 records in its other direction. The two flags
-    are mutually exclusive by construction: only :func:`_optional_understanding` and
-    :func:`_proposed_elements` raise with this one, and neither reads the marker.
+    question, which is the defect #1315 records in its other direction.
+
+    ``actions`` is a **fourth** case, on that same argument applied to ADR-0265 §2's
+    member and not on a preference for granularity. A reply whose ``actions`` could not
+    be read has also got its shape right, so the unclassified repair would re-open the
+    same settled judgement; and the ``understanding`` repair is not available to it
+    either, because that message asks for ``understanding`` again by name and would
+    tell a model to re-send a member that was never the problem — and, where the reply
+    sent none, a member it never sent at all. §2 makes the two independent in terms:
+    "a turn may propose an action without proposing an understanding".
+
+    The flags are mutually exclusive by construction: only
+    :func:`_optional_understanding` and :func:`_proposed_elements` raise with
+    ``understanding``, only :func:`_optional_actions` raises with ``actions``, and none
+    of the three reads the marker.
     """
 
     def __init__(
-        self, message: str, *, declined: bool = False, understanding: bool = False
+        self,
+        message: str,
+        *,
+        declined: bool = False,
+        understanding: bool = False,
+        actions: bool = False,
     ) -> None:
         """Record the reason and which repair the reply has earned.
 
@@ -1468,10 +1608,13 @@ class _ExtractionError(Exception):
                 marker and failed only the rationale condition (ADR-0176 §5).
             understanding: Whether the reply's shape was sound and only ADR-0249
                 §7's ``understanding`` beside it could not be read.
+            actions: Whether the reply's shape was sound and only ADR-0265 §2's
+                ``actions`` beside it could not be read.
         """
         super().__init__(message)
         self.declined = declined
         self.understanding = understanding
+        self.actions = actions
 
 
 class ModelBackedPlanner:
@@ -1748,6 +1891,7 @@ class ModelBackedPlanner:
                             str(exc),
                             declined=exc.declined,
                             understanding=exc.understanding,
+                            actions=exc.actions,
                         ),
                     ),
                 )
@@ -1793,6 +1937,17 @@ class ModelBackedPlanner:
         ADR-0047 §4's own specific verdict — no ``steps`` list, an empty plan — rather
         than a complaint about a member of a shape it never sent.
 
+        **ADR-0265 §2's ``actions`` is read the same way again**
+        (:func:`_optional_actions`), and it is read on **both** shapes where
+        ``interpretations`` below is read on one. That member "sits beside ``steps``";
+        this one sits on :class:`PlannerOutput`, and §2's ordering is stated over
+        "every ``PlannerOutput`` a planner returns" — a decline is still a turn that may
+        have been told what the goal intends. A malformed one costs a repair round for
+        :func:`_optional_understanding`'s reason sharpened: an intended action is a
+        durable record minted once and never re-derived (§1), and a step of this same
+        reply may name it, so a quietly dropped entry would take a plan's ``A`` label
+        down with it at the loop (§4).
+
         **ADR-0253 §8's ``interpretations`` is read the same explicit way** and for
         the same reason one level out: an ``id``, a ``verdict`` or a ``when`` a model
         wrote on one reaches nothing, because the payload
@@ -1813,7 +1968,7 @@ class ModelBackedPlanner:
         Raises:
             _ExtractionError: If the text is not one of the two legal envelopes, the
                 constructed plan fails a ``core`` invariant, or the ``understanding``
-                beside it cannot be read.
+                or the ``actions`` beside it cannot be read.
         """
         envelope = _extract_object(content)
         raw_steps = _require_steps(envelope)
@@ -1864,7 +2019,15 @@ class ModelBackedPlanner:
         except ValidationError as exc:
             msg = f"the drafted plan is not a valid ActionPlan: {exc}"
             raise _ExtractionError(msg) from exc
-        return PlannerOutput(plan=plan, understanding=_optional_understanding(envelope))
+        # ADR-0265 §2's own order, read here for its legibility rather than for any
+        # dependency: the loop records "(a) this call's `understanding` … (b) this
+        # call's `actions`", and the two reads are independent — "a turn may propose an
+        # action without proposing an understanding".
+        return PlannerOutput(
+            plan=plan,
+            understanding=_optional_understanding(envelope),
+            actions=_optional_actions(envelope),
+        )
 
     def _step_payload(self, raw: object, index: int, *, ids: Sequence[str], total: int) -> PlanStep:
         """Validate one raw step object into a ``PlanStep`` with a minted id.
@@ -2083,7 +2246,9 @@ _ISO_DURATION: Final = re.compile(
 def _step_shape(
     raw: dict[str, object], *, ids: Sequence[str], ordinal: int, total: int
 ) -> dict[str, object]:
-    """ADR-0253 §9's five optional step keys, read into ``PlanStep`` payload entries.
+    """Read ADR-0253 §9's five optional step keys and ADR-0265 §4's sixth.
+
+    Each becomes a ``PlanStep`` payload entry.
 
     **A key the envelope does not carry produces no entry**, so an absent one is
     literally the field's own default rather than a value this function chose — which
@@ -2091,7 +2256,7 @@ def _step_shape(
     keys" asks of the one site that reads them.
 
     **A key present is a key declared, and only an absent key is "not declared".** A
-    member written as ``null`` is refused on all five, and the rule is one rule
+    member written as ``null`` is refused on all six, and the rule is one rule
     because the failure is one failure: §1's "an empty ``depends_on`` means the step
     waits on no other step", §4's "a step declaring no ``verifies`` imposes none" and
     §5's "a step declaring none imposes none" each describe a step that said
@@ -2105,6 +2270,15 @@ def _step_shape(
     not carry" — and ADR-0253 §7 is the decision's own statement of it: "declaring
     nothing and declaring something malformed are two different states".
 
+    **ADR-0265 §4's ``action`` is the sixth, and the same rule decides it** (§4,
+    :func:`_step_action`). "A step naming no intended action is held to nothing by this
+    decision", so an absent key is the field's own ``None``; a key written as ``null``
+    is not that silence and is refused, because ``PlanStep.intended_action`` *takes*
+    ``None`` and reading a malformed value as it would put a step this reply meant to
+    scope to an act back into the unscoped population — §4's fail-open direction, which
+    it refuses in terms: "no lane drops the field instead, because a step whose action
+    was dropped is a step whose effect claim would be scoped to nothing".
+
     Args:
         raw: The step object the envelope carried.
         ids: The ids minted for the steps before this one, in envelope order.
@@ -2113,10 +2287,11 @@ def _step_shape(
 
     Returns:
         The entries to lay over the step's payload, which is empty for every step
-        that declares none of the five.
+        that declares none of the six.
 
     Raises:
-        _ExtractionError: For each refusal §§1, 4, 5, 6 and 9 state over these keys.
+        _ExtractionError: For each refusal ADR-0253 §§1, 4, 5, 6 and 9 and ADR-0265 §4
+            state over these keys.
     """
     shape: dict[str, object] = {}
     if "after" in raw:
@@ -2129,6 +2304,8 @@ def _step_shape(
         shape["verifies"] = _step_verifies(raw["verifies"], ordinal=ordinal)
     if "evidence_recency" in raw:
         shape["evidence_recency"] = _iso_duration(raw["evidence_recency"], ordinal=ordinal)
+    if "action" in raw:
+        shape["intended_action"] = _step_action(raw["action"], ordinal=ordinal)
     return shape
 
 
@@ -2405,6 +2582,73 @@ def _step_verifies(raw: object, *, ordinal: int) -> dict[str, object]:
     return {"kind": raw.get("kind"), "field": raw.get("field"), "equals": raw.get("equals")}
 
 
+def _step_action(raw: object, *, ordinal: int) -> str:
+    """``action`` read as the ``A`` label ADR-0265 §4 fixes, and crossed unresolved.
+
+    **The label crosses as the model wrote it and is not resolved here** (§4). "The
+    loop resolves it once, in §2's step (d), replacing the label with the
+    ``IntendedAction.id`` it names, under ADR-0253 §9's identical discipline — taken by
+    the loop, taken once, immediately on return, in place of whatever came back", which
+    is :func:`_step_conditions`' rule for ``about`` over one more vocabulary and for the
+    same reason: the ids it resolves to are minted by ``orchestration`` a moment after
+    this call returns, and §2's ordering records **this** reply's own proposals before
+    the substitution — so a planner that resolved its own labels could not name an act
+    the same reply proposed, which §4 makes "the ordinary shape of it and not an exotic
+    one".
+
+    **So this function tests the shape of the value and never the grammar of the
+    label.** An ordinal outside the range, and every value that is not a label at all —
+    ``A0``, ``A01``, ``A+1``, ``a1``, ``A 1``, a non-ASCII digit, ``banana`` — "each
+    resolve to nothing" and **the loop refuses the plan** over them (§4). Parsing them
+    here would be a second resolver of a space ADR-0249 §9 gives one side, and it could
+    only agree with the loop's or disagree with it: agreeing, it would trade a refusal
+    the user can be told about for a repair round; disagreeing, it would refuse at this
+    seam a spelling the loop admits, with no test in either package catching it. The
+    out-of-range half is not even decidable here, since the supply runs on past the
+    brief into this same reply's ``actions``.
+
+    **What is decided here is the one thing the field cannot decide for itself**: a
+    ``null``. :attr:`PlanStep.intended_action` *takes* ``None`` — it is the value on
+    every step that names no act and on every plan written before ADR-0265 — so an
+    ``"action": null`` would validate into exactly the silence §4 gives an omitted key,
+    and a step the reply meant to scope to an act would rejoin the unscoped population
+    with nothing recorded anywhere. §4 refuses that direction in terms — "no lane drops
+    the field instead, because a step whose action was dropped is a step whose effect
+    claim would be scoped to nothing" — and :func:`_step_verifies` refuses the same
+    spelling one key over, where an explicit ``null`` would silently drop a predicate.
+
+    A non-string is refused here rather than at ``PlanStep`` for the repair turn's sake
+    alone: the field would refuse an integer anyway, and what this adds is a message
+    naming the step and the key instead of a validator's rendering of the whole model.
+    A blank string is left to :data:`~ai_assistant.core.types.Identifier`, which refuses
+    it, because that is a ``core`` rule and restating it here would make two.
+
+    Args:
+        raw: The ``action`` the step carried.
+        ordinal: The declaring step's own 1-based position, for the repair turn.
+
+    Returns:
+        The label, exactly as the model wrote it, for the loop to resolve.
+
+    Raises:
+        _ExtractionError: If ``action`` is ``null`` or is not a string.
+    """
+    if raw is None:
+        msg = (
+            f"the step at position {ordinal} has an 'action' written as null: the one "
+            f"spelling of 'this step is an attempt at no intended act' is to send no "
+            f"'action' at all"
+        )
+        raise _ExtractionError(msg)
+    if not isinstance(raw, str):
+        msg = (
+            f"the step at position {ordinal} has an 'action' that is not a string: an "
+            f"action is named by its printed label, such as 'A1'"
+        )
+        raise _ExtractionError(msg)
+    return raw
+
+
 def _iso_duration(value: object, *, ordinal: int) -> timedelta:
     """``evidence_recency`` read as the ISO-8601 duration ADR-0253 §9 fixes.
 
@@ -2506,6 +2750,87 @@ def _resolved_record(label: object, memories: Sequence[MemoryRecord]) -> str:
         )
         raise _ExtractionError(msg)
     return memories[ordinal - 1].id
+
+
+def _optional_actions(envelope: dict[str, object]) -> tuple[ProposedAction, ...]:
+    """Read ADR-0265 §2's ``actions`` out of one envelope, or return an empty tuple.
+
+    **An envelope carrying no ``actions`` proposes none**, which §2 fixes as the
+    semantically correct answer "for a planner that knows nothing of this envelope and
+    for every turn that acts on an intent the goal already holds" — so the empty list
+    is a statement rather than a gap, and "no implementation reads an empty ``actions``
+    as an error, a degradation or an instruction to re-plan".
+
+    **It is read on both envelope shapes**, beside ADR-0249 §7's ``understanding`` and
+    unlike ADR-0253 §8's ``interpretations``. That member "sits beside ``steps``" and
+    every interpretation §8 describes is about a plan's own steps, so a decline carrying
+    one is stepped over; this member sits on :class:`PlannerOutput` and §2's ordering is
+    stated over "**every** ``PlannerOutput`` a planner returns". What it records is what
+    the goal intends, which §2 makes independent of what this turn plans to do about it:
+    a turn that needs no capability may still have been told of an act the goal intends,
+    and a decline that dropped it silently would lose a durable record the next turn's
+    ``A`` labels index into.
+
+    **Read key by key into an explicit payload, never handed the model's object**
+    (§2). Two members are read and everything else is stepped over, so an ``id`` of any
+    spelling reaches nothing — ``ProposedAction``'s ``extra="forbid"`` would refuse one
+    and this never offers it the chance, which is :func:`_optional_understanding`'s own
+    construction over a smaller value.
+
+    **This read is strict, like that one and for a sharper version of its reason.** A
+    dropped or half-read ``actions`` is not the "one further read" a dropped
+    ``read_request`` costs: §1 makes an intended action a durable record of what the
+    user asked for, minted once and never re-derived, so an entry quietly lost is an act
+    the goal never learns it intends — and a step of the same reply naming it would then
+    resolve to nothing and refuse the whole plan at the loop (§4). So a malformed
+    ``actions`` goes to ADR-0047 §6's bounded repair, where the model is asked for that
+    member again (:func:`_repair_prompt`).
+
+    **Nothing here resolves a label** (§3). A ``serves`` entry crosses as the model
+    wrote it; ``orchestration`` resolves each against its own copy of the sequence in
+    force on this call and **drops** what does not resolve, recording the action anyway.
+    A filter here would be a second resolver of a label space ADR-0249 §9 gives one
+    side, and it would turn §3's drop — which costs legibility — into this module's
+    refusal, which costs the turn.
+
+    **And nothing here counts them** (§1, §5). ``MAX_INTENDED_ACTIONS`` bounds what the
+    **goal** holds, not what one reply proposes, and the bound is enforced by a refusal
+    at ``record_intended_actions`` that is all-or-nothing over the whole minting; a
+    ceiling applied here could not see the actions the goal already holds and so could
+    only refuse a legal proposal or admit an illegal one.
+
+    Args:
+        envelope: The decoded model envelope, plan-shaped or decline-shaped.
+
+    Returns:
+        One :class:`~ai_assistant.core.types.ProposedAction` per entry, in the order the
+        model wrote them, empty where the envelope proposed none.
+
+    Raises:
+        _ExtractionError: If ``actions`` is present and cannot be read.
+    """
+    if "actions" not in envelope:
+        return ()
+    raw = envelope["actions"]
+    if not isinstance(raw, list):
+        msg = "'actions' is present but is not a list"
+        raise _ExtractionError(msg, actions=True)
+    payloads: list[dict[str, object]] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            msg = f"'actions[{index}]' is not a JSON object"
+            raise _ExtractionError(msg, actions=True)
+        # An absent `serves` is the field's own default and a `null` is refused by
+        # `ProposedAction`, which is :func:`_proposed_axis`' rule one member over: the
+        # only spelling of "this act serves nothing I can name" is an empty list or a
+        # key the object does not carry, because a `null` coerced to empty would turn a
+        # malformed reply into a statement §3 makes durable.
+        payloads.append({"intent": entry.get("intent"), "serves": entry.get("serves", ())})
+    try:
+        return tuple(ProposedAction.model_validate(payload) for payload in payloads)
+    except ValidationError as exc:
+        msg = f"a proposed action is not usable: {exc}"
+        raise _ExtractionError(msg, actions=True) from exc
 
 
 def _optional_understanding(envelope: dict[str, object]) -> ProposedUnderstanding | None:
@@ -3385,6 +3710,17 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
     all and is a well-formed brief rather than a degraded one (§9) — renders as it did
     before this decision.
 
+    **The goal's intended actions are printed below those three and under a heading of
+    their own** (ADR-0265 §4, :func:`_render_brief_actions`). A fourth label space and
+    so a fourth heading, on §9's own argument; **below** the three because a bullet
+    there names a ``C``, ``S`` or ``D`` label of the blocks above it, and above
+    "Current context:" because what it carries is a record of the goal rather than this
+    system's reading of its own clock. It is the goal's whole record of what it intends
+    and it carries no identifier, no effect, no execution, no step, no outcome and no
+    indication that an act has already been performed — §4's containment, which is a
+    property of :class:`~ai_assistant.core.types.BriefAction` rather than of this
+    function's care.
+
     **Every free-text value of the goal is quoted, the outcome statement included, and
     ADR-0249 is what changed that** (ADR-0098 §2). §2 refuses an assembler that
     "embeds a span in a syntax the serialised span can itself produce", and until this
@@ -3458,6 +3794,13 @@ def _render_request(  # noqa: PLR0913 — one parameter per block this message i
 
     # ADR-0249 §11, §9: three tuples, three headings, three label spaces.
     lines += _render_brief_elements(goal)
+
+    # ADR-0265 §4: the fourth, **below** the three — because a bullet here names a
+    # `C`, `S` or `D` label of the blocks above and a reader meeting `serves C1`
+    # before the constraint block has been shown a label for nothing. It is still
+    # inside the goal's own material and above "Current context:", since what it
+    # holds is a record of the goal rather than a reading of this system's clock.
+    lines += _render_brief_actions(goal)
 
     lines += [
         "",
@@ -3577,8 +3920,19 @@ def _brief_label(letter: str, ordinal: int) -> str:
     **The label is meaningful only within the call that rendered it** (§9): "no label
     survives that call, and none is persisted as a reference."
 
+    **ADR-0265 §4 spells a fourth sequence with this same construction**, and this
+    function takes an ``A`` for it rather than growing a near-identical twin. §4's
+    wording is §9's unaltered — "the ASCII string ``A`` followed by *n* in **ASCII**
+    decimal digits ``0``-``9``, with no padding and no sign" — and it fixes the same
+    three properties: the same on both sides of the seam, derived on each side from the
+    value it holds, and surviving no call. What differs is only which sequence it
+    indexes, which is the argument this parameter already carries; §4's "``A`` is not
+    ``M``, ``F``, ``C``, ``S``, ``D``, ``E`` or ``G``" is a statement about the letters
+    this corpus has spent and not a second scheme.
+
     Args:
-        letter: ``C`` for a constraint, ``S`` for a criterion, ``D`` for a condition.
+        letter: ``C`` for a constraint, ``S`` for a criterion, ``D`` for a condition
+            (ADR-0249 §9), ``A`` for an intended action (ADR-0265 §4).
         ordinal: The element's 1-based position within that tuple.
 
     Returns:
@@ -3633,6 +3987,65 @@ def _render_brief_elements(goal: GoalBrief) -> list[str]:
             f"[{element.ground.value}]"
             for ordinal, element in enumerate(elements, start=1)
         ]
+    return lines
+
+
+def _render_brief_actions(goal: GoalBrief) -> list[str]:
+    """ADR-0265 §4's ``A`` block, under a heading of its own.
+
+    **One bullet per member of** :attr:`~ai_assistant.core.types.GoalBrief.actions`
+    **in that tuple's own order**, which §4 makes one entry per member of
+    ``Goal.intended_actions`` in *its* own order — "so ``A1`` names the first-minted
+    action on both sides of the seam". Nothing here sorts, filters or truncates: §1
+    bounds the tuple by a refusal at the store rather than by an elision, so the
+    sequence this function is handed is the whole record and a truncation here would
+    make ``A1`` name one act and the loop's own copy another.
+
+    **The bullet carries the intent and the live links and nothing else** (§4). A
+    :class:`~ai_assistant.core.types.BriefAction` has no field an
+    :attr:`~ai_assistant.core.types.IntendedAction.id`, an effect, an execution, a
+    step or an outcome could sit in — that is a property of the value rather than of
+    this function's care — and its ``serves`` already holds the ``C``/``S``/``D``
+    labels of the **current** revision, the stale ones omitted by the projection that
+    filled it. So this function resolves nothing and drops nothing; what it adds is
+    the ordinal, which is the opposite of an identifier.
+
+    **A link block is printed only where a link survives, and its absence asserts
+    nothing** (§3, §4). "The brief shows the link where it is still true and shows
+    nothing where it is not", and an action all of whose links have gone stale "is a
+    live action rendered truthfully rather than a degraded one" — so an empty
+    ``serves`` prints no bracket at all rather than an empty one, which would read as
+    a claim that the act serves nothing rather than as the silence §3 makes it.
+
+    **The intent is quoted and the labels are not** (ADR-0098 §2). An ``intent`` is
+    free text this system wrote but did not constrain, and this block's own syntax is a
+    label a later reply names and the loop resolves, so an unquoted multi-line intent
+    could open an ``- A9`` bullet of its own and offer a label for an act nobody
+    minted — :func:`_render_brief_elements`' reason over one more sequence. A
+    ``serves`` label is derived from a position by the projection rather than held, so
+    there is nothing there to forge with.
+
+    **An empty tuple prints nothing at all** — no heading, no line, no mention that the
+    goal intends nothing. §1 makes ``intended_actions`` empty "on every goal at the
+    moment it is opened", so that is the ordinary state of a first turn rather than a
+    gap, and the space stays nameable regardless: §4's supply "runs on past the brief",
+    and a step may name an act this same reply proposed
+    (:data:`_INTENDED_ACTION_GUIDANCE`).
+
+    Args:
+        goal: The brief this call was handed.
+
+    Returns:
+        The block's lines, preceded by a blank separator, or an empty list.
+    """
+    if not goal.actions:
+        return []
+    lines = ["", _ACTIONS_HEADING]
+    for ordinal, action in enumerate(goal.actions, start=1):
+        bullet = f"  - {_brief_label('A', ordinal)} {_quoted_span(action.intent)}"
+        if action.serves:
+            bullet += f" [serves {', '.join(action.serves)}]"
+        lines.append(bullet)
     return lines
 
 
@@ -4555,10 +4968,12 @@ def _split_conversation_tail(
     return memories[:boundary], memories[boundary:]
 
 
-def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool = False) -> str:
+def _repair_prompt(
+    reason: str, *, declined: bool = False, understanding: bool = False, actions: bool = False
+) -> str:
     """The user turn that asks the model to fix a malformed reply (ADR-0176 §5).
 
-    Three messages, split on what evidence the reply carries of what the model
+    Four messages, split on what evidence the reply carries of what the model
     meant — because §5's whole argument is that a repair must not re-open a
     judgement the reply already got right.
 
@@ -4569,6 +4984,15 @@ def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool =
       with the argument that ground admits, and the objective is kept or restated
       and never left out. It also offers **omitting** the member, which is always a
       legal reply (§7) and is a better answer than a second malformed one.
+    - ``actions`` — the reply's shape was sound and only ADR-0265 §2's ``actions``
+      beside it could not be read. The ask is that one member again, with the two
+      rules a model most plausibly broke restated: an entry carries an ``intent`` and
+      nothing that names it, and ``serves`` is a list of labels rather than a string
+      or a null. It offers **omitting** the member, which §2 makes the semantically
+      correct answer for every turn that proposes no new act — "no implementation
+      reads an empty ``actions`` as an error" — and which is a better reply than a
+      second malformed one. It says nothing about ``understanding``: §2 makes minting
+      "independent of revising", so the two members fail and are repaired apart.
     - ``declined`` — the reply carried the ``no_capability_needed`` marker and only
       its ``rationale`` was missing, null, non-string or blank. The model has said
       what it meant, so completing the decline is the right ask, and asking for
@@ -4582,7 +5006,7 @@ def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool =
       the test between them and asks the model to choose by the goal, naming
       neither as the intended correction.
 
-    None of the three asks for steps, and none closes by requiring a non-empty
+    None of the four asks for steps, and none closes by requiring a non-empty
     ``steps`` list — the wording this function used to carry.
 
     Args:
@@ -4590,6 +5014,8 @@ def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool =
         declined: Whether the reply carried the decline marker (ADR-0176 §5).
         understanding: Whether the shape was sound and only the ``understanding``
             beside it could not be read (ADR-0249 §7).
+        actions: Whether the shape was sound and only the ``actions`` beside it could
+            not be read (ADR-0265 §2).
 
     Returns:
         The user turn to append to the conversation before the repair round.
@@ -4608,6 +5034,17 @@ def _repair_prompt(reason: str, *, declined: bool = False, understanding: bool =
             "label as `retains` and nothing else; and the objective needs either "
             '`"retains_outcome": true` or an `outcome` with an `outcome_ground`. '
             "Leaving `understanding` out altogether is also a correct answer."
+        )
+    if actions:
+        return (
+            f"{opening} — keeping the shape you sent and the steps or rationale in "
+            "it, and sending `actions` again as a list of objects. Every entry needs "
+            "an `intent` whose value is a non-empty string saying what act this goal "
+            "intends, and no id of any kind; `serves`, if you send it, is a list of "
+            'labels such as `["C1"]` and never a string, a null or an identifier. '
+            "Leaving `actions` out altogether is also a correct answer, and is the "
+            "right one wherever this turn asks for no act the goal does not already "
+            "intend."
         )
     if declined:
         return (

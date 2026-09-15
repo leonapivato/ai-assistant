@@ -9896,23 +9896,23 @@ class Engine:
         **refuses** a goal opened carrying one. Both routes therefore end in
         :meth:`_record_actions`, and on a goal the store already holds the two kinds of
         write **interleave** in the order the turn made them (:func:`_minted_after`),
-        because §2 records a call's actions after that same call's revision and a
-        ``serves`` link is checked against the current interpretation at the append.
+        because §2 records a call's actions after that same call's revision, so the
+        record of what the turn intended is written in the order the turn decided it.
 
-        **On an *opening* turn that interleave is not available, and #2414 is the
-        record of why.** ``save_goal`` is one write of the whole chain, so a turn that
-        opens a goal, mints on its **first** planner call and then records a revision on
-        its **second** that does not retain the element that action serves has its
-        minting refused by ADR-0265 §5's ``serves`` conjunct — which reads the
-        *current* interpretation, by then the second call's. The link is legitimate:
-        §3 makes it "stale, truthful and harmless". Three ratified clauses meet here and
-        no implementation satisfies all three — §2's per-call ordering, ADR-0249 §11's
-        one end-of-turn persistence site with ``save_goal`` carrying the chain entire,
-        and §1's refusal of a ``save_goal`` that carries an intended action at all — so
-        the state is forced rather than chosen, and resolving it is an amendment to
-        ADR-0265 §5 rather than a change here. It is **fail-closed** (nothing is
-        recorded, no plan is saved, no step is dispatched) and unreachable until
-        ADR-0265's L3 lands the seam that fills ``PlannerOutput.actions``.
+        **The interleave is no longer what keeps a link admissible, and #2414 is the
+        record of why it once was.** ADR-0265 §5's ``serves`` conjunct read the
+        *current* interpretation at the instant of the append, so a turn that opened a
+        goal, minted on its **first** planner call and then recorded a revision on its
+        **second** that did not retain the element that action served had its minting
+        refused — a link ADR-0265 §3 makes "stale, truthful and harmless", refused by a
+        write order no clause was free to move. **ADR-0269 §1 narrows the conjunct
+        instead**, to a membership test over "every revision the goal's
+        ``interpretation`` holds at the instant of the append", and §2 declines the
+        direction that would have moved a write: "no lane routes an opened turn's later
+        revisions through ``record_interpretation``, splits ``save_goal`` into a chain
+        of writes, defers the opening write past the turn's mintings, or reorders the
+        site's calls". So the order below is unchanged and is justified on §2's own
+        ground alone.
 
         ``None`` is unreachable from any path this component drives — every
         ``RespondedTurn`` the loop returns carries a record — and is accepted rather
@@ -9958,10 +9958,12 @@ class Engine:
             # ADR-0265 §2's per-call ordering, made durable: a call's actions are
             # recorded **after** its own revision, so the mintings standing before this
             # revision are the ones earlier calls took. Batching every minting after
-            # every revision would refuse a link a later call's restatement made stale —
-            # `record_intended_actions` checks each `serves` against the **current**
-            # interpretation at the append, and §3 makes a stale link truthful rather
-            # than a reason to refuse anything.
+            # every revision would record the turn's own history wrongly — a `serves`
+            # a later call's restatement made stale would be written as if it had been
+            # proposed against that restatement. Since ADR-0269 §1 it would no longer be
+            # *refused*, the conjunct now reading every revision the goal holds; §3
+            # makes the stale link truthful either way, and §2's ordering is what keeps
+            # the record of which call proposed what.
             expected = await self._record_actions(record, _minted_after(record, written), expected)
             stored = await self._plans.record_interpretation(
                 GoalRevision(
