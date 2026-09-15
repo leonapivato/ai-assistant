@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,9 @@ from plan_store_contract import PlanStoreContract
 from ai_assistant.planning import InMemoryPlanStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractContextManager
+
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import GoalAttempt
 
@@ -42,6 +46,10 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
         assert isinstance(store, InMemoryPlanStore)
         # A pre-decision row, by construction: the public members refuse it now.
         store._attempts[attempt.id] = attempt
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh subject on ``now``; nothing to dispose of, so a null context."""
+        return contextlib.nullcontext(InMemoryPlanStore(now=now))
 
 
 async def _seed_and_start(store: InMemoryPlanStore) -> str:

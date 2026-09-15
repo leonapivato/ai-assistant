@@ -21,10 +21,14 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from plan_store_contract import (
+    _KEY,
     PlanStoreContract,
     _attempt,
     _claim,
+    _effect_plan,
     _goal,
+    _intended,
+    _minting,
     _plan,
     _revision,
 )
@@ -36,6 +40,7 @@ from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
     ActionPlan,
     AttemptTransition,
+    EffectClaim,
     EvidenceApplicability,
     EvidenceBasis,
     EvidenceHistory,
@@ -69,6 +74,7 @@ from ai_assistant.testing.cancellation import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -154,6 +160,9 @@ _SYNC_METHODS = {
     # its write are one `BEGIN IMMEDIATE`, so it is its own lock site rather than a
     # caller of one above.
     "record_intended_actions": "_record_intended_actions_sync",
+    # ADR-0259 §2's member, likewise a compare-and-swap: its read, its comparison and
+    # its write are one `BEGIN IMMEDIATE`, so it is its own lock site.
+    "claim_effect": "_claim_effect_sync",
 }
 
 
@@ -187,6 +196,19 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             yield realised
         finally:
             realised.close()
+
+    def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
+        """A fresh in-memory database on ``now``, closed when the ``with`` ends."""
+
+        @contextlib.contextmanager
+        def opened() -> Iterator[PlanStore]:
+            realised = SqlitePlanStore(path=":memory:", now=now)
+            try:
+                yield realised
+            finally:
+                realised.close()
+
+        return opened()
 
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
@@ -3369,6 +3391,65 @@ def _version_4_database(path: Path) -> None:
         )
         conn.execute("ALTER TABLE goals ADD COLUMN evidence_elided INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+
+
+def _version_5_database(path: Path) -> None:
+    """Build the database this store shipped **after** ADR-0265 and before ADR-0259.
+
+    The **previous** version, which is the one ADR-0259 §9's migration is stated over.
+    ADR-0265 added no table and no column, so the version 5 file is the version 4 file
+    with the marker moved — which is exactly the claim the version 4 arm above makes,
+    and building it this way is what keeps the two statements one.
+
+    Args:
+        path: Where to build it.
+    """
+    _version_4_database(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
+
+
+async def test_a_version_5_plan_store_opens_with_an_empty_effects_table(tmp_path: Path) -> None:
+    """ADR-0259 §9's migration, and the guarantee it delimits rather than closes.
+
+    "The migration creates the table empty" — **no lane reconstructs a row for an
+    execution that predates it**, because doing so would need the tool, digest and
+    binding of a decision the *audit trail* holds, and ``planning`` reaching into
+    ``permissions`` to build its own rows is what golden rule 1 forbids. So an effect
+    performed before the migration "is not claimed, is not recognised, and a later plan
+    repeating it answers ``CLAIMED`` and dispatches" — which is asserted here rather
+    than left as prose, because it is the one window the migration opens. What bounds
+    it is ADR-0255 §13's Q4 rule: no consequential capability has been wired, so there
+    is no legacy real effect for the gap to expose.
+    """
+    path = tmp_path / "plans.db"
+    _version_5_database(path)
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        export = await store.export()
+        assert export.schema_version == 14
+        assert export.effects == (), "the table is created empty rather than reconstructed"
+
+        # A plan written **after** the upgrade, naming an action minted after it: the
+        # only shape a claim can be scoped to at all (ADR-0265 §5).
+        await store.record_intended_actions(_minting(_intended("ia1")))
+        await store.save_plan(_effect_plan("p1"))
+        state = await store.start_execution("p1")
+        answer = await store.claim_effect(execution_id=state.id, step_id="s1", effect_key=_KEY)
+
+        assert answer.claim is EffectClaim.CLAIMED, (
+            "a legacy act is not recognised, so the repeat is claimed and dispatches"
+        )
+        assert (await store.delete_goal("g1")).deleted, "and the upgraded store still erases"
+        assert (await store.export()).effects == ()
+    finally:
+        store.close()
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == (
+            "6",
+        )
 
 
 async def test_a_version_4_plan_store_reads_its_goals_with_no_intended_actions(
