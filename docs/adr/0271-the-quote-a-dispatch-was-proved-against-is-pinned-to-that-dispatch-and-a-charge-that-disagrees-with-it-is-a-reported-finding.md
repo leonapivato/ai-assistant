@@ -87,7 +87,7 @@ So ADR-0262 §2 makes every `MONEY` criterion `unestablished` outright: such a g
 **not met** for a capability whose acts make a charge. That is the fail-closed direction and the
 right one while the operand is missing; it is not a design anyone wants to keep.
 
-### The tree, read rather than assumed, at `origin/main` `210b33d7`
+### The tree, read rather than assumed, at `origin/main` `0e7b7192`
 
 - **`PermissionRuling` carries `authorised_by`, `authorised_subject` and `authorised_goal`**, and
   `PermissionDecision.from_request` transcribes the ruling whole (`ruling.model_copy(deep=True)`).
@@ -98,6 +98,11 @@ right one while the operand is missing; it is not a design anyone wants to keep.
   output and no digest of any of them — and its `incurred_cost` is *"the price of the invocation …
   never money the tool moved"* (ADR-0192 §5). Neither the row nor that field can carry this pin or
   this charge.
+- **`SqliteAuditTrail` stores each `PermissionDecision` as a JSON record under a
+  `meta("schema_version")` marker**, with `_SCHEMA_VERSION` reading **2**, `_OPENABLE_VERSIONS`
+  `{1, 2}`, a restamping migration and a loud refusal at open below the set — the mechanism ADR-0049
+  §1 fixed, ADR-0192 §2 applied to this store and ADR-0262 §8 last moved. Both fields this decision
+  adds are written through it, which §8 states the consequence of.
 - **`ActionQuote`, `QuotedOutput`, `ActionRequest.intended_action`, `CoverageMember.kind` and
   `BoundedArgument` are not on this tree.** ADR-0266's L1 is in flight (PR #2408), ADR-0267's Q1 is
   unbriefed, and ADR-0270's lane is unbriefed. Every operand this decision reads is ratified and
@@ -478,8 +483,8 @@ producer, no freshness rule and no coverage condition.
 > it (ADR-0015, golden rule 5), and it is implemented in **three lanes and no fourth**. **P1**, the
 > `core` record: `ChargedOutput` with its validator, `ToolDefinition.charged_output` and
 > `PermissionRuling.proved_quote` with its validator, in `core/types.py`, **together with the
-> `PROTOCOL_VERSION` bump and the `wire/envelope.py` log entry those widened shapes oblige** (below),
-> and nothing else. **`ChargedOutput` is a type and not a Protocol** and owes no triad of its own.
+> `PROTOCOL_VERSION` bump, the `wire/envelope.py` log entry and the audit trail's `schema_version`
+> move those widened shapes oblige** (both below), and nothing else. **`ChargedOutput` is a type and not a Protocol** and owes no triad of its own.
 > **P2**, the pin: `permissions` setting `proved_quote` at the
 > ruling, from the read condition 6's evidence route was proved over. **P3**, the verification read:
 > §2's charge reading and §3's limbs inside ADR-0262's comparison, in the subsystem that
@@ -505,9 +510,26 @@ producer, no freshness rule and no coverage condition.
 > lane. **The integer is chosen at P1's own base** against the bumps other lanes of this batch land,
 > and a number written into this document would be a claim about an order nobody controls. **No
 > compatibility shim, optional-member negotiation, per-member capability flag or lenient decode is
-> added** (ADR-0084 §3, whose refusal naming both versions is the intended outcome); **no stored row
-> is migrated or dropped**, a stored `PermissionDecision` decoding with `proved_quote` absent and a
-> stored `ToolDefinition` with `charged_output` absent; and `core/config.py` gains nothing.
+> added** (ADR-0084 §3, whose refusal naming both versions is the intended outcome); **no decision
+> record is rewritten, back-filled or re-decided**, a stored `PermissionDecision` decoding with
+> `proved_quote` absent and a stored `ToolDefinition` with `charged_output` absent; and
+> `core/config.py` gains nothing.
+
+> **Normative — P1 also carries the audit trail's `schema_version`, by exactly one, for the same
+> reason ADR-0262 §8 moved it, and no integer is fixed here either.** Both widened shapes are
+> **stored** shapes: `PermissionDecision.tool` embeds the whole `ToolDefinition` by value and
+> `from_request` transcribes the ruling whole, so a decision carrying `charged_output` or
+> `proved_quote` is written into `SqliteAuditTrail`'s JSON record under its `meta("schema_version")`
+> marker, and both models set `extra="forbid"` — **code at the current marker could not decode a
+> record newer code had written while the marker still said it could**, which is ADR-0262 §8's own
+> sentence about `postconditions` and is true of these two fields word for word. **The marker
+> therefore moves by exactly one and the previous value stays openable**, on ADR-0049 §1's additive
+> create-and-migrate as ADR-0192 §2 and ADR-0262 §8 each applied it to this store — a **restamp**,
+> which rewrites no record's content, so no trail on disk becomes unopenable and a **downgrade is
+> refused loudly at open** rather than at the first unreadable row. It rides **in P1's own change**,
+> beside the `PROTOCOL_VERSION` bump and with that store's own migration and downgrade-refusal
+> coverage, exactly as ADR-0262 §8 put it in the lane landing the `core` change: **this decision is
+> still implemented in three lanes and no fourth**, and none of the three is a migration lane.
 
 > **Normative — the lanes ship the five arms below, each over controlled fakes, and none is
 > demonstrated against a live integration or a real charge.**
@@ -523,9 +545,14 @@ producer, no freshness rule and no coverage condition.
    `authorised_goal` **unset**, and the **route-(c)** shape with `authorised_by` set and
    `authorised_subject` and `authorised_goal` **both unset** — the last two being the arm that fails
    a validator gating on `authorised_by` alone.
-2. **The pin is a value and not a pointer.** A quote appended to the goal after the ruling leaves the
-   pinned value **unchanged**, and a comparison over the pinned decision reads the earlier reading —
-   the arm that fails an implementation which re-selects by act and digest at read time.
+2. **The pin is a value and not a pointer, and it is the value condition 6 was proved against.** A
+   quote appended to the goal after the ruling leaves the pinned value **unchanged**, and a
+   comparison over the pinned decision reads the earlier reading — the arm that fails an
+   implementation which re-selects by act and digest at read time. **And the read is one read**: over
+   a `GoalQuotes` fake whose **second** call returns a further quote at `"130"` beside the `"120"` the
+   evidence route was taken over, the ruling pins `"120"` and the fake records **one** call for the
+   dispatch — the arm that fails an implementation evaluating condition 6 against one read and
+   constructing the ruling from another, which would pin a quote no comparison was made against.
 3. **The charge reading is total and fail-closed, and nothing in it raises.** Over one stored
    output, `charged_output` naming `amount` and `currency`: a JSON string, a JSON integer, a JSON
    **float**, a JSON **boolean**, a negative value, a missing key, a non-object output, `"usd"` and
@@ -551,7 +578,12 @@ producer, no freshness rule and no coverage condition.
    `SUCCEEDED` step whose operative declaration's postcondition its output **refuses**, under a
    decision carrying **no** `proved_quote` and a declaration carrying **no** `charged_output`, is
    **contradicting** and its criterion **`unmet`** — the arm that fails an implementation taking the
-   *charge test not taken* case first and answering `neither`/`unestablished`.
+   *charge test not taken* case first and answering `neither`/`unestablished`. **And §2's grouping
+   is driven, not assumed**: two `SUCCEEDED` steps sharing one `ActionRequest.parameters_digest`,
+   charging `"120"` and `"130"` against that same pin, make that **call** ambiguous and the criterion
+   **`unestablished`**, while the same pair under **different** digests leaves one call contradicting
+   and the criterion **`unmet`** — the arm that fails an implementation promoting a failed charge
+   test straight to a criterion-level `unmet` without §2's calls.
 5. **The finding is reported and prevents nothing.** A failing test yields `unmet`, an
    `AttemptOutcome` of `PARTIAL` where another criterion is met and `FAILED` where none is, and an
    `AttemptReport` carrying **exactly two fields** and no figure; and across the comparison **no
