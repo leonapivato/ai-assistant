@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     AuthorizationOrigin,
     AuthorizationSettlement,
     BoundAccount,
+    BoundedArgument,
     BoundKind,
     CanonicalDestination,
     CostBasis,
@@ -129,6 +130,11 @@ AUTHORIZATION_GOAL: Final = "goal-0001"
 #: **It classifies nothing system-supplied**, so ADR-0254 §3's condition 6 reads
 #: exactly as it would without the classification and every argument is
 #: user-facing. A case about that field raises it on a copy of this.
+#:
+#: **And it declares ``amount`` at ``MONEY``** (ADR-0266 §7), which is what gives
+#: the scripted ``MONEY`` member an argument route to be met on at all: a member
+#: names no argument, so a declaration declaring none meets it nowhere. A case about
+#: an undeclared argument raises it on a copy of this.
 AUTHORIZATION_TOOL: Final = ToolDefinition(
     id="book_site",
     capability="book_site",
@@ -141,6 +147,9 @@ AUTHORIZATION_TOOL: Final = ToolDefinition(
     discloses=(DataTier.PERSONAL,),
     cost=ToolCost(basis=CostBasis.FREE),
     idempotency=Idempotency.NONE,
+    bounded_arguments=(
+        BoundedArgument(argument="amount", kind=BoundKind.MONEY, currency_argument="currency"),
+    ),
 )
 
 #: The connected account a scripted row is established against. Two facts, as
@@ -193,27 +202,29 @@ def money_bound(
     maximum: str | Decimal = "60",
     *,
     currency: str = "GBP",
-    currency_argument: str = "currency",
     minimum: str | Decimal | None = None,
+    maximum_exclusive: bool = False,
 ) -> ValueBound:
     """A ``MONEY`` :class:`~ai_assistant.core.types.ValueBound` (ADR-0254 §2).
 
     Args:
         maximum: The greatest amount the bound permits.
         currency: The ISO-4217 code the amount is denominated in.
-        currency_argument: The key of ``parameters`` carrying that currency —
-            **the whole of the association**, which no schema supplies.
         minimum: The least amount, where the act stated one.
+        maximum_exclusive: Whether the ceiling itself is **excluded** — *"under
+            sixty"* rather than *"at most sixty"* (ADR-0266 §3).
 
     Returns:
-        The bound.
+        The bound. **It names no currency key**: which argument carries the
+        currency is the declaration's (``ToolDefinition.bounded_arguments``), not
+        the act's.
     """
     return ValueBound(
         kind=BoundKind.MONEY,
         currency=currency,
-        currency_argument=currency_argument,
         maximum=Decimal(maximum),
         minimum=None if minimum is None else Decimal(minimum),
+        maximum_exclusive=maximum_exclusive,
     )
 
 
@@ -251,7 +262,7 @@ def terms_bound(*terms: str) -> ValueBound:
 
 
 def coverage_member(
-    argument: str,
+    kind: BoundKind = BoundKind.MONEY,
     *,
     fixed: FrozenJsonValue | None = None,
     bound: ValueBound | None = None,
@@ -260,9 +271,14 @@ def coverage_member(
     """One :class:`~ai_assistant.core.types.CoverageMember` (ADR-0254 §2).
 
     Args:
-        argument: The key of ``parameters`` this member is about, at depth one.
-        fixed: The value the act fixed, where it fixed one.
-        bound: The range the act stated, where it stated one.
+        kind: Which kind of value the act fixed or bounded (ADR-0266 §3). **A
+            member names no argument**: which argument carries it is the
+            declaration's, read at the comparison.
+        fixed: The value the act fixed, where it fixed one. A ``MONEY`` member
+            fixes nothing, which the model itself refuses.
+        bound: The range the act stated, where it stated one; ``money_bound()``
+            where neither is given, so the default member is the ceiling ADR-0254's
+            own worked case is about.
         basis: The act, span and resolution behind it; a default basis otherwise.
 
     Returns:
@@ -270,9 +286,9 @@ def coverage_member(
         model itself refuses otherwise.
     """
     return CoverageMember(
-        argument=argument,
+        kind=kind,
         fixed=fixed,
-        bound=bound,
+        bound=money_bound() if fixed is None and bound is None else bound,
         basis=basis if basis is not None else authorization_basis(),
     )
 
@@ -334,7 +350,7 @@ def authorization(  # noqa: PLR0913 — one knob per Authorization field a suite
         origin=origin,
         coverage=tuple(coverage)
         if coverage is not None
-        else (coverage_member("amount", bound=money_bound()),),
+        else (coverage_member(BoundKind.MONEY, bound=money_bound()),),
         proposed_at=proposed_at,
         expires_at=expires_at,
         confirmation=confirmation,
@@ -461,29 +477,54 @@ _ANSWERS: Final[frozenset[AuthorizationDisposition]] = frozenset(
 )
 
 
+def _money_narrows(later: ValueBound, earlier: ValueBound) -> bool:
+    """ADR-0254 §5's non-widening test over two ``MONEY`` bounds.
+
+    **Extracted so the ceiling's two facts are read together** (ADR-0266 §3): the
+    figure and whether the endpoint itself is permitted are one statement about what
+    the user allowed, and a comparison that read only the figure would admit a
+    correction that adds back the call the live row refused.
+    """
+    # A ``None`` on either side is unreachable — the model requires a ``MONEY``
+    # bound's ``currency`` and ``maximum`` — and the narrowing question is answered
+    # ``False`` for one all the same, which is the fail-closed direction and costs a
+    # confirmation rather than an assertion.
+    if later.currency != earlier.currency:
+        return False
+    if later.maximum is None or earlier.maximum is None or later.maximum > earlier.maximum:
+        return False
+    # **At an equal ceiling the flag is the whole of the difference** (ADR-0266 §3):
+    # clearing it admits a call at exactly the endpoint the live row refused, which
+    # is a widening however the two numbers compare.
+    if (
+        later.maximum == earlier.maximum
+        and earlier.maximum_exclusive
+        and not later.maximum_exclusive
+    ):
+        return False
+    # A lower bound the correction **drops** widens: every amount below the earlier
+    # minimum becomes permitted. One it **adds** narrows, and one it raises narrows;
+    # one it lowers widens.
+    if earlier.minimum is None:
+        return True
+    return later.minimum is not None and later.minimum >= earlier.minimum
+
+
 def _narrows(  # noqa: PLR0911 — one return per refusal, and each names a different widening
     later: ValueBound, earlier: ValueBound
 ) -> bool:
     """Whether ``later`` permits no value ``earlier`` does not (ADR-0254 §1, §9).
 
     The non-widening test, per kind, and it is a **subset** question: equality
-    narrows vacuously and is admitted. A change of ``kind``, of ``currency``, of
-    ``currency_argument`` or of a ``PERIOD``'s ``timezone`` re-denominates what the
-    bound is *about* rather than shrinking what it permits, so each takes path (i).
+    narrows vacuously and is admitted. A change of ``kind``, of ``currency`` or of a
+    ``PERIOD``'s ``timezone`` re-denominates what the bound is *about* rather than
+    shrinking what it permits, so each takes path (i). **At an equal ``maximum``,
+    clearing ``maximum_exclusive`` widens and setting it narrows** (ADR-0266 §3).
     """
     if later.kind is not earlier.kind:
         return False
     if later.kind is BoundKind.MONEY:
-        if (later.currency, later.currency_argument) != (
-            earlier.currency,
-            earlier.currency_argument,
-        ):
-            return False
-        if later.maximum is None or earlier.maximum is None or later.maximum > earlier.maximum:
-            return False
-        if earlier.minimum is None:
-            return True
-        return later.minimum is not None and later.minimum >= earlier.minimum
+        return _money_narrows(later, earlier)
     if later.kind is BoundKind.PERIOD:
         if later.timezone != earlier.timezone:
             return False
@@ -503,11 +544,11 @@ def _member_defect(later: CoverageMember, earlier: CoverageMember | None) -> str
     """Why ``later`` is not a permitted correction of ``earlier`` — or ``None``.
 
     ADR-0254 §1's *"what path (ii) may change, and what it may never touch"*, per
-    argument, with §9 clause (ii)'s principle as the whole of the reason. See
+    **kind** (ADR-0266 §3), with §9 clause (ii)'s principle as the reason. See
     :func:`~ai_assistant.permissions.goal_authorizations._member_defect`, whose
     arms these are.
     """
-    key = later.argument
+    key = later.kind.value
     if earlier is None:
         return (
             f"a correction may not add a coverage member for {key!r}, which the row it "
@@ -726,15 +767,17 @@ class _AuthorizationLog:
                 f"own proposed_at and strictly before the superseded row's (ADR-0256 §5)"
             )
             raise InvalidAuthorizationError(msg)
-        held = {member.argument: member for member in earlier.coverage}
+        held = {member.kind: member for member in earlier.coverage}
         for member in row.coverage:
-            defect = _member_defect(member, held.get(member.argument))
+            defect = _member_defect(member, held.get(member.kind))
             if defect is not None:
                 msg = (
                     f"authorization {row.id!r} corrects {earlier.id!r}: {defect} (ADR-0254 §1, §9)"
                 )
                 raise InvalidAuthorizationError(msg)
-        dropped = sorted(held.keys() - {member.argument for member in row.coverage})
+        dropped = sorted(
+            kind.value for kind in held.keys() - {member.kind for member in row.coverage}
+        )
         if dropped:
             msg = (
                 f"authorization {row.id!r} corrects {earlier.id!r} and drops its member "

@@ -10009,13 +10009,15 @@ const authorizationInFlight = new Set();
 //
 // **One reader and one renderer for a coverage member**, shared by the question, the
 // listing and the announcement, because §11 puts the same three facts in front of the
-// owner at all three — the argument, the fixed value or the bound, and the owner's own
-// words. A second pair would be the two shapes of one fact ADR-0150 is named after,
-// and the round-9 parity lesson one surface over is that they drift.
+// owner at all three — the kind of value the act constrained, the fixed value or the
+// bound, and the owner's own words. A second pair would be the two shapes of one fact
+// ADR-0150 is named after, and the round-9 parity lesson one surface over is that they
+// drift.
 //
-// **Every value reaches the screen through a text node** (`line`), because an argument
-// key is caller-influenced (ADR-0150 §13), a fixed value is whatever the record holds,
-// and a span is the owner's own text.
+// **Every value reaches the screen through a text node** (`line`), because a fixed
+// value is whatever the record holds and a span is the owner's own text. The kind is
+// a closed vocabulary this system minted (ADR-0266 §3) and crosses as one, so an
+// unknown member is reported rather than rendered.
 //
 // **Instants are rendered as the gateway sent them**, which is this page's existing
 // convention for every instant it shows and is issue #1392's open lane, not this one's:
@@ -10062,7 +10064,12 @@ const AUTHORIZATION_SETTLEMENT_WORDS = {
 function boundSentence(bound) {
   if (bound.kind === "money") {
     const currency = bound.currency === null ? "" : ` ${bound.currency}`;
-    const ceiling = `up to ${bound.maximum}${currency}`;
+    // **A strict ceiling is said strictly** (ADR-0266 §3). "under 100" and "at most
+    // 100" stopped being one value, and rendering both as "up to" would show the
+    // owner a limit a cent wider than the one they are about to establish — on the
+    // one screen §11 exists to make the working checkable on.
+    const limit = bound.maximum_exclusive ? "under" : "up to";
+    const ceiling = `${limit} ${bound.maximum}${currency}`;
     return bound.minimum === null ? ceiling : `from ${bound.minimum}${currency} ${ceiling}`;
   }
   if (bound.kind === "period") {
@@ -10105,7 +10112,7 @@ function readBound(bound) {
     return (
       isText(bound.maximum) &&
       isText(bound.currency) &&
-      isText(bound.currency_argument) &&
+      typeof bound.maximum_exclusive === "boolean" &&
       (bound.minimum === null || isText(bound.minimum)) &&
       absent(bound, ["starts_at", "ends_at", "timezone", "terms"])
     );
@@ -10115,7 +10122,8 @@ function readBound(bound) {
       isText(bound.starts_at) &&
       isText(bound.ends_at) &&
       isText(bound.timezone) &&
-      absent(bound, ["maximum", "minimum", "currency", "currency_argument", "terms"])
+      bound.maximum_exclusive !== true &&
+      absent(bound, ["maximum", "minimum", "currency", "terms"])
     );
   }
   if (bound.kind === "terms") {
@@ -10123,15 +10131,8 @@ function readBound(bound) {
       Array.isArray(bound.terms) &&
       bound.terms.length > 0 &&
       bound.terms.every(isText) &&
-      absent(bound, [
-        "maximum",
-        "minimum",
-        "currency",
-        "currency_argument",
-        "starts_at",
-        "ends_at",
-        "timezone",
-      ])
+      bound.maximum_exclusive !== true &&
+      absent(bound, ["maximum", "minimum", "currency", "starts_at", "ends_at", "timezone"])
     );
   }
   return true;
@@ -10149,13 +10150,29 @@ function absent(bound, names) {
   return names.every((name) => bound[name] === null || bound[name] === undefined);
 }
 
+// What each `BoundKind` reads as in a coverage line (ADR-0266 §9's §11 scope).
+//
+// **A member says what the owner's act constrained and never which argument carries
+// it** (ADR-0266 §3), so this is what stands where the argument key used to. In the
+// owner's words rather than the wire value: `money` beside a ceiling would read as a
+// field name rather than as what it is.
+//
+// **A kind this build does not know is reported and never rendered as a blank**,
+// which is `goalMemberWords`' rule one vocabulary over: a member from a hub at
+// another version says so rather than showing a limit beside nothing.
+const COVERAGE_KIND_WORDS = {
+  money: "the amount",
+  period: "the dates",
+  terms: "the terms",
+};
+
 // One coverage member, as it crosses (ADR-0254 §11).
 //
 // **Exactly one of `fixed` and `bound`**, which is the two-shape rule `CoverageMember`
 // and `CoverageView` are both built on: a member stating both would need a precedence
 // rule at the rendering, and one stating neither renders nothing the owner said.
 function readCoverageView(view) {
-  if (!isRecord(view) || !isText(view.argument) || !isText(view.span)) {
+  if (!isRecord(view) || !isText(view.kind) || !isText(view.span)) {
     return false;
   }
   if (view.fixed !== null && !isText(view.fixed)) {
@@ -10189,7 +10206,11 @@ function renderCoverage(item, coverage) {
   coverage.forEach((view) => {
     const said =
       view.bound === null ? `fixed at ${view.fixed}` : boundSentence(view.bound);
-    line(item, `${view.argument}: ${said}`, "notification-summary");
+    // `goalMemberWords` and not a raw index: a `kind` of "constructor" would
+    // otherwise reach an inherited property and put a function's source text on the
+    // screen, which is `isGoalMember`'s own reason one vocabulary over.
+    const kind = goalMemberWords(COVERAGE_KIND_WORDS, view.kind);
+    line(item, `${kind}: ${said}`, "notification-summary");
     line(item, `from what you said: "${view.span}"`, "hint");
   });
 }

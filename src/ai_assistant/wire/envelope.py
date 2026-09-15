@@ -2028,7 +2028,58 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — ADR-0265's L1 mints no error
 #: class and removes none.
-PROTOCOL_VERSION: Final[int] = 46
+
+#: **47 since ADR-0266 §11**, and the ground is stated rather than weighed: *"``
+#: PROTOCOL_VERSION`` moves by exactly one, in L1"*. **Two grounds, one bump, and
+#: there is no third.**
+#:
+#: **The first.** :class:`~ai_assistant.core.types.ToolDefinition` gains
+#: ``bounded_arguments``, defaulting to the empty tuple, and a declaration crosses the
+#: promoted surface **inside a**
+#: :class:`~ai_assistant.core.types.PermissionDecision`. That model sets
+#: ``extra="forbid"`` and ``wire/codec.py`` renders a model by ``model_dump()``, so a
+#: hub at 46 emits ``"bounded_arguments": []`` on every declaration it sends and a
+#: client at 45 fails it with ``extra_forbidden``. **A defaulted member is still a shape
+#: change**, exactly as the entries at 39, 40, 42, 43, 44 and 45 state of their own.
+#:
+#: **The second.** :class:`~ai_assistant.core.types.PermissionDecision` gains
+#: ``intended_action``, likewise defaulted and likewise emitted on every decision that
+#: crosses — the act a request is an attempt at, which
+#: :meth:`~ai_assistant.core.types.PermissionDecision.authorises` compares as its sixth
+#: conjunct (ADR-0266 §7).
+#:
+#: **What earns no ground of its own, said rather than left to inference.**
+#: :class:`~ai_assistant.core.types.CoverageView` gains ``kind`` and loses ``argument``,
+#: and :class:`~ai_assistant.core.types.ValueBound` gains ``maximum_exclusive`` and loses
+#: ``currency_argument`` — but each crosses a frame only **inside** a
+#: :class:`~ai_assistant.core.types.Confirmation`, which the entry at 45 landed, so both
+#: ride this one bump rather than adding to it. :class:`~ai_assistant.core.types.ActionRequest`
+#: gains ``intended_action`` and **crosses no frame at all**, so the request's own field
+#: adds nothing either. :class:`~ai_assistant.core.types.ResolutionRule` gains
+#: ``STATED_BOUND`` and :class:`~ai_assistant.core.types.BoundedArgument` is minted, both
+#: reaching a frame only inside the two models above.
+#:
+#: **No integer is fixed in the ADR** (§11). It is whatever the tree holds when this lane
+#: lands plus one: this lane branched at 45 and was written **46**, and ADR-0265's L1
+#: landed 46 first — so it re-bumped to **47**, which is that entry's own instruction
+#: one line above, *"a lane that lands after this one re-bumps rather than reusing
+#: it"*, and the reason §11 refuses to write an integer into an ADR at all.
+#:
+#: **No stored-record version moves and no migration is owed** (§11).
+#: ``PlanExport.schema_version`` stays where it is — **untouched, and said rather than
+#: assumed**, ADR-0266 §11 ruling it out by name. The authorization store's stays at
+#: **1**, every new field being defaulted: a ``ToolDefinition`` written earlier decodes
+#: with ``bounded_arguments`` empty and a stored
+#: :class:`~ai_assistant.core.types.PermissionDecision` with ``intended_action``
+#: ``None``, which ``authorises`` then matches only against a request carrying none —
+#: the fail-closed direction. **And no stored row holds a coverage member to migrate**:
+#: ``orchestration/authorizing.py`` sets ``coverage=()`` on every row it builds, and the
+#: reading was re-taken at this lane's own base (ADR-0266 §11).
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
+#: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
+#: registered, and the error mapping is untouched — this lane mints no error class.
+PROTOCOL_VERSION: Final[int] = 47
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

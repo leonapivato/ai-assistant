@@ -12878,6 +12878,19 @@ def _render_confirmation(confirmation: Confirmation) -> bool:
 # user's own text; none of them is trusted with the terminal's control codes.
 
 
+#: What each :class:`~ai_assistant.core.types.BoundKind` reads as in a coverage
+#: line (ADR-0266 §9's §11 scope). **The vocabulary rendered in the owner's words,
+#: not its wire value**: a member says what the user's act constrained — an amount,
+#: a period, a named term — and ``"money"`` beside a ceiling would read as a field
+#: name rather than as what it is. Closed, and a member added later fails the type
+#: check here rather than rendering as silence.
+_KIND_WORDS: Final[Mapping[BoundKind, str]] = {
+    BoundKind.MONEY: "the amount",
+    BoundKind.PERIOD: "the dates",
+    BoundKind.TERMS: "the terms",
+}
+
+
 def _bound_sentence(bound: ValueBound) -> str:
     """One bound, as a sentence (ADR-0254 §2's three kinds and no fourth).
 
@@ -12898,7 +12911,13 @@ def _bound_sentence(bound: ValueBound) -> str:
     match bound.kind:
         case BoundKind.MONEY:
             currency = _safe("" if bound.currency is None else bound.currency)
-            ceiling = f"up to {_safe(str(bound.maximum))} {currency}".rstrip()
+            # **A strict ceiling is said strictly** (ADR-0266 §3): *"under 100"* and
+            # *"at most 100"* stopped being one value, and a rendering that said "up
+            # to" for both would show the owner a limit one cent wider than the one
+            # they are about to establish — the permissive direction, on the one
+            # screen where the working is meant to be checkable.
+            limit = "under" if bound.maximum_exclusive else "up to"
+            ceiling = f"{limit} {_safe(str(bound.maximum))} {currency}".rstrip()
             if bound.minimum is None:
                 return ceiling
             return f"from {_safe(str(bound.minimum))} {currency} {ceiling}".replace("  ", " ")
@@ -12919,6 +12938,12 @@ def _render_coverage(coverage: Sequence[CoverageView], *, indent: str) -> None:
     halves survive — *"neither is derivable from the other"* — so a reader can check
     the working rather than take the figure on trust.
 
+    **Each member is rendered by its ``kind``** (ADR-0266 §9's §11 scope): *this
+    kind of value is fixed at that value*, or *bounded by that limit*, the
+    ``BoundKind`` naming what the act constrained where the argument key used to
+    stand. A member names no argument, so a rendering that named one would be
+    inventing it.
+
     **An empty coverage says what it is and never nothing at all** (§1, §11). It is
     an authority over a call that carries no argument, and it is a wildcard over
     nothing: a blank here would read as *"no limits"*, which is the opposite of what
@@ -12936,11 +12961,11 @@ def _render_coverage(coverage: Sequence[CoverageView], *, indent: str) -> None:
         )
         return
     for view in coverage:
-        argument = _safe(view.argument)
+        kind = _safe(_KIND_WORDS[view.kind])
         if view.bound is not None:
-            _print(f"{indent}{argument}: {_bound_sentence(view.bound)}")
+            _print(f"{indent}{kind}: {_bound_sentence(view.bound)}")
         else:
-            _print(f"{indent}{argument}: fixed at {_safe(str(view.fixed))}")
+            _print(f"{indent}{kind}: fixed at {_safe(str(view.fixed))}")
         _print(f'{indent}  [dim]from what you said: "{_safe(view.span)}"[/]')
 
 

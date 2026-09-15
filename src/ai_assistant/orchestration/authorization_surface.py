@@ -46,10 +46,18 @@ if TYPE_CHECKING:
 def coverage_views(row: Authorization, /) -> tuple[CoverageView, ...]:
     """One :class:`CoverageView` per member of ``row``, in the record's own order.
 
-    **Transcribed and never recomputed** (ADR-0254 §11, ADR-0178 §5): the argument,
+    **Transcribed and never recomputed** (ADR-0254 §11, ADR-0178 §5): the **kind**,
     the fixed value or the bound, and the user's own words come off the member, and
-    the order is the record's — ADR-0254 §3's comparison is per argument and reads no
-    order, so nothing here sorts.
+    the order is the record's — ADR-0266 §7's two routes read no order, so nothing
+    here sorts.
+
+    **The kind is transcribed where the argument key used to be** (ADR-0266 §9's §11
+    scope). A member records what the user stated and never which slot it fills, so
+    a required ``argument`` would have to be transcribed from nothing and no
+    projection would be constructible at all. The ``span`` beside it is what the
+    user's assent now rests on: a ceiling read from their words is rendered next to
+    those words, and a reading that got the polarity wrong is **declined** rather
+    than silently established (ADR-0266 §4).
 
     **The span and nothing else of the basis** (§11). The act the member rests on,
     the rule that resolved it, the ``now`` that was read, the zone and the record it
@@ -66,7 +74,7 @@ def coverage_views(row: Authorization, /) -> tuple[CoverageView, ...]:
     """
     return tuple(
         CoverageView(
-            argument=member.argument,
+            kind=member.kind,
             fixed=member.fixed,
             bound=member.bound,
             span=member.basis.span,
