@@ -117,14 +117,19 @@ argument the act never mentioned"*, but only path (ii)'s widening is store-enfor
 minted path-(i) member is checked by nothing and a wrong association is a **standing authority the
 user never gave**.
 
-### The tree, read rather than assumed, at `origin/main` `8dbfddf0`
+### The tree, read rather than assumed, at `origin/main` `9fa8c110`
 
-ADR-0254's Lane 1 and Lane 3 have landed and so has §20's route-(d) wiring. `core/types.py` carries
-`Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`, `AuthorizationBasis`,
-`ValueResolution`, `ResolutionRule` and `ToolDefinition.system_supplied`; `CoverageMember` carries
-`argument`, `CoverageView` carries a **required** `argument` transcribed from it, and `ValueBound`'s
-`MONEY` arm carries `currency_argument` and a required `maximum`, all four of which this decision
-changes; `canonical_json_bytes` is public and is the one encoding and
+**ADR-0254's Lane 1 has landed and so has §20's route-(d) wiring; Lane 3 has not.** `CoverageView`,
+`AuthorizationProjection`, `AuthorizationView`, `Confirmation.authorization`,
+`TurnOutcome.authorizations` and `AssistantEngine`'s `standing_authorizations` and
+`revoke_authorization` are **ratified in ADR-0254 §16 and in no merged tree** — Lane 3 is in flight
+and lands them there, so every clause below that reads a projection reads ratified text and never
+code. `core/types.py` carries `Authorization`, `CoverageMember`, `ValueBound`, `BoundKind`,
+`AuthorizationBasis`, `ValueResolution`, `ResolutionRule` and `ToolDefinition.system_supplied`;
+`CoverageMember` carries `argument`, **ADR-0254 §11 declares a `CoverageView` whose `argument` is
+required and transcribed from it**, and `ValueBound`'s `MONEY` arm carries `currency_argument` and a
+required `maximum`, all four of which this decision changes; `canonical_json_bytes` is public and is
+the one encoding and
 `ActionRequest.parameters_digest` is computed rather than supplied; `ActionRequest` carries `goal`,
 `step_id`, `execution_id` and `egress_binding` and **no `intended_action`**, and
 `PermissionDecision.authorises` compares those four and the tool and **nothing about which act a
@@ -768,7 +773,8 @@ transcribe-the-ruling-whole rule, which is how `intended_action` reaches the rec
 
 **ADR-0254 §20 — in its arm enumeration, scoped by a decidable test and not by a list, because three
 review rounds each found a list incomplete.** §20 obliges its lanes to ship the seventy-one arms
-enumerated under it; Lanes 1 and 3 have landed, so those arms are tests in the tree. **The scope is
+enumerated under it; **Lane 1 has landed, so its arms are tests in the tree, while Lane 3's are
+the arms of a lane in flight and Lane 2's are unwritten**. **The scope is
 every arm whose statement an implementation of §§3-7 above cannot satisfy, and six mechanisms decide
 it** — the test is applied arm by arm by the lane that owns the arm, and **no enumeration here is
 closed or relied on as one**; the arms named are examples. **(i)** A member *naming an argument*, or
@@ -936,10 +942,13 @@ superseded.
 > gains an entry naming this ADR and the reason: `ToolDefinition` gains `bounded_arguments` and a
 > declaration crosses the promoted surface **inside a `PermissionDecision`**, that model sets
 > `extra="forbid"` and `wire/codec.py` renders a model by `model_dump()`, so a defaulted member is
-> still a shape change. **`CoverageView` gains `kind` and loses `argument` inside a
-> `Confirmation`, and `PermissionDecision` gains `intended_action`** — a second and a third ground
-> for the same one bump. **`ActionRequest` itself crosses no frame**, ADR-0254's own Lane 2 entry
-> stating that ground, so the request's own field adds no fourth; and **`PlanExport` gains no
+> still a shape change. **`PermissionDecision` gains `intended_action`** — a second ground for the
+> same one bump, and **there is no third**. **`CoverageView` gains `kind` and loses `argument`, but
+> that earns no ground of its own here**: it crosses a frame only inside a `Confirmation`, which
+> ADR-0254 §20's **Lane 3** lands and no merged tree carries, and L1 is briefed above that lane
+> (below), so the field change rides L1's single bump rather than adding to it. **`ActionRequest`
+> itself crosses no frame**, ADR-0254's own Lane 2 entry stating that ground, so the request's own
+> field adds nothing further either; and **`PlanExport` gains no
 > member and `schema_version` does not move**.
 >
 > **No stored row is migrated, edited or dropped, and the reason is a fact about the tree rather
@@ -959,7 +968,9 @@ superseded.
   `CoverageMember`'s `kind`, its kind-validated `fixed` and the removal of `argument`;
   `ValueBound`'s `maximum_exclusive` and the removal of `currency_argument`;
   `ResolutionRule.STATED_BOUND`; `BoundedArgument` and `ToolDefinition.bounded_arguments`;
-  **`CoverageView`'s `kind` in place of its `argument`** (§9); `ActionRequest.intended_action` and
+  **`CoverageView`'s `kind` in place of its `argument`** (§9) — the one member of this list Lane 3
+  must have landed first, and the whole reason L1 is briefed above it (below);
+  `ActionRequest.intended_action` and
   **`PermissionDecision`'s transcription of it with `authorises`' sixth conjunct** (§7);
   `PROTOCOL_VERSION` with `wire/envelope.py`'s log entry; and §7's two routes, its condition 6 and
   its lineage narrowing in `permissions/_coverage.py`. **L1 and L2 between them restate every
@@ -986,8 +997,18 @@ superseded.
   double standing in for it — **and with them the covered limbs of every ADR-0254 §20 arm §9's
   mechanism (iv) reaches**, arm 45's GBP 50 `ALLOW` among them, **and arm 2(b)'s quote half**.
 
-> **Normative — L1 lands before L2, both are briefed on this decision alone, and ADR-0254 §20's
-> Lane 2 is briefed after the quote decision (§10) rather than after these two.** Neither lane
+> **Normative — L1 is briefed after ADR-0254 §20's Lane 3 lands, L1 lands before L2, both are
+> briefed on this decision alone, and ADR-0254 §20's Lane 2 is briefed after the quote decision
+> (§10) rather than after these two.** **Lane 3 lands `CoverageView`, `AuthorizationProjection`,
+> `AuthorizationView`, `Confirmation.authorization`, `TurnOutcome.authorizations` and
+> `AssistantEngine`'s two members exactly as ADR-0254 §16 and §11 ratify them, `CoverageView`'s
+> required `argument` included** — a lane implements ratified text and never a `Proposed` ADR, so
+> **nothing in this decision is Lane 3's to carry** and Lane 3 is briefed and reviewed without
+> reference to it. **§9's §11 scope is a supersession of ratified text and stands whole from this
+> decision's own ratification; its implementation is L1's, above Lane 3's tree**, which is where
+> `argument` becomes `kind` and where the projection arms below are demonstrable at all. **Where
+> Lane 3 is not yet in its base, L1 is not briefed** — the same shape as L2's wait on
+> `PlanStep.intended_action`, one lane earlier. Neither lane
 > reads a quote and **every tree either leaves is conforming and fail-closed** (ADR-0084 §3). But
 > **no row carrying a non-empty `coverage` is usefully written until the quote decision lands a
 > carrier**, and the arithmetic is stated here rather than discovered by that lane: §4 mints only
@@ -1034,11 +1055,13 @@ superseded.
    span `"under 100 euros"` of `"avoid booking hotels under 100 euros"` and of `"avoid these prices
    — under 100 euros"` each mint a `MONEY` ceiling of `100`, nothing outside the span being read,
    and **no path-(iii) opening act carries a `STATED_BOUND` member in any case**. **3(c) — what that
-   member then does, and it is stated over the store and the projection rather than over a
-   proposal**: a row carrying that member, recorded **`PROPOSED`**, renders a `CoverageView`
-   carrying the bound **beside that span**; a `DECLINED` settlement establishes nothing and leaves
-   **no row of that goal and declaration `ESTABLISHED`**; an `ESTABLISHED` settlement establishes
-   exactly that member. **3(c) drives no proposal through `orchestration` and asserts none**,
+   member then does, and it is stated over the store alone rather than over a proposal**: a row
+   carrying that member, recorded **`PROPOSED`**, is written and read back carrying it entire; a
+   `DECLINED` settlement establishes nothing and leaves **no row of that goal and declaration
+   `ESTABLISHED`**; an `ESTABLISHED` settlement establishes exactly that member. **Its projection
+   half is L1's too and is demonstrable only above Lane 3's tree** — that a `CoverageView` built
+   from that row carries the bound **beside that span** — which is what §11's dependency clause
+   briefs L1 above. **3(c) drives no proposal through `orchestration` and asserts none**,
    because §1's completeness condition proposes no row while no `MONEY` member is met (§11) — **the
    end-to-end proposal, its question and its answer are ADR-0254 §20's Lane 2's**, after the quote
    decision, and this decision claims them for no lane of its own. **3(b):** against an exclusive
@@ -1052,10 +1075,11 @@ superseded.
    `Authorization` carrying two `MONEY` members is not constructible and one carrying a `MONEY` and
    a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
    `maximum_exclusive`, a path-(ii) correction to the same `maximum` **with** it is written as a
-   narrowing, while the reverse is **refused as a widening** — no row written, no standing route,
-   and the act asks (ADR-0254 §5). **4(b):** a goal carrying two `USER_STATED` constraints that each
-   read as `MONEY` mints **neither**, and one carrying a money ceiling beside a constraint no
-   reading mints still mints the ceiling.
+   narrowing, while the reverse is **refused as a widening** — no row written and no standing
+   route, the refusal naming path (i) in its own reason. **The asking there is `orchestration`'s**
+   (ADR-0254 §5), and no arm here drives it. **4(b):** a goal carrying two `USER_STATED`
+   constraints that each read as `MONEY` mints **neither**, and one carrying a money ceiling
+   beside a constraint no reading mints still mints the ceiling.
 5. **The arguments are the ones quoted, the governing quote is the latest, and the worked case.** A
    request whose arguments equal the quoted ones is covered; one carrying **one extra** argument,
    one **missing** one, and one whose value differs are each **not** covered though the price is
