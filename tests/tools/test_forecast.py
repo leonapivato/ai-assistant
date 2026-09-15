@@ -899,6 +899,12 @@ async def test_a_day_whose_transcribed_span_carries_a_line_break_is_dropped() ->
         pytest.param(b'{"days": {"not": "a list"}}', id="days-is-an-object"),
         pytest.param(b'{"days": ["not an object"]}', id="a-row-is-not-an-object"),
         pytest.param(b"\xff\xfe", id="not-utf-8"),
+        # RFC 8259 has no such token. Python's decoder takes all three as an extension
+        # unless told otherwise, and a body carrying one **anywhere** — including in a
+        # member neither integration reads — is a body outside the documented format.
+        pytest.param(b'{"days": [], "junk": NaN}', id="a-nan-in-a-member-nobody-reads"),
+        pytest.param(b'{"days": Infinity}', id="an-infinity"),
+        pytest.param(b'{"days": -Infinity}', id="a-negative-infinity"),
     ],
 )
 async def test_a_response_of_another_shape_is_refused_by_the_provider(malformed: bytes) -> None:
@@ -1494,6 +1500,37 @@ async def test_a_forecaster_is_refused_where_it_is_configured(field: str, value:
         ForecastEgress(**fields)
 
 
+@pytest.mark.parametrize(
+    "enormous",
+    [
+        pytest.param(10**10000, id="too-large-to-be-a-float"),
+        pytest.param(-(10**10000), id="too-small-to-be-a-float"),
+    ],
+)
+async def test_a_coordinate_too_large_to_be_a_float_is_refused_as_a_value_error(
+    enormous: int,
+) -> None:
+    """The class a caller is told to catch is the class it gets.
+
+    ``float(10**10000)`` raises ``OverflowError``, which is **not** a ``ValueError`` —
+    so a caller catching the configuration error this constructor documents would meet
+    an exception it never declared, and the same value arriving in a call's parameters
+    would reach :meth:`ForecastEgress.read` as a fault where a refusal belongs. A JSON
+    body can carry an integer of any size, so this is a value a *provider* can produce
+    and not only a mis-wired composition root.
+    """
+    subject = await built(channels=[answering(day())])
+
+    with pytest.raises(ValueError, match="latitude"):
+        ForecastEgress(
+            transport=subject.seam,
+            latitude=enormous,
+            longitude=LONGITUDE,
+            max_days=MAX_DAYS,
+            max_day_chars=2048,
+        )
+
+
 @pytest.mark.parametrize("name", ["", "   ", " forecast ", "forecast "])
 async def test_a_forecaster_named_something_identifier_would_strip_is_refused(
     name: str,
@@ -1589,6 +1626,15 @@ class TestForecastEgressContract(ForecasterContract):
         transport = GatedTransport(answering(day()))
         forecaster, call = await self._prepared(transport=transport)
         return GatedRead(forecaster=forecaster, call=call, arm=transport.suspend_next)
+
+    async def elsewhere(self) -> ScriptedRead:
+        # **Bound by the real seam and authorised over itself.** The binding is derived
+        # for the same registration and the same origin, so ADR-0148 §8's floor is
+        # satisfied and every check but the place's passes — which is what makes the
+        # shared case about the place rather than about a missing binding.
+        subject = await built(max_day_chars=_SMALL_CONTENT_BOUND, channels=[answering(day())])
+        proposal = await request(subject, latitude=0.0, longitude=0.0)
+        return ScriptedRead(forecaster=subject.forecaster, call=authorised_read(proposal))
 
     async def configured(self) -> ConfiguredProvider:
         forecaster, _ = await self._prepared(channels=[answering(day())])

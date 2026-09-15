@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
@@ -89,6 +90,7 @@ from ai_assistant.core.types import (
     ToolCall,
     ToolCost,
     ToolDefinition,
+    describe_untrusted,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 from ai_assistant.testing.spend import countable
@@ -334,7 +336,13 @@ def _real(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, float) or type(value) is int:
-        return float(value)
+        try:
+            return float(value)
+        except OverflowError:
+            # An exact ``int`` too large to be a float. ``OverflowError`` is not a
+            # ``ValueError``, so letting it out would break the class this module's
+            # constructor guards promise.
+            return None
     return None
 
 
@@ -348,19 +356,28 @@ def _check_coordinate(label: str, value: float, *, maximum: float) -> None:
 
     Raises:
         TypeError: If ``value`` is not a real number, ``bool`` included.
-        ValueError: If it is not finite, or is outside ``[-maximum, maximum]``. A fake
-            configurable into a state no deployment can be in is the failure this module
-            refuses one field along.
+        ValueError: If it is not finite, is an exact ``int`` too large to be a float, or
+            is outside ``[-maximum, maximum]``. A fake configurable into a state no
+            deployment can be in is the failure this module refuses one field along.
+
+    **The message is built with ``describe_untrusted``**: ``repr`` of a
+    ten-thousand-digit integer raises on its own account, and the diagnostic must not be
+    able to destroy the diagnosis.
     """
     if isinstance(value, bool) or not isinstance(value, float | int):
-        msg = f"{label} must be a real number, got {value!r}"
+        msg = f"{label} must be a real number, got {describe_untrusted(value)}"
         raise TypeError(msg)
-    number = float(value)
-    if number != number or number in {float("inf"), float("-inf")}:  # noqa: PLR0124 — NaN is the one value unequal to itself
-        msg = f"{label} must be finite (ADR-0260 §11), got {value!r}"
+    number = _real(value)
+    if number is None or not math.isfinite(number):
+        # ``None`` here is an exact ``int`` too large to be a float, which is a value
+        # no coordinate has; ``isfinite`` is the NaN and infinity half.
+        msg = f"{label} must be finite (ADR-0260 §11), got {describe_untrusted(value)}"
         raise ValueError(msg)
     if not -maximum <= number <= maximum:
-        msg = f"{label} must be from {-maximum} to {maximum} (ADR-0260 §11), got {value!r}"
+        msg = (
+            f"{label} must be from {-maximum} to {maximum} (ADR-0260 §11), got "
+            f"{describe_untrusted(value)}"
+        )
         raise ValueError(msg)
 
 
@@ -679,9 +696,15 @@ class FakeForecaster:
             msg = f"timeout must be a strictly positive timedelta (ADR-0241 §1); got {timeout!r}"
             raise ValueError(msg)
         self.read_calls.append(call)
-        self._authorised(call)
         try:
             async with asyncio.timeout(timeout.total_seconds()):
+                # **Inside the window, and ahead of everything else** (ADR-0241 §1):
+                # the bound covers "the seam's own work — the revalidation, … the
+                # response read and the transcription", so a clock started after the
+                # checks would hand what follows a *fresh* budget. The production
+                # forecaster opens its window at the same point, which is what makes
+                # this a property of the contract rather than of one implementation.
+                self._authorised(call)
                 return await self._answered()
         except TimeoutError:
             # This fake's own deadline, and only ever this one: nothing it awaits raises

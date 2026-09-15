@@ -309,6 +309,26 @@ class ForecasterContract:
         """
         raise NotImplementedError
 
+    #: Whether this implementation's request names no place at all, so that there is
+    #: nothing for a caller to name elsewhere. ADR-0260 §3 obliges the forecaster to
+    #: read its own configured place and fixes no argument for it, so an implementation
+    #: composing the place entirely inside its own request shape satisfies the clause by
+    #: construction — which is the shape ``CONTRIBUTING.md`` gives
+    #: ``optional_obligation``.
+    names_no_place_in_its_request: bool = False
+
+    async def elsewhere(self) -> ScriptedRead:
+        """Override with a **fully bound, separately authorised** wrong-place call.
+
+        Its declaration, its origin and its binding are the subject's own; only the
+        coordinate differs, and the decision it carries was recorded over that very
+        request. Every check but the place's therefore passes it.
+
+        Unreached by an implementation that sets
+        :attr:`names_no_place_in_its_request`, which then leaves this alone.
+        """
+        raise NotImplementedError
+
     def test_conforms_to_protocol(self, forecaster: Forecaster) -> None:
         assert isinstance(forecaster, Forecaster)
 
@@ -716,14 +736,22 @@ class ForecasterContract:
         """§3: "the place is the deployment's own configured place", over every
         implementation.
 
-        **The call is entirely valid**: the subject's own proposal with its real-valued
-        arguments moved, carried by its **own** recorded ``ALLOW`` — so it survives
-        revalidation, carries the registered declaration, and its decision authorises it.
-        Every one of §6's three checks passes, and only a comparison against the
+        **The call the hook supplies is entirely valid, and that is the whole of the
+        case**: the subject's own declaration, its own origin and its own binding, with
+        another coordinate, carried by its **own** recorded ``ALLOW``. So it survives
+        revalidation, carries the registered declaration, and its decision authorises
+        it — every one of §6's three checks passes — and only a comparison against the
         forecaster's own held configuration stands between it and a read about somewhere
         the deployment did not choose. §3 is absolute that no caller widens, narrows or
         offsets the read, on ADR-0093 §10's ground — "a caller able to widen the read is
         a caller able to defeat the bound".
+
+        **The call comes from the harness rather than from this suite**, and round 4's
+        architecture lens is why: a suite that rebuilt the proposal itself would produce
+        an *unbound* request, which an egress-backed forecaster refuses at ADR-0148 §8's
+        floor before it ever reaches the place — so the case would stay green with the
+        place check deleted. Only the implementation knows how to build a fully bound
+        call, which is this suite's standing shape for every other clause too.
 
         **A suite clause because the obligation is the contract's**, not one
         implementation's: a fake answering a call production refuses is one a consumer's
@@ -732,30 +760,15 @@ class ForecasterContract:
         **Optional, because an implementation may carry no place in its request at all**
         — §3 obliges the forecaster to read its own configured place and fixes no
         argument for it, so one that composes the place entirely inside its own request
-        shape has nothing here to move and satisfies the clause by construction.
+        shape has nothing to name and satisfies the clause by construction.
         """
-        subject = await self.configured()
-        proposal = await subject.forecaster.request()
-        assert proposal is not None
-        moved = {
-            name: (value / 2 + 1.0 if isinstance(value, float) else value)
-            for name, value in proposal.parameters.items()
-        }
-        if moved == dict(proposal.parameters):
-            pytest.skip("this implementation's request carries no real-valued place")
+        if self.names_no_place_in_its_request:
+            pytest.skip("this implementation's request names no place")
 
-        elsewhere = ActionRequest(tool=proposal.tool, parameters=moved)
-        decision = PermissionDecision.from_request(
-            elsewhere,
-            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="somewhere else"),
-            id="d-another-place",
-            decided_at=_DECIDED_AT,
-        )
+        subject = await self.elsewhere()
 
         with pytest.raises(ToolBindingError):
-            await subject.forecaster.read(
-                ToolCall(request=elsewhere, decision=decision), timeout=A_BOUND
-            )
+            await subject.forecaster.read(subject.call, timeout=subject.timeout)
 
     async def test_a_cancelled_read_is_delivered_onward_unchanged(self) -> None:
         """ADR-0060 through this seam: a cancellation is never absorbed (§4).

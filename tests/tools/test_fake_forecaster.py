@@ -36,6 +36,7 @@ from forecaster_contract import (
 )
 
 from ai_assistant.core.types import (
+    ActionRequest,
     ForecastRefusal,
     PermissionDecision,
     PermissionOutcome,
@@ -57,7 +58,6 @@ from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYW
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import Forecaster
-    from ai_assistant.core.types import ActionRequest
 
 #: When the one decision every call here carries was taken.
 _DECIDED_AT: Final = datetime(2026, 9, 4, 11, 30, tzinfo=UTC)
@@ -142,6 +142,20 @@ class TestFakeForecasterContract(ForecasterContract):
     async def gated(self) -> GatedRead:
         forecaster, call = await _prepared()
         return GatedRead(forecaster=forecaster, call=call, arm=forecaster.suspend_next)
+
+    async def elsewhere(self) -> ScriptedRead:
+        # This fake holds no binding and derives none, so "fully bound" is vacuous for
+        # it: what the shared case needs is a *valid, separately authorised* call naming
+        # another place, and that is what this is.
+        forecaster = FakeForecaster(max_day_chars=_SMALL_CONTENT_BOUND)
+        proposal = await forecaster.request()
+        assert proposal is not None
+        moved = {
+            name: (0.0 if isinstance(value, float) else value)
+            for name, value in proposal.parameters.items()
+        }
+        somewhere_else = ActionRequest(tool=proposal.tool, parameters=moved)
+        return ScriptedRead(forecaster=forecaster, call=_authorised(somewhere_else))
 
     async def configured(self) -> ConfiguredProvider:
         forecaster, _ = await _prepared()
@@ -251,6 +265,11 @@ def test_the_fake_declares_the_production_safety_fields() -> None:
         pytest.param({"max_days": True}, TypeError, id="days-a-flag"),
         pytest.param({"max_day_chars": 0}, ValueError, id="chars-zero"),
         pytest.param({"latitude": 90.1}, ValueError, id="latitude-out-of-range"),
+        # ``float(10**10000)`` raises ``OverflowError``, which is not a ``ValueError``:
+        # a caller catching the class this constructor documents would meet one it never
+        # declared. The production forecaster refuses it for the same reason.
+        pytest.param({"latitude": 10**10000}, ValueError, id="latitude-too-large-for-a-float"),
+        pytest.param({"longitude": -(10**10000)}, ValueError, id="longitude-too-small-for-a-float"),
         pytest.param({"longitude": float("nan")}, ValueError, id="longitude-nan"),
         pytest.param({"name": " forecast "}, ValueError, id="a-name-identifier-would-strip"),
         pytest.param({"name": ""}, ValueError, id="a-blank-name"),

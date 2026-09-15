@@ -78,6 +78,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     ToolCost,
     ToolDefinition,
+    describe_untrusted,
 )
 from ai_assistant.tools.consume import pending_cancellations
 from ai_assistant.tools.egress import (
@@ -1262,17 +1263,29 @@ def _checked_coordinate(label: str, value: float, *, maximum: float) -> float:
         ValueError: If ``value`` is not a real number, is not finite, or is outside
             ``[-maximum, maximum]``. A ``bool`` is refused by name: it is an ``int`` by
             ``isinstance`` and would otherwise configure a place one degree north of
-            the equator while satisfying the range.
+            the equator while satisfying the range. An exact ``int`` too large to be a
+            float lands here too, as a ``ValueError`` and not the ``OverflowError``
+            ``float()`` raises for it.
+
+    **The message is built with ``describe_untrusted``, and the diagnostic must not be
+    able to destroy the diagnosis.** ``repr`` of a ten-thousand-digit integer raises on
+    its own account — Python's integer-to-string limit — so an ``f``-string over the
+    value would replace the field-naming refusal with an unrelated ``ValueError`` from
+    inside the guard that was reporting it. That is ``core``'s own rule at a second
+    seam, and the value here is one a JSON body can carry.
     """
     real = _real(value)
     if real is None:
-        msg = f"{label} is a finite real number; got {value!r}"
+        msg = f"{label} is a finite real number; got {describe_untrusted(value)}"
         raise ValueError(msg)
     if not math.isfinite(real):
-        msg = f"{label} is finite; got {value!r}"
+        msg = f"{label} is finite; got {describe_untrusted(value)}"
         raise ValueError(msg)
     if not -maximum <= real <= maximum:
-        msg = f"{label} is from {-maximum} to {maximum} (ADR-0260 §11); got {value!r}"
+        msg = (
+            f"{label} is from {-maximum} to {maximum} (ADR-0260 §11); got "
+            f"{describe_untrusted(value)}"
+        )
         raise ValueError(msg)
     return real
 
@@ -1294,7 +1307,15 @@ def _real(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, float) or type(value) is int:
-        return float(value)
+        try:
+            return float(value)
+        except OverflowError:
+            # An exact ``int`` too large to be a float — ``10**10000``, which a JSON
+            # body can carry and a caller can pass. ``OverflowError`` is **not** a
+            # ``ValueError``, so letting it out would break the class every caller of
+            # :func:`_checked_coordinate` is told to catch, and would reach
+            # :meth:`ForecastEgress._authorised` as a fault where a refusal belongs.
+            return None
     return None
 
 
