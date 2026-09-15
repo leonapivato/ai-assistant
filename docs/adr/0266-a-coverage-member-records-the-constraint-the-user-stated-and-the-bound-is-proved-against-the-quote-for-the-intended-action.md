@@ -967,22 +967,24 @@ superseded.
   the covered limbs of mechanism (iv)'s arms, which ride with the quote decision because no lane
   here can make a `MONEY` member met (§9).** **The evidence route is implemented and is met by no
   quote**, this decision landing no carrier — so every `MONEY` member is unmet and the act asks.
-  **`core/protocols.py` is not touched**, so no triad is owed. Arms 2(b), 3(b), 4(a), 6(a)'s
+  **`core/protocols.py` is not touched**, so no triad is owed. Arms 2(b), 3(b), **3(c)** — which is
+  L1's because it is taken over the store and the projection and drives no proposal — 4(a), 6(a)'s
   no-quote limbs and 6(b).
 - **L2 — the mint and the request builder, in `orchestration` alone.** §1's candidate selection,
   §2's act and its four refusals, §4's reading, its refusals and its path-(i)-only rule, and §5's
   one-per-kind refusal and goal-only read; **and setting `ActionRequest.intended_action` from the
-  `intended_action` of the plan step the request serves, on every construction and resume path**
-  — `orchestration/runner.py`, `reads.py` and `parked_reads.py` build one today — which is
-  ADR-0254 §6's own pattern for `ActionRequest.goal` one field over: *"`orchestration` sets it from
-  the plan the execution names; no policy, no seam, no interface adapter and no model output writes
-  it"*. **L2 therefore waits on the lane that lands ADR-0265 §1's `PlanStep.intended_action`**;
-  where that field is not yet in its base, L2 is not briefed. Arms 1(a), 2(a), 3(a), 4(b) and 7.
+  `intended_action` of the plan step the request serves, on every construction and resume path** —
+  `orchestration/runner.py`, `reads.py` and `parked_reads.py` build one today — which is ADR-0254
+  §6's own pattern for `ActionRequest.goal` one field over: *"`orchestration` sets it from the plan
+  the execution names; no policy, no seam, no interface adapter and no model output writes it"*.
+  **L2 therefore waits on the lane that lands ADR-0265 §1's `PlanStep.intended_action`**; where that
+  field is not yet in its base, L2 is not briefed. Arms 1(a), 2(a), **3(a)'s mints and refusals**,
+  4(b) and 7.
 - **And one lane this decision does not cut.** The **quote decision** (§10, #2387) lands the
   carrier, the producer and the read, and wires them into §7's evidence route. **Arms 1(b), 5 and
   6(a)'s with-a-quote limbs are shipped there**, against that decision's carrier and never against a
   double standing in for it — **and with them the covered limbs of every ADR-0254 §20 arm §9's
-  mechanism (iv) reaches**, arm 45's GBP 50 `ALLOW` among them.
+  mechanism (iv) reaches**, arm 45's GBP 50 `ALLOW` among them, **and arm 2(b)'s quote half**.
 
 > **Normative — L1 lands before L2, both are briefed on this decision alone, and ADR-0254 §20's
 > Lane 2 is briefed after the quote decision (§10) rather than after these two.** Neither lane
@@ -994,9 +996,11 @@ superseded.
 > asked by route (a). **#2373 is unblocked by the two decisions together, not by this one alone.**
 
 > **Normative.** **The two lanes ship the arms §11 assigns them, of the seven below, each over
-> controlled fakes, and no lane is complete without the arms it is assigned.** Every arm states a
-> correction as a **subsequent turn**, on the owner's sequencing ruling of 2026-09-13, and none is
-> demonstrated against a live integration.
+> controlled fakes, and no lane is complete without the arms it is assigned.** **No arm assigned to
+> a lane here asserts anything that lane's own tree cannot produce** — which is why the proposal an
+> answer settles is nobody's here (arm 3), and why every with-a-quote limb rides with the quote
+> decision. Every arm states a correction as a **subsequent turn**, on the owner's sequencing ruling
+> of 2026-09-13, and none is demonstrated against a live integration.
 
 1. **A stated ceiling, end to end.** **1(a):** a goal whose current interpretation carries a
    `USER_STATED` constraint with span `"up to 150 euros"` mints exactly one member — `kind`
@@ -1010,9 +1014,10 @@ superseded.
    with **no** quote for that action it is not covered however small the declared arguments are.
 2. **Kind agreement and not numeric fit — the review's own case.** **2(a):** a constraint with span
    `"4 stars"` mints **no member at all**, matching no form of §4's table. **2(b):** a `TERMS`
-   member constructed directly — the shape a later decision will mint — is met by a `MONEY` quote
-   in no case and by a `MONEY`-declared argument in none, whatever number either carries, and a
-   `MONEY` member is met at a `TERMS`-declared argument in none.
+   member constructed directly — the shape a later decision will mint — is met by a `MONEY`-declared
+   argument in no case whatever number it carries, and a `MONEY` member is met at a `TERMS`-declared
+   argument in none. **Its quote half rides with the quote decision**, there being no quote in
+   either lane's tree to be unmet by (§11).
 3. **Only ceilings, the endpoints, and what a mis-chosen span actually produces.**
    **3(a) mints**, the element's span being the string given: `"under 100 euros"` → `maximum` `100`
    **with** `maximum_exclusive`; `"at most 100 euros"` → the same without it; `"up to 150 euros"` →
@@ -1025,19 +1030,24 @@ superseded.
    more than 100 euros"`, `"not over 100 euros"`, `"not exactly 100 euros"` and `"never spending
    over 100 euros"`, none being a form of the table; **and nothing from `"up to fifty pounds"` or
    `"under one hundred euros"`**, a figure written in words being no decimal figure §4's reading
-   accepts. **And what a wrongly chosen span produces is a proposal and never an authority**: the
-   span `"under 100 euros"` of `"avoid booking hotels under 100 euros"` mints a `MONEY` ceiling of
-   `100`, the row carrying it is written **`PROPOSED`**, its `CoverageView` renders that bound
-   **beside that span**, a `DECLINED` settlement establishes nothing, and **no row of that goal and
-   declaration stands `ESTABLISHED`** afterwards — the same over `"avoid these prices — under 100
-   euros"`, while the same shape over `"up to 150 euros"` of `"Book Riverside if it is dry Saturday,
-   up to 150 euros"` **is** established by a yes. **No path-(iii) opening act carries a
-   `STATED_BOUND` member in any case.** **3(b):** against an exclusive `maximum` of `100` a value of
-   exactly `"100"` does **not** satisfy and against an inclusive one it does. **Both halves are
-   parameterised over the whole of §4's closed reading and not over its illustrations** — every one
-   of the four forms, every currency word and symbol in **both** orders, mixed case, runs of **every
-   ASCII whitespace character** — space, tab, newline, carriage return, form feed and vertical tab —
-   against a non-ASCII space that is **not** collapsed, and `99.50` as well as `100`.
+   accepts. **And 3(a) mints the same member from a mis-chosen span as from a well-chosen one**: the
+   span `"under 100 euros"` of `"avoid booking hotels under 100 euros"` and of `"avoid these prices
+   — under 100 euros"` each mint a `MONEY` ceiling of `100`, nothing outside the span being read,
+   and **no path-(iii) opening act carries a `STATED_BOUND` member in any case**. **3(c) — what that
+   member then does, and it is stated over the store and the projection rather than over a
+   proposal**: a row carrying that member, recorded **`PROPOSED`**, renders a `CoverageView`
+   carrying the bound **beside that span**; a `DECLINED` settlement establishes nothing and leaves
+   **no row of that goal and declaration `ESTABLISHED`**; an `ESTABLISHED` settlement establishes
+   exactly that member. **3(c) drives no proposal through `orchestration` and asserts none**,
+   because §1's completeness condition proposes no row while no `MONEY` member is met (§11) — **the
+   end-to-end proposal, its question and its answer are ADR-0254 §20's Lane 2's**, after the quote
+   decision, and this decision claims them for no lane of its own. **3(b):** against an exclusive
+   `maximum` of `100` a value of exactly `"100"` does **not** satisfy and against an inclusive one
+   it does. **Both halves are parameterised over the whole of §4's closed reading and not over its
+   illustrations** — every one of the four forms, every currency word and symbol in **both** orders,
+   mixed case, runs of **every ASCII whitespace character** — space, tab, newline, carriage return,
+   form feed and vertical tab — against a non-ASCII space that is **not** collapsed, and `99.50` as
+   well as `100`.
 4. **One member per kind, and the exclusivity ordering at an equal ceiling.** **4(a):** an
    `Authorization` carrying two `MONEY` members is not constructible and one carrying a `MONEY` and
    a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
