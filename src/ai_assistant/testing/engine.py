@@ -752,6 +752,37 @@ class FakeAssistantEngine:
 
     # --- the two turn calls -----------------------------------------------
 
+    @staticmethod
+    def _detached(statement: OutboundStatement) -> OutboundStatement:
+        """One exact ``OutboundStatement`` of this value, sharing nothing with it.
+
+        **The detachment ADR-0264 §7's "composed once per turn" needs of the object as
+        well as of the computation.** ``frozen=True`` stops ``statement.reach = ...``
+        but not ``statement.__dict__["reach"] = ...`` (ADR-0018 §3, §4), so an instance
+        handed to two outcomes lets a consumer holding either rewrite what the other
+        says this system did — the aliasing bug PR #2377's round 4 found in the concrete
+        engine, which mints per pass for this reason. Every statement this engine hands
+        out goes through here, so no two outcomes it returns can share one.
+
+        **The value is read from the object's stored state and rebuilt as the base
+        model**, rather than taken through ``model_copy``, ``model_dump`` or a plain
+        attribute read. Each of those is a hook a subclassing caller controls: an
+        override returning ``self`` reopens the aliasing above, and one intercepting
+        field access hands back a value the object does not hold. ``__dict__`` is where
+        a pydantic model keeps its fields, ``OutboundStatement.model_fields`` is read
+        off the base class rather than the subject, and the result is validated exactly
+        as a decoded frame's would be — so what an outcome carries is this value,
+        typed as every consumer of the wire will see it.
+
+        Args:
+            statement: The value to detach, of this type or any subclass of it.
+
+        Returns:
+            An exact ``OutboundStatement`` equal to it.
+        """
+        state = object.__getattribute__(statement, "__dict__")
+        return OutboundStatement(**{name: state[name] for name in OutboundStatement.model_fields})
+
     def _outbound(self) -> OutboundStatement:
         """ADR-0264 §7's statement for **one** outcome this engine composed.
 
@@ -764,55 +795,49 @@ class FakeAssistantEngine:
         it and never read the field at all, which is the failure the fake exists to
         prevent.
 
-        **A fresh value per outcome, and a rebuild of a scripted one for the same
-        reason** (:attr:`outbound_statement`). ``frozen=True`` stops
-        ``statement.reach = ...`` but not ``statement.__dict__["reach"] = ...``
-        (ADR-0018 §3, §4), so one instance handed out twice would let a consumer holding
-        either outcome rewrite what the other says this system did — the aliasing bug
-        PR #2377's round 4 found in the concrete engine, which mints per pass for this
-        reason. A scripted value is rebuilt so that scripting cannot reopen it.
-
-        **Rebuilt from its declared fields rather than copied by a method the caller
-        controls.** ``model_copy`` is overridable, and a subject whose override returned
-        ``self`` would hand one instance to every outcome — reopening the aliasing this
-        method exists to close, silently and only for the consumer that subclassed. The
-        fields are read from :attr:`OutboundStatement.model_fields` rather than named
-        here, so a field the model gains rides along instead of being dropped; what
-        comes back is an exact ``OutboundStatement``, validated as any other is, which is
-        also what a decoded frame would carry.
+        A scripted value (:attr:`outbound_statement`) is detached per outcome for
+        :meth:`_detached`'s reason, so scripting cannot reopen the aliasing the default
+        closes.
 
         Returns:
-            The scripted statement, rebuilt, or a fresh ``NOT_REACHED``.
+            The scripted statement, detached, or a fresh ``NOT_REACHED``.
         """
         scripted = self.outbound_statement
         if scripted is None:
             return OutboundStatement(reach=OutboundReach.NOT_REACHED)
-        return OutboundStatement(
-            **{name: getattr(scripted, name) for name in OutboundStatement.model_fields}
-        )
+        return self._detached(scripted)
 
     def _stating(self, outcome: TurnOutcome) -> TurnOutcome:
-        """Give a **scripted** outcome ADR-0264 §7's member where §7 obliges one.
+        """Carry ADR-0264 §7's member on the outcome a turn call is about to return.
 
+        **The one site of §7's rule for the three calls that take a scripted outcome**,
+        so a synthesised outcome and a scripted one are held to it alike.
         :attr:`turn_outcome` is the lever every consumer drives a surface from, so an
         outcome scripted through it reaching a surface with ``reply`` and no statement
         is issue #2381 exactly, merely one lever further along: a renderer would be
         written, tested green against this double, and never read the field. §7 leaves
         the member ``None`` "on exactly the passes that neither established a contact
-        nor composed a reply", and this engine establishes none — so a scripted outcome
-        that composed a reply owes one, and a fake handing back a shape no conforming
-        engine produces is the looseness ADR-0026 §7 forbids.
+        nor composed a reply", and this engine establishes none — so an outcome that
+        composed a reply owes one, and a fake handing back a shape no conforming engine
+        produces is the looseness ADR-0026 §7 forbids.
 
-        **A statement the caller scripted is never rewritten**, and a reply-less outcome
-        is never given one. §7 admits both values on a pass that composed nothing — a
-        recovered park carries ``None`` and ADR-0198 §1's restatement carries
-        ``NOT_REACHED`` — and the two are not distinguishable from an outcome's shape,
-        so filling one in there would assert what the caller did not. The member is a
-        member of the outcome, and a caller who means one says so.
+        **A statement the caller stated is kept at its value and detached at its
+        object** (:meth:`_detached`). A scripted outcome is one object this engine
+        returns from every call, so carrying its statement through would put one
+        instance on every outcome a consumer holds — which is the aliasing the default
+        path closes, reached by the other lever.
 
-        **Rebuilt field by field rather than through** ``model_copy`` for
-        :meth:`_outbound`'s reason: the method is the caller's to override, and this one
-        is holding a value the caller built.
+        **A reply-less outcome is given none.** §7 admits both values on a pass that
+        composed nothing — a recovered park carries ``None`` and ADR-0198 §1's
+        restatement carries ``NOT_REACHED`` — and nothing in an outcome's shape tells
+        the two apart, so filling one in there would assert what the caller did not.
+
+        **The outcome's other members are carried across untouched, and that includes
+        their objects**: a scripted ``turn`` or ``routed`` is the same instance on every
+        outcome this engine returns, exactly as it is today
+        (`#2386 <https://github.com/leonapivato/ai-assistant/issues/2386>`_). What is
+        detached here is the member this decision makes load-bearing, and widening that
+        to the whole outcome is a change to what scripting means rather than this lane's.
 
         Args:
             outcome: The outcome this call is about to return.
@@ -820,10 +845,12 @@ class FakeAssistantEngine:
         Returns:
             The outcome, carrying §7's member where the pass composed a reply.
         """
-        if outcome.reply is None or outcome.outbound_statement is not None:
+        stated = outcome.outbound_statement
+        if stated is None and outcome.reply is None:
             return outcome
         carried = {name: getattr(outcome, name) for name in TurnOutcome.model_fields}
-        return TurnOutcome(**{**carried, "outbound_statement": self._outbound()})
+        statement = self._outbound() if stated is None else self._detached(stated)
+        return TurnOutcome(**{**carried, "outbound_statement": statement})
 
     def _resolve(self, conversation_id: str | None) -> str:
         """Continue the conversation named, or start one where none was (ADR-0074 §1).
@@ -887,14 +914,11 @@ class FakeAssistantEngine:
             turn=_turn(utterance),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
-            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
-            # never ``None`` — which §7 reserves for a pass that "neither established a
-            # contact nor composed a reply" (#2381).
-            outbound_statement=self._outbound(),
         )
-        # ADR-0264 §7 on a **scripted** outcome, which the one synthesised above
-        # already carries: a reply reaching a surface with no statement is #2381 one
-        # lever further along, and `turn_outcome` is the lever consumers drive from.
+        # ADR-0264 §7's member, on the scripted outcome and the synthesised one alike:
+        # this pass composed a reply, so it carries a statement and never ``None`` —
+        # which §7 reserves for a pass that "neither established a contact nor composed
+        # a reply" (#2381).
         outcome = self._stating(outcome)
         return self._checked(outcome, "converse")
 
@@ -963,14 +987,11 @@ class FakeAssistantEngine:
             turn=_turn(utterance),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
-            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
-            # never ``None`` — which §7 reserves for a pass that "neither established a
-            # contact nor composed a reply" (#2381).
-            outbound_statement=self._outbound(),
         )
-        # ADR-0264 §7 on a **scripted** outcome, which the one synthesised above
-        # already carries: a reply reaching a surface with no statement is #2381 one
-        # lever further along, and `turn_outcome` is the lever consumers drive from.
+        # ADR-0264 §7's member, on the scripted outcome and the synthesised one alike:
+        # this pass composed a reply, so it carries a statement and never ``None`` —
+        # which §7 reserves for a pass that "neither established a contact nor composed
+        # a reply" (#2381).
         outcome = self._stating(outcome)
         checked = self._checked(outcome, "converse_streaming")
         for piece in _pieces_of(checked.reply):
@@ -1079,16 +1100,11 @@ class FakeAssistantEngine:
             turn=_turn(heard),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {heard.strip()!r}.",
-            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
-            # never ``None`` — which §7 reserves for a pass that "neither established a
-            # contact nor composed a reply" (#2381). A **spoken** turn carries it like
-            # any other: §7 makes the spoken surface no rendering surface, which is a
-            # fact about that surface and not a reason to leave the member absent here.
-            outbound_statement=self._outbound(),
         )
-        # ADR-0264 §7 on a **scripted** outcome, which the one synthesised above
-        # already carries: a reply reaching a surface with no statement is #2381 one
-        # lever further along, and `turn_outcome` is the lever consumers drive from.
+        # ADR-0264 §7's member, exactly as on the two text calls. A **spoken** turn
+        # carries it like any other: §7 makes the spoken surface no rendering surface,
+        # which is a fact about that surface and not a reason to leave the member
+        # absent on the outcome (#2381).
         outcome = self._stating(outcome)
         chosen = next((member for member in plays if member in self.spoken_formats), None)
         # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,

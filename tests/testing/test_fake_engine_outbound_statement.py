@@ -345,26 +345,35 @@ async def test_a_scripted_reply_is_given_the_member_it_did_not_carry(call: str) 
     assert outcome.outbound_statement == OutboundStatement(reach=OutboundReach.INDETERMINATE)
 
 
-async def test_a_statement_the_caller_scripted_onto_an_outcome_is_never_rewritten() -> None:
-    """The fill-in is for an **absent** member and rewrites no value a caller stated."""
+async def test_a_statement_the_caller_scripted_onto_an_outcome_is_kept_and_detached() -> None:
+    """The fill-in rewrites no value a caller stated — and shares no object either.
+
+    A scripted outcome is one object this engine returns from every call, so carrying
+    its statement through would put **one instance** on every outcome a consumer holds:
+    the aliasing the default path closes, reached by the other lever. The value survives
+    exactly; the object does not.
+    """
+    stated = OutboundStatement(
+        reach=OutboundReach.REACHED, destinations=(OutboundDestination.SEARCH_PROVIDER,), records=2
+    )
     engine = FakeAssistantEngine()
     engine.outbound_statement = OutboundStatement(reach=OutboundReach.INDETERMINATE)
     engine.turn_outcome = TurnOutcome(
         turn=None,
         routed=RoutedOperation(operation=RoutableOperation.FORGET, outcome=RouteOutcome.PERFORMED),
         reply="scripted whole",
-        outbound_statement=OutboundStatement(
-            reach=OutboundReach.REACHED,
-            destinations=(OutboundDestination.SEARCH_PROVIDER,),
-            records=2,
-        ),
+        outbound_statement=stated,
     )
 
-    outcome = await engine.converse("hello", timeout=PATIENT)
+    first = await engine.converse("hello", timeout=PATIENT)
+    second = await engine.converse("hello again", timeout=PATIENT)
 
-    assert outcome.outbound_statement == OutboundStatement(
-        reach=OutboundReach.REACHED, destinations=(OutboundDestination.SEARCH_PROVIDER,), records=2
-    )
+    assert first.outbound_statement == stated
+    assert second.outbound_statement is not None
+    assert first.outbound_statement is not second.outbound_statement
+    first.outbound_statement.__dict__["records"] = 99
+    assert second.outbound_statement.records == 2
+    assert stated.records == 2
 
 
 async def test_a_scripted_outcome_that_composed_nothing_is_given_no_statement() -> None:
@@ -384,23 +393,40 @@ async def test_a_scripted_outcome_that_composed_nothing_is_given_no_statement() 
     assert outcome.outbound_statement is None
 
 
-async def test_a_scripted_statement_whose_copy_method_lies_is_rebuilt_anyway() -> None:
-    """``model_copy`` is the caller's to override, and this engine does not depend on it.
+class _Sticky(OutboundStatement):
+    """An ``OutboundStatement`` whose copy is itself, and whose fields read as another.
 
-    A subject whose override returned ``self`` would hand one instance to every outcome
-    and reopen the aliasing :meth:`FakeAssistantEngine._outbound` exists to close —
-    silently, and only for the consumer that subclassed. The statement is rebuilt from
-    its declared fields instead, so what every outcome carries is an exact
-    ``OutboundStatement`` of its own.
+    The two hooks a subclassing caller controls, on one subject: ``model_copy`` returns
+    this very instance, and attribute access reports a ``REACHED`` this object does not
+    hold. A double that took either at its word would hand one shared instance to every
+    outcome, or a statement no value in the process ever carried.
     """
 
-    class _Sticky(OutboundStatement):
-        """An ``OutboundStatement`` that hands back itself instead of a copy."""
+    def model_copy(self, **kwargs: object) -> _Sticky:
+        """Return this very instance, as an unhelpful subclass might."""
+        return self
 
-        def model_copy(self, **kwargs: object) -> _Sticky:
-            """Return this very instance, as an unhelpful subclass might."""
-            return self
+    def __getattribute__(self, name: str) -> object:
+        """Report a reach this object does not hold, for the declared fields only."""
+        if name == "reach":
+            return OutboundReach.REACHED
+        if name == "destinations":
+            return (OutboundDestination.SEARCH_PROVIDER,)
+        if name == "records":
+            return 7
+        return super().__getattribute__(name)
 
+
+async def test_a_scripted_statement_is_taken_from_its_state_and_not_from_its_hooks() -> None:
+    """Neither ``model_copy`` nor field access decides what an outcome carries.
+
+    An override returning ``self`` would hand one instance to every outcome and reopen
+    the aliasing :meth:`FakeAssistantEngine._detached` exists to close; one intercepting
+    field access would put a statement in front of a user that no value in this process
+    holds — ``REACHED``, a destination class and a record count, on a double that opened
+    no channel, which is #2268's and #2365's shape inverted. The value is read from the
+    object's stored state and rebuilt as the base model, so both are answered at once.
+    """
     engine = FakeAssistantEngine()
     engine.outbound_statement = _Sticky(reach=OutboundReach.INDETERMINATE)
 
@@ -411,5 +437,6 @@ async def test_a_scripted_statement_whose_copy_method_lies_is_rebuilt_anyway() -
     assert second.outbound_statement is not None
     assert first.outbound_statement is not second.outbound_statement
     assert type(first.outbound_statement) is OutboundStatement
+    assert first.outbound_statement == OutboundStatement(reach=OutboundReach.INDETERMINATE)
     first.outbound_statement.__dict__["reach"] = OutboundReach.REACHED
     assert second.outbound_statement.reach is OutboundReach.INDETERMINATE
