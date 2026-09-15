@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import pytest
 from assistant_engine_contract import (
+    _AUTHORIZATION_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -67,6 +68,7 @@ from assistant_engine_contract import (
 
 from ai_assistant.core.protocols import (
     AuditTrail,
+    GoalAuthorizationStore,
     InvocationLedger,
     SpendGate,
     SpendLedger,
@@ -78,9 +80,12 @@ from ai_assistant.core.types import (
     DataTier,
     Disposition,
     EvidenceDigest,
+    Goal,
     GoalAssociation,
     GoalBrief,
+    GoalInterpretation,
     GrantScope,
+    Ground,
     Idempotency,
     MemorySource,
     MemoryWrite,
@@ -104,6 +109,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    AuthorizationOperations,
     ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
@@ -126,6 +132,9 @@ from ai_assistant.orchestration import (
 # one that does not says which value it wants and why (ADR-0198 §4).
 from ai_assistant.orchestration.engine import _DEFAULT_MAX_OUTSTANDING
 from ai_assistant.testing import (
+    AUTHORIZATION_GOAL,
+    AUTHORIZATION_NOW,
+    AUTHORIZATION_PROPOSED_AT,
     FakeActionPolicy,
     FakeAuditTrail,
     FakeConnectionProvisioner,
@@ -136,6 +145,7 @@ from ai_assistant.testing import (
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeGoalAssociator,
+    FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -155,6 +165,7 @@ from ai_assistant.testing import (
     FakeTraceSink,
     FakeTranscriptArchive,
     FakeTranscriptArchiveWriter,
+    opening_act,
 )
 from ai_assistant.testing.grants import source_grant
 from ai_assistant.tools.registry import InMemoryToolRegistry
@@ -387,6 +398,35 @@ class _RoutingProvider:
         return Message(role=Role.ASSISTANT, content=json.dumps(envelope))
 
 
+def _authorized_goal() -> Goal:
+    """The durable goal :data:`AUTHORIZATION_GOAL`'s standing rows are listed under.
+
+    A listing renders the goal by its **statement** (ADR-0254 §11), read from the plan
+    store — so a subject whose listing must reach the frame check needs the goal there
+    as well as the row in the record store.
+    """
+    statement = "book the usual campsite"
+    return Goal(
+        id=AUTHORIZATION_GOAL,
+        interpretation=(
+            GoalInterpretation(
+                revision=1,
+                outcome=statement,
+                outcome_ground=Ground.USER_STATED,
+                outcome_span=statement,
+                recorded_at=AUTHORIZATION_PROPOSED_AT,
+                raised_by="t-1",
+            ),
+        ),
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED,
+            confidence=1.0,
+            last_updated=AUTHORIZATION_PROPOSED_AT,
+        ),
+        created_at=AUTHORIZATION_PROPOSED_AT,
+    )
+
+
 def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subject in
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -402,6 +442,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     routes: str | None = None,
     memory: FakeMemoryStore | None = None,
     plans: FakePlanStore | None = None,
+    authorizations: GoalAuthorizationStore | None = None,
     max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     notification_outbox: FakeNotificationOutbox | None = None,
     archive: FakeTranscriptArchive | None = None,
@@ -463,6 +504,16 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     store = FakePlanStore(now=lambda: AT) if plans is None else plans
+    # ADR-0254 §11's read side, wired only where a case supplies a record store — a
+    # deployment that wired none is the ordinary one the rest of this suite drives, and
+    # there the listing answers empty and the revocation `NO_SUCH_AUTHORIZATION`.
+    authorization_operations = (
+        None
+        if authorizations is None
+        else AuthorizationOperations(
+            authorizations=authorizations, plans=store, now=lambda: AUTHORIZATION_NOW
+        )
+    )
     audit: ConsumingTrail = FakeAuditTrail() if trail is None else trail
     read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
@@ -545,6 +596,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         loop=loop,
         runner=runner,
         plans=store,
+        authorization_operations=authorization_operations,
         trail=audit,
         spend=audit,
         reads=read_trail,
@@ -1185,6 +1237,20 @@ class TestEngineContract(AssistantEngineContract):
         """One wired engine at a limit the pair of totals cannot fit inside."""
         ledger = await seeded_spend_ledger()
         built = _wire(trail=ledger, max_payload_bytes=_SPEND_LIMIT)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_authorizations(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine at a limit one standing row's view cannot fit inside."""
+        plans = FakePlanStore(now=lambda: AT)
+        await plans.save_goal(_authorized_goal())
+        records = FakeGoalAuthorizationStore()
+        await records.record(opening_act(goal=AUTHORIZATION_GOAL))
+        built = _wire(plans=plans, authorizations=records, max_payload_bytes=_AUTHORIZATION_LIMIT)
         await built.start()
         try:
             yield built

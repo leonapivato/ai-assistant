@@ -52,6 +52,7 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
 from assistant_engine_contract import (
+    _AUTHORIZATION_LIMIT,
     _DECISION_LIMIT,
     _INVOCATION_LIMIT,
     _NOT_CANONICAL,
@@ -106,7 +107,7 @@ from ai_assistant.core.types import (
     RoutableOperation,
     SpanCoverage,
 )
-from ai_assistant.testing import FakeAssistantEngine
+from ai_assistant.testing import AUTHORIZATION_GOAL, FakeAssistantEngine, opening_act
 from ai_assistant.wire import (
     ENVELOPE_RESERVE_BYTES,
     HubEngineClient,
@@ -756,6 +757,22 @@ class TestHubEngineClientContract(AssistantEngineContract):
         # is produced, and it arrives here as a typed error frame. A frame size below
         # ADR-0085 §8d's floor is refused at the handshake, so it could not be the
         # instrument even if it were the tidier one.
+        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=MIN_FRAME_BYTES) as (
+            client
+        ):
+            yield client
+
+    @pytest.fixture
+    async def overfull_authorizations(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose published limit one standing row's view exceeds.
+
+        ``overfull_spending``'s binding one operation over: the **backing** engine
+        carries the small payload limit and the hub's frame stays legal, because
+        ADR-0085 §8c's refusal is measured where the value is produced and arrives here
+        as a typed error frame.
+        """
+        backing = FakeAssistantEngine(max_payload_bytes=_AUTHORIZATION_LIMIT)
+        backing.hold_authorization(opening_act(goal=AUTHORIZATION_GOAL))
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=MIN_FRAME_BYTES) as (
             client
         ):
