@@ -55,14 +55,15 @@ the quote for the intended action
   mechanisms decide — a member *naming an argument* or condition 6 over key sets; a bound's
   `currency_argument` and its cross-member refusal; two members of one **kind** or a `fixed` value
   the kind validation refuses; a `MONEY` member met **without a quote**, or `ResolutionRule`'s
-  closure at three; a **path-(iii) opening act carrying a member §4 mints**; and an act whose **own
-  words §4's four-form table does not match**. §9 applies each and names examples, relying on no
-  list as closed. **For five of the six the property each arm demonstrates is unchanged and only its
-  value or its act moves, and no arm is dropped; for the path-(iii) one it is a supersession
-  outright**, arms 64 and 65 losing their no-question limb for a member §4 mints while their whole
-  structure stands for an act §10's three ratified resolutions mint. §9 also records the arms the
-  sweep cleared with their ground. **Every other clause of all twelve sections binds entire**, §9
-  naming them section by section.
+  closure at three; a **path-(iii) opening act carrying a member §4 mints**; and an act **stating a
+  money bound** whose own words §4's four-form table does not match, which reaches **no** act a
+  ratified resolution mints. §9 applies each and names examples, relying on no list as closed. **For
+  five of the six the property each arm demonstrates is unchanged and only its value or its act
+  moves, and no arm is dropped; for the path-(iii) one it is a supersession outright**, arms 64 and
+  65 losing their no-question limb for a member §4 mints while their whole structure stands for an
+  act §10's three ratified resolutions mint. §9 also records the arms the sweep cleared with their
+  ground. **Every other clause of all twelve sections binds entire**, §9 naming them section by
+  section.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -777,12 +778,19 @@ the cross-member refusal that a `fixed` member naming it equals the bound's `cur
 now refuses (arms 1, 7, 14, 48). **(iv)** A `MONEY` member treated as **met without a quote**, or
 `ResolutionRule`'s closure at three (arms 31, 34, 44, 45, 46, 49, 57, 66, 67, 70). **(v)** A
 **path-(iii) opening act carrying a member §4 mints**, which §4 forbids (arms 64, 65). **(vi)** An
-act whose **own recorded words §4's four-form table does not match**, so the arm's act mints nothing
-— *"actually, make it Sunday"*, *"make it up to eighty"*, *"you may spend up to fifty pounds on
-this"* (arms 14, 15, 20, 39, 47, 57, 64, 65). **The disposition is stated per mechanism rather than
-asserted of all.** For (i)-(iv) and (vi) the property each arm demonstrates is unchanged and only
-the value or act it is stated over moves — the lane restates the act in a form §4's table carries,
-or supplies the quote — and **no arm is dropped**. **For (v) it is a supersession outright**: arm
+act that would need **`STATED_BOUND`** — one stating a **money bound** — whose own recorded words
+§4's four-form table does not match, so it mints nothing at all: *"make it up to eighty"*, *"you may
+spend up to fifty pounds on this"* (arms 15, 20, 39, 57, 64, 65). **It reaches no act a ratified
+resolution mints**: arm 14's *"actually, make it Sunday"* is `DATE_FROM_CONTEXT`'s and arm 47's
+*"add insurance"* is a term, and §4 leaves both readings untouched, so neither act is rewritten and
+arm 14's date member, its basis and its Sunday request stand exactly as stated. **The disposition is
+stated per mechanism rather than asserted of all.** For (i)-(iv) and (vi) the property each arm
+demonstrates is unchanged and only the value or act it is stated over moves — the lane restates the
+act in a form §4's table carries, or supplies the quote — and **no arm is dropped**. **Where the
+value that moves is a quote the arm moves lane with it**: mechanism (iv)'s arms split at their
+covered limb, L1 and L2 shipping the **uncovered** half — arm 45's GBP 80 `CONFIRM`, arm 46's
+failing member, arm 67's negatives — and the **covered** half riding with the quote decision (§11),
+no lane here being able to make a `MONEY` member met. **For (v) it is a supersession outright**: arm
 64's *"a row is written `ESTABLISHED` … with no `CONFIRM` put at all"* and arm 65's *"never asked to
 repeat the bound"* do **not** survive for a member §4 mints, since that member is proposed and
 settled by an answer (§4). **What survives of arms 64 and 65 is named rather than left to
@@ -1015,20 +1023,21 @@ superseded.
    Euros?"` each carry a `?` and are refused before any other step — **and nothing** from `"at least
    150 euros"`, `"more than 150 euros"`, `"over 150 euros"`, `"never spend over 100 euros"`, `"no
    more than 100 euros"`, `"not over 100 euros"`, `"not exactly 100 euros"` and `"never spending
-   over 100 euros"`, none being a form of the table. **And what a wrongly chosen span produces is a
-   proposal and never an authority**: the span `"under 100 euros"` of `"avoid booking hotels under
-   100 euros"` mints a `MONEY` ceiling of `100`, the row carrying it is written **`PROPOSED`**, its
-   `CoverageView` renders that bound **beside that span**, a `DECLINED` settlement establishes
-   nothing, and **no row of that goal and declaration stands `ESTABLISHED`** afterwards — the same
-   over `"avoid these prices — under 100 euros"`, while the same shape over `"up to 150 euros"` of
-   `"Book Riverside if it is dry Saturday, up to 150 euros"` **is** established by a yes. **No
-   path-(iii) opening act carries a `STATED_BOUND` member in any case.** **3(b):** against an
-   exclusive `maximum` of `100` a value of exactly `"100"` does **not** satisfy and against an
-   inclusive one it does. **Both halves are parameterised over the whole of §4's closed reading and
-   not over its illustrations** — every one of the four forms, every currency word and symbol in
-   **both** orders, mixed case, runs of **every ASCII whitespace character** — space, tab, newline,
-   carriage return, form feed and vertical tab — against a non-ASCII space that is **not**
-   collapsed, and `99.50` as well as `100`.
+   over 100 euros"`, none being a form of the table; **and nothing from `"up to fifty pounds"` or
+   `"under one hundred euros"`**, a figure written in words being no decimal figure §4's reading
+   accepts. **And what a wrongly chosen span produces is a proposal and never an authority**: the
+   span `"under 100 euros"` of `"avoid booking hotels under 100 euros"` mints a `MONEY` ceiling of
+   `100`, the row carrying it is written **`PROPOSED`**, its `CoverageView` renders that bound
+   **beside that span**, a `DECLINED` settlement establishes nothing, and **no row of that goal and
+   declaration stands `ESTABLISHED`** afterwards — the same over `"avoid these prices — under 100
+   euros"`, while the same shape over `"up to 150 euros"` of `"Book Riverside if it is dry Saturday,
+   up to 150 euros"` **is** established by a yes. **No path-(iii) opening act carries a
+   `STATED_BOUND` member in any case.** **3(b):** against an exclusive `maximum` of `100` a value of
+   exactly `"100"` does **not** satisfy and against an inclusive one it does. **Both halves are
+   parameterised over the whole of §4's closed reading and not over its illustrations** — every one
+   of the four forms, every currency word and symbol in **both** orders, mixed case, runs of **every
+   ASCII whitespace character** — space, tab, newline, carriage return, form feed and vertical tab —
+   against a non-ASCII space that is **not** collapsed, and `99.50` as well as `100`.
 4. **One member per kind, and the exclusivity ordering at an equal ceiling.** **4(a):** an
    `Authorization` carrying two `MONEY` members is not constructible and one carrying a `MONEY` and
    a `TERMS` member is; and against a live row whose `maximum` is `100` **without**
