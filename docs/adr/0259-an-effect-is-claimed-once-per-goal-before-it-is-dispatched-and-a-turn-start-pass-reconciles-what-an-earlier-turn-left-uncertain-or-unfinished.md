@@ -1,6 +1,6 @@
 # 259. An effect is claimed once per goal before it is dispatched, and a turn-start pass reconciles what an earlier turn left uncertain or unfinished
 
-- Status: Proposed
+- Status: Accepted
 - **Depends on [ADR-0265](0265-an-intended-action-has-a-stable-identity-minted-once-and-linked-to-the-goal-elements-it-serves.md),
   which is cited and superseded in nothing.** §6 of that decision states four obligations over *"a decision that lands
   the claim"* — the row keyed on the goal, the intended action and the effect key; an answer for a completed act of
