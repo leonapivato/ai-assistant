@@ -300,14 +300,20 @@ async def test_the_withdrawal_is_shown_before_it_is_taken_and_then_reports_what_
 
         assert STATEMENT in message
         assert "no narrowing" in message
-        said = drive.page.locator("#authorization-said")
+        said = drive.page.locator("#authorization-list .authorization-said")
         await expect(said).to_contain_text("Withdrawn.")
         await expect(said).to_contain_text("Nothing already decided is rewritten")
-        await expect(drive.page.locator("#authorizations")).to_contain_text("Nothing standing")
+        # **The row is retired in place and the listing is not re-read.** A record the
+        # store says is now `REVOKED` must not go on reading "still stands" beside an
+        # enabled control, and a refresh here would be one more request to race the
+        # owner's next. Adversarial review, round 4, ``major``.
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("You withdrew this.")
+        assert "still stands" not in await panel.inner_text()
+        await expect(panel.get_by_role("button", name="Withdraw this")).to_have_count(0)
         assert [name for name, _ in drive.engine.calls if "authoriz" in name] == [
             "standing_authorizations",
             "revoke_authorization",
-            "standing_authorizations",
         ]
 
 
@@ -326,7 +332,8 @@ async def test_declining_the_ceremony_withdraws_nothing(
         await asyncio.wait_for(asked, timeout=10)
 
         assert "revoke_authorization" not in [name for name, _ in drive.engine.calls]
-        await expect(drive.page.locator("#authorization-said")).to_be_hidden()
+        await expect(drive.page.locator("#authorizations")).to_contain_text("still stands")
+        await expect(drive.page.locator(".authorization-said")).to_have_count(0)
 
 
 async def test_a_withdrawal_that_moves_nothing_reports_what_the_store_found(
@@ -354,10 +361,13 @@ async def test_a_withdrawal_that_moves_nothing_reports_what_the_store_found(
         await drive.page.click("#authorization-list button:has-text('Withdraw this')")
         await asyncio.wait_for(asked, timeout=10)
 
-        said = drive.page.locator("#authorization-said")
+        said = drive.page.locator("#authorization-list .authorization-said")
         await expect(said).to_contain_text("nothing was withdrawn")
         await expect(said).to_contain_text("declining it")
-        assert await said.evaluate("(node) => node.className") == "notice"
+        # **Not the fault slot, and the row is left exactly where it was**: the store
+        # moved nothing, so neither does the display.
+        assert "notice" in await said.evaluate("(node) => node.className")
+        await expect(drive.page.locator("#authorizations")).to_contain_text("still stands")
 
 
 async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
@@ -425,16 +435,18 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
         assert STATEMENT not in await panel.inner_text()
 
 
-async def test_a_withdrawal_reports_nothing_where_the_panel_has_moved_on(
+async def test_a_withdrawal_reports_on_its_own_row_however_the_panel_moves(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """A settlement is attributed to the work it was taken on, or to nothing.
+    """A settlement is attributed to the record it was taken on, and is never lost.
 
-    Start withdrawing a row of goal A, then open goal B before the revocation returns:
-    writing *"Withdrawn"* above B's rows would say the act was done to B's work, and
-    re-reading A would discard the listing the owner just asked for. The act still
-    happens and is recorded — what is dropped is the sentence, because there is nowhere
-    honest to put it. Adversarial review, round 3, ``major``.
+    Three rounds converged here and the arm states all three. Start withdrawing a row of
+    goal A, then open goal B before the revocation returns. Writing *"Withdrawn"* into a
+    panel-wide slot would say the act was done to B's work (round 3, ``major``); dropping
+    the sentence because the panel moved on would be silence about an act that happened
+    (round 4, ``blocker``). Reporting on the row itself is true under both — and the row
+    is gone from the screen by then, so what is asserted is that the act **completed**
+    and that nothing was attributed to B.
     """
     loop = asyncio.get_running_loop()
     held: asyncio.Future[None] = loop.create_future()
@@ -456,15 +468,16 @@ async def test_a_withdrawal_reports_nothing_where_the_panel_has_moved_on(
         # The owner re-points the panel while the withdrawal is still out.
         await drive.page.click("#goals-button")
         await drive.page.wait_for_selector("#goals:not([hidden])")
-        await (
-            drive.page.locator("#goal-list button:has-text('What this authorises')").nth(1).click()
-        )
+        rows = drive.page.locator("#goal-list button:has-text('What this authorises')")
+        await rows.nth(1).click()
         await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
         held.set_result(None)
 
-        await expect(drive.page.locator("#authorization-said")).to_be_hidden()
-        await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
-        assert STATEMENT not in await drive.page.locator("#authorizations").inner_text()
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text("Nothing standing")
+        shown = await panel.inner_text()
+        assert STATEMENT not in shown, "goal A's work is not named under goal B's listing"
+        assert "Withdrawn" not in shown, "and neither is the act taken on it"
         assert "revoke_authorization" in [name for name, _ in drive.engine.calls]
 
 
@@ -500,6 +513,11 @@ async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
         beside = drive.page.locator("#answer-body .authorization-said")
         await expect(beside).to_be_visible()
         await expect(beside).to_contain_text("Withdrawn.")
+        # The announced row is retired in place too, on the same ground.
+        await expect(drive.page.locator("#answer-body")).to_contain_text("You withdrew this.")
+        await expect(
+            drive.page.locator("#answer-body").get_by_role("button", name="Withdraw this")
+        ).to_have_count(0)
         await expect(drive.page.locator("#authorizations")).to_be_hidden()
         assert [name for name, _ in drive.engine.calls if "authoriz" in name] == [
             "revoke_authorization"

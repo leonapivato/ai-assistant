@@ -7761,6 +7761,10 @@ class Engine:
         lookup here to fail and no row that a concurrent deletion could silence.
         Adversarial review, round 3, ``blocker``.
 
+        **The clock is read by the operations object and not here**, through its own
+        ADR-0026 §4 guard: a reading taken here would raise ``ClockReadingError``, which
+        nothing on this path declares. Architecture review, round 4, ``blocker``.
+
         **It is empty on every turn that opened none**, including a turn that only
         re-grounds an existing constraint — the case ADR-0250 §5 requires to stay
         unannounced and the reason this member exists rather than riding
@@ -7785,11 +7789,7 @@ class Engine:
         operations = self._authorization_operations
         if operations is None or recorded is None or not disposition.opened:
             return ()
-        return operations.announced(
-            disposition.opened,
-            goal_statement=recorded.goal.statement,
-            reading=self._clock(),
-        )
+        return operations.announced(disposition.opened, goal_statement=recorded.goal.statement)
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 

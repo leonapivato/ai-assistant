@@ -665,9 +665,7 @@ async def test_an_act_that_opened_two_authorities_announces_two() -> None:
     )
     operations, _, _ = await _over()
 
-    announced = operations.announced(
-        (train, hotel), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW
-    )
+    announced = operations.announced((train, hotel), goal_statement=STATEMENT)
 
     assert [one.id for one in announced] == ["auth-train", "auth-hotel"]
     assert [one.tool.id for one in announced] == ["rail", "hotels"]
@@ -683,7 +681,7 @@ async def test_a_turn_that_opened_none_announces_nothing_and_reads_no_clock() ->
     """
     operations, _, clock = await _over()
 
-    assert operations.announced((), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW) == ()
+    assert operations.announced((), goal_statement=STATEMENT) == ()
     assert clock.readings == 0
 
 
@@ -696,7 +694,7 @@ async def test_an_announcement_reports_the_rows_own_liveness_and_not_a_presumpti
     row = opening_act(id="auth-1", expires_at=AUTHORIZATION_NOW - timedelta(minutes=1))
     operations, _, _ = await _over()
 
-    (view,) = operations.announced((row,), goal_statement=STATEMENT, reading=AUTHORIZATION_NOW)
+    (view,) = operations.announced((row,), goal_statement=STATEMENT)
 
     assert view.live is False
 
@@ -719,7 +717,7 @@ def test_an_announcement_never_drops_a_row_and_reads_no_store() -> None:
     operations = AuthorizationOperations(authorizations=store, plans=plans, now=_Clock())
     rows = (opening_act(id="auth-1"), opening_act(id="auth-2", tool=OTHER_TOOL))
 
-    announced = operations.announced(rows, goal_statement=STATEMENT, reading=AUTHORIZATION_NOW)
+    announced = operations.announced(rows, goal_statement=STATEMENT)
 
     assert [one.id for one in announced] == ["auth-1", "auth-2"]
     assert [one.goal_statement for one in announced] == [STATEMENT, STATEMENT]
