@@ -318,13 +318,13 @@ rules did not. §10 books the floor with what fires it.
 > member of any kind is minted from an element whose `span` is preceded, anywhere in the act's
 > own recorded utterance, by a token of the negation vocabulary**, folded and tokenised as above.
 > A model chooses the span and a truncation can drop the word that reverses it: *"do not spend
-> under 100 euros"* would otherwise mint a ceiling from *"under 100 euros"*, *"do not send to
-> Alice"* a `TERMS` member fixing *"Alice"* from `AS_STATED`, and *"do not book Sunday"* a `PERIOD`
-> member from `DATE_FROM_CONTEXT` — and the last two are authorities in exactly the direction the
-> user forbade. **The bar is over every reading of this section**, it is deliberately blunt, and
-> it refuses *"I'm not fussy — spend under 100 euros"* along with them, which costs a question.
-> **It closes only what this vocabulary can see**: a refusal spelled *avoid*, *skip* or *rather
-> not* leaves the truncation readable, which §10 books and ADR-0249 §7 owns.
+> under 100 euros"* would otherwise mint a ceiling from *"under 100 euros"*. **The bar is over
+> every reading of this section** — which matters for the readings §10 books as much as for this
+> one — it is deliberately blunt, and it refuses *"I'm not fussy — spend under 100 euros"* along
+> with them, which costs a question. **It closes only what this vocabulary can see**: a refusal
+> spelled *avoid*, *skip* or *rather not* leaves the truncation readable, which is why the clause
+> below mints only a ceiling and why §10 books the two readings a ceiling's argument cannot
+> protect.
 
 > **Normative — a strict word mints a strict bound, and the endpoint is never widened.**
 > *"under 100 euros"* mints `maximum` `100` with `maximum_exclusive`, so a call at exactly `100`
@@ -334,27 +334,26 @@ rules did not. §10 books the floor with what fires it.
 > ADR-0254 §2's asymmetry is the reason, since the difference is a cent in the direction that
 > authorises a call the user did not authorise.
 
-> **Normative — `DATE_FROM_CONTEXT` mints a `PERIOD` member.** Its `starts_at` and `ends_at` are
-> the half-open interval the resolution yielded, and its **`timezone` is the configured IANA
-> zone as the act's turn read it** — **the same input the resolution records**, read once, and
-> **not derived from the resolution's record of it**. ADR-0254 §8 makes the two *"two facts
-> and neither is derived from the other"* and *"ordinarily equal"* with *"nothing requir[ing]
-> them to be"*, and reading one input twice is what keeps both true.
+> **Normative — `STATED_BOUND` is the only reading that mints a member, and the other three mint
+> nothing.** **`AS_STATED` mints no member from an element**, **`DATE_FROM_CONTEXT` mints none**,
+> and **`FROM_SHOWN_RECORD` mints none** — so the only member this decision mints is a **`MONEY`
+> ceiling**, and there is no ordering between readings to state. `FROM_SHOWN_RECORD` could not
+> reach an element in any case: ADR-0249 §1's validator gives a `USER_STATED` element a span and
+> **no** `evidence_id`, so none carries both a span and the record its reference resolved to. §10
+> books the other two with what fires each.
 
-> **Normative — `AS_STATED` mints a `fixed` member whose `fixed` is the span read as itself**,
-> normalised by nothing, which is ADR-0254 §10's discipline and ADR-0248 §1's before it. Its
-> `kind` is `TERMS` — a term the user named — and it is the only kind an `AS_STATED` span mints,
-> because a bare figure states no bound and a bare date states no period.
+**Minting only a ceiling is what makes a model-chosen span safe, and it is the answer to a class
+five review rounds kept finding.** A planner selects the span, and a proper substring can carry a
+different polarity from the sentence it came out of. §4's negation bar catches every refusal this
+vocabulary spells, and it cannot catch *avoid*, *skip* or *rather not* — so *"avoid sending to
+Alice"* would have yielded the span *"Alice"*, an `AS_STATED` `TERMS` member fixing it, and a
+declaration whose sole `TERMS` argument is its recipient covered at exactly the recipient the user
+forbade. The same span in *"avoid Sunday"* would have yielded a `PERIOD` member authorising
+Sunday. **A ceiling has no such reading**: whatever substring is chosen, a `maximum` bounded by a
+figure the user themselves uttered can only restrict what a call may cost, so the polarity
+question stops being one a rule has to answer. What that costs is stated rather than hidden — a
+term the user named and a period they gave mint nothing, and every act resting on one asks.
 
-> **Normative — `FROM_SHOWN_RECORD` mints nothing from an element.** ADR-0249 §1's validator gives
-> a `USER_STATED` element a span and **no** `evidence_id`, so no element carries both a span and
-> the record its reference resolved to; re-resolving the words at minting time would be a fresh
-> interpretation of the user's language, at the one moment §9 clause (i) reserves to code.
-
-> **Normative — the readings are attempted in one order and the first total one is taken**:
-> `STATED_BOUND`, then `DATE_FROM_CONTEXT`, then `AS_STATED`, so that a span which is both a bound
-> phrase and a term is a bound. It is the only ordering here, and **what makes a
-> `DATE_FROM_CONTEXT` resolution total over a span is not decided here** (§10).
 
 ### 5. One member per kind, and the mint reads the goal and nothing else
 
@@ -464,24 +463,30 @@ absolute again: **no model output reaches any input of a quote**.
 > attempt of that goal, and one whose `read_from` does not resolve to a completed step execution
 > of the named `attempt_id` itself — `execution_id` a member of that attempt's own
 > `execution_ids` (ADR-0255 §3) and `step_id` a step of it — **and one whose `read_from` names a
-> step whose own `intended_action` is not the quote's, or whose declaration carries no
-> `QuotedOutput` at the quote's `kind` naming `read_from.field`, so a quote can never be read
-> under one act and offered under another, nor read from a field the tool never declared. **And it
-> recomputes every derived field and refuses a mismatch**: the `value` at that field of that
-> execution's stored output, the `currency` at the declared `currency_field`, and the
-> `arguments_digest` over that step's own request's user-facing arguments. A command is therefore
-> a **pointer the store checks**, not a value it is told, and a caller reaching past
-> `orchestration` cannot record a price the execution does not hold.** That is the window ADR-0265
-> §4 closes at the store for a plan, closed here for every reference and every derived value a
-> quote carries, with the same error class. **That is what makes the export
-> closure and the deletion cascade true rather than asserted**: every identifier on a quote
-> resolves inside the goal the quote rides in, so ADR-0014 §5's rule is satisfied by construction
-> and `delete_goal` leaves nothing dangling.
+> step whose own `intended_action` is not the quote's**, so a quote can never be read under one
+> act and offered under another. That is the window ADR-0265 §4 closes at the store for a plan,
+> closed here for every reference a quote carries and with the same error class, and it is what
+> makes the export closure and the deletion cascade true rather than asserted: every identifier on
+> a quote resolves inside the goal the quote rides in, so ADR-0014 §5's rule is satisfied by
+> construction and `delete_goal` leaves nothing dangling.
+>
+> **What the store cannot check is `orchestration`'s, and the division is stated rather than
+> assumed.** The plan store holds no concrete `ActionRequest` for a completed step —
+> `PlanStep.parameters` predate the resolved references and the system-supplied fill — and no
+> snapshot of the `ToolDefinition` the call was made under; consulting a registry would give the
+> store lane a collaborator it does not have and would validate against a declaration that may
+> since have been re-issued. So **the store checks the references above and nothing derived**, and
+> the `value`, the `currency`, the `arguments_digest` and the declaration's `QuotedOutput` are
+> `orchestration`'s, computed from the execution it has just read and the declaration that call
+> was made under, under §8's sole-writer clause and exactly as every other minted record of this
+> corpus is (ADR-0265 §5). **A caller reaching past `orchestration` is outside the writer clause
+> and is a fault rather than a case**, which is the posture ADR-0254 §15 takes for every value it
+> names.
 
 > **Normative — the wire, the export, the stored shapes and the migration, and it is ADR-0265
 > §5's clause one record over.** **`PROTOCOL_VERSION` moves by exactly one, in the lane that lands
 > the `core` surface**, and `wire/envelope.py`'s log gains an entry naming this ADR and the
-> reason: `Goal` gains two fields and `ToolDefinition` gains one, `Goal` is carried on
+> reason: `Goal` gains two fields and `ToolDefinition` gains two, `Goal` is carried on
 > `TurnResult.goal`, both set `extra="forbid"`, and `wire/codec.py` renders a model by
 > `model_dump()`, so the shape change makes a hub's turn undecodable by a client at the previous
 > version. **`PlanExport` gains no member and
@@ -836,27 +841,27 @@ relied on rather than superseded.
   idempotency key and a client reference are per-call identity, and a **locale** is an input a
   price can depend on. **This decision draws no line between them, and §11 makes drawing it a
   prerequisite of the gate.** Fired by the decision that classifies a system-supplied key.
-- **A model-chosen span that reverses the user's words without a negation this vocabulary
-  carries.** §4 bars every reading where a negation token stands before the span, and its table
-  mints only ceilings, so what remains is a refusal spelled *avoid*, *skip* or *rather not* in
-  front of a `TERMS` or `PERIOD` span — *"avoid sending to Alice"* still yielding a member fixing
-  *"Alice"*. **ADR-0249 §7 owns that question**: its span check is a containment test, never a
-  check of what the model meant. Fired by the decision that constrains how a span is chosen, or
-  that gives an element a polarity the loop can read.
-- **What makes a `DATE_FROM_CONTEXT` resolution total over a span** — the reader that turns
-  *"Sunday"* into a half-open interval in a zone. §4 states what such a resolution **mints** and
-  not how it is **taken**. **Until it lands, the only readings an element takes are
-  `STATED_BOUND` and `AS_STATED`, and no `PERIOD` member is minted by any live path.** Fired by
-  the decision that lands the reader, with its own totality argument and arms.
+- **Minting a `TERMS` member from an act, and minting a `PERIOD` one.** §4 mints neither, so a
+  term the user named and a period they gave are covered by nothing and every call resting on one
+  asks. What stops both is the same thing: a span a model chose carries no polarity a rule can
+  read, and *"avoid sending to Alice"* would otherwise mint an authority to send to Alice.
+  **ADR-0249 §7 owns that question** — its span check is a containment test, never a check of what
+  the model meant. Fired by the decision that gives an element a polarity the loop can read, or
+  that constrains how a span is chosen; and for `PERIOD`, additionally by the reader that turns
+  *"Sunday"* into a half-open interval, which **owes ADR-0254 §8's two-zones rule**: such a
+  member's `timezone` is the configured zone as the act's turn read it, read from that input and
+  never from the resolution's own record of it.
+- **A `FROM_SHOWN_RECORD` basis for a coverage member**, which needs an element carrying both a
+  span and the record its reference resolved to, and ADR-0249 §1 admits none. Fired by the
+  decision that gives an element that shape.
 - **Any widening of §4's table** — a form it does not list (bare *"less than"* among them), a
   currency it does not name, a language other than English, a figure written in words, a bound on
   a count. It refuses rather than guessing. Fired by a decision stating the wider reading and its
   own totality argument.
 - **A fourth `BoundKind`**, so that an argument which is neither an amount, a period nor a named
-  term can be declared and met on the argument route; **a `FROM_SHOWN_RECORD` basis**, which needs
-  an element carrying both a span and the record its reference resolved to, and ADR-0249 §1 admits
-  none; and **which of two constraints of one kind the user meant**, which §5 refuses rather than
-  choosing. Each fired by the decision that supplies what it names.
+  term can be declared and met on the argument route; and **which of two constraints of one kind
+  the user meant**, which §5 refuses rather than choosing. Each fired by the decision that
+  supplies what it names.
 - **What the verification phase does with a quote.** The owner's ruling makes the actual charge
   confirmed after the act and a mismatch *"a reported finding"*; **no clause here verifies
   anything, compares a charge, or writes a finding**, and `AttemptPhase.VERIFY` is A10's by
@@ -911,8 +916,8 @@ relied on rather than superseded.
   condition 6 in `permissions/_coverage.py`, with each currency conjunct read where §7 puts it.
   Arms 1(b), 2(b), 3(b), 6 and 7(a).
 - **L4 — the mints, in `orchestration` alone.** §1's candidate selection, §2's act and its four
-  refusals, §4's readings and their order, §5's one-per-kind refusal and goal-only read, and
-  §6's quote mint from a completed step's output. Arms 1(a), 2(a), 3(a), 4(b), 5(c) and 8.
+  refusals, §4's reading and its refusals, §5's one-per-kind refusal and goal-only read, and
+  §6's quote mint from a completed step's output, with the derived values §6 assigns it. Arms 1(a), 2(a), 3(a), 4(b), 5(c) and 8.
 
 > **Normative — L1 lands before L2, L2 before L3 and L3 before L4**, and no later lane's arm is
 > demonstrated against an earlier lane's absence.
@@ -929,9 +934,11 @@ relied on rather than superseded.
    of any kind**. **1(b):** against a quote for the request's intended action at `"120"`/`"EUR"`
    over the request's own arguments, the request is covered; at `"170"` it is not.
 2. **Kind agreement and not numeric fit — the review's own case.** **2(a):** a constraint with
-   span `"4 stars"` mints **no `MONEY` member**: it matches no form of §4's table, so `AS_STATED`
-   gives it a `TERMS` member. **2(b):** that `TERMS` member is met by a `MONEY` quote in no case
-   and by a `MONEY`-declared argument in none, whatever number either carries.
+   span `"4 stars"` mints **no member at all**: it matches no form of §4's table, and no other
+   reading mints one. **2(b):** a `TERMS` member constructed directly — the shape a later decision
+   will mint — is met by a `MONEY` quote in no case and by a `MONEY`-declared argument in none,
+   whatever number either carries, and a `MONEY` member is met at a `TERMS`-declared argument in
+   none.
 3. **Only ceilings, the endpoints, and the negation refusals.** **3(a):** span `"under 100 euros"`
    mints `maximum` `100` **with** `maximum_exclusive`, `"at most 100 euros"` mints it without, and
    `"never spend over 100 euros"` mints an **inclusive** `maximum` of `100`. **Nothing at all** is
@@ -945,10 +952,9 @@ relied on rather than superseded.
    **3(b):** against an exclusive `maximum` of `100` a value of exactly `"100"` does **not**
    satisfy and against an inclusive one it does.
 4. **One member per kind.** **4(a):** an `Authorization` carrying two `MONEY` members is not
-   constructible. **4(b):** a goal carrying two `USER_STATED` constraints that each read as
-   `MONEY` mints **neither**, and a `PERIOD` constraint beside them still mints its own — with
-   its `timezone` read from the same input the resolution records and **not** read back off the
-   resolution's own record of it.
+   constructible, and one carrying a `MONEY` and a `TERMS` member is. **4(b):** a goal carrying
+   two `USER_STATED` constraints that each read as `MONEY` mints **neither**, and one carrying a
+   money ceiling beside a constraint no reading mints still mints the ceiling.
 5. **The quote, minted from a step's own output and from nothing else.** **5(a):** a
    `ToolDefinition` carrying two `quoted_outputs` of one `kind` is not constructible, one carrying
    a `MONEY` member with no `currency_field` is not constructible, and an `ActionQuote` whose
@@ -997,10 +1003,14 @@ relied on rather than superseded.
    declarations — including one declaring nothing; an element whose `id` is `None`, one whose
    carrying revision's `raised_by` is `None`, and one on a goal whose `interpretation_elided` is
    non-zero and whose oldest **retained** revision is its earliest carrier each mint nothing; and
-   a `PlannerOutput` whose envelope carries a coverage member, a bound, a kind, a
-   `BoundedArgument` or an `ActionQuote` leaves the recorded revision, the minted coverage and
-   the recorded quotes byte-identical to the same envelope without them, with the turn not
-   failing.
+   a `PlannerOutput` whose envelope carries **every value §8's discard list names** — a
+   `CoverageMember`, a `ValueBound`, an `AuthorizationBasis`, a `BoundKind`, an argument key, a
+   `BoundedArgument`, a **`QuotedOutput`**, an `ActionQuote`, an `arguments_digest`, an
+   `attempt_id` and an `InterpretedOutput` — leaves the recorded revision, the minted coverage and
+   the recorded quotes **byte-identical** to the same envelope without them, with the turn
+   completing and not failing. The `QuotedOutput` limb is the one to write first: an
+   implementation that admitted one would let a model name the output field a quote is read at,
+   which is the failure §6 moved that fact to the declaration to prevent.
 
 ### 12. This ADR classified, marked, and how it is ratified
 
@@ -1057,7 +1067,7 @@ euros"*, *"unter 100 Euro"* and *"max €100"* do not. **The negation is adjacen
 notify me about charges over 100 euros"* mints nothing; **a truncation of a negated form mints
 nothing**, so a planner cannot turn *"not under 100 euros"* into a ceiling; **the table is
 asymmetric on purpose**, bare *"less than 100 euros"* minting nothing; and **a strict word mints a
-strict bound**, which is why `ValueBound` gains the two flags.
+strict bound**, which is why `ValueBound` gains `maximum_exclusive`.
 
 **And one residual is the loudest.** A model chooses the span, and §4 bars only the refusals this
 negation vocabulary carries; *"avoid sending to Alice"* still yields a `TERMS` member fixing

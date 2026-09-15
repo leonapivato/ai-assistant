@@ -58,16 +58,15 @@
   and never by numeric fit: a constraint about a hotel's star rating has no `MONEY` reading, so
   it mints no money member and is proved against no price.
 
-  **Three consequences of that shape reach this section's own words.** `maximum` stops being
-  required in the superseding decision's own reading, which mints **only** ceilings — *"at least
-  150"* mints nothing and the act asks — because a span a model chose can be a truncation that
-  reverses direction, and a reading that can only restrict is the one truncation cannot invert. A
-  `MONEY`
-  bound stops carrying `currency_argument`, because the key carrying an amount's currency is a
-  fact about a declaration or about a quote and not about an act; and it gains
+  **Two consequences of that shape reach this section's own words, and a third does not.**
+  A `MONEY` bound stops carrying `currency_argument`, because the key carrying an amount's
+  currency is a fact about a declaration or about a quote and not about an act; and it gains
   **`maximum_exclusive`**, so *"under 100"* stops being recorded as a bound a call at exactly 100
-  satisfies. **`maximum` stays required**: the reading mints only ceilings, and a floor is not a
-  spending protection. And `ResolutionRule` gains a
+  satisfies. **`maximum` stays required and `minimum` stays optional, exactly as ratified**: the
+  superseding decision's reading mints **only** ceilings — *"at least 150"* mints nothing and the
+  act asks — because a span a model chose can be a truncation that reverses direction, and a
+  reading that can only restrict is the one a truncation cannot invert. And `ResolutionRule` gains
+  a
   **fourth** member, `STATED_BOUND`, reading a **ceiling** off the span by a closed table — no
   floor at all, so a truncation of the user's own words can only ever restrict — and no reading is
   taken where a negation stands before the span. **That is the supersession §19 books by name.**
