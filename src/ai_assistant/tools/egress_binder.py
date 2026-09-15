@@ -511,6 +511,7 @@ class EgressBindingSeam:
             carried.planned_with_external_content,
             carried.coverage,
             carried.closed_loop,
+            carried.forecast_reach,
         )
         self._refuse_unlocated_provenance(binding, carried.spans)
         return self._returned(binding, checked, arguments)
@@ -590,6 +591,13 @@ class EgressBindingSeam:
             # could ever answer, which is #2232. The field's ``False`` **default** is
             # untouched and still decodes a binding nothing wrote one on.
             was.closed_loop,
+            # **ADR-0260 §11 transcribes nothing new here, and says so in terms**: it
+            # mints **no park** for a forecast read — ADR-0244's park is a `CONFIRM` on
+            # a *search* — so no forecast binding is ever rebound, and the field's
+            # restrictive `False` default is the correct value on this path.
+            # ADR-0152 §7's and ADR-0247 §7's closed transcription count is therefore
+            # untouched and ADR-0260 supersedes neither.
+            False,
         )
         if binding != was:
             msg = (
@@ -742,6 +750,7 @@ class EgressBindingSeam:
         planned_with_external_content: bool,
         coverage: SpanCoverage,
         closed_loop: bool,
+        forecast_reach: bool,
         /,
     ) -> EgressBinding:
         """Derive the whole binding from the declaration and the arguments.
@@ -750,16 +759,26 @@ class EgressBindingSeam:
         would otherwise reach — and every value it reads is a detached copy
         (ADR-0152 §1, §5).
 
-        **Four of the binding's members are carried rather than derived**, and each
+        **Five of the binding's members are carried rather than derived**, and each
         arrives here already resolved by the member that called this: each span's
         ``provenance`` (ADR-0146 §2, ADR-0152 §7), the call's
         ``planned_with_external_content`` (ADR-0181 §3, §4), its ``coverage``
-        (ADR-0233 §4, §5) and its ``closed_loop`` (ADR-0238 §5). Nothing here computes,
+        (ADR-0233 §4, §5), its ``closed_loop`` (ADR-0238 §5) and its
+        ``forecast_reach`` (ADR-0260 §11). Nothing here computes,
         infers, defaults or amends any of them — in particular, no origin is recovered
         by reading an argument's value, its field or its shape, which is ADR-0146 §2's
         forbidden inference on the first axis, ADR-0181 §4's second clause on the
-        second, ADR-0233 §5's second clause on the third and ADR-0238 §5's
-        written-by-``orchestration``-and-by-nothing-else clause on the fourth.
+        second, ADR-0233 §5's second clause on the third and ADR-0238 §5's and
+        ADR-0260 §11's written-by-``orchestration``-and-by-nothing-else clause on the
+        last two.
+
+        **``forecast_reach`` is written from the carrier's value unchanged too, and
+        for ``closed_loop``'s reasons** (ADR-0260 §11). It is ``closed_loop``'s own
+        shape one field along and is **not** a widening of it: every condition the fact
+        is stated over is ``orchestration``'s, the fact is written there and by nothing
+        else, and this object holds none of its inputs. On the **resuming** path it is
+        not transcribed but defaulted, because ADR-0260 §11 mints no park for a forecast
+        read and no forecast binding is ever rebound.
 
         **``closed_loop`` is written from the carrier's value unchanged** — ADR-0238 §5:
         "the seam writes the binding's value from the carrier's unchanged" — and this
@@ -799,6 +818,7 @@ class EgressBindingSeam:
                 planned_with_external_content=planned_with_external_content,
                 coverage=coverage,
                 closed_loop=closed_loop,
+                forecast_reach=forecast_reach,
             )
         except ValidationError as exc:
             msg = (

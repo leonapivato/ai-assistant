@@ -1806,7 +1806,68 @@ from ai_assistant.wire.errors import (
 #: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
 #: is registered, and the error mapping is untouched — ADR-0264's lane 1 mints no error
 #: class and removes none.
-PROTOCOL_VERSION: Final[int] = 43
+#: **44 since ADR-0260 §11**, and the ground is that section's own sentence:
+#: *"``PROTOCOL_VERSION`` moves by one on the lane that lands the ``core`` surface,
+#: with its own log entry naming this ADR. The figure is that lane's, because more than
+#: one lane in flight moves it and a number written here would be a claim that goes
+#: stale silently."* So 43 is what the tree held when this lane branched and 44 is one
+#: more; a lane that lands after this one re-bumps rather than reusing the figure.
+#:
+#: :class:`~ai_assistant.core.types.TurnOutcome` gains **one** ``None``-defaulting
+#: member, ``forecast_not_read`` (ADR-0260 §10). That model sets ``extra="forbid"``,
+#: ``wire/codec.py`` renders a model by ``model_dump()``, and a ``TurnOutcome`` is what
+#: the promoted surface returns from every turn call — so a hub at 44 emits
+#: ``"forecast_not_read": null`` on **every** turn it sends and a client at 43 fails it
+#: with ``extra_forbidden``. **A defaulted member is still a shape change**, exactly as
+#: the entries at 39, 40, 42 and 43 state of ``AttemptEffort.kind``, ``TurnOutcome``'s
+#: four, ``PermissionRuling.authorised_goal`` and ``outbound_statement``.
+#:
+#: **Three more shapes move with it, and each would fail a peer one version back.**
+#: :class:`~ai_assistant.core.types.ReadKind` gains ``FORECAST_READ`` and
+#: :class:`~ai_assistant.core.types.OutboundDestination` gains ``FORECAST_PROVIDER``,
+#: so a hub emitting either member sends a ``str`` a client at 43 validates against a
+#: five- and a one-member enumeration; and
+#: :class:`~ai_assistant.core.types.CarriedProvenance` and
+#: :class:`~ai_assistant.core.types.EgressBinding` each gain ``forecast_reach``, which
+#: an ``extra="forbid"`` decode at 43 refuses on every binding a hub at 44 renders.
+#:
+#: **No new class of content crosses.**
+#: :class:`~ai_assistant.core.types.ForecastNotRead`,
+#: :class:`~ai_assistant.core.types.ForecastRefusal` and the two enumeration members
+#: are ``StrEnum`` values spelled by lower-cased member name;
+#: ``forecast_reach`` is a ``bool``. ADR-0260 §10's bar is the whole of what may sit in
+#: the folded member: no destination, host, origin, provider name, connection
+#: reference, account identity, place, coordinate, day, count, monetary figure,
+#: duration, ``Settings`` field name, ``ForecastDisposition`` value, record id or
+#: decision id. A member of ``destinations`` is a **class** of destination and never a
+#: destination (ADR-0264 §5). No row is minted in ADR-0087 §2c's scalar table —
+#: ``project`` already renders every ``Enum`` as its ``value`` and every ``bool`` as
+#: itself.
+#:
+#: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
+#: handshake is the mechanism and the refusal naming both versions is the intended
+#: user-visible outcome, so a peer at 43 and a peer at 44 refuse each other and say so.
+#:
+#: **The promoted method set does not move** and ADR-0177 §1's browser enumeration does
+#: not move: ADR-0260's L1 adds no method to the promoted ``AssistantEngine`` surface,
+#: removes none, and adds no gateway route.
+#:
+#: **No stored-record version moves and no migration is owed.** A ``TurnOutcome``
+#: crosses a frame and is stored by nothing; an ``EgressBinding`` is stored on a parked
+#: read, and ADR-0260 §11 mints **no park** for a forecast read, so every stored binding
+#: carries ``forecast_reach``'s restrictive ``False`` default and the parked-read store's
+#: ``schema_version`` stays at **3**. The plan store's stays where it is,
+#: ``PlanExport.schema_version`` stays where it is, and
+#: ``ConversationExport.schema_version`` stays at **2**. The captured episode is
+#: untouched — ADR-0260 mints no ``Notification``, no notification kind and no delivery.
+#: ``core.config.Settings`` gains nine fields, which cross no frame: ADR-0084's
+#: handshake carries no configuration.
+#:
+#: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member,
+#: no existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry
+#: is registered, and the error mapping is untouched — ADR-0260's L1 mints no error
+#: class and removes none.
+PROTOCOL_VERSION: Final[int] = 44
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

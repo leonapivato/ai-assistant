@@ -876,10 +876,21 @@ _INTEGER_FIELDS: Final = tuple(
 #: ADR-0140 §12 refuses an ``email_reader_interval`` with no source at load, so a
 #: case setting the interval alone would exercise that cross-field refusal rather
 #: than the per-field guard it means to.
+#: ``forecast_connection``, ``forecast_origin``, ``forecast_latitude`` and
+#: ``forecast_longitude`` join them for ADR-0260 §11's own cross-field refusal: the
+#: four are "one pair of pairs" and every half-set combination of them is refused at
+#: load, so a case setting one coordinate alone would be exercising *that* refusal
+#: rather than the per-field guard it means to. A case exercising one of the four
+#: overrides the companion and leaves the other three set, which is exactly the shape
+#: the calendar trio already has.
 _COMPANIONS: Final[dict[str, Any]] = {
     "calendar_reader_path": Path("/srv/calendars/personal.ics"),
     "calendar_upcoming_lead": timedelta(hours=2),
     "email_source_path": Path("/srv/mail/inbox.mbox"),
+    "forecast_connection": "forecast-account",
+    "forecast_origin": "https://forecast.example.invalid",
+    "forecast_latitude": 41.1579,
+    "forecast_longitude": -8.6291,
 }
 
 
@@ -1042,6 +1053,20 @@ def test_every_integer_setting_is_discovered() -> None:
         # keeps §11's precedence true in every configuration.
         "search_max_results",
         "search_max_result_chars",
+        # ADR-0260 §11's three forecast bounds, acknowledged here for the search
+        # bounds' reason one provider along and with the same ``bool`` argument on
+        # each. ``forecast_max_days=True`` mints one day where the operator asked for
+        # three, which is a deployment quietly getting a third of the horizon it
+        # configured — and §11 makes three the ceiling, the one upper end this tuple
+        # carries beside ``search_max_results``. ``forecast_max_day_chars=True`` is a
+        # bound of one character on a *quoted* rendering, whose two delimiters already
+        # cost two, so every day is dropped and every read yields ``NO_RESULT`` while
+        # the deployment looks configured. ``forecast_max_response_bytes=True`` is a
+        # one-octet response bound, so every response a provider can send is abandoned
+        # ``RESPONSE_TOO_LARGE`` after one octet.
+        "forecast_max_days",
+        "forecast_max_day_chars",
+        "forecast_max_response_bytes",
         # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
         # argument the caps above carry: `reconciler_max_conflicts=True` is a
         # bound of one, which asks the model about the best-ranked conflict alone
@@ -1215,11 +1240,43 @@ def _admitted_types(annotation: object) -> frozenset[object]:
     return frozenset(args) - {type(None)}
 
 
+def _is_nullable(annotation: object) -> bool:
+    """Whether ``annotation`` admits ``None`` beside its one real type.
+
+    :func:`_admitted_types` strips ``NoneType`` deliberately, so ``float`` and
+    ``float | None`` are indistinguishable there — which is right for the guards that
+    are about the *value*, and wrong for the one case that reads a field's default and
+    expects a number (ADR-0260 §11's coordinates default to absence).
+
+    Args:
+        annotation: The field's annotation.
+
+    Returns:
+        Whether ``None`` is one of the types it admits.
+    """
+    return type(None) in get_args(annotation)
+
+
 _REAL_FIELDS: Final = tuple(
     name
     for name, field in Settings.model_fields.items()
     if _admitted_types(field.annotation) == frozenset({float})
+    and not _is_nullable(field.annotation)
 )
+
+#: The real-valued settings that admit absence. Discovered separately from
+#: :data:`_REAL_FIELDS` for one case's sake — the environment one below reads a field's
+#: default and asserts it is a number — and folded back together for every other, which
+#: is what keeps #500's guard a property of the **type** rather than of a list.
+_OPTIONAL_REAL_FIELDS: Final = tuple(
+    name
+    for name, field in Settings.model_fields.items()
+    if _admitted_types(field.annotation) == frozenset({float}) and _is_nullable(field.annotation)
+)
+
+#: Every ``float``-typed setting, nullable or not. What the value guards parametrise
+#: over: a flag is not a measurement whether or not the field also admits absence.
+_EVERY_REAL_FIELD: Final = (*_REAL_FIELDS, *_OPTIONAL_REAL_FIELDS)
 
 _DURATION_FIELDS: Final = tuple(
     name
@@ -1261,6 +1318,22 @@ def test_every_real_setting_is_discovered() -> None:
         # seam into a deadline that never clears.
         "embedding_timeout_seconds",
     }
+
+
+def test_every_optional_real_setting_is_discovered() -> None:
+    """The same tripwire for the real-valued settings that admit absence.
+
+    ADR-0260 §11's two coordinates are the first of them, and they are nullable for the
+    reason the connection pair beside them is: a deployment that configured no forecast
+    provider has no place to read a forecast for, and §11 makes the four "one pair of
+    pairs" refused at load in every half-set combination. Their **domain** is closed all
+    the same — finite, and inside ±90 and ±180 — so they carry
+    ``_OptionalRealSetting`` and are subject to every value guard below, which is what
+    joining :data:`_EVERY_REAL_FIELD` buys. The ``bool`` guard is not decoration here:
+    ``forecast_latitude=True`` is a place one degree north of the equator, in the Gulf
+    of Guinea, loaded by a deployment that looks configured.
+    """
+    assert set(_OPTIONAL_REAL_FIELDS) == {"forecast_latitude", "forecast_longitude"}
 
 
 def test_every_duration_setting_is_discovered() -> None:
@@ -1444,7 +1517,7 @@ def test_every_duration_setting_is_discovered() -> None:
     }
 
 
-@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("name", _EVERY_REAL_FIELD)
 @pytest.mark.parametrize("value", [True, False])
 def test_every_real_setting_refuses_a_bool(name: str, value: bool) -> None:
     """``Settings(model_timeout_seconds=True)`` is a mistake, not a one-second deadline.
@@ -1483,7 +1556,7 @@ def test_every_duration_setting_refuses_a_bool(name: str, value: bool) -> None:
         _settings_with(name, value)
 
 
-@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("name", _EVERY_REAL_FIELD)
 @pytest.mark.parametrize("value", _CONVERTIBLE_NON_NUMBERS)
 def test_every_real_setting_refuses_a_convertible_non_number(name: str, value: object) -> None:
     """Only a float, an exact int, or a str is a real-valued setting.
@@ -1507,7 +1580,7 @@ def test_every_duration_setting_refuses_a_convertible_non_duration(
         _settings_with(name, value)
 
 
-@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("name", _EVERY_REAL_FIELD)
 @pytest.mark.parametrize(("value", "expected"), [(2.5, 2.5), (2, 2.0), ("2.5", 2.5)])
 def test_every_real_setting_still_accepts_the_forms_it_is_written_in(
     name: str, value: object, expected: float
@@ -1568,6 +1641,24 @@ def test_every_real_setting_still_parses_from_the_environment(
     assert type(default) is float
     monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(default))
     assert getattr(load_settings(), name) == default
+
+
+@pytest.mark.parametrize("name", _OPTIONAL_REAL_FIELDS)
+def test_every_optional_real_setting_still_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The same for the nullable ones, spelled as an operator spells one.
+
+    Not the field's own default, which is ``None`` and has no environment spelling
+    other than the absent variable: one literal every one of them accepts proves the
+    string path just as well. The companions go in beside it because ADR-0260 §11
+    refuses a half-set configuration at load, so a variable set alone would be
+    exercising that refusal rather than the string path.
+    """
+    for companion, value in _COMPANIONS.items():
+        monkeypatch.setenv(f"ASSISTANT_{companion.upper()}", str(value))
+    monkeypatch.setenv(f"ASSISTANT_{name.upper()}", "2.5")
+    assert getattr(load_settings(), name) == 2.5
 
 
 @pytest.mark.parametrize("name", _DURATION_FIELDS)
@@ -1669,7 +1760,7 @@ def test_every_duration_setting_refuses_a_timedelta_that_lies_about_its_length(
         _settings_with(name, grace)
 
 
-@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("name", _EVERY_REAL_FIELD)
 def test_every_real_setting_accepts_a_float_subclass_and_stores_a_plain_float(
     name: str,
 ) -> None:

@@ -116,6 +116,7 @@ from ai_assistant.readers import CalendarReader, EmailReader, LocalFileFetcher
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import (
     build_default_registry,
+    build_forecast_integration,
     build_send_email_integration,
     build_web_search_integration,
     egress_registrations,
@@ -1383,9 +1384,78 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             )
         )
 
+        # --- the configured forecast integration (ADR-0260 §6, §12) ------
+        #
+        # **Registered at the egress seam against the configured connection, and in
+        # no ``ToolRegistry``** (ADR-0260 §1), which is the hinge that design rests
+        # on: a registry entry would put its capability in front of the planner, and
+        # the planner naming it is the outcome the whole design exists to make
+        # unreachable. `build_default_registry` takes no forecast argument, so that
+        # absence is a property of the signature rather than of a line somebody
+        # remembered not to write.
+        #
+        # **Constructed only where a provider is configured** (§12), so a deployment
+        # that named none of `forecast_connection`, `forecast_origin`,
+        # `forecast_latitude` and `forecast_longitude` holds no forecaster at all —
+        # and `Settings` refuses every half-set combination of the four, so this is
+        # whole or absent. `records`, `secrets` and the transport are the objects this
+        # root already holds, for the search integration's reasons: a second store
+        # handle would let a provisioning act commit a revision one of them could not
+        # yet see, and constructing the transport inside the branch is what keeps "a
+        # subsystem handed no capability has no route to the world" true of the whole
+        # tree rather than of one argument list (ADR-0191 §1, §3).
+        #
+        # **No ledger and no gate are passed, and ADR-0260 §6 is why**: that section
+        # enumerates what `Forecaster.read` performs and states that this seam
+        # "inherits nothing written about `WEB_SEARCH`". The configured cost pair
+        # reaches the **declaration**, which is what ADR-0236 §4's unknown-cost floor
+        # reads at the ruling (§11).
+        #
+        # **No ``close`` is registered for it, and that is ADR-0042 §2 read rather
+        # than skipped** — the searcher's reasoning one integration along. That
+        # section's obligation is over "the resources it has opened"; a forecaster
+        # opens none that outlives a call, ADR-0191 §3 makes the exchange open a
+        # channel per call and close it in a `finally`, and the connection store and
+        # the keyring it reads through are objects this root already closes.
+        # ADR-0260 §4's `close` clause is conditional on "a concrete forecaster
+        # **holding an opened resource**", and this one holds none; a no-op `close`
+        # registered here would be a lifecycle nobody has.
+        #
+        # **The one caller will be the read servicer** (ADR-0260 §7, §12). ADR-0260
+        # §12 gives L1 the forecaster and L3 the servicing that receives it, so what
+        # this root does today is build it and put its registration in the seam's
+        # table; wiring it into `service_read_request` is that lane's, and no other
+        # subsystem holds the reference.
+        forecast = (
+            None
+            if settings.forecast_connection is None
+            or settings.forecast_origin is None
+            or settings.forecast_latitude is None
+            or settings.forecast_longitude is None
+            else build_forecast_integration(
+                connection=settings.forecast_connection,
+                origin=settings.forecast_origin,
+                latitude=settings.forecast_latitude,
+                longitude=settings.forecast_longitude,
+                records=connections,
+                secrets=integration_secrets,
+                transport=StreamOutboundTransport() if transport is None else transport,
+                max_days=settings.forecast_max_days,
+                max_day_chars=settings.forecast_max_day_chars,
+                max_response_bytes=settings.forecast_max_response_bytes,
+                # **Read and passed through unchanged, which is the whole of what this
+                # root does with them** (ADR-0236 §1, §7; ADR-0260 §11). Passing a
+                # value is not interpreting it: no default is applied, no arithmetic is
+                # performed, no `ToolCost` is constructed here, and whether the pair is
+                # whole was decided at `Settings` load.
+                cost_per_call=settings.forecast_cost_per_call,
+                cost_currency=settings.forecast_cost_currency,
+            )
+        )
+
         binder = EgressBindingSeam(
             definitions=tools,
-            registrations=egress_registrations(egress, search),
+            registrations=egress_registrations(egress, search, forecast),
             records=connections,
         )
         # **The canonical destination set a search of this deployment would bind to**
