@@ -1,7 +1,11 @@
 # 267. A quote is a record the goal holds in order, read from the output its declaration names,
 and no local check proves it still true
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0262 (one scope, in §10's first entry: the clause
+  naming *"A10's verification of the charge afterwards, which is a finding rather than a
+  prevention"*, in the application to which decision performs that verification alone — it is the
+  decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no
+  operand for the comparison; the note below states it in full)
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
@@ -68,6 +72,26 @@ and no local check proves it still true
   bind entire; **§2's elision is relied on and is the shape §2 of this decision reuses**; and
   §§3-17 stand entire.
 - Date: 2026-09-15
+- **Partially superseded: 2026-09-15 by ADR-0262 — §10's first entry, in the clause naming *"A10's
+  verification of the charge afterwards, which is a finding rather than a prevention"* and in the
+  application of that clause to *which decision performs that verification* alone. Nothing else in
+  this ADR.** That clause names one of the two safeguards standing today against a declaration that
+  quotes less than the whole charge of the act it is quoted for. **A10 supplies no such
+  safeguard**: the comparison the owner's ruling asks for is against the quote the dispatch was
+  proved against, that quote is recorded nowhere — §7 makes `quoted` the **proposal's** read, which
+  a refresh may correctly leave behind, and §4's mint has the acting step append its own reading —
+  and holding the charge against the user's ceiling instead passes a charge that exceeds the quote.
+  **It is therefore fired by the decision that pins that quote to that dispatch**, issue
+  [#2409](https://github.com/leonapivato/ai-assistant/issues/2409); until that lands a reader
+  holding only §10 counts a safeguard that is not there, and ADR-0262 §2 keeps every `MONEY`
+  criterion **unestablished** rather than compare a charge against an operand it does not have.
+  **The residual itself is not weakened**: a charge confirmed afterwards is still a finding rather
+  than a prevention, this entry's other two firing conditions stand — the decision giving a
+  declaration a machine-checkable statement of totality, and the one that rules what a verification
+  finding does — and the optional `MONEY` argument declaration beside it is untouched. **Every
+  other clause of this ADR binds entire**, §1's obligation and its no-reader clauses, §3's
+  declaration, §4's mint and §7's *"`quoted` is provenance"* conspicuously so: ADR-0262 reads no
+  field of any of them.
 
 ## Context
 

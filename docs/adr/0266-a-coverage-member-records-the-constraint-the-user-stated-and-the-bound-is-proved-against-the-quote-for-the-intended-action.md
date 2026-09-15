@@ -65,7 +65,11 @@ the quote for the intended action
   65 losing their no-question limb for a member §4 mints while their whole structure stands for an
   act §10's three ratified resolutions mint. §9 also records the arms the sweep cleared with their
   ground. **Every other clause of every section those twelve scopes touch binds entire**, §9 naming
-  them scope by scope.
+  them scope by scope. **Partially superseded by ADR-0262** (one scope, in §10's *"What the
+  verification phase does with a quote, and coverage's other conditions"* entry: its *"Fired by
+  A10"* clause, in the application to the charge confirmation and the quote/charge mismatch finding
+  alone, both of which that decision reassigns to the one that pins a dispatch's quote to that
+  dispatch, issue #2409 — the note below states it in full).
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope already recorded there reaching one further field**:
   the `ToolDefinition` model declaration and the required-field clause in the application to
@@ -77,6 +81,26 @@ the quote for the intended action
   that route nowhere. **The exception is this one further field on this one argument**, and no
   lane reads the two records together as licence to default a third safety field.
 - Date: 2026-09-15
+- **Partially superseded: 2026-09-15 by ADR-0262 — §10's *"What the verification phase does with a
+  quote, and coverage's other conditions"* entry, in its *"Fired by A10"* clause and in the
+  application of that clause to the **charge confirmation and the quote/charge mismatch finding**
+  alone. Nothing else in this ADR.** The owner's ruling of 2026-09-14 makes the actual charge
+  confirmed after the act and a mismatch *"a reported finding"*, and this entry fires both on A10.
+  **A10 has no operand for either**: the quote a dispatch was proved against is recorded nowhere —
+  §13 of ADR-0254 rules there is no cached coverage verdict, §7 of ADR-0267 makes `quoted` the
+  **proposal's** read, and a goal's `quotes` tuple carries the reading the acting step itself
+  appended — while comparing the charge against the user's own ceiling instead passes a charge that
+  exceeds the quote while staying under it, which is the mismatch the ruling calls a finding. **So
+  both are fired instead by the decision that pins that quote to that dispatch**, issue
+  [#2409](https://github.com/leonapivato/ai-assistant/issues/2409), sequenced before M33's
+  walkthrough; until it lands, ADR-0262 §2 makes every `MONEY` criterion **unestablished** and its
+  §7 records that ADR-0255 §13's gate is not met for a capability whose acts charge. A reader
+  holding only §10 waits on A10 for a comparison A10 cannot make. **Every other clause of §10 binds
+  entire** — *coverage's other conditions* stay fired by the decisions those clauses already name,
+  `AttemptPhase.VERIFY` stays A10's by ADR-0255 §17's assignment, and this ADR's own refusals, that
+  no clause here verifies anything, compares a charge or writes a finding, are untouched — **and so
+  does every other clause of this ADR**, §1's mint, §3's `kind` and §7's proof of the bound
+  **before** the act conspicuously so: that proof is what binds spending and ADR-0262 relies on it.
 
 ## Context
 

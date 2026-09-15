@@ -33,10 +33,34 @@
   structural-typing argument binds entire and is what keeps the widening narrow. **Every other
   clause of ADR-0254 binds entire**, §7's ten-condition refusal and §13's no-cached-verdict rule
   conspicuously so (§10).
+- **Partially supersedes** [ADR-0266](0266-a-coverage-member-records-the-constraint-the-user-stated-and-the-bound-is-proved-against-the-quote-for-the-intended-action.md)
+  — **one scope, in §10's *"What the verification phase does with a quote, and coverage's other
+  conditions"* entry: its *"Fired by A10"* clause, in the application to the **charge confirmation
+  and the quote/charge mismatch finding** alone.** This decision has no operand for either — the
+  quote a dispatch was proved against is recorded nowhere (§9) — so both are fired instead by the
+  decision that pins that quote to that dispatch
+  ([#2409](https://github.com/leonapivato/ai-assistant/issues/2409)), and a reader holding only §10
+  waits on A10 for a comparison A10 cannot make. **Nothing else of that entry or that ADR moves**:
+  *coverage's other conditions* stay fired by the decisions those clauses already name,
+  `AttemptPhase.VERIFY` stays A10's by ADR-0255 §17's assignment, its three refusals bind entire,
+  and §7's proof of the bound **before** the act — the proof that actually binds spending — is
+  relied on here and weakened in no part.
+- **Partially supersedes** [ADR-0267](0267-a-quote-is-a-record-the-goal-holds-in-order-read-from-the-output-its-declaration-names.md)
+  — **one scope, in §10's first entry: the clause naming *"A10's verification of the charge
+  afterwards, which is a finding rather than a prevention"*, in the application to *which decision
+  performs that verification* alone.** That clause offers a reader one of the two safeguards
+  standing today against a declaration naming less than the whole charge, and this decision
+  performs no such verification, so a reader holding only §10 counts a safeguard that is not there;
+  it is #2409's. **The finding itself is untouched** — a charge confirmed afterwards is still a
+  finding rather than a prevention, and the decision that rules what such a finding does still
+  fires it — and **every other clause of ADR-0267 binds entire**, §1's obligation, §3's
+  declaration, §4's mint and §7's *"`quoted` is provenance"* conspicuously so, this decision
+  reading no field of any of them.
 - **No other ADR is superseded in whole or in part** — **ADR-0249 is not, in any scope**, this
   decision adding no field to `GoalElement`, to `ProposedElement` or to anything a planner returns
-  (§2); and **ADR-0265, ADR-0266 and ADR-0267 are not**, every record §2 reads being one each of
-  those decisions already writes and enumerates. §10 states the test for each ADR this decision
+  (§2); **ADR-0265 is not**, every record §2 reads being one that decision already writes and
+  enumerates; and **neither ADR-0266 nor ADR-0267 is touched in any scope but the two residual
+  bookings above** — no clause of either about a member, a bound, a quote or a proof moves. §10 states the test for each ADR this decision
   reaches and shows the working: seven documents **book this subject here by name** and a
   booking **discharged** is not a clause made false; the two Protocol strengthenings are the move
   ADR-0261 §12 already ruled owes ADR-0250 §9 no record; and the one `TurnOutcome` widening is the
@@ -395,7 +419,8 @@ is the allow ADR-0249 §7 forbids (§2a).
 > owner's ruling of 2026-09-14 calls a finding. **So no criterion about an amount is ever `met`
 > here and no goal resting on one reaches `ACHIEVED`**, which is fail-closed, is why §7 says the
 > gate's verification guarantee does **not** cover a capability whose acts make a charge, and is
-> booked in §9 with what fires it. **No lane reads this as licence to compare a charge against a
+> booked in §9 — where it is **reassigned** to the decision that lands the operand, by the two
+> scopes the header states. **No lane reads this as licence to compare a charge against a
 > ceiling, a quote or anything else.**
 >
 > **No fourth result exists, no result is a degree, and no lane reads *unestablished* as either of
@@ -1071,18 +1096,30 @@ booking"*.
   ADR-0266 §7 proves it and never by a declaration here. **No lane adds a `VerificationKind`
   member, a numeric reading or a currency comparison to `postconditions` on this decision's
   authority**. Fired by a decision that states the wider reading with its own totality argument.
-- **Confirming the *actual charge* after the act, which the owner ruled on 2026-09-14 and
-  ADR-0267 §10 books here by name.** **Taken and not discharged, and the reason is an operand
-  rather than a rule.** The comparison the ruling asks for is against **the quote the dispatch was
-  proved against**, and that quote is recorded **nowhere**: ADR-0254 §13 rules there is *"no cached
-  coverage verdict anywhere"*, ADR-0267 §7's `Authorization.quoted` is the **proposal's** read,
-  which a refresh may correctly leave behind, and the goal's `quotes` tuple carries the reading the
-  **acting step itself appended** (ADR-0267 §4). **Comparing against the user's own ceiling instead
-  is not that comparison either**: it passes a charge that exceeds the quote while staying under
-  the ceiling, which is the mismatch the ruling calls a finding. **So no lane compares a charge
-  against any of the three, and none invents a fourth.** What binds a charge today is the proof
-  ADR-0266 §7 takes **before** the act, which is unweakened. Fired by the decision that pins the
-  quote a dispatch was proved against to that dispatch — #2401's seam question (ADR-0267 §10).
+- **Confirming the *actual charge* after the act, which the owner ruled on 2026-09-14 and which
+  ADR-0266 §10 and ADR-0267 §10 each booked here by name.** **Not decided, and — unlike every
+  other entry of this section — *reassigned*: the two scopes the header states move it off this
+  decision and onto the one that lands its operand** ([#2409](https://github.com/leonapivato/ai-assistant/issues/2409)),
+  because the reason is an operand rather than a rule and no round of this document can supply one.
+  The comparison the ruling asks for is against **the quote the dispatch was proved against**, and
+  that quote is recorded **nowhere**: ADR-0254 §13 rules there is *"no cached coverage verdict
+  anywhere"*, ADR-0267 §7's `Authorization.quoted` is the **proposal's** read, which a refresh may
+  correctly leave behind, and the goal's `quotes` tuple carries the reading the **acting step
+  itself appended** (ADR-0267 §4). **Comparing against the user's own ceiling instead is not that
+  comparison either**: it passes a charge that exceeds the quote while staying under the ceiling,
+  which is the mismatch the ruling calls a finding. **So no lane compares a charge against any of
+  the three, and none invents a fourth**, and §2 makes a `MONEY` criterion `unestablished` outright
+  rather than comparing the one operand it has. What binds a charge today is the proof ADR-0266 §7
+  takes **before** the act, which is unweakened, and #2409 is sequenced **before** M33's campsite
+  walkthrough for that reason. **And the shape a stronger confirmation takes is stated here so that
+  the reassignment does not smuggle one into this phase** (the owner's direction of 2026-09-15,
+  recorded on [#2255](https://github.com/leonapivato/ai-assistant/issues/2255)): evidence stronger
+  than the act's own answer — a receipt in email, a line on a statement — **may take hours to
+  arrive, so reading it is a *later act***, in its own turn or as a background check, and **the
+  end-of-turn phase reports what the record establishes *now* and names what is unconfirmed**,
+  which is `UNCERTAIN` and its statement (§4, §6). **That is the shape #2409 and any later
+  verification decision take, and no lane reads it as licence for this phase to wait, poll or
+  schedule** — the sequencing ruling above forbids all three.
 - **A criterion stating a *count*.** **Not decided, and it is `unestablished` by construction
   rather than by a rule here**: ADR-0254 §2 closes the coverage vocabulary at `MONEY`, `PERIOD` and
   `TERMS` and rules that *"a **count** … takes a fixed value or no member at all"*, so *"two
@@ -1154,8 +1191,8 @@ booking"*.
 stated in those words**: *"Would a reader holding only the earlier ADR now act differently, or read
 one of its clauses more widely than it now holds?"*
 
-**Exactly two documents owe a record — ADR-0016 and ADR-0254, one scope each** — and the header
-states both in full. **ADR-0249 owes none, and that is the largest single change between this decision and its
+**Exactly four documents owe a record — ADR-0016, ADR-0254, ADR-0266 and ADR-0267, one scope
+each** — and the header states all four in full. **ADR-0249 owes none, and that is the largest single change between this decision and its
 earlier drafts**: those added a `check` field to `GoalElement` and to `ProposedElement`, and §2 now
 adds neither, so §1's field enumeration, §7's `ProposedElement` shapes and §7's four-shape
 validator each stay true word for word and a reader holding only ADR-0249 builds exactly what it
@@ -1265,19 +1302,36 @@ them, each decided by the same test.
   restriction to the policy and the composition root, and the structural-typing argument that makes
   the division sound each bind entire — a verification phase can name neither `record` nor
   `live_for`, for exactly the reason that argument gives.
-- **ADR-0266 §1, §3, §7 and §10** — *no*. §1's rule that a `criteria` element mints no coverage
+- **ADR-0266 §10** — *yes*, in one scope, and the header states it: **its *"What the verification
+  phase does with a quote, and coverage's other conditions"* entry, in the *"Fired by A10"* clause
+  and in its application to the charge confirmation and the mismatch finding alone**. A reader
+  holding only §10 waits on this decision for a comparison this decision cannot make — the operand
+  does not exist (§9) — and so reads that entry more widely than it now holds. **Nothing else of
+  §10 moves**: *coverage's other conditions* stay fired by the decisions those clauses already
+  name, `AttemptPhase.VERIFY` stays A10's by ADR-0255 §17's assignment, and the entry's own
+  refusals — no clause there verifies anything, compares a charge or writes a finding — bind
+  entire.
+- **ADR-0266 §1, §3 and §7** — *no*. §1's rule that a `criteria` element mints no coverage
   member is **relied on** and keeps the two decisions' subjects disjoint — this decision mints no
   coverage member anywhere and writes no row; §3's `kind` and its one-member-per-kind refusal are
-  **read** and gain nothing, this decision adding no `BoundKind` member; §7's proof of a bound
-  against the quote is **relied on** and repeated by nothing; §10's entry booking the verification
-  phase's use of a quote is **fired**, its answer being that the operand does not exist (§9).
-- **ADR-0267, entire** — *no*, and this is the entry rounds 8-10 of this document would each have
-  had go a different way. **No clause of this decision reads an `ActionQuote`, a `quoted`, a
+  **read** and gain nothing, this decision adding no `BoundKind` member; and §7's proof of a bound
+  against the quote is **relied on** and repeated by nothing — it is what binds a charge today, and
+  the scope above weakens no part of it.
+- **ADR-0267 §10** — *yes*, in one scope, and the header states it: **its first entry, in the
+  clause naming *"A10's verification of the charge afterwards, which is a finding rather than a
+  prevention"*, and in its application to *which decision performs that verification* alone**. That
+  clause offers a reader one of the two safeguards standing today against a declaration naming less
+  than the whole charge, and this decision performs **no** such verification (§9) — so a reader
+  holding only §10 counts a safeguard that is not there. **The finding is not weakened and neither
+  is the residual**: a charge confirmed afterwards is still a finding rather than a prevention, the
+  decision that rules what such a finding does still fires it, and the optional `MONEY` argument
+  declaration beside it is untouched.
+- **ADR-0267 otherwise, entire** — *no*, and this is the entry rounds 8-10 of this document would
+  each have had go a different way. **No clause of this decision reads an `ActionQuote`, a `quoted`, a
   `quoted_output` or any field of any of them**, so §1's *"`plan`, `read_from` and `read_at` are
   read by no clause"*, §3's declaration, §4's mint and §7's *"`quoted` is provenance"* and
-  no-reader clauses each stay true **word for word**. §10's *"A10's verification of the charge
-  afterwards"* is **fired and answered in §9** — the operand does not exist — and every other
-  residual that section books is left standing by name.
+  no-reader clauses each stay true **word for word**, and every other residual §10 books is left
+  standing by name.
 - **ADR-0021 §1 and ADR-0192 §2** — *no*. §2 **relies on** ADR-0021 §1's embedded definition rather
   than widening it — *"There is no name left to rebind"* is what makes a pinned comparison possible
   — and adds no field to `ActionRequest`, `PermissionDecision` or `PermissionRuling`. ADR-0192 §2's
@@ -1535,9 +1589,12 @@ against a simulated booking service.
 
 ### 13. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
-**A new decision that partially supersedes two ADRs** (§10), in one narrow scope each — a field
-enumeration, and a sentence naming a Protocol's holder — neither of them a rule, and a **stacked addition** against every other ADR it reaches — nine of
-which it **reads** without widening a clause of any. It is
+**A new decision that partially supersedes four ADRs** (§10), in one narrow scope each — a field
+enumeration, a sentence naming a Protocol's holder, and two residual bookings that named this
+decision as what fires them — **none of them a rule**, the last two reassigning a question to the
+decision that lands its operand rather than answering it differently; and a **stacked addition**
+against every other ADR it reaches, each of which it **reads** without widening a clause of any.
+It is
 **marked** under ADR-0089 §2 as ADR-0257 §1 admits the label, so the marked clauses are the whole
 of what it obligates.
 
