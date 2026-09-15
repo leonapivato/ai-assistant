@@ -14800,9 +14800,13 @@ class BoundKind(StrEnum):
     MONEY = "money"
     """An amount denominated in a currency the record names (ADR-0254 §2).
 
-    Carries :attr:`ValueBound.currency`, :attr:`ValueBound.currency_argument` and
-    :attr:`ValueBound.maximum`, and optionally :attr:`ValueBound.minimum`. The
-    owner's *"additional costs"*."""
+    Carries :attr:`ValueBound.currency` and :attr:`ValueBound.maximum`, optionally
+    :attr:`ValueBound.minimum`, and :attr:`ValueBound.maximum_exclusive` where the
+    user stated the ceiling strictly. **Which argument carries the currency is not
+    the bound's** (ADR-0266 §§3, 7): the act records what the user stated and never
+    which slot it fills, so the key is
+    :attr:`BoundedArgument.currency_argument` on the *declaration*, read at the
+    comparison. The owner's *"additional costs"*."""
 
     PERIOD = "period"
     """A half-open interval of instants, ``[starts_at, ends_at)`` (ADR-0254 §2).
@@ -14985,7 +14989,7 @@ class ToolDefinition(BaseModel):
             "The keys of ``parameters`` the **system** fills — an idempotency key, a "
             "client reference, a locale — possibly empty and duplicate-free, each a "
             "key name at depth **one** exactly as "
-            ":attr:`~ai_assistant.core.types.CoverageMember.argument` is (ADR-0254 §3). "
+            ":attr:`~ai_assistant.core.types.BoundedArgument.argument` is (ADR-0266 §7). "
             "**Every key it does not name is user-facing**, and only a user-facing "
             "argument needs coverage: §3's condition 6 and §6's argument-authority bar "
             "each read this field, so a system-supplied key neither needs a coverage "
@@ -19105,6 +19109,52 @@ class RecipientGrantOutcome(BaseModel):
 _HOST_LOCAL_ZONE_KEYS: Final[frozenset[str]] = frozenset({"localtime", "posixrules"})
 
 
+def _exactly_a_bool(value: object) -> object:
+    """Refuse anything that is not already a ``bool`` (ADR-0266 §3).
+
+    Pydantic's lax mode coerces ``"true"``, ``"false"``, ``0`` and ``1`` into a
+    ``bool``, and a flag ADR-0266 §3 states as *"a ``bool`` defaulting to
+    ``False``"* is not a field where that is harmless.
+    :attr:`ValueBound.maximum_exclusive` is **ordered for ADR-0254 §5's narrowing
+    test**, so a malformed value does not fail loudly — it silently becomes a
+    *different authority*: ``"false"`` arrives as an inclusive ceiling and ``1`` as
+    an exclusive one, either of which §5 then compares as though the user had said
+    it. That comparison is over two **recorded** values, and a value nothing
+    recorded is not one of them.
+
+    **Stated here rather than at the page**, which is where it was: the browser's
+    ``readBound`` already rejects exactly these shapes on the ground that they are
+    states *"``ValueBound`` refuses"* — and until now it did not, so the adapter
+    was enforcing a contract ``core`` did not hold. Golden rule 3's direction is
+    that the invariant lives on the type. Adversarial review, round 10, ``blocker``.
+
+    Args:
+        value: The value as it arrived.
+
+    Returns:
+        The value unchanged, where it is exactly a ``bool``.
+
+    Raises:
+        ValueError: If it is anything else, an ``int`` of either value included.
+    """
+    if type(value) is not bool:
+        msg = f"must be a boolean, not {type(value).__name__} (ADR-0266 §3)"
+        raise ValueError(msg)
+    return value
+
+
+type StrictBool = Annotated[bool, BeforeValidator(_exactly_a_bool)]
+"""A ``bool`` that is **not** reached by coercion from a string or an integer.
+
+Used where the flag is part of what a record *means* rather than a convenience —
+see :func:`_exactly_a_bool` for why :attr:`ValueBound.maximum_exclusive` is such a
+field. It is deliberately **not** applied to every ``bool`` in this module: a flag
+no comparison orders loses nothing to lax parsing, and widening it to fields no
+ratified decision has asked about would be this lane changing a surface outside
+ADR-0266 §11's list.
+"""
+
+
 def _iana_zone_name(value: str) -> str:
     """Require a name the tz database knows, without normalising it.
 
@@ -19366,7 +19416,7 @@ class ValueBound(BaseModel):
             "Whether the endpoint itself is permitted is :attr:`maximum_exclusive`'s."
         ),
     )
-    maximum_exclusive: bool = Field(
+    maximum_exclusive: StrictBool = Field(
         default=False,
         description=(
             "``MONEY`` only: whether :attr:`maximum` is **excluded** from what this "
@@ -19378,7 +19428,10 @@ class ValueBound(BaseModel):
             "for §5's narrowing test**: at an equal ``maximum``, setting it narrows "
             "and clearing it **widens**, so a path-(ii) correction that clears it is a "
             "widening §5 refuses — a lane comparing ``maximum`` alone would read that "
-            "as no change and establish a wider authority with no confirmation."
+            "as no change and establish a wider authority with no confirmation. "
+            "**Exactly a ``bool``, never coerced** (:func:`_exactly_a_bool`): a "
+            '``"false"`` that arrived as an inclusive ceiling would be a different '
+            "authority rather than a malformed one."
         ),
     )
     minimum: Decimal | None = Field(

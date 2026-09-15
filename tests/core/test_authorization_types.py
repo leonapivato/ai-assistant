@@ -367,6 +367,42 @@ def test_a_money_bound_defaults_to_an_inclusive_ceiling_and_states_a_strict_one(
     assert money_bound("100", maximum_exclusive=True).maximum_exclusive is True
 
 
+@pytest.mark.parametrize("coercible", ["true", "false", "yes", "no", "on", "off", 0, 1])
+def test_a_ceiling_is_not_made_strict_or_inclusive_by_a_value_pydantic_would_coerce(
+    coercible: object,
+) -> None:
+    """ADR-0266 §3 states the flag as *"a ``bool`` defaulting to ``False``"*, and
+    lax coercion would make each of these a **different authority** rather than a
+    malformed one: ``"false"`` an inclusive ceiling, ``1`` an exclusive one.
+
+    **The one field in this model where that is not harmless**, because ADR-0254 §5
+    *orders* it: a correction clearing the flag at an equal ``maximum`` is a
+    widening §5 refuses, so a value nobody recorded decides whether the user is
+    asked. The browser's ``readBound`` already rejected exactly these shapes on the
+    ground that they are states ``ValueBound`` refuses — and it did not, so the
+    adapter was holding an invariant the type did not. Adversarial review, round 10,
+    ``blocker``.
+    """
+    with pytest.raises(ValidationError, match="must be a boolean"):
+        ValueBound.model_validate(
+            {"kind": BoundKind.MONEY, "maximum": "100", "currency": "GBP"}
+            | {"maximum_exclusive": coercible}
+        )
+
+
+@pytest.mark.parametrize("stated", [True, False])
+def test_a_ceiling_states_either_boolean_and_both_survive_a_round_trip(stated: bool) -> None:
+    """The control beside the refusals above: strictness rejects **only** what is
+    not a ``bool``, and a bound of either flag decodes from its own JSON unchanged.
+
+    Both directions matter because the flag crosses the wire on every ``MONEY``
+    bound, so a refusal reaching a conforming payload would take the whole record
+    with it.
+    """
+    bound = money_bound("100", maximum_exclusive=stated)
+    assert ValueBound.model_validate(bound.model_dump(mode="json")).maximum_exclusive is stated
+
+
 def test_a_money_bound_takes_an_optional_minimum_and_refuses_one_above_its_maximum() -> None:
     """§2: ``minimum`` is *"less than or equal to ``maximum``"*."""
     assert money_bound("60", minimum="10").minimum == Decimal("10")
