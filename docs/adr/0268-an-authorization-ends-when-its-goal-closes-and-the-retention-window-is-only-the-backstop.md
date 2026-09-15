@@ -938,14 +938,17 @@ and the ratification flip is one line and no other byte (ADR-0165).
 
 **What becomes possible.** An authorisation can be said to be *for a request*, which is the
 sentence the owner's ruling is written in and which the corpus could not previously express: the
-row comes into being on one of ADR-0254 §1's write paths — a proposal the user answers on path
-(i), which is where the quote sits, or an opening act on path (iii), which is `ESTABLISHED` at
-once and carries no `quoted` (ADR-0267) and no question — covers every call of that request, and
-is ended by the act that finishes it. A user opening the listing of a finished
-booking sees no authority, because they hold none — on a database this store closed the goal in,
-the three residuals below being where that sentence stops. And the campsite walkthrough M33 runs
-becomes checkable end to end — book, verify, close, and the ceiling is gone — rather than ending
-with a standing authority nobody intended and nothing retires.
+row comes into being on **any** of ADR-0254 §1's three write paths — a proposal the user answers
+on path (i), which is where the quote sits; a correction on path (ii), `ESTABLISHED` at once,
+superseding its predecessor and transcribing that row's `expires_at` rather than asking again; or
+an opening act on path (iii), likewise `ESTABLISHED` at once and carrying no `quoted` (ADR-0267)
+and no question — covers every call of that request, and **is ended on all three alike by the act
+that finishes it**, the ending being stated over the goal's rows and never over how one was
+written. A user opening the listing of a finished booking sees no authority, because they hold
+none — on a database this store closed the goal in, the three residuals below being where that
+sentence stops. And the campsite walkthrough M33 runs becomes checkable end to end — book,
+verify, close, and the ceiling is gone — rather than ending with a standing authority nobody
+intended and nothing retires.
 
 **What becomes harder, and each is a question asked rather than a call authorised.** On the
 path this decision governs — a goal this store closed, outside the three residuals above — every
