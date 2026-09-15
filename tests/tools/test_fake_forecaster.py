@@ -340,6 +340,24 @@ async def test_the_fake_mints_at_most_its_bound_and_takes_them_from_the_front() 
     assert [record.content for record in outcome.records] == ["d0", "d1"]
 
 
+async def test_the_fake_caps_what_survived_and_not_what_was_scripted() -> None:
+    """ADR-0260 §5: the cap is taken **over the surviving days**, and from the front.
+
+    "Where more days survive the drop rule below than ``forecast_max_days`` admits, the
+    records minted are the *first* that many." An implementation that sliced first would
+    let an oversized early day consume the only slot and answer ``NO_RESULT`` about a
+    response that described a usable later one — a read the provider answered reported
+    as one that yielded nothing.
+    """
+    oversized = forecast_day(2026, 9, 5, content="x" * (_SMALL_CONTENT_BOUND + 1))
+    usable = forecast_day(2026, 9, 6, content="fine")
+    forecaster, call = await _prepared(days=(oversized, usable), max_days=1)
+
+    outcome = await forecaster.read(call, timeout=A_BOUND)
+
+    assert [record.content for record in outcome.records] == ["fine"]
+
+
 def test_the_default_answer_is_three_dated_days_each_declaring_its_own_offset() -> None:
     """ADR-0260 §12: "It answers with **dated days, each declaring the UTC offset it is
     in**".

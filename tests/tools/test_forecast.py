@@ -792,6 +792,30 @@ async def test_the_cap_counts_what_survived_and_not_what_the_provider_sent() -> 
     assert _days(outcome) == ["2026-09-05", "2026-09-06", "2026-09-07"]
 
 
+async def test_the_cap_counts_what_the_content_bound_left_too() -> None:
+    """§5's cap is over **every** drop rule's survivors, not over the completeness one's.
+
+    The sibling of the case above on the other axis: an oversized first day and a cap of
+    one. An implementation that capped the rows before measuring their transcriptions
+    would spend the only slot on the day it was about to drop and answer ``NO_RESULT``
+    about a response that described a usable later one.
+    """
+    subject = await built(
+        channels=[
+            answering(
+                day(date="2026-09-05", conditions="x" * 4096),
+                day(date="2026-09-06"),
+            )
+        ],
+        max_days=1,
+        max_day_chars=64,
+    )
+
+    outcome = await _read(subject)
+
+    assert _days(outcome) == ["2026-09-06"]
+
+
 def test_the_transcription_form_is_pinned() -> None:
     """§5: "What this clause fixes is that the form is *fixed somewhere a test asserts*".
 
