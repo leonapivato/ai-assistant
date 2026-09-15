@@ -12984,7 +12984,7 @@ def _render_confirmation_authorization(projection: AuthorizationProjection | Non
     )
 
 
-def _render_authorization(view: AuthorizationView) -> None:
+def _render_authorization(view: AuthorizationView, *, with_goal: bool) -> None:
     """One standing record, as ADR-0254 §11's listing renders it.
 
     **The goal by its statement and never by its id** (§11), the declaration by its
@@ -13004,16 +13004,32 @@ def _render_authorization(view: AuthorizationView) -> None:
     resting on a recipient authority that has since lapsed still reads as standing,
     because that is what it is.
 
+    **The goal is named once and not once per row**, which is what driving the page
+    settled: §11's listing is *per goal*, so every row of one listing carries the same
+    statement and repeating it turns the fact that distinguishes the rows — the
+    declaration — into the third line of each. The listing names the goal in its own
+    heading and the rows lead with the declaration; the **announcement** passes
+    ``with_goal`` true, because it has no heading naming the goal and a reader meeting
+    it mid-reply needs to know which piece of work it is about.
+
     Args:
         view: The record to render.
+        with_goal: Whether this rendering names the goal itself.
     """
-    _print(f"\n[bold]{_safe(view.goal_statement)}[/]")
-    _print(f"  Through: {_safe(view.tool.id)} — {_safe(view.tool.description)}")
+    if with_goal:
+        _print(f"\n[bold]{_safe(view.goal_statement)}[/]")
+        _print(f"  Through: {_safe(view.tool.id)} — {_safe(view.tool.description)}")
+    else:
+        _print(f"\n[bold]{_safe(view.tool.id)}[/] — {_safe(view.tool.description)}")
     _render_coverage(view.coverage, indent="  ")
     standing = "still stands" if view.live else "has lapsed"
     _print(f"  [dim]{standing}; the horizon is {_safe(_when(view.expires_at))}.[/]")
     if not _is_pasteable(view.id):
-        _uncopyable("this authorisation's handle")
+        # The handle is the one value this view carries that a printed command has to
+        # reproduce **exactly**, so a value the terminal cannot show is one no command
+        # here may name: a command written from what is on screen would name something
+        # else. The act still takes the exact bytes from anything that can carry them.
+        _print(f"  {_uncopyable('Its handle')}")
         return
     _print_hint(f"  [dim]Withdraw it:[/] assistant revoke-authorization {_argument(view.id)}")
 
@@ -13036,9 +13052,9 @@ def _render_standing_authorizations(standing: Sequence[AuthorizationView], *, go
             f"work is put to you as it comes up.[/]"
         )
         return
-    _print("[bold]What this piece of work authorises:[/]")
+    _print(f"[bold]What this authorises:[/] {_safe(standing[0].goal_statement)}")
     for view in standing:
-        _render_authorization(view)
+        _render_authorization(view, with_goal=False)
     _print(
         "\n[dim]These are records of what you authorised. They are not a promise that "
         "the next call will go through — I check every call against everything else "
@@ -13120,7 +13136,7 @@ def _render_opened_authorizations(opened: Sequence[AuthorizationView]) -> None:
         return
     _print("\n[bold]I have taken that as standing permission:[/]")
     for view in opened:
-        _render_authorization(view)
+        _render_authorization(view, with_goal=True)
 
 
 def _render_withheld_confirmation(confirmation: Confirmation, *, because: str) -> None:

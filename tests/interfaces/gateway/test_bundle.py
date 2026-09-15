@@ -8152,6 +8152,54 @@ def test_the_goal_surface_is_not_the_deferred_question_surface() -> None:
     assert "/goal/abandon" not in questions
 
 
+def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_about() -> None:
+    """ADR-0254 §11's listing is **per goal**, and the page's shape says so.
+
+    §11 adds no cross-goal read — *"a cross-goal read would have to choose between a
+    truncated answer and an unbounded one"* — so there is no button in the choice row
+    that would open one, and the panel is reached from a goal row. The id the request
+    carries is therefore the row's own rather than one typed into a field.
+
+    **Two paths and no third** (§16's closed roster), and neither reaches the goal acts:
+    a page that posted ``/goal/abandon`` from a withdrawal control would give up the
+    work when the owner meant to withdraw an authority.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert '<section id="authorizations"' in document
+    assert 'id="authorizations-button"' not in document
+    assert 'id="authorization-said"' in document
+
+    authorities = "".join(
+        _functions(script)[name]
+        for name in ("listAuthorizations", "revokeAuthorization", "renderAuthorization")
+    )
+    assert "/authorizations" in authorities
+    assert "/authorization/revoke" in authorities
+    assert "/goal/abandon" not in authorities
+    assert "/clarification/withdraw" not in authorities
+
+    goals = "".join(_functions(script)[name] for name in ("readGoals", "withdrawClarification"))
+    assert "/authorization/revoke" not in goals
+
+
+def test_every_settlement_member_has_a_sentence_on_the_page() -> None:
+    """ADR-0254 §16's vocabulary is closed at four, and a member with no sentence renders
+    as silence.
+
+    ``would_duplicate`` is unreachable on this surface — it is reachable only on a
+    settlement to ``ESTABLISHED`` and a withdrawal settles to ``REVOKED`` — and it is
+    given a sentence anyway, because the vocabulary crosses a version boundary.
+    """
+    script = _code("app.js")
+    start = script.index("const AUTHORIZATION_SETTLEMENT_WORDS = {")
+    words = script[start : script.index("\n};", start)]
+
+    for member in ("settled", "not_at_source", "no_such_authorization", "would_duplicate"):
+        assert f"  {member}:" in words, member
+
+
 def test_the_reference_is_given_up_only_by_a_turn_that_reached_the_assistant() -> None:
     """A refusal the gateway took before the engine consumes nothing.
 

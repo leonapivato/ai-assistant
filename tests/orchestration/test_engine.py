@@ -101,6 +101,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration import (
+    AuthorizationOperations,
     ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
@@ -146,6 +147,7 @@ from ai_assistant.testing import (
     FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeGoalAssociator,
+    FakeGoalAuthorizationStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -640,6 +642,22 @@ class Harness:
         # every other case's deployment: no search account connected, so §13's
         # disposition for any `WEB_SEARCH` ask is `NOT_CONFIGURED`.
         search: SearchServicer | None = None,
+        # ADR-0254 §20's Lane 1 and Lane 3 seams, wired **together or not at all**: the
+        # writer that proposes a row (`StepRunner`) and the reader that renders it
+        # (`AuthorizationOperations`) are given the **same** store, which is what makes
+        # "the confirmation shows what the answer would establish" a property of the
+        # wiring rather than of two tables that happen to agree.
+        #
+        # `None` is the default and is every other case's deployment: no store wired, so
+        # `_propose` writes nothing, every `Confirmation` carries `authorization` `None`,
+        # the listing answers empty and the revocation answers `NO_SUCH_AUTHORIZATION` —
+        # which is exactly what is true of a deployment holding no rows. A case that
+        # wires one therefore changes no other case's behaviour.
+        authorizations: FakeGoalAuthorizationStore | None = None,
+        # ADR-0256 §1's third rung, which `StepRunner` reads when an act names no
+        # instant and the goal carries no deadline. Only a case wiring `authorizations`
+        # can reach it.
+        episode_retention: timedelta | None = None,
         # ADR-0244 §18's Lane 1 seam, so an engine-level case can drive a **parked**
         # read end to end — which is the only level it can be driven at: the question is
         # assembled at the capture point, the answer runs through `resume`, and the
@@ -908,6 +926,10 @@ class Harness:
             # request carries ``egress_binding=None``, which is the ordinary
             # non-egress shape almost every case here is about.
             binder=binder,
+            # ADR-0254 §15's single writer of an `Authorization`, over the store this
+            # harness also hands the reader below.
+            authorizations=authorizations,
+            episode_retention=episode_retention,
         )
         # The trace store's *deletion* seam, and only that: ADR-0119 §7 gives the
         # engine the purge and withholds the walk, so the harness hands it a
@@ -980,6 +1002,15 @@ class Harness:
                 clock=lambda: AT,
             ),
             connection_operations=_connection_operations(),
+            # ADR-0254 §11's read side, over the **same** store the runner writes
+            # through and the **same** plan store the goal's statement is read from.
+            authorization_operations=(
+                None
+                if authorizations is None
+                else AuthorizationOperations(
+                    authorizations=authorizations, plans=self.plans, now=self.clock
+                )
+            ),
             loop=loop,
             runner=runner,
             plans=self.plans,
@@ -1841,6 +1872,10 @@ def _fresh_facade(harness: Harness) -> Engine:
         recipient_grant_operations=_recipient_grant_operations(),
         destination_trust_operations=_destination_trust_operations(),
         connection_operations=_connection_operations(),
+        # ADR-0254 §11's recovery clause needs this across the restart: "A restart
+        # between the question and the answer recovers the row and renders the same
+        # projection", which a facade holding no read side could not do.
+        authorization_operations=harness.engine._authorization_operations,
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
