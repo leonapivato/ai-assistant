@@ -199,7 +199,7 @@ decision by another route.
 ### 1. A goal that closes ends every authorization of it and admits no more, in one step
 
 > **Normative — the ending, the set it is stated over, and the trigger.** **A *closing act* of a
-> goal — an act whose write moves it to a closed `GoalStatus`, `ACHIEVED` or `ABANDONED`,
+> goal — an act whose own write names a closed `GoalStatus`, `ACHIEVED` or `ABANDONED`,
 > ADR-0250 §1's own division and no wider set — ends every `Authorization` of that goal standing
 > `PROPOSED` or `ESTABLISHED`**, a live row and a lapsed one alike, each settled **`GOAL_CLOSED`**
 > (§2) at the instant of the act; **and in the same indivisible step the goal is recorded closed
@@ -208,7 +208,11 @@ decision by another route.
 > ending total: the ending is taken **before** the status write (below), so a closing write that
 > then fails leaves rows this decision has ended under a goal that is still open — stated here,
 > truthful under §2's meaning, and the reason §3 states the backstop over the rows no closing act
-> ends rather than over the goals that never close. **The ending is stated over the set and never
+> ends rather than over the goals that never close. **An act is a closing act by the write it
+> takes and not by that write landing**, which is why the definition above is stated over what
+> the act writes: defined over the status the goal ends up holding it would make §2's member
+> untruthful on exactly the path this clause states, and the ending would have to follow the
+> status write — the race the order below exists to close. **The ending is stated over the set and never
 > over one row**: a goal whose plan reached two declarations holds two rows under ADR-0254 §1's
 > per-declaration uniqueness, and an act that ended one would leave the other standing under a
 > closed goal.
