@@ -1333,7 +1333,11 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   single retry, and the **mapping of that call's `bool` onto §6's `GoalAbandonment` member**;
   `GoalSummary.effect_in_flight`'s computation — **one `has_outstanding_effect` call per listed
   goal** (§6), which is this lane's and is the member's only caller; and §7's refusal catch, walk
-  end, ordered read and `drive_withheld`. **On the abandoning path it commits no attempt, computes
+  end, ordered read and `drive_withheld`; and **the recovery from `open_attempt`'s new live-attempt
+  refusal** (§2) — on `StaleExecutionError` the caller re-takes the associate-or-open decision,
+  **reusing the competing attempt where it is still live** and opening where it has ended, and
+  never re-submits the attempt it built, which is work the tree's callers do not do today because
+  they await `open_attempt` directly. **On the abandoning path it commits no attempt, computes
   no `AttemptOutcome` and takes no outstanding-effect read of its own** — §2 and §3 put all three
   inside the one call, and a lane that split them out would rebuild the window the member exists to
   remove; the listing's call is a different path and is untouched by that prohibition. **It moves no contract**:
@@ -1387,7 +1391,12 @@ it.
    the distinction §2 draws, and the arm asserts the classes and not merely the refusals. One on an
    `ACTIVE` or `BLOCKED` goal whose every attempt is terminal, or which has none, is accepted. **And the two-opener arm**: two attempts built
    against one terminal current attempt and persisted in sequence — the second is refused, so **no
-   conforming store ever holds two non-terminal attempts of one goal**. Every other
+   conforming store ever holds two non-terminal attempts of one goal**. **And the losing opener's
+   recovery (L2)**: two turns associating concurrently, the second refused with
+   `StaleExecutionError`, the engine re-takes the decision and **drives the turn under the
+   competing attempt** rather than propagating — and where that attempt has since ended, opens its
+   own; the arm that fails against a caller awaiting `open_attempt` directly, which is what the
+   tree does today. Every other
    `AttemptTransition` and every other `set_goal_status` write is unaffected. ***§2's
    `close_goal_abandoned`***: it ends **every** non-terminal attempt of the goal with the outcome
    §3's limbs yield over that attempt's own executions, writes `ABANDONED`, advances `Goal.version`
