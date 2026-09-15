@@ -445,6 +445,59 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
         assert STATEMENT not in await panel.inner_text()
 
 
+async def test_a_listing_that_outlives_its_session_reveals_nothing(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A panel is not re-opened by a response admitted under a session that has ended.
+
+    The generation counter orders two *listings* and says nothing about the session
+    under them. Let the listing hang, let any other request meet ``no-live-session`` —
+    ``sessionLost`` forgets the header half and puts the bootstrap entry back — and the
+    hanging run is still the latest, so on the unguarded page it resumes, renders, and
+    calls ``show("authorizations", true)``: one goal's standing authorities on screen
+    beside a form asking the owner to start a session. Adversarial review, round 9,
+    ``major``.
+
+    **The settle is deliberate and is not synchronisation for a state the page reaches.**
+    What is asserted is a state the page must *not* reach, and for that the response
+    landing plus a bounded settle is the honest instrument — a bare retrying assertion
+    would pass the instant before the reveal it is looking for.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+
+    async def route(one: Route) -> None:
+        await held
+        await one.fallback()
+
+    async def ended(one: Route) -> None:
+        await one.fulfill(
+            status=401,
+            content_type="application/json",
+            body=json.dumps({"fault": "no-live-session"}),
+        )
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        await drive.page.route("**/authorizations", route)
+        await drive.page.click("#goal-list button:has-text('What this authorises')")
+
+        # The session ends under the hanging listing, through a request of its own.
+        await drive.page.route("**/goals", ended)
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_response("**/authorizations"):
+            held.set_result(None)
+        await drive.page.wait_for_timeout(300)
+
+        await expect(drive.page.locator("#authorizations")).to_be_hidden()
+        await expect(drive.page.locator("#bootstrap")).to_be_visible()
+        await expect(drive.page.locator("#authorization-list .notification-row")).to_have_count(0)
+
+
 async def test_a_withdrawal_is_read_back_after_the_panel_moves_to_another_goal(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
