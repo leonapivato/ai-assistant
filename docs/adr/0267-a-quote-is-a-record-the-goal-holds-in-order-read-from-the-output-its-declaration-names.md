@@ -144,7 +144,12 @@ that a quote/charge mismatch is *"a reported finding"*.
 > (ADR-0265 §1) this price was read for; **`arguments_digest`**, a `Sha256Hex`, **the
 > `parameters_digest` of the `ActionRequest` whose output it was read from** and never a value
 > computed a second way; **`amount`**, a `Decimal`, finite and not negative; **`currency`**, an
-> `EncodableText`, the ISO-4217 code ADR-0254 §4's `MONEY` reading compares byte for byte;
+> `EncodableText` **validated for the corpus's money shape — three uppercase ASCII letters,
+> checked for shape and never against a register**, exactly as `ToolCost.currency` and a `MONEY`
+> `ValueBound`'s already are (ADR-0254 §2) — the ISO-4217 code ADR-0254 §4's `MONEY` reading
+> compares **byte for byte**, which is why the shape is on the record rather than left to prose: a
+> quote minted at `"usd"` matches no bound's `"USD"` ever, so it would cover nothing while looking
+> like a price that had been read;
 > **`plan`**, an `Identifier`; **`read_from`**, a `StepOutputRef`; and **`read_at`**, a
 > `UtcInstant`. It carries no eighth field: no id of its own, no attempt, no tool, no capability,
 > no expiry, no status, no `BoundKind` and no count.
@@ -202,9 +207,12 @@ one spelling of that"*. **Its six unresolvability cases are untouched and unreac
 reference something resolves, and nothing resolves this one.
 
 **The record carries no id of its own, and that is decided rather than forgotten.** A later record
-naming one quote — a verification finding, say — names it by the act and the digest, which select
-it deterministically under §2's order, so an identifier would be a second handle on a value already
-addressable. §10 books the case that would need one with what fires it.
+naming one quote — a verification finding, say — names it by the act and the digest, which under
+§2's order select **the governing** quote for that pair: the one every comparison of this decision
+reads, so an identifier would be a second handle on the value they all address. **It is not a
+handle on an individual displaced quote, and the claim is not made**: two readings over identical
+arguments carry the same pair, so a record meaning the **earlier** of them cannot say which, and
+§2's elision can drop it. §10 books the case that would need one with what fires it.
 
 ### 2. The quote lives on the goal, in order, bounded by an elision that can only cost a question
 
@@ -315,8 +323,9 @@ record of the same durability.
 > (§3); the step's `output` is a JSON **object** carrying, at the key that declaration's
 > `QuotedOutput` names as its `amount`, a JSON **string** that `Decimal` accepts or a JSON
 > **integer**, whose `Decimal` is finite and not negative; and it carries, at the key it names as
-> its `currency`, a JSON **string**. The quote is then written by `record_quote` (§2) with
-> `arguments_digest` taken from the request that produced that output, `plan` and `read_from`
+>  its `currency`, a JSON **string of §1's shape**. The quote is then written by `record_quote`
+> (§2) with `arguments_digest` taken from the request that produced that output, `plan` and
+> `read_from`
 > naming where it was read, and `read_at` the instant the step's output was recorded. **No
 > `verifies` is among the four and none is evaluated here.** ADR-0255 §8 reads that predicate at
 > exactly two sites — a dependent step's second conjunct and an interpretation's gate — and rules
@@ -329,8 +338,9 @@ record of the same durability.
 > **Normative — every failure of that reading mints nothing, and nothing is repaired, coerced,
 > defaulted or substituted.** A step with no `intended_action`, a declaration with no
 > `quoted_output`, an `output` that is not an object, a missing key at either name, a **JSON
-> floating-point** amount, a **JSON boolean** amount, a non-finite or negative one, or a currency
-> that is not a JSON string each leave the goal's `quotes` **unchanged** and raise nothing. **A
+> floating-point** amount, a **JSON boolean** amount, a non-finite or negative one, a currency
+> that is not a JSON string, **or one that is a string of any other shape** — `"usd"`, `"EURO"`,
+> `"€"` — each leave the goal's `quotes` **unchanged** and raise nothing. **A
 > JSON boolean is not a JSON integer and is refused on that ground, stated because the
 > implementation language will not state it**: `bool` is a subclass of `int` in Python, so a check
 > written as an `int` instance test admits `true` as `Decimal(1)` and mints a one-unit quote that
@@ -546,17 +556,13 @@ what makes that true rather than a coordination.** The field is the quote the go
 row was built, so there is no window in which it could record a quote the row was not built over;
 what a later quote changes is the **dispatch**, ADR-0254 §13's recheck reading the **current**
 governing quote every time, so an act whose price has moved above the ceiling is uncovered however
-the confirmation read. **Where ADR-0254 §1's completeness condition is evaluated, and through what
-a component that is not `permissions` obtains condition 6's answer, is not settled here**: ADR-0266
-§7 states the one implementation and ADR-0254 §1 states the condition, **this decision moves
-neither, adds no second implementation of either, and evaluates condition 6 in neither of its
-lanes** (§11) — the question is booked in §10 with what fires it and with the amendment issue that
-holds it.
+the confirmation read.
 
 > **Normative.** `core/types.py` gains **`QuoteView`**, a frozen model with `extra="forbid"` whose
 > fields are exactly three: **`amount`**, a `Decimal` that is **finite and not negative**;
-> **`currency`**, an `EncodableText`; and **`read_at`**, a `UtcInstant`. **The bound is restated
-> from §1 rather than assumed from the record it transcribes**, because a `QuoteView` crosses a
+> **`currency`**, an `EncodableText` of §1's shape; and **`read_at`**, a `UtcInstant`. **The
+> bound is restated from §1 rather than assumed from the record it transcribes**, because a
+> `QuoteView` crosses a
 > frame inside a `Confirmation` and its own model is the only guard a decoded one has. It carries
 > **no** digest, no intended action, no plan, no step, no goal id and no authorization id —
 > ADR-0254 §11's renders-no-internal-value bar, unrelaxed.
@@ -764,9 +770,12 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
 - **A quote for anything but `MONEY`.** A quote states a price and carries no `BoundKind` (ADR-0266
   §6), so a `PERIOD` or a `TERMS` member is met by no quote however §4 of ADR-0266 comes to mint
   one. Fired by the decision that gives such a member something to be proved against.
-- **Caching a quote, and reusing one across goals, turns or declarations.** `quotes` is a field of
-  one `Goal` and `for_action` is keyed on one goal; **no lane shares a quote between two goals**,
-  reuses one for a second declaration, or holds one in memory across a dispatch. Fired by the
+- **Caching a quote, and reusing one across goals or turns.** `quotes` is a field of one `Goal`
+  and `for_action` is keyed on one goal; **no lane shares a quote between two goals**, holds one
+  in memory across a dispatch, or reads one from anywhere but the goal that holds it. **Reuse
+  across two declarations of one goal is not on this list**: §1 binds a quote to the act and never
+  to the declaration, which is the owner's check-then-book case, arm 5 pins it, and the residual
+  it carries is the first bullet of this section. Fired by the
   decision stating what a shared price record is and what bounds its reuse.
 - **An identifier of a quote's own, and any record that names one.** §1 declines it because the act
   and the digest select one deterministically. Fired by the decision that records a verification
@@ -900,8 +909,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    round-trips through its own dump; it is **not** constructible carrying a non-finite or negative
    `amount`, an `arguments_digest` that is not lowercase 64-character hex, or an eighth field; and
    a `QuoteView` carries no digest, no action and no identifier, and is **not** constructible
-   carrying a negative or non-finite `amount` (§7). **Zero is a price**: `Decimal("0")`
-   constructs, covers under any ceiling of its currency, and is no absence. **And the
+   carrying a negative or non-finite `amount` (§7). **And the currency is shape-checked on both**:
+   neither model is constructible at `"usd"`, `"EURO"` or `"€"`, and both are at `"EUR"` — shape
+   and not register, so an unassigned three-letter code constructs. **Zero is a price**:
+   `Decimal("0")` constructs, covers under any ceiling of its currency, and is no absence. **And
+   the
    goal's order is the total order**: a goal carrying quotes for two actions returns them oldest
    first, the **last** naming an action is the governing one, and appending a second for one action
    leaves the first in place and unmarked.
@@ -935,7 +947,8 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    negative amount; a non-numeric string; **the three strings `Decimal` accepts and §4's finiteness
    conjunct then refuses — `"NaN"`, `"Infinity"` and `"-Infinity"`** — each of which mints nothing
    and, like every other case on this list, **raises nothing**, the validator's own exception
-   included; and a currency that is not a JSON string. **And the
+   included; a currency that is not a JSON string; and **a currency of the wrong shape**, `"usd"`
+   and `"EURO"`. **And the
    mint reads its own step alone**: a second step's output carrying a different price in the
    same walk changes nothing about the quote minted from the first. **And the two interruption
    boundaries** (§4): a walk stopped after the output transition committed and **before**
