@@ -237,8 +237,11 @@ decision by another route.
 >   it does not hold.
 > - **`clear_closure(goal: Identifier, /, *, goal_version: int) -> bool`** — removes that record
 >   **only where the version it holds is at or below `goal_version`**, and answers whether one
->   was removed. **A record standing at a higher version is left exactly as it was and `False`
->   is answered**, which is what keeps a stale caller from erasing a later closure's fence.
+>   was removed — **`True` where it removed one and `False` where it did not**. **A record
+>   standing at a higher version is left exactly as it was and `False` is answered**, which is
+>   what keeps a stale caller from erasing a later closure's fence, and **a goal the store holds
+>   no record of is answered `False` and raises nothing**, the shape `end_for_goal` above takes
+>   for a goal it holds no row of.
 >   **It settles nothing, revives nothing and reads no clock**; a row already `GOAL_CLOSED` is
 >   retired and no edge leaves it (§2).
 >
@@ -836,7 +839,11 @@ nothing. **ADR-0249
 >    all the same** — asserted by a `record` refused afterwards. **And the record keeps the
 >    higher version**: a second `end_for_goal` at a **higher** `goal_version` raises it — a
 >    `clear_closure` at the first version then answers `False` and the fence **stands** — while
->    one at a **lower** version leaves it where it was, and neither moves a row.
+>    one at a **lower** version leaves it where it was, and neither moves a row. **And
+>    `clear_closure`'s own answer is asserted on both paths §1 states it over**: against a record
+>    standing at the version passed it answers **`True`** and the record is **gone**, asserted by
+>    a `record` for that goal then succeeding; against a goal the store holds **no** record of it
+>    answers **`False`** and raises nothing.
 > 2. **Indivisibility, and the fence in the same step.** A `record` or a settlement to
 >    `ESTABLISHED` raced against `end_for_goal` leaves the store in one of exactly two states —
 >    the write landed **before** the call's step and the row is ended and counted, or it is
