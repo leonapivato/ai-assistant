@@ -1,6 +1,6 @@
 # 262. Verification compares the goal's criteria with what the goal's own records establish, at a strength the consequence class fixes, and it is the only producer of `GoalStatus.ACHIEVED`
 
-- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's classification of a bound step restated as three ordered limbs: an agreeing charge is added conjunctively to satisfaction, a disagreeing one disjunctively to contradiction, and a contradiction §2 already reached stands whether or not a charge can be read — the charge being measured against the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in the limb *"the guarantee does not cover a capability whose acts make a charge"* alone — it covers one, for a deployment that declares where its acts report a charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
+- Status: Partially superseded by ADR-0271 (two scopes. §2's `MONEY` clause, which rules that a criterion whose confirmed member is a `MONEY` one is `unestablished` outright — such a criterion now takes §2's own three results, over §2's own calls and decisive steps, with §2's classification of a bound step restated as three ordered limbs: an agreeing charge is added conjunctively to satisfaction, a disagreeing one disjunctively to contradiction, and a contradiction §2 already reached stands whether or not a charge can be read — the charge being measured against the quote that decision pins to the dispatch, which is the operand §9 reassigns to it by name. And §7's gate statement, in two limbs and no more — the limb *"the guarantee does not cover a capability whose acts make a charge"*, which is reversed, it covers one; and its *"A deployment wiring a covered capability does two things as part of wiring it"* in the application to a capability whose acts charge alone, where the deployment does a third thing beside those two, declaring where those acts report a charge. The two obligations that clause names are themselves unchanged, and it stands at two for every covered capability whose acts make no charge. Every other clause of both sections binds entire; the first dated note below states both scopes in full)
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope three records already take there reaching one further
@@ -106,12 +106,17 @@
   as licence to compare a charge against a ceiling, a quote or anything else"* is **kept in the
   direction it was written**: the comparison is against the **pinned** quote and only then against
   the member, never against a ceiling alone and never against a quote the goal's tuple holds now.
-  **The second** is §7's statement that *"the guarantee does not cover a capability whose acts make a
-  charge"*, whose ground is the same missing operand: it **does** cover one, and a deployment wiring
-  such a capability does a **third** thing as part of wiring it beside §7's two — it declares where
-  its acts report a charge, a declaration carrying no such key satisfying this guarantee for no
-  `MONEY` criterion at all. **§7's other two obligations are unchanged**, its count of **seven**
-  conditions stands with none added and none removed — ADR-0267 §6's provider-side hold, condition
+  **The second** is §7's gate statement, in **two limbs**. Its *"the guarantee does not cover a
+  capability whose acts make a charge"* rests on the same missing operand and is **reversed**: it
+  **does** cover one. And in consequence its *"A deployment wiring a covered capability does **two**
+  things as part of wiring it"* is moved **in the application to a capability whose acts charge
+  alone**, where such a deployment does a **third** thing beside those two — it declares where its
+  acts report a charge, a declaration carrying no such key satisfying this guarantee for no
+  `MONEY` criterion at all. That second limb is recorded rather than left to the first, because a
+  reader holding only this ADR would otherwise wire such a capability on the enumerated two and omit
+  the declaration the superseding decision's comparison reads. **The two obligations that clause
+  names are themselves unchanged** and it stands at **two** for every covered capability whose acts
+  make no charge; its count of **seven** conditions stands with none added and none removed — ADR-0267 §6's provider-side hold, condition
   (7), binding exactly that class — and its *"ratification is not implementation"* is true of the
   superseding decision on the day it ratifies. **Three further places where the replaced reading is
   available are left standing and are named so that no reader takes them for the scope**: §3's rung
