@@ -656,13 +656,23 @@ revision 1 §H.1 identified.
 > compatibility shim, negotiation or lenient decode is added** — ADR-0084 §3's exact-match
 > handshake is the mechanism and the refusal naming both versions is the intended outcome.
 
-> **Normative — `PlanExport.schema_version` moves by exactly one and the plan store's does not.**
-> `PlanExport` carries `tuple[GoalAttempt, ...]`, so a document written after this decision may
-> carry an `AttemptOutcome` value an earlier reader refuses, which is ADR-0049 §1's loud refusal
-> reached through a **value** rather than through a shape. As a dated observation it reads **9**.
-> **No stored row changes shape and no migration is owed**: every attempt already on disk carries
-> one of the six members and decodes unchanged, so the plan store's `_SCHEMA_VERSION` stays where
-> it is — **2**, as a dated observation — and `ConversationExport` is untouched.
+> **Normative — `PlanExport.schema_version` moves by exactly one, and the ground is stated
+> honestly as an extension rather than borrowed.** `PlanExport` carries `tuple[GoalAttempt, ...]`,
+> so a document written after this decision may carry an `AttemptOutcome` value an earlier reader
+> refuses. **ADR-0039 §10's mechanism is what moves it** — *"`StepExecution` is inside the export,
+> so its shape changing is exactly what the version exists to announce"* — **applied for the first
+> time to a value rather than to a shape**, on ADR-0014 §5's own reason for the field: *"an export
+> outlives the code that wrote it … a reader must be able to tell which shape it is holding."* A
+> document a v9 reader cannot decode is exactly what the label exists to warn it about, and the
+> direction of the extension is the announcing one. **It is a stacked addition and owes ADR-0039
+> no record** (§12): §10's sentence says a shape change announces itself, not that only a shape
+> change does. It is a **stored-record version and not a second wire ground** — `PlanExport`
+> crosses no frame and is emitted by no peer. As a dated observation it reads **9**.
+
+> **Normative — no stored row changes shape and no migration is owed.** Every attempt already on
+> disk carries one of the six members and decodes unchanged, so the plan store's `_SCHEMA_VERSION`
+> stays where it is — **2**, as a dated observation — ADR-0049 §1's loud refusal on opening a newer
+> database is **not reached**, and `ConversationExport` is untouched.
 
 > **Normative — nothing else under `wire/` changes, and no setting is added.** The connect exchange
 > gains no member, no existing frame's encoding changes, no `FrameKind` is added, no codec entry is
@@ -745,7 +755,8 @@ earlier ADR now act differently, or read one of its clauses more widely than it 
   of both sections stays true, including §12's *"does not end an execution and does not cancel
   anything in flight"*, which §2 obeys.
 
-**Six further ADRs are reached and none owes a record**, each by the same test.
+**Every other ADR this decision reaches owes no record**, and the seven entries below are the
+whole of them, each decided by the same test.
 
 - **ADR-0255** — *no*. §12 books three subjects here by name and §11 books two; a booking
   **discharged** is not a clause made false. §3's conjuncts, §2's stop list, §7's preservation
@@ -767,8 +778,14 @@ earlier ADR now act differently, or read one of its clauses more widely than it 
   atomicity; §20's general-case deferral is left standing with its firing condition (§11).
 - **ADR-0259 §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes none of
   the replay §5 declines; *"A parked `ALLOW` … is left standing"* stays true.
-- **ADR-0014, ADR-0029, ADR-0034, ADR-0060, ADR-0148** — *no*. §6 cites each for the boundary and
-  the intervals either side of it and adds no clause to any; every sentence stays true.
+- **ADR-0039 §10** — *no*. Its *"`StepExecution` is inside the export, so its shape changing is
+  exactly what the version exists to announce"* says that a shape change announces itself; it does
+  **not** say that only a shape change does. §10 extends the mechanism to a **value** an earlier
+  reader refuses, which is a **stacked addition** recorded in this ADR and nowhere else.
+- **ADR-0014, ADR-0029, ADR-0034, ADR-0060, ADR-0148** — *no*. §§1 and 6 cite each for the
+  boundary and the intervals either side of it and add no clause to any. **ADR-0049 §1** likewise:
+  §10 records that its loud refusal is **not reached**, the plan store's `schema_version` not
+  moving. Every sentence of each stays true.
 
 ### 13. The lane cut
 
