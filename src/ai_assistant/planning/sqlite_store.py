@@ -38,10 +38,17 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ActiveExecutionError, PlanningError, StaleExecutionError
+from ai_assistant.core.errors import (
+    ActiveExecutionError,
+    ClaimRefused,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     MAX_GOAL_EVIDENCE,
+    TERMINAL_ATTEMPT_STATES,
     ActionPlan,
+    AttemptState,
     EvidenceHistory,
     EvidenceStanding,
     ExecutionState,
@@ -52,6 +59,7 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     GoalQuestion,
     GoalQuestionDisposition,
+    GoalStatus,
     MemorySource,
     PlanExport,
     StepStatus,
@@ -60,16 +68,22 @@ from ai_assistant.core.types import (
 from ai_assistant.planning._transactions import transaction
 from ai_assistant.planning.execution import PlanExecution
 from ai_assistant.planning.goals import (
+    OUTSTANDING_STEP_STATUSES,
     advanced,
     appended,
     bounded,
+    cancellation_outcome,
+    cancelled,
     capped,
     engaged,
     invalidated,
     minted,
+    refuse_a_closed_goal,
+    refuse_a_live_attempt,
     refuse_a_second_owner,
     refuse_a_seeded_minting,
     refuse_a_superseded_plan,
+    refuse_a_wrong_cancellation_outcome,
     refuse_an_unclaimable_attempt,
     refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
@@ -91,7 +105,6 @@ if TYPE_CHECKING:
         AttemptTransition,
         GoalCandidates,
         GoalRevision,
-        GoalStatus,
         IntendedActionMinting,
         StepTransition,
         UtcInstant,
@@ -152,18 +165,49 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: **No lane invents an intended action for a stored goal** (§5): "an act nothing
 #: declared is an act no claim was ever scoped to, and minting one would state a
 #: history the row does not hold".
-_SCHEMA_VERSION = 5
+#: **Version 6 is ADR-0261 §10's migration, and it is the first that *repairs* rather
+#: than only creating or relabelling.** No stored row changes **shape** — every attempt
+#: already on disk decodes unchanged under the new contract, and no column and no table
+#: is added — so the marker moves for ADR-0049 §1's *downgrade* reading, exactly as at
+#: 5: this store persists a ``GoalAttempt`` as its ``model_dump_json()``, so **the set
+#: of values ``AttemptOutcome`` admits is part of what a database holds**, and leaving
+#: the marker where it stood would let new code write ``"cancelled"`` into a database an
+#: older binary still accepts — that binary then failing while decoding a *row* rather
+#: than refusing the *database*, which is §1's loud refusal made unreachable.
+#: **And what the migration writes is the act's second half** (§10):
+#: ``AttemptState.CANCELLED``, with ADR-0261 §3's outcome over that attempt's own
+#: executions, on **every non-terminal attempt of a goal whose status is
+#: ``ABANDONED``** — and on nothing else. That is the one legacy state **no later act
+#: can reach**: the goal is already closed, so ``abandon_goal`` answers
+#: ``ALREADY_CLOSED`` and §2's act never runs on it, while ADR-0255 §3's claim conjunct
+#: does not fire on a **live** attempt — so a turn still holding one could claim a step
+#: and dispatch under a goal its user gave up. **On an *open* goal it writes nothing**:
+#: such a goal has had no abandoning act, so ending an attempt under it would invent a
+#: user intent, and it needs nothing — §2's act is stated over the set, so it is
+#: abandoned in one act with every attempt ending. **The population is closed and
+#: shrinks to zero** as those goals are abandoned, and no lane repairs it, sweeps it,
+#: refuses to open a database holding it, or calls it corruption.
+_SCHEMA_VERSION = 6
 
-#: The versions a database this code can upgrade carries. Four members since ADR-0265:
+#: The versions a database this code can upgrade carries. Five members since ADR-0261:
 #: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
-#: ADR-0250 §9's and version 4 is ADR-0252 §13's. Only the first needs its ``goals``
-#: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all four** gain
+#: ADR-0250 §9's, version 4 is ADR-0252 §13's and version 5 is ADR-0265 §5's. Only the
+#: first needs its ``goals``
+#: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all five** gain
 #: whichever of the :data:`_GOAL_COLUMNS` they lack and whichever record tables they do
 #: not hold, which ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier
 #: store holds a question or an evidence row. **Version 4 needs nothing else at all**:
 #: ADR-0265 adds no column and no table, and every row it holds decodes unchanged with
 #: an empty ``intended_actions``.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4})
+#:
+#: **ADR-0261 §14 arm 6's repair is stated over every member of this set**, because a
+#: repair run only for the newest source passes a single unparameterised arm and leaves
+#: an older database with an ``ABANDONED`` goal and live attempts. **Version 1 is the
+#: one that carries no repair**: ``attempts`` is created by ADR-0249 §12's own
+#: migration and a version 1 store holds none, so it upgrades, writes no attempt row
+#: and reaches the new marker — and no arm seeds an ``attempts`` table into a version 1
+#: fixture, which would test a schema the application never wrote.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4, 5})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -655,6 +699,11 @@ class SqlitePlanStore:
                 # file's version leaves them: the two columns are projections of the
                 # blob, so they are written from it rather than guessed.
                 self._backfill_goal_columns(conn)
+                # ADR-0261 §10's repair, in the same transaction as everything above,
+                # so a failure leaves the file unupgraded rather than half-repaired.
+                # It runs *after* `_upgrade_goal_rows`, because it reads the goal
+                # blobs' `status`, and *before* the marker moves below.
+                self._repair_abandoned_attempts(conn)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
                 # to the current shape — and a failure rolls it back rather than
@@ -680,6 +729,70 @@ class SqlitePlanStore:
             msg = f"failed to initialise the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
         return conn
+
+    def _repair_abandoned_attempts(self, conn: sqlite3.Connection) -> None:
+        """Complete the act an ``ABANDONED`` goal's own user already performed (§10).
+
+        ADR-0261 §10's one-time repair, run inside the setup transaction on a database
+        this open is upgrading. It writes ``AttemptState.CANCELLED`` — with ADR-0261
+        §3's outcome over that attempt's **own** executions, ``ended_at`` at this
+        store's clock and ``version`` advanced by one — on **every non-terminal
+        attempt of a goal whose status is ``ABANDONED``**, and on nothing else.
+
+        **It records the consequence of an act that happened rather than manufacturing
+        one**: ``abandon_goal`` is the only writer of ``ABANDONED`` (ADR-0250 §12), and
+        under ADR-0261 §2 that act ends the goal's attempts — the pre-change act simply
+        did not take the second write. So ADR-0261 §1's "a cancellation is a user act"
+        is satisfied rather than evaded. **On an open goal it writes nothing**, because
+        such a goal has had no such act and §2's act reaches it the moment its user
+        abandons it.
+
+        **It writes rows rather than calling ``commit_attempt``**, which is ADR-0249
+        §12's sole-route rule partially superseded for this one versioned upgrade step
+        (ADR-0261 §10): an upgrade is the store's own, below the Protocol and outside
+        any caller's reach, exactly as ADR-0249 §12's own first migration of this
+        database was. **No lane exposes the repair as a ``PlanStore`` member or calls
+        ``commit_attempt`` from it.**
+
+        **``ended_at`` is the instant of the upgrade**, the only one the database can
+        honestly supply: the user's act left no timestamp, and inventing one from the
+        goal would state a time nothing recorded.
+
+        **Every non-terminal attempt of such a goal, and not the newest**: repairing
+        one would leave the other live and claimable under a goal its user gave up,
+        which is the state the repair exists to remove.
+
+        Args:
+            conn: The connection the setup transaction is running on.
+
+        Raises:
+            PlanningError: If the clock reading is not one ADR-0026 admits, or a
+                stored record no longer decodes.
+        """
+        if self._upgrade_from is None:
+            return
+        rows = conn.execute(
+            "SELECT a.id, a.data, g.data FROM attempts a JOIN goals g ON a.goal_id = g.id"
+        ).fetchall()
+        owed = [
+            attempt
+            for _, attempt_data, goal_data in rows
+            if _decode_goal(goal_data).status is GoalStatus.ABANDONED
+            and (attempt := _decode_attempt(attempt_data)).state not in TERMINAL_ATTEMPT_STATES
+        ]
+        if not owed:
+            return
+        at = self._clock()
+        for attempt in owed:
+            ended = cancelled(
+                attempt,
+                outcome=cancellation_outcome(self._step_statuses(conn, attempt)),
+                at=at,
+            )
+            conn.execute(
+                "UPDATE attempts SET data = ? WHERE id = ?",
+                (ended.model_dump_json(), ended.id),
+            )
 
     def _restrict_permissions(self) -> None:
         """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
@@ -1714,12 +1827,19 @@ class SqlitePlanStore:
     ) -> Goal:
         """Move the goal's status, compare-and-swap (ADR-0250 §9).
 
-        The goal's **only** status-mutation route, and it refuses no member of the
-        vocabulary: A10 and A3 write ``ACHIEVED`` and ``BLOCKED`` through it, and a
-        store that refused one would be a second place the vocabulary is decided.
+        It refuses no member of the vocabulary: A10 and A3 write ``ACHIEVED`` and
+        ``BLOCKED`` through it, and a store that refused one would be a second place
+        the vocabulary is decided. **It is no longer the only route to** ``ABANDONED``:
+        :meth:`close_goal_abandoned` writes that member too (ADR-0261 §2).
+
+        **A ``→ ABANDONED`` write over a goal holding a non-terminal attempt is
+        refused**, decided inside the same transaction as the write (ADR-0261 §2).
+        What is refused is a write that would leave two records inconsistent, not a
+        status member.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or the write is
+                ``→ ABANDONED`` over a goal holding a live attempt.
             PlanningError: If ``goal_id`` names no stored goal.
         """
         async with self._lock:
@@ -1730,12 +1850,162 @@ class SqlitePlanStore:
     def _set_goal_status_sync(self, goal_id: str, status: GoalStatus, expected: int) -> Goal:
         with self._transaction(f"set the status of goal {goal_id!r}") as conn:
             stored = self._goal_for_write(conn, goal_id, expected, "set the status of")
+            refuse_a_live_attempt(
+                goal_id=goal_id,
+                status=status,
+                live=[one.id for one in self._live_attempts(conn, goal_id)],
+            )
             updated = _with_status(stored, status=status)
             conn.execute(
                 "UPDATE goals SET data = ? WHERE id = ?",
                 (updated.model_dump_json(), updated.id),
             )
         return updated
+
+    @staticmethod
+    def _attempts_under(conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
+        """Every stored attempt of ``goal_id``, decoded, inside the caller's step.
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            goal_id: The goal to look under.
+
+        Returns:
+            The attempts, in ``opened_at`` order with ``id`` as the tie-break.
+        """
+        rows = conn.execute(
+            "SELECT data FROM attempts WHERE goal_id = ? ORDER BY opened_at, id", (goal_id,)
+        ).fetchall()
+        return [_decode_attempt(row[0]) for row in rows]
+
+    @staticmethod
+    def _live_attempts(conn: sqlite3.Connection, goal_id: str) -> list[GoalAttempt]:
+        """``goal_id``'s attempts standing in a non-terminal state (ADR-0261 §2).
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            goal_id: The goal to look under.
+
+        Returns:
+            Every such attempt, in :meth:`_attempts_under`'s order.
+        """
+        return [
+            one
+            for one in SqlitePlanStore._attempts_under(conn, goal_id)
+            if one.state not in TERMINAL_ATTEMPT_STATES
+        ]
+
+    @staticmethod
+    def _step_statuses(conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
+        """Every step status of every execution ``attempt`` names (ADR-0261 §3).
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            attempt: The attempt whose ``execution_ids`` are walked.
+
+        Returns:
+            One status per step, over the executions this store holds. Read on the
+            caller's own connection, so the statuses and the write are one step.
+        """
+        if not attempt.execution_ids:
+            return []
+        placeholders = ", ".join("?" for _ in attempt.execution_ids)
+        rows = conn.execute(
+            # The `IN` list is generated from the tuple's own length; every id is
+            # bound, so nothing of the caller's reaches the SQL text.
+            f"SELECT data FROM executions WHERE id IN ({placeholders})",  # noqa: S608 — `placeholders` is generated from the tuple's own length and every id is bound
+            tuple(attempt.execution_ids),
+        ).fetchall()
+        return [step.status for row in rows for step in _decode_execution(row[0]).steps]
+
+    @staticmethod
+    def _outstanding(conn: sqlite3.Connection, goal_id: str) -> bool:
+        """ADR-0261 §6's predicate over ``goal_id``, inside the caller's step.
+
+        Args:
+            conn: The connection the caller's transaction is running on.
+            goal_id: The goal to ask about.
+
+        Returns:
+            Whether any step of any execution of any attempt of it stands
+            ``INDETERMINATE`` or ``RUNNING``.
+        """
+        return any(
+            status in OUTSTANDING_STEP_STATUSES
+            for attempt in SqlitePlanStore._attempts_under(conn, goal_id)
+            for status in SqlitePlanStore._step_statuses(conn, attempt)
+        )
+
+    async def close_goal_abandoned(
+        self, goal_id: str, /, *, at: UtcInstant, expected_version: int
+    ) -> bool:
+        """End the goal's live attempts, close it, and say what was outstanding (§2).
+
+        ADR-0261 §2's one member. **The three writes and the answer are one step**:
+        the whole of it runs inside one ``BEGIN IMMEDIATE`` transaction on this
+        store's single connection, so no claim, no opener and no resolution
+        interleaves — which is the property every two-step arrangement loses, and
+        which is also what makes the failure case clean, the transaction rolling back
+        whole rather than leaving a partial act.
+
+        **Over the set and not the row**: every non-terminal attempt of the goal is
+        ended, each carrying the outcome ADR-0261 §3's limbs yield over its **own**
+        executions. **The answer is goal-wide**, so an ``INDETERMINATE`` step on an
+        older, already terminal attempt makes it ``True`` though that attempt is not
+        ended at all.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If ``goal_id`` names no stored goal, or the goal is already
+                closed — ``ACHIEVED`` or ``ABANDONED`` — which no re-read makes valid.
+        """
+        async with self._lock:
+            return await _run_to_completion(
+                self._close_goal_abandoned_sync, goal_id, at, expected_version
+            )
+
+    def _close_goal_abandoned_sync(self, goal_id: str, at: UtcInstant, expected: int) -> bool:
+        with self._transaction(f"abandon goal {goal_id!r}") as conn:
+            stored = self._goal_for_write(conn, goal_id, expected, "abandon")
+            refuse_a_closed_goal(goal_id=goal_id, status=stored.status, what="abandon")
+            outstanding = self._outstanding(conn, goal_id)
+            for one in self._live_attempts(conn, goal_id):
+                ended = cancelled(
+                    one,
+                    outcome=cancellation_outcome(self._step_statuses(conn, one)),
+                    at=at,
+                )
+                conn.execute(
+                    "UPDATE attempts SET data = ? WHERE id = ?",
+                    (ended.model_dump_json(), ended.id),
+                )
+            updated = _with_status(stored, status=GoalStatus.ABANDONED)
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return outstanding
+
+    async def has_outstanding_effect(self, goal_id: str, /) -> bool:
+        """Whether any step of any execution of any attempt of ``goal_id`` is claimed.
+
+        ADR-0261 §6's existential, **goal-wide and never per-attempt**. The scan runs
+        to completion on this store's one connection with the lock held, so it answers
+        from **a single consistent read**: a concurrent claim or resolution cannot
+        commit while it is in flight, and so cannot be seen half-applied. That is
+        ADR-0261 §14 arm 9's *one snapshot* witness rather than ADR-0069 §3's
+        no-``await`` escape, which an async wrapper around a worker cannot claim.
+
+        **An unknown goal answers ``False``**, never a raise.
+
+        Raises:
+            PlanningError: If a stored record no longer decodes.
+        """
+        async with self._lock:
+            return await _run_to_completion(self._has_outstanding_effect_sync, goal_id)
+
+    def _has_outstanding_effect_sync(self, goal_id: str) -> bool:
+        return self._outstanding(self._conn, goal_id)
 
     async def candidates_for(self, conversation_id: str, /, *, limit: int) -> GoalCandidates:
         """Return this conversation's candidate goals, capped (ADR-0250 §2, §9).
@@ -2335,8 +2605,13 @@ class SqlitePlanStore:
         execution and defeat the claim conjunct without ever calling
         :meth:`commit_attempt`. Decided in the same transaction as the write.
 
+        **An attempt on a *closed* goal is refused** (ADR-0261 §2), decided in the same
+        transaction as the write; an attempt on an **open** goal is opened whatever
+        attempts that goal already holds, so this serialises no openers.
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, the store already
+            PlanningError: If ``goal_id`` names no stored goal, the goal it names is
+                closed (ADR-0261 §2), the store already
                 holds an attempt under this ``id``, the attempt does not revalidate,
                 or any ``execution_ids`` member is already carried by another attempt
                 of that goal (ADR-0255 §3).
@@ -2348,10 +2623,17 @@ class SqlitePlanStore:
 
     def _open_attempt_sync(self, attempt: GoalAttempt) -> None:
         with self._transaction(f"open attempt {attempt.id!r}") as conn:
-            held = conn.execute("SELECT 1 FROM goals WHERE id = ?", (attempt.goal_id,)).fetchone()
+            held = conn.execute(
+                "SELECT data FROM goals WHERE id = ?", (attempt.goal_id,)
+            ).fetchone()
             if held is None:
                 msg = f"attempt {attempt.id} refers to unknown goal {attempt.goal_id}"
                 raise PlanningError(msg)
+            refuse_a_closed_goal(
+                goal_id=attempt.goal_id,
+                status=_decode_goal(held[0]).status,
+                what=f"open attempt {attempt.id} on",
+            )
             if (
                 conn.execute("SELECT 1 FROM attempts WHERE id = ?", (attempt.id,)).fetchone()
                 is not None
@@ -2422,8 +2704,14 @@ class SqlitePlanStore:
         untouched: a repeat of the same append **on the owning attempt** is still
         ignored rather than refused.
 
+        **A ``→ CANCELLED`` transition carries the outcome ADR-0261 §3's four limbs
+        yield over this attempt's own executions**, read in the same transaction, and
+        every other is refused. That is the rule for every caller *other* than
+        :meth:`close_goal_abandoned`, which computes the limbs itself.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ CANCELLED`` transition proposes the wrong outcome (ADR-0261 §3).
             IllegalTransitionError: If the move is not legal from where it stands.
             PlanningError: If the attempt does not exist, the result is not a shape
                 ADR-0249 §5 admits, or the execution it names is already another
@@ -2456,6 +2744,12 @@ class SqlitePlanStore:
                     attempt_id=stored.id,
                     execution_id=transition.add_execution_id,
                     owners=self._owners_of(conn, stored.goal_id, transition.add_execution_id),
+                )
+            if transition.to_state is AttemptState.CANCELLED:
+                refuse_a_wrong_cancellation_outcome(
+                    attempt_id=stored.id,
+                    proposed=transition.outcome,
+                    yielded=cancellation_outcome(self._step_statuses(conn, stored)),
                 )
             updated = advanced(stored, transition)
             conn.execute(
@@ -2821,8 +3115,11 @@ class SqlitePlanStore:
             transition: The move being applied.
 
         Raises:
-            StaleExecutionError: If the claim names a plan that does not target its
-                goal's current interpretation revision.
+            ClaimRefused: If the claim names a plan that does not target its goal's
+                current interpretation revision (ADR-0249 §8, re-classed by ADR-0261
+                §7): a **correction** replaced what the user asked for, which is one
+                of the two states a user act produces and the one thing a driver
+                cannot otherwise tell from an ordinary compare-and-swap loss.
         """
         if transition.to_status is not StepStatus.RUNNING:
             return
@@ -2841,7 +3138,7 @@ class SqlitePlanStore:
                 f"{goal.id} stands at {goal.revision}: a plan that does not target the "
                 f"goal's current understanding is not driven (ADR-0249 §8)"
             )
-            raise StaleExecutionError(msg)
+            raise ClaimRefused(msg)
 
     def _refuse_an_unclaimable_attempt(
         self, conn: sqlite3.Connection, stored: ExecutionState, transition: StepTransition

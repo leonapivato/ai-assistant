@@ -321,7 +321,7 @@ def test_the_export_carries_the_actions_inside_the_goal_and_gains_no_member() ->
     export = PlanExport(exported_at=_WHEN, goals=(goal,), evidence=(EvidenceHistory(goal_id="g1"),))
     restored = PlanExport.model_validate_json(export.model_dump_json())
 
-    assert restored.schema_version == 13
+    assert restored.schema_version == 14
     assert restored.goals[0].intended_actions == goal.intended_actions
     assert "intended_actions" not in set(PlanExport.model_fields)
 

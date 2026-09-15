@@ -2079,7 +2079,75 @@ from ai_assistant.wire.errors import (
 #: **Nothing else under** ``wire/`` **changes**: the connect exchange gains no member, no
 #: existing frame's encoding changes, no :class:`FrameKind` is added, no codec entry is
 #: registered, and the error mapping is untouched — this lane mints no error class.
-PROTOCOL_VERSION: Final[int] = 47
+#: **48 since ADR-0261 §10**, whose ground is ADR-0124 §9's **second** limb — *"a change
+#: to a wire-carried ``core`` type that makes a value one peer emits invalid for the
+#: other"* — and which ADR-0178 §6 is the precedent for stating in the deciding ADR.
+#: Every field this decision adds defaults and both enumerations are *added to*, so no
+#: existing construction stops validating; **what breaks is a peer that enumerates a
+#: vocabulary exhaustively, and one does.**
+#:
+#: **Four grounds, each sufficient on its own.**
+#: :class:`~ai_assistant.core.types.GoalAbandonment` gains
+#: ``ABANDONED_EFFECT_IN_FLIGHT`` and is returned by the promoted ``abandon_goal``, so a
+#: hub at 48 sends a ``str`` a client at 47 validates against a three-member
+#: enumeration — and the CLI's abandon command answers a non-zero exit code for every
+#: member but ``ABANDONED``, so an unchanged client would report a successful
+#: cancellation as a failure (that handling is ADR-0261 §13's L3).
+#: :class:`~ai_assistant.core.types.GoalSummary` gains ``effect_in_flight`` and
+#: :class:`~ai_assistant.core.types.TurnOutcome` gains ``drive_withheld``; both models
+#: set ``extra="forbid"``, ``wire/codec.py`` renders a model by ``model_dump()``, and
+#: both are returned by promoted-surface methods — so a hub at 48 emits
+#: ``"effect_in_flight": false`` on **every** listed goal and ``"drive_withheld": null``
+#: on **every** turn, and a client at 47 fails each with ``extra_forbidden``. **A
+#: defaulted member is still a shape change**, exactly as the entries at 39, 40, 42, 43
+#: and 44 state. And :class:`~ai_assistant.core.errors.ClaimRefused` is minted: it can
+#: cross as an error payload whose ``code`` is its class name, and ADR-0085 §10a fixes
+#: that **an unknown code is a protocol violation and not a widening** — ``wire/errors.py``
+#: resolves the code by name and raises ``ProtocolError`` where the build does not hold
+#: it, with no base-class fallback, because falling back would manufacture a typed
+#: refusal the hub never sent. What makes that safe is ADR-0084 §3's exact-match
+#: handshake — a peer that cannot name the class never completes a connect with a hub
+#: that can raise it — **and it is this bump, landed in the same change that adds the
+#: class, that keeps it true**. No lane adds the class without the bump.
+#:
+#: **What earns no ground of its own.**
+#: :class:`~ai_assistant.core.types.AttemptOutcome` gains ``CANCELLED``, and it **crosses
+#: no frame**: that value rides a ``GoalAttempt``, which — read off the tree at this
+#: lane's own base rather than assumed — is named in the ``PlanStore`` Protocol alone
+#: (``open_attempt``, ``get_attempt``, ``attempts_of``, ``commit_attempt``), nowhere in
+#: the ``AssistantEngine`` Protocol and nowhere under ``wire/``; ``PlanStore`` is not
+#: promoted (ADR-0255 §11). So **no peer emits a ``GoalAttempt``**, and that member's
+#: version ground is the **export** alone. ADR-0261 §10 asks a lane that finds the tree
+#: disagrees to record the correction here: it does not — the reading holds at 386de825
+#: — **but the stale ADR-0251-era sentence elsewhere in this file, saying ``GoalAttempt``
+#: "is what the promoted surface's attempt-facing methods return", is still not true.**
+#: :class:`~ai_assistant.core.types.DriveWithheld` is minted, and reaches a frame only
+#: **inside** ``TurnOutcome``'s new member, so it rides this bump rather than adding to
+#: it. No new class of content crosses: both enumeration values are ``StrEnum`` members
+#: spelled by lower-cased member name, and ``effect_in_flight`` is a ``bool``.
+#:
+#: **No integer is fixed in the ADR** (§10): *"the figure is the tree's"*. This lane
+#: branched at 47 and is written **48**; ADR-0259's L1 and ADR-0267's Q1 also move it,
+#: so a lane that lands after this one **re-bumps rather than reusing the figure**.
+#:
+#: **Two stored-record versions do move, and neither is a second wire ground.**
+#: ``PlanExport.schema_version`` moves 13 → **14**, because the document carries
+#: ``tuple[GoalAttempt, ...]`` and may now hold an ``outcome`` an earlier reader's closed
+#: enumeration refuses — ADR-0039 §10's mechanism applied for the first time to a
+#: **value** rather than to a shape. The plan store's ``_SCHEMA_VERSION`` moves 5 → **6**
+#: with ADR-0261 §10's migration — the ``meta`` row and the one-time repair of the legacy
+#: attempt states no later act can reach — on ADR-0049 §1's loud refusal read in the
+#: **downgrade** direction. Neither crosses a frame and neither is emitted by a peer.
+#: The parked-read store's stays at **3**, the authorization store's at **1**, and
+#: ``ConversationExport.schema_version`` at **2**. ``core.config.Settings`` gains
+#: nothing: **no figure of this decision is configurable** (§10).
+#:
+#: **Nothing else under** ``wire/`` **changes** (§10): the connect exchange gains no
+#: member, no existing frame's encoding changes, no :class:`FrameKind` or codec entry is
+#: registered, the promoted method set does not move, no gateway route is added, and the
+#: error mapping gains the one class ADR-0261 §7 declares and nothing else. Retention,
+#: deletion and export are untouched, and no new durable record is minted.
+PROTOCOL_VERSION: Final[int] = 48
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
