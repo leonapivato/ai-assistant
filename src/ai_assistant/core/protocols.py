@@ -4939,13 +4939,35 @@ class PlanStore(Protocol):
         :meth:`commit_attempt`. An ``execution_ids`` entry any attempt of that goal
         already carries is refused, in the same indivisible step as the write.
 
+        **An attempt on a goal that is *closed* is refused** — ``ACHIEVED`` or
+        ``ABANDONED``, ADR-0250 §1's own division — **decided in the same indivisible
+        step as the write** (ADR-0261 §2). ``open_attempt`` advances no
+        ``Goal.version``, so a concurrent turn opening a new attempt is invisible to
+        any goal-level compare-and-swap and could otherwise leave an ``ABANDONED`` goal
+        carrying a live, claimable attempt. With this limb and
+        :meth:`set_goal_status`'s, the interleaving is exhaustive: an ``open_attempt``
+        landing **before** :meth:`close_goal_abandoned` is an attempt that call then
+        cancels — it ends **every** non-terminal attempt of the goal — and one landing
+        **after** it meets a goal closed in that same step.
+
+        **That is the whole of it, and it refuses nothing on account of another
+        attempt.** An attempt on an **open** goal is opened exactly as ADR-0249 §12
+        says, **whatever attempts that goal already holds**, and no lane adds a
+        live-attempt limb: this member is written at the **end** of the turn, after the
+        planning done under the attempt it persists, so serialising two openers here
+        would discard work rather than prevent it. *At most one live attempt per goal*
+        is not decided by this member (ADR-0261 §11).
+
         Raises:
-            PlanningError: If ``goal_id`` names no stored goal, the store already holds
+            PlanningError: If ``goal_id`` names no stored goal, the goal it names is
+                **closed** (ADR-0261 §2), the store already holds
                 an attempt under this ``id``, a ``plan_ids``/``execution_ids`` entry
                 is not one this attempt's goal holds, or an ``execution_ids`` entry is
                 already carried by another attempt of that goal (ADR-0255 §3). Never
                 ``StaleExecutionError``: no re-read makes an execution owned by one
-                attempt valid for another.
+                attempt valid for another, and a closed goal opens again only by
+                ADR-0250 §13's user act — which is why the arms assert the class and
+                not merely the refusal.
         """
         ...
 
@@ -5003,8 +5025,42 @@ class PlanStore(Protocol):
         attempt** and says nothing about two attempts, so a repeat on the owner still
         lands. Append-only prevents removal, not multiple ownership.
 
+        **A transition whose ``to_state`` is ``CANCELLED`` carries one further
+        condition: its ``outcome`` is the member ADR-0261 §3's four limbs yield over
+        this attempt's own executions, read inside that same indivisible step.** The
+        limbs are ordered and total over ``StepStatus``'s seven members, evaluated at
+        the instant of the write over every step of every execution
+        ``GoalAttempt.execution_ids`` names:
+
+        1. ``UNCERTAIN`` where any such step stands ``INDETERMINATE`` or ``RUNNING``
+           — the same two statuses ADR-0259 §4's act 4 reads, so *outstanding* means
+           one thing in the corpus;
+        2. otherwise ``PARTIAL`` where any such step stands ``SUCCEEDED``;
+        3. otherwise ``FAILED`` where any such step stands ``FAILED`` — reachable
+           rather than hypothetical, because "a ``FAILED`` step does not stop the
+           walk" (ADR-0255 §2);
+        4. otherwise ``CANCELLED`` — which ``PENDING``, ``AWAITING_APPROVAL`` and
+           ``SKIPPED`` steps reach.
+
+        Every other ``outcome`` is refused with ``StaleExecutionError``, which is
+        exactly the re-read-and-recompute that class means — and is why this refusal
+        takes the *stale* class where ADR-0255 §3's permanent ones do not. **The
+        store decides it and not the caller**: a claim writes an ``ExecutionState``
+        and does **not** advance ``GoalAttempt.version``, so a caller that read the
+        steps, chose ``CANCELLED`` and then committed would record *nothing was
+        outstanding* about a step a concurrent claim had just taken to ``RUNNING`` —
+        ADR-0014 §5's own reason for putting the guard in the store.
+
+        **This is the rule for every *other* caller that ends an attempt cancelled**:
+        :meth:`close_goal_abandoned` computes the limbs itself and proposes nothing.
+        **The conjunct binds on ``to_state=CANCELLED`` and on nothing else** — every
+        other transition is untouched, and no lane reads it as a general outcome
+        check. Which member a non-cancelled attempt earns stays A10's.
+
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ CANCELLED`` transition carries an ``outcome`` that is not the one
+                ADR-0261 §3's limbs yield.
             IllegalTransitionError: If the move is not legal from where the attempt
                 stands — a phase earlier than the one held, or any move out of a
                 terminal state.
@@ -5076,6 +5132,30 @@ class PlanStore(Protocol):
         a second place the vocabulary is decided". Which acts may write which member is
         the caller's rule, not this member's: ADR-0250 writes exactly two through it —
         ``ACTIVE`` on a reopen (§13) and ``ABANDONED`` on ``abandon_goal`` (§12).
+        **It is no longer the *only* route to** ``ABANDONED``:
+        :meth:`close_goal_abandoned` writes that member too, and no other (ADR-0261
+        §2, partially superseding ADR-0250 §9 in that one member).
+
+        **A ``→ ABANDONED`` write is refused where the goal has an attempt in a
+        non-terminal** :class:`~ai_assistant.core.types.AttemptState`, **decided in the
+        same indivisible step as the write** and refused with ``StaleExecutionError``
+        — the ground moves under a re-read, because the caller's correct response is to
+        end that attempt and write again (ADR-0261 §2). It binds on **every** caller of
+        this member; :meth:`close_goal_abandoned` satisfies it **by construction**,
+        ending the goal's live attempts in the step that closes it, and needs no
+        refusal of its own.
+
+        **That an ``ABANDONED`` goal never carries a live attempt is the store's
+        invariant and not one member's**, which is why it is stated here and on
+        :meth:`open_attempt` rather than inside one act. **It is deliberately not
+        stated over ``ACHIEVED``**: a ``→ ACHIEVED`` write over a live attempt is
+        admitted exactly as it is today, and ``ACTIVE`` on ADR-0250 §13's reopen is
+        untouched — which is what keeps the reopen sequence (status first, then the new
+        attempt) the one sequence that works. **This member still refuses no status
+        member**: what is refused is a *write that would leave two records
+        inconsistent*, so ADR-0250 §9's "which acts may write which member is the
+        caller's rule" stays true word for word. **It serialises no openers** (ADR-0261
+        §11).
 
         Args:
             goal_id: The goal to move.
@@ -5087,8 +5167,161 @@ class PlanStore(Protocol):
             The goal as written, with ``version`` advanced by one.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on.
+            StaleExecutionError: If the stored version has moved on, or a
+                ``→ ABANDONED`` write is taken over a goal holding a non-terminal
+                attempt (ADR-0261 §2).
             PlanningError: If ``goal_id`` names no stored goal.
+        """
+        ...
+
+    async def close_goal_abandoned(
+        self, goal_id: str, /, *, at: UtcInstant, expected_version: int
+    ) -> bool:
+        """End the goal's live attempts, close it, and say what was outstanding.
+
+        ADR-0261 §2's one member, and **in one indivisible step** it does three things
+        and nothing else.
+
+        1. It commits **every attempt of the goal standing in a non-terminal**
+           :class:`~ai_assistant.core.types.AttemptState` to ``CANCELLED``, each
+           carrying the :class:`~ai_assistant.core.types.AttemptOutcome` ADR-0261 §3's
+           four limbs yield **over that attempt's own executions** and ``ended_at`` at
+           ``at``. It **computes those limbs itself and proposes nothing**, which is
+           why they are evaluated here rather than by a caller: a claim advances no
+           ``GoalAttempt.version``, so a caller's read of an attempt's steps is not
+           ordered against one.
+        2. It writes ``GoalStatus.ABANDONED`` and advances ``Goal.version``,
+           **advancing each ended attempt's own ``version`` by one in the same step**
+           — so an ``AttemptTransition`` built *before* the closure is **stale** and
+           refuses rather than appending a reference to a record that is now terminal.
+        3. It **returns whether any step of any execution of any attempt of that goal
+           stood** ``INDETERMINATE`` **or** ``RUNNING`` **at that same instant** —
+           :meth:`has_outstanding_effect`'s predicate over the same goal-wide scope,
+           evaluated inside the same step. No lane gives the act a predicate of its
+           own, a per-attempt scope, or a second definition of *outstanding*.
+
+        **Stated over the *set* and never over the current row**: *at most one live
+        attempt per goal* is an invariant no store enforces, so ending only the current
+        attempt would leave an older live one under a closed goal. Where the goal has
+        **no** non-terminal attempt, no attempt write is made and the rest is unchanged.
+
+        **The three are one step because every two-step arrangement loses the answer.**
+        A predicate read *before* the status write is falsified between them; one
+        computed inside a closing write that follows separate attempt commits misses a
+        step that reached ``SUCCEEDED`` in between; and an *older* attempt the act does
+        not touch can resolve between any two writes. **The window is the defect, not
+        the guard placed in it** — no lane splits this into two writes, computes the
+        answer in the engine, or adds a guard to a window this member does not have.
+
+        **It writes nothing else**: not the engagement stamp, not the interpretation,
+        no ``StepTransition``. **It moves no step and ends no execution**: it disposes
+        of no ``PENDING`` step, writes no ``SkipReason``, commits nothing to
+        ``SKIPPED`` or ``SUPERSEDED``, and calls no ``StepRunner``, ``StepExecutor`` or
+        ``ToolInvoker``. A step a claim already carried keeps the status its own
+        disposal gives it.
+
+        **It is all-or-nothing, so there is no partial act and no residual**: it
+        either commits every write and answers, or **fails having written nothing**.
+        No interleaving leaves an ``ACTIVE`` goal with cancelled attempts, an
+        ``ABANDONED`` goal with a live one, or a goal durably closed whose answer was
+        lost; a failure propagates and the goal is not closed, and a retry re-runs the
+        act whole against the state the store still holds. **No lane adds a sweep, a
+        repair pass, a fail-closed ordering or a durable act identity.**
+
+        **Cancellation is the one exception, and it is stated rather than assumed**
+        (issue #2420, ADR-0060 §1). A ``CancelledError`` delivered while this call is
+        in flight leaves its effect **indeterminate to the caller**: the indivisible
+        step may or may not have committed, and *"the caller may assume neither, and in
+        particular may not assume the write did not land"*. What ADR-0060 §1 buys is
+        that **the resource is safe and the cancellation arrives**, never that the work
+        stopped — a write cancelled after its ``COMMIT`` is durably written. So the
+        all-or-nothing clause above is a rule about a **store fault**: either outcome
+        is admitted at cancellation, and a caller that must know re-reads the goal
+        rather than inferring from the raise. The store's own obligation is unweakened
+        — no half-written act, no attempt left cancelled under an open goal, and the
+        goal readable afterwards either way.
+
+        **The answer is a snapshot at the instant the call took**, and is not falsified
+        by a step that resolved afterwards: a later :meth:`has_outstanding_effect` is
+        the accurate answer to a different question, and nothing makes this one durable
+        or re-reads it to keep it current.
+
+        Args:
+            goal_id: The goal to close.
+            at: The instant of the act, from the caller's injected clock.
+            expected_version: The ``Goal.version`` this was computed against.
+
+        Returns:
+            Whether any step of any execution of any attempt of that goal stood
+            ``INDETERMINATE`` or ``RUNNING`` at the instant the writes took.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on. A lost
+                ``Goal.version`` is the **only** way this member takes that class —
+                the outcome is computed inside the write and cannot be stale against
+                its own caller — and a caller re-reads and retries **once**, re-taking
+                its own first-read decision rather than the call (ADR-0261 §2).
+            PlanningError: If ``goal_id`` names no stored goal — never an answer,
+                because an answer would report an abandonment no write performed — or
+                if the goal is already **closed**, ``ACHIEVED`` or ``ABANDONED``. The
+                closed-goal refusal is deliberately **not** ``StaleExecutionError``: no
+                re-read makes that write valid, and a store must not be drivable into
+                writing ``ABANDONED`` over ``ACHIEVED`` by any caller.
+        """
+        ...
+
+    async def has_outstanding_effect(self, goal_id: str, /) -> bool:
+        """Say whether any action of this goal is outstanding (ADR-0261 §6).
+
+        **True where any step of any execution any attempt of that goal opened stands**
+        ``INDETERMINATE`` **or** ``RUNNING``, and false otherwise — the same two
+        statuses ADR-0261 §3's limb 1 and ADR-0259 §4's acts 3 and 4 read, so
+        *outstanding* means one thing in the corpus. It is the predicate
+        :meth:`close_goal_abandoned` answers with, over the same scope.
+
+        **It reads inside one indivisible step**, so the answer corresponds to a state
+        the store actually held and **no sequence of concurrent claims and resolutions
+        makes it false while an effect was outstanding throughout** — which a
+        per-execution walk cannot promise. That, and a bound on the *engine's* reads,
+        is what the member buys: a walk would call ``attempts_of`` then
+        ``get_execution`` over a history ADR-0249 §5 and §12 leave append-only and
+        unbounded. **It is not a latency guarantee** and does not by itself bound a
+        store's own work.
+
+        ***Outstanding* is the step's status and never the presence of an effect
+        key.** A claimed **read** answers true exactly as a claimed write does:
+        ADR-0259 §1 gives a read no effect key, yet that decision's own §4 moves an
+        attempt on an ``INDETERMINATE`` step whatever tool it ran, so a predicate
+        filtered to side-effecting steps would be a second answer to one question. The
+        word *effect* is R78's, and nothing here asserts that an ``EffectKey`` exists
+        or that a read performs one — only that **a call of this goal is outstanding**.
+
+        **Goal-wide and never per-attempt**: a goal reopened after a cancellation that
+        left an ``INDETERMINATE`` step carries that uncertainty on an **older**
+        attempt, and an attempt-scoped answer would contradict the listing it is read
+        beside.
+
+        **A query and never a second authority.** The authoritative record stays the
+        step's own status (ADR-0255 §6), and **no persisted field, flag or counter is
+        added to any ``core`` type, to ``PlanExport`` or to any row a consumer reads**;
+        nothing is written at claim time and no lane caches the answer across calls.
+        **It is never derived from a terminal ``AttemptOutcome``**, which is what lets
+        the answer *clear*: a cancelled attempt recorded ``UNCERTAIN`` carries that
+        word for ever, truthfully, about what that attempt produced, so a flag derived
+        from it could never go false. What is **not** forbidden is how a conforming
+        store finds the answer — an index, a materialised set or any other structure
+        **private to one implementation**, derived from the statuses and read by
+        nothing outside it, is that implementation's to add.
+
+        Args:
+            goal_id: The goal to ask about.
+
+        Returns:
+            ``True`` where some step of the goal's history stands ``INDETERMINATE`` or
+            ``RUNNING``, and ``False`` otherwise. **An unknown ``goal_id`` answers
+            ``False``**, never a raise — the shape :meth:`get_goal` and
+            :meth:`attempts_of` already take, and the one case this member and
+            :meth:`close_goal_abandoned` part on.
         """
         ...
 
@@ -5410,8 +5643,10 @@ class PlanStore(Protocol):
         **A ``→ RUNNING`` claim carries one further condition: the plan the execution
         runs targets its goal's current interpretation revision** (ADR-0249 §8). A
         claim against a plan whose ``targets_revision`` is absent, or names any other
-        revision, is refused with the error class a stale ``expected_version``
-        already raises. **The store reads the plan and the goal inside the same
+        revision, is refused with :class:`~ai_assistant.core.errors.ClaimRefused`
+        (ADR-0261 §7, partially superseding ADR-0249 §8's choice of class): it is one
+        of the two *liveness* refusals, the one a **correction** produces. **The store
+        reads the plan and the goal inside the same
         indivisible step as the claim**, so there is no separate read on which a
         decision is taken, and no implementation satisfies this rule by a read of the
         goal taken outside the claim.
@@ -5455,21 +5690,37 @@ class PlanStore(Protocol):
         act answering what it is paused on; a duplicated ownership is refused whichever
         attempt is supplied; and a persisted successor is never un-persisted. Naming a
         different attempt or acting on a later turn is a **different claim**, not a
-        retry of this one. The stale-revision refusal above keeps
-        ``StaleExecutionError`` and is untouched: it compares a value that **moves**.
+        retry of this one.
+
+        **The attempt conjunct's *state* limb takes**
+        :class:`~ai_assistant.core.errors.ClaimRefused` (ADR-0261 §7, partially
+        superseding ADR-0255 §3 in the class alone) — the attempt being terminal or
+        paused — **still a ``PlanningError``, still not a ``StaleExecutionError``**, so
+        §3's own reason for that choice is exercised rather than contradicted. **Its
+        other three limbs and the successor conjunct keep the bare ``PlanningError``
+        exactly**, each being a defect of the *walk* rather than a state a user act
+        produced; a driver catches the first and none of the others. The
+        revision conjunct above takes ``ClaimRefused`` for the same reason — it is the
+        **other** state a user act produces — and a lost ``expected_version`` on the
+        same call keeps ``StaleExecutionError`` untouched: it compares a value that
+        **moves**, and a driver must be able to tell an ordinary compare-and-swap loss
+        from *the user changed something*.
 
         **A ``→ RUNNING`` transition carrying no ``attempt_id`` is unconstructible**
         (:class:`~ai_assistant.core.types.StepTransition`), so no implementation is
         asked to refuse one — the boundary is in one place rather than two.
 
         Raises:
-            StaleExecutionError: If the stored version has moved on, or a
-                ``→ RUNNING`` claim names a plan that does not target its goal's
-                current revision.
+            ClaimRefused: If a ``→ RUNNING`` claim names a plan that does not target
+                its goal's current revision (ADR-0249 §8), or names an attempt whose
+                state is terminal or paused (ADR-0255 §3's state limb) — the two
+                refusals a **user act** produces (ADR-0261 §7).
+            StaleExecutionError: If the stored version has moved on.
             IllegalTransitionError: If the move is not legal from the step's
                 current status.
             PlanningError: If the execution or step does not exist, or a
-                ``→ RUNNING`` claim fails either of ADR-0255 §3's conjuncts.
+                ``→ RUNNING`` claim fails ADR-0255 §3's successor conjunct or any of
+                the attempt conjunct's other three limbs.
         """
         ...
 

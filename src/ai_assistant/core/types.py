@@ -7679,12 +7679,26 @@ TERMINAL_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
 
 
 class AttemptOutcome(StrEnum):
-    """What one attempt produced (ADR-0249 §5).
+    """What one attempt produced (ADR-0249 §5, ADR-0261 §3).
 
-    A **closed** enumeration of exactly **six** members, each valued by its
+    A **closed** enumeration of exactly **seven** members, each valued by its
     lower-cased name and added to but never renamed. **Which member a given attempt
-    earns is A10's**; this vocabulary is fixed here, because a field typed by an enum
-    nobody has written is not a contract.
+    earns is A10's — for every attempt but a cancelled one** (ADR-0261 §3, partially
+    superseding §5's division); this vocabulary is fixed here, because a field typed
+    by an enum nobody has written is not a contract.
+
+    **The seventh is** :attr:`CANCELLED`, **and it is not A10's**, because A10 reaches
+    no cancelled attempt: ADR-0249 §5's own "no transition leaves a terminal member"
+    is what makes that true rather than a courtesy. Which member a *cancelled* attempt
+    earns is ADR-0261 §3's four ordered limbs, evaluated **inside the same indivisible
+    step as the write** by whichever ``PlanStore`` member takes it — never by a
+    caller, whose read of an attempt's steps is not ordered against a claim.
+
+    **The outcome is not a second record of the state.**
+    :class:`AttemptState` says *why* the attempt stopped and this says *what it
+    produced*; no consumer derives either from the other, and **no lane reads
+    ``outcome is CANCELLED`` as the test for whether an attempt was cancelled** —
+    the state is that test (ADR-0261 §3).
     """
 
     VERIFIED = "verified"
@@ -7698,6 +7712,20 @@ class AttemptOutcome(StrEnum):
     It is not a weaker :attr:`VERIFIED` and no lane reads it as one: it asserts that
     a reply exists, that no step failed and that no condition blocked, and it asserts
     nothing about whether the reply is correct."""
+    CANCELLED = "cancelled"
+    """The attempt produced **nothing**, and nothing of it is outstanding (ADR-0261 §3).
+
+    No step of the attempt succeeded, none failed and none is outstanding. It is the
+    fourth and last of ADR-0261 §3's limbs — the one ``PENDING``,
+    ``AWAITING_APPROVAL`` and ``SKIPPED`` steps reach — and the least it can say,
+    which is why the other three take precedence over it.
+
+    **A seventh member rather than the least wrong of six**: ADR-0249 §5's validator
+    makes an outcome compulsory on a terminal state, and an attempt a user ended
+    before it produced anything is none of them — :attr:`FAILED` reports a failure the
+    system did not have, :attr:`CONDITION_PREVENTED` names a condition nobody
+    evaluated, :attr:`PARTIAL` claims part of the work was done, and :attr:`ANSWERED`
+    asserts a reply exists."""
 
 
 class AttemptKind(StrEnum):
@@ -13022,24 +13050,40 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 14 because ``Goal`` gains ``quotes`` and ``quotes_elided``**
-    (ADR-0267 §11) — one ground, reaching ``tuple[Goal, ...]``. ``PlanExport`` gains
+    **``schema_version`` is 15 because ``AttemptOutcome`` gains ``CANCELLED``**
+    (ADR-0261 §10), which is ADR-0039 §10's mechanism — "``StepExecution`` is inside
+    the export, so its shape changing is exactly what the version exists to
+    announce" — applied **for the first time to a value rather than to a shape**. This
+    document carries ``tuple[GoalAttempt, ...]``, so a document written after that
+    decision may carry an ``outcome`` of ``"cancelled"`` that an earlier reader's
+    closed six-member enumeration refuses outright. **The ground is stated honestly as
+    an extension rather than borrowed**: §10's sentence says a shape change announces
+    itself, not that only a shape change does, and ADR-0014 §5's own reason for the
+    field is that "an export outlives the code that wrote it … a reader must be able to
+    tell which shape it is holding". The direction of the extension is the announcing
+    one, and it is **a stacked addition owing ADR-0039 no record**. **A stored-record
+    version and not a second wire ground**: ``PlanExport`` crosses no frame and is
+    emitted by no peer, and ADR-0261 §10's ``PROTOCOL_VERSION`` move rests on
+    ``GoalAbandonment``, ``GoalSummary`` and ``TurnOutcome`` instead.
+
+    **It was 14 because ``Goal`` gained ``quotes`` and ``quotes_elided``**
+    (ADR-0267 §11) — one ground, reaching ``tuple[Goal, ...]``. ``PlanExport`` gained
     **no member**: an :class:`ActionQuote` rides **inside** ``Goal``, which ``goals``
     already carries, so ADR-0014 §5's closure rule is satisfied by construction and is
     extended by nothing, and ``delete_goal`` removes a goal's quotes with the goal. The
-    version moves on ADR-0039 §10's own mechanism, because ``Goal`` is inside the
+    version moved on ADR-0039 §10's own mechanism, because ``Goal`` is inside the
     export and its shape changing is exactly what the version exists to announce, and a
     defaulted field on a frozen model is still a shape change to every document that
     carries it: ``model_dump()`` emits ``quotes`` and ``quotes_elided`` on **every**
     goal, which an older reader's ``extra="forbid"`` refuses exactly as
-    ``targets_revision`` is. **It is a stored-record version and not a wire ground**:
+    ``targets_revision`` is. **It was a stored-record version and not a wire ground**:
     ``PlanExport`` crosses no frame and is emitted by no peer, and ADR-0267 §11's
-    ``PROTOCOL_VERSION`` move rests on the two shapes that *do* cross — neither of them
-    ``Goal``. **No lane invents a quote for a stored goal**: a price nothing read is a
-    price no record holds.
+    ``PROTOCOL_VERSION`` move rested on the two shapes that *do* cross — neither of
+    them ``Goal``. **No lane invents a quote for a stored goal**: a price nothing read
+    is a price no record holds.
 
-    **It was 13 because ``Goal`` gains ``intended_actions`` and
-    ``PlanStep`` gains ``intended_action``** (ADR-0265 §5) — two independent grounds,
+    **It was 13 because ``Goal`` gained ``intended_actions`` and
+    ``PlanStep`` gained ``intended_action``** (ADR-0265 §5) — two independent grounds,
     each sufficient on its own, reaching ``tuple[Goal, ...]`` and
     ``tuple[ActionPlan, ...]``. ``PlanExport`` gains **no member**: an
     :class:`IntendedAction` rides **inside** ``Goal``, which ``goals`` already carries,
@@ -13194,12 +13238,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[14] = Field(
-        default=14,
+    schema_version: Literal[15] = Field(
+        default=15,
         description=(
-            "Shape of this export, pinned to exactly 14 (ADR-0039 §10, ADR-0267 §11): an "
+            "Shape of this export, pinned to exactly 15 (ADR-0039 §10, ADR-0261 §10): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[14]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[15]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -25478,6 +25522,31 @@ class GoalSummary(BaseModel):
         last_engaged_at: When a turn last engaged it, absent on a goal no turn has.
         clarification: The goal's open question where one stands, and ``None``
             otherwise.
+        effect_in_flight: Whether an action of this goal is **outstanding** — claimed,
+            possibly sent, outcome unknown (ADR-0261 §6). True where **any step of any
+            execution any attempt of that goal opened** stands ``INDETERMINATE`` or
+            ``RUNNING``, and false otherwise: the same two statuses ADR-0261 §3's limb
+            1 and ADR-0259 §4's acts 3 and 4 read, so *outstanding* means one thing in
+            the corpus. **Computed and never stored**, on :attr:`paused`'s own clause
+            one fact over — **the engine computes it**, from
+            ``PlanStore.has_outstanding_effect``, so two surfaces cannot render it
+            differently and no adapter derives it.
+
+            **Goal-wide and never per-attempt**, so a goal reopened after a
+            cancellation that left an ``INDETERMINATE`` step on an *older* attempt
+            still reads true. **Derived from the authoritative record and never from
+            an** :class:`AttemptOutcome`, which is what lets it **clear**: a terminal
+            attempt's outcome is immutable, so a flag derived from one could never go
+            false, and it is the step's own ``INDETERMINATE → SUCCEEDED`` resolution
+            that makes this false (ADR-0255 §6, ADR-0259 §3).
+
+            ***In flight* means the claim landed, never that the call left**: it
+            asserts the step is ``RUNNING`` or ``INDETERMINATE`` and **nothing** about
+            whether ``ToolInvoker.invoke`` was entered, and no surface renders it as
+            *the action was sent*. The word *effect* is R78's: the field asserts no
+            ``EffectKey`` exists, and **a claimed read answers true** exactly as a
+            claimed write does — narrowing it to side-effecting steps would give
+            *outstanding* a second meaning (ADR-0261 §6).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -25493,6 +25562,9 @@ class GoalSummary(BaseModel):
     )
     clarification: Clarification | None = Field(
         default=None, description="The goal's open question, where one stands (ADR-0250 §15)."
+    )
+    effect_in_flight: bool = Field(
+        default=False, description="Whether an action of this goal is outstanding (ADR-0261 §6)."
     )
 
 
@@ -25521,9 +25593,9 @@ class ClarificationWithdrawal(StrEnum):
 
 
 class GoalAbandonment(StrEnum):
-    """What became of a request to abandon a goal (ADR-0250 §12).
+    """What became of a request to abandon a goal (ADR-0250 §12, ADR-0261 §6).
 
-    A **closed** enumeration of exactly **three** members, each valued by its
+    A **closed** enumeration of exactly **four** members, each valued by its
     lower-cased name. The vocabulary is *added to and never renamed*.
 
     ``AssistantEngine.abandon_goal`` is **the only thing in this system that writes**
@@ -25535,14 +25607,47 @@ class GoalAbandonment(StrEnum):
     """
 
     ABANDONED = "abandoned"
-    """The goal's status was moved to ``ABANDONED`` and its open question withdrawn.
+    """The goal was given up and **nothing of it was outstanding** (ADR-0261 §2, §6).
 
-    It does **not** move the attempt's state, write an ``AttemptOutcome``, end an
-    execution or cancel anything in flight: what becomes of an attempt on an abandoned
-    goal is A9's (§17)."""
+    Its status was moved to ``ABANDONED``, its open question withdrawn, and **every
+    attempt of it standing in a non-terminal** :class:`AttemptState` **ended**
+    ``CANCELLED`` carrying the :class:`AttemptOutcome` ADR-0261 §3's four limbs yield
+    over that attempt's own executions — all in one indivisible step. That last is
+    ADR-0261 §2 completing ADR-0250 §12's act: A9 is discharged rather than still
+    owed, and this member's earlier promise that the act "does not move the attempt's
+    state" no longer holds.
+
+    It still **ends no execution and cancels nothing in flight**: it disposes of no
+    ``PENDING`` step, writes no ``SkipReason``, commits nothing to ``SKIPPED``, and a
+    step a claim already carried keeps the status its own disposal gives it."""
+
+    ABANDONED_EFFECT_IN_FLIGHT = "abandoned_effect_in_flight"
+    """The goal was given up **and an action of it had been claimed** (ADR-0261 §6).
+
+    Everything :attr:`ABANDONED` says, and in addition: at the one instant the act's
+    single store call took, **some step of some execution of some attempt of that
+    goal stood** ``INDETERMINATE`` **or** ``RUNNING``. Returned exactly where
+    ``PlanStore.close_goal_abandoned`` answers ``True``, so the fact is the state of
+    the whole goal at the instant the writes took and is read from no second call.
+
+    **It asserts that a claim landed and never that a call left**, and no surface
+    renders it as *the action was sent*, as *the action did not happen*, or as
+    anything the user does withdrawing it — ADR-0261's own title. It is a
+    **successful cancellation**, exactly as :attr:`ABANDONED` is.
+
+    **A snapshot, not a durable fact**: it is not falsified by a step that resolved
+    afterwards, and :attr:`GoalSummary.effect_in_flight` — the same predicate over the
+    same goal-wide scope, read later — is the accurate answer to a different
+    question. Nothing makes the act's answer durable or re-reads it to keep it
+    current, and the two are never required to agree across two instants."""
 
     ALREADY_CLOSED = "already_closed"
-    """The goal was already ``ACHIEVED`` or ``ABANDONED``, so nothing moved (§12)."""
+    """The goal was already ``ACHIEVED`` or ``ABANDONED``, so nothing moved (§12).
+
+    **It keeps exactly that meaning**: a retry of an act that did complete answers it,
+    and nothing re-derives an abandonment answer for a goal already ``ABANDONED``.
+    That loses nothing, because :attr:`GoalSummary.effect_in_flight` keeps saying what
+    is outstanding for as long as it is true (ADR-0261 §2)."""
 
     NO_SUCH_GOAL = "no_such_goal"
     """No goal of that id is held, which is a result and never a raise (§12)."""
@@ -25856,6 +25961,86 @@ class OutboundStatement(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+# --- what a turn did instead of driving, when a store refused its claim (ADR-0261 §7)
+
+
+class DriveWithheld(StrEnum):
+    """Where a goal stands, on a turn whose claim a store refused (ADR-0261 §7).
+
+    A **closed** enumeration of exactly **seven** members, each valued by its
+    lower-cased name. The vocabulary is *added to and never renamed*.
+
+    **Each member names exactly one stored fact** the engine's post-refusal read can
+    see, and the seven are exactly the states a **user act** produces. There is
+    deliberately **no member for a refusal nothing explains**: where a
+    :class:`~ai_assistant.core.errors.ClaimRefused` arrives but the read establishes
+    none of these states, it **propagates** rather than being given a name it could not
+    support. And there is **no member for the successor conjunct**, whose refusal is
+    the turn's own defect rather than the user changing something (ADR-0255 §5,
+    ADR-0228 §5) — no lane adds a ``PLAN_SUPERSEDED`` member or a successor query.
+
+    **The field names the state the goal is in, never the reason the store refused.**
+    One class covers both liveness raisers and says which of the two fired, so the
+    member is read, rendered and named as *where the goal stands* and never as *why
+    the step was not claimed*; no lane derives a member from the class or adds one
+    per conjunct.
+
+    **The read's order is normative and it is the one that cannot compose a false
+    report**: the attempt, then the plan, then the **goal last**, with the goal's
+    three tests taking priority. ADR-0261 §2's act moves an attempt and its goal in
+    **one** store step, so an abandonment landing between two reads is seen by the
+    later one — reading the goal last makes the goal fact at least as fresh as the
+    attempt fact. The reverse order is what a false report is composed from.
+
+    **A goal's disposition and its attempt's state are two facts and get two
+    members**, and no member asserts the goal is closed unless it is: ADR-0250 §1
+    rules ``BLOCKED`` **open**, and ADR-0249 §4 that an attempt reaching a terminal
+    state does not move its goal's status. **No lane collapses any two of the
+    seven** — not :attr:`GOAL_CANCELLED` with :attr:`ATTEMPT_CANCELLED`, and not
+    :attr:`GOAL_BLOCKED` with :attr:`ATTEMPT_PAUSED`.
+
+    **A driver *skip* is not one of these** and gains no carrier here: a step the walk
+    moved ``PENDING → SKIPPED``, and a step swept ``SUPERSEDED``, already reach
+    composing through ``StepOutcome``'s undriven set (ADR-0255 §11).
+    """
+
+    GOAL_CANCELLED = "goal_cancelled"
+    """The goal's status is ``ABANDONED`` — the user gave it up (ADR-0250 §12)."""
+
+    GOAL_ACHIEVED = "goal_achieved"
+    """The goal's status is ``ACHIEVED``, so it is already reached."""
+
+    GOAL_BLOCKED = "goal_blocked"
+    """The goal's status is ``BLOCKED``.
+
+    It **cannot currently be reached and is still open** (ADR-0250 §1), which is why
+    this is not :attr:`GOAL_CANCELLED` and not :attr:`ATTEMPT_PAUSED`."""
+
+    ATTEMPT_CANCELLED = "attempt_cancelled"
+    """The attempt the claim named is ``CANCELLED`` on a goal that is **open**.
+
+    Reached on a goal ADR-0250 §13 has **reopened**, which writes ``ACTIVE`` and
+    leaves the cancelled attempts of the abandonment standing (ADR-0261 §5). A turn
+    still holding a plan of one meets an open goal and a cancelled attempt, and the
+    goal tests do not answer for it — a member saying ``GOAL_CANCELLED`` there would
+    say the goal was given up when the user has just taken it up again."""
+
+    ATTEMPT_ENDED = "attempt_ended"
+    """The attempt the claim named is ``ENDED``, and **the goal is not thereby
+    closed** (ADR-0249 §4): asking again starts a new one (ADR-0250 §12)."""
+
+    ATTEMPT_PAUSED = "attempt_paused"
+    """The attempt is ``AWAITING_CLARIFICATION``, ``AWAITING_AUTHORIZATION`` or
+    ``BLOCKED`` — the three ADR-0249 §5 derives *paused* from. The goal is waiting on
+    the user."""
+
+    UNDERSTANDING_CHANGED = "understanding_changed"
+    """The plan's ``targets_revision`` is not the goal's current ``revision``.
+
+    A correction replaced what the user asked for (ADR-0249 §1, §8), so the plan no
+    longer matches what the goal now asks and asking again plans afresh."""
 
 
 class TurnOutcome(BaseModel):
@@ -26174,6 +26359,17 @@ class TurnOutcome(BaseModel):
             turn carries one: an undecided turn with no reply would answer a **spoken**
             request with silence, since ADR-0200 §4 makes ``spoken`` the rendering of
             ``outcome.reply`` and of nothing else.
+        drive_withheld: Where this turn's goal stands, on a turn that returned after a
+            store refused its claim, and ``None`` on every other returned outcome
+            (ADR-0261 §7). See the field for the whole of the rule — what makes it
+            non-``None``, why a propagating refusal is outside the invariant rather
+            than a case of it, and why a driver *skip* never sets it.
+
+            **A widening rather than a change**, which is ADR-0197's move and
+            ADR-0235's: a ``None``-defaulting member alters neither ADR-0170 §4's
+            three ``reply``-``None`` shapes nor its one ``reply_degraded`` shape, so
+            no clause of ADR-0170 is superseded, narrowed or read more widely, and the
+            value it adds to ADR-0198 §2's enumeration changes no value that fixes.
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -26300,6 +26496,35 @@ class TurnOutcome(BaseModel):
             "authority comes into being rather than only afterwards. The confirmation's "
             "no-identifier rule is stated over a row the user has **not** established "
             "and is not read onto this member."
+        ),
+    )
+    drive_withheld: DriveWithheld | None = Field(
+        default=None,
+        description=(
+            "Where this turn's goal stands, on a turn that **returned after a store "
+            "refused its claim** and the post-refusal read established one of "
+            ":class:`DriveWithheld`'s seven states, and ``None`` on every other "
+            "returned outcome (ADR-0261 §7).\n\n"
+            "**Non-``None`` on exactly the turns ADR-0261 §7 composes**: a "
+            ":class:`~ai_assistant.core.errors.ClaimRefused` ended the walk, nothing "
+            "further was dispatched, the claim was not retried, no second "
+            "``Planner.plan`` call was taken, and the turn composed a reply anyway "
+            "because a refused claim is **not a fault** \u2014 every cause is *the user "
+            "changed something*. ``None`` on every turn that dispatched, that stopped "
+            "on one of ADR-0255 \u00a72's five, that drove nothing at all, and on "
+            "ADR-0198 \u00a71's restatement.\n\n"
+            "**A refusal that *propagates* returns no outcome at all**, so it is "
+            "outside this invariant rather than a case of it \u2014 which is why the "
+            "invariant is stated over turns that returned and not over walks that met "
+            "a refusal. Every exception that is not a ``ClaimRefused`` propagates "
+            "unchanged, and so does a ``ClaimRefused`` whose state the read cannot "
+            "see: a turn reporting one of those as a withheld drive would assert "
+            "something about the step that nothing established.\n\n"
+            "**It says where the goal stands and never why the store refused**, and it "
+            "asserts nothing about the step \u2014 not that it would have succeeded, not "
+            "that its effect did not happen, and not that no step of this plan was "
+            "ever started. **It is never written for a driver *skip***, which reaches "
+            "composing through the undriven set instead (ADR-0255 \u00a711)."
         ),
     )
 
