@@ -362,19 +362,28 @@ record of the same durability.
 > read appended like any other (above) and minting one from an output recorded earlier would state
 > a reading nobody took at an instant nobody observed.
 
-> **Normative — a mint is taken in the step of the walk that recorded the output it reads, and
-> never afterwards, which is what makes position reading order.** **No lane defers, queues,
-> schedules, replays or re-drives a mint**, and no pass over stored outputs takes one later; a
-> `record_quote` call retried after an **ambiguous** result — the write committed, the answer
-> lost — is retried **there**, in that same step, and appends at most a **second quote equal to
-> the first**, which then governs, carries the same number, and makes the append **idempotent in
-> effect though not in storage**, its only cost a slot against `MAX_ACTION_QUOTES` (§2). **So no
-> append can put an older reading after a newer one**: every append is made at the moment of its
-> own read, no reading waits behind a later one, and the earlier price is never revived — ADR-0266
-> §7's *"An earlier quote is consulted in no case"* held by the order of the writes rather than by
-> a test at the store, which §1 and §2 each forbid the store to make. **No lane adds a duplicate
-> test, an idempotency key for a quote, a sequence number or a recovery pass** ahead of the
-> decision §10 books.
+> **Normative — a mint is taken in the step of the walk that recorded the output it reads and never
+> afterwards, and a write the store refuses is re-read rather than rebased.** **No lane defers,
+> queues, schedules, replays or re-drives a mint**, and no pass over stored outputs takes one
+> later. The `expected_version` a mint carries is the version the goal held when it read it, so a
+> **concurrent writer** — two turns of one conversation are **not** serialized (ADR-0255 §3, on
+> ADR-0014's note of 2026-08-25) — makes that write stale and `record_quote` refuses it, writing
+> nothing (§2). **The minter then re-reads the goal at most once and takes exactly one of three
+> dispositions, comparing records and never instants**: where the goal's **last quote naming that
+> action** is the member it read, or there is still none, it appends against the new version;
+> where that member **equals the quote it is minting**, the write already landed and it **stops**,
+> which is the ambiguous-retry case — the write committed, the answer lost — and is the whole of
+> how a mint is idempotent; and where that member is a **different** quote, it **abandons the mint
+> and appends nothing**, the recorded later reading standing and its own being lost. A second
+> refusal abandons the mint in the same way. **So no append ever puts an older reading after a
+> newer one for one action**, however turns interleave — ADR-0266 §7's *"An earlier quote is
+> consulted in no case"* held by the order of the writes rather than by a test at the store, which
+> §1 and §2 each forbid the store to make. **An abandoned mint is a lost reading and never a
+> revival**: the goal keeps a reading nothing displaced, §7's projection renders that one and
+> ADR-0254 §13's recheck reads it, so the cost is exactly the window §6 discloses and refuses to
+> close locally. **No lane rebases a stale quote write unconditionally, mints a sequence number,
+> holds a lock across the read, adds an idempotency key or makes the mint atomic with the
+> transition** ahead of the decision §10 books.
 
 ### 5. How the policy obtains one: a new Protocol, keyed and never asked, failing closed
 
@@ -714,16 +723,13 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
   concurrent.** §4 rules the mint non-atomic with the transition that recorded the output and
   states both residuals as fail-closed: a lost mint costs a question, a repeated one costs a slot.
   **Nothing here reconciles either**, and no lane writes a duplicate test, an idempotency key for a
-  quote or a recovery pass over stored outputs. **And position is reading order because §4 takes
-  every mint in the step that read it** — which leaves exactly one case position cannot speak to:
-  two reads of **one** action taken concurrently within one walk, where the appends may land in
-  either order and an earlier reading could sit last. **No clause here orders them**, a store-side
-  order being what §1 declines a quote an identity for and what §2 declines an instant to compare;
-  a re-quote as the corpus reaches one is a **subsequent turn** (the owner's sequencing ruling) and
-  is never concurrent with its predecessor. Fired by the decision that reconciles an attempt's
-  unfinished work at a turn-start pass, which is where ADR-0259 §1 already puts that shape of
-  question, and by the decision that gives a quote a store-authored sequence should a plan ever
-  read one price twice at once.
+  quote or a recovery pass over stored outputs. **And nothing here makes a concurrently read price
+  survive**: §4 keeps position in reading order by abandoning the loser of a race rather than by
+  ordering the two, so where two turns read one action at once the later writer's reading is
+  **lost** and the recorded one stands — safe against revival, and a reading the system paid for
+  and threw away. Fired by the decision that reconciles an attempt's unfinished work at a turn-start
+  pass, which is where ADR-0259 §1 already puts that shape of question, and by the decision that
+  gives a quote a store-authored order should a plan ever read one price twice at once.
 - **A quote read from anywhere but one key of one object.** §3 fixes depth one and one key pair, so
   a tool returning a **list** of priced options, a nested price, a price split across two keys, or
   two currencies in one output yields **no** quote and its acts ask. Fired by the decision stating
@@ -903,11 +909,14 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    boundaries** (§4): a walk stopped after the output transition committed and **before**
    `record_quote` leaves the step `SUCCEEDED` with its output, the goal's `quotes` **unchanged**,
    and no reconciliation on a later read — the act asks; and a mint driven twice over one output
-   appends **two** equal quotes and nothing raises, **while a later pass over that same stored
-   output mints nothing at all** — no deferred, replayed or re-driven mint exists to append an
-   older reading behind a newer one (§4), which is the arm that pins reading order onto position.
-   **And no
-   `verifies` is read**: a `SUCCEEDED` step whose plan-declared `verifies` predicate would **fail**
+   whose first write committed **appends nothing further**, the goal holding exactly one quote —
+   the ambiguous retry (§4). **And the concurrent race is driven with a
+   barrier**: a mint whose write is refused stale re-reads once and **appends** where the advance
+   touched anything but that action's quotes; **appends nothing** where that action gained a
+   **different** quote, the later reading still governing; and **appends nothing** where it gained
+   the **equal** one. No interleaving leaves an older reading last, and no later pass over a stored
+   output mints at all. **And no `verifies` is read**: a `SUCCEEDED` step whose plan-declared
+   `verifies` predicate would **fail**
    over its own output mints exactly as one whose predicate holds, the mint evaluating no
    plan-carried value and adding no evaluation site to the two ADR-0255 §8 names.
 5. **The comparison, end to end, and it is ADR-0266's own.** Against a quote for the request's
