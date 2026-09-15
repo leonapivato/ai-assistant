@@ -9860,7 +9860,7 @@ function offerGoalActs(item, goal) {
   const authorities = document.createElement("button");
   authorities.type = "button";
   authorities.textContent = "What this authorises";
-  authorities.addEventListener("click", () => listAuthorizations(goal, false));
+  authorities.addEventListener("click", () => listAuthorizations(goal));
   row.appendChild(authorities);
   if (!CLOSED_GOAL_STATUSES.includes(goal.status)) {
     const give = document.createElement("button");
@@ -9961,18 +9961,18 @@ async function abandonGoal(goal) {
 // **The goal is held rather than the goal's id**, because the panel renders the goal's
 // own outcome statement above the rows: ADR-0254 §11 renders a goal "never by its id",
 // and a re-read holding only an id would have nothing to render it by.
-let authorizedGoal = null;
-
 // How many listings this page has started. The panel is opened from a goal row, and two
 // rows pressed in quick succession are two requests that can land in either order — so
 // the count is captured when a request starts and compared when it returns, and a
 // response that is not the latest is dropped rather than rendered.
 //
-// **Without it the rows on screen and `authorizedGoal` can name different goals**: a
-// slow request for A landing after a fast one for B leaves B's statement recorded and
-// A's rows drawn, and a withdrawal taken from an A row then re-reads B and writes
-// "Withdrawn" above it — an act reported against work it was not taken on. This is
-// `runs.goals`' own arrangement one panel over. Adversarial review, round 2, `major`.
+// **Without it one goal's rows are drawn under another's name**: a slow request for A
+// landing after a fast one for B leaves B's statement at the head of the panel and A's
+// rows beneath it. This is `runs.goals`' own arrangement one panel over. Adversarial
+// review, round 2, `major`.
+//
+// **It bounds no act.** A withdrawal reports on the row it was taken on and re-reads
+// nothing, so it neither races a listing nor is lost to one (see `sayBeside`).
 let authorizationRuns = 0;
 
 // --- what an authorization says, on this page (ADR-0254 §11) ----------------
@@ -10196,7 +10196,7 @@ function readAuthorizationView(view) {
 // own subject line and the rows lead with the declaration; the **announcement** passes
 // `true`, because it has no subject line and a reader meeting it inside a reply needs to
 // know which piece of work it is about.
-function renderAuthorization(list, view, withGoal, sayFor) {
+function renderAuthorization(list, view, withGoal) {
   const item = document.createElement("div");
   item.className = "notification-row";
   if (withGoal) {
@@ -10207,46 +10207,39 @@ function renderAuthorization(list, view, withGoal, sayFor) {
   }
   renderCoverage(item, view.coverage);
   const standing = view.live ? "still stands" : "has lapsed";
-  line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
+  const status = line(item, `It ${standing}; the horizon is ${view.expires_at}.`, "hint");
   line(item, `id: ${view.id}`, "hint");
   const row = document.createElement("p");
   row.className = "choice";
   const withdraw = document.createElement("button");
   withdraw.type = "button";
   withdraw.textContent = "Withdraw this";
-  // `null` means *this row is in the panel*, whose own slot is where its act reports;
-  // a function means *this row is in a reply*, and the act reports beside it.
-  const said = sayFor(item);
-  withdraw.addEventListener("click", () =>
-    said === null ? revokeAuthorization(view) : revokeAnnouncedAuthorization(view, said)
-  );
+  withdraw.addEventListener("click", () => revokeAuthorization(view, item, status, row));
   row.appendChild(withdraw);
   item.appendChild(row);
   list.appendChild(item);
 }
 
-// Where the settlement of one act is written, for a row rendered **outside** the panel.
+// Where the settlement of one act is written: **beside the row it was taken on**.
 //
-// **An act reports where it was taken and not where its vocabulary lives.** The panel's
-// own slot (`authorization-said`) is inside a hidden section for an owner who has never
-// opened it, so an announcement's withdrawal would mutate the store and say so on a
-// screen nobody is looking at — the act working and the owner told nothing, which is the
-// opposite of ADR-0254 §11's reason for putting the handle in front of them at all.
-// Adversarial review, round 1, `blocker`.
+// **An act reports on the record it acted on, and never on a shared slot.** Three rounds
+// converged here. A panel-wide slot is invisible to an owner who reached the row through
+// a reply (round 1, `blocker`); it attributes the act to whatever listing the panel holds
+// by the time the answer lands (round 3, `major`); and dropping the sentence when the
+// panel has moved on is silence about an act that happened (round 4, `blocker`). A node
+// on the row itself is true under all three: it cannot be invisible, it cannot be
+// mis-attributed, and it is never dropped.
 //
-// The node is created beside the row it belongs to and reused, so a second press reports
-// over the first rather than stacking sentences nobody asked for.
+// The node is created once and reused, so a second press reports over the first rather
+// than stacking sentences nobody asked for.
 function sayBeside(item) {
-  return (said) => {
-    let node = item.querySelector(".authorization-said");
-    if (node === null) {
-      node = document.createElement("p");
-      node.className = "notice authorization-said";
-      item.appendChild(node);
-    }
-    node.textContent = said === null ? "" : said;
-    node.hidden = said === null;
-  };
+  let node = item.querySelector(".authorization-said");
+  if (node === null) {
+    node = document.createElement("p");
+    node.className = "notice authorization-said";
+    item.appendChild(node);
+  }
+  return node;
 }
 
 // ADR-0254 §11's announcement: authorities a turn opened **without asking**.
@@ -10263,28 +10256,23 @@ function sayBeside(item) {
 // **Silence where the turn opened none**, which is every turn that did not: the member
 // is empty then and there is no act to report.
 function renderOpenedAuthorizations(body, opened) {
-  if (!Array.isArray(opened) || opened.length === 0) {
+  // **Only an empty array is absence.** `null`, an object or a string are shapes no
+  // conforming hub sends, and reading any of them as "this turn opened none" would
+  // silently omit authorities that may have come into being — with their revocation
+  // handles. A malformed **non-empty** array is already reported; a malformed value of
+  // any other kind is reported on the same ground. Adversarial review, round 4,
+  // `major`.
+  if (Array.isArray(opened) && opened.length === 0) {
     return;
   }
-  if (!opened.every(readAuthorizationView)) {
+  if (!Array.isArray(opened) || !opened.every(readAuthorizationView)) {
     line(body, GOAL_MEMBER_UNREADABLE, "notice");
     return;
   }
   line(body, "I have taken that as standing permission:", "notice");
   // Each announcement reports its own withdrawal beside itself: this row is in the
   // reply, and the panel's slot is in a section this owner may never have opened.
-  opened.forEach((view) => renderAuthorization(body, view, true, sayBeside));
-}
-
-// What the last act on the authorizations panel did, in the vocabulary's own words.
-//
-// The quiet slot, on `sayGoalAct`'s stated reason: every member is something the hub
-// established, the two that moved nothing included, so a withdrawal that took nothing
-// back is the act working and not the act failing.
-function sayAuthorizationAct(said) {
-  const node = el("authorization-said");
-  node.textContent = said === null ? "" : said;
-  node.hidden = said === null;
+  opened.forEach((view) => renderAuthorization(body, view, true));
 }
 
 // What one piece of work still authorises (ADR-0254 §11).
@@ -10295,15 +10283,8 @@ function sayAuthorizationAct(said) {
 //
 // **Per goal, and reached from the goal it is about** — §11 adds no cross-goal read,
 // and the id this sends is the row's own rather than one typed here.
-// **`keepSaid` exists because the account of the last act would otherwise be erased at
-// the instant it was written**: `revokeAuthorization` re-reads the listing immediately
-// after writing one, and every other route into the panel clears it first. That is
-// `listGoals`' own arrangement one panel over.
-async function listAuthorizations(goal, keepSaid) {
+async function listAuthorizations(goal) {
   fault(null, "authorizations");
-  if (!keepSaid) {
-    sayAuthorizationAct(null);
-  }
   authorizationRuns += 1;
   const run = authorizationRuns;
   const half = headerHalf();
@@ -10313,12 +10294,11 @@ async function listAuthorizations(goal, keepSaid) {
   }
   try {
     const body = await relay(half, "/authorizations", { goal_id: goal.id }, "authorizations");
-    // A response that is not the latest is dropped whole: it renders nothing, it moves
-    // `authorizedGoal` not at all, and the run that overtook it owns the panel.
+    // A response that is not the latest is dropped whole: the run that overtook it owns
+    // the panel, and rendering this one would draw one goal's rows under another's name.
     if (body === null || run !== authorizationRuns) {
       return;
     }
-    authorizedGoal = goal;
     const list = el("authorization-list");
     clearNode(list);
     if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {
@@ -10348,7 +10328,7 @@ async function listAuthorizations(goal, keepSaid) {
       );
     } else {
       body.authorizations.forEach((one) =>
-        renderAuthorization(list, one, false, () => null)
+        renderAuthorization(list, one, false)
       );
       line(
         list,
@@ -10380,28 +10360,26 @@ function confirmWithdrawal(view) {
   );
 }
 
-// Withdraw one standing authority **from the listing** (ADR-0254 §11).
+// Withdraw one standing authority (ADR-0254 §11).
 //
-// **Two act functions and not one with a panel argument**, which is #1429's census
-// holding: every `fault` call names its panel with a literal, so a condition cannot be
-// sent to a slot the owner is not looking at by a variable that happened to be wrong.
-// The pair below differ in exactly that — where the sentence goes, where the fault goes,
-// and whether the listing re-reads itself — and `test_bundle` pins that they differ in
-// nothing else.
-async function revokeAuthorization(view) {
+// **One act for both places a row is offered from**, and it reports on the row rather
+// than on a panel: see `sayBeside` for the three rounds that settled that. Nothing here
+// re-reads a listing either — the row it acted on is updated in place, so there is no
+// refresh to race a newer one the owner asked for, and no sentence to lose to it.
+//
+// **The row is retired on `settled` and on nothing else.** A record the store says is
+// now `REVOKED` must not go on reading "still stands" beside an enabled control: that is
+// a display contradicting itself and still offering an act. Every other member left the
+// record where it was, so the row is left where it was too. Adversarial review, round 4,
+// `major`.
+async function revokeAuthorization(view, item, status, controls) {
   if (!confirmWithdrawal(view)) {
     return;
   }
   fault(null, "authorizations");
-  sayAuthorizationAct(null);
-  // **Which listing this act was taken on**, captured before the request goes out. The
-  // panel can be re-pointed at another goal while a withdrawal is in flight, and an act
-  // that then reported into it — or re-read it — would attribute a settlement to work it
-  // was not taken on, or discard the newer request the owner asked for. So the act
-  // reports and refreshes only while the panel is still showing the listing it acted on.
-  // Adversarial review, round 3, `major`.
-  const owner = authorizedGoal;
-  const run = authorizationRuns;
+  const said = sayBeside(item);
+  said.textContent = "";
+  said.hidden = true;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -10417,52 +10395,14 @@ async function revokeAuthorization(view) {
     if (done === null) {
       return;
     }
-    if (run !== authorizationRuns) {
-      // The panel moved on while this was out. The act happened and is recorded; what
-      // is dropped is the sentence about it, because there is nowhere honest to put it:
-      // writing it above another goal's rows would say this was done to that work.
-      return;
-    }
-    sayAuthorizationAct(goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement));
-    if (owner !== null) {
-      await listAuthorizations(owner, true);
+    said.textContent = goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement);
+    said.hidden = false;
+    if (done.settlement === "settled") {
+      status.textContent = "You withdrew this.";
+      controls.remove();
     }
   } catch (_) {
     fault(GATEWAY_GONE, "authorizations");
-  }
-}
-
-// Withdraw one standing authority **from the announcement in a reply** (ADR-0254 §11).
-//
-// **An act reports where it was taken and not where its vocabulary lives.** The panel's
-// own slot is inside a hidden section for an owner who has never opened it, so an
-// announcement's withdrawal would mutate the store and say so on a screen nobody is
-// looking at — the act working and the owner told nothing, which is the opposite of §11's
-// reason for putting the handle in front of them at the moment the authority comes into
-// being. Adversarial review, round 1, `blocker`.
-//
-// **It does not re-read the listing**, because there is none open: an announcement sits
-// in a reply the owner is still reading, and replacing a panel under them is a navigation
-// they did not ask for.
-async function revokeAnnouncedAuthorization(view, said) {
-  if (!confirmWithdrawal(view)) {
-    return;
-  }
-  fault(null, "answer");
-  said(null);
-  const half = headerHalf();
-  if (half === null) {
-    showBootstrap();
-    return;
-  }
-  try {
-    const done = await relay(half, "/authorization/revoke", { authorization_id: view.id }, "answer");
-    if (done === null) {
-      return;
-    }
-    said(goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement));
-  } catch (_) {
-    fault(GATEWAY_GONE, "answer");
   }
 }
 

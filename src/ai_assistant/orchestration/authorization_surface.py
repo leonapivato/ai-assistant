@@ -318,7 +318,7 @@ class AuthorizationOperations:
         )
 
     def announced(
-        self, opened: Sequence[Authorization], /, *, goal_statement: str, reading: datetime
+        self, opened: Sequence[Authorization], /, *, goal_statement: str
     ) -> tuple[AuthorizationView, ...]:
         """ADR-0254 §11's announcement, for the rows one turn opened without a question.
 
@@ -344,14 +344,25 @@ class AuthorizationOperations:
         predicate is applied anyway, so an announcement cannot say *live* about a row
         this engine's own clock says has lapsed (§20 arm 71).
 
+        **The reading is taken through this object's own guard** and not handed in. A
+        caller reading its clock for us would raise
+        :class:`~ai_assistant.core.clock.ClockReadingError`, which is nothing any
+        contract on that path declares; ADR-0026 §4 gives the translation to the stage
+        that reads, and that is here. Architecture review, round 4, ``blocker``.
+
         Args:
             opened: The rows this turn opened, in the order they were written.
             goal_statement: The goal's current outcome statement, as the turn holds it.
-            reading: The caller's clock reading for this pass.
 
         Returns:
             One view per row, in that order, and empty where the turn opened none.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not conforming.
         """
+        if not opened:
+            return ()
+        reading = self._now()
         return tuple(
             view_of(row, goal_statement=goal_statement, live=is_live(row, reading))
             for row in opened

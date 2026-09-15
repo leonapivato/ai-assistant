@@ -3876,11 +3876,6 @@ _FAULT_PANELS: Final = frozenset(
         "connection-log",
         "observation",
         "authorizations",
-        # ADR-0254 §11's announcement lives in a **reply**, so the withdrawal it offers
-        # reports where it was taken: the panel's own slot is inside a section an owner
-        # who never opened it cannot see, and a settlement written there is the act
-        # working and the owner told nothing. Adversarial review, round 1, ``blocker``.
-        "answer",
     }
 )
 
@@ -8174,7 +8169,7 @@ def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_
 
     assert '<section id="authorizations"' in document
     assert 'id="authorizations-button"' not in document
-    assert 'id="authorization-said"' in document
+    assert 'id="authorization-list"' in document
 
     authorities = "".join(
         _functions(script)[name]
@@ -8189,35 +8184,49 @@ def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_
     assert "/authorization/revoke" not in goals
 
 
-def test_the_two_withdrawal_acts_differ_only_in_where_they_report() -> None:
-    """ADR-0254 §11's withdrawal, offered from two places and reporting into both.
+def test_one_withdrawal_act_reports_on_the_row_and_re_reads_no_listing() -> None:
+    """ADR-0254 §11's withdrawal, offered from two places and reported in one way.
 
-    **Two act functions and not one with a panel argument**, because #1429's census
-    holds that every ``fault`` call names its panel with a **literal**: a variable target
-    is exactly how a condition ends up in a slot the owner is not looking at. The cost is
-    two near-identical bodies, and what this pins is that they stay near-identical —
-    differing in where the sentence goes, where the fault goes, and whether the listing
-    re-reads itself, and in nothing else.
+    **One act and one result node**, which is where rounds 1, 3 and 4 converged: a
+    panel-wide slot is invisible to an owner who reached the row through a reply, it
+    attributes the act to whatever listing the panel holds when the answer lands, and
+    dropping the sentence when the panel has moved on is silence about an act that
+    happened. A node on the row is true under all three.
 
-    The ceremony is shared outright (:js:func:`confirmWithdrawal`), because a second
-    wording of what the act does not do is the drift this module exists to catch.
+    **And it re-reads nothing.** A refresh here is one more request to race the owner's
+    next, and the row it acted on is updated in place instead — which is also what
+    retires a record the store says is now ``REVOKED``.
     """
-    functions = _functions(_code("app.js"))
-    panel = functions["revokeAuthorization"]
-    reply = functions["revokeAnnouncedAuthorization"]
+    script = _code("app.js")
+    act = _functions(script)["revokeAuthorization"]
 
-    for one in (panel, reply):
-        assert "confirmWithdrawal(view)" in one
-        assert '"/authorization/revoke",' in one
-        assert "{ authorization_id: view.id }" in one
-        assert "AUTHORIZATION_SETTLEMENT_WORDS, done.settlement" in one
-        assert "headerHalf()" in one
-        assert "showBootstrap()" in one
+    assert "confirmWithdrawal(view)" in act
+    assert "sayBeside(item)" in act
+    assert '"/authorization/revoke",' in act
+    assert "AUTHORIZATION_SETTLEMENT_WORDS, done.settlement" in act
+    assert 'done.settlement === "settled"' in act
+    assert "controls.remove()" in act
+    assert "listAuthorizations" not in act, "an act does not re-read a listing"
+    assert "authorization-said" not in _asset("index.html"), "no shared slot in the markup"
 
-    assert panel.count('"authorizations"') == 3, "clear, relay, and the transport fault"
-    assert "listAuthorizations(owner, true)" in panel
-    assert reply.count('"answer"') == 3, "clear, relay, and the transport fault"
-    assert "listAuthorizations" not in reply, "a reply is not replaced by a panel"
+
+def test_only_an_empty_array_is_an_empty_announcement() -> None:
+    """ADR-0254 §11's announcement, and what a malformed value must not be read as.
+
+    ``null``, an object or a string are shapes no conforming hub sends, and reading any
+    of them as *"this turn opened none"* would silently omit authorities that may have
+    come into being — with their revocation handles, which is the one thing §11 puts in
+    front of the owner at the act. A malformed **non-empty** array was already reported;
+    every other malformed value now is. Adversarial review, round 4, ``major``.
+
+    Pinned over the source rather than only in the browser layer because the distinction
+    is a branch, and a branch is exactly what a later edit collapses.
+    """
+    announcement = _functions(_code("app.js"))["renderOpenedAuthorizations"]
+
+    assert "Array.isArray(opened) && opened.length === 0" in announcement
+    assert "!Array.isArray(opened) || !opened.every(readAuthorizationView)" in announcement
+    assert "GOAL_MEMBER_UNREADABLE" in announcement
 
 
 def test_every_settlement_member_has_a_sentence_on_the_page() -> None:
