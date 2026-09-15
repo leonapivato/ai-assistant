@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     ProposedUnderstanding,
     Provenance,
 )
+from ai_assistant.orchestration.interpretation import rendered_actions
 from ai_assistant.orchestration.loop import ConversationalOperation
 from ai_assistant.testing import FakeMemoryStore
 
@@ -206,6 +207,26 @@ def _goal_holding(*actions: IntendedAction, constraints: Sequence[GoalElement] =
         created_at=_NOW,
         last_engaged_at=_NOW,
         version=4,
+    )
+
+
+def _revision_holding(
+    *actions: IntendedAction,
+    constraints: Sequence[GoalElement] = (),
+    criteria: Sequence[GoalElement] = (),
+    conditions: Sequence[GoalElement] = (),
+) -> Goal:
+    """A goal whose current revision holds elements in each of ADR-0249 §9's tuples."""
+    goal = _goal_holding(*actions, constraints=constraints)
+    current = goal.interpretation[-1]
+    return goal.model_copy(
+        update={
+            "interpretation": (
+                current.model_copy(
+                    update={"criteria": tuple(criteria), "conditions": tuple(conditions)}
+                ),
+            )
+        }
     )
 
 
@@ -655,3 +676,100 @@ async def test_a_step_naming_no_action_is_driven_carrying_none() -> None:
     assert responded.turn.plan.steps == (_step("step-1"),), (
         "byte for byte what the planner returned, which is ADR-0253 §12 over one more key"
     )
+
+
+# --------------------------------------------------------------------------- #
+# §4's projection: what the brief shows, and what it does not                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_projection_renders_one_entry_per_member_in_the_tuples_own_order() -> None:
+    """§4: "one entry per member of ``Goal.intended_actions`` in that tuple's own order".
+
+    So ``A1`` names the **first-minted** action on both sides of the seam. The order is
+    the record's own rather than any sort this projection applies: §1 makes the tuple
+    append-only and oldest first, and a projection that reordered it would make ``A1``
+    name a different act on two calls of one turn.
+
+    **It lives in ``orchestration`` and not on the value** (§9, ADR-0252 §11):
+    ``GoalBrief.of`` lands the field's shape and renders none of it, exactly as it
+    renders no ``open_questions``, and :func:`rendered_actions` is what fills it.
+    """
+    goal = _goal_holding(_intended("ia-1"), _intended("ia-2"))
+
+    assert GoalBrief.of(goal).actions == (), "core lands the shape and renders none of it"
+    rendered = rendered_actions(goal)
+    assert len(rendered) == 2
+    assert all(one.intent == _FIRST_ROOM for one in rendered), "the record's own order"
+
+
+def test_the_projection_renders_a_link_as_the_label_of_the_element_it_names() -> None:
+    """§4: a ``BriefAction.serves`` carries ``C``/``S``/``D`` **labels** and "never an
+    identifier".
+
+    All three tuples in one brief, because the letter is what keeps the three spaces
+    apart (ADR-0249 §9): an element id resolves to the label of **its own** tuple, so
+    the second element of ``criteria`` is ``S2`` and never ``C2``.
+    """
+    goal = _revision_holding(
+        _intended("ia-1", serves=("e-c2", "e-s1", "e-d1")),
+        constraints=(_element("e-c1", "under 200 a night"), _element("e-c2", "near the station")),
+        criteria=(_element("e-s1", "a confirmation arrives"),),
+        conditions=(_element("e-d1", "the trip happens"),),
+    )
+
+    [action] = rendered_actions(goal)
+
+    assert action.serves == ("C2", "S1", "D1"), "the proposed order, each in its own space"
+    assert all(not label.startswith("A") for label in action.serves), (
+        "§4: `A` is the action's own space and is not spelled over an element"
+    )
+
+
+def test_the_projection_omits_a_link_the_current_revision_does_not_hold() -> None:
+    """§3, §4: the brief shows the link "where it is still true and shows nothing where
+    it is not", and the record is untouched.
+
+    An action whose every link has gone stale renders with ``serves`` empty and is still
+    a live action — not a dropped one, and not one waiting to be repaired.
+    """
+    goal = _revision_holding(
+        _intended("ia-1", serves=("e-old", "e-c1")),
+        _intended("ia-2", serves=("e-old",)),
+        constraints=(_element("e-c1", "near the station"),),
+    )
+
+    first, second = rendered_actions(goal)
+
+    assert first.serves == ("C1",), "the surviving link alone, the stale one gone"
+    assert second.serves == ()
+    assert goal.intended_actions[1].serves == ("e-old",), "and the record is untouched"
+
+
+def test_the_projection_names_an_element_carrying_no_id_by_nothing() -> None:
+    """A ``GoalElement`` recorded before ADR-0253 §7 carries no ``id``.
+
+    Nothing can name it, so nothing renders for it — and the elements **after** it keep
+    their own ordinals, because the label is a position in the revision's tuple and not
+    a count of the elements that happen to be nameable.
+    """
+    goal = _revision_holding(
+        _intended("ia-1", serves=("e-c2",)),
+        constraints=(
+            GoalElement(text="recorded before ADR-0253", ground=Ground.INFERRED),
+            _element("e-c2", "near the station"),
+        ),
+    )
+
+    [action] = rendered_actions(goal)
+
+    assert action.serves == ("C2",), "the second constraint is C2 however the first was recorded"
+
+
+def test_a_goal_that_intends_nothing_projects_no_action() -> None:
+    """§1, §4: "a brief carrying no actions is well-formed rather than degraded".
+
+    §1 makes that every goal at the moment it is opened — "the goal's opening write
+    mints none" — so it is the shape of every brief of every turn that opens a goal.
+    """
+    assert rendered_actions(_goal_holding()) == ()

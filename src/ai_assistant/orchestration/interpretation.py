@@ -95,6 +95,7 @@ from typing import TYPE_CHECKING, Final
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
     MAX_APPLICABILITY_VALUES,
+    BriefAction,
     EvidenceApplicability,
     GoalElement,
     GoalInterpretation,
@@ -128,6 +129,7 @@ __all__ = [
     "RecordedUnderstanding",
     "recorded_actions",
     "recorded_revision",
+    "rendered_actions",
     "resolved_evidence_row",
     "resolved_ordinal",
     "substituted_plan",
@@ -793,6 +795,80 @@ def _positions(group: Sequence[GoalElement | None]) -> tuple[int | None, ...]:
         mapped.append(kept)
         kept += 1
     return tuple(mapped)
+
+
+def rendered_actions(goal: Goal) -> tuple[BriefAction, ...]:
+    """Project ``goal``'s intended actions onto the brief's ``actions`` (ADR-0265 §4).
+
+    **The projection is ``orchestration``'s and lives here rather than on the value**
+    (§9, ADR-0252 §11's *"projected by ``orchestration`` alone"*).
+    :meth:`~ai_assistant.core.types.GoalBrief.of` lands the field's shape and its bound
+    and renders none of it; this function renders it, and
+    :func:`~ai_assistant.orchestration.loop._brief_of` is the one caller — the same
+    division ADR-0250 §8's ``open_questions`` already takes, where ``core`` carries the
+    field and this package fills it.
+
+    **One entry per member of** :attr:`~ai_assistant.core.types.Goal.intended_actions`
+    **in that tuple's own order** (§4), so ``A1`` names the first-minted action on both
+    sides of the seam. The order is the record's own and never a sort applied here: §1
+    makes the tuple append-only and oldest first, and a projection that reordered it
+    would make ``A1`` name a different act on two calls of one turn. It is bounded by
+    construction at ``MAX_INTENDED_ACTIONS``, so nothing truncates it.
+
+    **It renders the intent and the live links and nothing else** (§4): no
+    ``IntendedAction.id``, no effect, no execution, no step, no outcome and no
+    indication of whether the action has already been performed. A ``serves`` entry
+    naming an element of the **current** revision becomes that element's ``C``/``S``/``D``
+    label; one naming an element the current revision does not hold — restated, split,
+    or carrying no ``id`` — is **omitted from the rendering**, "so the brief shows the
+    link where it is still true and shows nothing where it is not". An action every one
+    of whose links has gone stale renders with ``serves`` empty and is a live action
+    rendered truthfully rather than a degraded one.
+
+    **Nothing here touches the record** (§3). A stale link is "truthful and harmless",
+    and it is "not rewritten, not recomputed, not dropped and not refreshed": the
+    omission is a fact about this projection alone, and ``goal`` is read and never
+    copied back.
+
+    Args:
+        goal: The goal to project, whose **current** revision is the one a link is
+            rendered against — never an elided revision, a superseded one, or a union
+            of several (ADR-0249 §9).
+
+    Returns:
+        One :class:`~ai_assistant.core.types.BriefAction` per intended action, in the
+        record's own order. Empty on every goal that intends none, which §1 makes every
+        goal at the moment it is opened.
+    """
+    if not goal.intended_actions:
+        return ()
+    current = goal.interpretation[-1]
+    # ADR-0249 §9's scheme over the three element tuples, derived here from the revision
+    # this brief is projected from and never imported from `planning` (golden rule 1).
+    # Built as a map because `serves` holds ids and the brief shows labels, and that is
+    # the one direction of the correspondence anything needs. An element carrying no
+    # `id` — one recorded before ADR-0253 §7 — is nameable by no `serves` value and so
+    # is absent from the map rather than special-cased below.
+    labels = {
+        element.id: f"{letter}{index}"
+        for letter, name in _TUPLES_BY_LETTER.items()
+        for index, element in enumerate(getattr(current, name), start=1)
+        if element.id is not None
+    }
+    return tuple(
+        BriefAction(
+            intent=action.intent,
+            # §4: the surviving links in the record's own order, and nothing where none
+            # survives. The walrus keeps the lookup single: a stale entry is one
+            # `labels` does not hold.
+            serves=tuple(
+                label
+                for element_id in action.serves
+                if (label := labels.get(element_id)) is not None
+            ),
+        )
+        for action in goal.intended_actions
+    )
 
 
 def recorded_actions(
