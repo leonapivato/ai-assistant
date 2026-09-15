@@ -18,12 +18,14 @@ than left to two readings.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
 from browser_drive import DESKTOP, PHONE, driving
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 
 from ai_assistant.core.types import (
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
         Browser,
         ConsoleMessage,
         Dialog,
+        Request,
         Response,
         Route,
         ViewportSize,
@@ -394,39 +397,54 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
 
     Driven by holding the **first** request at the socket until the second has finished,
     which is the interleaving the defect needs and which no sequential case reaches.
+
+    **The overtaken request is now stopped rather than merely ignored** (round 12), so
+    what the case waits on is that request reaching a terminal state — a response *or* a
+    cancellation, whichever the browser gives it. Either is a condition the page reached
+    rather than a duration this test guessed (ADR-0216 §7), and waiting only for a
+    response would wait for one the abort guarantees never comes.
     """
     loop = asyncio.get_running_loop()
     held: asyncio.Future[None] = loop.create_future()
     landed: asyncio.Future[None] = loop.create_future()
     seen = 0
-    answered = 0
+    settled = 0
 
     async def route(one: Route) -> None:
         nonlocal seen
         seen += 1
         if seen == 1:
             await held
-        await one.fallback()
+        with contextlib.suppress(PlaywrightError):
+            # A request the page aborted while this handler was suspended can no longer
+            # be continued, and that is the outcome under test rather than a fault.
+            await one.fallback()
+
+    def done(url: str) -> None:
+        """Resolve once **both** listings have stopped being in flight.
+
+        The overtaken one stops by being cancelled and the newer one by answering; the
+        case cares only that neither is still outstanding when it asserts.
+        """
+        nonlocal settled
+        if not url.endswith("/authorizations"):
+            return
+        settled += 1
+        if settled == 2 and not landed.done():
+            landed.set_result(None)
 
     def arrived(response: Response) -> None:
-        """Resolve once the **overtaken** response has reached the page.
+        done(response.url)
 
-        The case's synchronisation (ADR-0216 §7): what the assertions below need is
-        that the late answer has been handled and changed nothing — a condition the
-        page reached, not a duration the test guessed.
-        """
-        nonlocal answered
-        if not response.url.endswith("/authorizations"):
-            return
-        answered += 1
-        if answered == 2 and not landed.done():
-            landed.set_result(None)
+    def cancelled(request: Request) -> None:
+        done(request.url)
 
     async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
         _seed(drive)
         drive.engine.goal_summaries = [_summary(), _summary(goal_id=OTHER_ID, outcome=OTHER)]
         drive.engine.goal_statements[OTHER_ID] = OTHER
         drive.page.on("response", arrived)
+        drive.page.on("requestfailed", cancelled)
         await drive.page.route("**/authorizations", route)
         await drive.page.click("#goals-button")
         await drive.page.wait_for_selector("#goals:not([hidden])")
@@ -443,6 +461,72 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
         panel = drive.page.locator("#authorizations")
         await expect(panel).to_contain_text("Nothing standing")
         assert STATEMENT not in await panel.inner_text()
+
+
+async def test_an_overtaken_listing_that_comes_back_refused_changes_nothing(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """A superseded listing must not be able to speak at all, not merely be ignored.
+
+    ``relay`` renders a refusal **before** it returns — ``refused`` → ``report`` →
+    ``sessionLost`` — so a comparison after the ``await`` is too late for the refusal
+    path. An overtaken listing coming back refused writes a stale fault over the newer
+    listing's rows, and one coming back ``no-live-session`` after the owner has
+    re-entered forgets the **new** session's header half and throws the page back to
+    the bootstrap form: a dead request ending a live session. Adversarial review,
+    round 12, ``major``.
+
+    Driven at the worst of the two: the overtaken request is released as a
+    ``no-live-session`` refusal. Stopped, it has no response to classify, so the page
+    keeps its session and its rows — and the following exchange, which only a page that
+    still holds a session can make, is what orders any handling of that refusal before
+    the assertions.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+    delivered: asyncio.Future[None] = loop.create_future()
+    seen = 0
+
+    async def route(one: Route) -> None:
+        nonlocal seen
+        seen += 1
+        if seen != 1:
+            await one.fallback()
+            return
+        await held
+        with contextlib.suppress(PlaywrightError):
+            await one.fulfill(
+                status=401,
+                content_type="application/json",
+                body=json.dumps({"fault": "no-live-session"}),
+            )
+        if not delivered.done():
+            delivered.set_result(None)
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        drive.engine.goal_summaries = [_summary(), _summary(goal_id=OTHER_ID, outcome=OTHER)]
+        drive.engine.goal_statements[OTHER_ID] = OTHER
+        await drive.page.route("**/authorizations", route)
+        await drive.page.click("#goals-button")
+        await drive.page.wait_for_selector("#goals:not([hidden])")
+        rows = drive.page.locator("#goal-list button:has-text('What this authorises')")
+
+        await rows.nth(0).click()
+        await rows.nth(1).click()
+        await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
+        held.set_result(None)
+        await asyncio.wait_for(delivered, timeout=10)
+
+        # Only a page that still holds a session makes this request at all.
+        async with drive.page.expect_response("**/goals", timeout=5000):
+            await drive.page.click("#goals-button")
+
+        await expect(drive.page.locator("#bootstrap")).to_be_hidden()
+        await expect(drive.page.locator("#console")).to_be_visible()
+        panel = drive.page.locator("#authorizations")
+        await expect(panel).to_contain_text(OTHER)
+        assert "no longer" not in await panel.inner_text()
 
 
 async def test_a_listing_that_outlives_its_session_reveals_nothing(
