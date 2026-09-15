@@ -7679,10 +7679,11 @@ class GoalBrief(BaseModel):
             per member of** :attr:`Goal.intended_actions` **in that tuple's own
             order** (ADR-0265 §4), so ``A1`` names the first-minted action on both
             sides of the seam. Bounded by construction at
-            :data:`MAX_INTENDED_ACTIONS`, so no lane truncates it here. **Empty on
-            every brief :meth:`of` projects**: the projection that fills it is L2's
-            (ADR-0265 §9), and an action-free brief is well-formed rather than
-            degraded.
+            :data:`MAX_INTENDED_ACTIONS`, so no lane truncates it here. Each entry
+            carries the **live** links alone: a ``serves`` naming an element that is
+            not in the current revision is omitted from the rendering (§3, §4, and
+            :meth:`of`). Empty on every brief of a goal that intends none, which §1
+            makes every goal at the moment it is opened.
         status: The goal's overall disposition.
         deadline: Its optional target date.
         open_questions: The **texts** of the goal's open questions — all a planner
@@ -7727,15 +7728,31 @@ class GoalBrief(BaseModel):
         :class:`ProposedUnderstanding`'s ``questions`` and no lane of that decision
         reads them, and what a raised question becomes is A2's.
 
-        **:attr:`actions` is empty here, and filling it is L2's** (ADR-0265 §9). That
-        section assigns "the ``GoalBrief.actions`` projection with its live-link
-        rendering" to "L2 — the loop, in ``orchestration`` alone", on ADR-0252 §11's
-        *"projected by ``orchestration`` alone"*, and names this lane's list without it.
-        So the field lands here with its shape and its bound (§4) and this projection
-        renders none, exactly as :attr:`open_questions` renders none for the reason
-        above. **A brief carrying no actions is well-formed rather than degraded** —
-        every goal that intends nothing projects one, and §1 makes that every goal at
-        the moment it is opened.
+        **:attr:`actions` carries one entry per member of
+        :attr:`Goal.intended_actions`, in that tuple's own order** (ADR-0265 §4), so
+        ``A1`` names the first-minted action on both sides of the seam. It renders the
+        action's :attr:`IntendedAction.intent` and its **live** links and nothing else:
+        a ``serves`` entry naming an element of the current revision becomes that
+        element's ``C``/``S``/``D`` **label**, and one naming an element that is not in
+        the current revision — a restated one, a split one, an element carrying no
+        ``id`` — is **omitted from the rendering**, "so the brief shows the link where
+        it is still true and shows nothing where it is not". An action every one of
+        whose links has gone stale renders with ``serves`` empty, and is a live action
+        rendered truthfully rather than a degraded one: §3 makes a stale link
+        "truthful and harmless", and **nothing here rewrites, recomputes, drops or
+        refreshes the record it read** — the omission is a fact about this projection
+        and never about ``goal``.
+
+        **The projection sits here though ADR-0252 §11 makes it ``orchestration``'s**,
+        because ADR-0249 §9 makes :meth:`of` "the one projection site in the system"
+        and a second renderer is the thing that clause exists to forbid. What is
+        ``orchestration``'s is that it is the only caller: nothing outside it projects
+        a brief, and the label scheme is derived from the value held on each side with
+        neither consulting the other.
+
+        **A brief carrying no actions is well-formed rather than degraded** — every
+        goal that intends nothing projects one, and §1 makes that every goal at the
+        moment it is opened.
 
         Args:
             goal: The goal to project.
@@ -7748,6 +7765,24 @@ class GoalBrief(BaseModel):
             tuple(BriefElement(text=element.text, ground=element.ground) for element in group)
             for group in (current.constraints, current.criteria, current.conditions)
         )
+        # ADR-0249 §9's scheme over the three element tuples, derived here from the
+        # revision this brief is projected from and never imported from `planning`: the
+        # label of the element at 1-based index *n* is the letter followed by *n* in
+        # decimal with no padding. It is built rather than looked up per entry because
+        # `serves` holds ids and the brief shows labels, and this is the one direction
+        # of that correspondence anything needs. An element carrying no `id` — one
+        # recorded before ADR-0253 §7 — is nameable by no `serves` value and so is
+        # absent from the map rather than special-cased below.
+        labels = {
+            element.id: f"{letter}{index}"
+            for letter, group in (
+                ("C", current.constraints),
+                ("S", current.criteria),
+                ("D", current.conditions),
+            )
+            for index, element in enumerate(group, start=1)
+            if element.id is not None
+        }
         return cls(
             goal_id=goal.id,
             outcome=current.outcome,
@@ -7755,6 +7790,20 @@ class GoalBrief(BaseModel):
             constraints=shown[0],
             criteria=shown[1],
             conditions=shown[2],
+            actions=tuple(
+                BriefAction(
+                    intent=action.intent,
+                    # ADR-0265 §4: the surviving links in the record's own order, and
+                    # nothing where none survives. The walrus keeps the lookup single:
+                    # a stale entry is one `labels` does not hold.
+                    serves=tuple(
+                        label
+                        for element_id in action.serves
+                        if (label := labels.get(element_id)) is not None
+                    ),
+                )
+                for action in goal.intended_actions
+            ),
             status=goal.status,
             deadline=goal.deadline,
         )
