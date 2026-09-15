@@ -382,3 +382,75 @@ async def test_each_planner_call_of_a_turn_mints_and_each_minting_is_its_own_wri
     assert outcome.turn.plan.steps[0].intended_action == second.id, (
         "§4: A2 over the tuple this call's own proposal extended"
     )
+
+
+class _MintingThenRestating(_TwoCall):
+    """Call 1 proposes an element and an action serving it; call 2 restates the element.
+
+    The narrowest shape of #2414: the action's link is legitimate on the call that
+    minted it, and §3 makes it "stale, truthful and harmless" the moment call 2's
+    revision replaces the element it names.
+    """
+
+    async def plan(self, goal: Any, **fields: Any) -> Any:
+        """Ask for the hop and mint against ``C1``; on the second call, restate ``C1``."""
+        produced = await super().plan(goal, **fields)
+        stated = "the booking is for Saturday" if len(self.calls) == 1 else "make it Sunday"
+        minting = len(self.calls) == 1
+        return produced.model_copy(
+            update={
+                "understanding": ProposedUnderstanding(
+                    retains_outcome=True,
+                    constraints=(ProposedElement(text=stated, ground=Ground.INFERRED),),
+                ),
+                "actions": (ProposedAction(intent=_FIRST_ROOM, serves=("C1",)),) if minting else (),
+                # Call 2 selects **no** action, so the only thing that can refuse this
+                # turn is the write: a step naming `A2` would be refused by §4 at the
+                # loop, on a goal whose second call minted none, and would mask the
+                # state this arm exists to pin.
+                "plan": produced.plan.model_copy(update={"steps": ()}),
+            }
+        )
+
+
+async def test_an_opening_turn_that_mints_then_restates_is_refused_at_the_append() -> None:
+    """#2414, pinned: the one state three ratified clauses leave no implementation.
+
+    **This arm records a defect rather than a decision**, and it is written so that the
+    lane resolving #2414 has the exact case to flip rather than to rediscover. What it
+    asserts is what the contracts currently force, not what ADR-0265 means:
+
+    - §2 resolves call 1's ``serves`` against call 1's own sequence and records the
+      action there — which PR #2411's loop does, and §3 then makes the link stale,
+      truthful and harmless once call 2 replaces the element.
+    - ADR-0249 §11 defers every write to one end-of-turn site, and §12 makes
+      ``save_goal`` the opening write **carrying the whole interpretation chain**, so
+      by the append the current revision is call 2's.
+    - ADR-0265 §1 refuses a ``save_goal`` carrying an intended action, so on an opening
+      turn the minting **must** follow that one write; it cannot interleave, as it does
+      on a goal the store already holds.
+    - ADR-0265 §5 then refuses the minting, because the link names an element the
+      current interpretation no longer holds.
+
+    The failure is **fail-closed** — no action recorded, no plan saved, no step
+    dispatched, nothing claiming an effect — and it is unreachable in production until
+    L3 fills ``PlannerOutput.actions``. The goal row standing without the action is the
+    shape any mid-persistence refusal already leaves (ADR-0249 §12), not a second
+    defect.
+    """
+    planner = _MintingThenRestating()
+    goals = iter([f"goal-{ordinal}" for ordinal in range(1, 60)])
+    harness = Harness(
+        memory=await _store_holding_the_address(),
+        planner=planner,
+        loop_id_factory=lambda: next(goals),
+    )
+
+    with pytest.raises(PlanningError):
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert len(planner.calls) == 2, "both calls ran; the refusal is at the write, not the loop"
+    stored = await harness.plans.get_goal("goal-1")
+    assert stored is not None, "ADR-0249 §12: the opening write had already committed"
+    assert len(stored.interpretation) == 3, "carrying both calls' revisions"
+    assert stored.intended_actions == (), "§5 wrote nothing: the append is all-or-nothing"
