@@ -369,13 +369,23 @@ honest one."*
 > Call a bound step **satisfying** where it stands `SUCCEEDED`, its operative definition declares
 > **at least one** postcondition, and **every** declaration of that definition holds over its
 > stored `output`. Call it **contradicting** where it stands `SUCCEEDED` and **some** declaration
-> of its operative definition does **not** hold, or where it stands **`FAILED`** — a bound step's
-> failure is an act the criterion rests on **provably not having happened** (ADR-0029 records
-> `FAILED` only where the call did nothing, `INDETERMINATE` where its fate is unknown), which is
-> *established not to hold* rather than an absence of evidence. **Nothing a planner returns is read
-> by either test**: not a label, not an `intended_action`, not a step's position, not its
-> `verifies`. **A step is satisfying or contradicting on what the tool's author declared and what
-> the provider returned, and on nothing else.**
+> of its operative definition does **not** hold, or where it stands **`FAILED`** **and its
+> operative definition is not both `side_effecting` and `Idempotency.NATURAL`** — such a failure is
+> an act the criterion rests on **provably not having happened**, which is *established not to
+> hold* rather than an absence of evidence. **The exception is ADR-0029 §4's own rule read
+> honestly rather than a caveat**: that section commits a timed-out or cancelled call **`FAILED`**
+> where the tool *"is not `side_effecting`, **or** its `idempotency` is `NATURAL`"*, and its ground
+> for the `NATURAL` half is that *"whether it acted does not change what a repeat does"* — **not**
+> that it did not act. So a `FAILED` step of a `side_effecting` `NATURAL` tool **may have acted**
+> and is **not decisive at all**: it neither satisfies nor contradicts, and a criterion resting on
+> it alone is `unestablished` rather than `unmet`, because reading it as *established not to hold*
+> would report a booking that exists as one the work failed to make. **Every other `FAILED` bound
+> step contradicts**, ADR-0029 committing `INDETERMINATE` wherever a call's fate is unknown for
+> any other reason — the status §4's third ending condition keeps an attempt live for. **Nothing a
+> planner returns is read by either test**: not a label, not an `intended_action`, not a step's
+> position, not its `verifies`. **A step is satisfying, contradicting or neither on what the
+> tool's author declared — its postconditions, and what its `side_effecting` and `idempotency` say
+> a failure can mean — and on what the provider returned, and on nothing else.**
 >
 > **The bound steps are grouped by *the call each made*, the grouping is the policy's rather than
 > the planner's, and a group that does not agree with itself establishes nothing.** Two bound steps
@@ -583,10 +593,10 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > class nothing. **A criterion about an amount is no longer the exception it was**: the user's
 > `MONEY` member is proved against a quote **before** the act (ADR-0266 §7), which is the
 > guarantee that binds the charge; what this decision does **not** add is the *post-hoc*
-> comparison, and §9 names it with what fires it. **This adds no condition to
-> ADR-0255 §15 item 19's count**,
-> which ADR-0265 §8 made six: it states what this decision's own guarantee covers, which is what
-> that gate already asks of it.
+> comparison, and §9 names it with what fires it — **reassigned** there to the decision
+> that lands its operand. **This adds no condition to ADR-0255 §15 item 19's count**, which §7
+> reads as **seven**: it states what this decision's own guarantee covers, which is what that gate
+> already asks of it.
 
 ### 4. Which `AttemptOutcome` an attempt earns, when it is written, and when the attempt ends
 
@@ -1422,13 +1432,18 @@ are ordered only by each other.
    a criterion whose confirmed member stands and whose bound tool declares **two** postconditions:
    **met** (a `SUCCEEDED` bound step's output satisfies both), **unmet** (it satisfies one and
    refuses the other), **unestablished** (the tool declares **none**; and, separately, no bound
-   step succeeded). **And the per-criterion half is asserted in both directions**: a goal carrying
+   step succeeded). **And ADR-0029 §4's `FAILED` is not read as a disproof where the call may have
+   acted**: a bound step `FAILED` under a `side_effecting` tool whose `idempotency` is
+   **`NATURAL`** → **unestablished**, the attempt `UNCERTAIN` at rung 2 and **never `FAILED`**,
+   while the same step under a `KEYED` or `NONE` tool → **unmet** — the pair that fails against an
+   implementation reading every `FAILED` step as proof the act did not happen. **And the per-criterion half is asserted in both directions**: a goal carrying
    a `PERIOD` criterion and a `TERMS` criterion whose spans are the two the confirmed row's two
    members rest on, over one booking step → **both met**; the same goal where the row carries a
    `PERIOD` member alone → **met and unestablished** respectively, the arm that fails against any
    rule giving one verdict to every criterion of a goal. **And the grouping by
    `parameters_digest` is asserted in every direction**: two bound steps of **one call** — the same
-   digest — the first `FAILED` and the later satisfying → **unestablished**, the ambiguous-group
+   digest — the first `FAILED` under a tool that is not `NATURAL` and the later satisfying →
+   **unestablished**, the ambiguous-group
    arm, and the same pair in the other order → **unestablished** likewise, the arm that fails
    against any implementation letting a step order break the tie; two bound steps of **one call**
    **both** satisfying → **met**, and both contradicting → **unmet**; two bound steps of
