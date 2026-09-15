@@ -274,8 +274,12 @@ member and the report — not a mechanism.
 > step** does three things and nothing else. It commits **every attempt of the goal standing in a
 > non-terminal `AttemptState`** to **`AttemptState.CANCELLED`**, each carrying **the `outcome` §3's
 > limbs yield over that attempt's own executions** and `ended_at` at `at`. It writes
-> **`GoalStatus.ABANDONED`** and advances `Goal.version`. And it **returns whether any step of any
-> execution of any attempt of that goal stood `INDETERMINATE` or `RUNNING` at that same instant**
+> **`GoalStatus.ABANDONED`** and advances `Goal.version`, **advancing each ended attempt's own
+> `version` by one in the same step** — ADR-0249 §5's compare-and-swap token moving exactly as
+> every other transition of that attempt moves it, so an `AttemptTransition` built before the
+> closure is **stale** and refuses rather than appending a reference to a record that is now
+> terminal. And it **returns whether any step of any execution of any attempt of that goal stood
+> `INDETERMINATE` or `RUNNING` at that same instant**
 > (§6). **Where the goal has no non-terminal attempt, no attempt write is made and the rest is
 > unchanged.** It writes **nothing else** — not the engagement stamp, not the interpretation, no
 > `StepTransition` — refuses a stale `expected_version` with `StaleExecutionError`, and **raises
@@ -685,8 +689,8 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > It is not R78's (above), so nothing is owed; it is a question about how a cancellation should
 > **feel**, which is the owner's. **My recommendation is that they should be told**, and the
 > cheapest carrier is a fifth `GoalAbandonment` member rather than a second field — but it is a
-> product choice and this decision does not take it. Raised twice in review (rounds 5 and 9),
-> disposed of both times against the text above.
+> product choice and this decision does not take it. Raised in review rounds 5, 9, 13 and 14 and
+> disposed of each time against the text below; filed as #2397.
 
 > **Normative — R78's *completed* is the completed disposition of an effect that was **in flight at
 > the cancellation**, and a goal abandoned while one is unresolved is closed rather than refused.**
@@ -694,7 +698,11 @@ after. **Both are the same defect — a window — and §2 has none**, so the *c
 > and the two adjectives are the two dispositions an in-flight effect reaches — ADR-0259 §3's
 > reconciliation takes an `INDETERMINATE` step to `SUCCEEDED`, *uncertain* becoming *completed*.
 > **Both are carried**: the act answers `ABANDONED_EFFECT_IN_FLIGHT` at the boundary and the
-> listing's field goes false when the reconciliation lands, which arm 10 asserts as a pair. **A step
+> listing's field goes false when the reconciliation lands, which arm 10 asserts as a pair.
+> **What is *not* owed here is naming that disposition to the user.** The act reports the fact it
+> can establish — an action was claimed and may have been sent — while **which** disposition it
+> reached is resolved by A8 (ADR-0259 §3, §11) and told by a decision owning the vocabulary for it.
+> **This decision mints none**, and #2397 is where that question stands. **A step
 > that stood `SUCCEEDED` *before* the cancellation was never in flight at it**, is not what R78
 > names, and is recorded by §3's outcome — `(CANCELLED, PARTIAL)`; **no lane reads R78 as requiring
 > every successful step of a goal's history to be rendered at the act.** And the act is **not
@@ -789,7 +797,10 @@ precedent, a derived fact the engine computes so no two adapters render it diffe
 > After the refusal the engine takes **one** read — of the goal and the attempt the claim named, and
 > of the plan the execution runs — and answers: **`GOAL_CANCELLED`** where the goal's `status` is
 > `ABANDONED`; **`GOAL_ACHIEVED`** where it is `ACHIEVED`; **`GOAL_BLOCKED`** where it is `BLOCKED`;
-> **`ATTEMPT_CANCELLED`** where the attempt's `state` is `CANCELLED`; **`ATTEMPT_ENDED`** where it
+> **`ATTEMPT_CANCELLED`** where the attempt's `state` is `CANCELLED` — **reached on a goal ADR-0250
+> §13 has reopened**, which writes `ACTIVE` and leaves the cancelled attempts of the abandonment
+> standing (§5), so a turn still holding a plan of one meets an open goal and a cancelled attempt,
+> and the goal tests above do not answer for it; **`ATTEMPT_ENDED`** where it
 > is `ENDED`; **`ATTEMPT_PAUSED`** where it is `AWAITING_CLARIFICATION`, `AWAITING_AUTHORIZATION` or
 > `BLOCKED`; and **`UNDERSTANDING_CHANGED`** where the plan's `targets_revision` is not the goal's
 > current `revision` — the goal's three tests first, then the attempt's three, then the plan's one.
@@ -1088,7 +1099,7 @@ admits.
 > changes under golden rule 5**. `commit_transition` gains **no conjunct** (§4). **The shared
 > `PlanStore` conformance suite and the canonical fake in `ai_assistant.testing` gain all five
 > obligations in the same change that adds them** (`CONTRIBUTING.md` → "Adding a Protocol": *"The
-> triad is what a Protocol *change* is measured against too"*), which is §14's arms 3, 4 and 9.
+> triad is what a Protocol *change* is measured against too"*), which is §14's arms 3, 4, 5 and 9.
 
 ### 11. What this decision does not decide, by name, each with what fires it
 
@@ -1281,14 +1292,19 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   `PlanStore.commit_attempt` and §2's two serialising conjuncts on `set_goal_status` and
   `open_attempt`**, each with its `planning` implementation; and the canonical fakes in
   `ai_assistant.testing` together with the shared `PlanStore` conformance suite's three cases
-  (§14, arms 3, 4 and 9) — including **`close_goal_abandoned`** and `has_outstanding_effect`, each
-  with its `planning` implementation.
+  (§14, arms 3, 4, 5 and 9) — including **`close_goal_abandoned`**, which is where §3's four-limb
+  outcome is **computed**, and `has_outstanding_effect`, each with its `planning` implementation.
+  **§3's limbs are this lane's, entire**: no other lane implements them, because the only place
+  they are evaluated is inside a store write.
   **This is the lane that moves the wire**, and it lands alone — golden rule 5, and
   `CONTRIBUTING.md` → "Adding a Protocol" for the suite and the fake riding the same change.
-- **L2 — `orchestration`.** §2's attempt commit inside `abandon_goal` with its ordering, §3's
-  four-limb outcome, §6's `GoalAbandonment` answer and `GoalSummary.effect_in_flight`
-  computation, and §7's refusal catch, walk end, ordered read and `drive_withheld`. **It moves no
-  contract**: `StepRunner` and `StepExecutor` are concrete classes, not Protocols.
+- **L2 — `orchestration`.** `abandon_goal`'s **one call to `close_goal_abandoned`** with its
+  single retry, and the **mapping of that call's `bool` onto §6's `GoalAbandonment` member**;
+  `GoalSummary.effect_in_flight`'s computation from §6's member; and §7's refusal catch, walk end,
+  ordered read and `drive_withheld`. **It commits no attempt, computes no `AttemptOutcome` and
+  takes no outstanding-effect read** — §2 and §3 put all three inside the store, and a lane that
+  split them out would rebuild the window the member exists to remove. **It moves no contract**:
+  `StepRunner` and `StepExecutor` are concrete classes, not Protocols.
 - **L3 — `interfaces`.** The fixed statements §6 and §7 name, on the CLI's abandon and goals
   surfaces and on the reply. **Thin, by golden rule 3**: it renders values L2 computed and derives
   none.
@@ -1344,12 +1360,16 @@ it.
    and **raises over a goal deleted since the caller read it** — each refusal **writing nothing at
    all**, no attempt among them left cancelled. **And the writes and the answer are one step**:
    over a goal holding a live attempt with a `RUNNING` step it ends that attempt
-   `(CANCELLED, UNCERTAIN)`, writes `ABANDONED` and answers **true**, and a transition admitted
-   only **after** it commits cannot change that answer, while one admitted **before** changes the
+   `(CANCELLED, UNCERTAIN)`, writes `ABANDONED` and answers **true**; **an `AttemptTransition`
+   built against that attempt before the call is then refused with `StaleExecutionError` and
+   appends nothing**, its `version` having advanced with the closure; and a transition admitted
+   only **after** the call commits cannot change its answer, while one admitted **before** changes the
    outcome and the answer **together** — never one without the other, which is what no arrangement
    of separate calls can assert. **And the goal-wide scope**: an `INDETERMINATE` step on an
    **older, already terminal** attempt makes it answer **true** though it ends no attempt at all.
-5. **The four-limb outcome (L2).** One arm per limb: an attempt holding an `INDETERMINATE` step →
+5. **The four-limb outcome (L1, shared suite).** Asserted over `close_goal_abandoned`'s own
+   writes, which is the only place the limbs are evaluated for this decision's act, and over
+   `commit_attempt` for any other caller. One arm per limb: an attempt holding an `INDETERMINATE` step →
    `UNCERTAIN`; one holding only a `SUCCEEDED` step → `PARTIAL`; one holding only a `FAILED` step →
    `FAILED`; and one whose every step is `PENDING`, `AWAITING_APPROVAL` or `SKIPPED` → `CANCELLED`.
    **And one arm per precedence boundary**, because the single-limb cases are all passed by an
