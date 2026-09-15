@@ -3943,11 +3943,18 @@ class Planner(Protocol):
     """Turns a :class:`~ai_assistant.core.types.GoalBrief` into a plan (ADR-0014 §6).
 
     The pipeline's planning step. Implementations produce a
-    :class:`~ai_assistant.core.types.PlannerOutput` — a plan, and what they propose
-    the system now understands — and nothing else: no model output ever sets
-    execution status, which stays the property of deterministic code (VISION §7), and
-    no model output writes a phase, a revision number, a ``raised_by`` or a
-    ``recorded_at`` (ADR-0249 §6).
+    :class:`~ai_assistant.core.types.PlannerOutput` — a plan, what they propose the
+    system now understands, and **what acts they propose the goal now intends**
+    (ADR-0265 §2, which makes §7's two-field envelope a three-field one in the count
+    alone) — and nothing else: no model output ever sets execution status, which stays
+    the property of deterministic code (VISION §7), and no model output writes a phase,
+    a revision number, a ``raised_by`` or a ``recorded_at`` (ADR-0249 §6).
+
+    **And no model output names an identifier or mints one.** A
+    :class:`~ai_assistant.core.types.ProposedAction` carries an ``intent`` and
+    ``serves`` **labels**, never an ``IntendedAction.id``: ``orchestration`` mints the
+    identity once at the instant the action is first recorded, which is ADR-0228 §8's
+    namer rule binding this field as it binds every other (ADR-0265 §2).
     """
 
     async def plan(  # noqa: PLR0913 — the brief plus one keyword per thing the pipeline assembled before planning; ADR-0230 §3, ADR-0240 §7 (as ADR-0251 §3 widens it) and ADR-0249 §7 each add to it, and bundling them into a context object would mint a core type ADR-0211 §2 already refused
@@ -3978,12 +3985,25 @@ class Planner(Protocol):
         elements carry.
 
         **A brief's elements are labelled, and the scheme is ADR-0226 §3's applied to
-        three sequences** (§9): the element at 1-based index *n* of ``constraints`` is
-        ``C`` followed by *n* in decimal with no padding, of ``criteria`` ``S``
-        followed by *n*, and of ``conditions`` ``D`` followed by *n*. Both sides
-        derive the label from the brief they hold and neither consults the other. A
-        label is meaningful only within the call that rendered it: **no label survives
-        that call, and none is persisted as a reference.**
+        four sequences** (§9, widened by ADR-0265 §4 in the sequence count alone): the
+        element at 1-based index *n* of ``constraints`` is ``C`` followed by *n* in
+        decimal with no padding, of ``criteria`` ``S`` followed by *n*, of
+        ``conditions`` ``D`` followed by *n*, and of ``actions`` — the acts this goal
+        already intends — ``A`` followed by *n* in **ASCII** decimal digits, with no
+        padding and no sign. Both sides derive the label from the brief they hold and
+        neither consults the other. A label is meaningful only within the call that
+        rendered it: **no label survives that call, and none is persisted as a
+        reference.**
+
+        **The ``A`` space is selection and never invention** (ADR-0265 §4). A step
+        names an act the brief already rendered, by its label, or names none: a planner
+        mints no action there and names no identifier, and a label the loop cannot
+        resolve **refuses the plan** rather than being dropped — the fail-closed
+        direction, because "a step whose action was dropped is a step whose effect claim
+        would be scoped to nothing". Nothing else is a label — not ``A01``, not ``A+1``,
+        not ``a1``, not a digit outside ``0``-``9`` — and each resolves to nothing
+        rather than being parsed, repaired or case-folded, which is ADR-0253 §9's
+        strict-extraction rule applied to one more vocabulary.
 
         **``goal_id`` is on the brief and is rendered nowhere** (§9). It names the
         *subject* of the call rather than a record in the labelled supply, it has
@@ -4356,8 +4376,32 @@ class Planner(Protocol):
         Returns:
             A frozen :class:`~ai_assistant.core.types.PlannerOutput`: the plan,
             carrying a ``read_request`` where the planner asked for one more read and
-            ``None`` where it did not (ADR-0226 §4), and the understanding it
-            proposes or ``None`` where it proposes no change (ADR-0249 §7). The
+            ``None`` where it did not (ADR-0226 §4), the understanding it
+            proposes or ``None`` where it proposes no change (ADR-0249 §7), and
+            ``actions`` — the acts it proposes this goal now intends, or ``()``
+            (ADR-0265 §2). **Empty means the planner proposes no new intended
+            action**, which is the semantically correct answer for an implementation
+            that knows nothing of this envelope and for every turn that acts on an
+            intent the goal already holds; no implementation reads an empty
+            ``actions`` as an error, a degradation or an instruction to re-plan.
+
+            **A proposal is warranted by the user's words and never by a plan's
+            convenience** (ADR-0265 §2). One is warranted where the request requires
+            an act the goal does not already hold an action for — *"book two identical
+            rooms" warrants two because the user asked for two* — and an implementation
+            that splits one intended act across two steps for its own reasons warrants
+            none. That is ADR-0249 §7's asymmetry observed rather than extended: a
+            **count of acts the user asked for** is interpretation, and interpretation
+            is the model's.
+
+            **``actions`` rides here and never inside ``ProposedUnderstanding``**,
+            because that value's omission rule is removal (ADR-0249 §7) and an intended
+            action must survive every revision that does not mention it. So minting is
+            independent of revising: an implementation may propose actions without
+            proposing an understanding, and an understanding that mentions no action
+            removes none.
+
+            The
             plan's ``supersedes`` and ``targets_revision`` are **not the planner's**:
             the loop takes both fields on every plan a planner returns, discarding any
             value it came back carrying (ADR-0228 §5, ADR-0249 §8), so an
