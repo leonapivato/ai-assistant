@@ -3676,7 +3676,7 @@ class PlanStoreContract:
 
         export = await store.export()
 
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert [one.id for one in export.attempts] == ["a1"]
         assert export.attempts[0].plan_ids == ("p1",)
 
@@ -5035,7 +5035,7 @@ class PlanStoreContract:
         await store.save_plan(_plan(read_request=_READ_REQUEST))
         export = await store.export()
 
-        assert export.schema_version == 13
+        assert export.schema_version == 14
         assert export.plans[0].read_request == _READ_REQUEST
 
     async def test_export_round_trips_a_plans_read_request(self, store: PlanStore) -> None:

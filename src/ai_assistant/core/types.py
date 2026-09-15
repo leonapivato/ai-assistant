@@ -6587,6 +6587,50 @@ class GoalInterpretation(BaseModel):
 _ACTION_LABEL: Final = re.compile(r"A[0-9]+")
 
 
+# **:class:`StepOutputRef` is declared here rather than beside its first plan-shaped
+# consumer**, and the move is the one :data:`Identifier`'s own comment rules on:
+# ADR-0267 §1 gives it a second consumer — :class:`ActionQuote`, whose ``read_from``
+# it is — and that record is carried by :class:`Goal`, which is declared far above
+# the old position. "A forward reference plus ``model_rebuild`` would have kept the
+# old position at the cost of making a `core` type depend on an import-order side
+# effect, so the primitive moved rather than the model." **Nothing about it
+# changed**: not a field, not a validator, not a line of its docstring.
+
+
+class StepOutputRef(BaseModel):
+    """A place in a producing step's output (ADR-0253 §6).
+
+    **It is the one spelling of that**, carried by a :class:`ResultReference`'s
+    ``source`` and by a :class:`PlanInterpretation`'s ``reads`` alike — one type
+    rather than two near-identical ones, which is ADR-0251 §3's "two carriers for
+    one fact" avoided rather than repaired.
+
+    **The depth is one and this rule is stated once here**, exactly as
+    :class:`StepVerification`'s is (§6): :attr:`field` is a key name and never a
+    dotted expression, an index, a wildcard or a selector, and no lane adds an
+    addressing syntax to it wherever a ``StepOutputRef`` is carried.
+
+    **Six cases make one unresolvable** (§6), and the same six bind every
+    ``StepOutputRef``: the producing step is not ``SUCCEEDED``; its ``verifies`` does
+    not hold; its ``output`` is ``None``; a ``field`` is named and the ``output`` is
+    not a JSON object; a ``field`` is named and the object does not carry that key;
+    the value at that key is JSON ``null``. **No lane substitutes an empty string, a
+    zero, an empty object, the parameter's absence, or a value from anywhere else** —
+    resolving one and disposing of a step that cannot be resolved is A7's (§11).
+
+    Attributes:
+        step: The producing step, by its ``PlanStep.id``.
+        field: A key of that step's ``output``, absent meaning the whole ``output``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step: Identifier = Field(description="The producing step, by its id.")
+    field: EncodableText | None = Field(
+        default=None, description="A key of that step's output; absent means the whole output."
+    )
+
+
 class IntendedAction(BaseModel):
     """One act a goal intends, minted once and never an instruction to act (§1).
 
@@ -6719,6 +6763,230 @@ class IntendedAction(BaseModel):
 MAX_INTENDED_ACTIONS: Final[int] = 64
 
 
+#: An ISO-4217 alphabetic code is exactly this long.
+#:
+#: **Declared here rather than beside** :class:`ToolCost`, which is where it used to
+#: sit, on the ground :data:`Identifier`'s own comment states: ADR-0267 §1 gives it a
+#: second consumer in :func:`_iso_4217_shaped`, which :class:`ActionQuote` is built on
+#: and which is declared far above that position. Nothing about it changed.
+_CURRENCY_CODE_LENGTH = 3
+
+
+def _iso_4217_shaped(value: str) -> str:
+    """Require exactly three uppercase ASCII letters, without normalising.
+
+    ``ToolCost.currency``'s rule stated once for the two records ADR-0267 mints —
+    :class:`ActionQuote` and :class:`QuoteView` — rather than twice, because §7
+    restates the bound on the view *"rather than assumed from the record it
+    transcribes"* and two spellings of one shape are two things to get wrong. It is
+    **shape and never a register** (§1, on ADR-0254 §2): validating against the live
+    ISO-4217 table would make a record's decoding depend on a list that changes when
+    currencies are withdrawn, and silently upcasing ``"usd"`` would treat a lowercase
+    code and a typo'd one differently for no reason a caller can see.
+
+    Args:
+        value: The code as written.
+
+    Returns:
+        The code unchanged.
+
+    Raises:
+        ValueError: If it is not three uppercase ASCII letters.
+    """
+    if len(value) != _CURRENCY_CODE_LENGTH or not (
+        value.isascii() and value.isupper() and value.isalpha()
+    ):
+        msg = f"currency must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+def _finite_non_negative(value: Decimal, *, what: str) -> Decimal:
+    """Require a finite, non-negative amount (ADR-0267 §1, §7).
+
+    ``ValueBound``'s ``MONEY`` refusals one record over: ``Decimal`` admits
+    ``Infinity`` and ``NaN``, *"neither of which has a JSON representation or survives
+    arithmetic in a running total, and comparing ``NaN`` with ``<`` raises rather than
+    answering"*. **Zero is a price** and is admitted: a free act is covered under any
+    ceiling of its currency and is no absence.
+
+    Args:
+        value: The amount as written.
+        what: What is being refused, for the message.
+
+    Returns:
+        The amount unchanged.
+
+    Raises:
+        ValueError: If it is not finite, or is negative.
+    """
+    if not value.is_finite():
+        msg = f"{what} is finite, got {value!r} (ADR-0267 §1)"
+        raise ValueError(msg)
+    if value < 0:
+        msg = f"{what} is not negative, got {value!r} (ADR-0267 §1)"
+        raise ValueError(msg)
+    return value
+
+
+class ActionQuote(BaseModel):
+    """One price read for one intended action (ADR-0267 §1).
+
+    **Exactly seven fields, and it carries no eighth**: no id of its own, no attempt,
+    no tool, no capability, no expiry, no status, no :class:`BoundKind` and no count.
+
+    **The four facts ADR-0266 §7 reads are the first four fields, and the last three
+    are provenance no comparison reads** (§1). §7 compares the act, the arguments, the
+    amount and the currency; :attr:`plan`, :attr:`read_from` and :attr:`read_at` are
+    read by no clause of ADR-0266, by no route of ADR-0267 and by no test of either.
+    **No lane computes an expiry from** :attr:`read_at`, refuses a quote for its age,
+    orders quotes by it, or resolves :attr:`read_from` into a value. They are on the
+    record so that a reader auditing a charge can say where the number came from and
+    when, which is ``GoalEvidence.read_at``'s own footing, and the prohibition is
+    stated because the alternative is a later lane reading an unenforced expiry back
+    in — ADR-0252 §1's *"sufficiency never reads a count"* one record over.
+
+    **The amount is the whole charge the act will make** (§1) — *"not a fee, not a
+    deposit, not a per-unit rate, not one leg of a transfer"*. A quote of a €1 fee for
+    a €200 transfer satisfies a €150 ceiling while the act breaches it. **The
+    obligation binds the declaration** (:class:`QuotedOutput`), whose ``amount`` names
+    the key carrying the total; **no code checks that it does**, and ADR-0267 §10
+    books that residual with what fires it.
+
+    **A quote is bound to the act and to the arguments, and never to the declaration
+    that produced it** (§1). :meth:`~ai_assistant.core.protocols.GoalQuotes.for_action`
+    is keyed on the goal and the intended action alone, and **no clause compares the
+    declaration a quote was read from against the declaration of the request it
+    covers** — the owner's own case reads a price from an availability tool and
+    performs the act at a **booking** tool, so a same-declaration rule would refuse
+    every act this mechanism exists to authorise. What binds the number to the act is
+    the totality obligation above together with :attr:`arguments_digest`, which pins
+    the arguments. The declaration that produced a quote is recoverable from
+    :attr:`plan` and :attr:`read_from` for an audit, and is carried in **no field of
+    its own**, because a field nothing compares is a field a later lane compares.
+
+    **The record carries no id of its own, and that is decided rather than
+    forgotten** (§1). A later record naming one quote names it by the act and the
+    digest, which under §2's order select **the governing** quote for that pair — so
+    an identifier would be a second handle on the value every comparison addresses.
+    It is **not** a handle on an individual displaced quote and the claim is not made:
+    two readings over identical arguments carry the same pair, and §2's elision can
+    drop one.
+
+    Attributes:
+        intended_action: The :attr:`IntendedAction.id` this price was read for.
+        arguments_digest: The ``ActionRequest.parameters_digest`` of the request whose
+            output it was read from, and **never a value computed a second way**
+            (§1). ADR-0266 §7 compares it to the acting request's own; the encoding is
+            ADR-0021 §1's, computed in the one place that computes it. **Every
+            argument of the quoting call is inside it, system-supplied keys
+            included** — so a quoting call and an acting call differing in **any** key
+            carry different digests, are covered by no quote, and ask.
+        amount: The whole charge the act will make — finite and not negative.
+        currency: The ISO-4217 code ADR-0254 §4's ``MONEY`` reading compares **byte
+            for byte**, validated for the corpus's money shape — three uppercase ASCII
+            letters, **checked for shape and never against a register** — exactly as
+            ``ToolCost.currency`` and a ``MONEY`` ``ValueBound``'s are (ADR-0254 §2).
+            A quote minted at ``"usd"`` matches no bound's ``"USD"`` ever, so it would
+            cover nothing while looking like a price that had been read, which is why
+            the shape is on the record rather than left to prose.
+        plan: The plan the reading step belonged to. **Carried because a step id alone
+            names no place** (§1): ``_step_ids_are_unique`` guarantees uniqueness
+            *within a plan*, so a goal that has replanned holds two plans whose steps
+            may share an id and ``read_from.step`` alone points at two places.
+        read_from: Where in that step's output the number was read.
+            :class:`StepOutputRef` is reused rather than restated because ADR-0253 §6
+            makes it *"the one spelling of that"*; **its six unresolvability cases are
+            untouched and unreached**, binding a reference something resolves, and
+            nothing resolves this one.
+        read_at: When the price was read. **Provenance**: no expiry is computed from
+            it and no ordering reads it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intended_action: Identifier = Field(
+        description="The IntendedAction.id this price was read for (ADR-0267 §1)."
+    )
+    arguments_digest: Sha256Hex = Field(
+        description=(
+            "The parameters_digest of the ActionRequest whose output this was read "
+            "from, and never a value computed a second way (ADR-0267 §1)."
+        )
+    )
+    amount: Decimal = Field(
+        description="The whole charge the act will make; finite and not negative (§1)."
+    )
+    currency: EncodableText = Field(
+        description="The ISO-4217 code, shape-checked and never checked against a register (§1)."
+    )
+    plan: Identifier = Field(description="The plan the reading step belonged to (§1).")
+    read_from: StepOutputRef = Field(
+        description="Where in that step's output the number was read (§1)."
+    )
+    read_at: UtcInstant = Field(
+        description="When the price was read — provenance, and no expiry is computed from it (§1)."
+    )
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_is_iso_4217_shaped(cls, value: str) -> str:
+        """Require exactly three uppercase ASCII letters, without normalising.
+
+        ``ToolCost.currency``'s rule and not a second one (ADR-0267 §1, on
+        ADR-0254 §2). Shape only, for that field's stated reason: validating against
+        the live ISO-4217 register would make a record's decoding depend on a table
+        that changes when currencies are withdrawn, and silently upcasing ``"usd"``
+        would treat a lowercase code and a typo'd one differently for no reason a
+        caller can see.
+
+        Raises:
+            ValueError: If the code is not three uppercase ASCII letters.
+        """
+        return _iso_4217_shaped(value)
+
+    @field_validator("amount")
+    @classmethod
+    def _amount_is_a_price(cls, value: Decimal) -> Decimal:
+        """Require a finite, non-negative amount (ADR-0267 §1).
+
+        ``ValueBound``'s ``MONEY`` refusals one record over: ``Decimal`` admits
+        ``Infinity`` and ``NaN``, *"neither of which has a JSON representation or
+        survives arithmetic in a running total, and comparing ``NaN`` with ``<``
+        raises rather than answering"*. **Zero is a price** and is admitted: a free
+        act is covered under any ceiling of its currency and is no absence.
+
+        Raises:
+            ValueError: If the amount is not finite, or is negative.
+        """
+        return _finite_non_negative(value, what="a quoted amount")
+
+
+#: The most quotes one goal holds (ADR-0267 §2).
+#:
+#: **A fixed constant and not a ``Settings`` field**, exactly as
+#: :data:`MAX_INTENDED_ACTIONS` and :data:`MAX_GOAL_EVIDENCE` are not: ADR-0086 §1's
+#: reasoning for fixing its own bound in ``core`` binds — "a knob that raises the
+#: ceiling is a knob that re-opens it". **64 is** their figure, "for a durable
+#: per-goal sequence of the same shape".
+#:
+#: **The tuple is bounded by an elision and not by a refusal** (§2), which is the
+#: opposite remedy to :data:`MAX_INTENDED_ACTIONS`'. An append that would carry a goal
+#: past it **drops members from the front**, oldest first, and advances
+#: :attr:`Goal.quotes_elided` by exactly as many as it dropped. **Silent truncation is
+#: not available** (ADR-0086 §4), and the count never decreases.
+#:
+#: **An elision never revives a superseded quote, and that is what makes it safe where
+#: ADR-0265 §1 refuses one** (§2). Members are dropped from the front alone, so within
+#: any action the **last** quote is the last to go: an elision either leaves the
+#: governing quote where it was, or leaves that action with no quote at all, in which
+#: case ADR-0266 §7 leaves the request **uncovered and the act asks**. **No elision can
+#: make an earlier reading govern.** What vanishes where ADR-0265 §1 refuses an elision
+#: is the scope of an at-most-once claim, so a dropped identity is a duplicate booking
+#: "nobody could detect afterwards"; **a dropped quote costs a question**.
+MAX_ACTION_QUOTES: Final[int] = 64
+
+
 class Goal(BaseModel):
     """A durable objective the assistant is working toward (ADR-0014 §1, ADR-0249 §1).
 
@@ -6779,6 +7047,23 @@ class Goal(BaseModel):
             and **no lane walks it and dispatches, plans, schedules or reports from
             it**: it is read by :attr:`GoalBrief.actions`, by the export, and by the
             effect claim ADR-0265 §6 obliges, and by nothing else.
+        quotes: The prices this goal has had read for its intended actions, **oldest
+            first and append-only** (ADR-0267 §2). No lane edits a member in place,
+            reorders the tuple, or removes a member other than by the elision below.
+            **The tuple's order *is* the total order ADR-0266 §6 requires**: no instant
+            is compared, no sequence number is minted and no tie-break exists to get
+            wrong. **The governing quote for an intended action is the last member
+            naming it**, and where none names it there is no quote for that action —
+            which is ADR-0266 §7's *"latest in §6's order"* read off this shape. Its one
+            writer is :meth:`~ai_assistant.core.protocols.PlanStore.record_quote`, and
+            it is empty on every goal at the moment it is opened and on every goal
+            written before that decision.
+        quotes_elided: How many quotes this goal's history has dropped (ADR-0267 §2). A
+            **count and never an identifier**, it never decreases, and an append that
+            drops *k* members advances it by *k*. **The bound is an elision and not a
+            refusal** — :data:`MAX_ACTION_QUOTES` — and a dropped quote costs a
+            question rather than reviving an earlier reading, because members are
+            dropped from the **front** alone.
         status: The goal's **overall disposition** — whether the objective stands,
             was reached, was given up, or cannot currently be reached — and never the
             state of any one attempt (ADR-0249 §4).
@@ -6835,6 +7120,25 @@ class Goal(BaseModel):
             "Empty on every goal at the moment it is opened and on every goal written "
             "before that decision. Never elided: a minting past MAX_INTENDED_ACTIONS "
             "is refused whole rather than making room."
+        ),
+    )
+    quotes: tuple[ActionQuote, ...] = Field(
+        default=(),
+        description=(
+            "The prices read for this goal's intended actions, oldest first and "
+            "append-only (ADR-0267 §2). The tuple's order is the total order the "
+            "governing-quote rule reads, and the last member naming an action is the "
+            "governing one. Empty on every goal at the moment it is opened and on "
+            "every goal written before that decision."
+        ),
+    )
+    quotes_elided: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many quotes this goal's history has dropped (ADR-0267 §2). Never "
+            "decreases; an append past MAX_ACTION_QUOTES drops from the front and "
+            "advances this by exactly as many as it dropped."
         ),
     )
     status: GoalStatus = GoalStatus.ACTIVE
@@ -7053,6 +7357,40 @@ class IntendedActionMinting(BaseModel):
 #: rather than by what a prompt can hold, and because the elision is **disclosed**
 #: rather than silent (§2) a deployment that hits the cap learns that it did.
 MAX_ASSOCIATION_CANDIDATES: Final[int] = 8
+
+
+class ActionQuoteMinting(BaseModel):
+    """The command that appends one quote to a goal (ADR-0267 §2).
+
+    **A command and not a snapshot**, on ADR-0014 §5's own argument as ADR-0249 §12
+    states it: "Had the store taken a whole ``ExecutionState``, any consumer of the
+    Protocol could commit ``PENDING → SUCCEEDED`` directly and the claim that
+    deterministic code owns state transitions (VISION §7) would rest on nobody
+    choosing to bypass it." :class:`IntendedActionMinting`'s shape one record over.
+
+    **The write is compare-and-swap**: the read, the comparison and the write are one
+    indivisible step, and there is no separate read on which a decision is taken. A
+    stale write raises the class ``StaleExecutionError`` occupies, and **a refused
+    write is never rebased** (ADR-0267 §4) — which is the whole of what makes two
+    recorded quotes for one action stand in the order they were read.
+
+    **One quote per command, never a tuple.** ADR-0267 §4's mint reads one step's
+    output and yields one quote, and a second reading is *"an append and never an
+    edit"*; a command carrying several would need an order rule of its own beside the
+    tuple's, which §2 puts in exactly one place.
+
+    Attributes:
+        goal_id: The goal to append to.
+        quote: The quote to append.
+        expected_version: The :attr:`Goal.version` this minting was computed against.
+            The read, the comparison and the write are **one indivisible step**.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier
+    quote: ActionQuote = Field(description="The quote to append (ADR-0267 §2).")
+    expected_version: int = Field(ge=0, description="The Goal.version this was computed against.")
 
 
 class GoalCandidates(BaseModel):
@@ -9360,40 +9698,6 @@ class StepVerification(BaseModel):
             )
             raise ValueError(msg)
         return self
-
-
-class StepOutputRef(BaseModel):
-    """A place in a producing step's output (ADR-0253 §6).
-
-    **It is the one spelling of that**, carried by a :class:`ResultReference`'s
-    ``source`` and by a :class:`PlanInterpretation`'s ``reads`` alike — one type
-    rather than two near-identical ones, which is ADR-0251 §3's "two carriers for
-    one fact" avoided rather than repaired.
-
-    **The depth is one and this rule is stated once here**, exactly as
-    :class:`StepVerification`'s is (§6): :attr:`field` is a key name and never a
-    dotted expression, an index, a wildcard or a selector, and no lane adds an
-    addressing syntax to it wherever a ``StepOutputRef`` is carried.
-
-    **Six cases make one unresolvable** (§6), and the same six bind every
-    ``StepOutputRef``: the producing step is not ``SUCCEEDED``; its ``verifies`` does
-    not hold; its ``output`` is ``None``; a ``field`` is named and the ``output`` is
-    not a JSON object; a ``field`` is named and the object does not carry that key;
-    the value at that key is JSON ``null``. **No lane substitutes an empty string, a
-    zero, an empty object, the parameter's absence, or a value from anywhere else** —
-    resolving one and disposing of a step that cannot be resolved is A7's (§11).
-
-    Attributes:
-        step: The producing step, by its ``PlanStep.id``.
-        field: A key of that step's ``output``, absent meaning the whole ``output``.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    step: Identifier = Field(description="The producing step, by its id.")
-    field: EncodableText | None = Field(
-        default=None, description="A key of that step's output; absent means the whole output."
-    )
 
 
 class InterpretedOutput(BaseModel):
@@ -12718,7 +13022,23 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 13 because ``Goal`` gains ``intended_actions`` and
+    **``schema_version`` is 14 because ``Goal`` gains ``quotes`` and ``quotes_elided``**
+    (ADR-0267 §11) — one ground, reaching ``tuple[Goal, ...]``. ``PlanExport`` gains
+    **no member**: an :class:`ActionQuote` rides **inside** ``Goal``, which ``goals``
+    already carries, so ADR-0014 §5's closure rule is satisfied by construction and is
+    extended by nothing, and ``delete_goal`` removes a goal's quotes with the goal. The
+    version moves on ADR-0039 §10's own mechanism, because ``Goal`` is inside the
+    export and its shape changing is exactly what the version exists to announce, and a
+    defaulted field on a frozen model is still a shape change to every document that
+    carries it: ``model_dump()`` emits ``quotes`` and ``quotes_elided`` on **every**
+    goal, which an older reader's ``extra="forbid"`` refuses exactly as
+    ``targets_revision`` is. **It is a stored-record version and not a wire ground**:
+    ``PlanExport`` crosses no frame and is emitted by no peer, and ADR-0267 §11's
+    ``PROTOCOL_VERSION`` move rests on the two shapes that *do* cross — neither of them
+    ``Goal``. **No lane invents a quote for a stored goal**: a price nothing read is a
+    price no record holds.
+
+    **It was 13 because ``Goal`` gains ``intended_actions`` and
     ``PlanStep`` gains ``intended_action``** (ADR-0265 §5) — two independent grounds,
     each sufficient on its own, reaching ``tuple[Goal, ...]`` and
     ``tuple[ActionPlan, ...]``. ``PlanExport`` gains **no member**: an
@@ -12874,12 +13194,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[13] = Field(
-        default=13,
+    schema_version: Literal[14] = Field(
+        default=14,
         description=(
-            "Shape of this export, pinned to exactly 13 (ADR-0039 §10, ADR-0265 §5): an "
+            "Shape of this export, pinned to exactly 14 (ADR-0039 §10, ADR-0267 §11): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[13]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[14]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -13953,9 +14273,6 @@ encodable are independent: ``_has_visible_text`` sees the letters in
 # registries serialise the same declaration identically.
 
 
-_CURRENCY_CODE_LENGTH = 3
-
-
 class ToolCost(BaseModel):
     """What one invocation of a tool costs (see ADR-0016 §4).
 
@@ -14941,6 +15258,72 @@ def _bounded_arguments(value: tuple[BoundedArgument, ...]) -> tuple[BoundedArgum
     return value
 
 
+class QuotedOutput(BaseModel):
+    """Where a declaration says a price may be read from its output (ADR-0267 §3).
+
+    **Exactly two fields**, each a key of the step's ``output`` at depth **one**.
+    ``StepOutputRef.field``'s rule stated once more where it governs: neither names a
+    dotted expression, an index, a wildcard or a selector, and **no lane adds an
+    addressing syntax to either**.
+
+    **The field that selects the number lives on the declaration and on nothing a turn
+    produces, and that is the whole answer to *no model chooses which number the quote
+    is*** (§3). **No plan, no plan step, no planner envelope, no ``ActionRequest``, no
+    ``Authorization`` and no ``CoverageMember`` carries a key a price is read at**, and
+    no lane adds one. A declaration is authored once by an integration author and
+    reviewed once; a plan is authored by a model on every turn. Against
+    ``{"price": "200", "stars": 4, "currency": "EUR"}`` a plan-carried selector naming
+    ``stars`` quotes ``4``, satisfies a ``150`` ceiling and authorises the ``200``
+    purchase — a number of the right **shape** in the wrong **slot**, which no
+    validation of shape catches. ADR-0266 §8's *"A model names no argument key, no
+    currency key and no identifier anywhere in this decision"* is adopted whole and
+    extended by one: **no output key either.**
+
+    **One quoted output per declaration, never a tuple** (§3). A declaration states
+    where its price is or states nothing. A second would need a selection rule at the
+    mint, and every candidate for one is refused already: by kind is ADR-0266 §7's rule
+    about members, by the plan is the clause above, by a schema keyword is ADR-0254
+    §4's *"No reading consults a schema to decide what an argument means, and there is
+    no exception"*, and by order is arbitrary.
+
+    Attributes:
+        amount: The key of the step's ``output`` whose value is the **whole charge**
+            the act will make (§1). **No code checks that it is**, and ADR-0267 §10
+            books that residual with what fires it.
+        currency: The key at depth one carrying that amount's ISO-4217 code.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount: EncodableText = Field(
+        description="The output key carrying the whole charge the act will make (ADR-0267 §3)."
+    )
+    currency: EncodableText = Field(
+        description="The output key carrying that amount's ISO-4217 code (ADR-0267 §3)."
+    )
+
+    @model_validator(mode="after")
+    def _the_two_keys_are_different(self) -> QuotedOutput:
+        """Refuse ``amount`` equal to ``currency`` (ADR-0267 §3).
+
+        One key cannot carry both a number and a three-letter code, so a declaration
+        naming one for both describes an output no reading of §4 can succeed against —
+        and the mint would refuse every act under it silently. Refusing at
+        construction is where the integration author sees it.
+
+        Raises:
+            ValueError: If the two keys are equal.
+        """
+        if self.amount == self.currency:
+            msg = (
+                f"a quoted output names two different keys of the step's output, and "
+                f"{self.amount!r} is named for both the amount and the currency "
+                f"(ADR-0267 §3)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class ToolDefinition(BaseModel):
     """A declaration of what a tool is and what invoking it risks (ADR-0016 §1).
 
@@ -15029,6 +15412,26 @@ class ToolDefinition(BaseModel):
             "ADR-0016 §1 refuses, since a declaration that declares nothing is met on "
             "that route nowhere — it forgoes the second comparison and keeps the "
             "primary one, the quote's."
+        ),
+    )
+    quoted_output: QuotedOutput | None = Field(
+        default=None,
+        description=(
+            "Where a price may be read from this declaration's output, and the whole "
+            "of what a declaration says about that (ADR-0267 §3). **A declaration "
+            "carrying ``None`` yields no quote ever**, so every act proved against a "
+            "quote of that declaration's output is uncovered and asks — the "
+            "fail-closed direction. **This is a third exception to this class's "
+            "required-field rule, recorded rather than argued away** (ADR-0267 §9's "
+            "ADR-0016 scope, taken on §1's own test applied afresh and not on the two "
+            "records beside it): absent makes the **opposite** claim to the one "
+            "ADR-0016 §1 refuses, a declaration naming no quoted output producing no "
+            "quote at all — so the default costs a question and can never authorise a "
+            "call. Requiring it would oblige every declaration and fixture in the tree "
+            "to write ``None`` for a fact absent on almost all of them, and would "
+            "refuse every definition written before it. **Authored by the "
+            "integration** and by nothing this system runs: no component writes, "
+            "edits, infers or repairs one at run time (§8)."
         ),
     )
     parameters_schema: FrozenJsonMapping = Field(
@@ -20280,6 +20683,33 @@ class Authorization(BaseModel):
             "check compares against and why that check reads the disposition first."
         ),
     )
+    quoted: ActionQuote | None = Field(
+        default=None,
+        description=(
+            "The governing quote for the request's intended action **in the goal this "
+            "row was built from** (ADR-0267 §7) — the figure the user's answer was "
+            "taken over. **A fact about that one read and not about the instant of "
+            "persistence**: a quote appended between the read and the write leaves "
+            "this carrying the one the read returned, and no version check, no "
+            "compare-and-swap and no second read is owed to make that true. Written "
+            "**once**, before the question is put, and **never edited afterwards**. "
+            "**Written on a path-(i) proposal alone** and absent there in three cases "
+            "— the row carries no MONEY member, the request carries no "
+            "``intended_action``, or no quote of the goal names that action — and "
+            "**absent on every path-(ii) and every path-(iii) row**, which write "
+            "``ESTABLISHED`` directly, put no question and so show no figure; a "
+            "path-(ii) correction does **not** transcribe it. **It is provenance**: it "
+            "states what was governing and never that it satisfied the member, and "
+            "**no comparison of any decision reads it** — ADR-0254 §13's recheck and "
+            "ADR-0266 §7's evidence route each read the **current** governing quote "
+            "through GoalQuotes.for_action, never this field. It sits **outside** "
+            ":data:`_AUTHORIZATION_SUBJECT`, so ADR-0254 §7's recompute parity is "
+            "unmoved, and **a stored row decodes with it None**. **Its producer is "
+            "ADR-0254 §20's Lane 2** (ADR-0267 §11): no lane of ADR-0267 populates it, "
+            "and until that lane every row is written and decodes with it None, which "
+            "§7 makes a conforming row rather than one to repair."
+        ),
+    )
 
     @model_validator(mode="after")
     def _a_settled_row_states_when_and_a_proposal_does_not(self) -> Authorization:
@@ -20583,6 +21013,56 @@ class CoverageView(BaseModel):
         return self
 
 
+class QuoteView(BaseModel):
+    """The figure an act was quoted at, as the user is shown it (ADR-0267 §7).
+
+    **Exactly three fields.** It carries **no** digest, no intended action, no plan, no
+    step, no goal id and no authorization id — ADR-0254 §11's renders-no-internal-value
+    bar, unrelaxed.
+
+    **The bound is restated from** :class:`ActionQuote` **rather than assumed from the
+    record it transcribes** (§7), because a ``QuoteView`` crosses a frame inside a
+    :class:`Confirmation` and its own model is the only guard a decoded one has.
+
+    **It is a disclosure and not a check** (§6). The amount and the instant it was read
+    are rendered beside the ceiling so that the user answering is shown the number the
+    proof rests on and how old it is; **no clause makes a user's assent a warrant that
+    the price is still current**, and no lane reads the rendering as discharging
+    ADR-0255 §15 item 19's seventh condition.
+
+    Attributes:
+        amount: The quoted amount, finite and not negative.
+        currency: Its ISO-4217 code, of :class:`ActionQuote`'s own shape.
+        read_at: When the price was read.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount: Decimal = Field(description="The quoted amount; finite and not negative (§7).")
+    currency: EncodableText = Field(description="Its ISO-4217 code, shape-checked (§1, §7).")
+    read_at: UtcInstant = Field(description="When the price was read (§7).")
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_is_iso_4217_shaped(cls, value: str) -> str:
+        """Require exactly three uppercase ASCII letters, without normalising (§1, §7).
+
+        Raises:
+            ValueError: If the code is not three uppercase ASCII letters.
+        """
+        return _iso_4217_shaped(value)
+
+    @field_validator("amount")
+    @classmethod
+    def _amount_is_a_price(cls, value: Decimal) -> Decimal:
+        """Require a finite, non-negative amount (§7).
+
+        Raises:
+            ValueError: If the amount is not finite, or is negative.
+        """
+        return _finite_non_negative(value, what="a rendered quoted amount")
+
+
 class AuthorizationProjection(BaseModel):
     """What answering a ``CONFIRM`` would establish (ADR-0254 §11).
 
@@ -20635,6 +21115,24 @@ class AuthorizationProjection(BaseModel):
             "the establishing act** and again in every listing, and it is the instant "
             "that was written rather than one recomputed at the answer: §12's ladder ran "
             "when the row was proposed and reads nothing again."
+        )
+    )
+    quote: QuoteView | None = Field(
+        description=(
+            "The figure this act was quoted at, **transcribed from the proposed row's "
+            "``quoted``** — its three values, and absent exactly where that field is "
+            "absent (ADR-0267 §7). **Required with no default**, because absence here "
+            "is a fact about the row and never a caller's omission: a confirmation "
+            "that renders a ceiling without the figure the act was quoted at is not a "
+            "confirmation of that charge, which is ADR-0254 §11's own construction "
+            "read onto the figure the row was built over, and §11's concrete list "
+            "already requires the question to name the price as a figure or as a "
+            "bounded limit with its currency. **Nothing re-selects at render time**: "
+            "the projection is rendered from the proposed row and is not recomputed, a "
+            "restart renders the same projection, and a refresh landing in between "
+            "changes the **ruling** and not the rendering. **Its producer is ADR-0254 "
+            "§20's Lane 2** (ADR-0267 §11): until that lane every row's ``quoted`` is "
+            "``None``, so every projection carries this ``None``."
         )
     )
 
