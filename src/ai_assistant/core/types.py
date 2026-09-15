@@ -19199,8 +19199,16 @@ PERIOD_FULL_DATE: Final[re.Pattern[str]] = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 #: not admit **satisfying** a bound, which is the permissive direction and the one
 #: direction §4 refuses: *"the answer is not to round, to quantise or to pick a
 #: tolerance, it is to refuse and ask."*
+#:
+#: **The offset's own ranges are in the grammar and not left to the parse**, because
+#: the parse **normalises** rather than refusing: ``datetime.fromisoformat`` reads
+#: ``+00:60`` as ``+01:00``, so a member fixed at the first would be compared under
+#: the second — the record saying one thing and the reading another, which is
+#: ADR-0150's two-shapes hazard at the one comparison that decides whether a call is
+#: authorised. RFC 3339 §4.2 bounds a ``time-offset`` at ``23:59``, and that is what
+#: this states. Adversarial review, round 5, ``blocker``.
 PERIOD_DATE_TIME: Final[re.Pattern[str]] = re.compile(
-    r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})\Z"
+    r"\A\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)\Z"
 )
 
 

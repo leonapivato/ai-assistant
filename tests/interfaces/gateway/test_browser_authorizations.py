@@ -976,67 +976,20 @@ async def test_a_malformed_bound_is_reported_rather_than_rendered(
         assert "undefined" not in shown
 
 
-async def test_a_fixed_period_naming_no_day_is_reported_rather_than_rendered(
-    gateway_browser: Browser, tmp_path: Path
-) -> None:
-    """A date that does not exist is never presented as an authority (ADR-0266 §3).
-
-    Driven through the **payload** for the malformed-bound arm's own reason, and in
-    the shape adversarial round 4 asked for: the listing's answer
-    is rewritten on the wire to fix a ``PERIOD`` member at ``2026-02-30``, which
-    matches RFC 3339's shape and names no day. ``CoverageMember`` and ``CoverageView``
-    both refuse it, so no conforming hub sends one — and what the page must not do is
-    render *"the dates: fixed at 2026-02-30"*, a claim about what the owner authorised
-    over a date that does not exist. **A fixed value is compared by byte equality**, so
-    the hub that sent it would be claiming exactly that.
-    """
-    body = {
-        "authorizations": [
-            {
-                "id": "auth-1",
-                "goal_statement": STATEMENT,
-                "tool_id": AUTHORIZATION_TOOL.id,
-                "tool_description": AUTHORIZATION_TOOL.description,
-                "coverage": [
-                    {
-                        "kind": "period",
-                        "fixed": "2026-02-30",
-                        "bound": None,
-                        "span": "the last day of February",
-                    }
-                ],
-                "expires_at": "2026-09-13T21:00:00+00:00",
-                "live": True,
-            }
-        ]
-    }
-
-    async def route(one: Route) -> None:
-        await one.fulfill(status=200, content_type="application/json", body=json.dumps(body))
-
-    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
-        _seed(drive)
-        await drive.page.route("**/authorizations", route)
-
-        await drive.page.click("#goals-button")
-        await drive.page.wait_for_selector("#goals:not([hidden])")
-        await drive.page.click("#goal-list button:has-text('What this authorises')")
-        await drive.page.wait_for_selector("#authorizations:not([hidden])")
-
-        panel = drive.page.locator("#authorizations")
-        await expect(panel).to_contain_text("no words for")
-        shown = await panel.inner_text()
-        assert "2026-02-30" not in shown
-        assert "the dates" not in shown
-
-
 async def test_a_fixed_period_naming_a_real_day_is_rendered(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """The control beside the refusal above, so it refuses the date and not the shape.
+    """A fixed ``PERIOD`` member reaches the screen as the day it names (§11).
 
-    The same payload at a day that exists renders, which is what makes the arm above a
-    statement about the **calendar** rather than about fixed members in general.
+    **Its counterpart — an impossible date reported rather than rendered — is
+    deliberately not here, and that is where the two lenses disagreed.** Adversarial
+    round 4 asked the page to check the calendar; architecture round 5 ruled that
+    parsing a **blocker** under golden rule 3, ADR-0266 §3 putting fixed-period
+    validity on the `core` contract. Architecture's reading is the one that survives
+    contact: the round-4 parser had drifted from ``period_reading_form`` by the very
+    next round, in both directions. So the invariant is enforced where §3 puts it —
+    ``tests/core/test_authorization_views.py`` pins that ``CoverageView`` refuses
+    ``2026-02-30`` — and the page renders what a validated projection carries.
     """
     body = {
         "authorizations": [

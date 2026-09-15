@@ -160,7 +160,21 @@ def test_no_two_members_of_one_row_carry_the_same_kind() -> None:
 
 @pytest.mark.parametrize(
     "fixed",
-    ["2026-02-30", "2026-13-01", "2026-09-13T25:00:00Z", "2026-09-13T10:70:00Z", "2026-02-29"],
+    [
+        "2026-02-30",
+        "2026-13-01",
+        "2026-09-13T25:00:00Z",
+        "2026-09-13T10:70:00Z",
+        "2026-02-29",
+        # **The offset's own ranges**, which the parse *normalises* rather than
+        # refusing: ``+00:60`` reads back as ``+01:00``, so the record would say one
+        # thing and the reading another — ADR-0150's two-shapes hazard at the one
+        # comparison that decides whether a call is authorised. Adversarial review,
+        # round 5, ``blocker``.
+        "2026-01-01T12:00:00+00:60",
+        "2026-01-01T12:00:00+24:00",
+        "2026-01-01T12:00:00+99:99",
+    ],
 )
 def test_a_period_member_fixing_a_date_the_reading_refuses_is_not_constructible(
     fixed: str,
@@ -179,7 +193,20 @@ def test_a_period_member_fixing_a_date_the_reading_refuses_is_not_constructible(
         CoverageMember(kind=BoundKind.PERIOD, fixed=fixed, basis=authorization_basis())
 
 
-@pytest.mark.parametrize("fixed", ["2026-09-13", "2026-02-28", "2026-09-13T10:00:00+01:00"])
+@pytest.mark.parametrize(
+    "fixed",
+    [
+        "2026-09-13",
+        "2026-02-28",
+        "2028-02-29",
+        "0099-01-01",
+        "2026-09-13T10:00:00+01:00",
+        # The widest offsets RFC 3339 §4.2 admits, either side of the line the
+        # refusals above are stated over.
+        "2026-01-01T12:00:00+23:59",
+        "2026-01-01T12:00:00-23:59",
+    ],
+)
 def test_a_period_member_fixing_a_date_the_reading_accepts_is_constructible(fixed: str) -> None:
     """The control beside the refusal above: a real calendar date and a real
     instant carrying an offset are both values §4's reading reads."""
