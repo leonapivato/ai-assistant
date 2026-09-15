@@ -561,7 +561,9 @@ write those conjuncts already test, and §2 makes it one (Alternatives).
 > attempt at `UNDERSTAND`** carrying no reference to the one it follows (§12) — admissible because
 > §2's conjuncts are satisfied in that order and §10's migration left no legacy live attempt
 > behind. That attempt **plans afresh** (ADR-0255 §2), and no walk of the cancelled attempt's plan
-> is re-entered, resumed or re-driven.
+> is re-entered, resumed or re-driven. **A turn that was already driving one when the cancellation
+> landed is not an exception**: its next claim meets ADR-0255 §3's refusal and §7 governs what it
+> says, which on a goal since reopened is `ATTEMPT_CANCELLED` over an open goal.
 
 > **Normative — an effect that did land is never repeated, and the record that stops it is already
 > written.** ADR-0259 §2 keys an effect row on `(goal_id, intended_action_id, effect_key)` and **a
@@ -1244,7 +1246,8 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   a record demanded *"on book-keeping grounds alone: … that a sibling ADR was recorded
   differently."*
 - **ADR-0249 §4** — *no*. *"An attempt reaching a terminal state does not move the goal's status"*
-  stays true: §2's one user act moves both, and nothing infers either from the other (§1).
+  stays true: §2's one user act moves both, in one store call, and **neither is inferred from the
+  other** — an attempt reaching `ENDED` under any other act still moves no status (§1, §7).
 - **ADR-0244 §11 and §20** — *no*. `cancel_read` keeps its three members, its scope and its
   atomicity; §20's general-case deferral is left standing with its firing condition (§11).
 - **ADR-0259 §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes none of
@@ -1264,10 +1267,10 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   *"which acts may write which member is the caller's rule, not this member's"* — and §2 refuses
   no member: `ABANDONED` stays writable, by `abandon_goal` and by it alone. What is added is a
   **consistency conjunct** between two records, which is the same move ADR-0255 §3 made on
-  `commit_transition` against ADR-0014 §5 and recorded nothing for. §9's own clauses — the
-  single route, the version advance, the *"writes nothing else"* rule and its refusal of neither
-  `ACHIEVED` nor `BLOCKED` — each stay true word for word, the last because §2's conjunct binds on
-  `ABANDONED` alone (§11).
+  `commit_transition` against ADR-0014 §5 and recorded nothing for. §9's remaining clauses — the
+  version advance, the *"writes nothing else"* rule and its refusal of neither `ACHIEVED` nor
+  `BLOCKED` — each stay true word for word, the last because §2's conjunct binds on `ABANDONED`
+  alone (§11); only the **sole-route phrase** moves, in its own entry above.
 - **ADR-0039 §10** — *no*. Its *"`StepExecution` is inside the export, so its shape changing is
   exactly what the version exists to announce"* says that a shape change announces itself; it does
   **not** say that only a shape change does. §10 extends the mechanism to a **value** an earlier
