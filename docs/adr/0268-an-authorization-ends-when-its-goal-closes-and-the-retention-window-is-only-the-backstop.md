@@ -946,10 +946,10 @@ and the ratification flip is one line and no other byte (ADR-0165).
 **What becomes possible.** An authorisation can be said to be *for a request*, which is the
 sentence the owner's ruling is written in and which the corpus could not previously express: a
 **closing act** of a goal ends every authorization of it still standing, however the row came
-into being — the ending is stated over the goal's rows and never over how one was written (§1).
-A user opening the listing of a finished booking sees no live authority, because they hold none
-— on a database this store closed the goal in, the three residuals below being where that
-sentence stops. And the campsite walkthrough M33 runs becomes checkable end to end — book,
+into being — the ending is stated over the goal's rows and never over how one was written (§1)
+— on a database this store closed the goal in, the three residuals below being where that rule
+stops. A user opening the listing of a finished booking therefore sees no live authority, because
+they hold none. And the campsite walkthrough M33 runs becomes checkable end to end — book,
 verify, close, and the ceiling is gone — rather than ending with a standing authority nobody
 intended and nothing retires.
 
@@ -983,10 +983,11 @@ ADR-0254 §13's residual window unchanged and A9's to close — a **cross-store*
 does not reach and does not claim to.
 
 **Those that can leave an authority, stated rather than rounded away.** On a **pre-decision
-database** (§9) the ending is prospective: a row whose goal closed before this decision is never
-ended, and a reopen whose `end_for_goal` then fails leaves it `ESTABLISHED` and covering calls
-until its own `expires_at` — fail-**open**, bounded by the retention window that was its only
-bound before, and no worse than what this decision improves on. A **`record` begun before a
+database** (§9) the ending is prospective: **no upgrade and no sweep** ends a row whose goal
+closed before this decision, the reopen is the one path that does (§2), and a reopen whose
+`end_for_goal` fails leaves the row `ESTABLISHED` and covering calls until its own `expires_at`
+— fail-**open**, bounded by the retention window that was its only bound before, and no worse
+than what this decision improves on. A **`record` begun before a
 closure and admitted after a reopen** has cleared the fence writes a live row carrying an
 authority given for the ended request, which §8 books to A9 rather than closing. And a **`clear`**
 erases the fences with the rows, so a delayed write for a closed goal afterwards succeeds —
