@@ -2485,11 +2485,12 @@ class MemoryBase(BaseModel):
 class ExchangeDisposition(StrEnum):
     """What became of the exchange one captured episode records (ADR-0221 §2).
 
-    Sixteen members: one per member of :class:`Disposition`, one for the no-step
-    case, and one per member of :class:`RouteOutcome`. Before ADR-0221 those same
-    sixteen facts were sixteen constant *phrases*, composed at the capture point and
-    stored in :attr:`EpisodicMemory.outcome`; §1 gives that field to the composed
-    reply, and this enum is where the fact goes instead.
+    **One member per member of** :class:`Disposition`, one for the no-step case, and
+    one per member of :class:`RouteOutcome` — a shape rather than a count, because
+    ADR-0259 §9 adds two members to ``Disposition`` and this enum follows it. Before
+    ADR-0221 those facts were as many constant *phrases*, composed at the capture
+    point and stored in :attr:`EpisodicMemory.outcome`; §1 gives that field to the
+    composed reply, and this enum is where the fact goes instead.
 
     **Which vocabulary a member came from is legible in the member itself** (§2).
     ``STEP_*`` mirrors a member of :class:`Disposition` — what became of one plan
@@ -2502,7 +2503,7 @@ class ExchangeDisposition(StrEnum):
     ``ROUTED_PERFORMED``, ``STEP_DENIED`` and ``ROUTED_REFUSED``, and the two
     ``AWAITING_CONFIRMATION``s — and **both members of each pair ship**. No
     implementation or later ADR collapses a pair, and none maps two members onto
-    one. Eleven of the sixteen have no counterpart at all, and the three pairs
+    one. Every member outside those three pairs has no counterpart at all, and they
     denote acts under different clauses (ADR-0170 §4, ADR-0197 §10), so a normalised
     vocabulary would be a lossy projection dressed as a tidy one — and the loss
     would fall exactly where the value is, since the reason to type this at all is
@@ -2542,7 +2543,7 @@ class ExchangeDisposition(StrEnum):
     NO_ACTION_NEEDED = "no_action_needed"
     """The pass drove no plan step, so there is no :class:`Disposition` to mirror.
 
-    The one member of the sixteen belonging to neither source vocabulary (§2), and
+    The one member belonging to neither source vocabulary (§2), and
     the case ``orchestration/engine.py``'s ``_outcome_of`` reaches when it is handed
     no ``StepOutcome`` at all."""
 
@@ -2589,6 +2590,23 @@ class ExchangeDisposition(StrEnum):
     """Mirrors :attr:`Disposition.EGRESS_UNBINDABLE`: the egress binding seam could
     not describe the outbound call, so no ruling was sought and nothing was asked or
     sent (ADR-0152 §9)."""
+
+    STEP_EFFECT_ALREADY_CLAIMED = "step_effect_already_claimed"
+    """Mirrors :attr:`Disposition.EFFECT_ALREADY_CLAIMED`: this goal had already
+    claimed the act the step is an attempt at, so nothing was dispatched
+    (ADR-0259 §2, §9).
+
+    Which :class:`EffectClaim` produced it — a completed act under other arguments,
+    an uncertain one, a held one, or a completed one whose reuse conditions failed —
+    is not carried on the disposition and is therefore not carried here."""
+
+    STEP_EFFECT_UNSCOPED = "step_effect_unscoped"
+    """Mirrors :attr:`Disposition.EFFECT_UNSCOPED`: the step is a side-effecting one
+    naming no intended action, so no claim could be scoped and nothing was dispatched
+    (ADR-0259 §2, §9).
+
+    Not ``STEP_EFFECT_ALREADY_CLAIMED``: that is a fact about what this goal has
+    already done, and this is a defect in the plan (§2)."""
 
     ROUTED_PERFORMED = "routed_performed"
     """Mirrors :attr:`RouteOutcome.PERFORMED`: the routed operation the user asked
@@ -2761,8 +2779,8 @@ class EpisodicMemory(MemoryBase):
         default=None,
         description=(
             "What became of the exchange this episode captures (ADR-0221 §2): one "
-            "of sixteen members, one per Disposition member, one for the no-step "
-            "case, and one per RouteOutcome member. None on a record written "
+            "member per Disposition member, one for the no-step case, and one per "
+            "RouteOutcome member. None on a record written "
             "before that decision and on a harness-supplied row, and that absence "
             "is the discriminator between those populations and one captured after "
             "it (§8) — nothing infers the population from the record's text, its "
@@ -11959,6 +11977,38 @@ class StepExecution(BaseModel):
         default=None,
         description="Why the step finished unsuccessfully; required when FAILED or INDETERMINATE.",
     )
+    satisfied_by_execution: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The execution whose completed effect satisfied this step (ADR-0259 §2); "
+            "absent on every step that ran."
+        ),
+    )
+    satisfied_by_step: DurableIdentifier | None = Field(
+        default=None,
+        description="That execution's step — the act this one was satisfied from (§2).",
+    )
+
+    @model_validator(mode="after")
+    def _a_satisfied_step_names_its_holder(self) -> StepExecution:
+        """Require the two satisfaction marks together and only on ``SUCCEEDED`` (§2).
+
+        ADR-0255 §11's constructor limb for ``attempt_id`` applied to a pair: a step
+        naming one half of a holder names a holder nothing can resolve, and a mark on
+        any other status claims a completion that has not happened.
+
+        Raises:
+            ValueError: If one mark is present without the other, or either is
+                present on a step that is not ``SUCCEEDED``.
+        """
+        marks = (self.satisfied_by_execution, self.satisfied_by_step)
+        if any(mark is not None for mark in marks) and not all(mark is not None for mark in marks):
+            msg = "a satisfied step names both satisfied_by_execution and satisfied_by_step"
+            raise ValueError(msg)
+        if marks[0] is not None and self.status is not StepStatus.SUCCEEDED:
+            msg = f"a {self.status} step cannot have been satisfied by an earlier effect"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _claimed_step_is_authorised(self) -> StepExecution:
@@ -11971,6 +12021,28 @@ class StepExecution(BaseModel):
         action is the one a user is least able to recall consenting to.
         """
         if self.status not in _CLAIMED_STATUSES:
+            return self
+
+        # ADR-0259 §2: a **satisfied** step has no execution mark, because nothing
+        # ran under it — the goal's earlier act did. The four marks are then not
+        # required, and none of the three that assert a run is *present*: a claim
+        # mark beside a satisfaction would say the step both ran and did not.
+        # `bound_tool` is neither required nor cleared, because ADR-0014 §3 makes it
+        # "which tool the **selection stage** chose" and not a claim mark — a
+        # `PENDING` source had none bound and an `AWAITING_APPROVAL` source had one
+        # from its park, and the commit leaves each as it stands.
+        if self.satisfied_by_execution is not None:
+            forbidden = {
+                "approval_ref": self.approval_ref,
+                "started_at": self.started_at,
+            }
+            for name, value in forbidden.items():
+                if value is not None:
+                    msg = f"a satisfied step did not run, so it cannot have {name}"
+                    raise ValueError(msg)
+            if self.attempts != 0:
+                msg = "a satisfied step did not run, so it cannot have attempts"
+                raise ValueError(msg)
             return self
 
         required = {
@@ -12142,6 +12214,298 @@ class ExecutionState(BaseModel):
         return value
 
 
+# --- planning: the effect claim (ADR-0259 §§1-2, §9) -------------------------
+# What tells *same act, same call* from *same act, different arguments* across two
+# plans of one goal, and the answer a store gives when it is asked to claim one.
+# The key is derived from a `ToolCall` and never minted; the row it keys is the
+# store's own record, reached only through `PlanStore.claim_effect`.
+
+
+class EffectKey(BaseModel):
+    """The identity of one authorised call, for at-most-once across a goal (§1).
+
+    **Exactly five fields, and it carries no sixth**: no step id, no execution id,
+    no plan id, no decision id, no goal id, no instant, no attempt — **and no
+    intended action id**, which is the row's *other half* (§2) and never a field of
+    the key. A reader who adds it here breaks the one case this decision exists to
+    tell apart: the goal whose booking moves from Saturday to Sunday carries one
+    intended action and two keys, and a key carrying the action id would make the
+    two rows unequal in the way two unrelated acts are unequal, so the revision
+    would dispatch a second booking instead of meeting §2's ``COMPLETED_OTHERWISE``.
+
+    **It is what** :meth:`PermissionDecision.authorises` **compares, less the two
+    ids a replan mints afresh and less the binding's provenance.** ``authorises``
+    compares the tool, ``parameters_digest``, ``step_id``, ``execution_id``, the
+    egress binding whole and by value, and the intended action; this key drops
+    ``step_id`` and ``execution_id``, which describe *where the call was made from*
+    and which a re-plan mints anew, and takes from the binding **only the three
+    facts that describe where the effect goes** — ``account``,
+    ``transport_endpoint`` and the derived ``canonical_destination_set``. So this
+    fixes the key's reach over **arguments** and nothing more, and no lane reads it
+    as the whole of the identity an at-most-once claim is scoped to: the durable
+    identity of the *act* is :attr:`IntendedAction.id`, and the row carries it (§2).
+    **A later decision that adds a conjunct to ``authorises``, or a field to
+    the binding, adds the matching field here in the same change** unless it states
+    in its own text why that value does not change what the remote system does.
+
+    **The binding's provenance and authorisation-posture fields are excluded by
+    name.** ``planned_with_external_content``, ``coverage``, ``closed_loop`` and
+    ``spans`` are not here. The first three record how the call was reasoned about
+    rather than what it does, so two replans differing only in them would carry two
+    keys and **dispatch the same effect twice**. ``spans`` is excluded because
+    ``canonical_destination_set`` is its canonicalisation — ADR-0150 §9 names that
+    set as a thing ``authorises`` deliberately does *not* compare, precisely because
+    two decompositions can canonicalise to one destination set, and for effect
+    identity that is the property wanted.
+
+    **The tool is projected to its** ``id``, a third narrowing. ``authorises``
+    compares a whole :class:`ToolDefinition` by value; a definition carries a
+    description, a schema, a risk level and declarations a deployment can revise
+    **without changing what the call does**, and a key over the whole definition
+    would mint a fresh key on every such revision and dispatch the effect twice.
+    The cost is stated rather than hidden: ADR-0016 spends an id for the life of the
+    process over a registry rebuilt each run, so a deployment that changes a
+    definition's code and restarts may bind a materially different tool to a spent
+    id while these rows are durable across it — and there the projection errs toward
+    **suppressing** the new call rather than dispatching twice, which is the
+    direction ADR-0014 §4 chooses everywhere it is faced with one.
+
+    **What it recognises is the same authorised call, and two calls that mean the
+    same thing without being the same call are not recognised.**
+    ``parameters_digest`` is ADR-0021 §1's digest over the canonical encoding of the
+    **supplied** arguments, so ``alice@Example.com`` in one plan and
+    ``alice@example.com`` in the next carry two digests and therefore two keys.
+    Under **one** intended action the second call is ``COMPLETED_OTHERWISE`` and is
+    not dispatched, so what the unrecognised equivalence costs is a spurious
+    modify-before-replace investigation; under **two** intended actions it is
+    ``CLAIMED`` and dispatched, which is two acts the user asked for. Neither case
+    is a double dispatch of one act.
+
+    **No digest of the key is minted and none is pinned.** It is compared **by
+    value**, field by field, exactly as ``authorises`` compares the values it is
+    built from. Nothing composes, concatenates or hashes its fields into a single
+    string, so there is no encoding to disagree about and no algorithm to pin; how a
+    store indexes it is below this contract, so long as two equal keys are one row
+    and two unequal keys are not.
+
+    Attributes:
+        tool_id: :attr:`ToolDefinition.id` of the tool the call runs.
+        parameters_digest: :attr:`PermissionDecision.parameters_digest`, the digest
+            over the canonical encoding of the supplied arguments.
+        egress_account: The connected account the binding was taken over, or
+            ``None`` where the decision carried no binding.
+        egress_endpoint: The binding's ``transport_endpoint``, or ``None``.
+        egress_destinations: The binding's ``canonical_destination_set``, or empty.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    tool_id: VisibleIdentifier = Field(
+        description="The tool the call runs, by id and never by whole declaration (§1)."
+    )
+    parameters_digest: Sha256Hex = Field(
+        description="Binds the supplied arguments without storing them (ADR-0021 §1)."
+    )
+    egress_account: BoundAccount | None = Field(
+        default=None, description="The account the binding was taken over; absent with no binding."
+    )
+    egress_endpoint: _VisibleUnchangedText | None = Field(
+        default=None, description="The binding's transport endpoint; absent with no binding."
+    )
+    egress_destinations: tuple[CanonicalDestination, ...] = Field(
+        default=(), description="The binding's canonical destination set; empty with no binding."
+    )
+
+    @model_validator(mode="after")
+    def _is_one_of_the_two_shapes(self) -> EffectKey:
+        """Admit exactly two shapes and no mixture (§1).
+
+        Either the account and the endpoint are both absent and the destinations are
+        empty — the no-binding shape — or both are present and the destinations are
+        non-empty. A key carrying an endpoint without an account, or destinations
+        without either, is **unconstructable**, so one effect cannot be split across
+        two unequal rows by a partial projection. The non-empty limb is not a new
+        rule: ``canonical_destination_set`` is documented as "therefore **never
+        empty**", and this refuses the shape that declaration already excludes.
+
+        **The message names no value**, for :class:`CanonicalDestination`'s reason:
+        which fields are present is what names the defect, and the strings are
+        recipient addresses.
+
+        Raises:
+            ValueError: If the key is neither the no-binding shape nor the bound one.
+        """
+        bound = self.egress_account is not None and self.egress_endpoint is not None
+        if bound and self.egress_destinations:
+            return self
+        if (
+            self.egress_account is None
+            and self.egress_endpoint is None
+            and not self.egress_destinations
+        ):
+            return self
+        msg = (
+            "an effect key is either unbound (no account, no endpoint, no destinations) "
+            "or bound (an account, an endpoint and at least one destination)"
+        )
+        raise ValueError(msg)
+
+
+class EffectClaim(StrEnum):
+    """What a store answered when asked to claim one effect (ADR-0259 §2).
+
+    **Five members, closed.** The vocabulary is added to and never renamed.
+    """
+
+    CLAIMED = "claimed"
+    """This step holds the goal's row for this intended action; the caller may
+    dispatch. Written where no row existed, where the row named a ``SKIPPED``
+    holder, where it named a ``FAILED`` holder on a superseded plan, and — writing
+    nothing — where it already names this same step at a status that may still
+    dispatch."""
+
+    COMPLETED = "completed"
+    """This intended action was already performed under **this** call's key, by the
+    ``SUCCEEDED`` step the answer names. Nothing is dispatched; the caller checks
+    §2's reuse conditions and, where they hold, satisfies its step from that
+    holder's own ``output``."""
+
+    COMPLETED_OTHERWISE = "completed_otherwise"
+    """This intended action was already performed, **with different arguments** —
+    the row names a ``SUCCEEDED`` holder whose key is not this call's. Nothing is
+    dispatched, nothing is committed, no authorisation is spent, and the work
+    returns to investigation. This member exists so that state is *distinguishable*;
+    the act that consumes it is A8's second decision and is not opened here."""
+
+    UNCERTAIN = "uncertain"
+    """The row names a ``RUNNING`` or ``INDETERMINATE`` holder, **whether or not the
+    keys are equal**: what is uncertain is whether this intended action was
+    performed at all, and a differently-argued call under an action that may already
+    have been performed is the one thing a modify-before-replace investigation must
+    not be started from."""
+
+    HELD = "held"
+    """The row names some other step that may still dispatch — a ``PENDING``, an
+    ``AWAITING_APPROVAL``, or a ``FAILED`` holder whose plan still stands. A row
+    naming a ``PENDING`` step was written by a turn that is about to dispatch it,
+    and two turns of one conversation are not serialized, so treating it as
+    re-claimable would let the second turn dispatch beside the first. The hold is
+    bounded by the holding plan's life, not permanent: once a stored plan supersedes
+    that plan the key is freed to whichever step asks."""
+
+
+class EffectOutcome(BaseModel):
+    """A store's answer to one :meth:`PlanStore.claim_effect` (ADR-0259 §2).
+
+    **The holder rides here only where the caller must act on it.** Both ids are
+    non-``None`` **if and only if** :attr:`claim` is ``COMPLETED``, which is the one
+    answer whose caller has work to do with the holder — §2's satisfaction reads
+    that step's ``output``. ``CLAIMED``, ``COMPLETED_OTHERWISE``, ``UNCERTAIN`` and
+    ``HELD`` carry neither, so no lane grows a habit of reading rows through this
+    member. ``COMPLETED_OTHERWISE`` is deliberately among them: the
+    modify-before-replace investigation that consumes it needs the earlier act's
+    *arguments* and not only its ids, which is a bounded lookup A8's second decision
+    must add and argue for rather than inherit here unreviewed.
+
+    Attributes:
+        claim: What the store answered.
+        execution_id: The execution holding the completed effect, on ``COMPLETED``.
+        step_id: That execution's step, on ``COMPLETED``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    claim: EffectClaim = Field(description="What the store answered (§2).")
+    execution_id: DurableIdentifier | None = Field(
+        default=None, description="The completed effect's holder, on COMPLETED alone."
+    )
+    step_id: DurableIdentifier | None = Field(
+        default=None, description="That holder's step, on COMPLETED alone."
+    )
+
+    @model_validator(mode="after")
+    def _the_holder_rides_on_completed_alone(self) -> EffectOutcome:
+        """Require both holder ids on ``COMPLETED`` and refuse either elsewhere (§2).
+
+        The if-and-only-if is enforced rather than documented because a satisfaction
+        reads the holder from this value: an answer that carried one id and not the
+        other would be a holder no caller could resolve, and one carrying a holder
+        on ``HELD`` would invite a caller to read a row it has no claim on.
+
+        Raises:
+            ValueError: If a ``COMPLETED`` answer is missing either id, or any other
+                answer carries one.
+        """
+        present = (self.execution_id is not None, self.step_id is not None)
+        if self.claim is EffectClaim.COMPLETED:
+            if not all(present):
+                msg = "a COMPLETED answer names its holder's execution_id and step_id"
+                raise ValueError(msg)
+            return self
+        if any(present):
+            msg = f"a {self.claim} answer carries no holder"
+            raise ValueError(msg)
+        return self
+
+
+class EffectRecord(BaseModel):
+    """One goal's claim on one intended action's effect (ADR-0259 §2, §9).
+
+    **Exactly seven fields.** The row is identified by ``(goal_id,
+    intended_action_id, key)`` — ADR-0265 §6's own keying, "not on the pair" — and
+    names the ``(execution_id, step_id)`` currently holding it together with the key
+    it was taken under. **A store additionally keeps at most one row per**
+    ``(goal_id, intended_action_id)``, not as a competing constraint but as an
+    invariant of §2's write rules: the only writes are the first claim and a
+    re-point onto a dead holder, and a re-point **re-keys** the row rather than
+    leaving the dead key's row beside it.
+
+    **It is the store's own record.** No Protocol member takes or returns one
+    outside :attr:`PlanExport.effects`; :meth:`PlanStore.claim_effect` returns an
+    :class:`EffectOutcome` and nothing else.
+
+    **A row references an execution and a step by id and inlines neither**, which is
+    ADR-0014 §3's pattern, and ADR-0014 §5's closure rule reaches it: in an export,
+    ``execution_id`` resolves to an execution in the document, ``step_id`` names a
+    step *of that execution*, and that execution's plan carries the row's
+    ``goal_id``.
+
+    Attributes:
+        goal_id: The goal the claim is scoped to.
+        intended_action_id: The act it is scoped to (ADR-0265 §1), **never** absent:
+            §2 refuses the claim of a step that names no action.
+        key: The authorised call the claim was taken under.
+        execution_id: The execution currently holding the claim.
+        step_id: That execution's step.
+        targets_revision: The interpretation revision the claiming plan targeted.
+            **Recorded and compared by nothing** (ADR-0265 §6): the store reads it
+            from the claiming execution's plan itself, no caller threads it, no
+            clause compares it, it scopes no claim, it is never part of the row's
+            identity, and it is restamped with the row on every re-point, because
+            the value has to describe the claim that stands rather than one that was
+            released. The decision that reads it is A8's second.
+        claimed_at: When the claim that stands was taken, from the store's own
+            injected clock **at each write that lands** — so a first claim stamps it,
+            a re-point restamps it at the new holder's instant, and every no-write
+            outcome leaves it exactly as it stands. No record ever carries an instant
+            earlier than its current holder's claim.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal_id: Identifier = Field(description="The goal the claim is scoped to.")
+    intended_action_id: Identifier = Field(
+        description="The act it is scoped to (ADR-0265 §1); never absent."
+    )
+    key: EffectKey = Field(description="The authorised call the claim was taken under.")
+    execution_id: DurableIdentifier = Field(description="The execution holding the claim.")
+    step_id: DurableIdentifier = Field(description="That execution's step.")
+    targets_revision: int = Field(
+        ge=1, description="The revision the claiming plan targeted; compared by nothing."
+    )
+    claimed_at: UtcInstant = Field(description="When the claim that stands was taken.")
+
+
 # --- planning: the write path, deletion, export (ADR-0014 §5, ADR-0004 §6) ---
 # A transition is a command rather than a caller-built state, which is what
 # keeps the transition graph authoritative. `PlanExport` is the portable
@@ -12194,6 +12558,60 @@ class StepTransition(BaseModel):
     output: FrozenJsonValue = None
     skip_reason: SkipReason | None = None
     failure: StepFailure | None = None
+    satisfied_by_execution: DurableIdentifier | None = Field(
+        default=None,
+        description="The execution whose completed effect satisfies this step (ADR-0259 §9).",
+    )
+    satisfied_by_step: DurableIdentifier | None = Field(
+        default=None, description="That execution's step — the act being borrowed from (§9)."
+    )
+    satisfied_by_key: EffectKey | None = Field(
+        default=None,
+        description=(
+            "The key of the call this step is being satisfied from (§9). **Compared "
+            "and not stored**: the goal's effect row carries the key already, so "
+            "`StepExecution` gains two fields and not three."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_satisfaction_names_what_it_borrows(self) -> StepTransition:
+        """Require the satisfaction trio together, on ``→ SUCCEEDED`` alone (§9).
+
+        ADR-0255 §11's constructor limb for ``attempt_id`` applied to a trio: a
+        transition carrying some but not all of it names a borrowing nothing can
+        check, and one on any other target status claims a completion the move does
+        not make. Its own validator rather than a clause of
+        :meth:`_fields_match_target_status`, which is already at the complexity the
+        linter admits.
+
+        **And it forbids** ``output`` **beside the trio**, because the store writes
+        it: §9 has the store copy ``output`` from the holder row it has just verified
+        and stamp ``finished_at`` from its own clock, so "a value the caller never
+        supplies cannot be mis-stated". A satisfaction that carried its own output
+        would be the caller asserting what the borrowed act returned.
+
+        Raises:
+            ValueError: If the trio is partial, if any of it rides a transition to a
+                status other than ``SUCCEEDED``, or if it rides beside an ``output``.
+        """
+        trio = (self.satisfied_by_execution, self.satisfied_by_step, self.satisfied_by_key)
+        present = [mark is not None for mark in trio]
+        if any(present) and not all(present):
+            msg = (
+                "a satisfaction carries satisfied_by_execution, satisfied_by_step and "
+                "satisfied_by_key together or none of them"
+            )
+            raise ValueError(msg)
+        if not any(present):
+            return self
+        if self.to_status is not StepStatus.SUCCEEDED:
+            msg = f"a transition to {self.to_status} cannot be satisfied by an earlier effect"
+            raise ValueError(msg)
+        if self.output is not None:
+            msg = "a satisfaction carries no output: the store copies the holder's own"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _fields_match_target_status(self) -> StepTransition:
@@ -12998,7 +13416,17 @@ class PlanExport(BaseModel):
     internally consistent — every ``goal_id``/``plan_id`` referenced by an
     included record resolves within the same export.
 
-    **``schema_version`` is 13 because ``Goal`` gains ``intended_actions`` and
+    **``schema_version`` is 14 because the document gains ``effects``, and
+    ``StepExecution`` gains the two satisfaction marks** (ADR-0259 §9). Two
+    independent grounds again, each sufficient on its own: an older reader's
+    ``extra="forbid"`` refuses the new member on the document itself, and refuses
+    ``satisfied_by_execution``/``satisfied_by_step`` emitted as ``null`` on every
+    step of every execution the document carries. ``effects`` is the **first member
+    ADR-0014 §5's closure rule is extended for rather than satisfied by** — an
+    :class:`EffectRecord` rides nowhere else — so the rule is stated below over one
+    holder rather than over three ids.
+
+    **13 because ``Goal`` gains ``intended_actions`` and
     ``PlanStep`` gains ``intended_action``** (ADR-0265 §5) — two independent grounds,
     each sufficient on its own, reaching ``tuple[Goal, ...]`` and
     ``tuple[ActionPlan, ...]``. ``PlanExport`` gains **no member**: an
@@ -13154,12 +13582,12 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[13] = Field(
-        default=13,
+    schema_version: Literal[14] = Field(
+        default=14,
         description=(
-            "Shape of this export, pinned to exactly 13 (ADR-0039 §10, ADR-0265 §5): an "
+            "Shape of this export, pinned to exactly 14 (ADR-0039 §10, ADR-0259 §9): an "
             "export outlives the code that wrote it, so the label must be a fact about "
-            "the document rather than a producer's unchecked claim. ``Literal[13]`` "
+            "the document rather than a producer's unchecked claim. ``Literal[14]`` "
             "refuses every other value — a document of any earlier shape does not "
             "validate against this contract at all — so the advertised version cannot "
             "be mislabelled."
@@ -13172,6 +13600,7 @@ class PlanExport(BaseModel):
     attempts: tuple[GoalAttempt, ...] = ()
     questions: tuple[GoalQuestion, ...] = ()
     evidence: tuple[EvidenceHistory, ...] = ()
+    effects: tuple[EffectRecord, ...] = ()
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:
@@ -13248,9 +13677,11 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         self._questions_close_over_their_records(goal_ids, attempt_ids)
-        self._evidence_closes_over_its_records(
-            goal_ids, {execution.id: execution for execution in self.executions}
-        )
+        by_id = {execution.id: execution for execution in self.executions}
+        self._evidence_closes_over_its_records(goal_ids, by_id)
+        goal_of_plan = {plan.id: plan.goal_id for plan in self.plans}
+        self._effects_close_over_their_holders(by_id, goal_of_plan)
+        self._satisfactions_close_over_their_holders(by_id, goal_of_plan)
 
         steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
         for execution in self.executions:
@@ -13264,6 +13695,71 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         return self
+
+    def _effects_close_over_their_holders(
+        self, executions: Mapping[str, ExecutionState], goal_of_plan: Mapping[str, str]
+    ) -> None:
+        """Enforce ADR-0259 §9's extension of ADR-0014 §5's closure rule.
+
+        **Stated over one holder rather than over three ids.** An included row's
+        ``execution_id`` resolves to an execution in the document, its ``step_id``
+        names a step **of that execution**, and that execution's plan carries the
+        row's ``goal_id`` — so a row cannot name a step that exists only in some
+        other execution while every id still resolves, which three independent
+        lookups would admit.
+
+        Raises:
+            ValueError: If any row's holder does not resolve, or resolves to a step
+                of another execution or an execution of another goal.
+        """
+        for row in self.effects:
+            holder = executions.get(row.execution_id)
+            if holder is None or holder.step(row.step_id) is None:
+                msg = (
+                    f"export has an effect row whose holder is missing: "
+                    f"{row.execution_id}/{row.step_id}"
+                )
+                raise ValueError(msg)
+            if goal_of_plan.get(holder.plan_id) != row.goal_id:
+                msg = (
+                    f"export has an effect row of goal {row.goal_id} whose holder "
+                    f"{holder.id} runs a plan of another goal"
+                )
+                raise ValueError(msg)
+
+    def _satisfactions_close_over_their_holders(
+        self, executions: Mapping[str, ExecutionState], goal_of_plan: Mapping[str, str]
+    ) -> None:
+        """Enforce the same closure over a satisfied step's pair (ADR-0259 §9).
+
+        "The same closure is owed of a satisfied step's pair": its
+        ``satisfied_by_execution`` resolves to an execution of the **same goal** in
+        the document, and its ``satisfied_by_step`` to a step of that execution. An
+        export naming an act the reader cannot look up is a step whose provenance has
+        been lost, which is exactly what §5's promise exists to stop.
+
+        Raises:
+            ValueError: If a satisfied step names an execution the document does not
+                carry, a step not of that execution, or an execution of another goal.
+        """
+        for execution in self.executions:
+            for step in execution.steps:
+                named, borrowed_step = step.satisfied_by_execution, step.satisfied_by_step
+                if named is None or borrowed_step is None:
+                    continue  # the pair is all-or-nothing on StepExecution's own validator
+                borrowed = executions.get(named)
+                if borrowed is None or borrowed.step(borrowed_step) is None:
+                    msg = (
+                        f"export has a satisfied step whose holder is missing: "
+                        f"{named}/{borrowed_step}"
+                    )
+                    raise ValueError(msg)
+                if goal_of_plan.get(borrowed.plan_id) != goal_of_plan.get(execution.plan_id):
+                    msg = (
+                        f"export has step {step.step_id} satisfied from execution "
+                        f"{named}, which belongs to another goal"
+                    )
+                    raise ValueError(msg)
 
     def _evidence_closes_over_its_records(
         self, goal_ids: set[str], executions: Mapping[str, ExecutionState]
@@ -21484,6 +21980,62 @@ class ToolCall(BaseModel):
             return None
         return self.decision.id
 
+    @property
+    def effect_key(self) -> EffectKey | None:
+        """The goal-facing identity of this call, or ``None`` (ADR-0259 §1).
+
+        **Derived rather than minted, supplied, configured or carried as a field**,
+        for :attr:`idempotency_key`'s own recorded reason: a field "would be a value
+        some caller computed, two callers could compute differently, and a retry path
+        could forget to carry" — and a :class:`ToolDefinition` field saying *this is
+        the same effect as that one* would additionally be a **tool author's** claim
+        about a **goal's** history.
+
+        ``None`` **if and only if the tool is not** ``side_effecting``, and
+        deliberately **not** :attr:`ToolDefinition.interrupted_outcome`'s two-limb
+        test. That test asks what an *interrupted* call means and exempts
+        ``NATURAL``, because a repeat of one is harmless; this asks whether an effect
+        exists to be claimed at all, and ADR-0255 §7's requirement is stated over
+        **dispatch**. So a side-effecting ``NATURAL`` tool has an effect key and is
+        held to at-most-once exactly as a ``KEYED`` or ``NONE`` one is.
+
+        **Every value is read from the** :class:`PermissionDecision` **and none from**
+        :attr:`request`. The decision carries ``tool``, ``parameters_digest`` and
+        ``egress_binding`` as its own fields, so the key needs nothing from the
+        request — and :attr:`idempotency_key`'s reason binds verbatim: the decision's
+        copy is the one the trail holds, which is the copy a restart reconstructs
+        from. ADR-0018 §3 puts a post-construction ``call.__dict__["request"]``
+        mutation inside the threat model, and a key derived from the mutable half
+        could be persisted for one effect while another was invoked.
+
+        **The two keys are two values and no lane collapses them.**
+        :attr:`idempotency_key` is the **tool-facing** key, "distinct for a distinct
+        intent"; this is the **goal-facing** one with the opposite property,
+        identical across two authorisations of the same concrete call, which is what
+        lets a later plan's step be recognised as the earlier plan's effect. Neither
+        is computed from the other, neither is substituted for the other, and **no
+        ToolInvoker, tool or component outside this system is ever passed
+        this value** — the one seam it crosses is :meth:`PlanStore.claim_effect`.
+
+        A plain ``property`` and specifically **not** a ``computed_field``, for the
+        reason :attr:`idempotency_key` records: a computed field enters
+        ``model_dump()``, and ADR-0018 §4's registration rebuild runs against
+        ``extra="forbid"``.
+        """
+        decision = self.decision
+        if not decision.tool.side_effecting:
+            return None
+        binding = decision.egress_binding
+        if binding is None:
+            return EffectKey(tool_id=decision.tool.id, parameters_digest=decision.parameters_digest)
+        return EffectKey(
+            tool_id=decision.tool.id,
+            parameters_digest=decision.parameters_digest,
+            egress_account=binding.account,
+            egress_endpoint=binding.transport_endpoint,
+            egress_destinations=binding.canonical_destination_set,
+        )
+
 
 # --- what a call spent, and what it did (ADR-0192 §§1-2) ---------------------
 # --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
@@ -22796,6 +23348,45 @@ class Disposition(StrEnum):
     is never translated into this member: it asserts nothing about the call, which
     may be perfectly bindable a second later, and it propagates out of the runner
     stage instead (ADR-0152 §9)."""
+
+    EFFECT_ALREADY_CLAIMED = "effect_already_claimed"
+    """This goal has already claimed this act, so nothing was dispatched
+    (ADR-0259 §2).
+
+    Returned for a ``COMPLETED_OTHERWISE``, an ``UNCERTAIN`` or a ``HELD``
+    :class:`EffectClaim`, and for a ``COMPLETED`` one whose reuse conditions fail.
+    **Which member produced it is not carried on the disposition**, and what the turn
+    tells the user about it is the reply surface's.
+
+    **It commits nothing:** no call is made, no invocation is claimed, no
+    authorisation is spent, no transition is committed, and the step **keeps the
+    status it was entered at** — ``PENDING`` where ``StepRunner.run`` took the claim,
+    ``AWAITING_APPROVAL`` where ``StepRunner.resume`` did. It is the entry status
+    rather than ``PENDING`` because no transition is committed: naming ``PENDING``
+    for a resumed step would demand a move ADR-0014 §4's table does not admit. **No
+    step is moved to** ``SKIPPED`` **on this ground, with any**
+    :class:`SkipReason`.
+
+    Not ``EFFECT_UNSCOPED``, and the two are two members because they are two
+    different facts about the world — *this goal has already claimed this act*
+    against *this plan cannot say which act this step is* — and a client that could
+    not tell them apart could not tell a user which of the two it was, while the
+    second is a defect in the plan and this is not."""
+
+    EFFECT_UNSCOPED = "effect_unscoped"
+    """A side-effecting call whose step names no intended action, so nothing was
+    dispatched (ADR-0259 §2, ADR-0265 §4).
+
+    ADR-0265 §4 leaves *"whether an effect-bearing dispatch must name one"* to be
+    decided where the effect claim is taken, and it must:
+    :meth:`PlanStore.claim_effect` is **not called**, nothing is committed, the step
+    keeps the status it was entered at and the walk stops. Dispatching there would
+    perform an effect **no row could ever recognise**, so every later plan of the
+    goal would answer ``CLAIMED`` and repeat it — ADR-0255 §7's obligation unmet, and
+    the fail-open direction ADR-0265 §4 refuses for a dropped condition label.
+
+    **A call that is not side-effecting is untouched**: it has no effect key, so it
+    reaches the claim never and is held to nothing by this ground."""
 
 
 class StepOutcome(BaseModel):
@@ -25812,6 +26403,51 @@ class TurnOutcome(BaseModel):
             "and is not read onto this member."
         ),
     )
+    satisfied_from_earlier: tuple[DurableIdentifier, ...] | None = Field(
+        default=None,
+        description=(
+            "The steps this turn committed ``\u2192 SUCCEEDED`` from an effect the goal "
+            "had already completed, **in walk order** (ADR-0259 §2). ``None`` on every "
+            "turn that satisfied no step this way, and carried by value from what the "
+            "stage computed \u2014 never a second computation.\n\n"
+            "**“Once” is at most once per *step*, and it is best-effort.** A step is "
+            "satisfied at most once, because satisfaction commits it ``SUCCEEDED`` and "
+            "ADR-0014 §4 admits no move out, so the turn that satisfies a step reports "
+            "it and no later turn reports that step again; a later turn that satisfies "
+            "a **different** step from the same effect reports that one, which is "
+            "different work completed rather than a repetition. **No effect row carries "
+            "an announced flag and no lane adds one**: the step's own one-way "
+            "transition is what meets ADR-0250 §5's announcement discipline.\n\n"
+            "**The window in which a satisfaction is never announced is named rather "
+            "than closed.** A failure after the ``\u2192 SUCCEEDED`` commit and before "
+            "the turn returns leaves the step durably terminal and unreported, and no "
+            "later walk reconstructs the announcement, because ADR-0255 §5 passes over "
+            "a ``SUCCEEDED`` step. So the guarantee is **at most once and not at least "
+            "once**, which is ADR-0014 §4's *“We do not claim exactly-once execution”* "
+            "applied to the report rather than to the act, and no lane reads this as a "
+            "delivery guarantee. What the window does not cost is the fact: "
+            "``StepExecution.satisfied_by_execution`` and ``satisfied_by_step`` are "
+            "committed in the same write, so the record always says the step was "
+            "satisfied and names the act it was satisfied from."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_satisfaction_report_is_never_empty(self) -> TurnOutcome:
+        """Refuse an empty non-``None`` :attr:`satisfied_from_earlier` (ADR-0259 §2).
+
+        ``None`` is the one spelling of *nothing was satisfied* and ``()`` is
+        unconstructable: the type is unchanged and the degenerate value is removed,
+        because two spellings of one fact let an implementation and a client disagree
+        about whether a satisfaction occurred.
+
+        Raises:
+            ValueError: If the member is present and empty.
+        """
+        if self.satisfied_from_earlier is not None and not self.satisfied_from_earlier:
+            msg = "satisfied_from_earlier is None when nothing was satisfied, never empty"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _at_most_one_read_fact(self) -> TurnOutcome:
