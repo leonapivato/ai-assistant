@@ -8276,6 +8276,13 @@ def test_a_view_the_record_could_not_have_produced_is_not_rendered() -> None:
 
     assert "view.bound.kind === view.kind" in reader
     assert 'view.kind !== "money"' in reader
+    # **And no calendar parsing beside them.** ADR-0266 §3 puts fixed-period validity
+    # on the `core` contract and golden rule 3 keeps business logic out of an
+    # interface adapter; a round-4 version of this function parsed RFC 3339 here and
+    # had drifted from `period_reading_form` in both directions by the next round.
+    # Architecture review, round 5, `blocker`.
+    assert "Date.UTC" not in reader
+    assert "readFixed" not in _code("app.js")
 
 
 def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
