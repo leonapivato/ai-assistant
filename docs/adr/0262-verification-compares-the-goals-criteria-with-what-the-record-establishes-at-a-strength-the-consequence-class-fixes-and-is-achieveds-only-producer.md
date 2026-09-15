@@ -489,10 +489,19 @@ refused**: a planner writes it, and a verdict turning on it is the allow ADR-024
 > that did not happen**: everything §2 establishes about the act — the user's confirmed value, the
 > proof of the call against it, the tool's own declaration — remains true, and what is wrong is
 > *which criterion the goal was taken to have*, which is ADR-0249 §7's own asymmetry and ADR-0250
-> §5's announcement and revision path, never this comparison's. **No lane closes it here by reading
-> a criterion's text**, which would be the prose comparison §2 refuses, **and no lane reads §2a as
-> a claim that a planner cannot affect a verdict at all**: it cannot affect *this* one, given the
-> criteria; the criteria are the model's own reading, and §9 books what would put them beyond it.
+> §5's announcement and revision path, never this comparison's. **ADR-0249 §7 is obeyed on its own
+> words rather than read past them**: the sentence *"A model may never clear a permission, a
+> coverage test, a prerequisite or a dependency"* stands beside, in the same clause, *"A model may
+> interpret meaning, **resolve a reference**, assess whether a record supports a proposition, and
+> **raise** a question"* — and a `USER_STATED` element's `span` is a reference the model resolves
+> and **code checks**, ADR-0249 §7 dropping any span that is not a span of this turn's own request.
+> **Reading a model-authored criterion as a cleared prerequisite would make §7 contradict itself**,
+> since the same section gives the model the interpretation the criteria are part of; what §7
+> forbids is taking a prerequisite *on a model's word*, and no conjunct of §2 is a model's word.
+> **No lane closes the residual here by reading a criterion's text**, which would be the prose
+> comparison §2 refuses, **and no lane reads §2a as a claim that a planner cannot affect a verdict
+> at all**: it cannot affect *this* one, given the criteria; the criteria are the model's own
+> reading, and §9 books what would put them beyond it.
 
 > **Normative — `IntendedAction.serves` is read by nothing here, and ADR-0265 §3 is left entire.**
 > That section rules that *"`serves` gates nothing"*, that **no lane** *"derives an intended action
@@ -628,26 +637,34 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 
 ### 4. Which `AttemptOutcome` an attempt earns, when it is written, and when the attempt ends
 
-> **Normative — three derived facts the limbs are stated over, named once so the limbs read as one
+> **Normative — four derived facts the limbs are stated over, named once so the limbs read as one
 > rule.** Over every step of every execution `GoalAttempt.execution_ids` names, and over the
 > criteria §1 fixes with §2's three results: **`failed`** is true where any such step stands
 > **`FAILED`**; **`blocked`** is true where any such step stands **`SKIPPED`** carrying
 > `SkipReason.UNMET_DEPENDENCY` or `SkipReason.APPROVAL_DENIED`, whichever source status it was
-> committed from; and **`fully_met`** is true where the goal carries **at least one** criterion,
-> **every** one **met**. **None is stored, none is a field and no consumer reads any** — ADR-0252
-> §6's own posture toward its four tests, computed where they are used.
+> committed from; **`fully_met`** is true where the goal carries **at least one** criterion,
+> **every** one **met**; and **`effect_possible`** is true where some step of **§3's rung-2 class**
+> — the claimed steps whose declarations put the attempt at rung 2 — stands **`SUCCEEDED`**, or
+> stands **`FAILED` under a definition that is `side_effecting` with `Idempotency.NATURAL`**.
+> **Those are the only two states in which a consequential effect may exist**: ADR-0029 §4 commits
+> every other definitive failure of a claimed act as `FAILED` **having not acted**, an
+> `INDETERMINATE` step keeps the attempt live (§4's third ending condition) so no ending turn sees
+> one, and a `SKIPPED` step never ran. **`effect_possible` is false at rung 0 and rung 1 by
+> construction**, the class being empty there. **None of the four is stored, none is a field and no
+> consumer reads any** — ADR-0252 §6's own posture toward its four tests, computed where they are
+> used.
 
 > **Normative — which member the attempt earns, decided by §2's three results over the criteria §1
 > fixes, by §3's rung, and by those two facts, in this order and over nothing else.**
 >
 > 1. **`FAILED`** — **no** criterion is met, and either **some** criterion is **unmet**, or
->    **`failed`** and the attempt is **not at rung 2**.
+>    **`failed`** and **not `effect_possible`**.
 > 2. **`CONDITION_PREVENTED`** — **no** criterion is met, **no** criterion is **unmet**,
->    **`blocked`**, **not `failed`**, and the attempt is **not at rung 2**. The plan's own declared
->    conditions, or the user's own refusal, refused the work, and nothing consequential ran.
-> 3. **`UNCERTAIN`** — the attempt is at **rung 2** (§3), **no** criterion is **unmet**, and
->    **not `fully_met`**: a consequential act ran and the record does not establish that every
->    criterion holds.
+>    **`blocked`**, **not `failed`**, and **not `effect_possible`**. The plan's own declared
+>    conditions, or the user's own refusal, refused the work, and no effect may exist.
+> 3. **`UNCERTAIN`** — the attempt is at **rung 2** (§3), **no** criterion is **unmet**,
+>    **not `fully_met`**, and **`effect_possible`**: an act that may have taken effect ran and the
+>    record does not establish that every criterion holds.
 > 4. **`PARTIAL`** — **some** criterion is met and **some** criterion is **not met**.
 > 5. **`VERIFIED`** — **`fully_met`**.
 > 6. **`ANSWERED`** — otherwise, which is exactly ADR-0249 §5's own definition of the member: a
@@ -681,13 +698,18 @@ rung 2 buys is not a lookup; it is the **refusal to say verified**.
 > two things the record contradicts. **`FAILED` is first and `CONDITION_PREVENTED` second**, so
 > that where both predicates hold — a bound step reporting a mismatching value beside another step
 > skipped `UNMET_DEPENDENCY` — the established failure is reported and the condition does not
-> suppress it; and **both are refused at rung 2 unless a criterion is actually `unmet`**, because
-> a consequential act did run: *a condition prevented action* would be false of it, and so would
-> *what was asked was established not to have happened* where the **only** failure on the record
-> is a step about something else. **An unrelated `FAILED` or `SKIPPED` step therefore does not
-> convert a rung-2 attempt whose criteria are merely unestablished into a claim about them**,
-> which is the direction §3's rung rule already fixes and which limb 1's first arm keeps reachable
-> — a criterion established **not** to hold is `FAILED` at every rung. **`UNCERTAIN` precedes
+> suppress it; and **both are refused while `effect_possible` holds, unless a criterion is
+> actually `unmet`**, because an act that may have taken effect ran: *a condition prevented action*
+> would be false of it, and so would *what was asked was established not to have happened* where
+> the **only** failure on the record is a step about something else. **An unrelated `FAILED` or
+> `SKIPPED` step therefore does not convert an attempt whose consequential act may have acted, and
+> whose criteria are merely unestablished, into a claim about them.** **What that conjunct does
+> *not* do is convert a definitive failure into uncertainty**: where every rung-2 step of the
+> attempt failed under a tool that is not `NATURAL`, no effect may exist, `effect_possible` is
+> false, and limb 1 reports `FAILED` — the same answer the same record earns at rung 1, so **the
+> member does not turn on whether a criterion happened to have a confirmed member**. Reading the
+> rung alone, as an earlier revision did, made *"a consequential act ran"* stand for *"an effect
+> may exist"*, which a claimed act that provably did nothing falsifies. **`UNCERTAIN` precedes
 > `PARTIAL`** so that a rung-2 attempt with a **met** criterion and an **unestablished** one is
 > reported as uncertain rather than as partly not done: the record establishes only that the rest
 > is unknown, and §3's rule that an unestablished criterion at rung 2 **is** uncertainty would
@@ -750,7 +772,12 @@ reachable.**
 > against, which is what closes the window the status set only narrows.** **`AttemptTransition`
 > gains `execution_versions`**, a possibly-empty `tuple[tuple[Identifier, int], ...]` defaulting to
 > the empty tuple, each pair an execution id and the **`ExecutionState.version` the caller read**
-> when it computed the comparison. **`PlanStore.commit_attempt` refuses a `to_state` of `ENDED`,
+> when it computed the comparison. **Each version is validated on the model itself as a
+> **non-negative** integer**, `ExecutionState.version`'s own `ge=0` domain, so a pair carrying a
+> value no execution can hold is refused where every other malformed field of a command is —
+> **at construction, with the `ValueError` a frozen model raises** — and never reaches the store to
+> be reported as a lost race. **No lane widens the domain, coerces a value into it, or reads a
+> version this decision does not compare.** **`PlanStore.commit_attempt` refuses a `to_state` of `ENDED`,
 > in the same indivisible step as the write, where the pairs' ids are not *exactly* the attempt's
 > `execution_ids`** — a missing id, an extra id or a duplicate each refuse — **or where any pair's
 > `version` is not the one stored**. **The two refusals raise different classes, and the
@@ -1415,7 +1442,8 @@ and safe at every point in it.**
   carrying the new declaration at **open** rather than at the first unreadable row (ADR-0049 §1).
   It adds no member, no type and no clause of its own.
 - **L1 — `core` (with `wire` and `testing`).** `ToolDefinition.postconditions` with its
-  `OUTPUT_PRESENT` refusal; `AttemptTransition.execution_versions` **as a field and nothing more**;
+  `OUTPUT_PRESENT` refusal; `AttemptTransition.execution_versions` **as a field with its non-negative validator and nothing
+  more**, no store refusal of its own;
   `AttemptReport`; `TurnOutcome.attempt_report`; the docstrings naming this ADR;
   `PROTOCOL_VERSION` **+1** with its `wire/envelope.py` log entry; and the canonical fakes carrying
   the new field. **It states no Protocol refusal**, so every existing caller still commits.
@@ -1579,14 +1607,20 @@ are ordered only by each other.
    `ANSWERED`**, which is the arm that pins limb 1 to ADR-0249 §5's *"no step failed"*; a `FAILED`
    step **beside** a met criterion → `PARTIAL`; a skipped `UNMET_DEPENDENCY` step with no claim, no
    failure and every criterion unestablished → `CONDITION_PREVENTED`, never `ANSWERED`; a **rung 2**
-   attempt whose goal carries **no criterion at all** → `UNCERTAIN`; a **rung 2** attempt with one
-   criterion **met** and one **unestablished** → `UNCERTAIN`, **never `PARTIAL`**; **an unrelated
-   `FAILED` step at rung 2 with every criterion unestablished** → `UNCERTAIN`, **never `FAILED`**,
-   and **the same beside a `SKIPPED` one** → `UNCERTAIN`, **never `CONDITION_PREVENTED`** — the two
-   arms that fail against limbs 1 and 2 reading a failure about something else as a verdict about
-   the criteria; a rung-2 attempt whose criterion's own **bound step stands `FAILED`** → `FAILED`,
-   **never `UNCERTAIN`**, and the same step `INDETERMINATE` → `UNCERTAIN`, the pair that pins
-   *established not to hold* apart from *unknown*; a **rung 2** attempt with **every criterion
+   attempt whose consequential step **succeeded** and whose goal carries **no criterion at all** →
+   `UNCERTAIN`; the same with one criterion **met** and one **unestablished** → `UNCERTAIN`,
+   **never `PARTIAL`**; **an unrelated `FAILED` step beside that successful consequential act,
+   every criterion unestablished** → `UNCERTAIN`, **never `FAILED`**, and **the same beside a
+   `SKIPPED` one** → `UNCERTAIN`, **never `CONDITION_PREVENTED`** — the two arms that fail against
+   limbs 1 and 2 reading a failure about something else as a verdict about the criteria. **And
+   `effect_possible`'s own boundary, which is the pair that keeps the member off the criterion
+   join**: a rung-2 attempt whose **only** consequential step stands `FAILED` under a `KEYED` tool,
+   every criterion **unestablished** → **`FAILED`**, never `UNCERTAIN` — the same answer the same
+   record earns at rung 1 — while the identical attempt under a `side_effecting` **`NATURAL`** tool
+   → **`UNCERTAIN`**, the arm that fails against a rule reading the rung alone; a rung-2 attempt
+   whose criterion's own **bound step stands `FAILED`** under a `KEYED` tool → `FAILED`, **never
+   `UNCERTAIN`**, and the same step under a `NATURAL` one → `UNCERTAIN`, the pair that pins
+   *established not to hold* apart from *may have acted*; a **rung 2** attempt with **every criterion
    met** beside an unrelated `FAILED` step → **`VERIFIED`**, and its goal `ACHIEVED` — the arm that pins limbs 4 and 5 to the criteria
    alone and keeps §6's `PARTIAL` statement true of every attempt that reaches it; a rung-2 attempt
    with a criterion **unmet** → `FAILED` whatever else stands; a **read that succeeded** followed
@@ -1618,7 +1652,8 @@ are ordered only by each other.
    `StaleExecutionError`**: a pair naming an execution the attempt does not name, a **missing**
    id, a **duplicate** id and a **partial** snapshot — the arm that fails against a subset the
    omitted execution could move under, and the one that pins a malformed command apart from a lost
-   race; an **empty** tuple is accepted for an attempt naming no execution and refused for one
+   race — **and a pair carrying a negative `version` is refused at construction (L1)**, before any
+   store sees it, the arm that fails against a field typed `int` and validated nowhere; an **empty** tuple is accepted for an attempt naming no execution and refused for one
    that does; **an execution appended after the caller's read is refused on `expected_version`**,
    not as a malformed set, the arm that pins the order of the two tests; and a `→ CANCELLED`
    transition carrying a stale pair still commits.
