@@ -1,7 +1,7 @@
 # 266. A coverage member records the constraint the user stated, and the bound is proved against
 the quote for the intended action
 
-- Status: Proposed
+- Status: Accepted
   — **twelve narrowly stated scopes, found by a sweep of that document rather than one at a time; §9
   shows the working for each and ADR-0254's own `Status` line carries them in full. §1, in four
   limbs**: its **proposal-completeness** condition, that a proposed row's coverage *"is complete for
