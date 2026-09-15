@@ -353,23 +353,39 @@ honest one."*
 > `verifies`. **A step is satisfying or contradicting on what the tool's author declared and what
 > the provider returned, and on nothing else.**
 >
-> - **Unmet** — **some** bound step is contradicting.
-> - **Met** — **no** bound step is contradicting, and **some** bound step is satisfying.
-> - **Unestablished** — otherwise: the criterion has no confirmed member, no bound step, or no
->   bound step that is satisfying or contradicting — every one `PENDING`, `SKIPPED`, `RUNNING` or
->   `INDETERMINATE`, or `SUCCEEDED` under a definition declaring **nothing** or none this decision
->   can read.
+> **The bound steps are grouped by *the call each made*, and the grouping is the policy's rather
+> than the planner's.** Two bound steps are of **one call** where their pinned decisions carry the
+> same **`ActionRequest.parameters_digest`** (ADR-0021 §1's embedded value, computed by the policy
+> over the concrete request and written by no model), and of **different calls** otherwise. Within
+> one call the **last** decisive step governs, last in the order `GoalAttempt.execution_ids` and
+> each execution's own step order fix; across calls **every** call must agree.
+>
+> - **Unmet** — the last decisive step of **some** call is contradicting.
+> - **Met** — no call's last decisive step is contradicting, and **some** call's is satisfying.
+> - **Unestablished** — otherwise: the criterion's kind is **`BoundKind.MONEY`** (below); it has no
+>   confirmed member; it has no bound step; or no bound step is satisfying or contradicting — every
+>   one `PENDING`, `SKIPPED`, `RUNNING` or `INDETERMINATE`, or `SUCCEEDED` under a definition
+>   declaring **nothing** or none this decision can read.
 
-**One contradiction is decisive and a later success does not erase it, which is a trade this
-decision makes with its eyes open.** The alternative — *the last bound step governs* — would let a
-**retry** of one act clear the failure it recovered from, which is A8's case and is better; but the
-same rule lets a **second, different** act under the same row clear the first one's failure, and
-*"book two rooms"* then reads **met** with one room booked. **Telling those apart needs an act
-identity, and the only one the corpus has is `PlanStep.intended_action`, which a planner writes** —
-so using it would put the allow ADR-0249 §7 forbids back exactly where §2a says there is none. **A
-criterion whose act failed and was later retried successfully therefore reads `unmet`**, which is
-the conservative direction and which §9 books with what fires it; A8's retry is not in the tree
-today (§11), and the two-act case is.
+**The digest is what tells a retry from a second act, and it is the only discriminator here that no
+model writes.** A **retry** re-dispatches the *same* concrete call, so its steps share a
+`parameters_digest` and the later success resolves the earlier no-effect failure — A8's case, and
+the one a *"some step contradicts"* rule would leave permanently `unmet`. A **second, different**
+act — the second of two rooms — is a different call with different arguments and therefore a
+different digest, so its success clears nothing, and a first booking that failed keeps the
+criterion `unmet`. **`PlanStep.intended_action` would answer the same question and is refused**:
+a planner writes it, and a verdict turning on it is the allow ADR-0249 §7 forbids (§2a).
+
+> **Normative — a criterion whose confirmed member is a `MONEY` one is `unestablished`, and this
+> decision states it as a rule rather than as a caveat.** What such a member states is a **ceiling
+> on what the act charges**, and **the charge is not an operand this decision has**: the quote a
+> dispatch was proved against is recorded nowhere (§9), and holding the charge against the ceiling
+> alone would pass a charge that exceeded the quote while staying under it — the mismatch the
+> owner's ruling of 2026-09-14 calls a finding. **So no criterion about an amount is ever `met`
+> here and no goal resting on one reaches `ACHIEVED`**, which is fail-closed, is why §7 says the
+> gate's verification guarantee does **not** cover a capability whose acts make a charge, and is
+> booked in §9 with what fires it. **No lane reads this as licence to compare a charge against a
+> ceiling, a quote or anything else.**
 >
 > **No fourth result exists, no result is a degree, and no lane reads *unestablished* as either of
 > the other two**; and **no step of another goal, another row, another route or no route at all is
@@ -407,10 +423,11 @@ today (§11), and the two-act case is.
 > **Normative — `IntendedAction.serves` is read by nothing here, and ADR-0265 §3 is left entire.**
 > That section rules that *"`serves` gates nothing"*, that **no lane** *"derives an intended action
 > from `serves`"*, and that a stale entry is *"truthful and harmless"* **because no mechanism reads
-> the staleness at all**. **This decision reads no `serves` entry**: a criterion reaches an act
-> through the **row** the act was authorised against, and the act's id is read off the satisfying
-> step's own `PlanStep.intended_action` — the field ADR-0265 §4 already makes a mechanism. **§1's
-> enumeration of what reads `Goal.intended_actions` is therefore not widened.**
+> the staleness at all**. **This decision reads no `serves` entry and no `PlanStep.intended_action`
+> either**: the **row** the act was authorised against and the **pinned decision** that names it
+> are the whole of the binding, and the call's own `parameters_digest` is the whole of the
+> grouping. **ADR-0265 gains no reader anywhere**, of `Goal.intended_actions`, of `serves` or of a
+> step's action label.
 
 > **Normative — what a met criterion establishes, and what it does not.** A met criterion
 > establishes **three** things and no fourth: that the user **confirmed** the typed value it rests
@@ -864,18 +881,22 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > M33's campsite walkthrough runs against the simulated booking service the owner ruled on
 > 2026-09-14.
 
-> **Normative — this decision is the gate's **verification** guarantee and meets that condition for
-> a class exactly as §3 states it.** §2's three conjuncts and §4's function are the mechanism and
-> §3's rungs are the strength. **A deployment wiring a capability of that class therefore does two
-> things as part of wiring it** (§2, §2a): it **declares its tools' `postconditions`**, a tool
+> **Normative — this decision is the gate's **verification** guarantee, and the class it does
+> *not* cover is named rather than left to be discovered.** §2's conjuncts and §4's function are
+> the mechanism and §3's rungs are the strength. **A deployment wiring a covered capability does
+> two things as part of wiring it** (§2, §2a): it **declares its tools' `postconditions`**, a tool
 > declaring none satisfying this guarantee for no criterion at all; and it authorises that
 > capability's consequential acts **against a confirmed `Authorization`** rather than per call,
-> since a route-(a) confirmation establishes no criterion. **Neither is a condition this decision
-> adds to the gate**: both are statements of what its own guarantee covers, which is what
-> ADR-0255 §13 already asks of it.
+> since a route-(a) confirmation establishes no criterion. **And the guarantee does not cover a
+> capability whose acts make a charge**: §2 makes every `MONEY` criterion `unestablished`, because
+> the quote a dispatch was proved against is recorded nowhere (§9), so such a goal reaches
+> `UNCERTAIN` at rung 2 and never `VERIFIED` — **ADR-0255 §13's gate is therefore *not met* for
+> that class by this decision**, and condition (7) below is where the corpus books the rest of it.
+> **None of the three is a condition this decision adds to the gate**: each states what its own
+> guarantee covers, which is what ADR-0255 §13 asks of it.
 
-> **Normative — the count is ADR-0255 §15 item 19's as ADR-0265 §8 made it, it is **six**, and
-> **all six still stand** on the day this decision is ratified.** Named by ADR and by issue so that
+> **Normative — the count is ADR-0255 §15 item 19's as ADR-0265 §8 and then ADR-0267 made it, it
+> is **seven**, and **all seven still stand** on the day this decision is ratified.** Named so that
 > no reader mistakes this document for the last of them: **(1)** A8's reconciliation guarantee
 > (ADR-0259), **(2)** A9's cancellation guarantee (ADR-0261) and **(3)** this decision's
 > verification guarantee are each **ratified and not yet implemented**, and the gate asks for
@@ -883,9 +904,11 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > recovery of a resolved confirmation whose claim was refused — which ADR-0259 §5 takes the `DENY`
 > half of and leaves the `ALLOW` half standing ([#2380](https://github.com/leonapivato/ai-assistant/issues/2380));
 > **(5)** ADR-0255 §13's second — the evidence-to-claim window ([#2309](https://github.com/leonapivato/ai-assistant/issues/2309));
-> and **(6)** ADR-0265 §6's containment for a wrongly minted intended action. **This decision adds
-> no condition to that count and removes none**, and **no lane reads this ADR's ratification, or
-> the merging of its L1, as the gate being met.**
+> **(6)** ADR-0265 §6's containment for a wrongly minted intended action; and **(7)** ADR-0267 §6's
+> freshness prerequisite — the provider-side hold or conditional execution a capability authorised
+> through a `MONEY` ceiling owes, which that decision added to item 19 while this one was being
+> drafted. **This decision adds no condition to that count and removes none**, and **no lane reads
+> this ADR's ratification, or the merging of its L1, as the gate being met.**
 
 **The gate is nearest to being met here and that is exactly when it is most worth restating.** All
 three named guarantees are *designed* once this document ratifies, so the natural reading is *one
@@ -1029,16 +1052,19 @@ booking"*.
   against any of the three, and none invents a fourth.** What binds a charge today is the proof
   ADR-0266 §7 takes **before** the act, which is unweakened. Fired by the decision that pins the
   quote a dispatch was proved against to that dispatch — #2401's seam question (ADR-0267 §10).
-- **A criterion that requires more than one act.** **Not decided, and nothing records arity**: §2
-  reads a criterion as met where some bound step satisfies it and none contradicts, so *"book two
-  rooms"* reads **met** once the first booking succeeds and nothing else has failed. **No lane
-  infers an arity from a criterion's text, from a plan's step count or from a model.** Fired by a
-  decision that gives a criterion a machine-readable arity, or an act an identity no model writes.
-- **Resolving a retry of one act against the failure it recovered from.** **Not decided, and §2
-  states the trade**: a criterion whose act failed and was later retried successfully reads
-  `unmet`, because telling a retry from a second, different act needs an identity only
-  `PlanStep.intended_action` supplies and a planner writes it. Fired by **A8**'s retry decision, or
-  by one that gives an act a non-model identity.
+- **A criterion stating a *count*.** **Not decided, and it is `unestablished` by construction
+  rather than by a rule here**: ADR-0254 §2 closes the coverage vocabulary at `MONEY`, `PERIOD` and
+  `TERMS` and rules that *"a **count** … takes a fixed value or no member at all"*, so *"two
+  rooms"* mints no member, §2 finds none resting on that span, and the criterion never reaches
+  `met`. **No lane infers an arity from a criterion's text, from a plan's step count or from a
+  model.** Fired by a decision that adds a `BoundKind` for a count with its own totality argument.
+- **Whether every act a criterion's *proposition* needs was performed.** **Not decided**: §2 reads
+  a criterion as met where every call that acted agrees and one satisfies, so a criterion whose
+  member is typed and whose first act succeeded reads `met` though a plan meant to make a second
+  call never made it. **That is §1's rule read honestly** — a criterion is a proposition about the
+  outcome and not a work list, and R48 asks for the comparison against the criteria — and §4's
+  other limbs still report an incomplete walk. Fired by a decision that gives a criterion a
+  machine-readable arity.
 - **Establishing a criterion from a `GoalEvidence` row.** **Not decided**: the corpus carries **no
   association from a criterion to an evidence row** (Alternatives), so a criterion only an
   interpretation over a read's output could settle is **unestablished**. Fired by a decision that
@@ -1305,11 +1331,15 @@ are ordered only by each other.
    a `PERIOD` criterion and a `TERMS` criterion whose spans are the two the confirmed row's two
    members rest on, over one booking step → **both met**; the same goal where the row carries a
    `PERIOD` member alone → **met and unestablished** respectively, the arm that fails against any
-   rule giving one verdict to every criterion of a goal. **And one contradiction is decisive**: an
-   earlier bound step satisfying every declaration beside a later contradicting one → **unmet**;
-   a bound step standing **`FAILED`** beside a **later** satisfying one → **unmet** likewise, and
-   the second is the *"book two rooms"* arm — two acts under one row, the first failed and the
-   second succeeded, asserted **not** to reach `met`, `VERIFIED` or `ACHIEVED`. **And
+   rule giving one verdict to every criterion of a goal. **And the grouping by
+   `parameters_digest` is asserted in both directions**: two bound steps of **one call** — the same
+   digest — the first `FAILED` and the later satisfying → **met**, the retry arm; two bound steps
+   of **different calls** — different digests, the two rooms — the first `FAILED` and the later
+   satisfying → **unmet**, and neither `VERIFIED` nor `ACHIEVED`; and within one call, an earlier
+   satisfying step beside a later contradicting one → **unmet**. **And a `MONEY` criterion is
+   `unestablished` whatever else holds**: a confirmed `MONEY` member over a booking step every
+   declaration holds over → **unestablished**, the attempt `UNCERTAIN` at rung 2 and the goal not
+   `ACHIEVED`. **And
    `OUTPUT_PRESENT` is unconstructible** as a declared postcondition (L1) — the arm that fails
    against a model-authored predicate. **And prose is not an operand**: the same criterion
    satisfied word for word by the composed reply, by a `GoalElement.text` and by an
@@ -1318,7 +1348,12 @@ are ordered only by each other.
 4. **No model can move any criterion to *met*, and the campsite case end to end (L4).** A goal
    whose criteria are *Riverside*, *Sunday* and *up to 150 euros*, a confirmed row carrying the
    three members those spans rest on, and a booking step authorised route-(d) against it whose
-   declared postconditions hold → **`VERIFIED`** and `ACHIEVED`. **And each conjunct removed in
+   declared postconditions hold → the first two **met**, the third **unestablished** because it is
+   a `MONEY` criterion (§2), so **not `fully_met`**, the attempt **`UNCERTAIN`** at rung 2 and the
+   goal **not `ACHIEVED`** — which is the whole of what this decision can honestly say about a
+   booking that charges; **and the same goal without the third criterion → `VERIFIED` and
+   `ACHIEVED`**, the pair that shows the mechanism works and shows exactly what §7 says it does not
+   cover. **And each conjunct removed in
    turn leaves the criterion unestablished**: the row's `origin` `OPENING_ACT`; the row belonging
    to **another goal**; the step's
    decision a route-(a), (b) or (c) `ALLOW`, or carrying no `authorised_by`; the member's
@@ -1471,16 +1506,18 @@ intended and loud. A goal that reaches `ACHIEVED` can no longer open an attempt 
 to declare, and a tool that declares nothing verifies nothing. **And the bar is high by
 construction**: a goal reaches `VERIFIED` only where the user's own constraint was put to them and
 confirmed, the act ran under **that row**, and the tool declared what its success establishes — so
-a capability authorised per call, a criterion the user never stated in words a member rests on, and
-a goal whose acts nobody bounded each reach `UNCERTAIN` at rung 2 and stay open. **That is the
-deliberate direction and it is where a falsifier would show up first** (below). And a goal with an
+a capability authorised per call, a criterion the user never stated in words a member rests on, a
+criterion stating an **amount**, and a goal whose acts nobody bounded each reach `UNCERTAIN` at
+rung 2 and stay open. **That is the deliberate direction and it is where a falsifier would show up
+first** (below). And a goal with an
 unresolved effect now deliberately **does not** end its attempt, so it stays open until A8's
 reconciliation reaches it — the owner's ruling, and a state a user sees on `assistant goals` rather
 than one the system quietly closes.
 
 **What would trigger revisiting this.** A corpus of goals in which **no** criterion's `span` ever
-equals a confirmed member's would say the span is the wrong join and the agreement should be made
-at the reading that produces both. A corpus of integrations declining to declare any postcondition
+equals a confirmed member's would say the span is the wrong join. A booking capability whose goals
+all stop at `UNCERTAIN` because every one of their criteria is about an amount would say the
+charge operand §9 books is the next thing to build rather than a residual. A corpus of integrations declining to declare any postcondition
 would say the declaration is in the wrong place. And a deployment in which `UNCERTAIN` is the
 effective terminal member for every consequential goal would say the conjuncts are too strong — the
 first place to look being §2a's route-(a) cost, which §9 books.
