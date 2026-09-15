@@ -37,6 +37,7 @@ from ai_assistant.testing import (
     AUTHORIZATION_EXPIRES_AT,
     AUTHORIZATION_TOOL,
     money_bound,
+    terms_bound,
 )
 
 #: The three types §20 arm 35 states its bar over, together.
@@ -164,6 +165,52 @@ def test_a_coverage_view_fixes_a_value_or_states_a_bound_and_never_both() -> Non
         CoverageView(**_view(fixed="60"))
     with pytest.raises(ValidationError, match="renders nothing the user said"):
         CoverageView(**_view(bound=None))
+
+
+@pytest.mark.parametrize(
+    ("kind", "extra"),
+    [
+        (BoundKind.TERMS, {"bound": money_bound("50")}),
+        (BoundKind.MONEY, {"bound": terms_bound("flexible")}),
+        (BoundKind.PERIOD, {"bound": money_bound("50")}),
+        (BoundKind.MONEY, {"fixed": "50", "bound": None}),
+        (BoundKind.TERMS, {"fixed": 50, "bound": None}),
+        (BoundKind.PERIOD, {"fixed": "2026-02-30", "bound": None}),
+    ],
+)
+def test_a_view_the_record_could_not_have_produced_is_not_constructible(
+    kind: BoundKind, extra: dict[str, Any]
+) -> None:
+    """ADR-0266 §3's kind validation, read through §11's transcription rule.
+
+    **The cost of not stating it is on the screen the user answers from**: a
+    ``TERMS`` view carrying a ``MONEY`` bound renders *"the terms: up to 50 GBP"*,
+    and a ``MONEY`` view carrying a fixed value renders an amount nothing
+    denominates. Both misstate the authority at the one moment §11 exists to make
+    checkable, and no ``CoverageMember`` can produce either — so the view is
+    *"refusable in exactly the cases the record is"*. Adversarial review, round 1,
+    ``major``.
+    """
+    with pytest.raises(ValidationError):
+        CoverageView(**_view(kind=kind, **extra))
+
+
+@pytest.mark.parametrize(
+    ("kind", "extra"),
+    [
+        (BoundKind.MONEY, {"bound": money_bound("50")}),
+        (BoundKind.TERMS, {"bound": terms_bound("flexible")}),
+        (BoundKind.TERMS, {"fixed": "flexible", "bound": None}),
+        (BoundKind.PERIOD, {"fixed": "2026-09-13", "bound": None}),
+    ],
+)
+def test_a_view_transcribed_from_a_constructible_member_is_constructible(
+    kind: BoundKind, extra: dict[str, Any]
+) -> None:
+    """The controls beside the refusals above: the validator forbids no rendering a
+    conforming record can produce, which is what keeps it a transcription rule
+    rather than a second, narrower one."""
+    assert CoverageView(**_view(kind=kind, **extra)).kind is kind
 
 
 def test_a_coverage_view_requires_the_span() -> None:

@@ -158,6 +158,67 @@ def test_no_two_members_of_one_row_carry_the_same_kind() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "fixed",
+    ["2026-02-30", "2026-13-01", "2026-09-13T25:00:00Z", "2026-09-13T10:70:00Z", "2026-02-29"],
+)
+def test_a_period_member_fixing_a_date_the_reading_refuses_is_not_constructible(
+    fixed: str,
+) -> None:
+    """ADR-0266 §3: a ``PERIOD`` ``fixed`` is *"a value that reading accepts"*.
+
+    **Shape is not enough, and the cost of treating it as enough is a covered
+    call.** A fixed value is compared by **byte equality**, so a member holding
+    ``"2026-02-30"`` would cover a request carrying that same impossible string —
+    a value ADR-0254 §4's reading accepts nowhere, since it denotes no day. The
+    construction and the comparison read **one** parser
+    (``period_reading_form``), so a string one refuses is a string the other never
+    sees. Adversarial review, round 1, ``blocker``.
+    """
+    with pytest.raises(ValidationError, match="reading accepts"):
+        CoverageMember(kind=BoundKind.PERIOD, fixed=fixed, basis=authorization_basis())
+
+
+@pytest.mark.parametrize("fixed", ["2026-09-13", "2026-02-28", "2026-09-13T10:00:00+01:00"])
+def test_a_period_member_fixing_a_date_the_reading_accepts_is_constructible(fixed: str) -> None:
+    """The control beside the refusal above: a real calendar date and a real
+    instant carrying an offset are both values §4's reading reads."""
+    assert (
+        CoverageMember(kind=BoundKind.PERIOD, fixed=fixed, basis=authorization_basis()).fixed
+        == fixed
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "fixed", "bound"),
+    [
+        (BoundKind.MONEY, "60", None),
+        (BoundKind.TERMS, 60, None),
+        (BoundKind.TERMS, True, None),
+        (BoundKind.TERMS, None, "money"),
+        (BoundKind.MONEY, None, "terms"),
+        (BoundKind.PERIOD, None, "money"),
+    ],
+)
+def test_a_member_whose_value_its_kind_does_not_state_is_not_constructible(
+    kind: BoundKind, fixed: object, bound: str | None
+) -> None:
+    """ADR-0266 §3's kind validation, over every shape it refuses (arm 6(b)).
+
+    A ``MONEY`` ``fixed`` outright — *"an amount carries no currency on a fixed
+    member"* — a ``TERMS`` ``fixed`` that is not a string, and every unequal pair
+    of a member's kind and its bound's.
+    """
+    stated = {"money": money_bound(), "terms": terms_bound("flexible")}
+    with pytest.raises(ValidationError):
+        CoverageMember(
+            kind=kind,
+            fixed=fixed,  # type: ignore[arg-type]  # the refusal is what is asserted
+            bound=None if bound is None else stated[bound],
+            basis=authorization_basis(),
+        )
+
+
 def test_a_row_carrying_two_members_of_different_kinds_is_constructible() -> None:
     """ADR-0266 §3's rule is one **per kind** and not one per row (arm 4(a)).
 

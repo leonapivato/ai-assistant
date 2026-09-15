@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime, time
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, NamedTuple
@@ -57,9 +57,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import TypeAdapter
 
+from ai_assistant.core import types as ai_types
 from ai_assistant.core.types import (
-    PERIOD_DATE_TIME,
-    PERIOD_FULL_DATE,
     BoundAccount,
     BoundKind,
     CanonicalDestination,
@@ -822,69 +821,50 @@ def _satisfies_period(bound: ValueBound, value: FrozenJson) -> bool:
     return bound.starts_at <= instant < bound.ends_at
 
 
-def _instant_of(  # noqa: PLR0911 — one return per form the grammar or the zone refuses
-    text: str, zone: str | None
-) -> datetime | None:
+def _instant_of(text: str, zone: str | None) -> datetime | None:
     """The instant ``text`` denotes, or ``None`` where the reading refuses it.
 
-    **The grammar is checked before anything is parsed**, and the two arms are told
-    apart by which pattern matched rather than by which parser happened to succeed.
-    ``datetime.fromisoformat`` and ``date.fromisoformat`` are then used only to turn
-    a string already known to be in the admitted grammar into a value, which is what
-    keeps this reading exactly as wide as ADR-0254 §4 states it and no wider.
+    **The reading itself is** :func:`~ai_assistant.core.types.period_reading_form`,
+    which the `core` type validates a fixed ``PERIOD`` value against — one parser,
+    so a string this refuses can never be a value a member holds, and a string it
+    admits is read the same way at both ends (ADR-0266 §3).
+
+    What is left here is the half that needs the **bound's own zone**: which instant
+    a calendar date denotes, and whether that civil day exists in that zone at all.
     """
-    if PERIOD_FULL_DATE.match(text):
-        if zone is None:  # pragma: no cover — a PERIOD bound's model requires one
-            return None
-        try:
-            located = ZoneInfo(zone)
-        except ZoneInfoNotFoundError, ValueError:  # pragma: no cover — the model validates it
-            return None
-        try:
-            day = date.fromisoformat(text)
-        except ValueError:  # pragma: no cover — an impossible date, e.g. 2026-02-31
-            return None
-        start = datetime.combine(day, time(), tzinfo=located)
-        # **A civil date that has no start in that zone denotes no instant, and the
-        # reading refuses it** (§4's totality: *"every failure of it is a refusal to
-        # cover"*). A zone can skip a whole calendar day — Samoa skipped 30 December
-        # 2011 when it crossed the date line — and ``datetime.combine`` answers such a
-        # date with an instant all the same, resolving the gap by PEP 495's rule. That
-        # instant belongs to a **different** local day, so a bound containing it would
-        # cover a request whose date the user could not have meant: the permissive
-        # direction, on a value nothing in this system can prove. The round trip is
-        # the whole test — where the instant reads back as the day asked for, the day
-        # has a start and this is it.
-        try:
-            round_tripped = start.astimezone(UTC).astimezone(located).date()
-        except OverflowError, OSError, ValueError:
-            # **A date at the representable boundary is unreadable, not an exception
-            # out of ``decide``** (§4). ``0001-01-01`` in a zone ahead of UTC
-            # converts to a year-0 instant, which ``datetime`` cannot hold and which
-            # surfaces as ``OverflowError`` — neither a ``ValueError`` nor an
-            # ``AssistantError``, so it would leave the policy's own error boundary
-            # through a hole and take down a ruling that owed a ``CONFIRM``. §4's
-            # totality clause is what this is: "every failure of it is a refusal to
-            # cover".
-            return None
-        if round_tripped != day:
-            return None
-        return start
-    if not PERIOD_DATE_TIME.match(text):
+    read = ai_types.period_reading_form(text)
+    if read is None:
         return None
-    # **RFC 3339 §5.6's own case rule permits a lower-case ``t`` and ``z``**, and
-    # ``datetime.fromisoformat`` accepts the first and refuses the second. Upper-
-    # casing both markers before the parse is what makes the grammar above and the
-    # reading below admit exactly the same set: a regex that claimed a form the
-    # parse then refused would be a second statement of the rule, free to disagree
-    # with the first — and the disagreement would be silent, since a refusal to
-    # read is indistinguishable from a refusal to cover.
-    normalised = f"{text[:10]}T{text[11:-1]}{text[-1].upper()}"
+    if isinstance(read, datetime):
+        return read
+    if zone is None:  # pragma: no cover — a PERIOD bound's model requires one
+        return None
     try:
-        parsed = datetime.fromisoformat(normalised)
-    except ValueError:  # pragma: no cover — an impossible date inside the grammar
+        located = ZoneInfo(zone)
+    except ZoneInfoNotFoundError, ValueError:  # pragma: no cover — the model validates it
         return None
-    return parsed if parsed.utcoffset() is not None else None
+    start = datetime.combine(read, time(), tzinfo=located)
+    # **A civil date that has no start in that zone denotes no instant, and the
+    # reading refuses it** (§4's totality: *"every failure of it is a refusal to
+    # cover"*). A zone can skip a whole calendar day — Samoa skipped 30 December 2011
+    # when it crossed the date line — and ``datetime.combine`` answers such a date
+    # with an instant all the same, resolving the gap by PEP 495's rule. That instant
+    # belongs to a **different** local day, so a bound containing it would cover a
+    # request whose date the user could not have meant: the permissive direction, on
+    # a value nothing in this system can prove. The round trip is the whole test —
+    # where the instant reads back as the day asked for, the day has a start and this
+    # is it.
+    try:
+        round_tripped = start.astimezone(UTC).astimezone(located).date()
+    except OverflowError, OSError, ValueError:
+        # **A date at the representable boundary is unreadable, not an exception out
+        # of ``decide``** (§4). ``0001-01-01`` in a zone ahead of UTC converts to a
+        # year-0 instant, which ``datetime`` cannot hold and which surfaces as
+        # ``OverflowError`` — neither a ``ValueError`` nor an ``AssistantError``, so
+        # it would leave the policy's own error boundary through a hole and take down
+        # a ruling that owed a ``CONFIRM``.
+        return None
+    return start if round_tripped == read else None
 
 
 def _satisfies_terms(bound: ValueBound, value: FrozenJson) -> bool:

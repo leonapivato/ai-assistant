@@ -8261,6 +8261,23 @@ def test_the_act_is_offered_in_the_panel_and_named_in_a_reply() -> None:
     assert "restateAuthorization" in script
 
 
+def test_a_view_the_record_could_not_have_produced_is_not_rendered() -> None:
+    """ADR-0266 §3's kind invariants, mirrored where the page reads a member.
+
+    ``CoverageView`` refuses a ``TERMS`` view carrying a ``MONEY`` bound and a
+    ``MONEY`` view carrying a fixed value one layer up, so no conforming hub sends
+    either. **This is the page refusing to render what a hub at another version,
+    or a wrong one, might still send** — *"the terms: up to 50 GBP"* is a statement
+    about the owner's authority that no record could have produced, and an
+    undenominated fixed amount is a figure nothing gives a currency to. Adversarial
+    review, round 1, ``major``.
+    """
+    reader = _functions(_code("app.js"))["readCoverageView"]
+
+    assert "view.bound.kind === view.kind" in reader
+    assert 'view.kind !== "money"' in reader
+
+
 def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     """ADR-0254 §2 gives every kind a required set, and a bag test admits none of them.
 
