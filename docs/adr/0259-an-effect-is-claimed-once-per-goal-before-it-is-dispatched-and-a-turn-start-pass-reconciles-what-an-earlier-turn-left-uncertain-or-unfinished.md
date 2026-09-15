@@ -152,8 +152,9 @@ attempt paused has **spent their one answer on nothing**, with the ruling durabl
 
 Golden rule 5 and ADR-0015 put a `core` contract change behind a ratified ADR of its own, and this **is** that ADR for the
 surface §9 names. It is not one for anything else. **It decides no retry policy** (§10), **no verification** (A10), **no
-cancellation semantics** (A9), **no user surface** for anything it records (A9), and **no parallel execution** (ADR-0014
-§7's second half and ADR-0253 §1, untouched).
+cancellation semantics** (A9), **no reply text, phrasing or channel** for anything it records (A9) — *that* an uncertain
+effect is surfaced in the investigation phase before it is checked is the owner's ruling, stated in §3; how it is said is
+A9's — and **no parallel execution** (ADR-0014 §7's second half and ADR-0253 §1, untouched).
 
 ## Decision
 
@@ -1037,10 +1038,11 @@ decision answers it by adding no route**, and states why the resolution is nonet
 > the turn was not handed, or resumes a walk over a superseded one**, and ADR-0255 §7's *"one plan is driven per walk, and it
 > is the plan the turn holds"* is untouched.
 
-> **Normative — what the resolution buys is the order and the record, and not a claim.** §4's acts run **before** the turn's
-> first `Planner.plan` call and leave the uncertain step standing **`INDETERMINATE`** with its attempt repaired to
-> `EFFECT_UNRESOLVED` by act 3, so the planner reads a goal whose uncertainty is recorded rather than hidden; the
-> **resolution** lands later in that same turn, in the investigation phase, after which the step is
+> **Normative — what the resolution buys is the order and the record, and not a claim, and the turn's sequence is stated
+> once here.** §4's acts 1–4 run first and leave the uncertain step standing **`INDETERMINATE`** with its attempt repaired
+> to `EFFECT_UNRESOLVED` by act 3; the turn's **investigation phase** then surfaces and checks it (§3); and **both are
+> before the turn's first `Planner.plan` call**, so the planner reads the record **settled** where the check resolved it and
+> still `INDETERMINATE` where it did not — never a goal whose uncertainty is hidden. After a resolution the step is
 > `SUCCEEDED`, its attempt is releasable by the next pass's act 4, and the dependents of that step are evaluated under
 > ADR-0253 §2 like any others wherever a walk reaches them. **What it does not buy is a `COMPLETED` answer to a later plan,
 > and that is stated rather than assumed.** §3 admits a **read** alone; §1 gives a read **no effect key**; so no row is
@@ -1500,8 +1502,8 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
    startup scan is shown to have written no attempt state.
 10. A step left `INDETERMINATE` by the recovery scan is **left standing by the pass and checked nowhere in it** —
     `ToolInvoker.invoke` is not reached by any act, nothing is written for it by any act but act 3's attempt repair, and the
-    step is still `INDETERMINATE` when the pass returns — **surfaced to
-    the user in that turn's investigation phase**, and reconciled there to **`SUCCEEDED`**, its attempt returning to
+    step is still `INDETERMINATE` when the pass returns — **surfaced to the user in that turn's investigation phase and
+    reconciled there, both before that turn's first `Planner.plan` call**, to **`SUCCEEDED`**, its attempt returning to
     **`RUNNING`** on the next pass's act 4, over the one reconcilable declaration — a tool that is **not `side_effecting`** —
     over a request **rebuilt from stored plan and execution state after a restart** and accepted by
     `PermissionDecision.authorises`. **The surfacing is asserted and not only the write**: the turn says it is unsure whether
@@ -1524,7 +1526,7 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     definition after a restart), the two spend errors, the two authorisation errors and `AuditError` (the invocation-claim
     append failing) — ends the check with the turn's own work **continuing** and **the turn not failing**; while a
     `ValueError`, a bare `RuntimeError` from a broken invoker and a `CancelledError` are each asserted to **propagate out of
-    the pass unchanged**. An implementation catching a base class fails the second table. In **every** row the step stays
+    the check unchanged**, into the turn's own work and not into the pass, which has already returned. An implementation catching a base class fails the second table. In **every** row the step stays
     **`INDETERMINATE`**, `attempts` is **unchanged**, no transition is committed, the attempt stays **`EFFECT_UNRESOLVED`**,
     and **no second call is made in that turn**. **The key is asserted per row rather than across them**, because §1 gives one
     only to a side-effecting tool: a **side-effecting** row's key answers **`UNCERTAIN`** to a later plan's claim, and the
@@ -1547,9 +1549,11 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     this arm, driven by a barrier rather than by an injected store error**: two turns reconcile one `INDETERMINATE` step at
     once and both calls return, one `INDETERMINATE → SUCCEEDED` commit **lands** and the other loses on a stale
     `expected_version` — after which the winner's `SUCCEEDED`, its `output` and its `finished_at` **stand unchanged**, the
-    loser **writes nothing**, **retries nothing**, takes **no later act** of its pass and makes **no second reconciliation
-    call**, and **the losing turn does not fail**. The store under test is not permitted to pass this row by serialising the
-    two passes in the test's own control flow.
+    loser **writes nothing**, **retries nothing**, makes **no second reconciliation call** and **does not fail its turn**,
+    whose own work continues. **The two actors here are two turns' investigation phases and not two passes** — the check is
+    never the pass's (§3) — and the row sits in this arm because the budget and store-failure boundaries it shares are
+    stated here. The store under test is not permitted to pass this row by serialising the two checks in the test's own
+    control flow.
 
 13. **Two intended actions, one goal, two dispatches** — the owner's *"book two identical rooms"*, and the arm that would have
     been impossible before ADR-0265. One goal holds **two** `IntendedAction`s; one plan carries two steps naming one each,
