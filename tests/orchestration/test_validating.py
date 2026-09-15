@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     StepStatus,
 )
 from ai_assistant.orchestration.validating import (
+    OutstandingDependency,
     PhaseFour,
     UnfillableStep,
     UnmetDependency,
@@ -296,6 +297,131 @@ def test_a_failed_dependency_dominates_a_second_outstanding_one() -> None:
     assert gate.deferred == ("step-3",)  # step-2 is still outstanding
     assert [one.producer for one in gate.unmet] == ["step-1"]
     assert not gate.ready
+
+
+# --- the one step the deferral does not cover: the one being dispatched ---
+
+
+def test_the_dispatched_steps_own_outstanding_dependency_is_not_deferred() -> None:
+    """ADR-0255 defers a producer that runs "before that step is dispatched".
+
+    Naming the step being dispatched falsifies that condition for it: the producer
+    has not run and the dependent is about to act anyway. So the check is refused
+    rather than deferred, and the plan is not ready.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), dispatching="step-2")
+
+    assert gate.outstanding == (OutstandingDependency(step="step-2", producer="step-1"),)
+    assert gate.deferred == ()
+    assert gate.unmet == ()
+    assert not gate.ready
+
+
+def test_naming_the_producer_leaves_the_dependent_deferred() -> None:
+    """The deferral is untouched for every step that is not the one being dispatched.
+
+    Without it "every plan carrying a `depends_on` replans forever" (ADR-0255) —
+    which is the failure the conditional deferral exists to avoid, and dispatching
+    the producer is exactly the case it is about.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), dispatching="step-1")
+
+    assert gate.outstanding == ()
+    assert gate.deferred == ("step-2",)
+    assert gate.ready
+
+
+def test_a_dispatched_step_over_a_succeeded_producer_is_still_only_deferred() -> None:
+    """The guard is about a producer that has **not run**, and not about `verifies`.
+
+    A ``SUCCEEDED`` producer has run; what is left of ADR-0253 §2's conjunction is
+    the ``verifies`` half, whose evaluator is A7's driver. Refusing here would refuse
+    every dependent step that driver will ever dispatch — a lock rather than a guard
+    — so the check stays deferred exactly as it was.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(
+        plan,
+        candidates=_offered(plan, a_tool()),
+        disposed={"step-1": StepStatus.SUCCEEDED},
+        dispatching="step-2",
+    )
+
+    assert gate.outstanding == ()
+    assert gate.deferred == ("step-2",)
+    assert gate.ready
+
+
+@pytest.mark.parametrize(
+    "status",
+    [StepStatus.PENDING, StepStatus.AWAITING_APPROVAL, StepStatus.RUNNING],
+    ids=lambda status: status.name,
+)
+def test_every_status_at_which_a_producer_has_not_acted_refuses_the_dispatch(
+    status: StepStatus,
+) -> None:
+    """A producer that has not acted is any of these, and an unnamed step besides.
+
+    The set is stated as the complement of "has run", so a status added later
+    refuses rather than admits — the fail-closed direction for the one thing it
+    decides.
+    """
+    plan = a_plan(a_step(), a_step("step-2", depends_on=("step-1",)))
+
+    gate = evaluate(
+        plan,
+        candidates=_offered(plan, a_tool()),
+        disposed={"step-1": status},
+        dispatching="step-2",
+    )
+
+    assert gate.outstanding == (OutstandingDependency(step="step-2", producer="step-1"),)
+    assert not gate.ready
+
+
+def test_a_dispatched_step_with_no_dependency_is_unaffected() -> None:
+    """Naming a step that depends on nothing changes no answer."""
+    plan = a_plan(a_step(), a_step("step-2"))
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), dispatching="step-1")
+
+    assert gate.outstanding == ()
+    assert gate.ready
+
+
+def test_every_outstanding_producer_of_the_dispatched_step_is_named() -> None:
+    """The record a caller logs names each one, in the step's own `depends_on` order."""
+    plan = a_plan(
+        a_step(),
+        a_step("step-2"),
+        a_step("step-3", depends_on=("step-1", "step-2")),
+    )
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), dispatching="step-3")
+
+    assert [one.producer for one in gate.outstanding] == ["step-1", "step-2"]
+    assert not gate.ready
+
+
+def test_a_dispatched_step_keeps_its_when_deferred() -> None:
+    """Only check 1 is un-deferred by the dispatch; check 3 has no evaluator here.
+
+    ADR-0252 §6's four tests are the sufficiency decision's own lane's, and
+    ADR-0255 puts that decision "at the moment of dispatch, in the words the
+    sufficiency decision fixes" — which this stage is not.
+    """
+    plan = a_plan(a_step("step-1", when=(a_condition(),)))
+
+    gate = evaluate(plan, candidates=_offered(plan, a_tool()), dispatching="step-1")
+
+    assert gate.deferred == ("step-1",)
+    assert gate.outstanding == ()
+    assert gate.ready
 
 
 def test_a_known_check_2_failure_dominates_a_deferral() -> None:
