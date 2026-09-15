@@ -68,7 +68,12 @@ BROWSER: Final = _joined(
 #: should: a terminal prints a command to paste and a page draws a button. What the row
 #: fixes is that the clause is stated on both.
 CLAUSES: Final = (
-    ("§11: the coverage is rendered member by member", "argument", "view.argument"),
+    # **By its ``kind`` and no longer by an argument key** (ADR-0266 §9's §11
+    # scope): a member records what the user stated and never which slot it fills,
+    # so each surface renders *this kind of value is fixed at that value* where the
+    # key used to stand. Both spell the vocabulary in the owner's words rather than
+    # in its wire values, which is what the two names below pin.
+    ("§11: the coverage is rendered member by member", "_KIND_WORDS", "COVERAGE_KIND_WORDS"),
     ("§8: the user's own words sit beside every member", "you said", "you said"),
     ("§11: the horizon is shown (ADR-0256)", "lapses at", "It lapses at"),
     ("§11: the horizon is shown again in the listing", "horizon is", "the horizon is"),
