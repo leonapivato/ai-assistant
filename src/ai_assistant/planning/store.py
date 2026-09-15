@@ -504,7 +504,8 @@ class InMemoryPlanStore:
         ]
         for one in ended:
             self._attempts[one.id] = one
-        self._goals[goal_id] = _with_status(stored, status=GoalStatus.ABANDONED)
+        updated = _with_status(stored, status=GoalStatus.ABANDONED)
+        self._goals[updated.id] = updated
         return outstanding
 
     async def has_outstanding_effect(self, goal_id: str, /) -> bool:

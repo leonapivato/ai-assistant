@@ -964,6 +964,23 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     ``OutboundDestination``'s new member, which is an ``assert_never`` this addition
     forces rather than a rendering decision.
 
+    **``drive_withheld`` is ADR-0261 §7's member, and the decision taken here is "not
+    rendered" for ``forecast_not_read``'s identical reason.** §13 cuts three lanes — the
+    contract with its ``planning`` implementations, the act and the refusal catch in
+    ``orchestration/``, and the surfaces in ``interfaces/`` — and this member's
+    rendering is **L3's by name**: "the fixed statements §6 and §7 name, on the CLI's
+    abandon and goals surfaces and on the reply". So the member crosses the wire,
+    because it is on ``TurnOutcome`` and this page decodes the whole outcome, and no
+    panel reads it.
+
+    **The cost in this lane is nil, and that is stated rather than hidden.** L2 owns the
+    driver's catch and the post-refusal read, so on L1's tree a ``ClaimRefused``
+    propagates out of the store like any other ``PlanningError``, no turn composes a
+    withheld drive at all, and the member is ``None`` on every outcome this adapter can
+    see. What a surface owes when it does arrive is not optional — §7 requires one fixed
+    statement per member of a closed seven-member vocabulary, under ADR-0242 §9's
+    all-or-nothing rule, which is the obligation the two entries above already carry.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -988,6 +1005,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "outbound_statement",
         "forecast_not_read",
         "authorizations",
+        "drive_withheld",
     }
 
 
