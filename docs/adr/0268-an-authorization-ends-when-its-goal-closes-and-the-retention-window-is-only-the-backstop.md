@@ -293,8 +293,11 @@ does not take that decision by another route.
 >   the store's settlement trigger governs this write unchanged. **Where the record already stands
 >   at a version *above* `goal_version` it moves no row, writes nothing and answers `0`** — the
 >   stale-call rule below. **A goal the store holds no row of answers `0`** and is fenced all the
->   same, which is the shape `standing` already takes for a goal it does not hold; and a call at or
->   above a standing record finds no row left to move and answers `0` too.
+>   same, which is the shape `standing` already takes for a goal it does not hold; and a **repeated**
+>   call at or above a standing record finds none left to move and answers `0` too — **but only
+>   because the fence stood throughout**. **Where a reopen lifted it and a row was admitted since, that
+>   call ends the row and counts it**, raising the record and standing the fence as this member's first
+>   clause says; **the version governs staleness, never emptiness**, and arm 4 pins it.
 > - **`clear_closure(goal: Identifier, /, *, goal_version: int) -> bool`** — **lifts the fence and
 >   removes no record**: where the record stands at a version **at or below** `goal_version` it
 >   raises the record to `goal_version` with the fence **lifted**, and answers whether a standing
@@ -393,8 +396,7 @@ does not take that decision by another route.
 > left, and no lane infers one or compensates on its strength**; what the rule buys is *"that the
 > resource is safe and the cancellation arrives"* (arm 7), the act propagating rather than
 > classifying it, and the repair is the user's own two acts under either outcome. **ADR-0261 §2
-> states the identical claim of `close_goal_abandoned` unqualified**; that clause is untouched by
-> this decision (§7) and narrowing it is its own lane's. **Where it succeeds
+> states the identical claim unqualified**; that clause is untouched here (§7). **Where it succeeds
 > and the closing write does not, the act propagates and clears nothing**: the rows stand
 > `GOAL_CLOSED`, truthfully under §2's meaning — the ending their goal's closure takes is what ended
 > them, which is what happened — the goal is left open and fenced, and **every call of it asks**
