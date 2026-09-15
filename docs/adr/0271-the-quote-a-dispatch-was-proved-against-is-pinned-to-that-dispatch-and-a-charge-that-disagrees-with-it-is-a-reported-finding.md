@@ -32,8 +32,9 @@ disagrees with it is a reported finding
   not on the field being outside a permission decision's reach**: ADR-0254 §3's condition 3 compares
   the request's declaration with the row's **by value**, so this field moves a route-(d) coverage
   answer exactly as a severity or schema edit does. The default is an exception because absent makes
-  the **opposite** claim to the one §1 refuses — a declaration naming no charged output reports none
-  and establishes nothing — which is `quoted_output`'s and `postconditions`' own ground. Every other
+  the **opposite** claim to the one §1 refuses — a declaration naming no charged output reports none,
+  so no charge is established and the test above is not taken, a contradiction §2 reached over such a
+  step standing regardless — which is `quoted_output`'s and `postconditions`' own ground. Every other
   clause of §1 binds entire, its `frozen=True` rule and its no-inference rule conspicuously.
 - **No other ADR is superseded in whole or in part**, and **ADR-0267 is not, in any scope**. §1's
   unmarked ground beside the no-eighth-field clause reads that a later record naming one quote
@@ -204,8 +205,10 @@ producer, no freshness rule and no coverage condition.
 > **Normative — every failure of that reading yields no charge, and nothing is repaired, coerced,
 > defaulted or substituted.** A declaration with no `charged_output`, an `output` that is not an
 > object, a missing key at either name, a value of any refused shape: each yields **no charge**, and
-> §3 leaves the criterion `unestablished` in consequence. **A yield of no charge raises nothing**:
-> a string `Decimal` refuses — `"not-a-number"`, an empty string — and a string it **accepts** whose
+> the charge test is then **not taken**, so §3's third limb calls the step **neither** and no such
+> criterion is ever `met` — leaving it `unestablished` **unless** §2's own contradicting test holds
+> over some bound step of it independently, in which case §3's **first** limb stands and the
+> criterion is `unmet`. **A yield of no charge raises nothing**: a string `Decimal` refuses — `"not-a-number"`, an empty string — and a string it **accepts** whose
 > value is **not finite** — `"NaN"`, `"Infinity"`, `"-Infinity"`, in any case — each leave the
 > comparison with no charge rather than with an exception, the second pair being the one a natural
 > implementation reaches by accident because `Decimal` constructs them without complaint, exactly as
@@ -507,8 +510,12 @@ producer, no freshness rule and no coverage condition.
    quote on the ruling and on the decision `from_request` builds; the same request with a coverage
    carrying no `MONEY` member, one whose member is met by no route, a `CONFIRM`, a `DENY` and a
    route-(a) `ALLOW` each record **none**; where the goal holds two quotes naming that action the
-   pin is **the last**; and `PermissionRuling` **refuses construction** with `proved_quote` set and
-   `authorised_by` unset.
+   pin is **the last**; and `PermissionRuling` **refuses construction** with `proved_quote` set over
+   each of the three row shapes ADR-0254 §7 tells the other cases apart by — `authorised_by`
+   **unset**, the **route-(b)** shape with `authorised_by` and `authorised_subject` set and
+   `authorised_goal` **unset**, and the **route-(c)** shape with `authorised_by` set and
+   `authorised_subject` and `authorised_goal` **both unset** — the last two being the arm that fails
+   a validator gating on `authorised_by` alone.
 2. **The pin is a value and not a pointer.** A quote appended to the goal after the ruling leaves the
    pinned value **unchanged**, and a comparison over the pinned decision reads the earlier reading —
    the arm that fails an implementation which re-selects by act and digest at read time.

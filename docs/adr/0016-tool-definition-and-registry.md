@@ -195,16 +195,15 @@
   so **no `MONEY` criterion resting on that tool is ever `met` and no goal resting on one reaches
   `ACHIEVED`**: the charge test is never taken, which leaves such a criterion `unestablished` unless
   its own postconditions independently contradict, in which case it is `unmet` on that ground alone.
-  The
-  default is an exception to *"Every field that a permission decision depends on is required"* taken
+  The default is an exception to *"Every field that a permission decision depends on is required"* taken
   on **its own fail-closed ground**, and **not** on the field being outside a permission decision's
   reach: ADR-0254 §3's condition 3 compares the request's declaration with the row's **by value**, so
   this field moves a route-(d) coverage answer exactly as a severity or schema edit does. Absent is
   an exception because it makes the **opposite** claim to the one §1 refuses — a declaration naming
   no charged output reports none, so the charge test is never taken and no such criterion is ever
   `met` — which is `quoted_output`'s ground and `postconditions`', and which is a **refusal to
-  establish** rather than a claim that nothing is established. Every other clause of §1 binds entire, its `frozen=True` rule and its
-  no-inference rule conspicuously, and §5's re-registration rule is untouched.
+  establish** rather than a claim that nothing is established. Every other clause of §1 binds
+  entire, its `frozen=True` rule and its no-inference rule conspicuously, and §5's re-registration rule is untouched.
 
 ## Context
 
