@@ -3,8 +3,9 @@
 - Status: Proposed
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
-  — **two scopes: a count and a division, both of §5, and the class of §8's revision conjunct.
-  §12 shows the working for each.**
+  — **three scopes: a count and a division, both of §5; the class of §8's revision conjunct; and
+  §12's sole-mutation-route sentence, for the versioned upgrade step alone. §12 shows the working
+  for each.**
   **§5's `AttemptOutcome` closure**: *"a `StrEnum` valued by lower-cased member name and **closed
   at exactly six members**: `VERIFIED`, `CONDITION_PREVENTED`, `PARTIAL`, `FAILED`, `UNCERTAIN`
   and `ANSWERED`"* becomes **seven**, gaining `CANCELLED` — *the attempt produced nothing and
@@ -74,12 +75,16 @@
   committed claim before the invocation is what §6's boundary cites rather than amends. §§1-3, §6
   and §7 stand entire.
 - **Partially supersedes** [ADR-0255](0255-the-driver-walks-a-plan-in-dependency-order-claims-each-step-under-its-attempt-and-stops-rather-than-acting-under-an-unfinished-one.md)
-  — **one scope: the class its two claim conjuncts refuse with, and nothing else.** §3's *"Both
-  refuse with a `PlanningError` that is **not** a `StaleExecutionError`"* becomes **both refuse
-  with `ClaimRefused`** (§7) — still a `PlanningError`, still not a `StaleExecutionError`, so §3's
-  own reason for that choice is **exercised rather than contradicted** — because a reader holding
-  only §3 builds a store whose claim refusals a driver cannot tell from an unknown execution's, and
-  §7's composing turn needs exactly that distinction. **Nothing else of ADR-0255 is
+  — **one scope: the class the attempt conjunct's *state limb* refuses with, and nothing else.**
+  §3's *"Both refuse with a `PlanningError` that is **not** a `StaleExecutionError`"* becomes, **for
+  a refusal on the state limb alone** — the attempt being terminal or paused — **a refusal with
+  `ClaimRefused`** (§7); still a `PlanningError`, still not a `StaleExecutionError`, so §3's own
+  reason for that choice is **exercised rather than contradicted**. A reader holding only §3 builds
+  a store whose *liveness* refusals a driver cannot tell from an unknown execution's, and §7's
+  composing turn needs exactly that distinction. **The conjunct's other three limbs — the attempt
+  exists, it carries this execution, it is the only attempt naming it — and the successor conjunct
+  keep that class exactly**, each being a defect of the walk rather than a state a user act
+  produced, and §7 leaves every one of them to propagate. **Nothing else of ADR-0255 is
   touched**: §3's four attempt limbs, its successor conjunct, its
   read-inside-the-same-indivisible-step rule, its exclusive ownership of an execution and its
   refusal of a caller-supplied revision bind **entire**, as do §2's stop list, §6's authoritative
@@ -726,19 +731,32 @@ the only thing a live predicate can be.
 > selected: ADR-0255 §2's re-entry and plans-again clauses bind entire, and *"What causes that
 > later turn is a user act"* is what follows a refusal.
 
-> **Normative — the refusal carries its own identity, and `core/errors.py` gains exactly one
-> class to give it one.** **`ClaimRefused(PlanningError)`** is raised by **ADR-0255 §3's attempt
-> conjunct, ADR-0255 §3's successor conjunct and ADR-0249 §8's revision conjunct, and by nothing
-> else in the corpus.** It defines no `__init__`, so it carries a message and no structured state
-> and sends no `details` (ADR-0085 §10a). **Every other refusal of `commit_transition` keeps the
-> class it has today** — a lost `expected_version` stays `StaleExecutionError`, an illegal move
-> stays `IllegalTransitionError`, an unknown execution stays a bare `PlanningError` — and **no
-> lane raises `ClaimRefused` from any other member, guard or subsystem.** **And because the three
-> conjuncts are its only raisers, catching it *is* catching *a liveness conjunct refused this
-> claim*** — so the driver confirms nothing further about the execution, the step, its owner or its
-> status, and **no lane adds such a confirmation**. An earlier draft carried four, enumerating the
-> ways a defect could reach a composed reply through a shared class; **the set is open** (see
-> Alternatives) **and a dedicated class closes it by construction.**
+> **Normative — the refusal carries its own identity, and `core/errors.py` gains exactly one class
+> to give it one. It covers the *liveness* refusals and no others.**
+> **`ClaimRefused(PlanningError)`** is raised by exactly two things: **ADR-0255 §3's attempt
+> conjunct in its *state* limb** — the attempt the claim names is in a state that is terminal or
+> paused — and **ADR-0249 §8's revision conjunct**. It defines no `__init__`, so it carries a
+> message and no structured state and sends no `details` (ADR-0085 §10a). **Every other limb of
+> every conjunct keeps the class it has today, each being a driver defect rather than a state a
+> user act produced.** ADR-0255 §3's attempt conjunct also
+> requires that the attempt **exists**, that it **carries this execution**, and that it is the
+> **only** attempt of the goal naming it; its **successor conjunct** requires that no stored plan
+> supersedes this one. **All four stay on the non-stale `PlanningError` that section gives them and
+> none is caught** — a claim naming an attempt that is absent or does not own the execution, one
+> made where two attempts own it, and one of a step of a superseded plan are each a defect of the
+> walk that built them, on ADR-0255 §5's own rule that *"A superseded plan drives nothing"*. So
+> too a lost `expected_version` (`StaleExecutionError`), an illegal move
+> (`IllegalTransitionError`) and an unknown execution (bare `PlanningError`). **No lane raises
+> `ClaimRefused` from any of them, from any other member, or from any other subsystem.** **So the
+> class, the read and the member list are one set of facts**: the two limbs it covers are exactly
+> the two a user act produces — an attempt ended, paused or cancelled, and an understanding
+> corrected — and §7's seven members are exactly the states the read decides for them. **Catching
+> the class *is* catching *a user act changed something under this walk***, so the driver confirms
+> nothing further about the execution, the step, its owner or its status, and **no lane adds such a
+> confirmation**. An earlier draft carried four such confirmations, enumerating the ways a defect
+> could reach a composed reply through a shared class; **the set is open** (see Alternatives) **and
+> a class scoped to the liveness limbs closes it by construction.**
+
 
 > **Normative.** **`core/types.py` gains `DriveWithheld`**, a `StrEnum` valued by lower-cased
 > member name and **closed at exactly seven members**: **`GOAL_CANCELLED`**, **`GOAL_ACHIEVED`**,
@@ -977,8 +995,8 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > without the bump.** **And on the tree it reaches no frame at all**, as a dated observation at
 > `28eb9e82`: the **only** `→ RUNNING` claim in `src/` is the driver's own shielded commit in
 > `orchestration/executor.py` — `runner.py` writes `→ SKIPPED` and `→ AWAITING_APPROVAL`,
-> `recovery.py` writes `→ INDETERMINATE`, and the three conjuncts each bind on `to_status is
-> RUNNING` alone — so every `ClaimRefused` these lanes can raise is caught by §7's driver.
+> `recovery.py` writes `→ INDETERMINATE`, and the conjuncts each bind on `to_status is RUNNING`
+> alone — so every `ClaimRefused` these lanes can raise is caught by §7's driver.
 > **A later lane adding a second `→ RUNNING` claimant owes that choice explicitly.**
 
 > **Normative — `PlanExport.schema_version` moves by exactly one, and the ground is stated
@@ -1010,7 +1028,13 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > **`ended_at` at the migration's own clock reading** — the instant of the upgrade, the only one the
 > database can honestly supply, the user's act having left no timestamp — and **`version` advanced
 > by one**. That satisfies `GoalAttempt`'s validator, whose terminal shape requires both `outcome`
-> and `ended_at` (ADR-0249 §5). **And ADR-0249 §12's sole-route rule is untouched by the write.** That rule governs **mutation through the
+> and `ended_at` (ADR-0249 §5). **ADR-0249 §12's sole-route rule — *"After the first write, every
+> change goes through this member"*, stated without a caller-or-Protocol qualifier — is therefore
+> **partially superseded**, in that one sentence and for this one versioned upgrade step, and §12
+> records it. Every mutation any *caller* makes still goes through `commit_attempt`, and the
+> `add_*` append discipline, the commands-not-snapshots rule and the compare-and-swap discipline
+> bind entire. **No lane exposes the repair as a `PlanStore` member, calls `commit_attempt` from
+> the upgrade, or reads the record as licence to write an attempt row anywhere else.** That rule governs **mutation through the
 > Protocol** — *"After the first write, every change goes through this member"* — and an upgrade
 > step is the store's own, below the Protocol and outside any caller's reach, exactly as ADR-0249
 > §12's own first migration of this database was. **No lane exposes the repair as a `PlanStore`
@@ -1135,7 +1159,7 @@ stated in those words**: *"What decides which of the two it is, is ADR-0070 §1'
 applied to the earlier ADR's **text**. Would a reader holding only the earlier ADR now act
 differently, or read one of its clauses more widely than it now holds?"*
 
-**Four ADRs owe a record**, in **six** scopes, and the header states each in full.
+**Four ADRs owe a record**, in **seven** scopes, and the header states each in full.
 
 - **ADR-0249 §5** — *yes*, twice over and in one scope. A reader holding only §5 reads
   `AttemptOutcome` as **closed at six** and cannot build the `GoalAttempt` §2 writes, its validator
@@ -1158,11 +1182,12 @@ differently, or read one of its clauses more widely than it now holds?"*
   refusal each stay true word for word — and §5's discipline is what §3 and §4 **reason from**.
   §3's outcome conjunct on `commit_attempt` is a **strengthening** and owes no record of its own,
   for the reason the ADR-0249 §12 entry below gives.
-- **ADR-0255 §3** — *yes*, in one scope: **the class its two claim conjuncts refuse with**. A
-  reader holding only §3 builds a store whose claim refusals a driver cannot tell from an unknown
-  execution's, which is the distinction §7's composing turn is decided on. Still a `PlanningError`
-  and still not a `StaleExecutionError`, so §3's own reasoning for that choice is **exercised
-  rather than contradicted**; every other clause of §3 binds entire.
+- **ADR-0255 §3** — *yes*, in one scope: **the class the attempt conjunct's *state limb* refuses
+  with**. A reader holding only §3 builds a store whose *liveness* refusals a driver cannot tell
+  from an unknown execution's, which is the distinction §7's composing turn is decided on. Still a
+  `PlanningError` and still not a `StaleExecutionError`, so §3's reasoning for that choice is
+  **exercised rather than contradicted**; the conjunct's other three limbs and the successor
+  conjunct keep the class unchanged, and every other clause of §3 binds entire.
 - **ADR-0249 §8** — *yes*, in one scope: **the class its revision conjunct refuses with**, so §8's
   *"The stale-revision refusal keeps `StaleExecutionError`"* becomes false of that conjunct alone.
   **The direction that class carried was never exercised**: it means *re-read and retry*, the only
@@ -1170,6 +1195,15 @@ differently, or read one of its clauses more widely than it now holds?"*
   it, a moved revision being the user's correction, whose answer is a later turn that plans again.
   **A lost `expected_version` keeps `StaleExecutionError`**, so the class leaves this conjunct and
   not the member. Every other clause of §8 binds entire.
+- **ADR-0249 §12** — *yes*, in one scope: **its sole-mutation-route sentence**, *"After the first
+  write, every change goes through this member"*, which carries no caller-or-Protocol qualifier and
+  so is made false by §10's versioned upgrade step writing attempt rows directly. **That sentence
+  and that step alone**: every mutation a *caller* makes still goes through `commit_attempt`, and
+  §12's `add_*` append discipline, its ignored-duplicate rule, its commands-not-snapshots rule, its
+  append-only reference tuples and its compare-and-swap discipline each bind **entire**. Recording
+  it is what ADR-0082 §1 asks for — a reader holding only §12 would refuse the upgrade this
+  decision's own conjuncts require — and it is **narrower than the conjunct records above**, which
+  is why it is stated separately rather than folded into them.
 
 **Every other ADR this decision reaches owes no record**, and the nine entries below are the
 whole of them, each decided by the same test. **ADR-0255 is not among them**: §12 books three
@@ -1192,14 +1226,14 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   atomicity; §20's general-case deferral is left standing with its firing condition (§11).
 - **ADR-0259 §5 and §10** — *no*. §9 **records** the signal §5 says A9 must mint and takes none of
   the replay §5 declines; *"A parked `ALLOW` … is left standing"* stays true.
-- **ADR-0249 §12** — *no*, for §3's conjunct on `commit_attempt` **and for §2's conjunct on
-  `open_attempt`**. That section declares both members and their append-only discipline; it does
-  not enumerate what either refuses, and **ADR-0255 §3 added an execution-ownership refusal to
-  both of those same members and recorded nothing against it**, classifying the move as *"a
-  **strengthening of an existing member** rather than a new one"*. These are the identical move
-  and record nothing either. §12's commands-not-snapshots rule, its append-only tuples and its
-  compare-and-swap discipline all stay true, and **an attempt on an open goal is opened exactly as
-  §12 says**.
+- **ADR-0249 §12, for the two conjuncts** — *no*, for §3's conjunct on `commit_attempt` **and
+  §2's on `open_attempt`** (its sole-route sentence is a different matter and **does** owe a
+  record, above). That section declares both members and their append-only discipline; it does not
+  enumerate what either refuses, and **ADR-0255 §3 added an execution-ownership refusal to both of
+  those same members and recorded nothing against it**, classifying the move as *"a **strengthening
+  of an existing member** rather than a new one"*. These are the identical move and record nothing
+  either. §12's commands-not-snapshots rule, its append-only tuples and its compare-and-swap
+  discipline all stay true, and **an attempt on an open goal is opened exactly as §12 says**.
 - **ADR-0250 §9** — *no*, for §2's conjunct on `set_goal_status`. §9 declares the member as the
   goal's only status-mutation route and fixes what it writes and what it refuses on a stale
   `expected_version`; **its one sentence about refusals is about which *member* may be written** —
@@ -1231,8 +1265,8 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
 **Three lanes, one subsystem each, and the first is the only one that moves a contract.**
 
 - **L1 — `core` (with `wire` and `testing`).** The two enumeration members, `DriveWithheld`, the
-  two model fields, **`ClaimRefused` in `core/errors.py` with the three conjuncts re-classed onto
-  it**, and the docstrings that name this ADR; `PROTOCOL_VERSION` **+1** with its
+  two model fields, **`ClaimRefused` in `core/errors.py` with the two liveness limbs re-classed
+  onto it** (§7), and the docstrings that name this ADR; `PROTOCOL_VERSION` **+1** with its
   `wire/envelope.py` log entry; `PlanExport.schema_version` **+1**; the plan store's
   `_SCHEMA_VERSION` **+1** with the migration §10 states — the `meta` row **and** the one-time
   repair of the legacy attempt states the new conjuncts would otherwise make unreachable; **§3's outcome conjunct on
@@ -1323,9 +1357,12 @@ it.
    **open** goal holding **two** non-terminal attempts — a state the conjunct forbids a store to
    create but a pre-change database may hold — is abandoned in one act, **both** attempts ending
    `CANCELLED` and the goal reaching `ABANDONED`; and **the migration (L1)** over a database
-   holding an `ABANDONED` goal with a live attempt ends that attempt, so the goal's reopen can
-   open its new one — while **an open goal's attempts are left exactly as they were**, which is
-   the arm that pins the migration to the act a user actually performed (§10).
+   holding an `ABANDONED` goal with **two** live attempts ends **both**, each with the outcome §3's
+   limbs yield over its **own** executions, so the goal's reopen can open its new one — the two
+   being what pins the migration to *every* non-terminal attempt rather than the newest, since
+   repairing one would leave the other live and the reopen refused. **And an open goal's attempts
+   are left exactly as they were**, which pins the migration to the act a user actually performed
+   (§10).
 7. **The post-cancellation prohibition (L2).** After a cancellation, a claim of a step of the
    cancelled attempt's execution is refused whether it names that attempt or another, and an effect
    the attempt completed answers `COMPLETED`/`UNCERTAIN` to a later plan of the goal rather than
@@ -1354,15 +1391,18 @@ it.
    `RUNNING` and `B` `PENDING`, the suite drives `B: PENDING → RUNNING` and then
    `A: RUNNING → SUCCEEDED` — a sequence through which **something was outstanding at every
    instant** — and asserts the member answers **true** at each of the three states it passes
-   through. **And the interleaving is forced rather than raced, through a seam the suite
-   requires**: every implementation the shared suite runs against **exposes a test-only barrier**
-   that releases the call between any two reads it takes, and the suite drives the two transitions
-   across it — so a call that read `B` before its claim is made to read `A` after its resolution,
-   and must then answer `true` or block until it can. **The seam is an obligation of conforming to
-   this member, not an option**: an implementation that exposes none cannot be shown to answer from
-   one read and **fails this arm**, which is the point — the alternative is assuming the property
-   the arm exists to prove. **And merely issuing a concurrent call is not this arm**: it may be
-   scheduled wholly before or after the pair, passes, and makes the arm probabilistic.
+   through. **And the interleaving is forced rather than raced, through a hook the suite's
+   *fixture* supplies** — never a member of `PlanStore`, which is ADR-0060 §3's own division: a
+   test-only affordance "does not go on the Protocol". The fixture releases the call between two
+   reads it takes and the suite drives the two transitions across it, so a call that read `B`
+   before its claim is made to read `A` after its resolution and must answer `true` or block until
+   it can. **And an implementation whose query has no observable intermediate read takes ADR-0069's
+   "no `await`" escape**, demonstrating that condition through its own test module instead — which
+   is the property itself, stated the only way an atomic implementation can state it. **What is not
+   admitted is silence**: an implementation that neither supplies the hook nor demonstrates the
+   escape has not been shown to answer from one read. **And merely issuing a concurrent call is not
+   this arm**: it may be scheduled wholly before or after the pair, passes, and makes the arm
+   probabilistic.
 10. **The two surfaces agree (L2, L3).** `GoalAbandonment` and `GoalSummary.effect_in_flight` are
     the same call: abandoning a goal whose **older** attempt holds an `INDETERMINATE` step answers
     `ABANDONED_EFFECT_IN_FLIGHT`, the listing row beside it reads `effect_in_flight` **true**, and
@@ -1383,7 +1423,7 @@ integration.
 
 ### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
-**A new decision that partially supersedes four ADRs** (§12), stated in six narrow scopes, and
+**A new decision that partially supersedes four ADRs** (§12), stated in seven narrow scopes, and
 a **stacked addition** against every other ADR it reaches. It is **marked** under ADR-0089 §2 as
 ADR-0257 **§1** admits the label and its §3 carries that grammar across the corpus, so the marked
 clauses are the whole of what it obligates.
