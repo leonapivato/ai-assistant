@@ -319,6 +319,9 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     OriginUnrecordedBinding,
+    OutboundDestination,
+    OutboundReach,
+    OutboundStatement,
     PermissionDecision,
     PermissionOutcome,
     ProvisioningState,
@@ -7620,6 +7623,15 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     account is correct by construction, and nothing here resolves that disagreement
     in the reply's favour.
 
+    **What this turn did about reaching outside this system is stated here too**
+    (ADR-0264 §7, §9). The terminal is a *rendering surface* in §7's sense and owes
+    the statement; :func:`_render_outbound_statement` composes it from the member and
+    from nothing else, beside the reply and never in place of it. It rides together
+    with ADR-0242 §9's statement where a turn carries both (§8), and neither is read
+    off the other. A surface that rendered no statement for a value it was given
+    "has not implemented this section, and is not exercising a permitted degradation"
+    (§9) — the browser's arrears are #2237's lane and not a rendering ruled optional.
+
     **A parked read rides here and is not a step** (ADR-0244 §1, §9). ``TurnOutcome``
     gained two mutually exclusive members and both are rendered from this one site:
     ``read_answer`` states what became of an answer to a question already put, and
@@ -7654,9 +7666,30 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
     if turn is not None and turn.memory_degraded:
         _print("[yellow]Note:[/] personal memory was unavailable, so this answer is generic.")
     _render_reply(outcome, streamed=streamed)
-    # ADR-0242 §9: **beside the reply and never in place of it**, and after it for
-    # `_render_recipient_grant_outcome`'s reason — it is about prose the user has by
-    # then read. The model said what was not done; this says what would enable it.
+    # ADR-0264 §7 and ADR-0242 §9's two statements, **both rendered where a turn
+    # carries both** (ADR-0264 §8), each in its own statement and neither suppressing
+    # nor qualifying the other. They answer different questions — one says this turn
+    # reached outside itself, the other says what act would change what a lookup
+    # produced — and **neither is read off the other**, so the order between them
+    # carries no meaning beyond the one thing it fixes: each sits after the reply it
+    # stands beside, for `_render_recipient_grant_outcome`'s reason, because it is
+    # about prose the user has by then read.
+    #
+    # **The outbound statement is first because it is the counterweight to the prose**
+    # (ADR-0264 §10). It is composed by code and cannot be made to agree with a reply
+    # that denies a recorded contact or claims one that never happened, so a user
+    # reading both sees the disagreement without anything having classified it — and
+    # the closer it sits to the words it contradicts, the harder that is to miss.
+    #
+    # **The reply's *existence* is what the asymmetry turns on, never its content**
+    # (ADR-0264 §7), so what crosses is a `bool` and not the prose: `reply` is
+    # ADR-0170 §3's authoritative value, and a stream whose chunks `settle` disowned
+    # composed no reply however much text is on the screen.
+    _render_outbound_statement(
+        outcome.outbound_statement, composed_a_reply=outcome.reply is not None
+    )
+    # ADR-0242 §9: **beside the reply and never in place of it**. The model said what
+    # was not done; this says what would enable it.
     _render_search_not_serviced(outcome.search_not_serviced)
     # ADR-0244 §9's two members, after the statement that introduces them and before
     # the plan: `read_answer` is what became of an answer to a question already put,
@@ -7701,7 +7734,30 @@ def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None
         # is *handed*, not one the type enforces, and the browser declined to depend on
         # it silently. Depending on it silently at one surface and not the other is how
         # rounds 7, 8 and 9 each happened.
-        if not plan.steps and outcome.clarification is None and outcome.disambiguation is None:
+        #
+        # **And not a turn that reached outside this system** (ADR-0264 §7). A search
+        # is serviced in context assembly and not as a plan step (ADR-0242 §6), so a
+        # turn whose planner then declined every capability reaches here with an empty
+        # plan — which is #2268's own shape, where the turn "fired a search to the
+        # configured provider" and planned nothing. "No action was needed." one line
+        # under "this turn reached outside this system" is the same contradiction on
+        # one screen this guard already exists to prevent, and it is one this lane
+        # would otherwise have created: before §7's statement the contact was invisible
+        # here, so the two lines could not sit together. **The guard is on `REACHED`
+        # and on neither of the other two**, because a turn that reached nothing is
+        # exactly a turn of which "no action was needed" may well be true.
+        #
+        # **The two members #2329 records are deliberately still unguarded**, and that
+        # is the triage rule rather than an oversight: `read_confirmation` and
+        # `read_answer` are pre-existing, neither is rendered by this lane, and PR
+        # #2325 — which closed the two its own members created and deferred those two
+        # out — is the ratified precedent for a lane closing its own and no more.
+        if (
+            not plan.steps
+            and outcome.clarification is None
+            and outcome.disambiguation is None
+            and not _reached_outside(outcome)
+        ):
             _print("[dim]No action was needed.[/]")
         for index, planned in enumerate(plan.steps, start=1):
             _print(f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]")
@@ -7908,6 +7964,157 @@ def _render_search_not_serviced(
             _print("[dim]Note: that lookup was begun and stopped.[/]")
         case SearchNotServiced.UNAVAILABLE:
             _print("[dim]Note: that lookup produced nothing this turn could use.[/]")
+
+
+def _outbound_destination(member: OutboundDestination) -> str:
+    """The words for one class of destination this turn contacted (ADR-0264 §5, §7).
+
+    **One fixed phrase per member, written out as a literal**, which is
+    :func:`_render_search_not_serviced`'s ratified shape one vocabulary over: no
+    phrase is assembled from the member's value, its name, a format string over the
+    enumeration or a mapping a later member would silently join. A class added
+    without its words is then a member with no rendering, and the ``assert_never``
+    below plus the enumeration arm over this surface make that a review question
+    rather than something a user meets in their terminal.
+
+    **It names a class and never a destination** (§5). The phrase carries no
+    provider name, no host, no origin, no account identity and no connection
+    reference: ADR-0247 §1 makes the configured provider "the destination the owner
+    chose and the recipient they granted", so what is said back is the thing the
+    owner already decided and not a fact about this turn's routing. A member whose
+    phrase named a particular destination would put that identity into every reply,
+    on a channel of unbounded audience, which §5 refuses in terms.
+
+    **A later seam's member renders as its own phrase** (§5) — not as this one, and
+    not as nothing.
+
+    Args:
+        member: The class of destination to name.
+
+    Returns:
+        The words this surface uses for it.
+    """
+    match member:
+        case OutboundDestination.SEARCH_PROVIDER:
+            return "the web search provider you have configured"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(member)
+
+
+def _reached_outside(outcome: TurnOutcome) -> bool:
+    """Whether this turn's own statement says it established an outbound contact.
+
+    Read off ``outbound_statement`` and off nothing else (ADR-0264 §7): no plan, no
+    supply, no latency, no reply and no store read of this surface's own. It exists
+    so that :func:`_render_turn`'s "No action was needed." notice is not printed one
+    line under a statement saying this turn contacted a third party — the
+    contradiction-on-one-screen that guard is for.
+
+    Args:
+        outcome: The turn's terminal outcome.
+
+    Returns:
+        Whether the turn carries a ``REACHED`` statement.
+    """
+    statement = outcome.outbound_statement
+    return statement is not None and statement.reach is OutboundReach.REACHED
+
+
+def _render_outbound_statement(
+    statement: OutboundStatement | None, *, composed_a_reply: bool
+) -> None:
+    """ADR-0264 §7's statement for this turn, **beside the reply and never in place of it**.
+
+    **One statement per** :class:`~ai_assistant.core.types.OutboundReach` **member,
+    built from the value and by no model's decision** (§7). Nothing here reads a
+    store, joins a row, computes a contact, inspects a reply or renders a statement
+    for a value it was not given: the value is the one ``orchestration`` composed
+    once for this turn, carried by value on ``TurnOutcome``, and "never recomputed
+    downstream". Rendering a fixed statement per member is presentation and not
+    business logic, on §7's ratified ground and
+    :func:`_render_search_not_serviced`'s precedent.
+
+    **The asymmetry is the decision's and is spelled out here because it is the one
+    thing about this function a reader would otherwise call a bug.** ``REACHED``
+    renders on every pass that carries it; ``NOT_REACHED`` and ``INDETERMINATE``
+    render only on a pass that composed a reply. ``REACHED`` reports an **act this
+    system performed**, which the user is owed whether or not prose was written —
+    ADR-0227's posture that the audit records acts — while the other two report
+    nothing having happened, whose only function is to stop a reply being read as
+    claiming otherwise; where there is no reply they answer a question nobody asked.
+
+    **The condition is the reply's existence and never its content** (§7), and this
+    function is given a ``bool`` rather than the reply precisely so that it *cannot*
+    read the prose: deciding from the words would be the model judgement §10
+    refuses. The caller's test is ``outcome.reply is not None``, which is ADR-0170
+    §3's authoritative value and not what is on the screen — a stream whose chunks
+    were disowned by :meth:`_StreamedReply.settle` composed no reply, and the user
+    has just been told to read what follows instead of it.
+
+    **It stands where the reply contradicts it** (§7, §10). No statement here is
+    suppressed, softened or conditioned on what the model said, and nothing edits a
+    reply to agree with it: the statement is composed by code from typed values, so
+    a user reading both sees the disagreement without anything having classified it.
+    That structural guarantee is what ADR-0264 supplies in place of detecting a
+    denial, which §10 declines to decide.
+
+    **No statement says a record reached, entered, supported or affected the
+    answer** (§7). ``records`` establishes that the records entered this turn's
+    supply and nothing beyond it (§4) — not that a model was given them, not that an
+    answer rests on them, and not that it would have differed without them — so the
+    count is stated and then immediately bounded, because a bare count beside a reply
+    is read as the answer's sources. **A** ``0`` **is stated rather than elided**,
+    which is the whole of what #2268 asks for: a turn that reached outside itself and
+    brought nothing back is the one a user cannot otherwise tell from a turn that
+    never looked.
+
+    **None of the three carries** a destination, a host, an origin, a provider name,
+    a connection reference, an account identity, a tool identifier, a query or any
+    fragment of one, a record, a title, a snippet, a monetary figure, a duration, a
+    ``Settings`` field name, a ``SearchDisposition`` value, a record id, a decision id
+    or an instant (§4, §7). The one number any of them carries is ``records``.
+
+    **The classes are rendered in the order**
+    :class:`~ai_assistant.core.types.OutboundDestination` **declares them, and this
+    surface does not re-derive that order** (§7). ``destinations``
+    is validated into that order on the model — on the model and not on its producer,
+    so a wire decode's value is held to it too — and sorting it again here would be
+    the second computation §7 forbids.
+
+    **Silence where the member is absent** is a pass that neither established a
+    contact nor composed a reply (§7): a routed park, and every other pass ADR-0170
+    §4 composes nothing for that established none. It is *not* an ordinary turn that
+    reached nothing — those carry ``NOT_REACHED`` and are stated.
+
+    Args:
+        statement: What ``TurnOutcome.outbound_statement`` carried, or ``None``.
+        composed_a_reply: Whether this pass composed a reply. **Never the reply
+            itself**, for the reason above.
+    """
+    if statement is None:
+        return
+    match statement.reach:
+        case OutboundReach.REACHED:
+            classes = ", ".join(_outbound_destination(one) for one in statement.destinations)
+            count = statement.records
+            records = f"{count} record" if count == 1 else f"{count} records"
+            _print(
+                f"[dim]Note: this turn reached outside this system, to {classes}. It "
+                f"brought {records} into what this turn had to work from. A count here "
+                f"says what arrived and nothing about whether any answer used it.[/]"
+            )
+        case OutboundReach.NOT_REACHED:
+            if composed_a_reply:
+                _print("[dim]Note: this turn reached nothing outside this system.[/]")
+        case OutboundReach.INDETERMINATE:
+            if composed_a_reply:
+                _print(
+                    "[dim]Note: this system cannot say whether this turn reached outside "
+                    "it: what it holds does not settle that question in either "
+                    "direction.[/]"
+                )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(statement.reach)
 
 
 def _render_reference_outcome(member: ReferenceOutcome | None) -> None:
