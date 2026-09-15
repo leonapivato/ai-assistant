@@ -627,11 +627,13 @@ does not take that decision by another route.
 > **Normative — the window keeps the one job it had, and it is the one ADR-0256 §1 argued for.** A
 > goal that never closes — the user stops engaging it, no act abandons it, A10 never verifies it —
 > has no closing write for §1 to hang an ending on, and its rows lapse on the window exactly as
-> ratified. **So do the rows that ending never reaches**: a row written after the closure and
-> admitted once a reopen has cleared the fence (§8), a row under a closure predating this decision on
-> a goal no reopen takes the ending for (§9), and a row of a goal whose identifier was reused after a
-> `delete_goal`, whose own ending a dead goal's watermark discarded (§8). **Those four cases are the
-> whole of the backstop**, and ADR-0256 §1's ground for the figure is undisturbed: *"an authority takes the
+> ratified. **And so does every row the ending never reaches — that is the rule, and what follows are
+> instances of it rather than a closed set**: a row admitted once a reopen has cleared the fence (§8);
+> a row under a closure predating this decision on a goal no reopen takes the ending for (§9); a row
+> of a goal whose identifier was reused after a `delete_goal`, whose ending a dead goal's watermark
+> discarded (§8); and a row recorded under a closed goal after a `clear` erased its fence with its
+> rows (§1, arm 9). **A lane reading that list as closed has read an enumeration this clause declines
+> to make**, and ADR-0256 §1's ground for the figure is undisturbed: *"an authority takes the
 > window the deployment keeps the record of its act for, and never a window minted for it"*. **No
 > lane reads this decision as a reason to lengthen, cap, default or re-derive that window**, and
 > ADR-0256 §6's exclusions — `RecipientGrant.expires_at` and ADR-0247's configured-provider
@@ -1129,7 +1131,9 @@ than narrowed: `ACHIEVED` and `BLOCKED` gain no producer here.
 >    avoided.** A goal is closed and then `clear()` runs: it answers the count of **rows** and the
 >    store holds none — a goal whose fence a reopen had already lifted included, its record going
 >    with the rest; a `record` for that closed goal afterwards **succeeds**, which is §1's universal
->    holding *absent a `clear`* and is the stated cost. **And the scope on ADR-0004 §6 is asserted
+>    holding *absent a `clear`* and is the stated cost — **and that row is reached by no ending and
+>    lapses on its own `expires_at`**, asserted by advancing the clock past it, which is §3's rule
+>    over it and not a case of its own. **And the scope on ADR-0004 §6 is asserted
 >    rather than assumed**: with a goal the store holds **no** row of fenced, `export` answers
 >    **nothing** and the record is reached by no member of the store. `export` before the `clear`
 >    carries the `GOAL_CLOSED` rows and **no fence**, ADR-0254 §16's snapshot being over rows.
@@ -1185,13 +1189,13 @@ line and no other byte (ADR-0165).
 the owner's ruling is written in and which the corpus could not previously express: a **closing
 act** of a goal ends every authorization of it still standing, however the row came into being — the
 ending is stated over the goal's rows and never over how one was written (§1) — on a database this
-store closed the goal in, the four residuals below being where that rule stops. A user opening the
+store closed the goal in, the residuals below being where that rule stops. A user opening the
 listing of a finished booking therefore sees no live authority, because they hold none. And the
 campsite walkthrough M33 runs becomes checkable end to end — book, verify, close — rather than
 ending with a standing authority nobody intended and nothing retires.
 
 **What becomes harder, and the cost is paid in authorisation acts of its own.** On the path this
-decision governs — a goal this store closed, outside the four residuals above — a request after a
+decision governs — a goal this store closed, outside the residuals above — a request after a
 closure inherits **no** authority from the request that ended and is covered only by an act taken
 for it, including where the user experiences it as a small amendment: *"make it Sunday"* the day
 after a confirmed booking is a fresh confirmation, and the only thing that stops it being a fresh
@@ -1206,8 +1210,8 @@ nothing here can hide.
 is what makes the first of them total rather than best-effort: from the instant `end_for_goal`
 returns, and for as long as the fence it raised stands, no row of that goal stands `PROPOSED` or
 `ESTABLISHED` and none can be recorded, so the closing write cannot be raced. **The residuals
-divide, and the division is the honest summary**: most cost a question, and four can leave an
-authority.
+divide, and the division is the honest summary**: most cost a question, and four of those named can
+leave an authority.
 
 **Those that cost a question.** A failure between the two writes leaves the goal open, its
 authorities gone, its fence standing and every call of it asking until the user abandons and reopens
