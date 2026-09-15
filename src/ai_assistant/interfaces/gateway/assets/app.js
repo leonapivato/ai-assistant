@@ -10047,25 +10047,40 @@ function boundSentence(bound) {
 
 // Whether a bound arrived whole enough to render (ADR-0254 §2).
 //
-// **Totality over what `boundSentence` dereferences**, which is `readConfirmation`'s
-// own rule: a member this page reads is a member it tests, so a half-arrived bound is
-// refused rather than rendered with `undefined` in it.
+// **Each kind is tested as the shape it is, not as a bag of optional fields.** §2 gives
+// every kind a required set — `MONEY` an amount, its currency and the key that carries
+// it; `PERIOD` both ends of its half-open interval; `TERMS` a non-empty set of strings —
+// and a bag test passed a money bound with all three `null`, which rendered as
+// `up to null`, and a terms bound with an empty set, which rendered as `one of:`. Those
+// are states `ValueBound` itself refuses, so a page presenting them would be showing a
+// limit the record does not carry. Adversarial review, round 5, `major`.
+//
+// **An unknown kind still reports rather than failing the whole view**, which is
+// `boundSentence`'s own arrangement: a member from a hub at another version is said to be
+// unreadable, and only a *known* kind that arrived malformed refuses the view.
 function readBound(bound) {
   if (!isRecord(bound) || !isText(bound.kind)) {
     return false;
   }
-  if (bound.terms !== null && !Array.isArray(bound.terms)) {
-    return false;
+  if (bound.kind === "money") {
+    return (
+      isText(bound.maximum) &&
+      isText(bound.currency) &&
+      isText(bound.currency_argument) &&
+      (bound.minimum === null || isText(bound.minimum))
+    );
   }
-  return [
-    bound.currency,
-    bound.currency_argument,
-    bound.maximum,
-    bound.minimum,
-    bound.starts_at,
-    bound.ends_at,
-    bound.timezone,
-  ].every((one) => one === null || isText(one));
+  if (bound.kind === "period") {
+    return (
+      isText(bound.starts_at) &&
+      isText(bound.ends_at) &&
+      (bound.timezone === null || isText(bound.timezone))
+    );
+  }
+  if (bound.kind === "terms") {
+    return Array.isArray(bound.terms) && bound.terms.length > 0 && bound.terms.every(isText);
+  }
+  return true;
 }
 
 // One coverage member, as it crosses (ADR-0254 §11).
@@ -10214,32 +10229,57 @@ function renderAuthorization(list, view, withGoal) {
   const withdraw = document.createElement("button");
   withdraw.type = "button";
   withdraw.textContent = "Withdraw this";
-  withdraw.addEventListener("click", () => revokeAuthorization(view, item, status, row));
+  withdraw.addEventListener("click", () =>
+    revokeAuthorization(view, { item, list, status, controls: row, withdraw })
+  );
   row.appendChild(withdraw);
   item.appendChild(row);
   list.appendChild(item);
 }
 
-// Where the settlement of one act is written: **beside the row it was taken on**.
+// Where the settlement of one act is written, and what it says.
 //
-// **An act reports on the record it acted on, and never on a shared slot.** Three rounds
-// converged here. A panel-wide slot is invisible to an owner who reached the row through
-// a reply (round 1, `blocker`); it attributes the act to whatever listing the panel holds
-// by the time the answer lands (round 3, `major`); and dropping the sentence when the
-// panel has moved on is silence about an act that happened (round 4, `blocker`). A node
-// on the row itself is true under all three: it cannot be invisible, it cannot be
-// mis-attributed, and it is never dropped.
+// **Outside anything a listing replaces, and naming the record it is about.** Four
+// rounds converged here and each ruled out one placement. A panel-wide slot with an
+// unattributed sentence says the act was done to whatever listing the panel holds by the
+// time the answer lands (round 3). Dropping the sentence when the panel has moved on is
+// silence about an act that happened (round 4). A node **inside** the row is detached
+// with it the moment the listing is cleared, and the owner reads nothing at all (round
+// 5). What is true under every order is a node the listing does not own, carrying a
+// sentence that names the goal and the declaration — so it cannot be detached, and it
+// cannot be read as being about work it does not name.
 //
-// The node is created once and reused, so a second press reports over the first rather
-// than stacking sentences nobody asked for.
-function sayBeside(item) {
-  let node = item.querySelector(".authorization-said");
+// The panel's node is its own element beside the list, built once and reused. An
+// announcement's row is in a reply that nothing clears, so its node sits beside the row
+// and is equally safe there.
+function actResult(item, list) {
+  if (list.id !== "authorization-list") {
+    let beside = item.querySelector(".authorization-said");
+    if (beside === null) {
+      beside = document.createElement("p");
+      beside.className = "notice authorization-said";
+      item.appendChild(beside);
+    }
+    return beside;
+  }
+  let node = list.parentElement.querySelector(".authorization-said");
   if (node === null) {
     node = document.createElement("p");
     node.className = "notice authorization-said";
-    item.appendChild(node);
+    list.parentElement.insertBefore(node, list);
   }
   return node;
+}
+
+// One settlement, as a sentence that names the record it is about.
+//
+// **The attribution is what makes a node outside the list honest**: the listing under it
+// may by then be another goal's, and a bare "Withdrawn." there would read as being about
+// those rows. Naming the goal and the declaration says which record moved, whatever is
+// on screen beneath it.
+function statedSettlement(view, settlement) {
+  const said = goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, settlement);
+  return `${view.goal_statement} — ${view.tool_id}: ${said}`;
 }
 
 // ADR-0254 §11's announcement: authorities a turn opened **without asking**.
@@ -10362,22 +10402,29 @@ function confirmWithdrawal(view) {
 
 // Withdraw one standing authority (ADR-0254 §11).
 //
-// **One act for both places a row is offered from**, and it reports on the row rather
-// than on a panel: see `sayBeside` for the three rounds that settled that. Nothing here
-// re-reads a listing either — the row it acted on is updated in place, so there is no
-// refresh to race a newer one the owner asked for, and no sentence to lose to it.
+// **One act for both places a row is offered from**, reporting into a node the listing
+// does not own and naming the record it moved: see `actResult` for the four rounds that
+// settled that, and `statedSettlement` for why the sentence carries the attribution.
+//
+// **It re-reads no listing.** A refresh here is one more request to race the owner's
+// next, and the row it acted on is updated in place instead.
+//
+// **The control is taken out of reach for the duration of the request.** Two accepted
+// presses race otherwise, and the loser's `NOT_AT_SOURCE` lands after the winner's
+// `SETTLED` and overwrites it — a row reading "You withdrew this" under a sentence
+// saying nothing was withdrawn. It is restored only where pressing again could do
+// something: on `SETTLED` the row is retired outright, and on a transport failure the
+// act may not have reached the hub at all. Adversarial review, round 5, `major`.
 //
 // **The row is retired on `settled` and on nothing else.** A record the store says is
-// now `REVOKED` must not go on reading "still stands" beside an enabled control: that is
-// a display contradicting itself and still offering an act. Every other member left the
-// record where it was, so the row is left where it was too. Adversarial review, round 4,
-// `major`.
-async function revokeAuthorization(view, item, status, controls) {
-  if (!confirmWithdrawal(view)) {
+// now `REVOKED` must not go on reading "still stands" beside an enabled control. Every
+// other member left the record where it was, so the row is left where it was too.
+async function revokeAuthorization(view, row) {
+  if (row.withdraw.disabled || !confirmWithdrawal(view)) {
     return;
   }
   fault(null, "authorizations");
-  const said = sayBeside(item);
+  const said = actResult(row.item, row.list);
   said.textContent = "";
   said.hidden = true;
   const half = headerHalf();
@@ -10385,6 +10432,7 @@ async function revokeAuthorization(view, item, status, controls) {
     showBootstrap();
     return;
   }
+  row.withdraw.disabled = true;
   try {
     const done = await relay(
       half,
@@ -10393,16 +10441,20 @@ async function revokeAuthorization(view, item, status, controls) {
       "authorizations"
     );
     if (done === null) {
+      row.withdraw.disabled = false;
       return;
     }
-    said.textContent = goalMemberWords(AUTHORIZATION_SETTLEMENT_WORDS, done.settlement);
+    said.textContent = statedSettlement(view, done.settlement);
     said.hidden = false;
     if (done.settlement === "settled") {
-      status.textContent = "You withdrew this.";
-      controls.remove();
+      row.status.textContent = "You withdrew this.";
+      row.controls.remove();
+      return;
     }
+    row.withdraw.disabled = false;
   } catch (_) {
     fault(GATEWAY_GONE, "authorizations");
+    row.withdraw.disabled = false;
   }
 }
 

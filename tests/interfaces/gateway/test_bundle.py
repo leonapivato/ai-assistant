@@ -8184,30 +8184,61 @@ def test_the_authorization_surface_is_its_own_panel_reached_from_the_goal_it_is_
     assert "/authorization/revoke" not in goals
 
 
-def test_one_withdrawal_act_reports_on_the_row_and_re_reads_no_listing() -> None:
+def test_one_withdrawal_act_reports_where_no_listing_can_detach_it() -> None:
     """ADR-0254 §11's withdrawal, offered from two places and reported in one way.
 
-    **One act and one result node**, which is where rounds 1, 3 and 4 converged: a
-    panel-wide slot is invisible to an owner who reached the row through a reply, it
-    attributes the act to whatever listing the panel holds when the answer lands, and
-    dropping the sentence when the panel has moved on is silence about an act that
-    happened. A node on the row is true under all three.
+    **One act and one result placement**, which is where rounds 1, 3, 4 and 5 converged.
+    A panel-wide slot is invisible to an owner who reached the row through a reply
+    (r1); an **unattributed** sentence there is read as being about whatever listing the
+    panel holds when the answer lands (r3); dropping it because the panel moved on is
+    silence about an act that happened (r4); and a node **inside** the row is detached
+    with the row the moment the listing is cleared (r5). What survives all four is a node
+    the listing does not own carrying a sentence that names the record — which is
+    ``actResult`` and ``statedSettlement``.
 
     **And it re-reads nothing.** A refresh here is one more request to race the owner's
     next, and the row it acted on is updated in place instead — which is also what
-    retires a record the store says is now ``REVOKED``.
+    retires a record the store says is now ``REVOKED``. **The control is out of reach for
+    the duration**, so two presses cannot produce two answers that contradict each other.
     """
-    script = _code("app.js")
-    act = _functions(script)["revokeAuthorization"]
+    act = _functions(_code("app.js"))["revokeAuthorization"]
 
     assert "confirmWithdrawal(view)" in act
-    assert "sayBeside(item)" in act
+    assert "actResult(row.item, row.list)" in act
+    assert "statedSettlement(view, done.settlement)" in act
+    assert "row.withdraw.disabled = true" in act
     assert '"/authorization/revoke",' in act
-    assert "AUTHORIZATION_SETTLEMENT_WORDS, done.settlement" in act
     assert 'done.settlement === "settled"' in act
-    assert "controls.remove()" in act
+    assert "row.controls.remove()" in act
     assert "listAuthorizations" not in act, "an act does not re-read a listing"
-    assert "authorization-said" not in _asset("index.html"), "no shared slot in the markup"
+    assert 'id="authorization-said"' not in _asset("index.html"), "no slot in the markup"
+
+
+def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
+    """ADR-0254 §2 gives every kind a required set, and a bag test admits none of them.
+
+    A money bound whose amount, currency and currency key are all ``null`` passed a
+    field-by-field optional test and rendered as ``up to null``; a terms bound with an
+    empty set rendered as ``one of:``. Those are states ``ValueBound`` itself refuses, so
+    a page presenting them shows a limit the record does not carry. Adversarial review,
+    round 5, ``major``.
+
+    **An unknown kind still reports rather than refusing the whole view**, which is
+    ``boundSentence``'s own arrangement for a hub at another version.
+    """
+    reader = _functions(_code("app.js"))["readBound"]
+
+    assert 'bound.kind === "money"' in reader
+    assert "isText(bound.maximum)" in reader
+    assert "isText(bound.currency)" in reader
+    assert "isText(bound.currency_argument)" in reader
+    assert 'bound.kind === "period"' in reader
+    assert "isText(bound.starts_at)" in reader
+    assert "isText(bound.ends_at)" in reader
+    assert 'bound.kind === "terms"' in reader
+    assert "bound.terms.length > 0" in reader
+    assert "bound.terms.every(isText)" in reader
+    assert reader.rstrip().endswith("return true;\n}"), "an unknown kind is not refused here"
 
 
 def test_only_an_empty_array_is_an_empty_announcement() -> None:

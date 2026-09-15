@@ -300,9 +300,13 @@ async def test_the_withdrawal_is_shown_before_it_is_taken_and_then_reports_what_
 
         assert STATEMENT in message
         assert "no narrowing" in message
-        said = drive.page.locator("#authorization-list .authorization-said")
+        said = drive.page.locator("#authorizations .authorization-said")
         await expect(said).to_contain_text("Withdrawn.")
         await expect(said).to_contain_text("Nothing already decided is rewritten")
+        # **The sentence names the record it moved**, which is what makes a node the
+        # listing does not own honest: the rows under it may by then be another goal's.
+        await expect(said).to_contain_text(STATEMENT)
+        await expect(said).to_contain_text(AUTHORIZATION_TOOL.id)
         # **The row is retired in place and the listing is not re-read.** A record the
         # store says is now `REVOKED` must not go on reading "still stands" beside an
         # enabled control, and a refresh here would be one more request to race the
@@ -361,7 +365,7 @@ async def test_a_withdrawal_that_moves_nothing_reports_what_the_store_found(
         await drive.page.click("#authorization-list button:has-text('Withdraw this')")
         await asyncio.wait_for(asked, timeout=10)
 
-        said = drive.page.locator("#authorization-list .authorization-said")
+        said = drive.page.locator("#authorizations .authorization-said")
         await expect(said).to_contain_text("nothing was withdrawn")
         await expect(said).to_contain_text("declining it")
         # **Not the fault slot, and the row is left exactly where it was**: the store
@@ -435,18 +439,19 @@ async def test_an_overtaken_listing_renders_nothing_and_claims_no_goal(
         assert STATEMENT not in await panel.inner_text()
 
 
-async def test_a_withdrawal_reports_on_its_own_row_however_the_panel_moves(
+async def test_a_withdrawal_is_read_back_after_the_panel_moves_to_another_goal(
     gateway_browser: Browser, tmp_path: Path
 ) -> None:
-    """A settlement is attributed to the record it was taken on, and is never lost.
+    """A settlement is **readable** and **attributed**, whatever the panel does meanwhile.
 
-    Three rounds converged here and the arm states all three. Start withdrawing a row of
-    goal A, then open goal B before the revocation returns. Writing *"Withdrawn"* into a
-    panel-wide slot would say the act was done to B's work (round 3, ``major``); dropping
-    the sentence because the panel moved on would be silence about an act that happened
-    (round 4, ``blocker``). Reporting on the row itself is true under both — and the row
-    is gone from the screen by then, so what is asserted is that the act **completed**
-    and that nothing was attributed to B.
+    Four rounds converged on this arm and it states all four. Start withdrawing a row of
+    goal A, then open goal B before the revocation returns. A bare *"Withdrawn."* above
+    B's rows says the act was done to B's work (round 3); dropping the sentence because
+    the panel moved on is silence about an act that happened (round 4); and writing it
+    into the row is writing into a node the listing has already detached, so the owner
+    reads nothing at all (round 5). What is asserted here is the shape true under all
+    four: the sentence is on screen, it names **goal A** and the declaration it moved,
+    and B's listing beneath it is B's.
     """
     loop = asyncio.get_running_loop()
     held: asyncio.Future[None] = loop.create_future()
@@ -473,12 +478,47 @@ async def test_a_withdrawal_reports_on_its_own_row_however_the_panel_moves(
         await expect(drive.page.locator("#authorizations")).to_contain_text(OTHER)
         held.set_result(None)
 
-        panel = drive.page.locator("#authorizations")
-        await expect(panel).to_contain_text("Nothing standing")
-        shown = await panel.inner_text()
-        assert STATEMENT not in shown, "goal A's work is not named under goal B's listing"
-        assert "Withdrawn" not in shown, "and neither is the act taken on it"
-        assert "revoke_authorization" in [name for name, _ in drive.engine.calls]
+        said = drive.page.locator("#authorizations .authorization-said")
+        await expect(said).to_be_visible()
+        await expect(said).to_contain_text("Withdrawn.")
+        await expect(said).to_contain_text(STATEMENT)
+        await expect(said).to_contain_text(AUTHORIZATION_TOOL.id)
+        await expect(drive.page.locator("#authorization-list")).to_contain_text(OTHER)
+
+
+async def test_a_second_press_while_the_first_is_out_reaches_the_hub_once(
+    gateway_browser: Browser, tmp_path: Path
+) -> None:
+    """Two accepted presses would race, and their answers would contradict each other.
+
+    The store admits exactly one winner, so the loser comes back ``NOT_AT_SOURCE`` — and
+    landing after the winner it would overwrite *"Withdrawn."* with *"nothing was
+    withdrawn"* above a row already reading *"You withdrew this."* The control is out of
+    reach for the duration instead, so there is one request and one answer. Adversarial
+    review, round 5, ``major``.
+    """
+    loop = asyncio.get_running_loop()
+    held: asyncio.Future[None] = loop.create_future()
+
+    async def route(one: Route) -> None:
+        await held
+        await one.fallback()
+
+    async with driving(gateway_browser, tmp_path, viewport=DESKTOP) as drive:
+        _seed(drive)
+        await _open_authorities(drive)
+        await drive.page.route("**/authorization/revoke", route)
+        asked = _answering(drive, accept=True)
+        control = drive.page.locator("#authorization-list button:has-text('Withdraw this')")
+
+        await control.click()
+        await asyncio.wait_for(asked, timeout=10)
+        await expect(control).to_be_disabled()
+        await control.click(force=True)
+        held.set_result(None)
+
+        await expect(drive.page.locator("#authorizations")).to_contain_text("You withdrew this.")
+        assert [name for name, _ in drive.engine.calls].count("revoke_authorization") == 1
 
 
 async def test_a_withdrawal_taken_from_an_announcement_reports_beside_it(
