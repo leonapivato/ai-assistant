@@ -7744,8 +7744,8 @@ class Engine:
             return None
         return await operations.projection_for(confirmation_id)
 
-    async def _announced_authorizations(
-        self, disposition: StepDisposition
+    def _announced_authorizations(
+        self, disposition: StepDisposition, recorded: RecordedGoal | None
     ) -> tuple[AuthorizationView, ...]:
         """ADR-0254 §11's announcement for the rows this drive opened without a question.
 
@@ -7755,21 +7755,41 @@ class Engine:
         themselves, so the value it needs exists at the instant it is emitted and there
         is no act-time projection to keep in step with a row written later.
 
+        **It reads no store and can therefore drop nothing.** The statement §11 renders
+        a goal by is this turn's own — ADR-0250 §3 gives a turn one goal and a
+        path-(iii) row is opened for the request it is dispatching — so there is no
+        lookup here to fail and no row that a concurrent deletion could silence.
+        Adversarial review, round 3, ``blocker``.
+
         **It is empty on every turn that opened none**, including a turn that only
         re-grounds an existing constraint — the case ADR-0250 §5 requires to stay
         unannounced and the reason this member exists rather than riding
         ``goal_engagement``.
 
+        **A drive that opened a row has a goal**, because §1's path (iii) opens one for
+        the request being dispatched and a request carrying no ``goal`` reaches route (d)
+        in no case (§1). ``None`` here is therefore a shape this decision's writer cannot
+        produce; it is handled by announcing nothing rather than by raising, because a
+        turn that dispatched a step is not a turn to fail over a member it cannot carry.
+
         Args:
             disposition: What the drive did.
+            recorded: The goal this turn ran under, whose statement the views carry.
 
         Returns:
             One view per row opened, in the order they were written.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not conforming.
         """
         operations = self._authorization_operations
-        if operations is None or not disposition.opened:
+        if operations is None or recorded is None or not disposition.opened:
             return ()
-        return await operations.announced(disposition.opened)
+        return operations.announced(
+            disposition.opened,
+            goal_statement=recorded.goal.statement,
+            reading=self._clock(),
+        )
 
     # --- the destination-trust surface (ADR-0242 §2, §4) --------------------
 
@@ -10995,7 +11015,7 @@ class Engine:
             # being dispatched inside one" — so no other outcome site can carry the
             # member. A driver dispatching **outside** a turn is §19's booked case and
             # is A7's, not this decision's.
-            authorizations=await self._announced_authorizations(disposition),
+            authorizations=self._announced_authorizations(disposition, goal_record),
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------

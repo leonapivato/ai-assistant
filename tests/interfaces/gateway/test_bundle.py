@@ -8215,7 +8215,7 @@ def test_the_two_withdrawal_acts_differ_only_in_where_they_report() -> None:
         assert "showBootstrap()" in one
 
     assert panel.count('"authorizations"') == 3, "clear, relay, and the transport fault"
-    assert "listAuthorizations(authorizedGoal, true)" in panel
+    assert "listAuthorizations(owner, true)" in panel
     assert reply.count('"answer"') == 3, "clear, relay, and the transport fault"
     assert "listAuthorizations" not in reply, "a reply is not replaced by a panel"
 
