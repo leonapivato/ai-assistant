@@ -10171,6 +10171,54 @@ const COVERAGE_KIND_WORDS = {
 // **Exactly one of `fixed` and `bound`**, which is the two-shape rule `CoverageMember`
 // and `CoverageView` are both built on: a member stating both would need a precedence
 // rule at the rendering, and one stating neither renders nothing the owner said.
+// Whether a fixed value is one its kind states (ADR-0266 §3).
+//
+// **The page restates this for the same reason `readBound` restates `ValueBound`'s
+// per-kind shapes**: what reaches the screen is decided here, so a member from a hub
+// at another version — or a wrong one — is reported rather than rendered as a claim
+// about the owner's authority. `CoverageMember` and `CoverageView` both refuse these
+// one layer up, so no conforming hub sends one.
+//
+// **A `period` fixed value is checked for the calendar and not only for the shape.**
+// `2026-02-30` matches the grammar and names no day, and a fixed value is compared by
+// byte equality — so the hub that sent it would be claiming an authority over a date
+// that does not exist, rendered as "the dates: fixed at 2026-02-30". The round trip
+// through `Date` is the whole test: where the parts read back as the parts asked for,
+// the day exists. Adversarial review, round 4, `major`.
+//
+// **A `terms` fixed value is any text**, which is what §4's membership reading
+// compares, and a `money` one is refused outright by the caller.
+function readFixed(kind, fixed) {
+  if (kind === "terms") {
+    return true;
+  }
+  if (kind !== "period") {
+    return false;
+  }
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fixed);
+  if (day !== null) {
+    const [year, month, date] = day.slice(1).map(Number);
+    const read = new Date(Date.UTC(year, month - 1, date));
+    return (
+      read.getUTCFullYear() === year &&
+      read.getUTCMonth() === month - 1 &&
+      read.getUTCDate() === date
+    );
+  }
+  const stamp = /^(\d{4}-\d{2}-\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/.exec(
+    fixed
+  );
+  if (stamp === null) {
+    return false;
+  }
+  const [hour, minute, second] = stamp.slice(2, 5).map(Number);
+  const MINUTES = 60;
+  const HOURS = 24;
+  return (
+    readFixed("period", stamp[1]) && hour < HOURS && minute < MINUTES && second < MINUTES
+  );
+}
+
 function readCoverageView(view) {
   if (!isRecord(view) || !isText(view.kind) || !isText(view.span)) {
     return false;
@@ -10188,8 +10236,10 @@ function readCoverageView(view) {
     return view.bound !== null && readBound(view.bound) && view.bound.kind === view.kind;
   }
   // **A `money` view fixes nothing**: an amount carries no currency on a fixed
-  // member, so the page would be rendering a figure nothing denominates.
-  return view.bound === null && view.kind !== "money";
+  // member, so the page would be rendering a figure nothing denominates. And a
+  // fixed value of either other kind is one that kind states, checked here for the
+  // reason `readFixed` gives.
+  return view.bound === null && view.kind !== "money" && readFixed(view.kind, view.fixed);
 }
 
 // Every member of a coverage, each as its own statement with the words behind it.
