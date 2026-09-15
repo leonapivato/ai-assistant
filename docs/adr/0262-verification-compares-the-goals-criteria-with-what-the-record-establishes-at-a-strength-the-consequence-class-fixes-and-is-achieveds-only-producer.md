@@ -901,7 +901,7 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 > durable on any other record**: where a user asks later how a goal stands, `assistant goals` reads
 > the goal's status and the attempt's stored outcome.
 
-### 7. Q4's gate: this decision is the third guarantee, and all six conditions still stand
+### 7. Q4's gate: this decision is the third guarantee, and all seven conditions still stand
 
 > **Normative — ADR-0255 §13's rule is carried unchanged and is not weakened here.** *"No
 > consequential capability is wired into a production deployment until the verification,
@@ -943,7 +943,8 @@ offer and the **surface** the outcome word — ADR-0242 §9's own split, one fac
 **The gate is nearest to being met here and that is exactly when it is most worth restating.** All
 three named guarantees are *designed* once this document ratifies, so the natural reading is *one
 more merge and the gate is open* — and it is wrong twice over: **ratification is not
-implementation**, and two of the six conditions are assigned to lanes that have not started.
+implementation**, and **four of the seven** conditions — (4) through (7) — are held by decisions
+and lanes this document does not touch, **none of which has landed**.
 ADR-0255 §13 anticipated this arithmetic — *"a deployment reading the three could wire a
 booking"*.
 
@@ -1237,8 +1238,10 @@ them, each decided by the same test.
 - **ADR-0265 §1, §3, §4 and §8** — *no*, and §2a is written to keep it so. `IntendedAction` gains
   **no field**; §1's enumeration of what reads `Goal.intended_actions` — *"§4's `GoalBrief.actions`
   projection and its label resolution, §5's export, and the effect claim §6 obliges, and … nothing
-  else"* — **stays true because this decision reads that tuple not at all**, taking the act's id
-  off a step's own `PlanStep.intended_action`; §3's *"`serves` gates nothing"*, its refusal of a
+  else"* — **stays true because this decision reads that tuple not at all**, and
+  **`PlanStep.intended_action` is read no more than `serves` is**, the binding being the row a
+  step's own pinned route-(d) decision names and the grouping the call's own digest (§2, §2a);
+  §3's *"`serves` gates nothing"*, its refusal of a
   lane that *"derives an intended action from `serves`"* and its *"no mechanism reads the staleness
   at all"* each **stay true word for word** (§2a); §4's `A` label space is neither used nor
   extended, no value here carrying a label at all; and §8's sixth gate condition is named by §7 and
