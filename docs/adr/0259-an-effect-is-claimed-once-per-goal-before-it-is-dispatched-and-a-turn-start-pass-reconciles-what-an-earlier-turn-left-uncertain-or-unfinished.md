@@ -660,8 +660,12 @@ implements the **first** route and explains why the second is not taken here.
 > reconciliation's own instant, and **clearing `failure`** as ADR-0039 §2 requires of a `SUCCEEDED` step. **`attempts` is not
 > incremented** — the call established what happened and was not an attempt at the effect. Where the call returns anything
 > else — a failure, a timeout, an `INDETERMINATE` of its own — **or where the call cannot be built at all**, because the step
-> carries no `approval_ref` or the decision it names cannot be read, **the step stays `INDETERMINATE`, nothing is written, and
-> neither a failed reconciliation nor an unbuildable one is ever read as establishing that the effect did not happen.**
+> carries no `approval_ref`, or `AuditTrail.get` **answers nothing** for the decision it names, or that read **raises
+> `AuditError`** — a closed, corrupt or unreadable trail, which is the same store failure §4 answers for its own reads and is
+> answered the same way here — **the step stays `INDETERMINATE`, nothing is written, the check ends, the turn's own work
+> continues and the turn does not fail, and neither a failed reconciliation nor an unbuildable one is ever read as
+> establishing that the effect did not happen.** **The trail read is taken before `ToolInvoker.invoke` and its failure
+> therefore reaches no seam**, so it is not one of the six below and no invocation claim exists to complete.
 
 > **Normative — at most one reconciliation call per step per turn**, taken in the turn's **investigation phase** and on that
 > turn's own deadline. **No lane loops, backs off, schedules a second, or re-calls a step the same turn already reconciled.**
@@ -861,11 +865,18 @@ is a state that resolves where the integration supports it, and that is **durabl
 
 > **Normative — the pass makes every write as a compare-and-swap and stops at the first that loses.** A stale
 > `expected_version` or a **failure of either store it reads — `PlanStore`, or the trail through `resolution_of`, whose
-> `AuditError` is one such failure — ends the pass for that turn**, and so does a `CancelledError`, which propagates as it
-> does at every other await in this system; **what landed stands, nothing is undone, nothing is
+> `AuditError` is one such failure — ends the pass for that turn**; **what landed stands, nothing is undone, nothing is
 > retried within the turn**, and the next turn that engages the goal runs it again over whatever is then residual. **A pass
 > that ends early does not fail the turn** — every act is a repair of a record, not a prerequisite of the turn's work. **An
 > undeclared exception is the one thing that does escape it** (§3).
+
+> **Normative — a `CancelledError` is not an early end and is never a store failure.** **It propagates out of the pass
+> unchanged**, at whatever await it arrives — a `PlanStore` member, `AuditTrail.resolution_of`, or between two acts — and
+> **the turn is cancelled rather than continued**. **No lane catches it, translates it into a store failure, counts it among
+> the recoverable endings above, or takes a further act after one has arrived**: ADR-0060 rules that externally delivered
+> cancellation propagates, and a pass that swallowed it would keep working under an authority the caller had withdrawn.
+> **What landed before it stands**, because every write is its own compare-and-swap, and the next turn that engages the goal
+> runs the pass again over whatever is then residual.
 
 > **Normative — it infers nothing.** `EFFECT_UNRESOLVED` is **written** by act 3 and never derived at read time (ADR-0255 §6,
 > ADR-0249 §6); `SUPERSEDED` is committed by act 1 and never inferred from a `supersedes` chain. **No status of any record is
@@ -1470,8 +1481,9 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     carries an **`egress_binding`**, which can only be a side-effecting tool because ADR-0148 §8 rules that a tool registered
     at the seam declares a *"**non-empty `discloses`**"* and `core/types.py` refuses *"a tool that discloses data off-device
     is side-effecting"*, so that row pins a conjunct the first already implies and is kept for it; each takes **no call**. A
-    step whose `approval_ref` is absent, whose decision the trail cannot return, or whose rebuilt request
-    `PermissionDecision.authorises` rejects takes **no call**. And a reconcilable step whose call returns a failure, a timeout
+    step whose `approval_ref` is absent, whose decision the trail cannot return — **answering nothing, and raising
+    `AuditError`, as two rows** — or whose rebuilt request `PermissionDecision.authorises` rejects takes **no call**, leaves
+    the step `INDETERMINATE` and **does not fail the turn**. And a reconcilable step whose call returns a failure, a timeout
     or an `INDETERMINATE` of its own takes **one**, as does one whose call **raises**. **The raising rows are two tables and
     not one**: each of §3's **six declared refusals** — `ToolBindingError` (the registry no longer holding the recorded
     definition after a restart), the two spend errors, the two authorisation errors and `AuditError` (the invocation-claim
@@ -1496,7 +1508,9 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     injected at each act boundary — including an `AuditError` from act 2's `resolution_of` read, which is asserted to end the
     pass and not the turn — stops it there: what landed **stands**, every later act is **not taken**, **no write is
     retried inside that turn**, **the turn itself does not fail**, and the next turn that engages the goal runs the pass again
-    over whatever is then residual. **And the stale compare-and-swap §3's admitted concurrency produces is a distinct row of
+    over whatever is then residual. **And a `CancelledError` delivered at each of those same boundaries is a distinct row and
+    asserted the other way**: it **propagates out of the pass unchanged**, **no later act is taken**, what landed **stands**,
+    and the row fails an implementation that caught it, counted it as a store failure or let the turn continue. **And the stale compare-and-swap §3's admitted concurrency produces is a distinct row of
     this arm, driven by a barrier rather than by an injected store error**: two turns reconcile one `INDETERMINATE` step at
     once and both calls return, one `INDETERMINATE → SUCCEEDED` commit **lands** and the other loses on a stale
     `expected_version` — after which the winner's `SUCCEEDED`, its `output` and its `finished_at` **stand unchanged**, the
