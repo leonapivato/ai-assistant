@@ -1,6 +1,6 @@
 # 262. Verification compares the goal's criteria with what the goal's own records establish, at a strength the consequence class fixes, and it is the only producer of `GoalStatus.ACHIEVED`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope three records already take there reaching one further
