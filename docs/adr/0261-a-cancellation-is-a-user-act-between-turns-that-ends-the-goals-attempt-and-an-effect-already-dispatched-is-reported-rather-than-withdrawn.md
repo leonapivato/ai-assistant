@@ -577,7 +577,10 @@ on the `ExecutionState` its walk opened — so what the reply owes is the fact, 
 > **Normative — the goal-terminal ending of an authorisation is not written here.** The owner ruled
 > on 2026-09-14 that *"an authorisation lasts for its request, and a request ends when the action
 > is done … **the authorisation ends with the goal**"*, and that the change is *"a **short
-> superseding ADR, one edge + one clause, sequenced after ADR-0266**"*. **This decision does not
+> superseding ADR, one edge + one clause, sequenced after [the coverage-minting decision]**"* —
+> the number that ruling names is **not yet issued**, so it is elided here rather than cited
+> (ADR-0088 §6 Tier 1), and the lane drafting it is
+> [#2376](https://github.com/leonapivato/ai-assistant/issues/2376). **This decision does not
 > write that ending**, adds no ending to ADR-0254 §1's four, and **no clause of it contradicts the
 > ruling**: a cancellation is a terminal state of a goal, so an authorisation of a cancelled goal
 > ends under that ADR when it lands, and nothing here asserts that it survives. **The one case the
@@ -700,7 +703,9 @@ revision 1 §H.1 identified.
   surface that needs one, which would owe the vocabulary for what such an attempt produced and the
   rule for what opens the next one against ADR-0250 §12's three acts.
 - **The goal-terminal ending of an authorisation.** The owner's ruling of 2026-09-14, whose own
-  disposition is *"a short superseding ADR, one edge + one clause, **sequenced after ADR-0266**"*.
+  disposition is *"a short superseding ADR, one edge + one clause, **sequenced after [the
+  coverage-minting decision]**"* — the number elided for the reason §8 gives, its lane
+  being [#2376](https://github.com/leonapivato/ai-assistant/issues/2376).
   **Not this decision's**, and §8 states that nothing here contradicts it.
 - **The cross-turn replay of a parked `ALLOW`**, its deterministic selection rule among several
   parks, and its at-most-one semantics. **#2380**, and §9 records the signal and takes none of the
