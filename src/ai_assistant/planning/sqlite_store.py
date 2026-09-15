@@ -66,11 +66,14 @@ from ai_assistant.planning.goals import (
     capped,
     engaged,
     invalidated,
+    minted,
     refuse_a_second_owner,
     refuse_a_superseded_plan,
     refuse_an_unclaimable_attempt,
+    refuse_an_unsubstituted_action,
     refuse_an_unsubstituted_condition,
     revalidated_evidence,
+    revalidated_minting,
     revalidated_revision,
     revalidated_row_ids,
     settled,
@@ -88,6 +91,7 @@ if TYPE_CHECKING:
         GoalCandidates,
         GoalRevision,
         GoalStatus,
+        IntendedActionMinting,
         StepTransition,
         UtcInstant,
     )
@@ -131,16 +135,34 @@ _SIDECARS = ("-journal", "-wal", "-shm")
 #: the evidence table does not either. The marker is what makes the upgrade in place
 #: possible, exactly as at 2 and at 3, and ADR-0049 §1's loud refusal of a **newer**
 #: label binds entire.
-_SCHEMA_VERSION = 4
+#: **Version 5 is ADR-0265 §5's migration, and it is a migration that rewrites no row
+#: and creates no table.** A version 4 ``goals`` blob still **decodes** —
+#: ``Goal.intended_actions`` is a defaulted empty tuple, so "a ``Goal`` written before
+#: this decision decodes with ``intended_actions`` empty" — and no column beside the
+#: blob is added, because an intended action is read out of the blob and never queried
+#: for. **So the marker moves for the reading in the other direction**, which is the
+#: one ADR-0049 §1 wrote it for: this code writes goal blobs carrying
+#: ``intended_actions`` and plan blobs carrying ``intended_action``, and an older
+#: build's ``extra="forbid"`` refuses both — so a store this code has written must
+#: announce itself as newer, or that build meets the refusal at a *decode* of a single
+#: record rather than at the open. §1's "opening a database labelled **newer** than
+#: this is refused loudly rather than read blindly" is the whole of the mechanism, and
+#: a version that did not move would leave it nothing to refuse on.
+#: **No lane invents an intended action for a stored goal** (§5): "an act nothing
+#: declared is an act no claim was ever scoped to, and minting one would state a
+#: history the row does not hold".
+_SCHEMA_VERSION = 5
 
-#: The versions a database this code can upgrade carries. Three members since
-#: ADR-0252: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's and
-#: version 3 is ADR-0250 §9's. Only the first needs its ``goals`` blobs rewritten
-#: (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all three** gain whichever of the
-#: :data:`_GOAL_COLUMNS` they lack and whichever record tables they do not hold, which
-#: ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier store holds a
-#: question or an evidence row.
-_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3})
+#: The versions a database this code can upgrade carries. Four members since ADR-0265:
+#: version 1 is ADR-0049 §1's original shape, version 2 is ADR-0249 §12's, version 3 is
+#: ADR-0250 §9's and version 4 is ADR-0252 §13's. Only the first needs its ``goals``
+#: blobs rewritten (:meth:`SqlitePlanStore._upgrade_goal_rows`); **all four** gain
+#: whichever of the :data:`_GOAL_COLUMNS` they lack and whichever record tables they do
+#: not hold, which ``CREATE TABLE IF NOT EXISTS`` supplies **empty** because no earlier
+#: store holds a question or an evidence row. **Version 4 needs nothing else at all**:
+#: ADR-0265 adds no column and no table, and every row it holds decodes unchanged with
+#: an empty ``intended_actions``.
+_UPGRADABLE_FROM: Final[frozenset[int]] = frozenset({1, 2, 3, 4})
 
 # The ``meta`` table is created first and on its own, so the schema version can be
 # read and a newer store refused *before* any record table is created (ADR-0049
@@ -1555,6 +1577,52 @@ class SqlitePlanStore:
                 )
         return updated
 
+    async def record_intended_actions(self, minting: IntendedActionMinting) -> Goal:
+        """Append intended actions to a goal, compare-and-swap (ADR-0265 §5).
+
+        The read, the comparison and the write all run inside one ``BEGIN IMMEDIATE``
+        transaction, so a second writer that read the same version cannot also commit
+        — it reads the advanced version and is refused. That is ADR-0014 §5's
+        discipline on the construction ADR-0049 §1 already uses, and **two actions
+        minted on one turn are appended in one call**, so the two-rooms case takes one
+        compare-and-swap and not two.
+
+        **Every refusal runs before the ``UPDATE``**, inside that same transaction, so
+        a minting that cannot record every action it carries records none of them.
+
+        **The command is revalidated before the first ``await``**, which is both
+        ADR-0023 §2's obligation and this method's ADR-0065 snapshot: ``actions`` can
+        otherwise arrive as a one-shot iterator, as a string, or carrying two members
+        under one ``id``.
+
+        **Only the blob is written.** ADR-0250 §1's two engagement columns are unmoved
+        by a minting, ``conversation_id`` is never rewritten, and ADR-0252 §13's
+        elision count moves only where an evidence row is dropped.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, if an ``id`` is one the goal already holds, if the
+                append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
+                ``serves`` value names no element of the goal's current interpretation.
+        """
+        command = revalidated_minting(minting)
+        async with self._lock:
+            return await _run_to_completion(self._record_intended_actions_sync, command)
+
+    def _record_intended_actions_sync(self, minting: IntendedActionMinting) -> Goal:
+        what = f"mint an intended action on goal {minting.goal_id!r}"
+        with self._transaction(what) as conn:
+            stored = self._goal_for_write(
+                conn, minting.goal_id, minting.expected_version, "mint against"
+            )
+            updated = minted(stored, minting.actions)
+            conn.execute(
+                "UPDATE goals SET data = ? WHERE id = ?",
+                (updated.model_dump_json(), updated.id),
+            )
+        return updated
+
     # --- engagement, status and the candidate set (ADR-0250 §§1, 2, 9) -----
 
     def _goal_for_write(
@@ -2494,6 +2562,13 @@ class SqlitePlanStore:
         ``targets_revision``'s, one substitution later, and ADR-0253 §7's disjointness
         makes it exact. **A plan declaring neither is not checked.**
 
+        **And every ``PlanStep.intended_action`` must already be the ``id`` of an
+        intended action of this plan's goal** (ADR-0265 §4) — read off the same goal
+        row in the same transaction, on the identical footing and with the identical
+        error class. The set is the goal's own tuple, which ``targets_revision`` does
+        not narrow, and ADR-0265 §1's disjointness makes it exact. **A plan no step of
+        which names an action is not checked.**
+
         Revalidated before it is persisted, for the same reason as ``save_goal``:
         a mutable ``ActionPlan`` mutated past its validators must fail at the write
         rather than poison every later decode.
@@ -2509,7 +2584,9 @@ class SqlitePlanStore:
             if held is None:
                 msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
                 raise PlanningError(msg)
-            refuse_an_unsubstituted_condition(plan, _decode_goal(held[0]))
+            goal = _decode_goal(held[0])
+            refuse_an_unsubstituted_condition(plan, goal)
+            refuse_an_unsubstituted_action(plan, goal)
             # ADR-0249 §8: the unstamped state exists only between the planner's
             # return and the loop's stamp, and the window is closed at the store.
             if plan.targets_revision is None:

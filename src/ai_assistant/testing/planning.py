@@ -40,6 +40,7 @@ from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_EVIDENCE,
     MAX_GOAL_INTERPRETATIONS,
+    MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
     AssociationVerdict,
@@ -58,6 +59,7 @@ from ai_assistant.core.types import (
     GoalQuestionDisposition,
     GoalRevision,
     Identifier,
+    IntendedActionMinting,
     PlanExport,
     PlannerOutput,
     SkipReason,
@@ -174,6 +176,32 @@ def _revalidated_revision(revision: GoalRevision) -> GoalRevision:
     except ValidationError as exc:
         subject = getattr(revision, "goal_id", "<no goal>")
         msg = f"the revision for goal {subject!r} is not a valid command: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _revalidated_minting(minting: IntendedActionMinting) -> IntendedActionMinting:
+    """Rebuild ``minting`` as a validated, detached command, or refuse it (ADR-0265 §5).
+
+    :func:`_revalidated_revision`'s reason one command over: ``model_copy(update=...)``
+    skips validators (ADR-0023 §2), so ``actions`` can arrive as a one-shot iterator, as
+    a string whose ``tuple()`` is its characters, or carrying two members under one
+    ``id`` — the last being the case §5's own validator exists to close and the one a
+    store's refusal of an id the goal already holds cannot reach.
+
+    Args:
+        minting: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return IntendedActionMinting.model_validate(minting.model_dump())
+    except ValidationError as exc:
+        subject = getattr(minting, "goal_id", "<no goal>")
+        msg = f"the minting for goal {subject!r} is not a valid command: {exc}"
         raise PlanningError(msg) from exc
 
 
@@ -960,6 +988,84 @@ class FakePlanStore:
                 )
             return updated.model_copy(deep=True)
 
+    async def record_intended_actions(self, minting: IntendedActionMinting) -> Goal:
+        """Append intended actions to a goal, compare-and-swap (ADR-0265 §5).
+
+        Re-implemented here rather than imported from ``ai_assistant.planning``, for
+        the reason this module's docstring gives: importing it would pull in the very
+        subsystem the fake stands in for, and a fake that decided conformance by
+        calling the code it stands in for would report every implementation conformant.
+        The shared ``PlanStoreContract`` is what holds the two statements honest.
+
+        **The three refusals run before the append**, so a minting that cannot record
+        every action it carries records none of them — not the first, not a prefix, and
+        not the ones that would have fit. **None of them takes the stale-write class**:
+        each is an invariant breach at the current version, "and a caller that re-read
+        and retried would re-raise for ever".
+
+        **The command is revalidated on the first executed line**, which is both
+        ADR-0023 §2's obligation and this method's ADR-0065 snapshot.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            PlanningError: If the minting is not a valid command, if ``goal_id`` names
+                no stored goal, if an ``id`` is one the goal already holds, if the
+                append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
+                ``serves`` value names no element of the goal's current interpretation.
+        """
+        command = _revalidated_minting(minting)
+        async with self._resource.held():
+            stored = self._goal_for_write_locked(
+                command.goal_id, command.expected_version, "mint against"
+            )
+            held = {action.id for action in stored.intended_actions}
+            repeated = sorted({action.id for action in command.actions if action.id in held})
+            if repeated:
+                msg = (
+                    f"goal {command.goal_id} already holds intended action "
+                    f"{', '.join(repeated)}: an intended action is minted once and the "
+                    f"tuple is append-only (ADR-0265 §1, §5)"
+                )
+                raise PlanningError(msg)
+            if len(stored.intended_actions) + len(command.actions) > MAX_INTENDED_ACTIONS:
+                msg = (
+                    f"goal {command.goal_id} holds {len(stored.intended_actions)} "
+                    f"intended actions and this minting carries {len(command.actions)}, "
+                    f"which is past the bound of {MAX_INTENDED_ACTIONS}: the minting is "
+                    f"refused whole and nothing is elided to make room (ADR-0265 §1, §5)"
+                )
+                raise PlanningError(msg)
+            current = stored.interpretation[-1]
+            known = {
+                element.id
+                for group in (current.constraints, current.criteria, current.conditions)
+                for element in group
+                if element.id is not None
+            }
+            dangling = sorted(
+                {served for action in command.actions for served in action.serves} - known
+            )
+            if dangling:
+                msg = (
+                    f"the minting for goal {command.goal_id} serves "
+                    f"{', '.join(dangling)}, which "
+                    f"{'is' if len(dangling) == 1 else 'are'} not the id of an element "
+                    f"of revision {current.revision}: at the append every entry names a "
+                    f"current element (ADR-0265 §3, §5)"
+                )
+                raise PlanningError(msg)
+            updated = _revalidated_goal(
+                stored.model_copy(
+                    update={
+                        "intended_actions": (*stored.intended_actions, *command.actions),
+                        "version": stored.version + 1,
+                    }
+                ),
+                what="minting an intended action",
+            )
+            self._goals[updated.id] = updated
+            return updated.model_copy(deep=True)
+
     def _goal_for_write_locked(self, goal_id: str, expected: int, what: str) -> Goal:
         """Read a goal for a compare-and-swap write; the caller holds the resource.
 
@@ -1673,6 +1779,13 @@ class FakePlanStore:
         closed at the same place as ``targets_revision``'s, one substitution later.
         **A plan declaring neither is not checked.**
 
+        **And every ``PlanStep.intended_action`` must already be the ``id`` of an
+        intended action of this plan's goal** (ADR-0265 §4), on the identical footing
+        and with the identical error class. The set is the goal's own tuple, which
+        ``targets_revision`` does not narrow, because ``Goal.intended_actions`` is
+        appended to rather than revised. **A plan no step of which names an action is
+        not checked.**
+
         **And the plan is revalidated before it is kept, not merely copied** (ADR-0023
         §2): ``model_copy(update=...)`` skips validators, so a caller can hand in a plan
         whose graph ADR-0253 §§1, 6 and 8 make **unconstructible**, and "a write that
@@ -1691,6 +1804,7 @@ class FakePlanStore:
                 msg = f"plan {snapshot.id} refers to unknown goal {snapshot.goal_id}"
                 raise PlanningError(msg)
             self._refuse_an_unsubstituted_condition(snapshot, held)
+            self._refuse_an_unsubstituted_action(snapshot, held)
             # ADR-0249 §8: the window between the planner's return and the loop's
             # stamp is closed at the store rather than trusted to close itself.
             if snapshot.targets_revision is None:
@@ -1766,6 +1880,38 @@ class FakePlanStore:
                 f"element of revision {plan.targets_revision} of goal {plan.goal_id}: "
                 f"the loop substitutes each condition label for an element id once, "
                 f"and the window is closed at the store (ADR-0253 §9)"
+            )
+            raise PlanningError(msg)
+
+    @staticmethod
+    def _refuse_an_unsubstituted_action(plan: ActionPlan, goal: Goal) -> None:
+        """Refuse a plan naming an intended action the goal does not hold (ADR-0265 §4).
+
+        ADR-0265 §4's conjunct on ``save_plan``, and the fake's **own** statement of
+        it. The set read is ``Goal.intended_actions`` whole rather than one revision's,
+        because that tuple "is not revised: it is appended to" — which is the one place
+        this differs from the condition conjunct beside it.
+
+        Args:
+            plan: The plan being saved.
+            goal: The goal it is under, read under the same resource as the write.
+
+        Raises:
+            PlanningError: If the plan names an action the goal does not hold.
+        """
+        named = frozenset(
+            step.intended_action for step in plan.steps if step.intended_action is not None
+        )
+        if not named:
+            return
+        unresolved = sorted(named - {action.id for action in goal.intended_actions})
+        if unresolved:
+            msg = (
+                f"plan {plan.id} names {', '.join(unresolved)}, which "
+                f"{'is' if len(unresolved) == 1 else 'are'} not the id of an intended "
+                f"action of goal {plan.goal_id}: the loop substitutes each action label "
+                f"for an intended action id once, and the window is closed at the store "
+                f"(ADR-0265 §4)"
             )
             raise PlanningError(msg)
 

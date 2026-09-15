@@ -48,6 +48,32 @@
   is honoured, since this one is declared. §12's executions-projection booking is untouched, and
   §§1-6, §§8-12, §14 and §§16-17 stand entire.
 
+- Amended: 2026-09-15 (§5 — the wire ground is named wrongly, and the bump it obliges
+  is not). §5's `PROTOCOL_VERSION` clause reasons that "`Goal` gains a field and
+  `PlanStep` gains a field; `Goal` is carried on `TurnResult.goal`". **At the
+  tree this decision was written against, and at the tree L1 lands on,
+  `TurnResult.goal` is a `GoalBrief` and not a `Goal`** (ADR-0249 §11), and **no frame
+  carries a `Goal` at all** — `PlanExport` crosses no frame either, as §5's own export
+  clause says of it. So the sentence names a carrier this corpus does not have, and
+  issue #2400 reports it.
+
+  **The move it obliges is unchanged, and the reason is that the other two carriers are
+  real.** `GoalBrief` gains `actions` (§4) and is exactly what `TurnResult.goal`
+  carries; `PlanStep` gains `intended_action` (§4) and rides inside `ActionPlan`, which
+  is `TurnResult.plan`. Both models set `extra="forbid"` and `wire/codec.py` renders a
+  model by `model_dump()`, so each on its own makes a hub's turn undecodable by a client
+  at the previous version — which is the whole of what §5's clause needed a carrier for.
+  `IntendedAction`, `ProposedAction` and `IntendedActionMinting` cross no frame:
+  `PlannerOutput` is an in-process return from `Planner.plan` and a minting is an
+  argument to a `PlanStore` member. **`BriefAction` is the one new model that crosses**,
+  carrying §4's projection and no identifier.
+
+  **A stale phrase under ADR-0070 §1's third term, so a dated note is the whole record**
+  (ADR-0082 §1): the correction reconciles §5 with a fact that predates it and reverses
+  nothing this decision decided — the bump stands, its size stands, and the lane it
+  falls on stands. `wire/envelope.py`'s log entry at 45 states the true grounds, which
+  is where a reader looking for the carrier will be.
+
 ## Context
 
 ### Where this comes from

@@ -24,6 +24,7 @@ from ai_assistant.core.errors import IllegalTransitionError, PlanningError
 from ai_assistant.core.types import (
     MAX_ASSOCIATION_CANDIDATES,
     MAX_GOAL_INTERPRETATIONS,
+    MAX_INTENDED_ACTIONS,
     TERMINAL_ATTEMPT_STATES,
     ActionPlan,
     AttemptPhase,
@@ -37,6 +38,7 @@ from ai_assistant.core.types import (
     GoalQuestionDisposition,
     GoalRevision,
     Identifier,
+    IntendedActionMinting,
 )
 
 if TYPE_CHECKING:
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
         AttemptTransition,
         GoalInterpretation,
         GoalStatus,
+        IntendedAction,
         UtcInstant,
     )
 
@@ -659,6 +662,169 @@ def revalidated_plan(plan: ActionPlan) -> ActionPlan:
         subject = getattr(plan, "id", "<no id>")
         msg = f"plan {subject!r} is not a valid record and will not be stored: {exc}"
         raise PlanningError(msg) from exc
+
+
+def revalidated_minting(minting: IntendedActionMinting) -> IntendedActionMinting:
+    """Rebuild ``minting`` as a validated, detached command, or refuse it (ADR-0265 §5).
+
+    :func:`revalidated_revision`'s reason, one command over: ``model_copy(update=...)``
+    **skips validators** (ADR-0023 §2, "a pydantic property no type can close"), so a
+    caller can hand in a command whose ``actions`` is a one-shot iterator a second
+    traversal would find empty, a **string** whose ``tuple()`` is its characters, or a
+    tuple two of whose members share an ``id`` — the last being exactly the case §5's
+    validator exists to close and the one the store's own refusal cannot reach,
+    "because neither id is stored when the command is built".
+
+    Args:
+        minting: The command as the caller handed it in.
+
+    Returns:
+        The command, revalidated and detached.
+
+    Raises:
+        PlanningError: If it does not satisfy its own model.
+    """
+    try:
+        return IntendedActionMinting.model_validate(minting.model_dump())
+    except ValidationError as exc:
+        subject = getattr(minting, "goal_id", "<no goal>")
+        msg = f"the minting for goal {subject!r} is not a valid command: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def minted(goal: Goal, actions: Sequence[IntendedAction]) -> Goal:
+    """Append ``actions`` to ``goal`` and advance its version (ADR-0265 §5).
+
+    **All three refusals run before anything is appended**, which is what makes the
+    write all-or-nothing: "a partial record would leave *book two identical rooms*
+    holding **one** intended action". They are an ``id`` the goal already holds, a
+    minting that would carry the goal past
+    :data:`~ai_assistant.core.types.MAX_INTENDED_ACTIONS`, and a ``serves`` value that
+    is not the ``id`` of an element of the goal's **current** interpretation at the
+    instant of the append.
+
+    **None of the three takes the stale-write class** (§5). Each is an invariant
+    breach at the current version rather than a lost race, and "a caller that re-read
+    and retried would re-raise for ever", so all three take ``PlanningError`` — the
+    class ADR-0249 §12 gives ``save_goal`` for a goal whose id the store already holds.
+
+    **Nothing is elided to make room** (§1). A goal at the bound refuses and holds
+    every action it held: "an identity that can vanish is not an identity", and a
+    rollover would make a completed booking's claim fresh again, silently, at the
+    moment capacity ran out.
+
+    Stated here rather than in each store so the conforming implementations cannot
+    disagree about which mintings are refused.
+
+    Args:
+        goal: The goal as stored, read under the same lock or transaction as the write.
+        actions: The actions to append, in append order, already revalidated.
+
+    Returns:
+        The goal as it stands after the append.
+
+    Raises:
+        PlanningError: If an id is one the goal already holds, if the append would
+            carry the goal past the bound, or if a ``serves`` value names no element of
+            the goal's current interpretation.
+    """
+    held = {action.id for action in goal.intended_actions}
+    repeated = sorted({action.id for action in actions if action.id in held})
+    if repeated:
+        msg = (
+            f"goal {goal.id} already holds intended action {', '.join(repeated)}: an "
+            f"intended action is minted once and the tuple is append-only, so no "
+            f"minting re-mints an id the goal carries (ADR-0265 §1, §5)"
+        )
+        raise PlanningError(msg)
+    if len(goal.intended_actions) + len(actions) > MAX_INTENDED_ACTIONS:
+        msg = (
+            f"goal {goal.id} holds {len(goal.intended_actions)} intended actions and "
+            f"this minting carries {len(actions)}, which is past the bound of "
+            f"{MAX_INTENDED_ACTIONS}: the minting is refused whole and no action of it "
+            f"is recorded, because an identity that can vanish is not an identity "
+            f"(ADR-0265 §1, §5)"
+        )
+        raise PlanningError(msg)
+    current = {
+        element.id
+        for group in (
+            goal.interpretation[-1].constraints,
+            goal.interpretation[-1].criteria,
+            goal.interpretation[-1].conditions,
+        )
+        for element in group
+        if element.id is not None
+    }
+    dangling = sorted({served for action in actions for served in action.serves} - current)
+    if dangling:
+        msg = (
+            f"the minting for goal {goal.id} serves {', '.join(dangling)}, which "
+            f"{'is' if len(dangling) == 1 else 'are'} not the id of an element of "
+            f"revision {goal.interpretation[-1].revision}: orchestration resolves each "
+            f"label against the sequence in force on that call, so at the append every "
+            f"entry names a current element (ADR-0265 §3, §5)"
+        )
+        raise PlanningError(msg)
+    return _revalidated(
+        goal.model_copy(
+            update={
+                "intended_actions": (*goal.intended_actions, *actions),
+                "version": goal.version + 1,
+            }
+        ),
+        what="minting an intended action",
+    )
+
+
+def refuse_an_unsubstituted_action(plan: ActionPlan, goal: Goal) -> None:
+    """Refuse a plan naming an intended action the goal does not hold (ADR-0265 §4).
+
+    ADR-0265 §4 adds one conjunct to ``PlanStore.save_plan``: a plan is refused where
+    any ``PlanStep.intended_action`` is **not** the ``id`` of a member of
+    ``Goal.intended_actions`` of the plan's own goal. It is a **strengthening of an
+    existing member** rather than a new one, on ADR-0249 §12's own classification of
+    ``commit_transition``'s added claim condition, and it is
+    :func:`refuse_an_unsubstituted_condition`'s move one label space over: "the
+    unresolved state exists only between the planner's return and the loop's
+    substitution, and a window is closed at the store rather than trusted to close
+    itself".
+
+    **The set is the goal's own tuple and ``targets_revision`` does not narrow it**,
+    which is the one place this differs from the condition conjunct:
+    ``Goal.intended_actions`` "is not revised: it is appended to" (§4).
+
+    **ADR-0265 §1's disjointness is what makes the refusal exact**: an
+    ``IntendedAction.id`` can never match the action-label grammar, so a plan still
+    carrying an unsubstituted ``"A1"`` matches no action on any goal, ever — rather
+    than silently scoping an effect claim to a different act.
+
+    **A plan no step of which names an action is not checked**, which is what makes
+    this cost such a plan nothing at all.
+
+    Args:
+        plan: The plan being saved.
+        goal: The goal it is under, already read by the caller under the same lock or
+            transaction as the write, so the check and the write see one fact.
+
+    Raises:
+        PlanningError: If the plan names an action the goal does not hold.
+    """
+    named = frozenset(
+        step.intended_action for step in plan.steps if step.intended_action is not None
+    )
+    if not named:
+        return
+    unresolved = sorted(named - {action.id for action in goal.intended_actions})
+    if unresolved:
+        msg = (
+            f"plan {plan.id} names {', '.join(unresolved)}, which "
+            f"{'is' if len(unresolved) == 1 else 'are'} not the id of an intended "
+            f"action of goal {plan.goal_id}: the loop substitutes each action label for "
+            f"an intended action id once, and the window is closed at the store "
+            f"(ADR-0265 §4)"
+        )
+        raise PlanningError(msg)
 
 
 def refuse_an_unsubstituted_condition(plan: ActionPlan, goal: Goal) -> None:
