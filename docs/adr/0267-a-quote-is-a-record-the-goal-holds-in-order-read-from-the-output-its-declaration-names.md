@@ -374,8 +374,10 @@ record of the same durability.
 > answer lost — and the minter **stops silently**, appending nothing; that is the whole of how a
 > mint is idempotent and the whole of what a refused write is permitted to conclude. **Every other
 > outcome raises**: a different quote for that action, and no quote at all whether or not
-> `quotes_elided` has advanced, each **propagate** — nothing swallows them and the walk stops under
-> ADR-0255's own discipline rather than dispatching against a reading the minter could not record.
+> `quotes_elided` has advanced, each **propagate the store's own refusal** — the class
+> `StaleExecutionError` occupies (§2), unswallowed and **untranslated**, no lane wrapping it in a
+> class of its own — and the walk stops under ADR-0255's own discipline rather than dispatching
+> against a reading the minter could not record.
 > ADR-0148 §1's trade is taken here as §6 takes it, and **no lane re-reads a second time**: the one
 > re-read either recognises the mint's own committed write or raises.
 
@@ -912,7 +914,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    `quoted_output` and a plan step carrying an `intended_action`, a `SUCCEEDED` step whose output
    is `{"price": "120", "stars": 4, "currency": "EUR"}` mints exactly one quote, at `120`/`EUR`,
    whose `arguments_digest` equals that request's own `parameters_digest`, whose `plan` and
-   `read_from` name where it was read, and whose `stars` value appears **nowhere**. **And nothing
+   `read_from` name where it was read, and whose `stars` value appears **nowhere**. **And
+   `read_at` is the step's instant and never the mint's** (§4): driven with the output-recording
+   instant and the mint clock made distinguishable, and with a delay between them, the recorded
+   quote carries the **former** — the assertion that a quote minted late still states when the
+   price was read, which is the instant §6's disclosure renders and §7 transcribes. **And nothing
    is minted**, the goal's `quotes` unchanged and nothing raised, in each of: no `intended_action`
    on the step; no `quoted_output` on the declaration; an `output` that is not a JSON object; a
    missing `price` key; a missing `currency` key; a **JSON float** `120.0`; **a JSON boolean
@@ -931,7 +937,9 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    barrier**: a mint whose write is refused stale re-reads **once**, takes no second
    `record_quote`, and **stops silently — appending nothing and raising nothing — where that
    action's last quote equals the one it is minting**, the goal left holding exactly one; while in
-   each of the other outcomes it **raises and appends nothing**, the goal left exactly as the
+   each of the other outcomes it **raises and appends nothing**, the raise being **the store's own
+   refusal propagated** — the class `StaleExecutionError` occupies, asserted as that class and not
+   as a `RuntimeError` or a wrapper the minter minted (§4) — and the goal left exactly as the
    winner left it: where that action gained a **different** quote; where it has **none** and
    `quotes_elided` is unchanged, which is a concurrent advance touching some other field; and where
    its quote landed and was then **elided**, `quotes_elided` having advanced. **And the inverted
@@ -995,8 +1003,11 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    envelope carries every value §8 names — an `ActionQuote`, a `QuotedOutput`, a `QuoteView`, an
    amount, a currency, an output key and a digest — leaves the recorded revision and the goal's
    `quotes` **byte-identical** to the same envelope without them, the turn completing and not
-   failing. And: a `Goal` and a `ToolDefinition` dumped at the previous shape decode with the new
-   fields absent; `PROTOCOL_VERSION` has advanced by exactly one with a log entry naming this ADR;
+   failing. And: a `Goal`, a `ToolDefinition` **and an `Authorization`** dumped at the previous
+   shape each decode with the new field absent — the row's `quoted` **`None`**, which §8 makes a
+   conforming row rather than one to repair and which this arm can drive because **Q1 lands the
+   field as `core` shape** (§11) though the population is Lane 2's;
+   `PROTOCOL_VERSION` has advanced by exactly one with a log entry naming this ADR;
    `PlanExport.schema_version` has advanced; `PlanExport` carries the quotes **inside** its goals
    and gains no member; and `delete_goal` removes them with the goal.
 
