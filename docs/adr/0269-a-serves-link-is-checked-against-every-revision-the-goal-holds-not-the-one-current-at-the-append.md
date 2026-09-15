@@ -86,12 +86,15 @@ the user (§6).
 
 ### 1. The conjunct is a membership test over every revision the goal holds
 
-> **Normative — ADR-0265 §5's third refusal conjunct becomes goal-wide.**
-> `record_intended_actions` refuses a `serves` value that is not the `id` of an element of **any
-> revision the goal's `interpretation` holds at the instant of the append** — the current
-> revision and every earlier one it still holds alike — and writes nothing. The refusal keeps
-> ADR-0265 §5's error class, keeps its all-or-nothing rule, and stays an **invariant breach at
-> the current version** rather than a lost race.
+> **Normative — ADR-0265 §5's third refusal conjunct becomes goal-wide, and this is a BREAKING
+> contract change under golden rule 5.** `record_intended_actions` refuses a `serves` value that
+> is not the `id` of an element of **any revision the goal's `interpretation` holds at the
+> instant of the append** — the current revision and every earlier one it still holds alike —
+> and writes nothing. **An implementation that keeps the current-instant refusal is
+> non-conforming**, which is what makes it breaking: no member is added and no signature moves,
+> and a behaviour a caller may rely on does. The refusal keeps ADR-0265 §5's error class, keeps
+> its all-or-nothing rule, and stays an **invariant breach at the current version** rather than a
+> lost race.
 
 > **Normative — the test reads what the goal holds, and an elided revision is not held.** An
 > `id` whose only revision ADR-0249 §2 has elided resolves to nothing and is refused, exactly as
@@ -123,12 +126,17 @@ exactly once at the same instant; what it gives up is the property that every ad
 live at the append, and ADR-0265 §3 already gives that property up one moment later and says
 so.
 
-**The elision edge is named because the word "holds" is load-bearing, and it is unreachable from
-the seam.** `orchestration` resolves a `ProposedAction.serves` label against the sequence in
-force on that call (ADR-0265 §3), which is a revision this turn wrote; ADR-0249 §2's bound is 32
-and ADR-0228 §3 bounds a turn at two planner calls, so the revision a minting was computed
-against is never the one elided under it. A minting naming an elided element is therefore a
-caller reaching past the loop, which is the case the conjunct exists for.
+**The elision edge is named because the word "holds" is load-bearing, and the refusal is right
+whichever way the figures go.** `orchestration` resolves a `ProposedAction.serves` label against
+the sequence in force on that call (ADR-0265 §3), which is a revision **this same turn wrote**,
+and ADR-0249 §2 elides the **oldest** revision on the write that would exceed its bound. So the
+revision a minting was computed against is elided under it only where that one turn wrote
+`MAX_GOAL_INTERPRETATIONS` further revisions after it — a turn writing one per planner call,
+under an allowance ADR-0251 §4 admits a further call against. **This decision states no figure
+and depends on none**, because the two branches agree: while a turn's calls stay under that
+bound the case is unreachable from the seam, and where they do not, the goal genuinely no longer
+holds the element and the refusal is the truthful answer. What the conjunct exists for — a
+caller reaching past the loop — is reached either way.
 
 ### 2. The opening route stands, and the announcement is why
 
@@ -171,10 +179,13 @@ it, and leaves every other sentence of both decisions standing.
 > under `src/ai_assistant/orchestration/` moves**, and a lane that finds itself changing the loop
 > has left its fence and has misread this decision.
 
-> **Normative — `PROTOCOL_VERSION` does not move and `wire/envelope.py`'s log gains no entry.**
-> No `core` type gains, loses or narrows a field; no wire-carried value one peer emits becomes
-> invalid for the other. What changes is one store member's refusal condition, which crosses no
-> frame.
+> **Normative — `PROTOCOL_VERSION` does not move and `wire/envelope.py`'s log gains no entry,
+> and that is compatible with §1's breaking flag rather than in tension with it.** Golden rule
+> 5's *breaking* is about the **contract** — an implementation of it stops conforming —
+> while `PROTOCOL_VERSION` answers ADR-0124 §9's wire question, *"a change to a wire-carried
+> `core` type that makes a value one peer emits invalid for the other"*. No `core` type gains,
+> loses or narrows a field here and no wire-carried value changes validity: what changes is one
+> store member's refusal condition, which crosses no frame.
 
 ### 4. The arms this decision owes
 
@@ -191,11 +202,15 @@ it, and leaves every other sentence of both decisions standing.
    carries both calls' revisions, and the plan is saved. The arm keeps the shape of the test it
    replaces — the same two-call fake planner — so that what changed is the verdict and not the
    case.
-2. **An element of an earlier revision is admitted, at the store and without the loop.** Over a
-   goal the store already holds: record a revision restating the element, then call
-   `record_intended_actions` with a `serves` naming the **previous** revision's element `id`.
-   Assert: the action records, its stored `serves` names that `id` unchanged, and the goal's
-   `version` advances once.
+2. **An element of an older still-retained revision is admitted, at the store and without the
+   loop, with revisions intervening.** Over a goal the store already holds: record **three**
+   further revisions after the one carrying the element, each restating it afresh so ADR-0253 §7
+   mints a new `id` every time, then call `record_intended_actions` with a `serves` naming the
+   element `id` of the **oldest retained** revision — **not** the current one and **not** the one
+   before it. Assert: the action records, its stored `serves` names that `id` unchanged, and the
+   goal's `version` advances once. The intervening revisions are the whole point of the arm: an
+   implementation that searched only the current revision, or only the current and the one
+   before it, would pass every other arm here and fail this one.
 3. **The conjunct still refuses what it is for, all-or-nothing.** Over a **two**-action command
    whose **second** action carries the bad value, assert a refusal for each of: an identifier of
    no element of any revision the goal holds; an identifier of an element of a **different**
