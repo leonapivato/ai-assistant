@@ -802,9 +802,12 @@ is a state that resolves where the integration supports it, and that is **durabl
 > turn has engaged its goal** (ADR-0250 §1), **over that one goal and no other**, and **wholly before the turn's first
 > `Planner.plan` call**. It stamps **no `AttemptPhase`** (ADR-0249 §6's writer clause), opens **no attempt** (ADR-0249 §5: an
 > attempt is opened only by a user act), writes **no `GoalStatus`**, and **opens no walk and dispatches no `PENDING` step**.
-> **It reaches a dispatch through no act at all**: every act is a repair of a record, **not one of them invokes anything**,
-> **none calls `StepRunner` or `ToolInvoker`**, and **no act of this pass takes §3's check**, which is the investigation
-> phase's. **Nor does any act replay a recorded `ALLOW`** — this decision replays none (§5).
+> **It reaches a dispatch through no act at all**: every act is a repair of a record, **none calls `StepRunner` or
+> `ToolInvoker`**, **nothing is invoked through any seam**, and **no act of this pass takes §3's check**, which is the
+> investigation phase's. **Nor does any act replay a recorded `ALLOW`** — this decision replays none (§5). **What it does
+> reach is two stores, and only to read and to commit**: `PlanStore`, for every act, and **`AuditTrail.resolution_of`**,
+> which act 2 reads to find the recorded refusal it applies (ADR-0059 §2). **`AuditTrail` gains no member and the pass
+> writes none of it** (§9).
 
 > **Normative — it performs exactly four acts, in this order, and no fifth**, **every one of them before the turn's first
 > `Planner.plan` call**. Over the goal the turn engaged:
@@ -844,17 +847,22 @@ is a state that resolves where the integration supports it, and that is **durabl
 > walk starts"* — the remainder is read from that turn's **monotonic** source and nothing is started where it is **not
 > strictly positive**. **This pass reads that remainder immediately before each of its four acts and starts none of them where
 > it is not strictly positive**: the step or attempt keeps the state it stood at, **the pass ends there** with what earlier
-> acts landed standing, and **the turn does not fail**. **No enumeration of which acts are units of work is made or needed** —
-> §9 is applied to the pass as a whole, so nothing turns on classifying one act. **An act already begun runs to its own
-> completion**, §9's own posture, so a compare-and-swap the pass has reached lands rather than being abandoned. **No act of
-> this pass takes a `timeout` or reaches any seam**, because none of them calls anything: the remainder is read to decide
-> whether to begin a **store write**, and **no lane passes the turn's figure to a callable from inside this pass or fixes a
-> second deadline in it**. §3's own gate is stated over §3's own call, where the one `timeout` of this decision is passed.
+> acts landed standing, and **the turn does not fail**. **The gated unit is one candidate, not one act** — an act that
+> applies to several steps or several attempts is gated **before each of them**, so a pass whose remainder runs out after
+> act 1's first commit leaves act 1's remaining steps untouched and takes no later act. The four are an enumeration of
+> **kinds** of repair, not of units of work. **A unit already begun runs to its own completion**, §9's own posture, so **the
+> single compare-and-swap the pass has issued** lands rather than being abandoned, and the pass ends after it. **No act of
+> this pass takes a `timeout` or reaches a seam**: the only things it calls are `PlanStore`'s members and
+> `AuditTrail.resolution_of`, neither of which this decision gives a deadline, and **no lane passes the turn's figure to a
+> callable from inside this pass or fixes a second deadline in it**. §3's own gate is stated over §3's own call, where the
+> one `timeout` of this decision is passed.
 > **Its cost is one turn's delay** on a repair the next turn redoes, which is what
 > every other early end in this section already produces.
 
 > **Normative — the pass makes every write as a compare-and-swap and stops at the first that loses.** A stale
-> `expected_version` or a store failure ends the pass for that turn; **what landed stands, nothing is undone, nothing is
+> `expected_version` or a **failure of either store it reads — `PlanStore`, or the trail through `resolution_of`, whose
+> `AuditError` is one such failure — ends the pass for that turn**, and so does a `CancelledError`, which propagates as it
+> does at every other await in this system; **what landed stands, nothing is undone, nothing is
 > retried within the turn**, and the next turn that engages the goal runs it again over whatever is then residual. **A pass
 > that ends early does not fail the turn** — every act is a repair of a record, not a prerequisite of the turn's work. **An
 > undeclared exception is the one thing that does escape it** (§3).
@@ -1133,8 +1141,8 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is flagged here rather than inferred from a
 > version number.** `PlanStore` gains exactly one member, **`claim_effect`** (§2), so **every implementation and every fake
 > gains it before this decision's L2 lands**; the change extends ADR-0014 §5's member enumeration exactly as ADR-0249 §12's
-> and ADR-0250's additions did, and it is BREAKING for the same reason each of those was. **`AuditTrail` gains none** — §5
-> consumes `resolution_of`, which ADR-0059 §2 already landed. **`ToolInvoker`, `ActionPolicy`, `ToolRegistry`, `Planner` and
+> and ADR-0250's additions did, and it is BREAKING for the same reason each of those was. **`AuditTrail` gains none** — §4's
+> act 2 consumes `resolution_of`, which ADR-0059 §2 already landed, and writes nothing to the trail. **`ToolInvoker`, `ActionPolicy`, `ToolRegistry`, `Planner` and
 > `AssistantEngine` each gain none**, and **no Protocol member changes signature** — `commit_transition` gains **two
 > strengthenings**, the persistence and the claim condition above, in ADR-0255 §11's own sense of that word. **A
 > strengthening adds no member**, so ADR-0014 §5's enumeration is untouched by the pair and §13 owes them no record.
@@ -1446,7 +1454,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     reconciled there, both before that turn's first `Planner.plan` call**, to **`SUCCEEDED`**, its attempt returning to
     **`RUNNING`** on the next pass's act 4, over the one reconcilable declaration — a tool that is **not `side_effecting`** —
     over a request **rebuilt from stored plan and execution state after a restart** and accepted by
-    `PermissionDecision.authorises`. **The surfacing is asserted and not only the write**: the turn says it is unsure whether
+    `PermissionDecision.authorises`. **The step's `attempts` is asserted equal before and after**, on the successful
+    reconciliation and on the concurrent variant arm 11 drives alike, because §3 rules the call *"established what happened
+    and was not an attempt at the effect"* and an implementation that incremented it would corrupt the retry history while
+    passing every other assertion here. **The surfacing is asserted and not only the write**: the turn says it is unsure whether
     the action went through, and an implementation that resolved the step silently, or resolved it inside the pass, fails this
     arm. **And the superseded case is a row of the same arm**: the same step on a plan a stored plan supersedes reconciles
     identically, because a read drives nothing. **The arm asserts nothing about a later walk**: the reconciled step belongs to
@@ -1482,7 +1493,8 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
     implementation that handed a callable the turn's figure from inside the pass fails this row on the call it should not
     have made. It touches **only the goal the turn engaged**: a second goal
     carrying the same three residuals is **unchanged**, and nothing runs for it until a turn engages it. And a **store failure
-    injected at each act boundary** stops it there: what landed **stands**, every later act is **not taken**, **no write is
+    injected at each act boundary — including an `AuditError` from act 2's `resolution_of` read, which is asserted to end the
+    pass and not the turn — stops it there: what landed **stands**, every later act is **not taken**, **no write is
     retried inside that turn**, **the turn itself does not fail**, and the next turn that engages the goal runs the pass again
     over whatever is then residual. **And the stale compare-and-swap §3's admitted concurrency produces is a distinct row of
     this arm, driven by a barrier rather than by an injected store error**: two turns reconcile one `INDETERMINATE` step at
