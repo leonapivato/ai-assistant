@@ -370,12 +370,17 @@ record of the same durability.
 > ADR-0014's note of 2026-08-25) — makes that write stale and `record_quote` refuses it, writing
 > nothing (§2). **The minter then re-reads the goal at most once and takes exactly one of three
 > dispositions, comparing records and never instants**: where the goal's **last quote naming that
-> action** is the member it read, or there is still none, it appends against the new version;
+> action** is the member it read, or there is still none **and `quotes_elided` has not advanced
+> since that read**, it appends against the new version;
 > where that member **equals the quote it is minting**, the write already landed and it **stops**,
 > which is the ambiguous-retry case — the write committed, the answer lost — and is the whole of
 > how a mint is idempotent; and where that member is a **different** quote, it **abandons the mint
-> and appends nothing**, the recorded later reading standing and its own being lost. A second
-> refusal abandons the mint in the same way. **So no append ever puts an older reading after a
+> and appends nothing**, the recorded later reading standing and its own being lost. **An absence
+> under an advanced `quotes_elided` is abandoned on the same ground**: a quote for that action may
+> have landed and been elided since, and an absence the minter cannot tell from an elision is not
+> proof that nothing displaced its reading (§2's elision drops from the front and counts what it
+> drops). A second refusal abandons the mint in the same way. **So no append ever puts an older
+> reading after a
 > newer one for one action**, however turns interleave — ADR-0266 §7's *"An earlier quote is
 > consulted in no case"* held by the order of the writes rather than by a test at the store, which
 > §1 and §2 each forbid the store to make. **An abandoned mint is a lost reading and never a
@@ -720,10 +725,13 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
   first under golden rule 5, and is not this decision's to take. Fired by that amendment, which is
   booked **ahead of** ADR-0254 §20's Lane 2 and which that lane waits on (§11).
 - **Reconciling a mint that did not complete, and ordering two appends whose reads were
-  concurrent.** §4 rules the mint non-atomic with the transition that recorded the output and
-  states both residuals as fail-closed: a lost mint costs a question, a repeated one costs a slot.
-  **Nothing here reconciles either**, and no lane writes a duplicate test, an idempotency key for a
-  quote or a recovery pass over stored outputs. **And nothing here makes a concurrently read price
+  concurrent.** §4 rules the mint non-atomic with the transition that recorded the output, and the
+  two interruptions are not one question. **A write that never happened is unrecoverable here**:
+  the quote is lost, the act asks, and **no lane reconciles one from a stored output** or writes a
+  recovery pass over them. **An ambiguously committed write is decided rather than left open** —
+  §4's re-read recognises it by the record's own equality and appends nothing, which is this
+  decision's idempotency mechanism and is why no lane mints an idempotency key or a sequence for
+  one. **And nothing here makes a concurrently read price
   survive**: §4 keeps position in reading order by abandoning the loser of a race rather than by
   ordering the two, so where two turns read one action at once the later writer's reading is
   **lost** and the recorded one stands — safe against revival, and a reading the system paid for
@@ -913,8 +921,10 @@ for §6's trade; **ADR-0086 §4** for §2's disclosure; **ADR-0042 §6** for §7
    the ambiguous retry (§4). **And the concurrent race is driven with a
    barrier**: a mint whose write is refused stale re-reads once and **appends** where the advance
    touched anything but that action's quotes; **appends nothing** where that action gained a
-   **different** quote, the later reading still governing; and **appends nothing** where it gained
-   the **equal** one. No interleaving leaves an older reading last, and no later pass over a stored
+   **different** quote, the later reading still governing; **appends nothing** where it gained
+   the **equal** one; and **appends nothing** where that action's quote landed and was then
+   **elided**, the absence being one `quotes_elided`'s advance forbids it to read as proof. No
+   interleaving leaves an older reading last, and no later pass over a stored
    output mints at all. **And no `verifies` is read**: a `SUCCEEDED` step whose plan-declared
    `verifies` predicate would **fail**
    over its own output mints exactly as one whose predicate holds, the mint evaluating no
