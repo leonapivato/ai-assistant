@@ -798,10 +798,9 @@ refusals of **this** decision's own reading rather than changes to it. **ADR-025
 is read and **not moved**: §1's no-content rule, its two bases and verdict vocabularies, §6's four
 tests, §7's conflict rule, §11's digest and §§12-13 are untouched, and §6 records why the carrier
 question is the booked decision's. **ADR-0253** is superseded in nothing: this decision adds no
-field to `PlanStep`, and reads `PlanStep.intended_action` as ADR-0265 leaves it. **ADR-0265** is
-relied on entire — `IntendedAction` and its `id` are read as that decision leaves them, its *"no
-fourth field"* closure included, and §11 below makes L2 wait on its landing rather than
-anticipating it. **ADR-0254 §13** is the clause §7 is taken under, its *"Coverage and sufficiency
+field to `PlanStep` and reads `PlanStep.intended_action` as ADR-0265 leaves it. **ADR-0265** is
+relied on entire — `IntendedAction` and its `id` as that decision leaves them, its *"no fourth
+field"* closure included, and §11 makes L2 wait on its landing rather than anticipating it. **ADR-0254 §13** is the clause §7 is taken under, its *"Coverage and sufficiency
 are two tests and neither clears the other"* staying true. **ADR-0021 §1** is relied on for the
 one canonical encoding; **ADR-0145 §2 and §9** for the hazards §7 avoids; **ADR-0029 §5** is
 relied on rather than superseded.
