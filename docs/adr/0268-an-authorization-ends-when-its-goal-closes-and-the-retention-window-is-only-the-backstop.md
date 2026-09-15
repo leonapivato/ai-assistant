@@ -1,7 +1,7 @@
 # 268. An authorization ends when its goal closes, the retention window is only the
 backstop, and an offered change carries the price its acceptance authorises
 
-- Status: Proposed
+- Status: Accepted
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **five scopes.** **§1's `AuthorizationDisposition` clause**, in its closure and its retired
   enumeration: *"closed at exactly **six** members"* becomes **seven**, gaining **`GOAL_CLOSED`** —
