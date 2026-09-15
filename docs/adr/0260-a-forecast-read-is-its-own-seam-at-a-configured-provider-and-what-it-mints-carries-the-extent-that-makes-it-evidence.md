@@ -398,7 +398,12 @@ which §14 defers with what fires it.
 > the remaining days are minted: a day for which the provider omitted a documented field,
 > supplied it as `null`, or supplied a value of a type its documented format does not
 > admit, and a day whose transcription exceeds `forecast_max_day_chars` measured as
-> ADR-0230 §6 measures a fetched document. **Where every day is dropped the read yields
+> ADR-0230 §6 measures a fetched document. **A day the response names more than once is
+> dropped in every one of its rows**, whether they agree or conflict: the response has not
+> described that day once, and preferring one row over another would be this system
+> deciding what the provider said. That is not a deduplication — nothing is merged, no row
+> is preferred, and ADR-0226 §7's whole-union rule at the supply is untouched. **Where
+> every day is dropped the read yields
 > nothing** and the refusal is `NO_RESULT`, whose class §8's disposition carries. **A
 > partial drop is reported nowhere**, which §7 states as a limit and §14 defers with what
 > fires it.
@@ -473,6 +478,24 @@ hard case for the property a forecast has purely — *"its entries lie ahead of 
 > and reachable from nowhere else. ADR-0154 §2's clauses bind unchanged — designation
 > approves no destination, no recipient, no account and no payload, and every send remains
 > subject to ADR-0148's per-call machinery whole.
+
+> **Normative.** **`read` performs ADR-0029 §2's three pre-execution checks itself, in
+> that order, before the credential is read and before any channel is opened** — ADR-0231
+> §6's clause at a second seam and in its own words, because this seam is likewise **not**
+> `ToolInvoker.invoke` and inherits nothing written about `WEB_SEARCH`. (1) The `ToolCall`
+> is **revalidated and detached**, so a mutation landed after construction cannot survive
+> into the read. (2) The definition on that detached copy is compared for equality against
+> **the forecaster's own registered declaration** — the authoritative original here,
+> standing where ADR-0029 §2 puts the registry's, because this section gives the
+> integration an egress registration and no registry entry — and an unequal one is refused.
+> (3) `PermissionDecision.authorises` is **re-evaluated against that same detached copy**
+> rather than trusted from construction. **Every subsequent step reads the revalidated copy
+> and never the argument**; a failure at any of the three raises `ToolBindingError` and is
+> **no outcome of the read**, carrying no `ForecastRefusal` and no disposition; and the
+> order is part of the rule, for ADR-0029 §2's own stated reason. §4's construction-time
+> validator *"catches the honest mistake at the point it is made"*; these are what hold
+> against a deliberate one, and **a validly authorised call naming another declaration is
+> exactly what (2) exists for**.
 
 > **Normative.** **A forecast request is *at the configured forecast provider* when all
 > three hold**: the request carries §11's `forecast_reach` fact; the binding's
@@ -1015,7 +1038,9 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   `MemoryBase.validity` is fully open; a response naming a day without declaring an
 >   offset mints **no record for that day**; a response one of whose days omits a
 >   documented field, supplies it as `null`, or supplies a type its format does not admit
->   mints its **siblings only**; a response every day of which is so dropped mints nothing
+>   mints its **siblings only**; a response naming one day in **two** rows mints no record
+>   for that day and mints its siblings, asserted over agreeing rows and conflicting ones
+>   alike; a response every day of which is so dropped mints nothing
 >   and yields `NO_RESULT`; and a response declaring no instant, and one carrying an
 >   unreadable value in that position, each mint **no record** and yield `UNATTESTED`. In
 >   none of them does any minted value equal a clock the test controls.
@@ -1047,7 +1072,8 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   which §4's model already enforces and which a vendor string stamped consistently would
 >   satisfy. These are the §5 facts that are the producer's rather than
 >   `ForecastOutcome`'s, in `SearchOutcome`'s own division of labour.
-> - **(c) The cancellation that stays an exception, and the deadline's own shape.**
+> - **(c) The cancellation that stays an exception, the deadline's own shape, and the three
+>   checks before the channel.**
 >   **`read`**, cancelled from outside while suspended, re-raises `CancelledError` over the
 >   **production** forecaster: it yields no `ForecastOutcome`, no `ForecastRefusal`, and in
 >   particular no `DEADLINE_EXPIRED`, which is `read`'s **own** expiry and never an outer
@@ -1058,19 +1084,29 @@ recorded for search, arriving at a second seam and costing one enumeration to pr
 >   omitting it is a `TypeError`; a value that is not a `timedelta`, a zero and a negative
 >   each raise `ValueError` **before** the call is revalidated, before any
 >   credential is read and before any channel is opened, asserted over those three
->   orderings so that zero cannot pass as an instant expiry.
+>   orderings so that zero cannot pass as an instant expiry. **And §6's three
+>   pre-execution checks are asserted over the production forecaster**, each refusing with
+>   `ToolBindingError` before any credential is read and any channel is opened: a
+>   `ToolCall` mutated through `__dict__` after construction; one whose definition is not
+>   the forecaster's own registered declaration, **which `authorises` would otherwise pass**;
+>   and one whose decision does not authorise the detached copy. An implementation trusting
+>   the validator that ran at construction fails all three, and one that runs them after
+>   opening the channel fails the ordering they are asserted in.
 > - **(i) The deadline that actually expires, and the one request §3 allows.** A production
 >   forecaster whose exchange is suspended past a **positive** `timeout` **returns**
 >   `DEADLINE_EXPIRED`, raises no `CancelledError` outward, opens no second channel, and
 >   does not report `TRANSPORT_FAILED`. This is the case that separates a seam enforcing its
 >   own deadline from one that merely accepts the keyword, and (c) does not reach it: (c)
 >   asserts what an invalid timeout refuses, this asserts what a valid one does. **And §3's
->   *one ask is one read* is asserted over the two shapes that invite a retry** — a
->   production forecaster whose transport fails, and one whose provider refuses — each
->   issuing **exactly one** provider request and opening **exactly one** channel before
->   returning its disposition. Without them an implementation may open a second channel on
->   a failure, report `TRANSPORT_FAILED` once the second fails too, and satisfy every
->   disposition, contact and statement arm while breaching a clause §3 states absolutely.
+>   *one ask is one read* is asserted over every terminal outcome that could invite a
+>   retry**, **enumerated exhaustively over `ForecastRefusal`** rather than over a chosen
+>   few — `NO_RESULT`, `UNATTESTED`, `RESPONSE_TOO_LARGE`, `PROVIDER_REFUSED`,
+>   `TRANSPORT_FAILED` and `DEADLINE_EXPIRED` — each issuing **exactly one** provider
+>   request and opening **exactly one** channel before returning. A member added without
+>   this assertion fails the arm, as it does in (k). Without it an implementation may
+>   retry after any of them, return the same outcome from the second exchange, and satisfy
+>   every disposition, contact and statement arm while contacting the provider twice
+>   against a clause §3 states absolutely.
 > - **(j) The outcome's exactly-one rule, and the instant that rides with it.** A
 >   `ForecastOutcome` carrying **both** a non-empty `records` and a non-`None` `refusal`,
 >   and one carrying **neither**, is refused at construction; so is one carrying records
