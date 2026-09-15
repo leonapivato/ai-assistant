@@ -1972,16 +1972,16 @@ from ai_assistant.wire.errors import (
 #: * ``GoalBrief`` gains ``actions``, a defaulted empty ``tuple[BriefAction, ...]``
 #:   (ADR-0265 §4). ``TurnResult.goal`` is a ``GoalBrief``, ``wire/codec.py`` renders a
 #:   model by ``model_dump()``, and a ``TurnResult`` is what the promoted surface
-#:   returns from every turn call — so a hub at 45 emits ``"actions": []`` on **every**
-#:   turn it sends and a client at 44 fails it with ``extra_forbidden``. **A defaulted
-#:   member is still a shape change**, exactly as the entries at 39, 40, 42, 43 and 44
-#:   state of ``AttemptEffort.kind``, ``TurnOutcome``'s four,
-#:   ``PermissionRuling.authorised_goal``, ``outbound_statement`` and
-#:   ``forecast_not_read``.
+#:   returns from every turn call — so a hub at 46 emits ``"actions": []`` on **every**
+#:   turn it sends and a client at 45 fails it with ``extra_forbidden``. **A defaulted
+#:   member is still a shape change**, exactly as the entries at 39, 40, 42, 43, 44 and
+#:   45 state of ``AttemptEffort.kind``, ``TurnOutcome``'s four,
+#:   ``PermissionRuling.authorised_goal``, ``outbound_statement``, ``forecast_not_read``
+#:   and ``TurnOutcome.authorizations``.
 #: * ``PlanStep`` gains ``intended_action``, a ``None``-defaulting ``Identifier | None``
 #:   (ADR-0265 §4). A ``PlanStep`` rides inside ``ActionPlan``, which is
-#:   ``TurnResult.plan``, so a hub at 45 emits ``"intended_action": null`` on every step
-#:   of every plan it sends and a client at 44 refuses it on the same ground.
+#:   ``TurnResult.plan``, so a hub at 46 emits ``"intended_action": null`` on every step
+#:   of every plan it sends and a client at 45 refuses it on the same ground.
 #:
 #: :class:`~ai_assistant.core.types.BriefAction` is the one new model that crosses, and
 #: it is a **projection**: ADR-0265 §4's bar is the whole of what may sit in it — no
@@ -2002,7 +2002,7 @@ from ai_assistant.wire.errors import (
 #:
 #: **No compatibility shim, negotiation or lenient decode.** ADR-0084 §3's exact-match
 #: handshake is the mechanism and the refusal naming both versions is the intended
-#: user-visible outcome, so a peer at 44 and a peer at 45 refuse each other and say so.
+#: user-visible outcome, so a peer at 45 and a peer at 46 refuse each other and say so.
 #:
 #: **The promoted method set does not move** and ADR-0177 §1's browser enumeration does
 #: not move: ADR-0265's L1 adds no method to the promoted ``AssistantEngine`` surface,

@@ -71,8 +71,10 @@
   **A stale phrase under ADR-0070 §1's third term, so a dated note is the whole record**
   (ADR-0082 §1): the correction reconciles §5 with a fact that predates it and reverses
   nothing this decision decided — the bump stands, its size stands, and the lane it
-  falls on stands. `wire/envelope.py`'s log entry at 45 states the true grounds, which
-  is where a reader looking for the carrier will be.
+  falls on stands. `wire/envelope.py`'s log entry at **46** states the true grounds,
+  which is where a reader looking for the carrier will be — 46 and not 45 because
+  ADR-0254 §20's Lane 3 landed 45 while L1 was in review, which is §5's own "the figure
+  is that lane's" working rather than a second correction.
 
 ## Context
 
