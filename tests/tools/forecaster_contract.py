@@ -58,7 +58,7 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -67,19 +67,10 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ToolBindingError
 from ai_assistant.core.protocols import Forecaster
 from ai_assistant.core.types import (
-    ActionRequest,
-    CostBasis,
     ForecastOutcome,
     ForecastRefusal,
-    Idempotency,
     MemorySource,
-    PermissionDecision,
-    PermissionOutcome,
-    PermissionRuling,
-    Reversibility,
-    RiskLevel,
     ToolCall,
-    ToolCost,
     ToolDefinition,
 )
 
@@ -127,37 +118,6 @@ _MISATTRIBUTED = (
 _NO_EXTENT = (
     "every record a forecast read mints declares a bounded half-open extent over the day "
     "it is about (ADR-0260 §5, ADR-0117 §2). Got {got!r}"
-)
-
-
-#: When the decision the foreign-declaration case carries was taken. Any instant; what
-#: the case is about is the declaration, not the clock.
-_DECIDED_AT: Final = datetime(2026, 9, 4, 11, 30, tzinfo=UTC)
-
-#: A **valid** declaration that is not any forecaster's, for §6's second check. Its
-#: safety fields are deliberately the mildest this repository admits: the case is about
-#: the comparison against the forecaster's own registered original and not about a
-#: declaration a policy would refuse, and a ``ToolCall`` for it is constructible because
-#: its own decision authorises its own request.
-_SOMETHING_ELSE: Final = ToolDefinition(
-    id="not_a_forecast",
-    capability="something_else",
-    description="An act no forecaster registered.",
-    risk_level=RiskLevel.LOW,
-    reversibility=Reversibility.REVERSIBLE,
-    side_effecting=False,
-    reads=(),
-    writes=(),
-    discloses=(),
-    cost=ToolCost(basis=CostBasis.FREE),
-    idempotency=Idempotency.NATURAL,
-    parameters_schema={
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {"note": {"type": "string"}},
-        "required": ["note"],
-        "additionalProperties": False,
-    },
 )
 
 
@@ -316,6 +276,16 @@ class ForecasterContract:
     #: construction — which is the shape ``CONTRIBUTING.md`` gives
     #: ``optional_obligation``.
     names_no_place_in_its_request: bool = False
+
+    async def another_declaration(self) -> ScriptedRead:
+        """Override with a **fully bound, separately authorised** call carrying a valid
+        but different declaration.
+
+        Its id, its origin and its binding are the subject's own; only some field of the
+        declaration the policy ruled over differs, and the decision it carries was
+        recorded over that very request. Every check but the second therefore passes it.
+        """
+        raise NotImplementedError
 
     async def elsewhere(self) -> ScriptedRead:
         """Override with a **fully bound, separately authorised** wrong-place call.
@@ -712,24 +682,25 @@ class ForecasterContract:
 
         The authoritative original here, standing where ADR-0029 §2 puts the registry's,
         because this integration has an egress registration and no registry entry. The
-        call below is **valid and authorised** — its own decision was recorded over its
-        own request, so the third check would pass it — which is exactly what the second
-        exists to catch: a definition the policy never ruled on, reaching a seam that
-        holds a credential.
+        call the hook supplies is **valid and authorised** — its own decision was
+        recorded over its own request, so the third check passes it — which is exactly
+        what the second exists to catch: a definition the policy never ruled on,
+        reaching a seam that holds a credential. ADR-0018 §4's case, where a declaration
+        tampered into a still-valid state carries a ``discloses``, a ``cost`` or a
+        ``risk_level`` other than the one the ruling was taken over.
+
+        **The call comes from the harness, and round 4's lesson is why.** A suite that
+        built a request for a declaration of its own would produce an *unbound* one,
+        which an egress-backed forecaster refuses at ADR-0148 §8's floor before it ever
+        compares a definition — so the case would stay green with this check deleted,
+        which is what the wrong-place case one arm down was found doing. Only the
+        implementation knows how to build a bound call for a declaration its own seam
+        will bind.
         """
-        subject = await self.reading(1)
-        foreign = ActionRequest(tool=_SOMETHING_ELSE, parameters={"note": "not a forecast"})
-        decision = PermissionDecision.from_request(
-            foreign,
-            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="a different act"),
-            id="d-not-a-forecast",
-            decided_at=_DECIDED_AT,
-        )
+        subject = await self.another_declaration()
 
         with pytest.raises(ToolBindingError):
-            await subject.forecaster.read(
-                ToolCall(request=foreign, decision=decision), timeout=subject.timeout
-            )
+            await subject.forecaster.read(subject.call, timeout=subject.timeout)
 
     @pytest.mark.optional_obligation
     async def test_a_separately_authorised_call_naming_another_place_is_refused(self) -> None:

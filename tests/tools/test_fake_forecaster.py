@@ -20,6 +20,7 @@ a state only this implementation has.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -143,6 +144,17 @@ class TestFakeForecasterContract(ForecasterContract):
         forecaster, call = await _prepared()
         return GatedRead(forecaster=forecaster, call=call, arm=forecaster.suspend_next)
 
+    async def another_declaration(self) -> ScriptedRead:
+        # This fake holds no binding and derives none, so "fully bound" is vacuous for
+        # it: what the shared case needs is a *valid, separately authorised* call whose
+        # declaration is not this fake's own registered copy, and that is what this is.
+        forecaster = FakeForecaster(max_day_chars=_SMALL_CONTENT_BOUND)
+        proposal = await forecaster.request()
+        assert proposal is not None
+        weakened = proposal.tool.model_copy(update={"description": "nobody registered this"})
+        rewritten = ActionRequest(tool=weakened, parameters=dict(proposal.parameters))
+        return ScriptedRead(forecaster=forecaster, call=_authorised(rewritten))
+
     async def elsewhere(self) -> ScriptedRead:
         # This fake holds no binding and derives none, so "fully bound" is vacuous for
         # it: what the shared case needs is a *valid, separately authorised* call naming
@@ -187,6 +199,48 @@ async def test_request_answers_none_where_no_provider_is_configured() -> None:
 
     assert await forecaster.request() is None
     assert forecaster.requested == [None]
+
+
+async def test_a_cancelled_request_is_delivered_onward_unchanged() -> None:
+    """ADR-0260 §13's arm (c), its ``request`` limb — and the preamble's one allowance.
+
+    "**``request`` is asserted over the canonical fake**, under the preamble's one
+    allowance and only where an implementation suspends in it — ``WebSearcher``'s own
+    shape, which tests cancellation on the suspendable member and models the rest on its
+    fake." §4 lets a ``request`` answer from held configuration with no await, so the
+    contract obliges no implementation to suspend there and **a production arm would be
+    asserting a suspension point no implementation owes**; this fake's own lever is
+    therefore the only subject the clause has.
+
+    Held at that suspension and cancelled *there*, because a call cancelled before it
+    starts exercises none of the code an implementation would use to convert one — and
+    what ADR-0060 §1 forbids is converting one: the cancellation leaves as itself, and
+    neither a proposal nor a ``None`` is returned in its place.
+    """
+    forecaster = FakeForecaster()
+    gate = forecaster.suspend_next_request()
+    proposal = asyncio.ensure_future(forecaster.request())
+    await gate.reached()
+
+    proposal.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await proposal
+
+
+async def test_an_unarmed_request_answers_without_suspending() -> None:
+    """The lever is armed or it is absent, which keeps every other case ordinary.
+
+    A fake that suspended on every proposal would make every consumer's ``request`` a
+    scheduling point, and §4's "answers from held configuration" would stop being what
+    this fake exhibits. Armed once, it holds once.
+    """
+    forecaster = FakeForecaster()
+
+    assert await forecaster.request() is not None
+    assert await forecaster.request() is not None
+    assert forecaster.requested == [None, None]
 
 
 async def test_a_read_is_recorded_on_entry_so_its_absence_is_assertable() -> None:

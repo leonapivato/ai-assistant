@@ -23,7 +23,8 @@ to drive its own disposition (§8):
   :attr:`ForecastRefusal.DEADLINE_EXPIRED` is reachable that way *and* by holding a call
   open past its bound, which is the honest route.
 
-**And a fourth, which is what makes the cancellation clause testable at all.**
+**And a fourth and a fifth, which are what make the cancellation clauses testable at
+all.**
 :meth:`read` runs inside a
 :class:`~ai_assistant.testing.cancellation.SuspendableResource`, so a suite can arm
 :meth:`FakeForecaster.suspend_next` and cancel a call that has *demonstrably* arrived at
@@ -32,6 +33,10 @@ only be cancelled before it starts, which exercises none of the code an implemen
 would use to catch a ``CancelledError`` during a provider call and convert it into a
 refusal. **The same lever is what makes ADR-0241 §1's deadline testable here**: a call
 held at that suspension and *not* released outlives whatever bound its caller stated.
+:meth:`FakeForecaster.suspend_next_request` is the same lever on :meth:`request`, and
+it exists because ADR-0260 §13's arm (c) puts that member's cancellation limb here:
+§4 lets a ``request`` answer with no await, so this fake is the only subject the
+clause has.
 
 **The two bounds are the fake's own, for the concrete forecaster's reasons** (§4).
 ``ForecastOutcome`` carries neither, so a suite reads them off the harness rather than off
@@ -595,6 +600,15 @@ class FakeForecaster:
         self._max_day_chars = max_day_chars
         self._id_factory = id_factory
         self._resource = SuspendableResource()
+        #: A resource of :meth:`request`'s own, so that a suite can hold **that** member
+        #: at a point it has demonstrably reached. ADR-0260 §13's arm (c) puts
+        #: ``request``'s cancellation limb over the canonical fake and says why: §4 lets
+        #: a ``request`` answer from held configuration with no await, "so the contract
+        #: does not oblige that member to suspend and a production arm would be
+        #: asserting a suspension point no implementation owes". This fake is therefore
+        #: the only place the clause has a subject, and a second resource is what keeps
+        #: arming one member from holding the other.
+        self._proposals = SuspendableResource()
         #: How many times this forecaster's :meth:`request` was called. Appended on
         #: entry, so a consumer asserting that a proposal was never sought has the
         #: absence of a row to assert over.
@@ -625,6 +639,23 @@ class FakeForecaster:
         """
         return self._resource.suspend_next()
 
+    def suspend_next_request(self) -> LoopSuspension:
+        """Arm the next :meth:`request` to suspend inside its own modelled resource.
+
+        **The lever ADR-0260 §13's arm (c) needs**, and the only one in this repository
+        that can hold a ``request``: §4 lets that member answer from held configuration
+        with no await, so a production forecaster suspends in it nowhere, and a
+        cancellation delivered before a call starts exercises none of the code an
+        implementation would use to convert one.
+
+        Returns:
+            The handle a suite waits on and releases.
+
+        Raises:
+            RuntimeError: If a suspension is already armed.
+        """
+        return self._proposals.suspend_next()
+
     async def request(self) -> ActionRequest | None:
         """Propose the forecast read this configuration would make, or answer none.
 
@@ -638,16 +669,25 @@ class FakeForecaster:
             :data:`FAKE_FORECAST_READ` where no cost was configured and its ``PER_CALL``
             twin where one was (ADR-0236 §1) — or ``None`` where this fake was built with
             no provider configured.
+
+        Raises:
+            CancelledError: Re-raised unchanged when a call armed by
+                :meth:`suspend_next_request` is cancelled from outside while suspended,
+                and converted into neither a proposal nor a ``None`` (ADR-0060, ADR-0260
+                §4). That suspension is this fake's own: §4 lets a ``request`` answer
+                with no await, so nothing here suspends unless a suite arms it, and this
+                is the only subject ADR-0260 §13's arm (c) has for the clause.
         """
         self.requested.append(None)
-        if self._origin is None:
-            return None
-        parameters: dict[str, FrozenJson] = {
-            "origin": self._origin,
-            "latitude": self._latitude,
-            "longitude": self._longitude,
-        }
-        return ActionRequest(tool=self._declaration, parameters=parameters)
+        async with self._proposals.held():
+            if self._origin is None:
+                return None
+            parameters: dict[str, FrozenJson] = {
+                "origin": self._origin,
+                "latitude": self._latitude,
+                "longitude": self._longitude,
+            }
+            return ActionRequest(tool=self._declaration, parameters=parameters)
 
     async def read(self, call: ToolCall, /, *, timeout: timedelta) -> ForecastOutcome:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0241 §1, §2); a caller wrapping this in `asyncio.timeout` cancels the forecaster mid-await and cannot classify its own expiry
         """Return the scripted answer, under ``timeout``.
