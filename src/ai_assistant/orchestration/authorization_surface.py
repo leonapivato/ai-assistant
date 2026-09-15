@@ -272,17 +272,20 @@ class AuthorizationOperations:
             AuthorizationError: If the authorization store could not be read.
             PlanningError: If the plan store could not be read.
         """
-        # **The reading is taken first and unconditionally**, which is
-        # `RecipientGrantOperations.grantable_decisions`' own shape one seam over: it
-        # "reads the clock once for the whole window, so the reading happens whether or
-        # not a row carries an expiry". A guard reached only on the populated branch is
-        # one a non-conforming clock slips past on every empty answer, and ADR-0026 §4's
-        # translation would then be true of some calls and not others.
-        reading = self._now()
         goal = await self._plans.get_goal(goal_id)
         if goal is None:
             return ()
         rows = await self._authorizations.standing(goal_id)
+        # **The reading is taken after the snapshot and never before it.** A reading
+        # taken first is one the snapshot can outrun: a row settled ``ESTABLISHED``
+        # while ``standing`` is suspended comes back with a ``settled_at`` **after**
+        # that reading, and §1's predicate then calls a live row not live — a listing
+        # true at no real instant, which is the failure ADR-0193 §9's one-reading rule
+        # exists to prevent, arrived at from the other side. Taking it here bounds every
+        # row's ``settled_at`` below by construction. It also keeps §11's *"a goal that
+        # store does not hold is an empty answer rather than a raise"* true of a
+        # deployment whose clock is broken. Adversarial review, round 2, ``blocker``.
+        reading = self._now()
         return tuple(
             view_of(row, goal_statement=goal.statement, live=is_live(row, reading)) for row in rows
         )

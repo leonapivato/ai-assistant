@@ -9963,6 +9963,18 @@ async function abandonGoal(goal) {
 // and a re-read holding only an id would have nothing to render it by.
 let authorizedGoal = null;
 
+// How many listings this page has started. The panel is opened from a goal row, and two
+// rows pressed in quick succession are two requests that can land in either order — so
+// the count is captured when a request starts and compared when it returns, and a
+// response that is not the latest is dropped rather than rendered.
+//
+// **Without it the rows on screen and `authorizedGoal` can name different goals**: a
+// slow request for A landing after a fast one for B leaves B's statement recorded and
+// A's rows drawn, and a withdrawal taken from an A row then re-reads B and writes
+// "Withdrawn" above it — an act reported against work it was not taken on. This is
+// `runs.goals`' own arrangement one panel over. Adversarial review, round 2, `major`.
+let authorizationRuns = 0;
+
 // --- what an authorization says, on this page (ADR-0254 §11) ----------------
 //
 // **One reader and one renderer for a coverage member**, shared by the question, the
@@ -10292,7 +10304,8 @@ async function listAuthorizations(goal, keepSaid) {
   if (!keepSaid) {
     sayAuthorizationAct(null);
   }
-  authorizedGoal = goal;
+  authorizationRuns += 1;
+  const run = authorizationRuns;
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -10300,9 +10313,12 @@ async function listAuthorizations(goal, keepSaid) {
   }
   try {
     const body = await relay(half, "/authorizations", { goal_id: goal.id }, "authorizations");
-    if (body === null) {
+    // A response that is not the latest is dropped whole: it renders nothing, it moves
+    // `authorizedGoal` not at all, and the run that overtook it owns the panel.
+    if (body === null || run !== authorizationRuns) {
       return;
     }
+    authorizedGoal = goal;
     const list = el("authorization-list");
     clearNode(list);
     if (!Array.isArray(body.authorizations) || !body.authorizations.every(readAuthorizationView)) {

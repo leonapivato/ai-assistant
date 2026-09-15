@@ -6777,11 +6777,11 @@ class Engine:
                     if planned is None:  # pragma: no cover — a step not in its plan is corrupt
                         continue
                     live.add((state.id, step.step_id))
-                    recovered.append(
-                        await self._recovered_confirmation(
-                            state.id, step.step_id, planned.parameters, confirmed
-                        )
+                    one = await self._recovered_confirmation(
+                        state.id, step.step_id, planned.parameters, confirmed
                     )
+                    if one is not None:
+                        recovered.append(one)
             await self._reconcile(live)
             return tuple(recovered) + await self._pending_read_confirmations()
 
@@ -7715,12 +7715,20 @@ class Engine:
         park and the read park — so a surface needs one renderer and a restart renders
         what the question rendered (§11, ADR-0178 §5's fourth clause).
 
-        **Absence is the answer on three grounds and is a fault on none**: a
+        **Absence means the answer establishes nothing, and it means only that**: a
         deployment wiring no authorization store, a `CONFIRM` failing one of §1's four
-        proposal conditions, and a proposal the store refused. §1 already rules that
-        outcome — *"the answer establishes nothing: the `CONFIRM` is resolved and the
-        one call is authorised by route (a)"* — so a question that cannot say *this
-        would establish a standing authority* is a question that establishes none.
+        proposal conditions, and a proposal the store refused at the write. §1 already
+        rules that outcome — *"the answer establishes nothing: the `CONFIRM` is resolved
+        and the one call is authorised by route (a)"*.
+
+        **A store that could not be read is not one of those, and is not answered
+        ``None``.** A row it failed to return may be durable and may be established by
+        an approval, so calling it absent would put a question in front of the user that
+        named no bound and then established one — which §11 refuses in terms. The fault
+        propagates and :meth:`_recovered_confirmation` refuses **that** confirmation,
+        which is ADR-0178 §4's own sanctioned degradation: *"a surface that cannot
+        render it may refuse that confirmation rather than every confirmation"*.
+        Adversarial and architecture review, round 2, ``blocker``.
 
         Args:
             confirmation_id: The recorded ``CONFIRM``'s own id.
@@ -7734,23 +7742,7 @@ class Engine:
         operations = self._authorization_operations
         if operations is None:
             return None
-        try:
-            return await operations.projection_for(confirmation_id)
-        except AuthorizationError as exc:
-            # **A fault costs the disclosure and never the listing.** ADR-0254 §16
-            # closes `AssistantEngine` at *"two members on an existing Protocol and no
-            # other change to it"*, so `pending_confirmations` may not begin raising a
-            # class its contract does not declare. What is lost is the standing half of
-            # one recovered question — the state issue #2378 describes, reached only on
-            # a store that cannot be read — and the live path never reaches it at all,
-            # the row travelling on the disposition there. Logged **by class and by no
-            # value** (ADR-0145 §8).
-            _log.warning(
-                "authorization_projection_unread",
-                confirmation_id=confirmation_id,
-                refused_by=type(exc).__name__,
-            )
-            return None
+        return await operations.projection_for(confirmation_id)
 
     async def _announced_authorizations(
         self, disposition: StepDisposition
@@ -13408,7 +13400,7 @@ class Engine:
         step_id: str,
         parameters: FrozenJsonMapping,
         confirmed: PermissionDecision,
-    ) -> Confirmation:
+    ) -> Confirmation | None:
         """Assemble a :class:`Confirmation` for a durably-parked step (ADR-0052 §1).
 
         The counterpart to :meth:`_confirmation` on the recovery path: the tool
@@ -13419,6 +13411,27 @@ class Engine:
         :meth:`resume` routes through the runner's restart recovery.
         """
         handle = self._handle_for_binding(execution_id, step_id)
+        try:
+            authorization = await self._authorization_projection(confirmed.id)
+        except AuthorizationError as exc:
+            # **This one park is withheld and the rest of the listing stands**, which is
+            # ADR-0178 §4's own degradation — *"a surface that cannot render it may
+            # refuse that confirmation rather than every confirmation"* — and is what
+            # this method already does for a park whose decision the trail no longer
+            # holds. Rendering it with ``authorization`` ``None`` instead would state
+            # that answering establishes no standing authority, which a row the store
+            # merely failed to return does not establish; and raising would teach
+            # `pending_confirmations` a class its contract does not declare, which
+            # ADR-0254 §16 rules out (*"two members on an existing Protocol and no other
+            # change to it"*). Logged **by class and by no value** (ADR-0145 §8).
+            # Adversarial and architecture review, round 2, ``blocker``.
+            _log.warning(
+                "confirmation_withheld",
+                decision_id=confirmed.id,
+                step_id=step_id,
+                refused_by=type(exc).__name__,
+            )
+            return None
         return Confirmation(
             tool_id=confirmed.tool.id,
             tool_description=confirmed.tool.description,
@@ -13435,7 +13448,7 @@ class Engine:
             # no disposition to carry the row across a process boundary — and it is a
             # site where reading is safe: nothing is parked by this call, and the park it
             # renders was committed by a run that has long since returned.
-            authorization=await self._authorization_projection(confirmed.id),
+            authorization=authorization,
         )
 
     async def _read_confirmation(
