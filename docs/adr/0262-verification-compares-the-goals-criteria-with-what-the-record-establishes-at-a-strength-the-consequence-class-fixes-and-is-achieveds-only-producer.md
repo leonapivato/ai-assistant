@@ -107,15 +107,17 @@
   conditions stands with none added and none removed — ADR-0267 §6's provider-side hold, condition
   (7), binding exactly that class — and its *"ratification is not implementation"* is true of the
   superseding decision on the day it ratifies. **Three further places where the replaced reading is
-  available are left standing and are named so that no reader takes them for the scope**: §2a's
-  unmarked ground that a `MONEY` member *"is proved against a quote **before** the act"* and that
-  this decision adds no *post-hoc* comparison stays true of **this** document; §9's reassignment
-  entry is **fired** rather than falsified, a booking discharged not being a clause made false, which
-  is §10's own test; and §12's arm asserting that *"a `MONEY` criterion is `unestablished` whatever
-  else holds"* is **restated** by the implementing lane under the new conjunct — an agreeing charge
-  yielding `VERIFIED`, a disagreeing one `PARTIAL` — its property, its other criteria and its rung-2
-  case unmoved. **Every other clause of this ADR binds entire**, §§1, 2a, 3-6, 8, 10, 11 and 13
-  included: the report's two fields and its fixed statements, which the superseding decision reports
+  available are left standing and are named so that no reader takes them for the scope**: §3's rung
+  clause — *"A criterion about an amount is no longer the exception it was … what this decision does
+  **not** add is the *post-hoc* comparison, and §9 names it with what fires it — **reassigned**
+  there"* — stays true **word for word**, stating what *this* document does not add while the
+  superseding decision adds it elsewhere, which is what the reassignment anticipates; §9's
+  reassignment entry is **fired** rather than falsified, a booking discharged not being a clause made
+  false, which is §10's own test; and §12's **arms 3 and 4**, each asserting a `MONEY` criterion
+  `unestablished`, are **restated** by the implementing lane under the new conjunct — an agreeing
+  charge yielding `met`, a disagreeing one `unmet` — each arm's other criteria, its negative half and
+  its `ACHIEVED` assertions unmoved. **Every other clause of this ADR binds entire**, §§1, 2a, 3-6,
+  8, 10, 11 and 13 included: the report's two fields and its fixed statements, which the superseding decision reports
   the finding through and neither widens nor renames.
 
 ## Context

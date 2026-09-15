@@ -17,18 +17,15 @@ disagrees with it is a reported finding
   grouping by `parameters_digest`, its ambiguity rule, its no-fourth-result rule and its
   no-model-operand rules; §7's three wired-deployment obligations, its count of **seven**
   conditions and its *"ratification is not implementation"*.
-- **Partially supersedes** [ADR-0267](0267-a-quote-is-a-record-the-goal-holds-in-order-read-from-the-output-its-declaration-names.md)
-  — **one scope, in §1's unmarked ground beside the no-eighth-field clause and in one limb of it**:
-  the sentence *"A later record naming one quote — a verification finding, say — names it by the
-  act and the digest"*. That pair selects **the governing** quote for that pair at the instant it is
-  read, and a dispatch's pin must state the reading the dispatch was proved against, which a later
-  append displaces; so this record carries the quote **by value** and names it by nothing. **§1's
-  decision to mint no identifier is upheld and reached by a different route**, so ADR-0267 §10's
-  *"An identifier of a quote's own"* entry is **fired and discharged in the negative** rather than
-  contradicted; §1's seven fields, its no-eighth-field clause, its four facts, its totality
-  obligation, its digest rule and its bound-to-the-act rule bind entire, as does every other
-  section of that ADR — §4's mint, §5's seam, §6's freshness prerequisite and §7's *"`quoted` is
-  provenance"* conspicuously so.
+- **No other ADR is superseded in whole or in part**, and **ADR-0267 is not, in any scope**. §1's
+  unmarked ground beside the no-eighth-field clause reads that a later record naming one quote
+  *"names it by the act and the digest"* — and its very next sentence carves this case out: *"**It
+  is not a handle on an individual displaced quote, and the claim is not made**"*, with §10 booking
+  what would need one *"if that record needs a handle the pair cannot give"*. This record needs no
+  handle at all, carrying the `ActionQuote` **by value**, so §10's entry is **fired and answered no**
+  — a booking discharged and not a clause made false — and §1 stays true read whole. **ADR-0254,
+  ADR-0192, ADR-0266, ADR-0270, ADR-0249 and ADR-0016 are each reached and none is moved.** §7 states
+  the test for every ADR this decision reaches and shows the working at each.
 
 ## Context
 
@@ -322,28 +319,38 @@ producer, no freshness rule and no coverage condition.
 > sweep of that document for every clause naming `BoundKind.MONEY`, a charge or a quote: **(a)** §2's
 > three-results list, whose `unestablished` limb names *"the criterion's kind is
 > **`BoundKind.MONEY`**"* — that limb is **removed**, and the list's other five limbs bind entire;
-> **(b)** §2's `MONEY` clause itself, the scope above; **(c)** §2a's unmarked ground that a `MONEY`
-> member *"is proved against a quote **before** the act … what this decision does **not** add is the
-> *post-hoc*"* comparison — **true of ADR-0262 and left standing**, this decision adding the
-> post-hoc half elsewhere; **(d)** §7's gate statement, the second scope; and **(e)** §12's arm
-> asserting that *"a `MONEY` criterion is `unestablished` whatever else holds"*, whose two cases the
-> implementing lane **restates** under §3's conjunct — an agreeing charge yielding `VERIFIED` and a
-> disagreeing one `PARTIAL` — the arm's property, its other criteria and its rung-2 case unmoved.
+> **(b)** §2's `MONEY` clause itself, the scope above; **(c)** §3's rung clause, *"A criterion about
+> an amount is no longer the exception it was … what this decision does **not** add is the *post-hoc*
+> comparison, and §9 names it with what fires it — **reassigned** there"* — **true of ADR-0262 word
+> for word and left standing**, since it states what **that** document does not add while this
+> decision adds the post-hoc half elsewhere, which is what its own reassignment anticipates;
+> **(d)** §7's gate statement, the second scope; and **(e)** §12's **arms 3 and 4**, each asserting
+> that a `MONEY` criterion is `unestablished` — arm 3's *"a confirmed `MONEY` member over a booking
+> step every declaration holds over → **unestablished**"* and arm 4's campsite pair — which the
+> implementing lane **restates** under §3's conjunct: an agreeing charge yields `met` and `VERIFIED`,
+> a disagreeing one `unmet`, and each arm's other criteria, its negative half and its `ACHIEVED`
+> assertions are unmoved.
 > **§9's reassignment entry is *fired*, not falsified**: it books this subject here by name and a
 > booking discharged is not a clause made false, which is ADR-0262's own test for the seven
 > documents that book subjects into it.
 
-> **Normative — ADR-0267 §1's naming sentence is superseded in one limb, and §1's decision is
-> upheld.** The unmarked ground beside the no-eighth-field clause reads *"A later record naming one
-> quote — a verification finding, say — names it by the act and the digest, which under §2's order
-> select **the governing** quote for that pair"*. Under ADR-0089 §3 unmarked text supplies no
-> obligation, so what is replaced is a **reading** and not a rule — but a reader holding only §1
-> builds this record by that pair and builds it wrong, which is ADR-0082 §1's test met. **The record
-> carries the quote by value** (§1). **§1's conclusion is unchanged and reached differently**: no id
-> is minted, no eighth field is added, and ADR-0267 §10's *"An identifier of a quote's own … Fired
-> by the decision that records a verification finding against the quote it contradicts, **if that
-> record needs a handle the pair cannot give**"* is **fired and answered no**, so **no record is
-> owed on §10**.
+> **Normative — no record is owed against ADR-0267, and the working is stated rather than assumed
+> because a reader may expect one.** §1's unmarked ground reads *"A later record naming one quote —
+> a verification finding, say — names it by the act and the digest, which under §2's order select
+> **the governing** quote for that pair"*, which would be the wrong handle for this pin. **But §1
+> does not stop there**: its next sentence is *"**It is not a handle on an individual displaced
+> quote, and the claim is not made**: two readings over identical arguments carry the same pair, so
+> a record meaning the **earlier** of them cannot say which, and §2's elision can drop it. §10 books
+> the case that would need one with what fires it."* **So §1 read whole makes no claim about this
+> record and sends its reader to §10**, whose entry — *"An identifier of a quote's own … Fired by
+> the decision that records a verification finding against the quote it contradicts, **if that
+> record needs a handle the pair cannot give**"* — is **fired here and answered no**: the record
+> needs no handle, carrying the quote by value (§1). A booking **discharged** is not a clause made
+> false, which is ADR-0262's own test for the documents that book subjects into it, and under
+> ADR-0089 §3 the passage is unmarked ground supplying no obligation in any case. **No sentence of
+> ADR-0267 becomes false or over-wide**, so this is a **stacked addition**, recorded here and
+> nowhere else (ADR-0082 §1) — and ADR-0082 §1's own rule that *"the test controls, not the label"*
+> is why the record is declined rather than written for tidiness.
 
 > **Normative — no record is owed against ADR-0254, §15's and §16's clauses included, and the
 > working is stated rather than assumed.** **§13** stays true word for word: the pin is an operand
@@ -368,13 +375,14 @@ producer, no freshness rule and no coverage condition.
 > declared-not-inferred default is applied, not amended. **ADR-0249 §9's** containment and **ADR-0262
 > §6's** two-field `AttemptReport` are obeyed rather than scoped (§3).
 
-> **Normative — the header records this change writes, and they are the whole of it.** ADR-0262's
-> and ADR-0267's `Status` lines each take ADR-0070 §4's canonical partial form on **one physical
-> line**, this decision's pair added beside any already there and never replacing it, each scope
-> naming a clause and carrying **no `ADR-NNNN` token** so that §4's *"every `ADR-NNNN` after the
-> leading `Partially superseded by` is a target"* reads true; and each gains the **appended dated
-> note** ADR-0070 §1 requires, stating its scope in full. **No other ADR's header is edited**, and no
-> file under `src/` or `tests/` is touched by the lane that lands this document.
+> **Normative — the header record this change writes, and it is the whole of it.** **ADR-0262's
+> `Status` line alone** takes ADR-0070 §4's canonical partial form on **one physical line**, this
+> decision's pair carrying **both** scopes and added beside any already there rather than replacing
+> it, the scope text naming clauses and carrying **no `ADR-NNNN` token** so that §4's *"every
+> `ADR-NNNN` after the leading `Partially superseded by` is a target"* reads true; and that ADR gains
+> the **appended dated note** ADR-0070 §1 requires, stating both scopes in full. **No other ADR's
+> header is edited — ADR-0267's conspicuously not** — and no file under `src/` or `tests/` is touched
+> by the lane that lands this document.
 
 ### 8. The lane cut, and the arms this decision owes
 
@@ -438,10 +446,11 @@ producer, no freshness rule and no coverage condition.
 
 ### 9. This ADR classified, marked, and how it is ratified
 
-> **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment**: a reader
-> holding only ADR-0262 §2 or §7, or ADR-0267 §1, would act differently, so §7's two records take
-> ADR-0070 §3's and §4's partial form. Every other reach of this decision is a **stacked addition**,
-> recorded in this document and nowhere else (ADR-0082 §1, §7).
+> **Normative.** Under ADR-0070 §1's test this is a **supersession and not an amendment** for
+> ADR-0262: a reader holding only its §2 or its §7 would act differently, so §7's two records take
+> ADR-0070 §3's and §4's partial form, on that ADR alone. **Every other reach of this decision is a
+> stacked addition**, ADR-0267's included, recorded in this document and nowhere else (ADR-0082 §1,
+> §7).
 
 > **Normative.** It is a **contract** decision — it widens `core/types.py` — so under ADR-0015 §1 it
 > is reviewed by **both** lenses while `Proposed`, ratified by `just adr-ratify`'s one-line flip, and
