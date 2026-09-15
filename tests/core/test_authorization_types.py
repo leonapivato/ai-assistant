@@ -32,6 +32,7 @@ from ai_assistant.core.types import (
     AuthorizationDisposition,
     AuthorizationOrigin,
     AuthorizationSettlement,
+    BoundedArgument,
     BoundKind,
     CoverageMember,
     PermissionOutcome,
@@ -216,34 +217,60 @@ def test_a_period_member_fixing_a_date_the_reading_accepts_is_constructible(fixe
     )
 
 
-@pytest.mark.parametrize(
-    ("kind", "fixed", "bound"),
-    [
-        (BoundKind.MONEY, "60", None),
-        (BoundKind.TERMS, 60, None),
-        (BoundKind.TERMS, True, None),
-        (BoundKind.TERMS, None, "money"),
-        (BoundKind.MONEY, None, "terms"),
-        (BoundKind.PERIOD, None, "money"),
-    ],
-)
-def test_a_member_whose_value_its_kind_does_not_state_is_not_constructible(
-    kind: BoundKind, fixed: object, bound: str | None
-) -> None:
-    """ADR-0266 §3's kind validation, over every shape it refuses (arm 6(b)).
+#: One bound of each kind, so the pair matrix below is written over kinds rather
+#: than over three hand-built values (ADR-0266 §11's arm 6(b)).
+def _bound_of(kind: BoundKind) -> ValueBound:
+    """A well-formed :class:`ValueBound` of ``kind``."""
+    return {
+        BoundKind.MONEY: money_bound(),
+        BoundKind.PERIOD: period_bound(),
+        BoundKind.TERMS: terms_bound("flexible"),
+    }[kind]
 
-    A ``MONEY`` ``fixed`` outright — *"an amount carries no currency on a fixed
-    member"* — a ``TERMS`` ``fixed`` that is not a string, and every unequal pair
-    of a member's kind and its bound's.
-    """
-    stated = {"money": money_bound(), "terms": terms_bound("flexible")}
+
+@pytest.mark.parametrize(
+    ("kind", "fixed"),
+    [(BoundKind.MONEY, "60"), (BoundKind.TERMS, 60), (BoundKind.TERMS, True)],
+)
+def test_a_member_fixing_a_value_its_kind_does_not_state_is_not_constructible(
+    kind: BoundKind, fixed: object
+) -> None:
+    """ADR-0266 §3, arm 6(b): a ``MONEY`` ``fixed`` outright — *"an amount carries
+    no currency on a fixed member"* — and a ``TERMS`` ``fixed`` that is not a
+    string, ``True`` among them, since ``bool`` is an ``int`` in Python."""
     with pytest.raises(ValidationError):
         CoverageMember(
             kind=kind,
             fixed=fixed,  # type: ignore[arg-type]  # the refusal is what is asserted
-            bound=None if bound is None else stated[bound],
             basis=authorization_basis(),
         )
+
+
+@pytest.mark.parametrize(
+    ("kind", "bound"),
+    [(one, other) for one in BoundKind for other in BoundKind if one is not other],
+)
+def test_a_member_whose_bound_is_of_another_kind_is_not_constructible(
+    kind: BoundKind, bound: BoundKind
+) -> None:
+    """ADR-0266 §11's arm 6(b): **every unequal pair of the three kinds**.
+
+    **Generated from the vocabulary rather than listed**, so the matrix is complete
+    by construction and a fourth ``BoundKind`` would widen it without anyone
+    remembering to. Adversarial review, round 7, ``blocker``: three of the six pairs
+    were exercised and the arm asks for all of them.
+    """
+    with pytest.raises(ValidationError, match="states a bound of that kind"):
+        CoverageMember(kind=kind, bound=_bound_of(bound), basis=authorization_basis())
+
+
+@pytest.mark.parametrize("kind", list(BoundKind))
+def test_a_member_whose_bound_is_of_its_own_kind_is_constructible(kind: BoundKind) -> None:
+    """Arm 6(b)'s *"beside one equal pair of each that is"* — the three controls,
+    without which the matrix above would pass on a validator refusing everything."""
+    member = CoverageMember(kind=kind, bound=_bound_of(kind), basis=authorization_basis())
+    assert member.bound is not None
+    assert member.bound.kind is kind
 
 
 def test_a_row_carrying_two_members_of_different_kinds_is_constructible() -> None:
@@ -565,6 +592,84 @@ def test_a_declaration_declaring_a_system_supplied_key_at_a_kind_is_not_construc
                 ),
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("kind", "currency_argument", "refusal"),
+    [
+        (BoundKind.MONEY, None, "names the key carrying its currency"),
+        (BoundKind.PERIOD, "currency", "carries no currency_argument"),
+        (BoundKind.TERMS, "currency", "carries no currency_argument"),
+        (BoundKind.MONEY, "amount", "names a second key"),
+    ],
+    ids=["money-without", "period-with", "terms-with", "one-key-for-both"],
+)
+def test_a_bounded_argument_of_a_shape_section_seven_does_not_admit_is_refused(
+    kind: BoundKind, currency_argument: str | None, refusal: str
+) -> None:
+    """ADR-0266 §7's two shapes, and arm 6(b)'s enumeration of what neither admits.
+
+    ``MONEY`` **with** a ``currency_argument`` or ``PERIOD``/``TERMS`` **with
+    none** — an amount is the only kind §4's readings denominate, and a currency key
+    beside a period or a term is a value nothing reads. **And ``argument`` never
+    equals ``currency_argument``**: one key cannot carry both the amount and the
+    code it is denominated in, and a declaration claiming so would have §4's
+    currency conjunct compare an amount against a currency. Adversarial review,
+    round 7, ``blocker``.
+    """
+    with pytest.raises(ValidationError, match=refusal):
+        BoundedArgument(argument="amount", kind=kind, currency_argument=currency_argument)
+
+
+@pytest.mark.parametrize(
+    ("kind", "currency_argument"),
+    [(BoundKind.MONEY, "currency"), (BoundKind.PERIOD, None), (BoundKind.TERMS, None)],
+)
+def test_a_bounded_argument_of_a_shape_section_seven_admits_is_constructible(
+    kind: BoundKind, currency_argument: str | None
+) -> None:
+    """The controls beside the refusals above: exactly two shapes, and both work."""
+    assert (
+        BoundedArgument(argument="amount", kind=kind, currency_argument=currency_argument).kind
+        is kind
+    )
+
+
+def test_a_declaration_declaring_one_argument_twice_is_not_constructible() -> None:
+    """ADR-0266 §7: ``bounded_arguments`` is **duplicate-free on ``argument``**.
+
+    Two declarations of one key would need a precedence rule at the comparison,
+    which is the shape ADR-0254 §2 refuses one type over. **Two declarations of one
+    *kind* are admitted** and are not a defect — §7 answers those by meeting no
+    member of that kind on the argument route at all, which the policy suite
+    exercises. Adversarial review, round 7, ``blocker``.
+    """
+    with pytest.raises(ValidationError, match="name the same argument"):
+        ToolDefinition.model_validate(
+            {
+                **AUTHORIZATION_TOOL.model_dump(),
+                "bounded_arguments": (
+                    {"argument": "amount", "kind": "money", "currency_argument": "currency"},
+                    {"argument": "amount", "kind": "terms", "currency_argument": None},
+                ),
+            }
+        )
+
+
+def test_a_declaration_declaring_two_arguments_at_one_kind_is_constructible() -> None:
+    """The control beside it, and the distinction the rule turns on: the refusal is
+    over the **argument**, and two arguments at one kind are a declaration this type
+    admits and the comparison answers (ADR-0266 §7)."""
+    declared = ToolDefinition.model_validate(
+        {
+            **AUTHORIZATION_TOOL.model_dump(),
+            "bounded_arguments": (
+                {"argument": "amount", "kind": "money", "currency_argument": "currency"},
+                {"argument": "fee", "kind": "money", "currency_argument": "currency"},
+            ),
+        }
+    )
+    assert len(declared.bounded_arguments) == 2
 
 
 def test_a_declaration_filling_the_currency_key_itself_declares_no_money_argument() -> None:

@@ -8313,7 +8313,12 @@ def test_each_bound_kind_is_read_as_the_shape_it_is() -> None:
     # And a flag belonging to the money shape is refused on the other two, which is
     # the `absent` rule reaching a field a `null` test cannot see (a `bool` is not
     # `null`).
-    assert reader.count("bound.maximum_exclusive !== true") == 2
+    # **Absent-as-`false` and not merely "not `true`"**: the flag is a `bool` with a
+    # default, so it crosses on every bound of every kind and the `absent` test
+    # cannot see it — `!== true` admitted `null`, `"true"` and `1`, each of which
+    # `ValueBound` refuses. Adversarial review, round 7, `major`.
+    assert reader.count("bound.maximum_exclusive === false") == 2
+    assert "maximum_exclusive !== true" not in reader
     assert 'bound.kind === "period"' in reader
     assert "isText(bound.starts_at)" in reader
     assert "isText(bound.ends_at)" in reader
