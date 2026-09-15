@@ -945,6 +945,24 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     member it was given" one that "has not implemented this section" — which is the
     obligation ADR-0244 §13's own last clause already put on the two members above.
 
+    **``forecast_not_read`` is ADR-0260 §10's member, and the decision taken here is
+    "not rendered" for ``search_not_serviced``'s identical reason.** §12 cuts three
+    lanes — the contract and its ``tools/`` implementation, the authority in
+    ``permissions/``, and the servicing in ``orchestration/`` plus the composition root
+    — and names ``interfaces/`` in none of them. So the member crosses the wire, because
+    it is on ``TurnOutcome`` and this page decodes the whole outcome, and no panel reads
+    it.
+
+    **The cost in this lane is nil, and that is stated rather than hidden.** ADR-0260
+    §12's L1 wires the forecaster into no servicing site, so nothing computes a
+    ``ForecastDisposition`` and the member is ``None`` on every outcome this adapter can
+    see. What a surface owes when it does arrive is not optional — §10 requires "one
+    fixed statement per member" and ADR-0242 §9's all-or-nothing rule governs it, which
+    is the same obligation the entry above already carries — and the terminal's is
+    likewise a later lane's, ``interfaces/cli.py`` gaining a phrase here only for
+    ``OutboundDestination``'s new member, which is an ``assert_never`` this addition
+    forces rather than a rendering decision.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -967,6 +985,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "reference",
         "disambiguation",
         "outbound_statement",
+        "forecast_not_read",
     }
 
 
