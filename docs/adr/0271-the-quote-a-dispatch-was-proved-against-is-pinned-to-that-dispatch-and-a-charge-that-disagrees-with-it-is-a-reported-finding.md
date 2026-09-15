@@ -11,12 +11,16 @@ disagrees with it is a reported finding
   added **conjunctively** to satisfaction, a **disagreeing** one **disjunctively** to contradiction,
   and a contradiction §2 already reached stands whether or not a charge can be read. That clause's
   stated ground was that *"the charge is not an operand this decision has"*; this decision lands the
-  operand, which is what ADR-0262 §9 reassigns here by name. **And §7's gate statement, in the limb *"the guarantee does
-  not cover a capability whose acts make a charge"* alone**: it covers one, for a deployment that
-  declares where its acts report a charge. **Every other clause of both sections binds entire** —
-  §2's authorising rows, its confirmed member, its bound steps, its operative declaration, its
-  grouping by `parameters_digest`, its ambiguity rule, its no-fourth-result rule and its
-  no-model-operand rules; §7's three wired-deployment obligations, its count of **seven**
+  operand, which is what ADR-0262 §9 reassigns here by name. **And §7's gate statement, in two
+  limbs and no more**: the limb *"the guarantee does not cover a capability whose acts make a
+  charge"*, which is **reversed** — it covers one; and, in consequence, its *"A deployment wiring a
+  covered capability does **two** things as part of wiring it"* **in the application to a capability
+  whose acts charge alone**, where the deployment does a **third** thing beside those two — it
+  declares where those acts report a charge. **The two obligations that clause names are themselves
+  unchanged**, and the clause binds entire, at two, for every covered capability whose acts make no
+  charge. **Every other clause of both sections binds entire** — §2's authorising rows, its confirmed
+  member, its bound steps, its operative declaration, its grouping by `parameters_digest`, its
+  ambiguity rule, its no-fourth-result rule and its no-model-operand rules; §7's count of **seven**
   conditions and its *"ratification is not implementation"*.
 - **Partially supersedes** [ADR-0016](0016-tool-definition-and-registry.md)
   — **one scope, in §1, and it is the scope four records already take there reaching one further
@@ -284,13 +288,16 @@ producer, no freshness rule and no coverage condition.
 > otherwise, which now reaches a charge that cannot be read at all. **The `BoundKind.MONEY` limb of
 > §2's `unestablished` list is removed and is replaced by no other blanket.**
 
-> **Normative — ADR-0262 §7's gate statement is reversed in one limb, and in that limb alone.** The
+> **Normative — ADR-0262 §7's gate statement is moved in two limbs, and in those alone.** The
 > verification guarantee **does** cover a capability whose acts make a charge, and a deployment
 > wiring one does a **third** thing as part of wiring it, beside §7's two: it **declares
 > `charged_output` on every declaration whose acts charge**, a declaration carrying none satisfying
-> this guarantee for no `MONEY` criterion at all. **§7's own two obligations are unchanged** —
-> declared `postconditions`, and authorisation against a confirmed `Authorization` rather than per
-> call.
+> this guarantee for no `MONEY` criterion at all. So §7's *"does **two** things"* is **three** for
+> that class, which is the second limb and is recorded as one: a reader holding only ADR-0262 would
+> wire such a capability on the two and omit the declaration this decision's whole comparison reads.
+> **The two obligations that clause names are themselves unchanged** — declared `postconditions`,
+> and authorisation against a confirmed `Authorization` rather than per call — and for a covered
+> capability whose acts make no charge the clause stands at **two**.
 
 > **Normative — the gate is not met, this decision adds no condition to it and removes none, and
 > the count is still seven.** ADR-0255 §15 item 19's seven conditions stand as ADR-0262 §7
