@@ -58,6 +58,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.tools.declared_cost import checked_per_call_cost
 from ai_assistant.tools.egress import (
     HttpsEgressTransport,
     HttpsExchange,
@@ -72,7 +73,6 @@ from ai_assistant.tools.web_search import (
     WEB_SEARCH,
     WEB_SEARCH_ID,
     WebSearchEgress,
-    checked_search_cost,
 )
 
 if TYPE_CHECKING:
@@ -438,7 +438,7 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
     # because ADR-0236 §4's state is exactly what it already declares — and building
     # an equal copy of it would make ``WEB_SEARCH`` no longer the object a reader can
     # compare against.
-    cost = checked_search_cost(cost_per_call, cost_currency)
+    cost = checked_per_call_cost(cost_per_call, cost_currency)
     declaration = WEB_SEARCH if cost is None else WEB_SEARCH.model_copy(update={"cost": cost})
     registration = EgressRegistration(
         tool_id=WEB_SEARCH_ID, reference=connection, transport_endpoint=origin
