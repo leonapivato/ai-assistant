@@ -1,7 +1,7 @@
 # 270. The policy answers whether a proposed row's coverage is met, and that answer is the whole
 of what crosses the seam
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0266](0266-a-coverage-member-records-the-constraint-the-user-stated-and-the-bound-is-proved-against-the-quote-for-the-intended-action.md)
   — **two scopes. §7's last normative clause, in the limb naming `ActionPolicy.decide` as the only
