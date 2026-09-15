@@ -53,7 +53,8 @@ from ai_assistant.orchestration.reads import SearchDisposition
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.testing import FakeAuditTrail, FakeRecipientGrants
 from ai_assistant.testing.recipient_grants import recipient_grant
-from ai_assistant.tools.web_search import WEB_SEARCH, checked_search_cost
+from ai_assistant.tools.declared_cost import checked_per_call_cost
+from ai_assistant.tools.web_search import WEB_SEARCH
 
 if TYPE_CHECKING:
     from web_search_harness import Built
@@ -311,7 +312,7 @@ async def test_a_zero_figure_projects_zero_at_the_gate(*, figure: Decimal, admit
 # --------------------------------------------------------------------------- #
 
 #: Every cost pair ADR-0236 §2 refuses, in the spelling a caller offers it. Shared by
-#: the builder cases here and by :func:`checked_search_cost`'s own, so the two
+#: the builder cases here and by :func:`checked_per_call_cost`'s own, so the two
 #: statements of one rule are asserted over one list rather than over two that can
 #: drift.
 REFUSED_PAIRS: Final = [
@@ -358,7 +359,7 @@ def test_the_cost_helper_refuses_the_same_states_the_builder_does(
     fail for a reason that is not the cost — and this one cannot.
     """
     with pytest.raises(ValueError, match=r"cost_per_call|cost_currency"):
-        checked_search_cost(amount, code)
+        checked_per_call_cost(amount, code)
 
 
 class _LyingCode(str):
@@ -394,7 +395,7 @@ async def test_the_builder_refuses_a_currency_that_is_not_a_string(code: object)
     domain includes the type for that reason: a caller that ignored the annotation is
     told which parameter it got wrong, rather than being handed whatever exception the
     first operation on the value happens to raise. Driven through the builder as well
-    as through :func:`checked_search_cost` below, for :data:`REFUSED_PAIRS`' reason.
+    as through :func:`checked_per_call_cost` below, for :data:`REFUSED_PAIRS`' reason.
     """
     with pytest.raises(TypeError, match="cost_currency"):
         await built(cost_per_call=FIGURE, cost_currency=code)  # type: ignore[arg-type]  # the subject
@@ -409,7 +410,7 @@ def test_the_cost_helper_refuses_a_currency_that_is_not_a_string(code: object) -
     ``Settings.web_search_cost_currency`` can be misconfigured into (ADR-0236 §2).
     """
     with pytest.raises(TypeError, match="cost_currency"):
-        checked_search_cost(FIGURE, code)  # type: ignore[arg-type]  # the subject
+        checked_per_call_cost(FIGURE, code)  # type: ignore[arg-type]  # the subject
 
 
 @pytest.mark.parametrize(
@@ -425,7 +426,7 @@ def test_the_cost_helper_admits_what_adr_0194_s1_calls_countable(amount: Decimal
     implementation that read ``as_tuple().exponent`` without stripping the trailing
     zeros first. Zero is admitted because ADR-0236 §2's floor is ``>= 0``.
     """
-    cost = checked_search_cost(amount, CODE)
+    cost = checked_per_call_cost(amount, CODE)
 
     assert cost is not None
     assert cost.basis is CostBasis.PER_CALL
@@ -440,7 +441,7 @@ def test_the_cost_helper_answers_absence_with_no_cost_at_all() -> None:
     a reader comparing against the constant is comparing against the object that was
     registered.
     """
-    assert checked_search_cost(None, None) is None
+    assert checked_per_call_cost(None, None) is None
 
 
 # --------------------------------------------------------------------------- #

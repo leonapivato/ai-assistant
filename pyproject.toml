@@ -1614,6 +1614,9 @@ source_modules = [
     "ai_assistant.tools.builtin",
     "ai_assistant.tools.connection_store",
     "ai_assistant.tools.consume",
+    # ADR-0236 §2's domain at the one site an integration is built without going
+    # through `Settings`. It builds a `ToolCost` and opens nothing.
+    "ai_assistant.tools.declared_cost",
     "ai_assistant.tools.destinations",
     "ai_assistant.tools.egress_binder",
     "ai_assistant.tools.egress_declaration",
