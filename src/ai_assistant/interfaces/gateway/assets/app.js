@@ -10342,10 +10342,18 @@ function showAuthorizationState(item, view) {
 // on screen at the end of an act are not the rows that were on screen when it started,
 // and an act that writes into the ones it remembers writes into DOM the page has thrown
 // away.
+//
+// **Matched by comparing the attribute, never by building a selector out of it**, for
+// `actResult`'s stated reason one function over: `CSS.escape` maps U+0000 to U+FFFD, so
+// a selector built from an id the type admits can silently match no row — and the row
+// the act settled would go on reading "still stands" beside a live control, which is
+// the very state round 7 closed. Adversarial review, round 8, `major`.
 function restateAuthorization(view) {
-  document
-    .querySelectorAll(`[data-authorization="${CSS.escape(view.id)}"]`)
-    .forEach((item) => showAuthorizationState(item, view));
+  document.querySelectorAll("[data-authorization]").forEach((item) => {
+    if (item.dataset.authorization === view.id) {
+      showAuthorizationState(item, view);
+    }
+  });
 }
 
 // Where the settlement of one act is written, and what it says.
@@ -10374,8 +10382,15 @@ function actResult(list, view) {
     region.className = "authorization-results";
     list.parentElement.insertBefore(region, list);
   }
+  // **The record is matched by comparing the value, never by building a selector out
+  // of it.** An `Identifier` refuses only a blank and requires a UTF-8 encoding — issue
+  // #62 holds the control-character question open — and `CSS.escape` replaces U+0000
+  // with U+FFFD, which is a *lossy* escape rather than a failing one: the selector then
+  // matches nothing and quietly builds a second entry for a record that already has
+  // one. Comparing `dataset` values compares the strings the page actually holds, for
+  // every id the type admits. Adversarial review, round 8, `major`.
   const key = `said-${view.id}`;
-  let node = region.querySelector(`[data-record="${CSS.escape(key)}"]`);
+  let node = [...region.children].find((one) => one.dataset.record === key) ?? null;
   if (node === null) {
     node = document.createElement("p");
     node.className = "notice authorization-said";
