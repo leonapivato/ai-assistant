@@ -36,20 +36,27 @@ def test_the_reach_vocabulary_is_closed_at_three_members_spelled_by_name() -> No
     assert [one.value for one in OutboundReach] == ["reached", "not_reached", "indeterminate"]
 
 
-def test_the_destination_vocabulary_is_closed_at_one_member() -> None:
-    """ADR-0264 §5: exactly one, and its declaration order is the rendering order.
+def test_the_destination_vocabulary_is_closed_at_two_members() -> None:
+    """ADR-0264 §5 as ADR-0260 §10 amends it: two, in declaration order.
 
-    "``OutboundDestination``, a ``StrEnum`` valued by lower-cased member name, **closed
-    at exactly one member**, which is also the order ``destinations`` renders in."
+    ADR-0264 §5 closed the vocabulary at one member and required in terms that "a later
+    outbound seam adds its own member with its own ADR. It does **not** render as
+    ``SEARCH_PROVIDER`` and does not render as nothing" — so ADR-0260 §10's
+    ``FORECAST_PROVIDER`` is that section working rather than a departure from it, and
+    ADR-0260's header records the amendment to §5's closure at one.
 
-    **One member is the point rather than an embarrassment** (§5): the vocabulary makes
-    the next seam's addition cheap — a second member rather than a second carrier minted
-    from scratch — so the tuple is kept and ordered rather than collapsed into the
-    member's absence. A later outbound seam adds its own member with its own ADR, and
-    "it does **not** render as ``SEARCH_PROVIDER`` and does not render as nothing".
+    **The keeping of the ordered tuple is what that bought** (§5): the next seam's
+    addition was a member rather than a second carrier minted from scratch, and a turn
+    that reached both providers carries one statement naming both classes, neither
+    displacing the other.
+
+    **The order is asserted and not only the membership**: it is the order
+    ``destinations`` renders in, so an *inserted* member would change what every existing
+    statement renders. The value spelling is load-bearing for the same reason the reach
+    vocabulary's is — the member crosses the wire inside a ``TurnOutcome``.
     """
-    assert [one.name for one in OutboundDestination] == ["SEARCH_PROVIDER"]
-    assert [one.value for one in OutboundDestination] == ["search_provider"]
+    assert [one.name for one in OutboundDestination] == ["SEARCH_PROVIDER", "FORECAST_PROVIDER"]
+    assert [one.value for one in OutboundDestination] == ["search_provider", "forecast_provider"]
 
 
 # --- §13 item 6: what the model accepts ---------------------------------------

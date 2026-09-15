@@ -1185,6 +1185,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     renders the statement in ``interfaces/cli.py`` and changes no ``core`` type at all.
     ADR-0264 fixes no numeral, so 42 is what the tree held when that lane branched.
 
+    **44 is ADR-0260 §11's L1, and it is under the second limb alone.**
+    ``TurnOutcome`` gains ``forecast_not_read`` on the same argument
+    ``outbound_statement`` moved it on one version back, and three more ``core`` shapes
+    move with it: ``ReadKind`` gains a member, ``OutboundDestination`` gains a member,
+    and ``CarriedProvenance`` and ``EgressBinding`` each gain ``forecast_reach``, which
+    an ``extra="forbid"`` decode at 43 refuses on every binding a hub at 44 renders. The
+    method set does **not** move: ADR-0260's L1 adds no ``AssistantEngine`` member and
+    no gateway route. §11 fixes no numeral and says why — "more than one lane in flight
+    moves it and a number written here would be a claim that goes stale silently" — so
+    43 is what the tree held when this lane branched.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -1193,7 +1204,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 43), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (61, 44), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
