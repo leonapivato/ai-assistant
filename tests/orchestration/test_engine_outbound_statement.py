@@ -24,6 +24,7 @@ from __future__ import annotations
 from itertools import count
 from typing import TYPE_CHECKING, Any, Final, final
 
+import pytest
 from test_converse_spoken import _MP4, _recording
 from test_engine import (
     AT,
@@ -53,6 +54,7 @@ from test_loop_search import (
     _search,
 )
 
+from ai_assistant import orchestration
 from ai_assistant.core.types import (
     AssociationVerdict,
     Disposition,
@@ -1031,3 +1033,46 @@ async def test_mutating_one_turns_statement_cannot_reach_another_turns() -> None
     )
     assert _statement(second) is not _statement(first)
     assert _statement(asked) is not _statement(first)
+
+
+# --- §6's obligation, refused rather than assumed, at each unrouted composer ---
+
+
+async def test_no_unrouted_pass_composes_without_the_fragment_it_is_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§6 binds on **every** pass that composes and is not routed, so none may proceed without.
+
+    "The fragment obligation binds on every pass that composes a reply, except a routed
+    one, **whatever the statement's value**."
+    :func:`~ai_assistant.orchestration.reads.outbound_statement` returns ``None`` only
+    where it was told the pass composes nothing — but that ``composes`` argument and each
+    composer's own ADR-0170 §4 decline are computed at **different points**, so their
+    agreement is an invariant across a seam and not one expression.
+
+    This drives all three unrouted composers with the assembly forced to ``None`` and
+    asserts each **refuses** rather than composing. Composing anyway is the one outcome
+    this decision cannot accept: an unrouted reply written under no instruction is #2268's
+    shape and #2365's alike, and it would be produced silently. A ``RuntimeError`` and not
+    a degradation, on the ground ADR-0170 §8's closed set is already read with — a defect
+    in this engine rather than a composition that failed.
+
+    **The routed composers are deliberately absent**, which is §6's own exclusion: ADR-0197
+    §6 closes their inputs at "exactly two" and they are given no fragment to withhold.
+    """
+    monkeypatch.setattr(orchestration.engine, "outbound_statement", lambda **_: None)
+
+    whole = _Wired(model=FakeModelProvider("an answer"))
+    with pytest.raises(RuntimeError, match="ADR-0264 §6"):
+        await whole.engine.converse(_ASKED, timeout=PATIENT)
+
+    streamed = _Wired(
+        model=FakeModelProvider("an answer"),
+        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=("an", " answer")),)),
+    )
+    with pytest.raises(RuntimeError, match="ADR-0264 §6"):
+        [value async for value in streamed.engine.converse_streaming(_ASKED, timeout=PATIENT)]
+
+    spoken = _Wired(model=FakeModelProvider("an answer"))
+    with pytest.raises(RuntimeError, match="ADR-0264 §6"):
+        await spoken.engine.converse_spoken(_recording(), plays=(_MP4,), timeout=PATIENT)

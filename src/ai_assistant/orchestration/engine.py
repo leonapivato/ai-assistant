@@ -1760,6 +1760,43 @@ def _reached_nothing() -> OutboundStatement:
     return OutboundStatement(reach=OutboundReach.NOT_REACHED)
 
 
+def _fragment_for(outbound: OutboundStatement | None) -> OutboundStatement:
+    """ADR-0264 §6's statement for a pass that **is** composing, refusing its absence.
+
+    §6 binds the fragment obligation *"on every pass that composes a reply, except a
+    routed one, whatever the statement's value"*, and
+    :func:`~ai_assistant.orchestration.reads.outbound_statement` returns ``None``
+    **only** where it was told the pass composes nothing. The two facts are computed at
+    different points — the assembly is handed ``composes``, and each composer decides for
+    itself whether ADR-0170 §4 owes an answer — so their agreement is an invariant across
+    a seam rather than one expression, and this is where it is checked instead of assumed.
+
+    Called past each composer's own decline, so reaching it with ``None`` means those two
+    points have disagreed: a pass that is about to compose was assembled as one that would
+    not. That is a **defect in this engine** and not a composition failure, so it raises
+    rather than joining ADR-0170 §8's closed degradation set — the same ground on which
+    :meth:`Engine._compose_streaming` raises for a stage that ended without reporting.
+    Composing anyway is the one outcome this decision cannot accept: an unrouted reply
+    written under no instruction is #2268's shape and #2365's alike.
+
+    Args:
+        outbound: The statement this pass assembled, or ``None``.
+
+    Returns:
+        The statement, narrowed for the composing call.
+
+    Raises:
+        RuntimeError: If the pass is composing and no statement was assembled.
+    """
+    if outbound is None:
+        msg = (
+            "a composing unrouted pass was assembled with no OutboundStatement: "
+            "ADR-0264 §6 gives every such pass one fragment, whatever its value"
+        )
+        raise RuntimeError(msg)
+    return outbound
+
+
 type _RoutedComposer = Callable[[RoutedOperation, str], Awaitable[ComposedReply | None]]
 
 
@@ -4622,6 +4659,7 @@ class Engine:
         del conversation
         if turn is None or (step is not None and step.confirmation is not None):
             return None
+        statement = _fragment_for(outbound)
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
@@ -4656,7 +4694,7 @@ class Engine:
             # than a gap, and it is the reason the fragment is given here and not
             # dropped: the reply composed for the ear is the only thing that user hears,
             # so it is the one place the instruction can still do any work at all.
-            outbound=outbound,
+            outbound=statement,
             # ADR-0250 §15: a turn of this operation builds no candidacy and makes no
             # `associate` call, so no elision can be disclosed here and the value's
             # elision half is always clear. A **clarification this turn's own planner
@@ -11614,6 +11652,7 @@ class Engine:
         """
         if turn is None or (step is not None and step.confirmation is not None):
             return None
+        statement = _fragment_for(outbound)
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
@@ -11627,7 +11666,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
-            outbound=outbound,
+            outbound=statement,
             goal=carried.facts,
         )
         # ADR-0250 §5's announcement, placed in the reply here and at the streaming
@@ -11677,6 +11716,7 @@ class Engine:
         """
         if turn is None or (step is not None and step.confirmation is not None):
             return None
+        statement = _fragment_for(outbound)
         undriven = (
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
@@ -11718,7 +11758,7 @@ class Engine:
             stopped_while_asking=stopped_while_asking,
             structured=structured,
             search_not_serviced=search_not_serviced,
-            outbound=outbound,
+            outbound=statement,
             goal=carried.facts,
         )
         async with closing_stream(stream) as composing:
