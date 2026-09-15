@@ -1,6 +1,6 @@
 # 261. A cancellation is a user act between turns that ends the goal's attempt, the claim it races is decided by the store, and an effect already dispatched is reported rather than withdrawn
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes** [ADR-0249](0249-the-goal-carries-its-interpretation-the-attempt-carries-the-phase-and-the-planner-returns-its-understanding.md)
   — **three scopes: a count and a division, both of §5; the class of §8's revision conjunct; and
