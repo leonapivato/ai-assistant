@@ -2234,6 +2234,41 @@ class PlanStoreContract:
                 await store.save_goal(opened)
             assert await store.get_goal("g1") is None, "and nothing is stored trimmed"
 
+    @pytest.mark.parametrize(
+        "malformed",
+        [None, "ia1", 7, {"ia1": True}, (7,)],
+        ids=[
+            "a-falsey-none",
+            "a-string-whose-tuple-is-its-characters",
+            "not-a-container",
+            "a-mapping",
+            "a-member-that-is-not-an-action",
+        ],
+    )
+    async def test_save_goal_refuses_a_goal_whose_intended_actions_is_not_a_tuple(
+        self, store: PlanStore, malformed: object
+    ) -> None:
+        """The field is **checked and not trusted**, and the store keeps nothing (§12).
+
+        ADR-0023 §2: "``model_copy(update=...)`` skips validators (a pydantic property
+        no type can close), so the invariant holds *at the validation boundary*, and **a
+        write that reaches past it must re-validate**." A ``save_goal`` that tested the
+        field for **truthiness** would wave ``None`` straight through — and then persist
+        it, leaving the next ``record_intended_actions`` to raise a bare ``TypeError``
+        out of a member this contract says raises ``PlanningError``. ``None`` is
+        parametrised first for exactly that reason: it is the one malformed value the
+        seeded-action refusal above cannot see.
+
+        Every case is refused with ``PlanningError`` at the write, and nothing is
+        stored — which is what makes the three conforming implementations agree rather
+        than differ by whichever of them happened to revalidate.
+        """
+        opened = _goal().model_copy(update={"intended_actions": malformed})
+
+        with pytest.raises(PlanningError):
+            await store.save_goal(opened)
+        assert await store.get_goal("g1") is None
+
     async def test_record_intended_actions_refuses_an_unknown_goal(self, store: PlanStore) -> None:
         """§5: the member refuses a goal the store does not hold, as every other goal
         write does and with the class ADR-0249 §12 gives ``save_goal``."""

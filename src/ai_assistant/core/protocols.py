@@ -4511,8 +4511,16 @@ class PlanStore(Protocol):
         only through :meth:`record_interpretation` would take at the door what the
         ceiling forbids and enforce it on nothing.
 
+        **The goal is revalidated before it is kept, not merely copied** (ADR-0023 §2).
+        "``model_copy(update=...)`` skips validators … and a write that reaches past it
+        must re-validate", so a caller can hand in a goal whose ``interpretation`` or
+        ``intended_actions`` is ``None`` or a string. Every conforming store refuses
+        such a goal with ``PlanningError`` **at the write** rather than storing a record
+        its own next read cannot use.
+
         **And a goal opened carrying an intended action is refused** (ADR-0265 §1, §2),
-        with the same error class. "The goal's opening write mints none" — a goal is
+        with the same error class, **on the revalidated value** — which is what makes it
+        a refusal rather than a truthiness test. "The goal's opening write mints none" — a goal is
         opened carrying revision 1 alone — and "the only route to a new
         ``IntendedAction`` is a ``ProposedAction`` recorded by"
         :meth:`record_intended_actions`. It is the clause above read over ADR-0265 §1's
@@ -4524,8 +4532,9 @@ class PlanStore(Protocol):
         identity that can vanish is not an identity".
 
         Raises:
-            PlanningError: If the store already holds a goal under this ``id``, or if
-                the goal is opened carrying an intended action.
+            PlanningError: If the goal is not one ``Goal`` admits, if the store already
+                holds a goal under this ``id``, or if the goal is opened carrying an
+                intended action.
         """
         ...
 
