@@ -111,18 +111,27 @@ backstop, and an offered change carries the price its acceptance authorises
   looks for the record in an export or on a surface, finds it on neither, and reads its absence as a
   defect rather than as this decision's stated and bounded cost (#2410)
 - **Partially supersedes** [ADR-0261](0261-a-cancellation-is-a-user-act-between-turns-that-ends-the-goals-attempt-and-an-effect-already-dispatched-is-reported-rather-than-withdrawn.md)
-  — **one scope. §2's all-or-nothing clause, in its act-level limbs alone**: *"there is no partial
-  act, no ordering rule and no residual"*, and its *"No lane adds … a fail-closed ordering … for a
-  residual this member cannot leave"*, are now false of the **abandonment act** — §1 orders
-  `end_for_goal` strictly before the closing write and states what a failure between the two
-  leaves: rows ended `GOAL_CLOSED`, the goal open and fenced, compensated by nothing. **The
-  member's own limbs stand verbatim and are what this rests on** — `close_goal_abandoned` is still
-  one indivisible step that either commits every write and answers or raises having written
-  nothing, still refuses a stale `expected_version` and a goal already closed, and its single
-  re-read-and-retry is taken as it stands — and **the residual stated here is one that member
-  cannot leave**, being in another store. A reader holding only §2 reads *no partial act* as a
-  property of the act and would take the ending after the closing write, which is the
-  establish-against-closure race §1 exists to close. **§§1 and 3-11 stand entire**
+  — **one scope in three limbs, each about the abandonment *act* and none about the member.**
+  **§2's all-or-nothing clause, in its act-level limbs**: *"there is no partial act, no ordering
+  rule and no residual"*, and its *"No lane adds … a fail-closed ordering … for a residual this
+  member cannot leave"*. **§2's inventory clause, in one sentence**: *"**The act's only write is
+  `close_goal_abandoned`**"* — the act now takes `GoalAuthorizationStore.end_for_goal` first, in
+  another store, and the rest of that clause stands verbatim, `commit_attempt` still called **not
+  at all**, `PlanStore` still gaining **exactly two** new members and **exactly three**
+  strengthenings and this decision adding neither. **And §14's arm 6, in its framing**: *"**The act
+  has no window, asserted as the absence of every partial state**"*, and its *"the arm a two-write
+  act cannot pass"* — the act has one, and §9's arm 7 asserts what each half of it leaves. **§1
+  orders `end_for_goal` strictly before the closing write** and states what a failure between them
+  leaves: rows ended `GOAL_CLOSED`, the goal open and fenced, compensated by nothing. **What all
+  three limbs leave untouched is the member**: `close_goal_abandoned` is still one indivisible step
+  that either commits every write and answers or raises having written nothing, arm 6's injection
+  **into that member** still leaves the goal `ACTIVE` with nothing written, its concurrent-closer
+  and `ALREADY_CLOSED` limbs are unmoved, and a stale `expected_version` and an already-closed goal
+  are still refused. **The residual stated here is one that member cannot leave**, being in another
+  store. A reader holding only §2 reads *no partial act* and *only write* as properties of the act,
+  ships an abandonment that ends no authorization, and would take the ending after the closing
+  write — the establish-against-closure race §1 exists to close. **§§1 and 3-13 stand entire, and
+  §14 but for arm 6's framing**
 - Date: 2026-09-15
 
 ## Context
@@ -808,16 +817,19 @@ places, in five documents.**
    `clear`. A reader holding only §6 reads the record's absence from `export` as a defect rather
    than as the bounded cost §1 states, and would author the projection #2410 books.
 
-8. **ADR-0261 §2's all-or-nothing clause, in its act-level limbs alone**: *"there is no partial act,
-   no ordering rule and no residual"*, and that clause's *"No lane adds … a **fail-closed ordering**
-   … for a residual this member cannot leave"*, are stated over the whole abandonment and are now
-   false of it — §1 orders `end_for_goal` strictly before the closing write, and states what a
-   failure between them leaves: rows ended, the goal open and fenced, compensated by nothing. **The
-   member's own limbs are untouched** — `close_goal_abandoned` is still one indivisible step that
-   commits every write or writes nothing — and **the residual stated here is one it cannot leave**,
-   being in another store. A reader holding only §2 reads *no partial act* as a property of the act
-   and would take the ending **after** the closing write, which is the establish-against-closure
-   race §1 exists to close.
+8. **ADR-0261, in three limbs about the abandonment act**: §2's all-or-nothing clause — *"there is
+   no partial act, no ordering rule and no residual"*, and its *"No lane adds … a **fail-closed
+   ordering** …"*; §2's *"**The act's only write is `close_goal_abandoned`**"*; and §14's arm 6 in
+   its framing, *"**The act has no window, asserted as the absence of every partial state**"* and
+   its *"the arm a two-write act cannot pass"*. All three are stated over the **act** and all three
+   are now false of it: §1 orders `end_for_goal` strictly before the closing write, in another
+   store, and states what a failure between them leaves. **The member's own limbs are untouched**
+   — `close_goal_abandoned` still commits every write or writes nothing, arm 6's injection into it
+   still leaves the goal `ACTIVE` with nothing written, and `PlanStore` still gains exactly the two
+   members and three strengthenings §2 inventories — and **the residual stated here is one that
+   member cannot leave**. A reader holding only §2 ships an abandonment that ends no authorization,
+   and reading *no partial act* as the act's property would take the ending **after** the closing
+   write, which is the establish-against-closure race §1 exists to close.
 
 **Reached and superseded in nothing, recorded because a reader would otherwise look for a scope.**
 **ADR-0266 §7's worked case** is stated at phase 3 of a live goal and every word of it survives (§5
