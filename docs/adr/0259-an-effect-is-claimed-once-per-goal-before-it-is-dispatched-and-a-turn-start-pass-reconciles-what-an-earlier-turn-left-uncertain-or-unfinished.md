@@ -796,11 +796,13 @@ Nothing in this decision converts local persistence into a remote guarantee. Wha
 having one: before, an uncertain effect was a state nothing could resolve and nothing could stop being repeated; after, it
 is a state that resolves where the integration supports it, and that is **durably un-repeatable** where it does not.
 
-### 4. The reconciliation pass: at the start of one turn, over one goal, finishing writes and starting no job
+### 4. The reconciliation pass: inside one turn, over one goal, finishing writes and starting no job
 
 > **Normative.** `orchestration` gains a **reconciliation pass**: a concrete collaborator run **inside a turn**, **after that
-> turn has engaged its goal** (ADR-0250 §1) and **before the turn's first `Planner.plan` call**, **over that one goal and no
-> other**. It stamps **no `AttemptPhase`** (ADR-0249 §6's writer clause), opens **no attempt** (ADR-0249 §5: an attempt is
+> turn has engaged its goal** (ADR-0250 §1), **over that one goal and no other**, and **around the turn's first
+> `Planner.plan` call — acts 1–5 before it and act 6 after the plan it produced is persisted**, the ordering fixed and
+> argued below. **This decision's title calls it a turn-start pass for where it begins**, which is before anything else in
+> the turn reads the goal's records; act 6 is the one act that follows the plan, and no reader takes the name as the rule. It stamps **no `AttemptPhase`** (ADR-0249 §6's writer clause), opens **no attempt** (ADR-0249 §5: an attempt is
 > opened only by a user act), writes **no `GoalStatus`**, and **opens no walk and dispatches no `PENDING` step**. **It
 > reaches a dispatch through exactly one of its acts — act 6's replay of an authority the trail already holds — and through
 > no other**: acts 1–5 invoke nothing at all, and no act of this pass takes §3's check, which is the investigation phase's.
@@ -890,8 +892,8 @@ its opposite**: the first operation that reads the residual, inside an owner-ini
 budget. Nothing is scheduled, polls or wakes, and ADR-0083 §7's *"no job gets new store surface"* is not reached —
 `claim_effect` is reached by a dispatch, not a job. So the clause is **relied on and not superseded** (§13).
 
-**And it runs before planning rather than after, because planning is what reads it**, which the owner's decision 3 requires
-a late answer to. A planner handed a goal whose superseded plan still shows a `PENDING` step, or whose attempt still reads
+**And acts 1–5 run before planning rather than after, because planning is what reads what they repair**, which the owner's
+decision 3 requires a late answer to. A planner handed a goal whose superseded plan still shows a `PENDING` step, or whose attempt still reads
 `RUNNING` beside an uncertain effect, reasons from a record the system knows is stale; running first also lets §2's key be
 free by the time the walk reaches a step whose predecessor was swept.
 
@@ -1013,9 +1015,9 @@ decision answers it by adding no route**, and states why the resolution is nonet
 > the turn was not handed, or resumes a walk over a superseded one**, and ADR-0255 §7's *"one plan is driven per walk, and it
 > is the plan the turn holds"* is untouched.
 
-> **Normative — what the resolution buys is the order and the record, and not a claim.** §4's pass runs **before** the turn's
-> first `Planner.plan` call and **marks** the uncertain step there, so the planner reads a goal whose uncertainty is recorded
-> rather than hidden; the **resolution** lands later in that same turn, in the investigation phase, after which the step is
+> **Normative — what the resolution buys is the order and the record, and not a claim.** §4's **act 4** runs **before** the
+> turn's first `Planner.plan` call and **marks** the uncertain step there, so the planner reads a goal whose uncertainty is
+> recorded rather than hidden; the **resolution** lands later in that same turn, in the investigation phase, after which the step is
 > `SUCCEEDED`, its attempt is releasable by the next pass's act 5, and the dependents of that step are evaluated under
 > ADR-0253 §2 like any others wherever a walk reaches them. **What it does not buy is a `COMPLETED` answer to a later plan,
 > and that is stated rather than assumed.** §3 admits a **read** alone; §1 gives a read **no effect key**; so no row is
@@ -1338,7 +1340,10 @@ it** — the same construction ADR-0255 §7 uses for cross-plan at-most-once.
   condition (§9); `core/protocols.py`'s `claim_effect`; `planning`'s `PlanExecution` transition-table row (§7) and the
   `PlanStore` implementation with its schema migration, export entry and `delete_goal` cascade; the **shared conformance
   suite** for `claim_effect` — including arm 4's two-writer case — and the **canonical fake** in `ai_assistant.testing`, which
-  is `CONTRIBUTING.md`'s Protocol triad landing as one unit. **L1 moves `PROTOCOL_VERSION`** (§9). Arm 4.
+  is `CONTRIBUTING.md`'s Protocol triad landing as one unit. **It lands `ExchangeDisposition`'s two members and the two rows
+  they take in `orchestration`'s `_outcome_of` with them** (§9): ADR-0221 §2's `assert_never` makes those rows a compile-time
+  consequence of the enum addition rather than machinery of their own, so they cannot land in a later lane and are not a
+  second subsystem's work. **L1 moves `PROTOCOL_VERSION`** (§9). Arm 4.
 - **L2 — the effect claim at dispatch, and satisfaction from a completed one.** `orchestration`'s executor takes the
   claim between the read-back and the `→ RUNNING` commit and derives the key from the `ToolCall` it holds. On
   **`CLAIMED`** it dispatches; on **`COMPLETED`** it checks §2's three reuse conditions and, where they hold,
