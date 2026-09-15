@@ -91,6 +91,8 @@ from ai_assistant.core.types import (
     NotificationDelivery,
     ObservationReport,
     OperationConfirmation,
+    OutboundReach,
+    OutboundStatement,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -367,6 +369,10 @@ class FakeAssistantEngine:
     Attributes:
         turn_outcome: What :meth:`converse` returns. Defaults to a turn whose plan
             had no step — a real ratified shape, not a stub.
+        outbound_statement: ADR-0264 §7's statement every outcome this engine
+            *composes* carries, or ``None`` — the default — for a fresh
+            ``NOT_REACHED`` minted per outcome. Script it to drive a rendering
+            surface over ``REACHED`` and ``INDETERMINATE``.
         observation: What :meth:`observe` returns.
         answered: What :meth:`answer` returns, or ``None`` to synthesise one from
             the question's own state.
@@ -568,6 +574,23 @@ class FakeAssistantEngine:
         #: only by taking one out, and no call on this surface removes one.
         self.executions: dict[str, ExecutionState] = {}
         self.turn_outcome: TurnOutcome | None = None
+        #: ADR-0264 §7's statement, for every outcome this engine composes itself, or
+        #: ``None`` — the default — for :meth:`_outbound`'s fresh ``NOT_REACHED``.
+        #:
+        #: **A lever, because no sequence of surface calls reaches the other two
+        #: members**: this double originates no model call and opens no channel, so
+        #: nothing it does can establish a contact, and ``REACHED`` and
+        #: ``INDETERMINATE`` would be unreachable in a consumer's test without one.
+        #: They are what a surface rendering §7's statement most needs to be driven
+        #: over — the browser's lane (#2237) and the terminal's alike — and the
+        #: ``destinations`` and ``records`` a ``REACHED`` names come with the value a
+        #: test hands over rather than from a reach this engine invents.
+        #:
+        #: **It is the value for a pass this engine composed and never a rewrite of a
+        #: scripted one**: an outcome handed to :attr:`turn_outcome` is returned as the
+        #: caller built it, that member included, exactly as every other member of a
+        #: scripted outcome is.
+        self.outbound_statement: OutboundStatement | None = None
         self.observation: ObservationReport = ObservationReport()
         self.answered: AnswerOutcome | None = None
         # ADR-0250 §§12, 15's three operations, each defaulting to what the concrete
@@ -729,6 +752,34 @@ class FakeAssistantEngine:
 
     # --- the two turn calls -----------------------------------------------
 
+    def _outbound(self) -> OutboundStatement:
+        """ADR-0264 §7's statement for **one** outcome this engine composed.
+
+        §7 leaves the member ``None`` "on exactly the passes that neither established a
+        contact nor composed a reply", so every shape this double composes owes one —
+        and ``NOT_REACHED`` is the honest default here rather than a stand-in: a fake
+        originates no model call, services no read and opens no channel, so no pass of
+        it can have reached outside this system. Issue #2381 is what this closes: a
+        canonical fake that supplied none let a surface be written, tested green against
+        it and never read the field at all, which is the failure the fake exists to
+        prevent.
+
+        **A fresh value per outcome, and a copy of a scripted one for the same reason**
+        (:attr:`outbound_statement`). ``frozen=True`` stops ``statement.reach = ...``
+        but not ``statement.__dict__["reach"] = ...`` (ADR-0018 §3, §4), so one instance
+        handed out twice would let a consumer holding either outcome rewrite what the
+        other says this system did — the aliasing bug PR #2377's round 4 found in the
+        concrete engine, which mints per pass for this reason. A scripted value is
+        copied rather than shared so that scripting cannot reopen it.
+
+        Returns:
+            The scripted statement, copied, or a fresh ``NOT_REACHED``.
+        """
+        scripted = self.outbound_statement
+        if scripted is None:
+            return OutboundStatement(reach=OutboundReach.NOT_REACHED)
+        return scripted.model_copy()
+
     def _resolve(self, conversation_id: str | None) -> str:
         """Continue the conversation named, or start one where none was (ADR-0074 §1).
 
@@ -791,6 +842,10 @@ class FakeAssistantEngine:
             turn=_turn(utterance),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
+            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
+            # never ``None`` — which §7 reserves for a pass that "neither established a
+            # contact nor composed a reply" (#2381).
+            outbound_statement=self._outbound(),
         )
         return self._checked(outcome, "converse")
 
@@ -859,6 +914,10 @@ class FakeAssistantEngine:
             turn=_turn(utterance),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
+            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
+            # never ``None`` — which §7 reserves for a pass that "neither established a
+            # contact nor composed a reply" (#2381).
+            outbound_statement=self._outbound(),
         )
         checked = self._checked(outcome, "converse_streaming")
         for piece in _pieces_of(checked.reply):
@@ -967,6 +1026,12 @@ class FakeAssistantEngine:
             turn=_turn(heard),
             conversation_id=held,
             reply=f"This fake engine composed no real answer to {heard.strip()!r}.",
+            # ADR-0264 §7: this pass composed a reply, so it carries a statement and
+            # never ``None`` — which §7 reserves for a pass that "neither established a
+            # contact nor composed a reply" (#2381). A **spoken** turn carries it like
+            # any other: §7 makes the spoken surface no rendering surface, which is a
+            # fact about that surface and not a reason to leave the member absent here.
+            outbound_statement=self._outbound(),
         )
         chosen = next((member for member in plays if member in self.spoken_formats), None)
         # ADR-0205 §4: every turn of this operation is stamped `UNKNOWN` at capture,
@@ -1193,6 +1258,12 @@ class FakeAssistantEngine:
         # turn — the shape a **recovered** park produces after a restart, which
         # ADR-0052 §3 ratifies. The *step* is what a resume is for and is always
         # present (ADR-0085 §4).
+        #
+        # **And `outbound_statement` is absent**, which is ADR-0264 §7's one `None`
+        # case rather than an omission: a recovered park is a pass ADR-0170 §4
+        # composes nothing for, and this engine established no contact on it. It is
+        # not ADR-0198 §1's restatement, which carries the value — that pass is the
+        # one below, over a *settled* binding.
         return self._checked(
             TurnOutcome(turn=None, step=resolved, recipient_grant=recipient_grant), "resume"
         )
@@ -1562,7 +1633,17 @@ class FakeAssistantEngine:
             tool_id=settled.tool_id,
             confirmation=None,
         )
-        return self._checked(TurnOutcome(turn=None, step=restated), "resume")
+        # **ADR-0264 §7 gives a restatement `NOT_REACHED` and not `None`**, and names
+        # it among the three passes that carry the value: it "drives nothing and
+        # searches nothing", so there is nothing it could have reached. It composes no
+        # prose of its own, and §7's rendering asymmetry — `NOT_REACHED` renders only
+        # beside a reply — is the *surface's* rule rather than a reason to leave the
+        # member absent here. The concrete engine carries it on this shape for the same
+        # reason, and a fake that did not would let a client's test pass over an
+        # outcome no engine produces.
+        return self._checked(
+            TurnOutcome(turn=None, step=restated, outbound_statement=self._outbound()), "resume"
+        )
 
     # --- the two accumulation legs ----------------------------------------
 
@@ -1724,6 +1805,12 @@ class FakeAssistantEngine:
             reply="Here is what that lookup found.",
             recipient_grant=grant,
             read_answer=ReadAnswerOutcome.DISPATCHED,
+            # ADR-0264 §7: this pass composed a reply, so it carries a statement.
+            # **Only this one of the read answers does**: every other member returns
+            # above with `turn` and `reply` `None`, establishing no contact and
+            # composing nothing, which is exactly §7's `None` case — and it is where
+            # the concrete engine leaves the member absent too.
+            outbound_statement=self._outbound(),
         )
 
     def _settle_read(self, handle: str, outcome: ReadAnswerOutcome) -> None:
@@ -3742,6 +3829,12 @@ class FakeAssistantEngine:
                 turn=None,
                 routed=RoutedOperation(operation=operation, outcome=outcome),
                 reply=_ROUTED_REPLY,
+                # ADR-0264 §7's routed pass that is **not** a park: an answer is owed
+                # and prose exists, so the member is a statement and not `None`. The
+                # `None` §7 reserves belongs to the pass that *parked*, on which
+                # ADR-0197 §10 rules "the composing stage is not reached"; this is the
+                # pass that answered it.
+                outbound_statement=self._outbound(),
             ),
             "resume",
         )
