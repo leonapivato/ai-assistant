@@ -1072,6 +1072,14 @@ class FakePlanStore:
         each is an invariant breach at the current version, "and a caller that re-read
         and retried would re-raise for ever".
 
+        **The ``serves`` refusal is goal-wide** (ADR-0269 §1): a value is refused where
+        it is not the ``id`` of an element of **any revision the goal holds at the
+        instant of the append**, so this goal's own superseded element is admitted while
+        a fabricated value, another goal's element and an element of a revision this
+        goal has **elided** are each still refused. Re-implemented here for this
+        module's own reason, and the shared ``PlanStoreContract`` is what stops the two
+        statements of the membership test from disagreeing.
+
         **The command is revalidated on the first executed line**, which is both
         ADR-0023 §2's obligation and this method's ADR-0065 snapshot.
 
@@ -1080,7 +1088,7 @@ class FakePlanStore:
             PlanningError: If the minting is not a valid command, if ``goal_id`` names
                 no stored goal, if an ``id`` is one the goal already holds, if the
                 append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
-                ``serves`` value names no element of the goal's current interpretation.
+                ``serves`` value names no element of any revision the goal holds.
         """
         command = _revalidated_minting(minting)
         async with self._resource.held():
@@ -1104,10 +1112,13 @@ class FakePlanStore:
                     f"refused whole and nothing is elided to make room (ADR-0265 §1, §5)"
                 )
                 raise PlanningError(msg)
-            current = stored.interpretation[-1]
+            # Every revision the goal **holds**, current and earlier alike (ADR-0269
+            # §1). A revision ADR-0249 §2 has elided is not held and contributes
+            # nothing, so an id whose only revision went with it stays refused.
             known = {
                 element.id
-                for group in (current.constraints, current.criteria, current.conditions)
+                for revision in stored.interpretation
+                for group in (revision.constraints, revision.criteria, revision.conditions)
                 for element in group
                 if element.id is not None
             }
@@ -1115,12 +1126,15 @@ class FakePlanStore:
                 {served for action in command.actions for served in action.serves} - known
             )
             if dangling:
+                chain = stored.interpretation
                 msg = (
                     f"the minting for goal {command.goal_id} serves "
                     f"{', '.join(dangling)}, which "
                     f"{'is' if len(dangling) == 1 else 'are'} not the id of an element "
-                    f"of revision {current.revision}: at the append every entry names a "
-                    f"current element (ADR-0265 §3, §5)"
+                    f"of any revision the goal holds (revisions "
+                    f"{chain[0].revision}-{chain[-1].revision}): this goal's own "
+                    f"superseded element is admitted, a dangling or foreign identifier "
+                    f"is not (ADR-0269 §1; ADR-0265 §3, §5)"
                 )
                 raise PlanningError(msg)
             updated = _revalidated_goal(

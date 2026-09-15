@@ -1596,7 +1596,12 @@ class SqlitePlanStore:
         compare-and-swap and not two.
 
         **Every refusal runs before the ``UPDATE``**, inside that same transaction, so
-        a minting that cannot record every action it carries records none of them.
+        a minting that cannot record every action it carries records none of them. The
+        ``serves`` refusal is **goal-wide** (ADR-0269 §1) — a value is refused where it
+        names no element of **any revision the goal holds at the append**, the row read
+        under this transaction being what "holds" is read from — and
+        :func:`~ai_assistant.planning.goals.minted` states that membership test once for
+        both conforming stores.
 
         **The command is revalidated before the first ``await``**, which is both
         ADR-0023 §2's obligation and this method's ADR-0065 snapshot: ``actions`` can
@@ -1612,7 +1617,7 @@ class SqlitePlanStore:
             PlanningError: If the minting is not a valid command, if ``goal_id`` names
                 no stored goal, if an ``id`` is one the goal already holds, if the
                 append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
-                ``serves`` value names no element of the goal's current interpretation.
+                ``serves`` value names no element of any revision the goal holds.
         """
         command = revalidated_minting(minting)
         async with self._lock:

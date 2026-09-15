@@ -252,7 +252,10 @@ class InMemoryPlanStore:
 
         **The refusals run before the append**, so a minting that cannot record every
         action it carries records none of them — not the first, not a prefix, and not
-        the ones that would have fit.
+        the ones that would have fit. The ``serves`` refusal is **goal-wide** (ADR-0269
+        §1) — a value is refused where it names no element of **any revision the goal
+        holds at the append** — and :func:`~ai_assistant.planning.goals.minted` states
+        that membership test once for both conforming stores.
 
         **The command is revalidated on the first executed line**, and everything after
         reads the validated value rather than the caller's: ``model_copy(update=...)``
@@ -265,7 +268,7 @@ class InMemoryPlanStore:
             PlanningError: If the minting is not a valid command, if ``goal_id`` names
                 no stored goal, if an ``id`` is one the goal already holds, if the
                 append would carry the goal past ``MAX_INTENDED_ACTIONS``, or if a
-                ``serves`` value names no element of the goal's current interpretation.
+                ``serves`` value names no element of any revision the goal holds.
         """
         command = revalidated_minting(minting)
         stored = self._goal_for_write(command.goal_id, command.expected_version, "mint against")

@@ -388,8 +388,8 @@ class _MintingThenRestating(_TwoCall):
     """Call 1 proposes an element and an action serving it; call 2 restates the element.
 
     The narrowest shape of #2414: the action's link is legitimate on the call that
-    minted it, and §3 makes it "stale, truthful and harmless" the moment call 2's
-    revision replaces the element it names.
+    minted it, and ADR-0265 §3 makes it "stale, truthful and harmless" the moment call
+    2's revision replaces the element it names.
     """
 
     async def plan(self, goal: Any, **fields: Any) -> Any:
@@ -413,30 +413,30 @@ class _MintingThenRestating(_TwoCall):
         )
 
 
-async def test_an_opening_turn_that_mints_then_restates_is_refused_at_the_append() -> None:
-    """#2414, pinned: the one state three ratified clauses leave no implementation.
+async def test_an_opening_turn_that_mints_then_restates_records_the_action() -> None:
+    """ADR-0269 §4 arm 1: #2414's case, turned over — the turn completes and records.
 
-    **This arm records a defect rather than a decision**, and it is written so that the
-    lane resolving #2414 has the exact case to flip rather than to rediscover. What it
-    asserts is what the contracts currently force, not what ADR-0265 means:
+    This arm keeps the shape of the test it replaces — the same two-call fake planner —
+    "so that what changed is the verdict and not the case". What forced the old refusal
+    was four ratified clauses meeting, and ADR-0269 §1 moves exactly one of them:
 
-    - §2 resolves call 1's ``serves`` against call 1's own sequence and records the
-      action there — which PR #2411's loop does, and §3 then makes the link stale,
-      truthful and harmless once call 2 replaces the element.
+    - ADR-0265 §2 resolves call 1's ``serves`` against call 1's own sequence and records
+      the action there, and §3 then makes the link stale, truthful and harmless once
+      call 2 replaces the element.
     - ADR-0249 §11 defers every write to one end-of-turn site, and §12 makes
-      ``save_goal`` the opening write **carrying the whole interpretation chain**, so
-      by the append the current revision is call 2's.
+      ``save_goal`` the opening write **carrying the whole interpretation chain**, so by
+      the append the current revision is call 2's. ADR-0269 §2 leaves both standing:
+      no write moves, and the interleave an opening turn cannot have is not manufactured.
     - ADR-0265 §1 refuses a ``save_goal`` carrying an intended action, so on an opening
-      turn the minting **must** follow that one write; it cannot interleave, as it does
-      on a goal the store already holds.
-    - ADR-0265 §5 then refuses the minting, because the link names an element the
-      current interpretation no longer holds.
+      turn the minting still **follows** that one write.
+    - ADR-0265 §5's third conjunct is now a membership test over **every revision the
+      goal holds** (ADR-0269 §1), so the link — an element of this goal's own earlier
+      reading of itself — is admitted rather than refused.
 
-    The failure is **fail-closed** — no action recorded, no plan saved, no step
-    dispatched, nothing claiming an effect — and it is unreachable in production until
-    L3 fills ``PlannerOutput.actions``. The goal row standing without the action is the
-    shape any mid-persistence refusal already leaves (ADR-0249 §12), not a second
-    defect.
+    The assertions are §4 arm 1's: the turn completes, the goal holds **one**
+    ``IntendedAction``, its ``serves`` names the **call-1** element's ``id`` byte for
+    byte, the stored ``interpretation`` carries both calls' revisions, and the plan is
+    saved.
     """
     planner = _MintingThenRestating()
     goals = iter([f"goal-{ordinal}" for ordinal in range(1, 60)])
@@ -446,11 +446,25 @@ async def test_an_opening_turn_that_mints_then_restates_is_refused_at_the_append
         loop_id_factory=lambda: next(goals),
     )
 
-    with pytest.raises(PlanningError):
-        await harness.engine.converse(_ASKED, timeout=PATIENT)
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
 
-    assert len(planner.calls) == 2, "both calls ran; the refusal is at the write, not the loop"
+    assert len(planner.calls) == 2, "both calls ran, and the write took neither of them down"
+    assert outcome.turn is not None
     stored = await harness.plans.get_goal("goal-1")
-    assert stored is not None, "ADR-0249 §12: the opening write had already committed"
+    assert stored is not None
     assert len(stored.interpretation) == 3, "carrying both calls' revisions"
-    assert stored.intended_actions == (), "§5 wrote nothing: the append is all-or-nothing"
+
+    assert len(stored.intended_actions) == 1, "§5 recorded the one action call 1 proposed"
+    [action] = stored.intended_actions
+    [call_one] = stored.interpretation[1].constraints
+    assert call_one.id is not None, "ADR-0253 §7: orchestration minted it on call 1"
+    assert action.serves == (call_one.id,), "byte for byte, the element call 1 proposed"
+
+    [current] = stored.interpretation[-1].constraints
+    assert current.id != call_one.id, (
+        "ADR-0253 §7 minted the restatement a new id, so the link is stale at the "
+        "append — which is exactly the value ADR-0269 §1 admits"
+    )
+
+    saved = await harness.plans.get_plan(outcome.turn.plan.id)
+    assert saved is not None, "and the turn's plan is saved: nothing of it was rolled back"
