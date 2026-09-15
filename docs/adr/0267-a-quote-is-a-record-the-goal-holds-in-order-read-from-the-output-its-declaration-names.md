@@ -1,11 +1,7 @@
 # 267. A quote is a record the goal holds in order, read from the output its declaration names,
 and no local check proves it still true
 
-- Status: Accepted, partially superseded by ADR-0262 (one scope, in §10's first entry: the clause
-  naming *"A10's verification of the charge afterwards, which is a finding rather than a
-  prevention"*, in the application to which decision performs that verification alone — it is the
-  decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no
-  operand for the comparison; the note below states it in full)
+- Status: Partially superseded by ADR-0262 (one scope, in §10's first entry: the clause naming *"A10's verification of the charge afterwards, which is a finding rather than a prevention"*, in the application to which decision performs that verification alone — it is the decision that pins a dispatch's quote to that dispatch, issue #2409, and not A10, which has no operand for the comparison; the first dated note below states it in full) and ADR-0270 (one scope, in §7's selection clause and in one limb of it: the limb naming the component that writes the row as the selector and that write's own read as the source — the governing quote is selected by `permissions` inside condition 6's answer, over the read that answer was proved on, and the writer records what the answer carries; §2's order, the no-comparison rule, the write-once and never-edited rules, the absence rule over the three write paths and the provenance clause all bind entire; the second dated note below states it in full)
 - **Partially supersedes** [ADR-0254](0254-phase-4-validates-the-plan-in-code-and-route-d-authorises-a-concrete-call-against-fixed-values-and-permitted-ranges-from-recorded-acts.md)
   — **three narrowly stated scopes, and §9 shows the working for each. §1's `Authorization` field
   list**: the row gains `quoted`, an `ActionQuote | None` defaulting to `None`, carrying the
@@ -92,6 +88,36 @@ and no local check proves it still true
   other clause of this ADR binds entire**, §1's obligation and its no-reader clauses, §3's
   declaration, §4's mint and §7's *"`quoted` is provenance"* conspicuously so: ADR-0262 reads no
   field of any of them.
+
+- **Partially superseded: 2026-09-15 by ADR-0270 — one scope, in §7's selection clause and in one
+  limb of it. Nothing else in this ADR.** That clause reads *"`quoted` is selected by §2's order
+  alone, by no comparison, and by the component that writes the row"* — *"the last member of the
+  goal's `quotes` naming the request's `intended_action`, taken from the read that write is built
+  on."* **The limb naming the selecting component and that component's own read is replaced**: the
+  selection is `permissions`', taken inside the answer to ADR-0266 §7's condition 6 that the writer
+  must obtain from it in any case ([#2401](https://github.com/leonapivato/ai-assistant/issues/2401)),
+  over the read that answer was proved on, and the writer **records** what the answer carries rather
+  than selecting a quote of its own. **The value is unmoved**: §7 selects the last quote of the goal
+  naming the request's intended action and §5 has `permissions` *"take the last member of what comes
+  back"* from a seam returning those quotes *"in the order the goal holds them"* — one rule stated
+  twice — so what moves is which read it is taken over and which component takes it. **That is what
+  closes §10's second half**, the two-read window in which a refresh could leave the figure a
+  confirmation renders and the figure condition 6 passed on different numbers; there is now one read
+  of the goal's quotes on the proposal path, and §10's entry is **fired** as written rather than
+  contradicted. **§2's order and the no-comparison rule bind entire** — the selection is still a
+  position in a tuple decided by no comparison — and so do the write-once, before-the-question and
+  never-edited rules, the field's type, default and meaning, its *"fact about the read and not about
+  the instant of persistence"*, its three-case absence rule and its restriction to path (i), and the
+  whole provenance clause: `quoted` still states what was governing and never that it satisfied the
+  member, and **no comparison of any decision reads it**. The refusal of *"no version check, no
+  compare-and-swap and no second read"* is true a fortiori, a read having been removed rather than
+  added. The unmarked ground beside the clause, *"the selection itself asks `permissions` for
+  nothing"*, becomes false in that half and supplies no obligation (ADR-0089 §3); what it protected
+  is kept, the selection consulting no `CoverageMember`, no `ValueBound`, no bound, no declaration
+  and no route, and riding back on the one call the writer already makes. **And every other clause
+  of this ADR binds entire** — §5's seam, §6's freshness rule, §7's `QuoteView` and its
+  `AuthorizationProjection` transcription, and §11's assignment of `quoted`'s population to ADR-0254
+  §20's Lane 2, which now writes it from that answer.
 
 ## Context
 
