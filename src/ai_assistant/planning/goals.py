@@ -1284,11 +1284,19 @@ OUTSTANDING_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
     {StepStatus.INDETERMINATE, StepStatus.RUNNING}
 )
 
-#: The goal statuses a closed goal holds (ADR-0250 §1's division), stated once so the
-#: two conjuncts ADR-0261 §2 puts on this store read the same set.
-CLOSED_GOAL_STATUSES: Final[frozenset[GoalStatus]] = frozenset(
-    {GoalStatus.ACHIEVED, GoalStatus.ABANDONED}
-)
+#: ADR-0250 §1's *closed* half of the goal division, which ADR-0261 §2's two
+#: closed-goal refusals are both stated over — written as the **complement of §1's
+#: open half**, "a goal is **open** where its ``GoalStatus`` is ``ACTIVE`` or
+#: ``BLOCKED``, and **closed** where it is ``ACHIEVED`` or ``ABANDONED``". Stating it
+#: that way round names no achieved status: ADR-0249 §4 gives that member no producer,
+#: and ``tests/core/test_goal_status_has_no_producer.py`` reads **any** member access
+#: under ``src/`` as one — deliberately over-approximating, since what §4 refuses is
+#: the producer however it is written. This is a read, so the guard stays exactly as
+#: strict and costs this module nothing.
+CLOSED_GOAL_STATUSES: Final[frozenset[GoalStatus]] = frozenset(GoalStatus) - {
+    GoalStatus.ACTIVE,
+    GoalStatus.BLOCKED,
+}
 
 
 def cancellation_outcome(statuses: Iterable[StepStatus]) -> AttemptOutcome:

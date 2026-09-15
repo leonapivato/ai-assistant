@@ -767,6 +767,11 @@ def test_the_engagement_vocabularies_are_closed() -> None:
     assert {one.value for one in ClarificationWithdrawal} == {"withdrawn", "nothing_to_withdraw"}
     assert {one.value for one in GoalAbandonment} == {
         "abandoned",
+        # ADR-0261 §6's fourth member, closing the vocabulary there: the act reports
+        # which of the two things it did — gave the goal up, or gave it up with an
+        # action of it already claimed — on ADR-0244 §11's own construction, so the
+        # discrimination sits where the atomicity already is.
+        "abandoned_effect_in_flight",
         "already_closed",
         "no_such_goal",
     }
@@ -813,6 +818,12 @@ def test_a_reference_naming_both_records_or_neither_is_refused(fields: dict[str,
 def test_a_goal_summary_carries_no_attempt_and_no_element() -> None:
     """§15: "no attempt id, no revision number, no element, no ground, no evidence
     reference and no plan", and ``paused`` is computed by the engine and never stored.
+
+    **``effect_in_flight`` is the one addition and it is added *under* that rule**
+    (ADR-0261 §6): a ``bool`` is none of the six things §15 refuses, and it takes
+    ``paused``'s own clause one fact over — computed per read, never stored, computed
+    by the engine so two surfaces cannot render it differently, and derived by no
+    adapter.
     """
     assert set(GoalSummary.model_fields) == {
         "id",
@@ -821,6 +832,7 @@ def test_a_goal_summary_carries_no_attempt_and_no_element() -> None:
         "paused",
         "last_engaged_at",
         "clarification",
+        "effect_in_flight",
     }
     summary = GoalSummary(
         id="g1",
@@ -876,14 +888,23 @@ def test_neither_achieved_nor_blocked_is_written_anywhere_under_src() -> None:
     )
 
 
-def test_status_has_two_writers_and_they_are_the_two_acts_arm_23_names() -> None:
-    """§20 arm 23's first two limbs, over the shipped tree.
+def test_status_has_two_callers_and_one_store_member_that_writes_abandoned() -> None:
+    """§20 arm 23's first two limbs, over the shipped tree, as ADR-0261 §2 leaves them.
 
     **This case replaces M1's, which pinned the same fact at zero.** That lane changed
-    no behaviour and so had no caller at all; ADR-0250 §19's M3 supplies exactly the two
+    no behaviour and so had no caller at all; ADR-0250 §19's M3 supplied exactly the two
     §12 and §13 name — the reopen writes ``ACTIVE``, ``abandon_goal`` writes
-    ``ABANDONED`` — and the assertion narrows from "none" to "these two and no others"
+    ``ABANDONED`` — and the assertion narrowed from "none" to "these two and no others"
     rather than being dropped.
+
+    **ADR-0261 §2 adds the third population and the arm narrows again rather than
+    widening loosely.** ``PlanStore.close_goal_abandoned`` "**ends a goal's live
+    attempts, writes ``ABANDONED`` and returns that same predicate, all in one
+    indivisible step**", which is that decision partially superseding ADR-0250 §9's
+    sole-route phrase **in the ``ABANDONED`` member alone**; ``ACHIEVED``, ``BLOCKED``
+    and ``ACTIVE`` keep ``set_goal_status`` as their only route. So each conforming
+    ``PlanStore`` writes the member once, **inside that member's own body and nowhere
+    else** — which is what this arm pins, rather than merely counting three more lines.
 
     The **write** form is what is counted — a ``status=GoalStatus.…`` argument or a
     ``"status": GoalStatus.…`` entry — deliberately distinct from the **declaration**
@@ -899,11 +920,70 @@ def test_status_has_two_writers_and_they_are_the_two_acts_arm_23_names() -> None
     assert [where for where, _ in writes] == [
         "ai_assistant/orchestration/engine.py",
         "ai_assistant/orchestration/engine.py",
-    ], f"ADR-0250 §20 arm 23: two status writes, both `orchestration`'s. Found: {writes}"
+        "ai_assistant/planning/sqlite_store.py",
+        "ai_assistant/planning/store.py",
+        "ai_assistant/testing/planning.py",
+    ], (
+        "ADR-0250 §20 arm 23 with ADR-0261 §2: the two acts are `orchestration`'s and "
+        f"each conforming store writes ABANDONED once of its own. Found: {writes}"
+    )
     assert sorted(what for _, what in writes) == [
         "status=GoalStatus.ABANDONED,",
         "status=GoalStatus.ACTIVE,",
-    ], f"and they are the abandonment (§12) and the reopen (§13). Found: {writes}"
+        'update={"status": GoalStatus.ABANDONED, "version": stored.version + 1}',
+        "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
+        "updated = _with_status(stored, status=GoalStatus.ABANDONED)",
+    ], (
+        "and they are the abandonment (§12), the reopen (§13) and the three stores' "
+        f"one closing write each (ADR-0261 §2). Found: {writes}"
+    )
+    assert _enclosing_functions_writing_the_status() == {
+        "ai_assistant/orchestration/engine.py": {"_abandon_goal", "_engaged"},
+        "ai_assistant/planning/sqlite_store.py": {"_close_goal_abandoned_sync"},
+        "ai_assistant/planning/store.py": {"close_goal_abandoned"},
+        "ai_assistant/testing/planning.py": {"close_goal_abandoned"},
+    }, "and each store's write sits inside `close_goal_abandoned` and nowhere else"
+
+
+def _enclosing_functions_writing_the_status() -> dict[str, set[str]]:
+    """Which function each ``GoalStatus`` status write under ``src/`` sits in.
+
+    Read from the syntax tree, so "inside ``close_goal_abandoned``" is a fact about
+    where the write is rather than about which lines happen to be near it.
+
+    Returns:
+        One entry per file holding such a write, naming the enclosing functions.
+    """
+    found: dict[str, set[str]] = {}
+    for path in _SRC.rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        for enclosing in ast.walk(tree):
+            if not isinstance(enclosing, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if any(_writes_a_status(node) for node in ast.walk(enclosing)):
+                found.setdefault(str(path.relative_to(_SRC)), set()).add(enclosing.name)
+    return found
+
+
+def _writes_a_status(node: ast.AST) -> bool:
+    """Whether ``node`` is a ``status=GoalStatus.…`` keyword or mapping entry."""
+    if isinstance(node, ast.keyword):
+        return node.arg == "status" and _is_a_goal_status(node.value)
+    if isinstance(node, ast.Dict):
+        return any(
+            isinstance(key, ast.Constant) and key.value == "status" and _is_a_goal_status(value)
+            for key, value in zip(node.keys, node.values, strict=True)
+        )
+    return False
+
+
+def _is_a_goal_status(node: ast.expr) -> bool:
+    """Whether ``node`` is a literal ``GoalStatus`` member access."""
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "GoalStatus"
+    )
 
 
 def test_set_goal_status_has_exactly_the_two_callers_arm_23_names() -> None:
@@ -995,17 +1075,32 @@ def _values_that_travel(node: ast.AST) -> tuple[ast.expr, ...]:
     return ()
 
 
-def test_every_status_write_goes_through_set_goal_status() -> None:
+def test_every_status_write_a_caller_takes_goes_through_set_goal_status() -> None:
     """§20 arm 23's third limb: "**both go through ``set_goal_status``**".
 
     Read from the syntax tree rather than by proximity, so a later lane cannot satisfy
     it by putting the argument near a call it is not an argument to: every
-    ``status=GoalStatus.…`` keyword under ``src/`` must sit on a call whose callee is
-    ``set_goal_status``, which §9 makes "the goal's **only** status-mutation route".
+    ``status=GoalStatus.…`` keyword **a caller** writes under ``src/`` must sit on a
+    call whose callee is ``set_goal_status``, which §9 makes "the goal's **only**
+    status-mutation route".
+
+    **The stores' own closing write is excluded by name and not by a widened rule**
+    (ADR-0261 §2). ``close_goal_abandoned`` is a ``PlanStore`` member, so it *is* the
+    route rather than a caller taking one, and it writes ``ABANDONED`` **because**
+    ``set_goal_status`` cannot return R78's outstanding-effect answer computed in the
+    same step and a read beside it cannot do so correctly. The arm above pins those
+    three writes to that one member's body; anything else, in any file, is still a
+    second writer and fails here.
     """
+    inside_the_closing_member = {
+        "ai_assistant/planning/sqlite_store.py",
+        "ai_assistant/planning/store.py",
+        "ai_assistant/testing/planning.py",
+    }
     astray = sorted(
         f"{path.relative_to(_SRC)}:{node.lineno}"
         for path in _SRC.rglob("*.py")
+        if str(path.relative_to(_SRC)) not in inside_the_closing_member
         for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, ast.Call)
         and any(
@@ -1018,6 +1113,6 @@ def test_every_status_write_goes_through_set_goal_status() -> None:
         and not (isinstance(node.func, ast.Attribute) and node.func.attr == "set_goal_status")
     )
     assert astray == [], (
-        "ADR-0250 §9: `set_goal_status` is the goal's only status-mutation route, so a "
-        f"status written through any other call is a second writer. Found: {astray}"
+        "ADR-0250 §9: `set_goal_status` is the goal's only status-mutation route for a "
+        f"caller, so a status written through any other call is a second writer. Found: {astray}"
     )
