@@ -59,9 +59,9 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.tools.egress import (
+    HttpsEgressTransport,
     HttpsExchange,
     SmtpEgressTransport,
-    WebSearchTransport,
     parse_https_origin,
     parse_smtp_endpoint,
 )
@@ -445,7 +445,7 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
     )
     return WebSearchIntegration(
         searcher=WebSearchEgress(
-            transport=WebSearchTransport(
+            transport=HttpsEgressTransport(
                 registration=registration,
                 records=records,
                 secrets=secrets,

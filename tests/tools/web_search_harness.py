@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from ai_assistant.testing.cancellation import LoopSuspension
     from ai_assistant.tools.builtin import WebSearchIntegration
     from ai_assistant.tools.connection_store import StoredEntry
-    from ai_assistant.tools.egress import WebSearchTransport
+    from ai_assistant.tools.egress import HttpsEgressTransport
 
 #: The connected account's origin. ``.invalid`` (RFC 6761 §6.4), so a case that
 #: reached a resolver would fail rather than connect.
@@ -928,7 +928,7 @@ class Built:
         return self.integration.searcher
 
     @property
-    def seam(self) -> WebSearchTransport:
+    def seam(self) -> HttpsEgressTransport:
         """The egress transport the searcher acts through.
 
         Returns:

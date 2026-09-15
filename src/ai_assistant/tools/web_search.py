@@ -6,7 +6,7 @@ the response shape ADR-0231 §5 puts "inside ``ai_assistant.tools``", and the
 :class:`~ai_assistant.core.protocols.WebSearcher` that drives the whole of ADR-0231
 §6's order; :mod:`ai_assistant.tools.egress` — the module ADR-0154 §1 designates and
 where §5 rules a ``WEB_SEARCH`` request leaves from — holds
-:class:`~ai_assistant.tools.egress.WebSearchTransport`, which is the thing that reads
+:class:`~ai_assistant.tools.egress.HttpsEgressTransport`, which is the thing that reads
 the account's credential and opens a channel to the world. **Nothing here reads a
 secret, holds a ``Secrets`` face or constructs a transport**, exactly as nothing in
 ``send_email.py`` does; the credential is the seam's, at the position ADR-0148 §7 puts
@@ -114,7 +114,7 @@ if TYPE_CHECKING:
         SpendAdmissionHandle,
         ToolCall,
     )
-    from ai_assistant.tools.egress import HttpsResponse, WebSearchTransport
+    from ai_assistant.tools.egress import HttpsEgressTransport, HttpsResponse
 
 _log = structlog.get_logger(__name__)
 
@@ -1098,7 +1098,7 @@ class WebSearchEgress:
     4. Inside the claim, and inside the deadline the **caller** stated as
        :meth:`search`'s ``timeout`` (ADR-0241 §1): the pin, ADR-0148 §6's
        one-step credential read and its post-read discard, and the exchange — all of
-       them :class:`~ai_assistant.tools.egress.WebSearchTransport`'s, at the seam
+       them :class:`~ai_assistant.tools.egress.HttpsEgressTransport`'s, at the seam
        ADR-0154 §1 designates. Then §10's transcription and minting, here.
 
     **A claim left open states, as its own state, that the search may have reached the
@@ -1143,7 +1143,7 @@ class WebSearchEgress:
     def __init__(  # noqa: PLR0913 — one parameter per collaborator ADR-0231 §6 and §15 name, plus the declaration §6's second check compares against, the identity §10 attests to and the two bounds §5 adds; each is one thing this searcher is handed rather than reaches for
         self,
         *,
-        transport: WebSearchTransport,
+        transport: HttpsEgressTransport,
         ledger: InvocationLedger,
         gate: SpendGate,
         max_results: int,
