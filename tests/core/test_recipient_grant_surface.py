@@ -50,7 +50,7 @@ def test_it_transcribes_the_subject_and_answers_the_question() -> None:
     than a hand-built record: a caller has no parameter through which to substitute
     a subject, so the answer necessarily rules on the question it names.
     """
-    confirmed = _confirmation(_binding(ALICE))
+    confirmed = _confirmation(_binding(ALICE), intended_action="act-1")
 
     answer = _answer(confirmed)
 
@@ -59,6 +59,10 @@ def test_it_transcribes_the_subject_and_answers_the_question() -> None:
     assert answer.egress_binding == confirmed.egress_binding
     assert answer.step_id == confirmed.step_id
     assert answer.execution_id == confirmed.execution_id
+    # **The act the question was asked about is transcribed with the rest of the
+    # subject** (ADR-0266 §7): a resolving decision that lost it would answer a
+    # request that is an attempt at another act.
+    assert answer.intended_action == confirmed.intended_action == "act-1"
     assert answer.resolves == confirmed.id
     assert answer.ruling == _ALLOW
     assert answer.expires_at is None
