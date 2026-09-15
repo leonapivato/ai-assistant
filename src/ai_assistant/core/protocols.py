@@ -3993,17 +3993,24 @@ class Planner(Protocol):
         padding and no sign. Both sides derive the label from the brief they hold and
         neither consults the other. A label is meaningful only within the call that
         rendered it: **no label survives that call, and none is persisted as a
-        reference.**
+        reference.** That is the brief's own rendering and **not the whole of the ``A``
+        space**, which the paragraph below states: the supply a step selects from runs
+        on past the brief into this call's own proposals.
 
-        **The ``A`` space is selection and never invention** (ADR-0265 §4). A step
-        names an act the brief already rendered, by its label, or names none: a planner
-        mints no action there and names no identifier, and a label the loop cannot
-        resolve **refuses the plan** rather than being dropped — the fail-closed
-        direction, because "a step whose action was dropped is a step whose effect claim
-        would be scoped to nothing". Nothing else is a label — not ``A01``, not ``A+1``,
-        not ``a1``, not a digit outside ``0``-``9`` — and each resolves to nothing
-        rather than being parsed, repaired or case-folded, which is ADR-0253 §9's
-        strict-extraction rule applied to one more vocabulary.
+        **The ``A`` space is selection and never invention** (ADR-0265 §4). **The label
+        supply is the brief's ``actions`` extended by this call's own
+        ``PlannerOutput.actions``, in that order** (§4, §2). ``orchestration`` records
+        this call's proposals **before** it resolves the plan's labels, so a step may
+        name an act this same output proposed — which is *"book two rooms"* on the turn
+        the user says it, the ordinary shape and not an exotic one. A step selects from
+        that supply, or names none; a planner mints no action there and names no
+        identifier. A label the loop cannot resolve **refuses the plan** rather than
+        being dropped — the fail-closed direction, because "a step whose action was
+        dropped is a step whose effect claim would be scoped to nothing". Nothing else
+        is a label — not ``A01``, not ``A+1``, not ``a1``, not a digit outside
+        ``0``-``9`` — and each resolves to nothing rather than being parsed, repaired
+        or case-folded, which is ADR-0253 §9's strict-extraction rule applied to one
+        more vocabulary.
 
         **``goal_id`` is on the brief and is rendered nowhere** (§9). It names the
         *subject* of the call rather than a record in the labelled supply, it has
@@ -4407,9 +4414,10 @@ class Planner(Protocol):
             value it came back carrying (ADR-0228 §5, ADR-0249 §8), so an
             implementation neither sets them nor is penalised for setting them.
 
-            **ADR-0253 makes that a four-field clause and adds obligations to what a
-            conforming implementation produces.** The signature does not move and this
-            envelope gains no member; what changes is what a plan may *be*, which §10
+            **ADR-0253 makes that a four-field clause — and ADR-0265 §4 a five-field
+            one — and each adds obligations to what a conforming implementation
+            produces.** The signature does not move and this envelope gains no member
+            on either count; what changes is what a plan may *be*, which ADR-0253 §10
             classifies a **breaking** Protocol change under golden rule 5 precisely
             because it is stated here rather than in a type alone.
 
@@ -4428,10 +4436,20 @@ class Planner(Protocol):
               it received where it does not. **The loop substitutes each for the
               ``GoalElement.id`` it resolves to**, once, before any other component
               observes the plan, and ``PlanStore.save_plan`` refuses a plan on which it
-              has not. So the fields another component sets become **exactly four** —
-              ``supersedes``, ``targets_revision``, and each of these two — and an
-              implementation neither resolves them nor is penalised for returning a
-              label. A ``GoalBrief`` carries no element id for one to copy.
+              has not. An implementation neither resolves them nor is penalised for
+              returning a label. A ``GoalBrief`` carries no element id for one to copy.
+            - **And a step names the act it is an attempt at by an ``A`` label**
+              (ADR-0265 §4), which is the clause above applied to one more vocabulary:
+              ``PlanStep.intended_action`` a planner returns is a label of the supply
+              the paragraph on the ``A`` space states — the brief's ``actions``
+              extended by this call's own ``PlannerOutput.actions`` — and the loop
+              substitutes it for the ``IntendedAction.id`` it resolves to, once, at the
+              same moment and under the same discipline. A label resolving to nothing
+              refuses the plan rather than being dropped. **So the fields another
+              component sets become exactly five** (ADR-0265's supersession of ADR-0253
+              §9's own four-field count) — ``supersedes``, ``targets_revision``, each
+              ``StepCondition.about``, each ``PlanInterpretation.settles``, and each
+              ``PlanStep.intended_action``.
             - **Step and interpretation ids are the implementation's** and are minted
               by whatever mints step ids today. **No step identifier is rendered to a
               model and none is accepted from one** (§1): a model names a step by its
@@ -4533,6 +4551,29 @@ class PlanStore(Protocol):
     predicate. A store that evaluated the refresh test would be a second place the rule
     lives, and the first conforming implementation to read it differently would be right
     in one of them.
+
+    **One member carries ADR-0265's intended action and one is strengthened**, and that
+    is a fourth **BREAKING** contract change under golden rule 5, layering on ADR-0249
+    §12's widening of this Protocol, on ADR-0250 §9's and on ADR-0252's:
+    :meth:`record_intended_actions` is the new member, and :meth:`save_plan` gains the
+    conjunct over ``PlanStep.intended_action`` (ADR-0265 §4, §5). **The new member is a
+    command and not a snapshot** on ADR-0014 §5's argument unchanged — it takes an
+    :class:`~ai_assistant.core.types.IntendedActionMinting` naming the change it makes
+    and never a whole ``Goal`` — and it is **compare-and-swap** on the discipline
+    ``record_interpretation`` and ``commit_attempt`` already keep. The strengthening is
+    a strengthening rather than a fifth member "on ADR-0249 §12's own classification of
+    ``commit_transition``'s added claim condition", and :meth:`save_goal` is
+    strengthened by the same decision's refusal of a goal opened carrying an intended
+    action.
+
+    **The minting rides on no other write, and that is the asymmetry against the marks
+    above** (ADR-0265 §2). An intended action "must survive every revision that does
+    not mention it", so minting is **independent of revising**: it does not ride on
+    :meth:`record_interpretation`, a revision mentioning no action removes none, and a
+    turn may mint without revising at all. Where ADR-0252 §12's marks have no member of
+    their own because a window would open between two calls, this one has a member of
+    its own because a carrier whose omission rule is removal is the one carrier an
+    identity may not have.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
