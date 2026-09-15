@@ -25,13 +25,16 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from test_engine import AT, PATIENT, Harness, NoStepPlanner
+from test_engine_revision import _ADDRESS, _ASKED, _hop, _store_holding_the_address
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import (
+    ActionPlan,
     AssociationVerdict,
     GoalAssociation,
     Ground,
     IntendedActionMinting,
+    PlannerOutput,
     PlanStep,
     ProposedAction,
     ProposedElement,
@@ -45,7 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import ActionPlan, Goal
+    from ai_assistant.core.types import Goal, MemoryRecord
 
 #: What the planner proposes the goal now depends on, so a minted action has a live
 #: element to serve on the very call that proposes both.
@@ -302,4 +305,80 @@ async def test_a_second_turns_minting_follows_the_revision_that_turn_recorded() 
     assert stored.version > after_opening.version, "each write returned the next one's token"
     assert continued.turn.plan.steps[0].intended_action == second.id, (
         "§4: A2 over the extended tuple — the brief's one action plus this call's own"
+    )
+
+
+class _TwoCall:
+    """A planner that asks for a read, mints on both calls, and plans on the second.
+
+    ADR-0228 §3 bounds a turn at two ``Planner.plan`` calls, and ADR-0265 §2's ordering
+    is stated **per call** — "on every ``PlannerOutput`` a planner returns". A turn that
+    only ever made one call could not tell a loop that mints once per call from one that
+    mints once per turn, which is the gap this class exists to close.
+
+    **It reads the supply and not the iteration** for what it *plans* (ADR-0228 §12), and
+    counts its own calls only to vary what it *proposes* — which is a fake's own
+    bookkeeping and crosses no seam.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[MemoryRecord, ...]] = []
+
+    async def plan(self, goal: Any, **fields: Any) -> Any:
+        """Ask for the hop and mint the first room; on the second call, mint and plan."""
+        ordinal = len(self.calls) + 1
+        self.calls.append(tuple(fields["memories"]))
+        if not any(_ADDRESS in one.content for one in fields["memories"]):
+            return PlannerOutput(
+                plan=ActionPlan(
+                    id=f"{goal.goal_id}-plan-{ordinal}",
+                    goal_id=goal.goal_id,
+                    steps=(),
+                    created_at=AT,
+                    rationale="the address is not in front of me",
+                    read_request=_hop("M1"),
+                ),
+                actions=(ProposedAction(intent=_FIRST_ROOM),),
+            )
+        return PlannerOutput(
+            plan=ActionPlan(
+                id=f"{goal.goal_id}-plan-{ordinal}",
+                goal_id=goal.goal_id,
+                steps=(_step("step-1", action="A2"),),
+                created_at=AT,
+                rationale="now it is",
+            ),
+            actions=(ProposedAction(intent=_SECOND_ROOM),),
+        )
+
+
+async def test_each_planner_call_of_a_turn_mints_and_each_minting_is_its_own_write() -> None:
+    """§2's ordering is per call, and a turn's two calls take two appends.
+
+    "On **every** ``PlannerOutput`` a planner returns, ``orchestration`` … (b) records
+    this call's ``actions``" — so a turn that plans twice mints twice, the goal holds
+    both in the order the calls proposed them (§1, oldest first and append-only), and
+    the second call's ``A2`` indexes "``GoalBrief.actions`` extended by this call's own
+    ``PlannerOutput.actions``" — which on this turn is the first call's action plus this
+    one's.
+
+    **Two writes and not one** (§5), because each is all-or-nothing over its own call's
+    proposal: merging a turn's calls into one command would make a later call's bad
+    proposal discard an earlier call's good one.
+    """
+    plans = _CountingPlanStore(now=lambda: AT)
+    planner = _TwoCall()
+    harness = Harness(memory=await _store_holding_the_address(), planner=planner, plans=plans)
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert len(planner.calls) == 2, "ADR-0228 §3's second call, which the hop earned"
+    assert outcome.turn is not None
+    stored = await plans.get_goal(outcome.turn.goal.goal_id)
+    assert stored is not None
+    first, second = stored.intended_actions
+    assert (first.intent, second.intent) == (_FIRST_ROOM, _SECOND_ROOM), "§1: oldest first"
+    assert plans.mintings == 2, "§5: one compare-and-swap per call that minted"
+    assert outcome.turn.plan.steps[0].intended_action == second.id, (
+        "§4: A2 over the tuple this call's own proposal extended"
     )

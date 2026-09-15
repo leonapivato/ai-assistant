@@ -9899,6 +9899,21 @@ class Engine:
         because §2 records a call's actions after that same call's revision and a
         ``serves`` link is checked against the current interpretation at the append.
 
+        **On an *opening* turn that interleave is not available, and #2414 is the
+        record of why.** ``save_goal`` is one write of the whole chain, so a turn that
+        opens a goal, mints on its **first** planner call and then records a revision on
+        its **second** that does not retain the element that action serves has its
+        minting refused by ADR-0265 §5's ``serves`` conjunct — which reads the
+        *current* interpretation, by then the second call's. The link is legitimate:
+        §3 makes it "stale, truthful and harmless". Three ratified clauses meet here and
+        no implementation satisfies all three — §2's per-call ordering, ADR-0249 §11's
+        one end-of-turn persistence site with ``save_goal`` carrying the chain entire,
+        and §1's refusal of a ``save_goal`` that carries an intended action at all — so
+        the state is forced rather than chosen, and resolving it is an amendment to
+        ADR-0265 §5 rather than a change here. It is **fail-closed** (nothing is
+        recorded, no plan is saved, no step is dispatched) and unreachable until
+        ADR-0265's L3 lands the seam that fills ``PlannerOutput.actions``.
+
         ``None`` is unreachable from any path this component drives — every
         ``RespondedTurn`` the loop returns carries a record — and is accepted rather
         than asserted away so that a caller's double cannot turn a missing carrier
