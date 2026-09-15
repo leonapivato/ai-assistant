@@ -110,6 +110,19 @@ backstop, and an offered change carries the price its acceptance authorises
   §§1-5 and §7, and **no other store and no other datum takes this scope**. A reader holding only §6
   looks for the record in an export or on a surface, finds it on neither, and reads its absence as a
   defect rather than as this decision's stated and bounded cost (#2410)
+- **Partially supersedes** [ADR-0261](0261-a-cancellation-is-a-user-act-between-turns-that-ends-the-goals-attempt-and-an-effect-already-dispatched-is-reported-rather-than-withdrawn.md)
+  — **one scope. §2's all-or-nothing clause, in its act-level limbs alone**: *"there is no partial
+  act, no ordering rule and no residual"*, and its *"No lane adds … a fail-closed ordering … for a
+  residual this member cannot leave"*, are now false of the **abandonment act** — §1 orders
+  `end_for_goal` strictly before the closing write and states what a failure between the two
+  leaves: rows ended `GOAL_CLOSED`, the goal open and fenced, compensated by nothing. **The
+  member's own limbs stand verbatim and are what this rests on** — `close_goal_abandoned` is still
+  one indivisible step that either commits every write and answers or raises having written
+  nothing, still refuses a stale `expected_version` and a goal already closed, and its single
+  re-read-and-retry is taken as it stands — and **the residual stated here is one that member
+  cannot leave**, being in another store. A reader holding only §2 reads *no partial act* as a
+  property of the act and would take the ending after the closing write, which is the
+  establish-against-closure race §1 exists to close. **§§1 and 3-11 stand entire**
 - Date: 2026-09-15
 
 ## Context
@@ -694,8 +707,8 @@ and not the words the user used.
 
 ADR-0082 §1's test is ADR-0070 §1's applied to the earlier ADR's text: would a reader holding only
 that ADR now act differently, or read one of its clauses more widely than it now holds? For each
-limb below the answer is yes, and the sentence that becomes false or over-wide is named. **Seven
-places, in four documents.**
+limb below the answer is yes, and the sentence that becomes false or over-wide is named. **Eight
+places, in five documents.**
 
 1. **ADR-0254 §1's `AuthorizationDisposition` clause**, in its closure and its retired enumeration:
    *"closed at exactly **six** members"* becomes seven, gaining `GOAL_CLOSED`, and *"`DECLINED`,
@@ -795,16 +808,25 @@ places, in four documents.**
    `clear`. A reader holding only §6 reads the record's absence from `export` as a defect rather
    than as the bounded cost §1 states, and would author the projection #2410 books.
 
+8. **ADR-0261 §2's all-or-nothing clause, in its act-level limbs alone**: *"there is no partial act,
+   no ordering rule and no residual"*, and that clause's *"No lane adds … a **fail-closed ordering**
+   … for a residual this member cannot leave"*, are stated over the whole abandonment and are now
+   false of it — §1 orders `end_for_goal` strictly before the closing write, and states what a
+   failure between them leaves: rows ended, the goal open and fenced, compensated by nothing. **The
+   member's own limbs are untouched** — `close_goal_abandoned` is still one indivisible step that
+   commits every write or writes nothing — and **the residual stated here is one it cannot leave**,
+   being in another store. A reader holding only §2 reads *no partial act* as a property of the act
+   and would take the ending **after** the closing write, which is the establish-against-closure
+   race §1 exists to close.
+
 **Reached and superseded in nothing, recorded because a reader would otherwise look for a scope.**
 **ADR-0266 §7's worked case** is stated at phase 3 of a live goal and every word of it survives (§5
 above). **ADR-0267 §7** is relied on and unmoved, `quoted` being provenance no comparison reads.
-**ADR-0261 §2 and §5** bind entire: this decision adds no conjunct to `close_goal_abandoned`,
-`set_goal_status` or `open_attempt`, moves no attempt and no step, and leaves §2's single
-re-read-and-retry as it is — §1 states a store call `orchestration` takes around each attempt that
-section already makes, changing neither the attempt, nor what the re-read decides, nor how many
-there may be. **ADR-0250 §1's division is read and not changed**, and §12's abandonment sequence
-gains nothing. **ADR-0249 §4** is quoted rather than narrowed: `ACHIEVED` and `BLOCKED` gain no
-producer here.
+**ADR-0261 §5** binds entire, and **§2 but for the scope at 8 above**: no conjunct is added to
+`close_goal_abandoned`, `set_goal_status` or `open_attempt`, no attempt and no step is moved, and
+§2's single re-read-and-retry is left as it is. **ADR-0250 §1's division is read and not changed**,
+and §12's abandonment sequence gains nothing. **ADR-0249 §4** is quoted rather than narrowed:
+`ACHIEVED` and `BLOCKED` gain no producer here.
 
 ### 8. What this decision does not decide, by name, each with what fires it
 
@@ -993,9 +1015,11 @@ producer here.
 >    conjunct added; and `decide` over a goal whose rows are all `GOAL_CLOSED` reaches route (d) in
 >    no case, `live_for` answering `None`.
 > 7. **Each half of the two-write sequence failing, injected, and the act compensating nothing.**
->    `end_for_goal` raising: the act propagates, **`PlanStore` is not called at all** — asserted
->    over the call count and not only over the stored state — no status is written, no attempt is
->    committed, **no fence stands**, and a re-run performs the act whole; **the same injection on
+>    `end_for_goal` raising: the act propagates and **no write of `PlanStore` follows** — asserted
+>    over the call count of `close_goal_abandoned` and `set_goal_status` and not only over the
+>    stored state, the act's own first read (ADR-0250 §12) being no part of that count, every
+>    execution reaching the ending having taken it. **No status is written, no attempt is
+>    committed, no fence stands**, and a re-run performs the act whole; **the same injection on
 >    the retry attempt** leaves the first attempt's fence **standing** and no status written. The
 >    **closing write** raising after a successful ending: the act propagates, the rows stand
 >    `GOAL_CLOSED`, the goal is still open with its attempts untouched, **`clear_closure` is called
@@ -1039,12 +1063,12 @@ producer here.
 **A reader acts differently, so this is a decision and not a clarification.** A reader holding the
 corpus without it ships an authority that outlives the request it was granted for by up to a
 deployment's whole retention window, and a listing that offers the user a live authority over a
-finished booking. **It is a partial supersession of exactly four documents** (ADR-0070 §3) —
-ADR-0254 in four scopes, ADR-0256 in one, ADR-0250 in one and ADR-0004 in one — and the `Status`
-line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**, so ADR-0070
-§4's extraction invariant holds. **ADR-0004 carries the grandfathered accumulated form and takes
-both halves ADR-0082 §§1-2 owe it** — the scope appended to its `Status` qualifier and a dated
-`Partially superseded:` note beside its others. **The records land in the same change as this
+finished booking. **It is a partial supersession of exactly five documents** (ADR-0070 §3) —
+ADR-0254 in four scopes, ADR-0256 in one, ADR-0250 in one, ADR-0004 in one and ADR-0261 in one — and
+the `Status` line of each names its scopes **without an `ADR-NNNN` token inside the parentheses**,
+so ADR-0070 §4's extraction invariant holds. **ADR-0004 carries the grandfathered accumulated form
+and takes both halves ADR-0082 §§1-2 owe it** — the scope appended to its `Status` qualifier and a
+dated `Partially superseded:` note beside its others. **The records land in the same change as this
 document** (ADR-0082 §7), and nothing else in any of the four is edited — no Decision text is
 rewritten, which ADR-0070 §1 forbids.
 
