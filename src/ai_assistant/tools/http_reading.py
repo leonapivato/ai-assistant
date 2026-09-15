@@ -177,16 +177,25 @@ def decoded_object(body: bytes) -> dict[str, FrozenJson] | None:
     Args:
         body: The response's octets, as the exchange read them under its bound.
 
+    **``NaN``, ``Infinity`` and ``-Infinity`` are not JSON, and this decoder does not
+    take them.** Python's ``json`` accepts all three by default as an extension; RFC
+    8259 admits no such token, so a body carrying one is a body outside the documented
+    format — and a decoder that took it would let a response mint records off octets
+    the format does not describe, **anywhere in the body**, including a member neither
+    integration reads. :func:`_no_such_constant` is what refuses them, and it refuses
+    by raising a ``ValueError`` the clause below already answers.
+
     Returns:
-        The object, or ``None`` where the octets are not UTF-8, are not JSON, are
-        nested past :data:`MAX_JSON_DEPTH`, or are JSON that is not an object. All
-        four are one operator fact — the provider answered something this integration
-        does not read — so they are one answer rather than four.
+        The object, or ``None`` where the octets are not UTF-8, are not JSON, carry a
+        token JSON does not have, are nested past :data:`MAX_JSON_DEPTH`, or are JSON
+        that is not an object. All of them are one operator fact — the provider
+        answered something this integration does not read — so they are one answer
+        rather than five.
     """
     if _too_deep(body):
         return None
     try:
-        decoded = json.loads(body.decode("utf-8"))
+        decoded = json.loads(body.decode("utf-8"), parse_constant=_no_such_constant)
     except ValueError:
         # `ValueError` and not the two concrete classes: `UnicodeDecodeError` and
         # `json.JSONDecodeError` are both subclasses of it, and naming the base keeps
@@ -194,6 +203,29 @@ def decoded_object(body: bytes) -> dict[str, FrozenJson] | None:
         # refusals.
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+def _no_such_constant(token: str) -> object:
+    """Refuse ``NaN``, ``Infinity`` and ``-Infinity``, which JSON does not have.
+
+    Python's decoder accepts all three as an extension unless a caller says otherwise,
+    and a response carrying one is a response outside RFC 8259 — so the honest answer
+    is that the provider answered something this integration does not read, not that it
+    answered a number no arithmetic here could use.
+
+    Args:
+        token: The constant the decoder met.
+
+    Returns:
+        Nothing: this function always raises. The annotation is what a
+        ``parse_constant`` hook is typed as.
+
+    Raises:
+        ValueError: Always. :func:`decoded_object` already answers that class with
+            ``None``, so the refusal needs no branch of its own.
+    """
+    msg = f"{token!r} is not a JSON value (RFC 8259)"
+    raise ValueError(msg)
 
 
 def _too_deep(body: bytes) -> bool:
