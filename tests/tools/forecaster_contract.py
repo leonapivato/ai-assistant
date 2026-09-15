@@ -103,7 +103,7 @@ _SHORT_BOUND: Final = timedelta(milliseconds=50)
 _WAIT_SECONDS: Final = 5.0
 
 
-class _CannotDescribeItself:
+class CannotDescribeItself:
     """A bound outside the domain whose ``__repr__`` raises.
 
     **The diagnostic must not be able to destroy the diagnosis.** The value and its
@@ -473,7 +473,7 @@ class ForecasterContract:
             pytest.param("30s", id="a-string"),
             pytest.param(timedelta(0), id="zero"),
             pytest.param(timedelta(seconds=-1), id="negative"),
-            pytest.param(_CannotDescribeItself(), id="a-value-whose-repr-raises"),
+            pytest.param(CannotDescribeItself(), id="a-value-whose-repr-raises"),
         ],
     )
     async def test_a_bound_outside_its_domain_is_refused(self, bound: object) -> None:

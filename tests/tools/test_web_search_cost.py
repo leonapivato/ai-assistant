@@ -370,6 +370,63 @@ class _LyingCode(str):
         return True
 
 
+class _UndescribableAmount:
+    """An amount outside the domain that will not describe itself.
+
+    The type is refused before anything else is asked of the value, so what reaches the
+    message is arbitrary — and a validator interpolating its ``__repr__`` would raise
+    that instead of the ``ValueError`` ADR-0236 §2's domain promises. ``core`` carries
+    :func:`~ai_assistant.core.types.describe_untrusted` for exactly this.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        """Raise instead of describing this amount.
+
+        Returns:
+            Never.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        msg = "a value that will not say what it is"
+        raise RuntimeError(msg)
+
+
+#: Every non-``Decimal`` amount the type guard refuses, on :data:`REFUSED_PAIRS`'
+#: two-statements-of-one-rule footing. A ``float`` is the mistake an operator makes; a
+#: value whose ``repr`` raises is the one that decides whether the diagnostic can destroy
+#: the diagnosis.
+MISTYPED_AMOUNTS: Final = [
+    pytest.param(0.002, id="a-float"),
+    pytest.param(_UndescribableAmount(), id="an-amount-whose-repr-raises"),
+]
+
+
+@pytest.mark.parametrize("amount", MISTYPED_AMOUNTS)
+async def test_the_builder_refuses_an_amount_that_is_not_a_decimal(amount: object) -> None:
+    """The type is part of the domain for the amount as it is for the code (#2131).
+
+    And the message is built from a rendering that cannot raise: the value has just been
+    refused *for its type*, so its ``__repr__`` is the caller's and an f-string's ``!r``
+    would report the refusal by raising something else entirely.
+    """
+    with pytest.raises(ValueError, match="cost_per_call"):
+        await built(cost_per_call=amount, cost_currency=CODE)  # type: ignore[arg-type]  # the subject
+
+
+@pytest.mark.parametrize("amount", MISTYPED_AMOUNTS)
+def test_the_cost_helper_refuses_an_amount_that_is_not_a_decimal(amount: object) -> None:
+    """The same list at the function the builder delegates to, driven synchronously.
+
+    One rule with two statements, so a guard that drifted at one site fails at the other
+    — and both integrations reach this function (ADR-0236 §2).
+    """
+    with pytest.raises(ValueError, match="cost_per_call"):
+        checked_per_call_cost(amount, CODE)  # type: ignore[arg-type]  # the subject
+
+
 #: Every non-``str`` code the type guard refuses, on the same two-statements-of-one-rule
 #: footing as :data:`REFUSED_PAIRS` above — ``tests/tools/test_fake_web_searcher.py``
 #: asks the canonical fake for the same list, because ADR-0236 §7 forbids the fake being
