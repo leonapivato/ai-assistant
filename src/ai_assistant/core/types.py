@@ -19143,16 +19143,18 @@ def _exactly_a_bool(value: object) -> object:
     return value
 
 
-type StrictBool = Annotated[bool, BeforeValidator(_exactly_a_bool)]
-"""A ``bool`` that is **not** reached by coercion from a string or an integer.
-
-Used where the flag is part of what a record *means* rather than a convenience —
-see :func:`_exactly_a_bool` for why :attr:`ValueBound.maximum_exclusive` is such a
-field. It is deliberately **not** applied to every ``bool`` in this module: a flag
-no comparison orders loses nothing to lax parsing, and widening it to fields no
-ratified decision has asked about would be this lane changing a surface outside
-ADR-0266 §11's list.
-"""
+#: Applied **inline**, at the one field that needs it, and deliberately **not**
+#: given a name (ADR-0254 §16, as ADR-0266 §9 amends it). A named alias here would
+#: be a fifteenth type where §9 ratifies a fourteenth, `BoundedArgument`, and it is
+#: not only a naming question: a runtime ``TypeAliasType`` renders as a named
+#: ``$defs`` entry in every schema the field appears in, so the alias would reach
+#: the wire's published shape as surface no decision asked for. The validator is the
+#: contract; the alias was only convenience. Adversarial review, round 11,
+#: ``blocker``.
+#:
+#: **One field, not a sweep.** A flag no comparison orders loses nothing to lax
+#: parsing, so widening this to every ``bool`` in the module would be the change
+#: §11's list does not carry.
 
 
 def _iana_zone_name(value: str) -> str:
@@ -19416,7 +19418,7 @@ class ValueBound(BaseModel):
             "Whether the endpoint itself is permitted is :attr:`maximum_exclusive`'s."
         ),
     )
-    maximum_exclusive: StrictBool = Field(
+    maximum_exclusive: Annotated[bool, BeforeValidator(_exactly_a_bool)] = Field(
         default=False,
         description=(
             "``MONEY`` only: whether :attr:`maximum` is **excluded** from what this "
