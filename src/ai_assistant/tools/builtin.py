@@ -67,6 +67,7 @@ from ai_assistant.tools.egress import (
     parse_smtp_endpoint,
 )
 from ai_assistant.tools.egress_binder import EgressRegistration, RegistrationTable
+from ai_assistant.tools.forecast import FORECAST_READ, FORECAST_READ_ID, ForecastEgress
 from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 from ai_assistant.tools.web_search import (
@@ -461,8 +462,158 @@ def build_web_search_integration(  # noqa: PLR0913 — one parameter per injecte
     )
 
 
+# --- the configured forecast integration (ADR-0260 §6, §12) -------------
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastIntegration:
+    """One configured forecast integration: its forecaster and its registration.
+
+    :class:`WebSearchIntegration`'s shape one kind along, and with the same member
+    missing for the same reason. There is no ``definition`` here to put in a registry:
+    ADR-0260 §1 registers the forecast integration "at the egress seam against the
+    configured connection and in **no** ``ToolRegistry``", so a composition root that
+    wired this value could not accidentally advertise a capability for it. What the
+    binding seam needs is the registration; what the turn needs is the forecaster; and
+    nothing needs a registry entry.
+
+    Attributes:
+        forecaster: The ``Forecaster`` a servicer drives. It carries the declaration by
+            value and compares against it on every call (ADR-0029 §2, ADR-0260 §6).
+        registration: The configured connection and the origin, as the binding seam
+            reads them. The **same object** the transport inside ``forecaster`` holds,
+            so the origin a ruled call is pinned against and the reference a record is
+            read by cannot come apart.
+    """
+
+    forecaster: ForecastEgress
+    registration: EgressRegistration
+
+
+def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected seam ADR-0260 §6 names, plus the account's two configured facts, the place §3 makes the forecaster's own, the three bounds §11 adds and its per-call figure; each is one thing a deployment supplies on its own
+    *,
+    connection: str,
+    origin: str,
+    latitude: float,
+    longitude: float,
+    records: ConnectionRecords,
+    secrets: Secrets,
+    transport: OutboundTransport,
+    max_days: int,
+    max_day_chars: int,
+    max_response_bytes: int,
+    cost_per_call: Decimal | None = None,
+    cost_currency: str | None = None,
+) -> ForecastIntegration:
+    """Register the forecast read against one configured provider (ADR-0260 §6, §12).
+
+    **The one place in production a forecaster is constructed**, and the only site
+    under ``src/ai_assistant`` — :func:`build_web_search_integration`'s answer one kind
+    along: the exchange is built here, handed to the forecaster's transport, and
+    reachable from nowhere else.
+
+    **The origin is parsed here and then never used parsed.** Parsing is a fail-fast on
+    the operator's configuration — a deployment naming an origin this seam will not
+    canonicalise should not start and then fail at a read. What the transport compares
+    per call is the ruled call's origin against this registration's *as text, before
+    parsing* (ADR-0154's condition 5), so two spellings of one host stay two origins.
+
+    **No ledger and no spend gate are taken, which is ADR-0260 §6 read rather than
+    skipped**: that section enumerates what ``read`` performs and this seam "inherits
+    nothing written about ``WEB_SEARCH``". What the configured cost pair reaches is the
+    **declaration**, which is what ADR-0236 §4's unknown-cost floor reads at the ruling.
+
+    **Nothing is registered in a ``ToolRegistry``, and there is no parameter through
+    which it could be** (ADR-0260 §1). This function returns no ``definition`` and
+    :func:`build_default_registry` takes no forecast argument, so "the declaration is
+    absent from ``capabilities()`` and ``all_tools()``" is a property of the two
+    signatures rather than of a line somebody remembered not to write.
+
+    Args:
+        connection: The connection reference the forecast read is registered against —
+            a reference the provisioner already minted (ADR-0151 §3). The user
+            provisioned it by ADR-0149 §4's explicit act, supplying an identity and a
+            credential; **the reference provider accepts that credential and does not
+            use it** (ADR-0260 §12), which is a fact about the far end and changes
+            nothing about ADR-0148 §6's conditions on this side.
+        origin: The one origin the configured provider names, as ``https://host[:port]``
+            (ADR-0260 §6). The transport pins every call to exactly this text and opens
+            a channel to no other.
+        latitude: ``Settings.forecast_latitude`` — the place this deployment reads its
+            forecast for (ADR-0260 §3, §11).
+        longitude: ``Settings.forecast_longitude``, likewise.
+        records: The connection store, read once per call by the binding seam and twice
+            around the credential read by the transport (ADR-0148 §6). The **same**
+            store object the provisioner writes, so a provisioning act cannot commit a
+            revision this path could not yet see.
+        secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8). Never a
+            ``SecretStore``: a transport handed the writing face could delete the
+            credential it reads.
+        transport: The injected capability of reaching the world (ADR-0191 §1),
+            **required**. The one place that constructs the real implementation is
+            ``app/composition.py``; a test hands
+            :class:`~ai_assistant.testing.FakeOutboundTransport` by that same route,
+            and there is no other route.
+        max_days: ``Settings.forecast_max_days``.
+        max_day_chars: ``Settings.forecast_max_day_chars``.
+        max_response_bytes: ``Settings.forecast_max_response_bytes``.
+        cost_per_call: ``Settings.forecast_cost_per_call`` — what one forecast read
+            costs this deployment, as the operator's own figure (ADR-0236 §1, ADR-0260
+            §11). Passed through from the composition root unchanged; **this function
+            is the only place in production where it becomes a ``ToolCost``**, and it
+            becomes one on a declaration built per registration rather than by editing
+            :data:`~ai_assistant.tools.forecast.FORECAST_READ`.
+        cost_currency: ``Settings.forecast_cost_currency`` — the ISO-4217 code that
+            figure is denominated in. Set with ``cost_per_call`` or not at all; with
+            neither, the registered declaration keeps ``FORECAST_READ``'s own
+            ``UNKNOWN`` cost, which is the state ADR-0236 §4 governs.
+
+    Returns:
+        The forecaster and the registration as one value.
+
+    Raises:
+        TransportPinError: If ``origin`` is not a form this seam pins. The same class
+            the transport raises for the same fact, so a deployment reads one error for
+            one mistake whether it is caught at startup or at a read.
+        ValueError: If a bound or a coordinate is outside ADR-0260 §11's stated domain
+            for it, or if the declared cost is outside ADR-0236 §2's — half a pair, a
+            non-finite, negative or uncountable amount, or a malformed currency code.
+            ``Settings`` refuses each at load; this states the same rules at the one
+            place a forecaster can be built without going through it.
+    """
+    # Fail-fast only; the parsed value is deliberately discarded. See above.
+    parse_https_origin(origin)
+    # **The per-registration declaration ADR-0236 §1 requires, and never a mutation of
+    # the module constant.** A permission decision is recorded against the definition
+    # that was in force (ADR-0016 §1's `frozen=True` argument), so a shared constant
+    # whose `cost` was rewritten at start-up would be the back door that clause names.
+    cost = checked_per_call_cost(cost_per_call, cost_currency)
+    declaration = FORECAST_READ if cost is None else FORECAST_READ.model_copy(update={"cost": cost})
+    registration = EgressRegistration(
+        tool_id=FORECAST_READ_ID, reference=connection, transport_endpoint=origin
+    )
+    return ForecastIntegration(
+        forecaster=ForecastEgress(
+            transport=HttpsEgressTransport(
+                registration=registration,
+                records=records,
+                secrets=secrets,
+                exchange=HttpsExchange(transport=transport, max_response_bytes=max_response_bytes),
+            ),
+            latitude=latitude,
+            longitude=longitude,
+            max_days=max_days,
+            max_day_chars=max_day_chars,
+            declaration=declaration,
+        ),
+        registration=registration,
+    )
+
+
 def egress_registrations(
-    integration: EgressIntegration | None, search: WebSearchIntegration | None = None
+    integration: EgressIntegration | None,
+    search: WebSearchIntegration | None = None,
+    forecast: ForecastIntegration | None = None,
 ) -> RegistrationTable:
     """Return the binding seam's registration table for what is configured.
 
@@ -473,10 +624,11 @@ def egress_registrations(
     declaring either §3 keyword while bound to no connected account is refused
     rather than quietly answered "not an egress call".
 
-    **The search's registration goes in this same table and in no registry**
-    (ADR-0231 §5), which is what makes ``EgressBinder.bind`` able to derive a binding
-    for it: ``EgressBindingSeam._registered`` performs the registry-original
-    comparison "only where the registry holds a definition for the id", and then
+    **The search's and the forecast read's registrations go in this same table and in
+    no registry** (ADR-0231 §5, ADR-0260 §1), which is what makes ``EgressBinder.bind``
+    able to derive a binding for either: ``EgressBindingSeam._registered`` performs the
+    registry-original comparison "only where the registry holds a definition for the
+    id", and then
     returns the **egress** registration. So the two halves of what "registered" has
     meant since leg 12 come apart exactly here, and this function is where the half
     this kind needs is supplied.
@@ -484,12 +636,13 @@ def egress_registrations(
     Args:
         integration: The configured mail integration, or ``None`` where a deployment
             configured none.
-        search: The configured search integration, or ``None`` likewise. Separate
-            parameters and not one sequence, because they are two independent
-            configuration facts: a deployment may connect either, both or neither,
-            and a caller passing a list could pass two of one kind, which
-            :meth:`RegistrationTable.register` would then refuse at startup rather
-            than at the type.
+        search: The configured search integration, or ``None`` likewise.
+        forecast: The configured forecast integration, or ``None`` likewise
+            (ADR-0260 §6). Separate parameters and not one sequence, because these are
+            independent configuration facts: a deployment may configure any of them,
+            all of them or none, and a caller passing a list could pass two of one
+            kind, which :meth:`RegistrationTable.register` would then refuse at startup
+            rather than at the type.
 
     Returns:
         A table holding the registration of each configured integration, or an empty
@@ -500,6 +653,7 @@ def egress_registrations(
         for registration in (
             None if integration is None else integration.registration,
             None if search is None else search.registration,
+            None if forecast is None else forecast.registration,
         )
         if registration is not None
     )
@@ -576,8 +730,10 @@ __all__ = [
     "CURRENT_TIME",
     "CurrentTime",
     "EgressIntegration",
+    "ForecastIntegration",
     "WebSearchIntegration",
     "build_default_registry",
+    "build_forecast_integration",
     "build_send_email_integration",
     "build_web_search_integration",
     "egress_registrations",

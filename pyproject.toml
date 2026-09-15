@@ -1620,6 +1620,11 @@ source_modules = [
     "ai_assistant.tools.destinations",
     "ai_assistant.tools.egress_binder",
     "ai_assistant.tools.egress_declaration",
+    # ADR-0260's forecast integration: its declaration, its reference provider adapter
+    # and its forecaster. It drives the HTTPS exchange the seam holds and reaches no
+    # transport of its own, which is why it is bound here rather than exempted — the
+    # seam is still the one absence (ADR-0260 §1, §6).
+    "ai_assistant.tools.forecast",
     # The response-reading parts ADR-0231 §10 and ADR-0260 §5 state one rule over:
     # the RFC 9110 `Date` field and the bounded JSON decode. It opens nothing, and is
     # bound here rather than exempted for the reason the two integrations below are.
