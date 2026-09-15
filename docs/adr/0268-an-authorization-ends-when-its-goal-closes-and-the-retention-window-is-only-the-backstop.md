@@ -946,9 +946,10 @@ sentence stops. And the campsite walkthrough M33 runs becomes checkable end to e
 verify, close, and the ceiling is gone — rather than ending with a standing authority nobody
 intended and nothing retires.
 
-**What becomes harder, and each is a question asked rather than a call authorised.** On the
-path this decision governs — a goal this store closed, outside the three residuals above — every
-request after a goal closes asks, including one the user experiences as a small amendment:
+**What becomes harder, and the cost is paid in authorisation acts of its own.** On the
+path this decision governs — a goal this store closed, outside the three residuals above — a
+request after a closure inherits **no** authority from the request that ended and is covered
+only by an act taken for it, including where the user experiences it as a small amendment:
 *"make it Sunday"* the day after a confirmed booking is a fresh confirmation, and the only thing
 that stops it being a fresh **money** question is §5's offer carrying the figure. A goal closed
 by mistake cannot have its authority restored — the member is retired and the repair is the
