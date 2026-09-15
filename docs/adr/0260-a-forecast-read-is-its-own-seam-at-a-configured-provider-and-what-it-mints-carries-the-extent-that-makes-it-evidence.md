@@ -1,6 +1,6 @@
 # 260. A forecast read is its own seam, at a provider the deployment configured, and what it mints carries the extent that makes it evidence
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-15
 - **Partially supersedes**
   [ADR-0247](0247-the-configured-web-search-provider-is-the-destination-the-owner-chose-and-the-recipient-they-granted-and-the-call-budget-is-removed.md)
