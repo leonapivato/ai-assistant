@@ -290,12 +290,13 @@ member and the report — not a mechanism.
 > report an abandonment no write performed. **`ALREADY_CLOSED` and `NO_SUCH_GOAL` stay decided by
 > the act's own first read** (ADR-0250 §12) and the member mints no class for either.
 
-**Over the set and not over the row, because the invariant the engine keeps is not one the store
-enforced until now.** The tree's association rule means a goal is *meant* to hold at most one
-non-terminal attempt, and the conjunct below makes that true of the store rather than of a
-read-then-write — but a database written before it may hold more, and ending only the current
-attempt would leave an older live one under a closed goal. Stated over the set, the call is
-exhaustive whichever history the database has, and is identical wherever the invariant holds.
+**Over the set and not over the row, because *at most one live attempt per goal* is an invariant no
+store enforces.** The engine's association rule means a goal is *meant* to hold one, but it is a
+**read-then-write with ADR-0014 §5's gap**: two turns associating concurrently can open two, a
+pre-change database may hold more, and **this decision adds no refusal that would stop either**
+(§11, with what fires it and what it costs). Ending only the current attempt would leave an older
+live one under a closed goal; stated over the **set**, the call is exhaustive whichever history the
+database has, and identical wherever the goal holds one attempt or none.
 
 **The three are one step because every two-step arrangement loses the answer, and three review
 rounds found three ways.** A predicate read **before** the status write is falsified between them:
@@ -341,11 +342,14 @@ guard to a window this member does not have.**
 > exactly two new members** — `close_goal_abandoned`, and `has_outstanding_effect` (§6), which the
 > **listing** calls once per listed goal and the act calls **not at all** — and **exactly three
 > strengthenings of members that already exist**: §3's outcome conjunct on `commit_attempt`, which
-> governs every *other* caller that ends an attempt `CANCELLED`, and the two serialising conjuncts
-> below, on `set_goal_status` and on `open_attempt`. Every one of the three is a refusal on a member
-> that exists, on ADR-0255 §3's own footing that such a thing is **a strengthening of an existing
-> member rather than a new one**. **`commit_transition` gains no conjunct** (§4), and **no other
-> member, no argument and no Protocol is added by this decision** (§10).
+> governs every *other* caller that ends an attempt `CANCELLED`, and the two **closure** conjuncts
+> below — `set_goal_status`'s refusal of an `→ ABANDONED` write over a live attempt, and
+> `open_attempt`'s refusal of an attempt on a **closed** goal. **Each of those two is a single
+> limb, and neither serialises two openers**: *at most one live attempt per goal* is not decided
+> here (§11). Every one of the three is a refusal on a member that exists, on ADR-0255 §3's own
+> footing that such a thing is **a strengthening of an existing member rather than a new one**.
+> **`commit_transition` gains no conjunct** (§4), and **no other member, no argument and no
+> Protocol is added by this decision** (§10).
 
 > **Normative — a `StaleExecutionError` from `close_goal_abandoned` is re-read and retried
 > **once**, and there is exactly one cause to handle.** A lost `Goal.version` is the only way the
@@ -378,24 +382,21 @@ guard to a window this member does not have.**
 >   of that member; `close_goal_abandoned` satisfies it **by construction**, ending the goal's live
 >   attempts in the step that closes it, and needs no refusal of its own.
 > - **`PlanStore.open_attempt` refuses an attempt on a goal that is closed** — `ACHIEVED` or
->   `ABANDONED`, ADR-0250 §1's division — **and one on a goal that already holds a non-terminal
->   attempt**, each decided in the same indivisible step as the write, **and the two take different
->   classes because their grounds differ in the way the classes mean**. The closed-goal limb
->   refuses with a **`PlanningError` that is not a `StaleExecutionError`** — a closed goal opens
->   again only by ADR-0250 §13's user act, so no re-read makes that write valid, and this is the
->   class `open_attempt`'s existing ownership refusal takes. **The live-attempt limb refuses with
->   `StaleExecutionError`**, its ground **doing** move under a re-read: the competing attempt ends
->   and the same write becomes admissible. **What the caller re-reads is not the write but the
->   decision** — it re-takes the associate-or-open decision, reusing the competing attempt where it
->   is still live and opening where it has ended, and never re-submits the attempt it built. **The
->   second limb enforces the invariant the engine's association rule already decides** — a new
->   attempt where the goal was reopened, has none, or its current one is terminal — which is a
->   read-then-write with ADR-0014 §5's gap. **With it, at most one attempt of a goal is
->   non-terminal at a time.**
+>   `ABANDONED`, ADR-0250 §1's division — decided **in the same indivisible step as the write**,
+>   and refuses it with a **`PlanningError` that is not a `StaleExecutionError`**: a closed goal
+>   opens again only by ADR-0250 §13's user act, so no re-read makes that write valid, and this is
+>   the class `open_attempt`'s existing ownership refusal takes. **That is the whole of it, and it
+>   refuses nothing on account of another attempt**: an attempt on an **open** goal is opened
+>   exactly as ADR-0249 §12 says, whatever else that goal already holds, and **no lane adds a
+>   live-attempt limb to this member** — §11 gives the reason, that `open_attempt` is written at the
+>   **end** of the turn, after the planning done under the attempt it persists.
 >
-> **Together they are exhaustive over the interleaving**: an `open_attempt` that lands **before**
-> `close_goal_abandoned` is an attempt that call then cancels, and one that lands **after** it is
-> refused by the closed-goal limb. **No lane closes this with a read in the engine, a re-read after
+> **Together they are exhaustive over the interleaving, and the exhaustiveness rests on the act's
+> scope and on this one limb**: an `open_attempt` that lands **before** `close_goal_abandoned` is
+> an attempt that call then cancels — it ends **every** non-terminal attempt of the goal and not
+> the newest — and one that lands **after** it meets a goal closed in that same step and is
+> refused by the closed-goal limb. **There is no third case**, §4's total order admitting no
+> instant between the two. **No lane closes this with a read in the engine, a re-read after
 > the write, a sweep over attempts of closed goals, or a lock.**
 
 > **Normative — the conjunct binds on `ABANDONED` alone and decides no vocabulary.** `ACHIEVED` is
@@ -563,11 +564,12 @@ write those conjuncts already test, and §2 makes it one (Alternatives).
 > has left the open set, so nothing associates to it and nothing plans for it (ADR-0250 §1, §12).
 > The user **reopens it by explicit reference** (§13), which writes `ACTIVE` and **opens a new
 > attempt at `UNDERSTAND`** carrying no reference to the one it follows (§12) — admissible because
-> §2's conjuncts are satisfied in that order and §10's migration left no legacy live attempt
-> behind. That attempt **plans afresh** (ADR-0255 §2), and no walk of the cancelled attempt's plan
-> is re-entered, resumed or re-driven. **A turn that was already driving one when the cancellation
-> landed is not an exception**: its next claim meets ADR-0255 §3's refusal and §7 governs what it
-> says, which on a goal since reopened is `ATTEMPT_CANCELLED` over an open goal.
+> the status write precedes the open, so `open_attempt`'s closed-goal limb is satisfied, and §10's
+> migration left the goal no live attempt to carry into its new era. That attempt **plans afresh**
+> (ADR-0255 §2), and no walk of the cancelled attempt's plan is re-entered, resumed or re-driven.
+> **A turn that was already driving one when the cancellation landed is not an exception**: its
+> next claim meets ADR-0255 §3's refusal and §7 governs what it says, which on a goal since
+> reopened is `ATTEMPT_CANCELLED` over an open goal.
 
 > **Normative — an effect that did land is never repeated, and the record that stops it is already
 > written.** ADR-0259 §2 keys an effect row on `(goal_id, intended_action_id, effect_key)` and **a
@@ -976,8 +978,9 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > `__init__`, no structured state, §7), and **no other error type is added, renamed or
 > re-parented**. **What any Protocol gains is `PlanStore.close_goal_abandoned` (§2) and
 > `PlanStore.has_outstanding_effect` (§6), and three refusals on members that already exist — the
-> outcome conjunct on `commit_attempt` (§3) and the two serialising conjuncts on `set_goal_status`
-> and `open_attempt` (§2)** — **two additions and three strengthenings**, and nothing else: no other
+> outcome conjunct on `commit_attempt` (§3) and the two single-limb closure conjuncts on
+> `set_goal_status` and `open_attempt` (§2)** — **two additions and three strengthenings**, and
+> nothing else: no other
 > member, no argument on any existing one, and no conjunct on `commit_transition` (§4).
 
 > **Normative — this is a BREAKING contract change under golden rule 5, and it is breaking for the
@@ -1089,11 +1092,15 @@ facts and then claimed would re-introduce the gap revision 1 §H.1 identified.
 > shrinks to zero as those goals are abandoned**, and **no lane repairs it, sweeps it, refuses to
 > open a database holding it, or calls it corruption.**
 
-**The `ABANDONED` half is what the conjuncts need, and it is the half that is also truthful.**
-Without it a pre-change `ABANDONED` goal carrying a live attempt would be reopenable to `ACTIVE`
-and then **unable to open its new attempt**, the live-attempt limb refusing it while
-`ALREADY_CLOSED` writes nothing that could repair it first — and that is the only legacy state
-either conjunct makes unreachable, because the open-goal case is reached by §2's act over the set.
+**The `ABANDONED` half is the half no later act can reach, and it is the half that is also
+truthful.** A pre-change `ABANDONED` goal carrying a live attempt is exactly the failure *The gap
+this closes* names, and **nothing this decision adds repairs it in the ordinary course**: the goal
+is already closed, so `abandon_goal` answers `ALREADY_CLOSED` and §2's act — the thing that ends a
+goal's attempts over the set — never runs on it. Meanwhile ADR-0255 §3's claim conjunct does not
+fire on a **live** attempt, so a turn still holding one can claim a step and dispatch under a goal
+its user gave up: **R78 unmet on legacy data, with no act left to meet it.** That is the only
+legacy state left without a repairing act, because the open-goal case is reached by §2's act over
+the set the moment its user abandons it.
 **No lane repairs anything at reopen time, at engagement, in `abandon_goal`'s `ALREADY_CLOSED`
 path or in a background pass**: a one-time completion under a version marker is what ADR-0049 §1's
 mechanism is for, and anywhere else would put a writer of `CANCELLED` outside the one act §1
@@ -1124,7 +1131,8 @@ admits.
 > Protocol** means no new conformance suite and no new canonical fake is owed. What `PlanStore`
 > itself gains is **two members** — `close_goal_abandoned` (§2) and `has_outstanding_effect` (§6) —
 > and **three obligations on members that already exist**: §3's outcome conjunct on
-> `commit_attempt`, and §2's two serialising conjuncts on `set_goal_status` and `open_attempt`. The
+> `commit_attempt`, and §2's two closure conjuncts — `set_goal_status`'s live-attempt refusal and
+> `open_attempt`'s closed-goal refusal, one limb each. The
 > first two are **additions**, the other three **strengthenings**, and **all five are Protocol
 > changes under golden rule 5**. `commit_transition` gains **no conjunct** (§4). **The shared
 > `PlanStore` conformance suite and the canonical fake in `ai_assistant.testing` gain all five
@@ -1176,6 +1184,19 @@ admits.
   under a goal it verifies. Fired by that decision. `open_attempt`'s conjunct, by contrast, is
   stated over ADR-0250 §1's **closed** division and so already covers `ACHIEVED` — because the
   refusal there is about a goal that is closed, not about which act closed it.
+- **Whether a store enforces *at most one live attempt per goal*.** **Not decided**: `open_attempt`
+  refuses no attempt on account of another (§2). The engine's association rule decides it today — a
+  new attempt where the goal was reopened, has none, or its current one is terminal — and that rule
+  is a **read-then-write with ADR-0014 §5's gap**, so two turns associating concurrently can open
+  two live attempts of one goal. **That is the tree's state today, neither introduced nor repaired
+  here**; §2's act is stated over the **set** so that it stays correct whichever history the store
+  holds (arm 6's legacy case pins it). **The cost, stated**: a second live attempt is a second
+  ledger for one goal, so an effort count and an `AttemptOutcome` can each be split across two
+  records, and a cancellation must end both — which §2's act does. **What fires it is a decision
+  that serialises association *before* the turn plans**, ADR-0251's loop shape and not a refusal at
+  the write: `open_attempt` is written at the **end** of the turn, after `Planner.plan` has run
+  under the attempt it persists, so refusing there would charge planner calls to a ledger the store
+  never admitted — ADR-0251 §12's *"a call can never run uncharged"*.
 - **Parallel execution of two steps, a driver that walks a plan outside a turn, and whether a
   second `CONFIRM` of one turn may be put.** ADR-0255 §12's entries, **untouched** and left exactly
   where they stand. Fired by the decisions that take them.
@@ -1319,9 +1340,9 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   onto it** (§7), and the docstrings that name this ADR; `PROTOCOL_VERSION` **+1** with its
   `wire/envelope.py` log entry; `PlanExport.schema_version` **+1**; the plan store's
   `_SCHEMA_VERSION` **+1** with the migration §10 states — the `meta` row **and** the one-time
-  repair of the legacy attempt states the new conjuncts would otherwise make unreachable; **§3's outcome conjunct on
-  `PlanStore.commit_attempt` and §2's two serialising conjuncts on `set_goal_status` and
-  `open_attempt`**, each with its `planning` implementation; and the canonical fakes in
+  repair of the legacy attempt states no later act can reach; **§3's outcome conjunct on
+  `PlanStore.commit_attempt` and §2's two closure conjuncts on `set_goal_status` and
+  `open_attempt`**, one limb each, with their `planning` implementations; and the canonical fakes in
   `ai_assistant.testing` together with the shared `PlanStore` conformance suite's three cases
   (§14, arms 3, 4, 5 and 9) — including **`close_goal_abandoned`**, which is where §3's four-limb
   outcome is **computed**, and `has_outstanding_effect`, each with its `planning` implementation.
@@ -1333,11 +1354,10 @@ widened: §7 adds `drive_withheld` beside `step` rather than to it.
   single retry, and the **mapping of that call's `bool` onto §6's `GoalAbandonment` member**;
   `GoalSummary.effect_in_flight`'s computation — **one `has_outstanding_effect` call per listed
   goal** (§6), which is this lane's and is the member's only caller; and §7's refusal catch, walk
-  end, ordered read and `drive_withheld`; and **the recovery from `open_attempt`'s new live-attempt
-  refusal** (§2) — on `StaleExecutionError` the caller re-takes the associate-or-open decision,
-  **reusing the competing attempt where it is still live** and opening where it has ended, and
-  never re-submits the attempt it built, which is work the tree's callers do not do today because
-  they await `open_attempt` directly. **On the abandoning path it commits no attempt, computes
+  end, ordered read and `drive_withheld`. **It owes no recovery from `open_attempt`**, whose one
+  new refusal is the closed-goal limb and which an associating turn cannot meet — association is to
+  an **open** goal (ADR-0250 §1) — so its callers keep awaiting the member directly, exactly as the
+  tree does today. **On the abandoning path it commits no attempt, computes
   no `AttemptOutcome` and takes no outstanding-effect read of its own** — §2 and §3 put all three
   inside the one call, and a lane that split them out would rebuild the window the member exists to
   remove; the listing's call is a different path and is untouched by that prohibition. **It moves no contract**:
@@ -1384,19 +1404,15 @@ it.
    `UNCERTAIN` lands. *§2's `set_goal_status` conjunct*: an `→ ABANDONED` write is refused with
    `StaleExecutionError`, writing nothing, where the goal has a non-terminal attempt — including
    one **opened after the caller read the goal** — and accepted where every attempt is terminal;
-   `→ ACHIEVED`, `→ BLOCKED` and `→ ACTIVE` are unaffected. *§2's `open_attempt` conjunct, in both
-   limbs and **with the class each limb takes***: an attempt on a goal whose status is `ABANDONED`
-   or `ACHIEVED` is refused with a `PlanningError` that is **not** a `StaleExecutionError`, and one
-   on a goal that already holds a non-terminal attempt is refused with **`StaleExecutionError`** —
-   the distinction §2 draws, and the arm asserts the classes and not merely the refusals. One on an
-   `ACTIVE` or `BLOCKED` goal whose every attempt is terminal, or which has none, is accepted. **And the two-opener arm**: two attempts built
-   against one terminal current attempt and persisted in sequence — the second is refused, so **no
-   conforming store ever holds two non-terminal attempts of one goal**. **And the losing opener's
-   recovery (L2)**: two turns associating concurrently, the second refused with
-   `StaleExecutionError`, the engine re-takes the decision and **drives the turn under the
-   competing attempt** rather than propagating — and where that attempt has since ended, opens its
-   own; the arm that fails against a caller awaiting `open_attempt` directly, which is what the
-   tree does today. Every other
+   `→ ACHIEVED`, `→ BLOCKED` and `→ ACTIVE` are unaffected. *§2's `open_attempt` conjunct, in its
+   one limb and **with the class that limb takes***: an attempt on a goal whose status is
+   `ABANDONED` or `ACHIEVED` is refused with a `PlanningError` that is **not** a `StaleExecutionError` — the
+   arm asserts the class and not merely the refusal, because a caller reading it as stale would
+   re-read and retry a write no re-read makes valid. One on an `ACTIVE` or `BLOCKED` goal is
+   accepted **whatever attempts that goal already holds** — and the two-opener arm is stated in
+   that direction: two attempts built against one goal and persisted in sequence are **both
+   accepted**, which is the negative arm pinning the conjunct to the goal's status and failing
+   against an implementation that also serialises openers (§11). Every other
    `AttemptTransition` and every other `set_goal_status` write is unaffected. ***§2's
    `close_goal_abandoned`***: it ends **every** non-terminal attempt of the goal with the outcome
    §3's limbs yield over that attempt's own executions, writes `ABANDONED`, advances `Goal.version`
@@ -1450,15 +1466,17 @@ it.
    per-act fact can pass. **And the concurrent opener**: a new attempt opened by another turn
    **before** the call is one that call cancels, and one opened **after** it is refused by
    `open_attempt`'s closed-goal limb, so **no interleaving of `open_attempt` with the act leaves an
-   `ABANDONED` goal carrying a claimable attempt** — the arm R78 rests on. **And the legacy set, in
+   `ABANDONED` goal carrying a claimable attempt** — the arm R78 rests on. **And the two-live-attempt set, in
    two places**: a store seeded directly with an
-   **open** goal holding **two** non-terminal attempts — a state the conjunct forbids a store to
-   create but a pre-change database may hold — is abandoned in one act, **both** attempts ending
-   `CANCELLED` and the goal reaching `ABANDONED`; and **the migration (L1)** over a database
-   holding an `ABANDONED` goal with **two** live attempts ends **both**, each with the outcome §3's
-   limbs yield over its **own** executions, so the goal's reopen can open its new one — the two
-   being what pins the migration to *every* non-terminal attempt rather than the newest, since
-   repairing one would leave the other live and the reopen refused. **That arm is stated over every
+   **open** goal holding **two** non-terminal attempts — a state the engine's association rule is
+   meant to prevent and which neither this decision's conjuncts nor a pre-change database do — is
+   abandoned in one act, **both** attempts ending `CANCELLED` and the goal reaching `ABANDONED`;
+   and **the migration (L1)** over a database holding an `ABANDONED` goal with **two** live
+   attempts ends **both**, each with the outcome §3's limbs yield over its **own** executions, so
+   no attempt of that goal is claimable afterwards — the two being what pins the migration to
+   *every* non-terminal attempt rather than the newest, since repairing one would leave the other
+   live and claimable under a goal its user gave up, which is the state the repair exists to
+   remove. **That arm is stated over every
    source version `_UPGRADABLE_FROM` admits after this decision's bump** — as a dated observation
    at `28eb9e82` it reads `{1, 2, 3}` and gains the version the marker moves from — because a repair run only for the newest source passes a
    single unparameterised arm and leaves an older database with an `ABANDONED` goal and live
@@ -1567,16 +1585,17 @@ clauses are the whole of what it obligates.
 
 **What becomes easier.** `AttemptState.CANCELLED` gains its producer, so ADR-0255 §3's claim
 conjunct — the mechanism the design rests on — becomes reachable rather than hypothetical. R78's
-*no later action begins* becomes a property of the store rather than a rule a driver keeps, and so
-does one live attempt per goal. A user is told, once at the act and thereafter on the listing, that
+*no later action begins* becomes a property of the store rather than a rule a driver keeps. A user
+is told, once at the act and thereafter on the listing, that
 an effect of a cancelled goal may have left. And #2380's eligibility question is answered in a form
 needing no new predicate.
 
 **What becomes harder.** A peer at the old `PROTOCOL_VERSION` refuses a peer at the new one, an
 export reader at the old schema refuses a document written after L1, and an engine at the old
 plan-store schema refuses a database the new one wrote — all three intended, all three loud.
-`AttemptOutcome` grows a member every future reader must handle; a goal may no longer carry two
-live attempts; and an attempt is now ended by an act stated over the **goal**, so a surface that
+`AttemptOutcome` grows a member every future reader must handle; a goal that is closed can no
+longer open an attempt at all, so a caller must reopen it first (ADR-0250 §13); and an attempt is
+now ended by an act stated over the **goal**, so a surface that
 wants to stop the work without giving up the objective must ask for one (§11).
 
 **What would trigger revisiting this.** A deployment running two engines over one data directory,
