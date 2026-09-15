@@ -2616,18 +2616,12 @@ async def test_a_step_naming_a_capability_no_tool_offers_still_skips_rather_than
     assert result.disposition is Disposition.NO_CAPABLE_TOOL
 
 
-async def test_a_step_whose_dependency_was_already_disposed_of_is_never_dispatched() -> None:
-    """ADR-0253 §2 through phase 4: a disposed-of producer fails the dependency.
+async def _a_dependent_plan(harness: Harness) -> ExecutionState:
+    """A driven two-step execution whose second step depends on its first.
 
-    ADR-0255 makes the deferral conditional — "a known failure dominating a
-    deferral, so a check with an operand available now and failing now stays a
-    failed check whatever else it waits on" — and the statuses are read from the
-    **stored** execution, so a caller cannot call a failed producer `PENDING`.
-
-    A lane that deferred unconditionally dispatches this step over a producer the
-    store says did not deliver.
+    ``STEP`` produces and ``NEIGHBOUR`` consumes, which is the one shape ADR-0253
+    §2's dependency rule and ADR-0255's conditional deferral are both stated over.
     """
-    harness = Harness(tools=(tool(),))
     dependent = PlanStep(
         id=NEIGHBOUR, intent="send another", capability=CAPABILITY, depends_on=(STEP,)
     )
@@ -2651,7 +2645,22 @@ async def test_a_step_whose_dependency_was_already_disposed_of_is_never_dispatch
         id="p-1", goal_id=goal.id, steps=(plan_step(), dependent), created_at=AT, targets_revision=1
     )
     await harness.plans.save_plan(plan)
-    state = await _driven_under(harness.plans, plan)
+    return await _driven_under(harness.plans, plan)
+
+
+async def test_a_step_whose_dependency_was_already_disposed_of_is_never_dispatched() -> None:
+    """ADR-0253 §2 through phase 4: a disposed-of producer fails the dependency.
+
+    ADR-0255 makes the deferral conditional — "a known failure dominating a
+    deferral, so a check with an operand available now and failing now stays a
+    failed check whatever else it waits on" — and the statuses are read from the
+    **stored** execution, so a caller cannot call a failed producer `PENDING`.
+
+    A lane that deferred unconditionally dispatches this step over a producer the
+    store says did not deliver.
+    """
+    harness = Harness(tools=(tool(),))
+    state = await _a_dependent_plan(harness)
     # Dispose of the producer, as a walk that could not run it would. `SKIPPED` is
     # reachable from `PENDING` directly (ADR-0014 §4) and fails a dependency on the
     # same ADR-0253 §2 clause as `FAILED`; the other two dispositions are covered
@@ -2676,36 +2685,41 @@ async def test_a_step_whose_dependency_was_already_disposed_of_is_never_dispatch
     assert harness.invoker.invocations == []
 
 
+async def test_the_step_being_dispatched_is_refused_over_its_own_outstanding_producer() -> None:
+    """ADR-0255's deferral is conditional on the producer running **before** dispatch.
+
+    The deferral's words are "a step at least one of whose operands this same plan
+    will produce **before that step is dispatched**". For the step a caller is
+    dispatching *now* there is no such later moment, so the condition is falsified
+    by the dispatch itself and the check is not deferred: `run(NEIGHBOUR)` over a
+    `PENDING` producer refuses instead of acting.
+
+    The engine on this tree drives ``steps[0]`` only and `depends_on` points strictly
+    backwards, so no caller here reaches it — but nothing forbade it, and ordering a
+    plan's steps is A7's driver rather than a guard at the dispatch (ADR-0255 §1).
+    This refuses the one call, and commits nothing while doing it.
+    """
+    harness = Harness(tools=(tool(),))
+    state = await _a_dependent_plan(harness)
+
+    result = await harness.runner.run(
+        state, NEIGHBOUR, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+    )
+
+    assert result.disposition is Disposition.INVALID_PARAMETERS
+    assert harness.policy.requests == []
+    assert await harness.trail.export() == []
+    assert harness.invoker.invocations == []
+    assert result.state.step(NEIGHBOUR).status is StepStatus.PENDING  # type: ignore[union-attr]
+
+
 async def test_a_step_whose_dependency_is_still_pending_is_left_to_its_own_dispatch() -> None:
     """The deferral's other arm: an outstanding operand neither fails nor blocks.
 
     Without it "every plan carrying a `depends_on` replans forever" (ADR-0255).
     """
     harness = Harness(tools=(tool(),))
-    dependent = PlanStep(
-        id=NEIGHBOUR, intent="send another", capability=CAPABILITY, depends_on=(STEP,)
-    )
-    goal = Goal(
-        id="g-1",
-        interpretation=(
-            GoalInterpretation(
-                revision=1,
-                outcome="send the notes",
-                outcome_ground=Ground.USER_STATED,
-                outcome_span="send the notes",
-                recorded_at=AT,
-                raised_by="t-1",
-            ),
-        ),
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
-        created_at=AT,
-    )
-    await harness.plans.save_goal(goal)
-    plan = ActionPlan(
-        id="p-1", goal_id=goal.id, steps=(plan_step(), dependent), created_at=AT, targets_revision=1
-    )
-    await harness.plans.save_plan(plan)
-    state = await _driven_under(harness.plans, plan)
+    state = await _a_dependent_plan(harness)
 
     result = await harness.runner.run(
         state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL

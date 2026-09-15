@@ -751,6 +751,12 @@ class StepRunner:
         # whose *first* step's irreversible act must not be performed first, and no
         # other stage asks that question: the selection stage's own fit test
         # (ADR-0144 §7) is about the one step being dispatched and runs after this.
+        # The gate is told **which** step is being dispatched, so check 1 is not
+        # deferred for that one: ADR-0255 defers a dependency whose producer runs
+        # "before that step is dispatched", which the dispatch about to happen here
+        # falsifies. Ordering a plan's steps stays A7's driver (ADR-0255 §1); what
+        # this refuses is *this* call over *this* step's undisposed producer, which
+        # no driver has to be running for a caller to attempt.
         # A failed deterministic check leaves the attempt `RUNNING` and commits
         # nothing here — no ruling requested, no record written, the step still
         # `PENDING` — which is `INVALID_PARAMETERS`' shape, and where no replan can
@@ -763,6 +769,7 @@ class StepRunner:
                 step_id=step.id,
                 unfillable=[one.step for one in gate.unfillable],
                 unmet=[one.step for one in gate.unmet],
+                outstanding=[one.producer for one in gate.outstanding],
                 deferred=len(gate.deferred),
             )
             return StepDisposition(Disposition.INVALID_PARAMETERS, state)
@@ -1587,6 +1594,14 @@ class StepRunner:
         capability is outside the stated vocabulary"*; it is disposed of at its own
         dispatch through ADR-0037 §1's ``NO_CAPABLE_TOOL``.
 
+        **The step being dispatched is named to the gate** (``dispatching``), which
+        is what turns ADR-0255's *deferred* check 1 into a refusal for that one step:
+        a producer of it that the stored execution has not disposed of will not now
+        run "before that step is dispatched", because the dispatch is this call. A
+        step that is not the one being dispatched keeps the deferral, so a plan
+        carrying a `depends_on` still advances to ``EXECUTE`` rather than replanning
+        forever.
+
         **The step statuses come from the *stored* execution** (:meth:`_opened`),
         not from the caller's, for that method's own reason: everything this stage
         decides about *what has already happened* reads the store. A caller could
@@ -1599,7 +1614,12 @@ class StepRunner:
             resolved = resolve_capability(step.capability, advertised)
             candidates[step.id] = await self._registry.find(resolved)
         disposed = {one.step_id: one.status for one in opened.steps}
-        return evaluate(planned.plan, candidates=candidates, disposed=disposed)
+        return evaluate(
+            planned.plan,
+            candidates=candidates,
+            disposed=disposed,
+            dispatching=planned.step.id,
+        )
 
     async def _propose(self, request: ActionRequest, decision: PermissionDecision) -> None:
         """Write the `Authorization` this recorded `CONFIRM` proposes, if any.
