@@ -13,9 +13,12 @@ that works. What is asserted here is what Chromium put on the screen.
 read. ``browser_drive`` holds ADR-0233 §15's two figures and this module drives both.
 
 **The engine is the canonical fake, scripted.** It wires no forecaster and records no
-``ForecastDisposition``, so every one of the six members would be unreachable from here
-without :attr:`~ai_assistant.testing.FakeAssistantEngine.forecast_not_read` — the lever
-this lane added for exactly that.
+``ForecastDisposition``, so no sequence of page acts reaches any of the six: each case
+states the outcome it is about on ``turn_outcome``, which is
+``test_browser_goals.py``'s own arrangement one vocabulary over. (The attribute lever
+:attr:`~ai_assistant.testing.FakeAssistantEngine.forecast_not_read` this lane added is
+what reaches the member where the *outcome* is not the caller's to build —
+``converse_streaming``'s, and the terminal's end-to-end arm.)
 """
 
 from __future__ import annotations
