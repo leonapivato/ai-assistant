@@ -6001,6 +6001,59 @@ class PlanStoreContract:
             AttemptState.CANCELLED,
         ]
 
+    async def test_close_goal_abandoned_refuses_an_instant_the_attempt_cannot_carry(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0023 §2 over the row ADR-0261 §2's act writes, on **both** stores.
+
+        "``model_copy(update=...)`` skips validators — a pydantic property no type can
+        close — so the invariant holds *at the validation boundary*, and **a write that
+        reaches past it must re-validate**." The act rebuilds a ``GoalAttempt`` by
+        copy, so a store that trusted the copy would hold a terminal attempt whose
+        ``ended_at`` its own type refuses — and a durable one would serialise a row its
+        next decode reports as corruption, which is the failure discovered by reading
+        rather than by running.
+
+        **A ``PlanningError`` and not a ``ValidationError``**, because the member
+        contracts the former, and **it writes nothing**: the goal is still open at the
+        version it stood at and the attempt is still live, so the act is retryable with
+        an instant the row can carry.
+
+        Driven with a **naive** instant, which is the one shape ``UtcInstant`` refuses
+        outright. A non-UTC **offset** is the paired positive: that annotation converts
+        rather than refuses, so the arm asserts the act stores the same instant read as
+        UTC — the distinction a guard written as "refuse anything that is not UTC"
+        would get wrong in the other direction.
+        """
+        await self._with_steps(store, StepStatus.PENDING)
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        naive = datetime(2026, 1, 1)  # noqa: DTZ001 — the shape under test
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.close_goal_abandoned("g1", at=naive, expected_version=goal.version)
+
+        assert not isinstance(refusal.value, ValidationError)
+        held = await store.get_goal("g1")
+        attempt = await store.get_attempt("a1")
+        assert held is not None
+        assert attempt is not None
+        assert held.status is GoalStatus.ACTIVE, "the refusal wrote nothing"
+        assert held.version == goal.version
+        assert attempt.state is AttemptState.RUNNING
+        assert attempt.outcome is None
+
+        lisbon = datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2)))
+        assert (
+            await store.close_goal_abandoned("g1", at=lisbon, expected_version=goal.version)
+            is False
+        )
+        ended = await store.get_attempt("a1")
+        assert ended is not None
+        assert ended.ended_at == _WHEN, "an offset instant is converted, not refused"
+        assert ended.ended_at is not None
+        assert ended.ended_at.tzinfo is UTC
+
     # --- §14 arm 3: the interleaving invariant ----------------------------
 
     async def test_a_claim_after_the_cancellation_is_refused_and_writes_nothing(

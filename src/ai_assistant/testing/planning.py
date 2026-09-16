@@ -147,7 +147,7 @@ def _revalidated_attempt(attempt: GoalAttempt) -> GoalAttempt:
     """
     try:
         return GoalAttempt.model_validate(attempt.model_dump())
-    except ValidationError as exc:  # pragma: no cover — the closure supplies both fields
+    except ValidationError as exc:
         subject = getattr(attempt, "id", "<no id>")
         msg = f"cancelling attempt {subject} would leave a shape ADR-0249 §5 refuses: {exc}"
         raise PlanningError(msg) from exc

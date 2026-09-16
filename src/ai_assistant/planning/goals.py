@@ -1263,19 +1263,27 @@ def cancelled(attempt: GoalAttempt, *, outcome: AttemptOutcome, at: UtcInstant) 
     Returns:
         The attempt as it stands after the closure.
 
+    **Revalidated rather than merely copied** (ADR-0023 §2). ``model_copy(update=...)``
+    **skips validators** — "a pydantic property no type can close" — so a rebuild that
+    trusted it would store a terminal attempt carrying, say, a naive ``ended_at``: the
+    in-memory store would hold a ``GoalAttempt`` its own type refuses, and the SQLite
+    store would serialise a row its next decode reports as corruption. The rule is that
+    "a write that reaches past it must re-validate", and this is such a write.
+
     Raises:
         PlanningError: If the result is not a shape ADR-0249 §5 admits.
     """
+    rebuilt = attempt.model_copy(
+        update={
+            "state": AttemptState.CANCELLED,
+            "outcome": outcome,
+            "ended_at": at,
+            "version": attempt.version + 1,
+        }
+    )
     try:
-        return attempt.model_copy(
-            update={
-                "state": AttemptState.CANCELLED,
-                "outcome": outcome,
-                "ended_at": at,
-                "version": attempt.version + 1,
-            }
-        )
-    except ValidationError as exc:  # pragma: no cover — a terminal state with both fields validates
+        return GoalAttempt.model_validate(rebuilt.model_dump())
+    except ValidationError as exc:
         msg = f"cancelling attempt {attempt.id} would leave a shape ADR-0249 §5 refuses: {exc}"
         raise PlanningError(msg) from exc
 
