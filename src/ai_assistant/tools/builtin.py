@@ -58,6 +58,15 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.tools.booking import (
+    BOOKING_ACT,
+    BOOKING_AVAILABILITY,
+    BookingCatalogue,
+    BoundConnection,
+    SimulatedAvailabilityRead,
+    SimulatedBookingAct,
+    SqliteBookingStore,
+)
 from ai_assistant.tools.declared_cost import checked_per_call_cost
 from ai_assistant.tools.egress import (
     HttpsEgressTransport,
@@ -78,7 +87,9 @@ from ai_assistant.tools.web_search import (
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
+    from datetime import date
     from decimal import Decimal
+    from pathlib import Path
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -610,10 +621,176 @@ def build_forecast_integration(  # noqa: PLR0913 — one parameter per injected 
     )
 
 
+# --- the configured simulated booking integration (ADR-0273 §1, §10) ---
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatedBookingIntegration:
+    """One configured simulated booking provider: its two tools and its durable state.
+
+    :class:`EgressIntegration` **twice over**, and the plural is the whole of ADR-0273
+    §1: the provider registers *"exactly two ``ToolDefinition``s — an **availability
+    read** and a **booking act** — and nothing else"*, and both go *"in the
+    ``ToolRegistry`` as well as the seam's registration table, which is the email
+    integration's shape and deliberately not the forecast read's"*. Here the planner
+    naming the capability **is** the requirement: M33 is the planner proposing a
+    booking, the user confirming it and the driver dispatching it, and a capability no
+    planner can name has no walkthrough at all.
+
+    The three travel together for :class:`EgressIntegration`'s reason, one integration
+    on: a declaration in the registry with no matching registration is a tool the
+    binding seam refuses on every call, and a registration with no declaration names a
+    tool nothing can invoke.
+
+    Attributes:
+        availability: The read, its callable and its registration.
+        booking: The act, its callable and its registration.
+        store: The durable state both halves of §2 live in. Held here so the
+            composition root can register its ``close`` in the ordered shutdown path
+            (ADR-0042 §2), and for no other reason — nothing else reads it.
+    """
+
+    availability: EgressIntegration
+    booking: EgressIntegration
+    store: SqliteBookingStore
+
+
+def build_simulated_booking_integration(  # noqa: PLR0913 — one parameter per injected seam and per configured fact ADR-0273 §1 and §5 name; each is one thing a deployment supplies on its own
+    *,
+    connection: str,
+    endpoint: str,
+    records: ConnectionRecords,
+    secrets: Secrets,
+    store_path: Path | str,
+    available_from: date | str,
+    available_to: date | str,
+    price_amount: Decimal | int | str,
+    price_currency: str,
+    charge_amount: Decimal | int | str,
+    charge_currency: str,
+    retained_records: int,
+    indeterminate_date: date | str | None = None,
+) -> SimulatedBookingIntegration:
+    """Register the simulated booking provider against one connection (ADR-0273 §1).
+
+    **The one place in production this provider is constructed**, and the only site
+    under ``src/ai_assistant`` — :func:`build_forecast_integration`'s shape, which is
+    what §1 requires: *"a reference integration built by a single factory in
+    ``tools/builtin.py``, in ``build_forecast_integration``'s shape, and wired from
+    ``app/composition.py`` alone"*.
+
+    **No transport is taken and there is no parameter through which one could be**
+    (§3). The provider opens no socket, resolves no name and performs no HTTP exchange,
+    so the injection route by which the real and the fake transport both reach
+    production code does not reach it at all — a property of this signature rather
+    than of a line somebody remembered not to write.
+
+    **The endpoint is parsed here and then never used parsed**, exactly as the mail,
+    search and forecast factories parse theirs: a fail-fast on the operator's
+    configuration. What the four conditions compare per call is the ruled call's origin
+    against this registration's *as text, before parsing* (ADR-0154's condition 5), so
+    two spellings of one host stay two origins.
+
+    **It registers only against a connection the user provisioned** by ADR-0149 §4's
+    explicit act, supplying an identity and a credential the simulated provider
+    **accepts and does not use** (§1, ADR-0260 §12). **No connection, credential,
+    identity, reference or endpoint is fabricated, defaulted or inferred to make
+    registration succeed**: this function is handed a reference and an endpoint, and a
+    deployment that named neither reaches it not at all.
+
+    **The two registrations name one reference and one endpoint and two tool ids.**
+    ``RegistrationTable`` refuses two registrations for one *id*, which is ADR-0148
+    §6's one-account clause and is untouched here: one account, two tools bound to it.
+
+    Args:
+        connection: The connection reference both tools are registered against — a
+            reference the provisioner already minted (ADR-0151 §3).
+        endpoint: The one HTTPS origin the connected account names, as
+            ``https://host[:port]``. Nothing is transmitted to it (§3); it is what the
+            binding is pinned to and what the four conditions compare.
+        records: The connection store, read once per call by the binding seam and twice
+            around the credential read by :class:`~ai_assistant.tools.booking
+            .BoundConnection` (ADR-0148 §6). The **same** store object the provisioner
+            writes.
+        secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8).
+        store_path: Where the provider's durable state lives — under the deployment's
+            data directory (§2), so ``ai-assistant-purge`` destroys it with every other
+            store.
+        available_from: The first day the provider has a stay for (§5).
+        available_to: The last.
+        price_amount: The whole price the availability read quotes (ADR-0267 §3).
+        price_currency: Its ISO-4217 code (ADR-0267 §1).
+        charge_amount: The whole amount a booking charges (ADR-0271 §2). **Not required
+            to equal ``price_amount``**: §5's disagreeing-charge configuration is the
+            case ADR-0271 §3 wrote a finding for.
+        charge_currency: Its ISO-4217 code, independently configurable.
+        retained_records: §2's record bound, an integer ``n >= 1`` (§5).
+        indeterminate_date: The one day whose booking commits and then reports that it
+            may have committed, so §4's ``INDETERMINATE`` outcome is producible by a
+            production component.
+
+    Returns:
+        The two integrations and the store as one value.
+
+    Raises:
+        TransportPinError: If ``endpoint`` is not a form this seam pins. The same class
+            the other factories raise for the same fact.
+        BookingConfigurationError: If any configured amount, currency, day or bound is
+            outside ADR-0273 §5's domain for it. ``Settings`` refuses each at load;
+            this states the same rules at the one place a provider can be built without
+            going through it.
+        BookingStoreError: If the store cannot be opened or initialised.
+    """
+    # Fail-fast only; the parsed value is deliberately discarded. See above.
+    parse_https_origin(endpoint)
+    catalogue = BookingCatalogue.checked(
+        available_from=available_from,
+        available_to=available_to,
+        price_amount=price_amount,
+        price_currency=price_currency,
+        charge_amount=charge_amount,
+        charge_currency=charge_currency,
+        retained_records=retained_records,
+        indeterminate_date=indeterminate_date,
+    )
+    store = SqliteBookingStore(path=store_path, retained=catalogue.retained_records)
+    read_registration = EgressRegistration(
+        tool_id=BOOKING_AVAILABILITY.id, reference=connection, transport_endpoint=endpoint
+    )
+    act_registration = EgressRegistration(
+        tool_id=BOOKING_ACT.id, reference=connection, transport_endpoint=endpoint
+    )
+    return SimulatedBookingIntegration(
+        availability=EgressIntegration(
+            definition=BOOKING_AVAILABILITY,
+            implementation=SimulatedAvailabilityRead(
+                connection=BoundConnection(
+                    registration=read_registration, records=records, secrets=secrets
+                ),
+                catalogue=catalogue,
+            ),
+            registration=read_registration,
+        ),
+        booking=EgressIntegration(
+            definition=BOOKING_ACT,
+            implementation=SimulatedBookingAct(
+                connection=BoundConnection(
+                    registration=act_registration, records=records, secrets=secrets
+                ),
+                catalogue=catalogue,
+                store=store,
+            ),
+            registration=act_registration,
+        ),
+        store=store,
+    )
+
+
 def egress_registrations(
     integration: EgressIntegration | None,
     search: WebSearchIntegration | None = None,
     forecast: ForecastIntegration | None = None,
+    booking: SimulatedBookingIntegration | None = None,
 ) -> RegistrationTable:
     """Return the binding seam's registration table for what is configured.
 
@@ -637,6 +814,10 @@ def egress_registrations(
         integration: The configured mail integration, or ``None`` where a deployment
             configured none.
         search: The configured search integration, or ``None`` likewise.
+        booking: The configured simulated booking provider, or ``None`` likewise
+            (ADR-0273 §1). It contributes **two** registrations rather than one, which
+            is the only respect in which it differs here: §1 registers exactly two
+            declarations, both at this seam and both in the registry.
         forecast: The configured forecast integration, or ``None`` likewise
             (ADR-0260 §6). Separate parameters and not one sequence, because these are
             independent configuration facts: a deployment may configure any of them,
@@ -654,6 +835,8 @@ def egress_registrations(
             None if integration is None else integration.registration,
             None if search is None else search.registration,
             None if forecast is None else forecast.registration,
+            None if booking is None else booking.availability.registration,
+            None if booking is None else booking.booking.registration,
         )
         if registration is not None
     )
@@ -667,6 +850,7 @@ def build_default_registry(
     *,
     now: Clock = _utcnow,
     egress: EgressIntegration | None = None,
+    booking: SimulatedBookingIntegration | None = None,
     ledger: InvocationLedger,
     gate: SpendGate,
 ) -> InMemoryToolRegistry:
@@ -699,6 +883,15 @@ def build_default_registry(
             wires as ``AuditTrail``, ``InvocationCompleter`` and ``SpendLedger``:
             all four read the same rows, and two holders keyed by them could
             disagree about a total (ADR-0194 §5).
+        booking: The configured simulated booking provider, or ``None`` where a
+            deployment configured none (ADR-0273 §1). **Both** of its declarations are
+            registered here as well as at the egress seam, which is the email
+            integration's shape and deliberately **not** the forecast read's: ADR-0260
+            §1 keeps the forecast read out of every registry because *"a registry entry
+            would put its capability in front of the planner"*, and **here the opposite
+            is the requirement** — M33 is the planner proposing a booking. A lane that
+            reads ADR-0260 §1 as a rule about egress integrations in general has read a
+            clause written about a read that no user asks for.
         egress: The one configured egress integration, or ``None`` where a
             deployment configured none. **Conditional contents, and ADR-0048 §3
             permits them**: it fixes that "which tools exist, and the
@@ -723,6 +916,9 @@ def build_default_registry(
     ]
     if egress is not None:
         tools.append((egress.definition, egress.implementation))
+    if booking is not None:
+        tools.append((booking.availability.definition, booking.availability.implementation))
+        tools.append((booking.booking.definition, booking.booking.implementation))
     return InMemoryToolRegistry(tools, ledger=ledger, gate=gate)
 
 
@@ -731,10 +927,12 @@ __all__ = [
     "CurrentTime",
     "EgressIntegration",
     "ForecastIntegration",
+    "SimulatedBookingIntegration",
     "WebSearchIntegration",
     "build_default_registry",
     "build_forecast_integration",
     "build_send_email_integration",
+    "build_simulated_booking_integration",
     "build_web_search_integration",
     "egress_registrations",
 ]

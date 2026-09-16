@@ -122,6 +122,7 @@ from ai_assistant.tools import (
     build_default_registry,
     build_forecast_integration,
     build_send_email_integration,
+    build_simulated_booking_integration,
     build_web_search_integration,
     egress_registrations,
 )
@@ -1350,7 +1351,81 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # totals projection has acquired a permissions-owned history it has no use
         # for, which is ADR-0029 §1's argument one seam over. The engine below gets
         # the ledger face and never the gate, for the mirror reason.
-        tools = build_default_registry(egress=egress, ledger=trail, gate=trail)
+        # --- the configured simulated booking provider (ADR-0273 §1, §10) ---
+        #
+        # **The one place in production this provider is wired**, which is §1's
+        # *"wired from ``app/composition.py`` alone"* and ADR-0260 §12's L1 shape one
+        # integration along.
+        #
+        # **Built only where a deployment configured it whole**, so a deployment that
+        # named none of the nine ``booking_*`` settings holds no provider at all,
+        # registers neither declaration in any registry and adds no entry to the seam's
+        # table — and ``Settings`` refuses every half-set combination of them, so this
+        # is whole or absent rather than merely usually whole. The condition below tests
+        # every one of the nine rather than a representative: a reader checking this
+        # line should not have to hold a validator in mind to see that the branch and
+        # the refusal agree.
+        #
+        # **No transport is constructed for it and none is passed** (§3). The provider
+        # opens no socket, resolves no name and performs no HTTP exchange;
+        # `build_simulated_booking_integration` takes no ``OutboundTransport``
+        # parameter, so the injection route by which the real and the fake transport
+        # both reach production code does not reach it at all — and
+        # ``pyproject.toml``'s transport-confinement contract names its module, so an
+        # edit giving it one fails `lint-imports` rather than passing review.
+        #
+        # **`records` and `secrets` are the objects this root already holds**, not
+        # second ones over the same file and namespace, for the mail integration's
+        # reasons: ADR-0148 §6's conditions read the connection record twice around the
+        # credential read, and a second handle would let a provisioning act commit a
+        # revision one of them could not yet see.
+        #
+        # **Its store is an ordinary store of this deployment** (§2): it sits under the
+        # same data directory as every other, so `ai-assistant-purge` (ADR-0126,
+        # ADR-0153) destroys it with them, and its `close` is registered in the ordered
+        # shutdown path below like every other store's (ADR-0042 §2).
+        #
+        # **This root configures nothing.** ADR-0273 §10: *"no lane of this decision
+        # configures the provider in any deployment"* — that is the operator act §1
+        # reserves, performed by editing the deployment's configuration and restarting,
+        # and no model, plan, planner, tool, surface or API is given a route to it.
+        booking = (
+            None
+            if settings.booking_connection is None
+            or settings.booking_endpoint is None
+            or settings.booking_available_from is None
+            or settings.booking_available_to is None
+            or settings.booking_price_amount is None
+            or settings.booking_price_currency is None
+            or settings.booking_charge_amount is None
+            or settings.booking_charge_currency is None
+            or settings.booking_retained_records is None
+            else build_simulated_booking_integration(
+                connection=settings.booking_connection,
+                endpoint=settings.booking_endpoint,
+                records=connections,
+                secrets=integration_secrets,
+                store_path=directory / "bookings.db",
+                # **Read and passed through unchanged, which is the whole of what this
+                # root does with them.** Passing a value is not interpreting it: no
+                # default is applied, no arithmetic is performed, and whether each is in
+                # ADR-0273 §5's domain was decided at `Settings` load and is decided
+                # again by the factory, which is the one place a provider can be built
+                # without going through `Settings`.
+                available_from=settings.booking_available_from,
+                available_to=settings.booking_available_to,
+                price_amount=settings.booking_price_amount,
+                price_currency=settings.booking_price_currency,
+                charge_amount=settings.booking_charge_amount,
+                charge_currency=settings.booking_charge_currency,
+                retained_records=settings.booking_retained_records,
+                indeterminate_date=settings.booking_indeterminate_date,
+            )
+        )
+        if booking is not None:
+            opened.append(booking.store.close)
+
+        tools = build_default_registry(egress=egress, booking=booking, ledger=trail, gate=trail)
 
         # ADR-0152 §10's marked clause: "It is implemented in `tools/`, and consumed
         # in `orchestration` by the runner stage … **The composition root wires the
@@ -1523,7 +1598,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
 
         binder = EgressBindingSeam(
             definitions=tools,
-            registrations=egress_registrations(egress, search, forecast),
+            registrations=egress_registrations(egress, search, forecast, booking),
             records=connections,
         )
         # **The canonical destination set a search of this deployment would bind to**
