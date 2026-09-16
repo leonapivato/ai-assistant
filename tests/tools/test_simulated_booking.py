@@ -14,6 +14,7 @@ Arms 1, 3, 4 and 18 are in :mod:`test_booking_registration`; arms 2 and 12 are i
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from collections.abc import Mapping
@@ -40,6 +41,7 @@ from booking_harness import (
     Records,
     arguments,
     authorised,
+    booking_record,
     bound,
     configured,
     drive,
@@ -905,7 +907,7 @@ async def _commit_with_fault(
     store = _FaultAt(path=path, retained=retained, at=at)
     try:
         with pytest.raises(BookingStoreError) as caught:
-            await store.commit({DATE_ARGUMENT: day.isoformat()})
+            await store.commit(booking_record(day))
     finally:
         store.close()
     return caught.value
@@ -972,8 +974,8 @@ async def test_the_commit_reads_back_whole_after_an_interruption_mid_sequence(
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
-    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    await store.commit(booking_record("2026-10-01"))
+    await store.commit(booking_record("2026-10-02"))
     store.close()
 
     await _commit_with_fault(path, "at-commit", retained=4, day=date(2026, 10, 3))
@@ -1760,7 +1762,7 @@ async def test_a_blocked_commit_does_not_stall_the_event_loop(tmp_path: Path) ->
             await asyncio.sleep(0)
 
     try:
-        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        committing = asyncio.create_task(store.commit(booking_record("2026-10-01")))
         ticking = asyncio.create_task(tick())
         await asyncio.to_thread(store.entered.wait, 10)
         assert store.entered.is_set(), "the commit never reached the store"
@@ -1789,7 +1791,7 @@ async def test_a_cancelled_commit_leaves_no_worker_holding_the_connection(
     release = threading.Event()
     store = _SlowStore(path=tmp_path / "bookings.db", retained=2, release=release)
     try:
-        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        committing = asyncio.create_task(store.commit(booking_record("2026-10-01")))
         await asyncio.to_thread(store.entered.wait, 10)
         committing.cancel()
         release.set()
@@ -1832,7 +1834,7 @@ async def test_a_corrupt_booking_row_is_this_stores_error_and_not_a_raw_one(
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit(booking_record("2026-10-01"))
     store.close()
 
     handle = sqlite3.connect(path)
@@ -1867,7 +1869,7 @@ async def test_a_corrupt_commit_count_is_this_stores_error_too(tmp_path: Path, s
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit(booking_record("2026-10-01"))
     store.close()
 
     handle = sqlite3.connect(path)
@@ -1950,8 +1952,8 @@ async def test_an_established_store_with_no_commit_count_is_refused(tmp_path: Pa
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=1)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
-    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    await store.commit(booking_record("2026-10-01"))
+    await store.commit(booking_record("2026-10-02"))
     assert await store.commit_count() == 2
     store.close()
 
@@ -2000,7 +2002,7 @@ async def test_a_deeply_nested_corrupt_row_is_this_stores_error_too(tmp_path: Pa
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
+    await store.commit(booking_record("2026-10-01"))
     store.close()
 
     depth = 100_000
@@ -2031,8 +2033,8 @@ async def _an_established_store(path: Path) -> None:
     records **cannot** reconstruct the count, because pruning has already removed one.
     """
     store = SqliteBookingStore(path=path, retained=1)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
-    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    await store.commit(booking_record("2026-10-01"))
+    await store.commit(booking_record("2026-10-02"))
     assert await store.commit_count() == 2
     assert len(await store.records()) == 1
     store.close()
@@ -2149,8 +2151,8 @@ async def test_a_count_removed_while_the_store_is_open_fails_closed(tmp_path: Pa
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
     try:
-        await store.commit({DATE_ARGUMENT: "2026-10-01"})
-        await store.commit({DATE_ARGUMENT: "2026-10-02"})
+        await store.commit(booking_record("2026-10-01"))
+        await store.commit(booking_record("2026-10-02"))
         assert await store.commit_count() == 2
 
         _edit(path, "DELETE FROM meta WHERE key = 'commit_count'")
@@ -2160,7 +2162,7 @@ async def test_a_count_removed_while_the_store_is_open_fails_closed(tmp_path: Pa
         # And the commit that would have written `1` over a count of two is refused
         # **before** it lands, so the store is left as the corruption found it.
         with pytest.raises(BookingStoreError) as caught:
-            await store.commit({DATE_ARGUMENT: "2026-10-03"})
+            await store.commit(booking_record("2026-10-03"))
         assert caught.value.may_have_committed is False
         assert len(await store.records()) == 2
     finally:
@@ -2184,8 +2186,8 @@ async def test_a_count_below_the_records_it_retains_is_refused(tmp_path: Path) -
     """
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
-    await store.commit({DATE_ARGUMENT: "2026-10-01"})
-    await store.commit({DATE_ARGUMENT: "2026-10-02"})
+    await store.commit(booking_record("2026-10-01"))
+    await store.commit(booking_record("2026-10-02"))
     store.close()
 
     _edit(path, "UPDATE meta SET value = '0' WHERE key = 'commit_count'")
@@ -2201,15 +2203,15 @@ async def test_a_count_lowered_while_the_store_is_open_is_refused_too(
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=4)
     try:
-        await store.commit({DATE_ARGUMENT: "2026-10-01"})
-        await store.commit({DATE_ARGUMENT: "2026-10-02"})
+        await store.commit(booking_record("2026-10-01"))
+        await store.commit(booking_record("2026-10-02"))
 
         _edit(path, "UPDATE meta SET value = '1' WHERE key = 'commit_count'")
 
         with pytest.raises(BookingStoreError, match="corrupt"):
             await store.commit_count()
         with pytest.raises(BookingStoreError) as caught:
-            await store.commit({DATE_ARGUMENT: "2026-10-03"})
+            await store.commit(booking_record("2026-10-03"))
         assert caught.value.may_have_committed is False
         assert len(await store.records()) == 2
     finally:
@@ -2229,7 +2231,7 @@ async def test_pruning_leaves_the_count_above_its_floor_rather_than_at_it(
     path = tmp_path / "bookings.db"
     store = SqliteBookingStore(path=path, retained=1)
     for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
-        await store.commit({DATE_ARGUMENT: day})
+        await store.commit(booking_record(day))
     store.close()
 
     reopened = SqliteBookingStore(path=path, retained=1)
@@ -2258,7 +2260,7 @@ async def test_a_slow_worker_still_returns_and_does_not_hang(tmp_path: Path) -> 
     release = threading.Event()
     store = _SlowStore(path=tmp_path / "bookings.db", retained=2, release=release)
     try:
-        committing = asyncio.create_task(store.commit({DATE_ARGUMENT: "2026-10-01"}))
+        committing = asyncio.create_task(store.commit(booking_record("2026-10-01")))
         await asyncio.to_thread(store.entered.wait, 10)
         release.set()
         await asyncio.wait_for(committing, timeout=20)
@@ -2324,3 +2326,150 @@ def test_the_extended_form_is_what_both_ends_accept() -> None:
 
     assert catalogue.available_from == date(2026, 10, 1)
     assert catalogue.available_to == date(2026, 12, 31)
+
+
+# --------------------------------------------------------------------------- #
+# what the eighth adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+def _row(**changes: object) -> str:
+    """One stored row, as the store writes them, with §2's record changed in one way.
+
+    Args:
+        **changes: One field per keyword. :data:`_ABSENT` removes it; any other value
+            replaces it, and a name the record does not carry adds one.
+
+    Returns:
+        The row's stored text.
+    """
+    record: dict[str, object] = dict(booking_record("2026-10-01"))
+    for field, value in changes.items():
+        if value is _ABSENT:
+            del record[field]
+        else:
+            record[field] = value
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+#: "Remove this field", for :func:`_row`. A sentinel rather than ``None``, because
+#: ``None`` is itself one of the values a row is tested with.
+_ABSENT: Final = object()
+
+
+@pytest.mark.parametrize(
+    ("row", "why"),
+    [
+        ("{}", "an object carrying none of §2's fields"),
+        (_row(**{ORIGIN_ARGUMENT: _ABSENT}), "the origin removed"),
+        (_row(**{DATE_ARGUMENT: _ABSENT}), "the day removed"),
+        (_row(**{CHARGED_AMOUNT_KEY: _ABSENT}), "the charge's amount removed"),
+        (_row(**{CHARGED_CURRENCY_KEY: _ABSENT}), "the charge's currency removed"),
+        (_row(note="anything"), "a field no booking record carries, added"),
+        (_row(**{CHARGED_AMOUNT_KEY: 140}), "the amount as a JSON number"),
+        (_row(**{CHARGED_AMOUNT_KEY: None}), "the amount as a JSON null"),
+        (_row(**{ORIGIN_ARGUMENT: True}), "the origin as a JSON flag"),
+        (_row(**{DATE_ARGUMENT: {"year": 2026}}), "the day as a nested object"),
+        (_row(**{DATE_ARGUMENT: "not-a-day"}), "a day that is not a calendar date"),
+        (_row(**{CHARGED_AMOUNT_KEY: "NaN"}), "an amount that is not a finite figure"),
+        (_row(**{CHARGED_CURRENCY_KEY: "eur"}), "a code that is not ISO-4217's shape"),
+    ],
+)
+async def test_an_object_that_is_not_a_booking_record_is_a_corrupt_store(
+    tmp_path: Path, row: str, why: str
+) -> None:
+    """A JSON **object** is not yet a record, and ``records`` says so (ADR-0273 §2).
+
+    §2 requires every record to carry *"what it was asked and what it charged"* — both
+    declared arguments and the charge — and *"persists only the fields that schema
+    names"*. The corruption arms above reach only unreadable text and JSON that is not
+    an object, so ``{}`` and a row with the charge deleted were **returned** by
+    ``records``: a consumer indexing ``origin``, ``charged_amount`` or
+    ``charged_currency`` got incomplete durable state, or a bare ``KeyError`` out of an
+    index this layer's error boundary had promised not to raise.
+
+    Each shape is refused on its own ground — a field missing, a field added, a field of
+    the wrong JSON type, and a field whose value is outside the domain this module
+    states once for the configuration and the record alike. **The row is never
+    rendered**: it carries what the user asked, which is Tier 1.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    await store.commit(booking_record("2026-10-01"))
+    store.close()
+
+    handle = sqlite3.connect(path)
+    try:
+        handle.execute("UPDATE bookings SET record = ?", (row,))
+        handle.commit()
+    finally:
+        handle.close()
+
+    reopened = SqliteBookingStore(path=path, retained=4)
+    try:
+        with pytest.raises(BookingStoreError, match="corrupt") as caught:
+            await reopened.records()
+        assert row not in str(caught.value)
+        assert caught.value.may_have_committed is False
+        # The count is a figure and not a row, so it still reads — the corruption is in
+        # the detail and §2's irreversibility does not rest on it.
+        assert await reopened.commit_count() == 1
+    finally:
+        reopened.close()
+    assert why
+
+
+async def test_the_whole_record_is_what_the_arms_above_are_a_departure_from(
+    tmp_path: Path,
+) -> None:
+    """The control: the record :func:`_row` starts from reads back (ADR-0273 §2).
+
+    Without this, every case above would pass on a store that refused every row.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    try:
+        await store.commit(booking_record("2026-10-01"))
+
+        assert await store.records() == (booking_record("2026-10-01"),)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("record", "why"),
+    [
+        ({}, "nothing at all"),
+        ({DATE_ARGUMENT: "2026-10-01"}, "the day alone"),
+        ({**booking_record("2026-10-01"), "note": "anything"}, "a field added"),
+        ({**booking_record("2026-10-01"), CHARGED_AMOUNT_KEY: 140}, "a number for the amount"),
+    ],
+)
+async def test_the_store_refuses_to_commit_something_that_is_not_a_record(
+    tmp_path: Path, record: Mapping[str, FrozenJson], why: str
+) -> None:
+    """And the same shape is refused at the **write**, before the transaction opens.
+
+    The read's promise and the write's are one statement (``_record_fault``): a store
+    that accepted a fragment and then refused to read it back would turn one caller's
+    mistake into a store that fails on the next open — the module's own recurring
+    defect, one fact hardened at one of its two ends.
+
+    §2's *"commits none of the three"* is asserted too: the refusal falls before the
+    transaction is opened, so no record is appended, the count does not move and no
+    pruning runs.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    try:
+        await store.commit(booking_record("2026-10-01"))
+
+        with pytest.raises(BookingStoreError, match="not a booking record") as caught:
+            await store.commit(record)
+
+        assert caught.value.may_have_committed is False
+        assert len(await store.records()) == 1
+        assert await store.commit_count() == 1
+    finally:
+        store.close()
+    assert why

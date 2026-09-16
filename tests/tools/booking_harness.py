@@ -49,6 +49,8 @@ from ai_assistant.tools.booking import (
     BOOKING_ACT_ID,
     BOOKING_AVAILABILITY,
     BOOKING_AVAILABILITY_ID,
+    CHARGED_AMOUNT_KEY,
+    CHARGED_CURRENCY_KEY,
     DATE_ARGUMENT,
     ORIGIN_ARGUMENT,
 )
@@ -93,6 +95,7 @@ __all__ = [
     "Records",
     "arguments",
     "authorised",
+    "booking_record",
     "bound",
     "configured",
     "drive",
@@ -267,6 +270,31 @@ def arguments(day: date | str = IN_WINDOW, **extra: FrozenJson) -> dict[str, Fro
         DATE_ARGUMENT: day if isinstance(day, str) else day.isoformat(),
     }
     return built | dict(extra)
+
+
+def booking_record(day: date | str = IN_WINDOW, **overrides: FrozenJson) -> dict[str, FrozenJson]:
+    """One whole booking record, in the shape the store persists (ADR-0273 §2).
+
+    *"What it was asked and what it charged"*: both declared arguments and the charge
+    with its code. A case that commits **through the store** rather than through the act
+    writes what the act writes, so it exercises the store the provider actually has
+    rather than a fragment the store refuses.
+
+    Args:
+        day: The day booked.
+        **overrides: Fields to replace or add, for the cases about a store holding
+            something that is not a record.
+
+    Returns:
+        The record.
+    """
+    built: dict[str, FrozenJson] = {
+        ORIGIN_ARGUMENT: ENDPOINT,
+        DATE_ARGUMENT: day if isinstance(day, str) else day.isoformat(),
+        CHARGED_AMOUNT_KEY: CHARGE,
+        CHARGED_CURRENCY_KEY: CURRENCY,
+    }
+    return built | dict(overrides)
 
 
 def provenance() -> CarriedProvenance:
