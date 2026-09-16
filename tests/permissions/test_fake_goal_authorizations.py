@@ -16,6 +16,7 @@ from one shared log and a future lane could easily give one of them its own.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
@@ -36,8 +37,10 @@ from ai_assistant.testing import (
     FakeGoalAuthorizationStore,
     authorization,
 )
+from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from datetime import datetime
 
     from ai_assistant.core.protocols import (
@@ -140,6 +143,27 @@ class TestFakeGoalAuthorizationStoreContract(GoalAuthorizationStoreContract):
     def store(self) -> GoalAuthorizationStore:
         """The store fake, over the suite's shared clock."""
         return FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[SuspendedMidWrite[GoalAuthorizationStore]]:
+        """The fake models the resource it does not really own (ADR-0060 §3).
+
+        A list needs no serialising, so without this the canonical fake could only
+        opt out — and ADR-0268 §9 arm 7's case would run solely against the
+        ``sqlite3`` store, leaving the fake's own *"every check and the append are
+        one operation"* claim untested. **Every method passes through the one
+        modelled resource**, so ``arm`` ignores which member it is handed: the
+        parametrised cases exercise the same ``held()`` path here and earn their
+        keep on the durable store, where each member is a separate lock site.
+        """
+        store = FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
+        yield SuspendedMidWrite(
+            store=store,
+            log=store.resource_log,
+            arm=lambda _member: store.suspend_next_operation(),
+        )
 
 
 class TestTheFakesOwnScriptedFaults:

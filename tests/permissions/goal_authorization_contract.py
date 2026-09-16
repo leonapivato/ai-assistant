@@ -39,9 +39,12 @@ store's own surface:
   ``orchestration`` walks them, and §12's ladder.** All ``orchestration``'s, which
   ADR-0254 §20 assigns to **Lane 2**. What a store can see is the *shape* a path
   leaves, and that is what is asserted here.
-* **ADR-0060's cancellation matrix.** Not among ADR-0254's clauses, and the
-  implementations inherit the SQLite family's own ``_run_to_completion``; filed
-  rather than half-built here.
+* **ADR-0060's cancellation matrix**, for every member but two. Not among
+  ADR-0254's clauses, and the implementations inherit the SQLite family's own
+  ``_run_to_completion``; filed rather than half-built here. **The two exceptions
+  are ``end_for_goal`` and ``clear_closure``**, where ADR-0268 §9 arm 7 owes the
+  shape explicitly and *"at every call of either store member"* — so the harness
+  below is built for those two and is not widened to the rest by this lane.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract bases directly.
@@ -51,7 +54,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import pytest
 from authorization_builders import (
@@ -74,6 +77,7 @@ from ai_assistant.core.types import (
     AuthorizationSettlement,
     BoundKind,
 )
+from ai_assistant.testing.cancellation import settle as settle_loop
 from ai_assistant.testing.goal_authorizations import (
     authorization,
     coverage_member,
@@ -83,12 +87,31 @@ from ai_assistant.testing.goal_authorizations import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+    from contextlib import AbstractAsyncContextManager
+
     from ai_assistant.core.protocols import (
         AuthorizationResolution,
         GoalAuthorizations,
         GoalAuthorizationStore,
     )
     from ai_assistant.core.types import Authorization
+    from ai_assistant.testing.cancellation import SuspendedMidWrite
+
+
+#: What a failed cancellation case says, so a failure reads as the invariant it
+#: broke rather than as an assertion number.
+_RELEASED_EARLY = (
+    "a cancelled call released the store's resource while the work it started was "
+    "still using it (ADR-0060 §1, §3)"
+)
+
+#: The two members ADR-0268 §9 arm 7 owes the cancellation shape at, each a
+#: distinct lock site. **Only these two.** This suite's module docstring records
+#: that ADR-0060's matrix is filed rather than half-built here, and that stands for
+#: every other member; what this decision adds is an obligation *"owed at every
+#: call of either store member"*, which is these.
+_ENDING_OPS: Final = ("end_for_goal", "clear_closure")
 
 
 class _Deceptive(int):
@@ -104,22 +127,27 @@ class _Deceptive(int):
         return False
 
 
-#: Every disposition that is **retired**: no edge leaves it (ADR-0254 §1).
+#: Every disposition that is **retired**: no edge leaves it (ADR-0254 §1). **Five
+#: since ADR-0268 §2**, which makes ``GOAL_CLOSED`` the fifth.
 RETIRED = (
     AuthorizationDisposition.DECLINED,
     AuthorizationDisposition.EXPIRED,
     AuthorizationDisposition.REVOKED,
     AuthorizationDisposition.SUPERSEDED,
+    AuthorizationDisposition.GOAL_CLOSED,
 )
 
-#: ADR-0254 §1's five edges, as ``(source, target)`` pairs. Stated once so the
-#: edge cases and the non-edge cases are derived from one enumeration.
+#: ADR-0254 §1's **seven** edges, as ``(source, target)`` pairs — five its own, two
+#: ADR-0268 §2's. Stated once so the edge cases and the non-edge cases are derived
+#: from one enumeration.
 EDGES = (
     (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.ESTABLISHED),
     (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.DECLINED),
     (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.EXPIRED),
+    (AuthorizationDisposition.PROPOSED, AuthorizationDisposition.GOAL_CLOSED),
     (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.REVOKED),
     (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.SUPERSEDED),
+    (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.GOAL_CLOSED),
 )
 
 #: Moves ADR-0254 §1's graph does **not** admit, each named so a failure says which.
@@ -129,6 +157,16 @@ NON_EDGES = (
     (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.DECLINED),
     (AuthorizationDisposition.ESTABLISHED, AuthorizationDisposition.EXPIRED),
 )
+
+#: A second declaration, so a goal can hold two ``ESTABLISHED`` rows at once —
+#: which ADR-0268 §1's *"the ending is stated over the set and never over one
+#: row"* is the whole point of: *"an act that ended one would leave the other
+#: standing under a closed goal"*.
+OTHER_TOOL = TOOL.model_copy(update={"id": "other_tool"})
+
+#: A third and a fourth, for the two proposals arm 1 arranges beside them.
+THIRD_TOOL = TOOL.model_copy(update={"id": "third_tool"})
+FOURTH_TOOL = TOOL.model_copy(update={"id": "fourth_tool"})
 
 
 def established(**overrides: object) -> Authorization:
@@ -1095,7 +1133,7 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
     # --- settle: the graph, and the four outcomes (§1, §16) ----------------
 
     @pytest.mark.parametrize(("source", "target"), EDGES)
-    async def test_each_of_the_five_edges_succeeds_from_its_own_source(
+    async def test_each_of_the_seven_edges_succeeds_from_its_own_source(
         self,
         store: GoalAuthorizationStore,
         source: AuthorizationDisposition,
@@ -1843,3 +1881,572 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
             await store.settle("a1", to=AuthorizationDisposition.EXPIRED, settled_at=EXPIRES)
             is AuthorizationSettlement.SETTLED
         )
+
+    # --- ADR-0268: the ending, the fence and the closure record ---------------
+    #
+    # §9's arms 1, 2, 3, 8 and 9, plus the two coverage gaps #2427 books to this
+    # lane. Arms 4, 5, 6, 7's act half and 10's reopen half are about an **act**
+    # and are `tests/orchestration/`'s; arm 10's database half is about bytes on
+    # disk and is the durable store's own.
+
+    @staticmethod
+    async def _fenced(store: GoalAuthorizationStore, goal: str = GOAL) -> bool:
+        """Whether ``goal`` stands fenced, read the only way the surface allows.
+
+        **The closure record is reached by no member of the store** (ADR-0268 §1,
+        its scope on ADR-0004 §6), so the fence is not readable and is not meant to
+        be: what it *does* is refuse a ``record``, and that is what is observed
+        here. A helper rather than the assertion written out each time, because
+        every arm below asks the same question and a second spelling of it would be
+        a second answer free to drift.
+        """
+        row = established(goal=goal, tool=FOURTH_TOOL)
+        try:
+            await store.record(row)
+        except InvalidAuthorizationError:
+            return True
+        # Recorded, so no fence stood — and the probe is undone, because an arm
+        # asserting over the store's contents afterwards must not see it.
+        assert (await store.resolve(row.id)) is not None
+        await store.settle(row.id, to=AuthorizationDisposition.REVOKED, settled_at=NOW)
+        return False
+
+    async def test_the_ending_moves_every_standing_row_and_leaves_each_retired_one(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """Arm 1's first limb: the ending over the **set**, and what it does not touch.
+
+        A goal holding established rows for two declarations, one live and one
+        lapsed; an unexpired ``PROPOSED`` row; **a ``PROPOSED`` row already past its
+        ``expires_at`` and unsettled**; and one row at each of the five retired
+        dispositions. ``end_for_goal`` answers **4**.
+
+        **The lapsed proposal is settled ``GOAL_CLOSED`` and not ``EXPIRED``**, which
+        is this member's *evaluates no liveness* and the limb of ADR-0254's arm 37
+        that ADR-0268 §7 retires as false of it. **Each retired row is byte-identical
+        to what it was and excluded from the count** — asserted one disposition at a
+        time, so an implementation that excludes one retired member and not the rest
+        fails here rather than passing on an aggregate.
+
+        **The instant is the call's own**, on every row it moved.
+        """
+        lapsed_expiry = NOW + timedelta(minutes=1)
+        await store.record(established(id="live", tool=TOOL))
+        await store.record(established(id="lapsed", tool=OTHER_TOOL, expires_at=lapsed_expiry))
+        await store.record(authorization(id="unexpired", tool=THIRD_TOOL))
+        await store.record(authorization(id="past", tool=FOURTH_TOOL, expires_at=lapsed_expiry))
+        retired_ids = {}
+        for index, disposition in enumerate(RETIRED):
+            row_id = f"retired-{disposition.value}"
+            retired_ids[disposition] = row_id
+            tool = TOOL.model_copy(update={"id": f"retired_tool_{index}"})
+            await store.record(authorization(id=row_id, tool=tool))
+            if disposition in (
+                AuthorizationDisposition.REVOKED,
+                AuthorizationDisposition.SUPERSEDED,
+            ):
+                await store.settle(row_id, to=AuthorizationDisposition.ESTABLISHED, settled_at=AT)
+            at = EXPIRES if disposition is AuthorizationDisposition.EXPIRED else AT
+            assert (
+                await store.settle(row_id, to=disposition, settled_at=at)
+                is AuthorizationSettlement.SETTLED
+            ), disposition
+        before = {row.id: row for row in await store.export()}
+
+        # The clock is set past the two lapsed instants, so *"it evaluates no
+        # liveness"* is asked of a store that could tell the difference.
+        clock.set(EXPIRES + timedelta(days=1))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 4
+
+        held = {row.id: row for row in await store.export()}
+        for row_id in ("live", "lapsed", "unexpired", "past"):
+            assert held[row_id].disposition is AuthorizationDisposition.GOAL_CLOSED, row_id
+            assert held[row_id].settled_at == NOW, row_id
+            assert held[row_id].expires_at == before[row_id].expires_at, row_id
+        for disposition, row_id in retired_ids.items():
+            assert held[row_id] == before[row_id], disposition
+
+    async def test_a_second_ending_answers_zero_and_leaves_the_fence_standing(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: *"A second call answers 0 and leaves the fence set."*
+
+        **And only because the fence stood throughout**, which is what the ``record``
+        refusal in between is evidence of: the version governs staleness, never
+        emptiness.
+        """
+        await store.record(established(id="a1"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await self._fenced(store)
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await self._fenced(store)
+
+    async def test_a_goal_the_store_holds_no_row_of_answers_zero_and_is_fenced(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: it *"answers 0, does not raise, **and is fenced all the same**"*.
+
+        The shape ``standing`` already takes for a goal it does not hold — and the
+        fence is asserted by a ``record`` refused afterwards, because the record is
+        reached by no member of the store.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await self._fenced(store)
+
+    async def test_the_record_keeps_the_higher_version_and_a_lower_call_moves_nothing(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: *"the record keeps the higher version"*, both ways round.
+
+        A second ``end_for_goal`` at a **higher** version raises it — proved by a
+        ``clear_closure`` at the *first* version then answering ``False`` with the
+        fence still standing — while one at a **lower** version leaves it where it
+        was, and **neither moves a row**.
+        """
+        await store.record(established(id="a1"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=9) == 0
+        assert await store.clear_closure(GOAL, goal_version=4) is False
+        assert await self._fenced(store)
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=2) == 0
+        assert await self._fenced(store)
+        held = await store.resolve("a1")
+        assert held is not None
+        assert (held.disposition, held.settled_at) == (AuthorizationDisposition.GOAL_CLOSED, NOW)
+
+    async def test_clear_closure_against_a_standing_fence_at_that_version_lifts_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: ``True``, the fence lifted, **and the record stands at that version**.
+
+        The lift is asserted by a ``record`` for that goal then succeeding, and the
+        record's survival by a second ``clear_closure`` at the same version answering
+        ``False`` — *"lifts the fence and **removes no record**"*.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert not await self._fenced(store)
+        assert await store.clear_closure(GOAL, goal_version=4) is False
+
+    async def test_clear_closure_against_a_standing_fence_at_a_lower_version_lifts_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """#2427's first gap, and the arm that closes it.
+
+        ADR-0268 §1 specifies ``clear_closure`` over a record standing **"at or
+        below"** ``goal_version``. The ADR's own arm 1 asserts the standing-fence
+        path only at the **exact** version, and the lower-version path only where the
+        fence is **already lifted** — so an equality-only implementation passes every
+        prescribed arm while ``clear_closure(goal_version=6)`` against a fence
+        standing at 5 answers ``False`` and **leaves that fence standing**, which is
+        a reopen that could not admit a fresh row.
+
+        A fence standing at 5, cleared at 6: ``True``, the fence lifted — a ``record``
+        for that goal then succeeding — and the record standing at **6**, which a
+        ``clear_closure`` back at 5 shows by answering ``False``.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=5) == 0
+        assert await store.clear_closure(GOAL, goal_version=6) is True
+        assert not await self._fenced(store)
+        assert await store.clear_closure(GOAL, goal_version=5) is False
+
+    async def test_clear_closure_against_a_lifted_record_answers_false_and_still_raises_it(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: ``False`` *"and still raises the watermark to the version passed"*.
+
+        Proved the way the ADR says to prove it — by a **delayed** ``end_for_goal`` at
+        that lower version then answering ``0``, moving no row and standing no fence.
+        A lane that answered ``False`` by leaving the record alone would let that
+        delayed call fence a goal a reopen had just opened for business.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert await store.clear_closure(GOAL, goal_version=9) is False
+        await store.record(established(id="fresh"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        held = await store.resolve("fresh")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.ESTABLISHED
+        assert not await self._fenced(store)
+
+    async def test_clear_closure_over_a_goal_with_no_record_writes_none(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: ``False``, *"writes none and raises nothing"*.
+
+        The absence of a written record is what the delayed ``end_for_goal`` at a
+        **lower** version shows: had this call written one at 9, that call would have
+        been discarded as stale and left the row standing.
+        """
+        assert await store.clear_closure(GOAL, goal_version=9) is False
+        await store.record(established(id="a1"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+
+    async def test_a_record_outliving_its_goal_discards_the_new_goals_own_ending(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1's last limb, and §8's residual this decision **adds**, pinned.
+
+        *"A goal's record standing, that goal deleted from ``PlanStore``, a **new**
+        goal saved under the same identifier at a lower version — its
+        ``end_for_goal`` answers ``0``, leaving its row ``ESTABLISHED`` under a goal
+        that closes."*
+
+        **The ``PlanStore`` half is not a store's to exhibit** — ``delete_goal``
+        reaches this store not at all, which is exactly why the residual exists — so
+        what is pinned here is the whole of what this store's surface shows: a
+        lifted record standing **above** a later goal's version discards that goal's
+        own ending, and the row survives. A lane that made either member lower the
+        watermark would pass a suite that never asked.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=9) == 0
+        assert await store.clear_closure(GOAL, goal_version=9) is True
+        await store.record(established(id="reborn"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=2) == 0
+        held = await store.resolve("reborn")
+        assert held is not None
+        assert held.disposition is AuthorizationDisposition.ESTABLISHED
+
+    async def test_neither_member_reads_the_clock(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """#2427's second gap, and the arm that closes it.
+
+        ADR-0268 §1 states it of both — ``end_for_goal`` *"reads **no clock**, the
+        instant being the caller's"*, and ``clear_closure`` *"settles nothing,
+        revives nothing and **reads no clock**"* — and no prescribed arm asserts it.
+        An implementation could call the injected clock and discard the value,
+        passing every caller-instant assertion.
+
+        **Asserted over the reading count rather than against a clock that raises**,
+        which is the same claim in the form this suite can make and is strictly
+        stronger: a member that never *calls* the clock cannot be made to fail by
+        poisoning it, while one that calls and discards is caught here and would be
+        caught there. The subject is built over the shared clock by a fixture the
+        triad check must be able to evaluate with no argument, so a poisoned subject
+        is not something this suite can hand itself.
+        """
+        await store.record(established(id="a1"))
+        clock.reset()
+        before = clock.readings
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert clock.readings == before
+
+    async def test_a_settlement_cannot_enter_the_step_the_ending_is_inside(self) -> None:
+        """Arm 2's other half, as an interleaving.
+
+        A settlement to ``ESTABLISHED`` fired into the window the ending holds open
+        does not complete while the step is open, and answers ``NOT_AT_SOURCE``
+        afterwards **over a row the same step ended** — the store needing no
+        conjunct on ``settle`` for it, because the row it names now stands where no
+        edge to ``ESTABLISHED`` leaves.
+        """
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await store.record(authorization(id="a1"))
+            suspended = harness.arm("end_for_goal")
+
+            ending = asyncio.ensure_future(store.end_for_goal(GOAL, at=NOW, goal_version=4))
+            settling: asyncio.Task[object] | None = None
+            try:
+                await suspended.reached()
+                settling = asyncio.ensure_future(
+                    store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+                )
+                await settle_loop()
+                assert not settling.done(), _RELEASED_EARLY
+            finally:
+                suspended.release()
+
+            assert await ending == 1
+            assert await settling is AuthorizationSettlement.NOT_AT_SOURCE
+            held = await store.resolve("a1")
+            assert held is not None
+            assert held.disposition is AuthorizationDisposition.GOAL_CLOSED
+            assert await store.standing(GOAL) == ()
+
+    async def test_an_ended_row_is_never_live_is_absent_from_standing_and_is_exported(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """Arm 3's last limb.
+
+        A ``GOAL_CLOSED`` row is **never live**, is **absent from ``standing``**, and
+        is **present in ``recent`` and in ``export``** carrying its coverage, its
+        basis and its **unmoved** ``expires_at`` — ADR-0254 §12's no-deletion rule
+        binding entire, so a user reading the record of a finished request still
+        finds what they authorised and when it ended.
+        """
+        row = established(id="a1")
+        await store.record(row)
+        clock.set(EXPIRES - timedelta(hours=1))
+        assert await store.live_for(GOAL, TOOL.id) is not None
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+
+        assert await store.live_for(GOAL, TOOL.id) is None
+        assert await store.standing(GOAL) == ()
+        exported = await store.export()
+        assert [one.id for one in exported] == ["a1"]
+        assert [one.id for one in await store.recent()] == ["a1"]
+        assert exported[0].coverage == row.coverage
+        assert exported[0].expires_at == row.expires_at
+        assert exported[0].disposition is AuthorizationDisposition.GOAL_CLOSED
+
+    async def test_a_proposal_across_a_closure_and_a_reopen_settles_nothing(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 8: what the fence is for.
+
+        An unexpired ``PROPOSED`` row exists when the goal closes; it is ended
+        ``GOAL_CLOSED``; the goal is reopened and the fence cleared; **an answer
+        naming that row then settles nothing**, answering ``NOT_AT_SOURCE`` — so no
+        call of the reopened goal is covered by it. A proposal left standing could
+        be answered after the reopen and would cover calls of the reopened request
+        under a bound the user stated for the request that ended.
+        """
+        await store.record(authorization(id="a1"))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert (
+            await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=NOW)
+            is AuthorizationSettlement.NOT_AT_SOURCE
+        )
+        assert await store.standing(GOAL) == ()
+        assert await store.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_record_across_the_closure_is_refused_until_the_fence_is_cleared(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 8's second half, **and §8's booked residual asserted rather than assumed**.
+
+        Across the closure a ``record`` for that goal is refused — before the
+        reopen's ``ACTIVE`` write and after it — and admitted **only** after
+        ``clear_closure``. That last admission is the residual ADR-0268 §8 declines
+        to close: *"a ``record`` begun before the closure and arriving after the
+        clear succeeds"*, carrying an authority the user gave for the request that
+        ended. It is pinned here so a later lane cannot mistake it for a defect, and
+        closing it would take a retained generation on ``record`` itself, which §8
+        refuses to have inferred from silence.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        await _refuses(store, established(id="across"))
+        # The ``ACTIVE`` write is `orchestration`'s and reaches this store not at
+        # all, so what a store can exhibit is that nothing between the ending and
+        # the clear lifts the fence.
+        await _refuses(store, established(id="across"))
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        assert await store.record(established(id="across")) == "across"
+
+    async def test_the_fence_refusal_names_no_new_error_class(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """ADR-0268 §1: the class is **reused and none is minted**.
+
+        ``InvalidAuthorizationError`` is what ADR-0254 §16 gives *"a write this store
+        does not admit"*, and a caller wanting only *"the store would not accept
+        this"* keeps one handler — which ``AuthorizationError`` being its base is
+        what provides.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        await _refuses(store, established(id="fenced"), AuthorizationError)
+
+    async def test_clear_erases_the_closure_records_with_the_rows(
+        self, store: GoalAuthorizationStore, clock: MovableClock
+    ) -> None:
+        """Arm 9: *"the consequence is asserted rather than avoided"*.
+
+        ``clear`` answers the count of **rows** and the store holds none — a goal
+        whose fence a reopen had already lifted included, its record going with the
+        rest. A ``record`` for the closed goal afterwards **succeeds**, which is
+        ADR-0268 §1's universal holding *absent a ``clear``* and is the stated cost;
+        **and that row is reached by no ending and lapses on its own
+        ``expires_at``**, which is §3's rule over it and not a case of its own.
+        """
+        await store.record(established(id="a1"))
+        await store.record(established(id="a2", goal=OTHER_GOAL))
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await store.end_for_goal(OTHER_GOAL, at=NOW, goal_version=4) == 1
+        assert await store.clear_closure(OTHER_GOAL, goal_version=4) is True
+
+        assert await store.clear() == 2
+        assert await store.export() == ()
+        assert not await self._fenced(store)
+        assert not await self._fenced(store, OTHER_GOAL)
+
+        after = established(id="after")
+        assert await store.record(after) == "after"
+        clock.set(after.expires_at - timedelta(microseconds=1))
+        assert await store.live_for(GOAL, TOOL.id) is not None
+        clock.set(after.expires_at)
+        assert await store.live_for(GOAL, TOOL.id) is None
+
+    async def test_a_fenced_goal_the_store_holds_no_row_of_is_carried_by_no_export(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 9's last limbs, which are ADR-0268's **scope on ADR-0004 §6** asserted.
+
+        With a goal the store holds **no** row of fenced, ``export`` answers
+        **nothing** and the record is reached by no member of the store — the
+        sharpest case in that scope, an identifier retained behind no row at all.
+        And an ``export`` taken **before** a ``clear`` carries the ``GOAL_CLOSED``
+        rows and **no fence**, §16's snapshot being over rows.
+
+        **That absence is the decision's stated and bounded cost and is not a defect
+        to fix here** (#2410): a surface for the record would take a new
+        ``core/types.py`` type and a third store member, and is ADR-0004 §6's
+        decision rather than this one's.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await store.export() == ()
+        assert await self._fenced(store)
+
+        await store.record(established(id="a1", goal=OTHER_GOAL))
+        assert await store.end_for_goal(OTHER_GOAL, at=NOW, goal_version=4) == 1
+        exported = await store.export()
+        assert [one.id for one in exported] == ["a1"]
+        assert exported[0].disposition is AuthorizationDisposition.GOAL_CLOSED
+
+    # --- ADR-0268 arm 7's cancellation shape, per member ----------------------
+
+    def store_suspended_mid_write(
+        self,
+    ) -> AbstractAsyncContextManager[SuspendedMidWrite[GoalAuthorizationStore]]:
+        """Supply a store whose named member can be stopped *inside* its resource.
+
+        Overridden by both subjects. ADR-0060 §3 is explicit that propagation alone
+        is not the evidence — *"a propagation-only suite would certify exactly the
+        bug this ADR exists to catch"* — so the case cancels the call while it is
+        suspended and then watches what a **second** caller can reach.
+
+        The returned :class:`SuspendedMidWrite` carries the store, its
+        ``ResourceLog``, and an ``arm(member)`` lever the case calls *after* its
+        preconditions, so a fake arming one modelled resource suspends the member
+        under test rather than a setup write.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def _ending_call(
+        store: GoalAuthorizationStore, member_name: str, goal: str
+    ) -> Coroutine[object, object, object]:
+        """One call of ``member_name`` against ``goal``, as the case drives it."""
+        if member_name == "end_for_goal":
+            return store.end_for_goal(goal, at=NOW, goal_version=4)
+        return store.clear_closure(goal, goal_version=4)
+
+    @pytest.mark.parametrize("member_name", _ENDING_OPS)
+    async def test_a_cancelled_ending_call_holds_its_resource_until_the_work_finishes(
+        self, member_name: str
+    ) -> None:
+        """Arm 7's cancellation shape, taken once per member (ADR-0060 §1, §3).
+
+        **ADR-0060 §1's two guarantees are what is asserted**: the
+        ``CancelledError`` **arrives** at the caller unabsorbed, and the resource is
+        **safe** — a second call of this store reaches the resource only once the
+        cancelled call's work has finished, and the store still serves reads after.
+        The second call is what makes this a test of the invariant rather than of
+        propagation, because a single cancelled call in isolation looks identical
+        either way.
+
+        **This store is not among ADR-0060 §3's four** — that scope is its own — but
+        §1's rule binds every Protocol in the file, and ADR-0268 §9 arm 7 owes the
+        shape at every call of both members.
+
+        **No composition of outcomes is asserted, and none is enumerated.** ADR-0060
+        §1 rules a cancelled write's effect *"indeterminate to the caller"* — *"A
+        cancelled write may or may not have committed. The caller may assume
+        neither"* — so each cancelled write admits **both** of its own outcomes and
+        no limb here asserts it left nothing. A cancelled ``clear_closure`` that
+        landed leaves the rows ended and the fence **lifted**, which nothing refuses.
+        """
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await store.record(established(id="seed"))
+            suspended = harness.arm(member_name)
+            visited_before = harness.log.visits
+
+            first = asyncio.ensure_future(self._ending_call(store, member_name, GOAL))
+            second: asyncio.Task[object] | None = None
+            try:
+                await suspended.reached()
+                first.cancel()
+                await settle_loop()
+
+                second = asyncio.ensure_future(self._ending_call(store, member_name, OTHER_GOAL))
+                await settle_loop()
+                assert not second.done(), _RELEASED_EARLY
+
+                # Again, because deferring one cancellation is not the contract: a
+                # second delivered while the deferred wait runs must not escape and
+                # unwind out of the resource either.
+                first.cancel()
+                await settle_loop()
+                assert not second.done(), _RELEASED_EARLY
+            finally:
+                suspended.release()
+
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert second is not None
+            await second
+
+            # Decisive where the blocked-caller check is not: the two calls were
+            # never inside the resource at the same time.
+            assert not harness.log.overlapped, _RELEASED_EARLY
+            assert harness.log.visits - visited_before == 2, (
+                "both calls should have reached the resource by now"
+            )
+            # The store still serves reads, which is the other half of *safe*.
+            assert {one.id for one in await store.export()} == {"seed"}
+
+    async def test_a_record_cannot_enter_the_step_the_ending_is_inside(
+        self,
+    ) -> None:
+        """Arm 2, made an interleaving rather than a scheduling coincidence.
+
+        ``asyncio.gather`` over two coroutines on one loop proves little on its own:
+        whichever runs first may run to completion, and the arm above would pass
+        against a store whose step was not indivisible at all. Here the ending is
+        **held open inside its resource** and a ``record`` of the same goal is fired
+        into that window.
+
+        **What no interleaving produces** (arm 2): the ``record`` does not complete
+        while the step is open, and once it is released the store is in one of
+        exactly two states — the write landed **before** the step and the row is
+        ended and counted, or it is **refused**. In neither does a row of that goal
+        stand ``PROPOSED`` or ``ESTABLISHED`` afterwards, and in neither is the set
+        the step saw partitioned.
+        """
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await store.record(established(id="seed"))
+            suspended = harness.arm("end_for_goal")
+
+            ending = asyncio.ensure_future(store.end_for_goal(GOAL, at=NOW, goal_version=4))
+            writing: asyncio.Task[object] | None = None
+            try:
+                await suspended.reached()
+                writing = asyncio.ensure_future(store.record(established(id="racer")))
+                await settle_loop()
+                assert not writing.done(), _RELEASED_EARLY
+            finally:
+                suspended.release()
+
+            assert await ending == 1
+            refused = None
+            try:
+                await writing
+            except InvalidAuthorizationError as exc:  # the fence was up first
+                refused = exc
+
+            held = await store.resolve("racer")
+            if refused is not None:
+                assert held is None
+            else:
+                assert held is not None
+                assert held.disposition is AuthorizationDisposition.GOAL_CLOSED
+            assert await store.standing(GOAL) == ()
+            seed = await store.resolve("seed")
+            assert seed is not None
+            assert seed.disposition is AuthorizationDisposition.GOAL_CLOSED

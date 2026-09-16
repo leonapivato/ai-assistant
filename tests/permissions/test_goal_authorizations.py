@@ -13,24 +13,46 @@ to seed.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import stat
+import threading
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
-from authorization_builders import AT, EXPIRES, GOAL, NOW, SHARED_CLOCK, TOOL
-from goal_authorization_contract import GoalAuthorizationStoreContract, established
+from authorization_builders import AT, EXPIRES, GOAL, NOW, SHARED_CLOCK, TOOL, MovableClock
+from goal_authorization_contract import (
+    OTHER_TOOL,
+    GoalAuthorizationStoreContract,
+    established,
+)
 
 from ai_assistant.core.errors import AuthorizationError
 from ai_assistant.core.types import AuthorizationDisposition, BoundKind
 from ai_assistant.permissions.goal_authorizations import SqliteGoalAuthorizationStore
+from ai_assistant.testing.cancellation import (
+    ResourceLog,
+    SuspendedMidWrite,
+    ThreadSuspension,
+)
 from ai_assistant.testing.goal_authorizations import authorization, coverage_member, money_bound
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from ai_assistant.core.protocols import GoalAuthorizationStore
+    from ai_assistant.testing.cancellation import SuspendedCall
+
+
+#: Where each of ADR-0268 §1's two members does its SQL. Named rather than derived,
+#: because a lever that guessed the attribute would silently suspend nothing and the
+#: cancellation case would certify a store it never held open.
+_ENDING_SYNC_METHODS: Final[dict[str, str]] = {
+    "end_for_goal": "_end_for_goal_sync",
+    "clear_closure": "_clear_closure_sync",
+}
 
 
 class TestSqliteGoalAuthorizationStoreContract(GoalAuthorizationStoreContract):
@@ -63,6 +85,54 @@ class TestSqliteGoalAuthorizationStoreContract(GoalAuthorizationStoreContract):
         return SqliteGoalAuthorizationStore(
             path=self._tmp / "authorizations.sqlite3", now=SHARED_CLOCK.reset()
         )
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[SuspendedMidWrite[GoalAuthorizationStore]]:
+        """Park a named member's worker thread inside the connection's turn.
+
+        ``arm(member)`` wraps the private method that member does its SQL in
+        (:data:`_ENDING_SYNC_METHODS`) — inside ``async with self._lock`` and inside
+        the worker the event loop cannot interrupt, which is exactly where ADR-0054's
+        bug lived — so the first worker to reach it blocks and every later one runs
+        free. Blocking there is what makes the case deterministic: left to run, a
+        commit finishes in microseconds and whether the second caller arrives while
+        the worker still holds the connection would be a race.
+
+        **Its own store on its own connection**, not the ``store`` fixture's: the
+        suspended worker is parked for the length of the case, and sharing would make
+        an unrelated failure hang instead of fail.
+        """
+        store = SqliteGoalAuthorizationStore(
+            path=self._tmp / "suspended.sqlite3", now=SHARED_CLOCK.reset()
+        )
+        log = ResourceLog()
+        suspension = ThreadSuspension()
+
+        def arm(member: str) -> SuspendedCall:
+            attribute = _ENDING_SYNC_METHODS[member]
+            original = getattr(store, attribute)
+            armed = threading.Event()
+
+            def blocking(*args: object) -> object:
+                with log.inside():  # the span the connection is genuinely in use for
+                    if not armed.is_set():  # the first worker only; later ones run free
+                        armed.set()
+                        suspension.hold()
+                    return original(*args)
+
+            setattr(store, attribute, blocking)
+            return suspension
+
+        try:
+            yield SuspendedMidWrite(store=store, log=log, arm=arm)
+        finally:
+            # An implementation that released the connection early leaves a worker
+            # parked here; releasing unconditionally is what turns that into a
+            # failure rather than a hang.
+            suspension.release()
+            store.close()
 
 
 class TestWhatOnlyAFileCanSay:
@@ -132,6 +202,201 @@ class TestWhatOnlyAFileCanSay:
             ).value == "settled"
         finally:
             second.close()
+
+    @staticmethod
+    def _made_version_one(path: Path) -> None:
+        """Turn a file this code wrote into the one version 1 would have written.
+
+        A version-1 database is not something this code can produce any more, and
+        writing one out by hand would be a second statement of the old shape free to
+        drift from the real one. So the current store writes the file and the two
+        differences ADR-0268 §9's migration is *"the whole of it"* are undone: the
+        closure-record storage goes, and the marker goes back to ``1``. Every row is
+        left exactly as it was, which is what the arm is about.
+        """
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute("DROP TABLE goal_authorization_closures")
+            connection.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _marker_and_tables(path: Path) -> tuple[str, set[str]]:
+        """The file's ``schema_version`` and the names of the tables it holds."""
+        connection = sqlite3.connect(path)
+        try:
+            marker = str(
+                connection.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'"
+                ).fetchone()[0]
+            )
+            names = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+        finally:
+            connection.close()
+        return marker, names
+
+    async def test_a_version_one_database_opens_under_version_two_with_every_row_intact(
+        self, path: Path
+    ) -> None:
+        """ADR-0268 §9's arm 10, the half that is about bytes on disk.
+
+        A store at the previous ``schema_version`` holding an ``ESTABLISHED`` row
+        whose goal is **already closed** — the closing act having run before
+        ``end_for_goal`` existed. **It opens**, every row it held intact and the
+        closure-record storage created under the new marker; **the upgrade ends
+        nothing, records no closure and rewrites no row**; and the row still appears
+        in ``standing`` and still covers a call.
+
+        *"A lane that moved the marker without creating the storage has shipped a
+        store no existing database opens"*, which is what the table assertion
+        catches; one that rewrote a row would have retrofitted a decision ADR-0247
+        §8(b) makes prospective.
+        """
+        first = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await first.record(established(id="legacy"))
+            before = await first.export()
+        finally:
+            first.close()
+        self._made_version_one(path)
+        assert self._marker_and_tables(path)[0] == "1"
+
+        second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            marker, tables = self._marker_and_tables(path)
+            assert marker == "2"
+            assert "goal_authorization_closures" in tables
+            # **No row rewritten, re-dispositioned or back-filled.**
+            assert await second.export() == before
+            assert [row.id for row in await second.standing(GOAL)] == ["legacy"]
+            assert await second.live_for(GOAL, TOOL.id) is not None
+            # **No goal recorded closed by the upgrade**: nothing is fenced, which a
+            # ``record`` for that same goal succeeding is the evidence of.
+            assert await second.record(established(id="fresh", tool=OTHER_TOOL)) == "fresh"
+        finally:
+            second.close()
+
+    async def test_the_upgraded_row_lapses_on_its_own_expiry_and_no_ending_reaches_it(
+        self, path: Path
+    ) -> None:
+        """Arm 10: the row *"still covers a call, **until its own ``expires_at``** and
+        no longer — asserted by advancing the clock past it"*.
+
+        That is ADR-0268 §9's prospectivity bound exactly, and **it is no worse than
+        the pre-decision behaviour**: the defect the decision names, persisting for
+        rows written before the fix and bounded by the backstop that was their only
+        bound (ADR-0256 §1). **No upgrade ends it and no sweep finds it**, which is
+        the point of asserting the expiry rather than an ending.
+        """
+        clock = MovableClock()
+        first = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await first.record(established(id="legacy"))
+        finally:
+            first.close()
+        self._made_version_one(path)
+
+        second = SqliteGoalAuthorizationStore(path=path, now=clock)
+        try:
+            clock.set(EXPIRES - timedelta(microseconds=1))
+            assert await second.live_for(GOAL, TOOL.id) is not None
+            clock.set(EXPIRES)
+            assert await second.live_for(GOAL, TOOL.id) is None
+            held = await second.resolve("legacy")
+            assert held is not None
+            assert held.disposition is AuthorizationDisposition.ESTABLISHED
+        finally:
+            second.close()
+
+    async def test_a_reopen_of_a_pre_decision_goal_ends_the_row_the_closure_never_reached(
+        self, path: Path
+    ) -> None:
+        """Arm 10: *"the reopen is the one path that is closed"*.
+
+        Reopening that goal ends the legacy row ``GOAL_CLOSED`` **before** clearing
+        the fence, so a call of the reopened goal is covered by **no** row written
+        before the upgrade. That is the only route by which such a row otherwise
+        reaches a call of the reopened goal, and it is why ADR-0268 §2 orders the
+        pair ending-then-clear rather than the other way about.
+
+        **The reopen's two calls are driven directly here**, because the act that
+        takes them is ``orchestration``'s and this file is about what the durable
+        store does with a file it did not write.
+        """
+        first = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await first.record(established(id="legacy"))
+        finally:
+            first.close()
+        self._made_version_one(path)
+
+        second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            assert await second.end_for_goal(GOAL, at=NOW, goal_version=7) == 1
+            assert await second.clear_closure(GOAL, goal_version=7) is True
+            held = await second.resolve("legacy")
+            assert held is not None
+            assert (held.disposition, held.settled_at) == (
+                AuthorizationDisposition.GOAL_CLOSED,
+                NOW,
+            )
+            assert await second.standing(GOAL) == ()
+            assert await second.live_for(GOAL, TOOL.id) is None
+            # The fence is down, so the reopened request can establish afresh.
+            assert await second.record(established(id="afresh")) == "afresh"
+        finally:
+            second.close()
+
+    async def test_a_faulting_ending_on_a_pre_decision_database_leaves_it_unfenced(
+        self, path: Path
+    ) -> None:
+        """Arm 10's injection, on the database that carries no fence.
+
+        *"``end_for_goal`` faulting after a successful ``ACTIVE`` write leaves the
+        goal **active and unfenced**, its legacy row **still ``ESTABLISHED`` and
+        still covering a call** until its own ``expires_at``."* That is §9's
+        prospectivity bound and the state the reopen exists to improve on rather than
+        one this decision creates — **no clause claims every call of such a goal
+        asks** — and the repair is the user's own abandon and reopen.
+
+        The fault is injected at the store's own step, which is all-or-nothing, so
+        what it leaves is *nothing*: no settlement and no record.
+        """
+        first = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            await first.record(established(id="legacy"))
+        finally:
+            first.close()
+        self._made_version_one(path)
+
+        second = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            second.close()  # the connection the next call would use
+            with pytest.raises(AuthorizationError):
+                await second.end_for_goal(GOAL, at=NOW, goal_version=7)
+        finally:
+            second.close()
+
+        third = SqliteGoalAuthorizationStore(path=path, now=SHARED_CLOCK.reset())
+        try:
+            held = await third.resolve("legacy")
+            assert held is not None
+            assert held.disposition is AuthorizationDisposition.ESTABLISHED
+            assert [row.id for row in await third.standing(GOAL)] == ["legacy"]
+            # **Unfenced**: a fresh row records, which on a goal closed *under* this
+            # decision it could not.
+            assert await third.record(established(id="unfenced", tool=OTHER_TOOL)) == "unfenced"
+            # And the repair is the user's own two acts.
+            assert await third.end_for_goal(GOAL, at=NOW, goal_version=8) == 2
+            assert await third.clear_closure(GOAL, goal_version=9) is True
+            assert await third.record(established(id="repaired")) == "repaired"
+        finally:
+            third.close()
 
     def test_a_database_labelled_with_a_schema_this_code_cannot_read_is_refused(
         self, path: Path
