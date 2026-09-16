@@ -3985,14 +3985,23 @@ def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     to the owner of that page, as though something went wrong.
 
     The sentence is on the **delivery** ending alone and deliberately: an answer
-    stream's own request refreshed the timeout on its way in, so ``no-live-session``
-    there is not the hour passing, and saying it was would be a wrong explanation
+    stream's own request refreshed the timeout on its way in, so the idle bound is not
+    what ended that stream's session, and saying it was would be a wrong explanation
     rather than a missing one.
+
+    **And it names all three of a session's endings rather than the idle one** (#2498).
+    §7's fourth clause ends a stream for any ending of the session under it, and the
+    gateway names them with one condition because one is true of all of them. A sentence
+    that said the hour had passed would be false of a session that reached
+    ``gateway_session_ttl`` with a request made minutes ago, and of one ADR-0168 §4 ended
+    with the gateway process — so all three are named, which adversarial review's round 1
+    found this saying only the first of.
     """
     script = _code("app.js")
 
-    assert "gateway_session_idle_timeout" in script
-    assert "Watching does not keep a session alive." in script
+    assert "Watching does not keep a session alive" in script
+    for bound in ("gateway_session_idle_timeout", "gateway_session_ttl", "the gateway process"):
+        assert bound in script, bound
     assert 'value.fault === "no-live-session"' in _functions(script)["describeDeliveryEnd"]
     assert "describeDeliveryEnd" in _functions(script)["readDeliveries"]
     assert "describeDeliveryEnd" not in _functions(script)["askStreaming"]

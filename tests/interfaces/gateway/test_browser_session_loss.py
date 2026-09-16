@@ -211,10 +211,10 @@ _CONDITION_SAID: Final = {
 #: It is the sentence ``describeDeliveryEnd`` adds to a ``no-live-session`` **on the
 #: body** and to nothing else, and the asymmetry is the point: an answer stream and a
 #: head refusal each carried a request that refreshed the idle timeout on the way in, so
-#: "the hour passed while you watched" would be a *wrong* explanation there rather than a
-#: missing one. ``expired`` is therefore the one ending of the three that gets it, which
-#: is asserted both ways round.
-_WATCHING_DID_NOT_KEEP_IT: Final = "Watching does not keep a session alive."
+#: an explanation about a page that asked nothing would be a *wrong* one there rather
+#: than a missing one. ``expired`` is therefore the one ending of the three that gets it,
+#: which is asserted both ways round.
+_WATCHING_DID_NOT_KEEP_IT: Final = "Watching does not keep a session alive"
 
 #: The sentence a page must **not** say about a gateway that is listening — ``GATEWAY_GONE``
 #: in ``app.js``, which is where every one of these endings landed before #2498 because the

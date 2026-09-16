@@ -930,6 +930,45 @@ class Note(StrEnum):
     outstanding, still on its own clock", and the gateway keeps serving."""
 
 
+@dataclass
+class _Ending:
+    """Whether a terminal value has been written on one stream (ADR-0175 §2).
+
+    §2 partitions a stream's endings — "the gateway wrote a **terminal** value, or
+    the body ended without one" — and §3 gives an answer stream exactly one of the
+    first kind: "one value per ``ReplyChunk``, then one terminal value carrying the
+    ``TurnOutcome``, or one terminal value carrying the fault the exchange ended in".
+    A second terminal value appended to a stream that already has one is neither
+    ending: a conforming reader stops at the first and never sees it, so it is a byte
+    on the wire that no clause here describes and no reader is told how to treat.
+
+    **It is set at framing time and not after the write**, which is the whole of why
+    it is reliable. ``StreamWriter.write`` is synchronous and the ``drain`` that
+    follows it is the suspension point, so a session ending during that drain finds
+    this already true — where a flag set after the drain would find it false and
+    append a second terminal to a stream whose browser is merely slow.
+
+    One record per stream, built where the stream is decided and read where it is
+    ended, so the body and :class:`_OpenStream` cannot hold two answers to one
+    question.
+    """
+
+    named: bool = False
+
+    def framing(self, value: Mapping[str, Any]) -> bytes:
+        """Frame one value for this stream, recording a terminal one as it goes.
+
+        Args:
+            value: The value, already carrying its ``kind``.
+
+        Returns:
+            The bytes to write, framed as a chunk of the chunked body.
+        """
+        if value.get("kind") in streams.TERMINAL_KINDS:
+            self.named = True
+        return _frame(value)
+
+
 @dataclass(eq=False)
 class _OpenStream:
     """One stream a session admitted, and how the gateway ends it (ADR-0175 §7).
@@ -951,6 +990,7 @@ class _OpenStream:
     """
 
     writer: asyncio.StreamWriter
+    ending: _Ending
     delivery: DeliveryStream | None = None
     driver: asyncio.Task[Any] | None = None
 
@@ -1006,15 +1046,59 @@ class _OpenStream:
         the writer. ``close()`` flushes what is buffered, so the ordering costs no
         drain — which this cannot await, being the synchronous callback
         :class:`.SessionTable` announces an ending through.
+
+        **And a stream that already carries a terminal value is ended without a second**
+        — adversarial review, round 1, ``blocker``. :meth:`_name_the_ending` has it, and
+        has why the other half of that finding is not acted on.
         """
+        self._name_the_ending()
         if self.delivery is not None:
             self.delivery.abandon()
         if self.driver is not None and self.driver is not asyncio.current_task():
             self.driver.cancel()
         with contextlib.suppress(ConnectionError, OSError):
-            self.writer.write(_frame(streams.fault(RefusalCondition.NO_LIVE_SESSION.value)))
-            self.writer.write(render_stream_end())
             self.writer.close()
+
+    def _name_the_ending(self) -> None:
+        """Write the terminal fault this ending is, where the stream can carry one.
+
+        **A stream that already carries a terminal value gets no second one** (§2,
+        §3). The window is real rather than theoretical: a body writes its terminal
+        value and then awaits the drain, and a session expiring inside that drain would
+        find the value written and the response not yet complete. A conforming reader
+        stops at the first terminal and never sees a second — so the harm is not what
+        an owner reads but what the stream *is*, and §3 gives an answer stream exactly
+        one. :class:`_Ending` is set at framing time, before the write that precedes
+        that drain, so this reads the state as it is rather than as it was.
+
+        **A delivery stream with a write outstanding still gets it**, which is the half
+        of that finding this rebuts rather than fixes. ADR-0175 §4 says "the gateway
+        holds at most one value pending per stream and queues nothing behind one", and
+        that pending slot is :class:`.DeliveryStream`'s — which this does not touch at
+        all: the value goes to the socket, not through :meth:`.DeliveryStream.offer`,
+        and the stream is abandoned in the same breath by :meth:`end`. §4's other clause
+        states its own purpose — a stalled write is abandoned "so a browser that stops
+        reading cannot delay another browser's delivery" — and nothing here waits on a
+        drain, because there is nothing to wait on: two synchronous writes and a close.
+        So no browser is delayed, nothing accumulates beyond one value and five bytes,
+        and the abandoned browser gets a *better* ending than §4's fallback if it ever
+        reads again. Suppressing the value there would be the clause's letter applied
+        against its stated reason.
+
+        **A complete chunk can only follow a complete chunk**, which is what makes the
+        preceding paragraph true of the bytes as well as of the state.
+        :func:`~ai_assistant.interfaces.gateway.http.render_chunk` frames a whole value
+        and every writer hands it to ``write`` in one call, so a stream is never
+        suspended mid-chunk: the drain that follows is the only suspension point, and by
+        then the chunk before it is whole.
+        """
+        if self.ending.named:
+            return
+        with contextlib.suppress(ConnectionError, OSError):
+            self.writer.write(
+                self.ending.framing(streams.fault(RefusalCondition.NO_LIVE_SESSION.value))
+            )
+            self.writer.write(render_stream_end())
 
 
 @dataclass(frozen=True)
@@ -1051,12 +1135,17 @@ class _Streamed:
         release: Gives back what deciding to stream took — the hub slot, or the
             fan-out's registration and the poll that goes with the last reader.
             Called exactly once, on every exit.
+        ending: Whether a terminal value has been written on this stream. The body
+            frames every value through it and :meth:`_OpenStream._name_the_ending`
+            reads it, so "has this stream already been ended by a value" is one fact
+            held in one place rather than two the pair could disagree about.
     """
 
     handle: SessionHandle
     head: StreamHead
     body: Callable[[asyncio.StreamWriter], Awaitable[None]]
     release: Callable[[], None]
+    ending: _Ending
     delivery: DeliveryStream | None = None
 
 
@@ -1921,7 +2010,12 @@ class Gateway:
             Whether the connection survived. ``False`` where the peer went away,
             which is an ordinary end for a stream and not a fault to report.
         """
-        held = _OpenStream(writer=writer, delivery=answer.delivery, driver=asyncio.current_task())
+        held = _OpenStream(
+            writer=writer,
+            ending=answer.ending,
+            delivery=answer.delivery,
+            driver=asyncio.current_task(),
+        )
         self._register(answer.handle, held)
         try:
             writer.write(render_stream_head(replace(answer.head, close=closing), policy=_POLICY))
@@ -2459,22 +2553,26 @@ class Gateway:
         reference = _reference(payload)
         if not self._take_hub_slot():
             return _ceiling()
+        ending = _Ending()
         return _Streamed(
             handle=handle,
             head=StreamHead(content_type=streams.MEDIA_TYPE),
             body=partial(
                 self._pump_answer,
+                ending=ending,
                 utterance=utterance,
                 conversation=conversation,
                 reference=reference,
             ),
             release=self._give_hub_slot,
+            ending=ending,
         )
 
     async def _pump_answer(
         self,
         writer: asyncio.StreamWriter,
         *,
+        ending: _Ending,
         utterance: str,
         conversation: str | None,
         reference: TurnReference | None,
@@ -2512,11 +2610,13 @@ class Gateway:
             async with closing_stream(answering) as pieces:
                 async for produced in pieces:
                     if isinstance(produced, TurnOutcome):
-                        await _write_value(writer, streams.outcome(_outcome_view(produced)))
+                        await _write_value(
+                            writer, streams.outcome(_outcome_view(produced)), frame=ending.framing
+                        )
                         return
-                    await _write_value(writer, streams.chunk(produced))
+                    await _write_value(writer, streams.chunk(produced), frame=ending.framing)
         except (TransportError, AssistantError, ValueError) as exc:
-            await _write_value(writer, _stream_fault(exc))
+            await _write_value(writer, _stream_fault(exc), frame=ending.framing)
 
     def _delivery_stream(self, handle: SessionHandle) -> Response | _Streamed:
         """Open one delivery stream, and the poll with the first (ADR-0175 §4).
@@ -2548,14 +2648,16 @@ class Gateway:
         opened = self._deliveries.open()
         if opened is None:
             return _ceiling()
+        ending = _Ending()
         return _Streamed(
             handle=handle,
             head=StreamHead(
                 content_type=streams.MEDIA_TYPE,
                 headers=(streams.keep_alive_header(self._settings.gateway_notification_budget),),
             ),
-            body=partial(write_stream, stream=opened, frame=_frame),
+            body=partial(write_stream, stream=opened, frame=ending.framing),
             release=partial(self._deliveries.close, opened),
+            ending=ending,
             delivery=opened,
         )
 
@@ -4262,7 +4364,12 @@ def _frame(value: Mapping[str, Any]) -> bytes:
     return render_chunk(streams.encode(value))
 
 
-async def _write_value(writer: asyncio.StreamWriter, value: Mapping[str, Any]) -> None:
+async def _write_value(
+    writer: asyncio.StreamWriter,
+    value: Mapping[str, Any],
+    *,
+    frame: Callable[[Mapping[str, Any]], bytes],
+) -> None:
     """Write one value on a stream and wait for it to leave.
 
     The drain is awaited rather than fired and forgotten, because it is what applies
@@ -4271,8 +4378,15 @@ async def _write_value(writer: asyncio.StreamWriter, value: Mapping[str, Any]) -
     An answer stream "has one reader and nothing to protect from it", so ADR-0175
     §4's abandonment clause does not reach one and there is nothing here to race the
     drain against.
+
+    Args:
+        writer: The connection's writer, already carrying the stream's head.
+        value: The value to write.
+        frame: How one value becomes bytes on *this* stream — the stream's own
+            :class:`_Ending`, so that a terminal value is recorded as one in the same
+            step it is framed and before the drain below can suspend.
     """
-    writer.write(_frame(value))
+    writer.write(frame(value))
     await writer.drain()
 
 

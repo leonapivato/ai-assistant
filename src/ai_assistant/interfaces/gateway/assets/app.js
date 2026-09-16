@@ -1051,10 +1051,21 @@ const GATEWAY_GONE =
 // writes on one, and not by a delivery poll" (ADR-0175 §7). So a page left open and
 // watching, asked nothing for an hour, expires exactly on time, and the stream ends
 // with the session that held it (§7's fourth clause).
+//
+// **It names every bound rather than the idle one, because the value cannot say which
+// fell due** (#2498, adversarial review round 1). §7's fourth clause ends a stream for
+// *any* ending of the session under it, and the gateway names all of them with the one
+// condition that is true of all of them — there is no live session. A sentence that said
+// the hour had passed would be right on the common route and false on the other two: a
+// session reaching `gateway_session_ttl` with a request made minutes ago, and a gateway
+// going down (ADR-0168 §4's "every session ends when the gateway process ends"). Naming
+// the three is what keeps this an explanation rather than a guess, and it is the same
+// three the bootstrap panel's own standing text already names.
 const IDLE_WHILE_WATCHING =
-  "Watching does not keep a session alive. A session ends an hour after the last " +
-  "thing you asked (gateway_session_idle_timeout), and a stream carries no request, " +
-  "so a page left watching and asked nothing expires on time.";
+  "Watching does not keep a session alive: a stream carries no request, so a page " +
+  "left watching and asked nothing expires on gateway_session_idle_timeout like any " +
+  "other. A session also ends at gateway_session_ttl from when it started, and with " +
+  "the gateway process.";
 
 function describe(body, status) {
   const known = FAULTS[body.fault];
@@ -1067,8 +1078,10 @@ function describe(body, status) {
 
 // The same, for a value that ended a **delivery** stream. The extra sentence is on
 // this ending alone and deliberately: an answer stream's own request refreshed the
-// idle timeout on its way in, so `no-live-session` there is not the hour passing and
-// saying it was would be a wrong explanation rather than a missing one.
+// idle timeout on its way in, so the idle bound is not what ended *that* stream's
+// session and putting it in front of the owner would be a wrong explanation rather
+// than a missing one. A delivery stream carried no request at all, which is the fact
+// the sentence is about and the one nobody guesses.
 function describeDeliveryEnd(value, status) {
   const said = describe(value, status);
   return value.fault === "no-live-session" ? `${said} ${IDLE_WHILE_WATCHING}` : said;

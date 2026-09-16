@@ -16,7 +16,7 @@ import contextlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from gateway_mint import bootstrap_value
@@ -43,9 +43,15 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
 )
-from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS
+from ai_assistant.interfaces.gateway import streams
+from ai_assistant.interfaces.gateway.delivery import GATEWAY_PLAYS, DeliveryStream
 from ai_assistant.interfaces.gateway.http import Request, Response
-from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, Gateway
+from ai_assistant.interfaces.gateway.server import (
+    _ASSISTANT_PATHS,
+    Gateway,
+    _Ending,
+    _OpenStream,
+)
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
 
@@ -857,6 +863,166 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
         assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
         status, body = await one.whole("POST", "/ask", {"utterance": "what is on today"})
         assert (status, body) == (401, {"fault": "no-live-session"})
+
+
+class _Recording:
+    """Everything one stream's writer was handed, and whether it was closed.
+
+    A stub rather than a socket because the two arms below are about a *decision*
+    :class:`_OpenStream` makes before it writes anything — and the state that decision
+    turns on (a terminal value already framed, a delivery stream with a write
+    outstanding) is reachable here directly and, through the listener, only by
+    arranging for a browser to stop reading mid-drain. ADR-0216 §7's objection to a
+    duration applies to that arrangement exactly.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing written and nothing closed."""
+        self.written = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        """Take bytes, as a writer does."""
+        self.written += data
+
+    def close(self) -> None:
+        """Record that the stream was closed."""
+        self.closed = True
+
+
+def _held(
+    *, ending: _Ending, delivery: DeliveryStream | None = None
+) -> tuple[_OpenStream, _Recording]:
+    """One registered stream over a recording writer, and the recording."""
+    recording = _Recording()
+    return (
+        _OpenStream(
+            # The stub stands in for the writer alone; nothing under test reads anything
+            # of a `StreamWriter` that it does not implement.
+            writer=cast("asyncio.StreamWriter", recording),
+            ending=ending,
+            delivery=delivery,
+        ),
+        recording,
+    )
+
+
+def test_a_stream_that_already_carries_a_terminal_value_is_not_given_a_second() -> None:
+    """§2 and §3, at the window a session's ending opens in a body's last drain.
+
+    "Every stream ends in exactly one of two ways… the gateway wrote a **terminal**
+    value, or the body ended without one", and §3 gives an answer stream "one value per
+    ``ReplyChunk``, then one terminal value". A body writes its terminal value and then
+    awaits the drain; a session expiring inside that drain finds the value written and
+    the response not yet complete, and appending a second terminal there would put a
+    value on the wire that neither clause describes and no reader is told how to treat.
+
+    :class:`_Ending` is set where the value is *framed*, which is the synchronous step
+    before that drain, so the state this reads is the state as it is. Adversarial
+    review, round 1, ``blocker``.
+    """
+    ending = _Ending()
+    stream, recording = _held(ending=ending)
+    already = ending.framing(streams.outcome({"turn": "done"}))
+
+    stream.end()
+
+    assert recording.written == b""
+    assert recording.closed
+    assert already  # the body's own value, framed and therefore recorded
+
+
+def test_a_delivery_stream_with_a_write_outstanding_is_still_given_its_ending() -> None:
+    """The half of round 1's ``blocker`` this rebuts rather than fixes.
+
+    The finding read ADR-0175 §4 as forbidding the terminal value on a stream whose
+    previous write has not completed: "queues nothing behind one", and a stalled write
+    "is abandoned and the stream is ended". Both clauses are about
+    :class:`.DeliveryStream`'s **pending slot** — the one :meth:`.DeliveryStream.offer`
+    refuses on — and :meth:`_OpenStream.end` does not touch it: the value goes to the
+    socket, and the stream is abandoned in the same breath, which is asserted here.
+
+    §4 states the abandonment clause's own purpose in the clause — a stalled write is
+    abandoned "so a browser that stops reading cannot delay another browser's delivery"
+    — and nothing in this path waits on a drain. Two synchronous writes and a close
+    delay nobody, bound the stream's cost at one value and five bytes, and leave a
+    browser that resumes reading with a *better* ending than the cut §4 would otherwise
+    leave it. Withholding the value here would apply the clause's letter against its
+    stated reason.
+    """
+    delivery = DeliveryStream()
+    assert delivery.offer(streams.alive())
+    stream, recording = _held(ending=_Ending(), delivery=delivery)
+
+    stream.end()
+
+    assert json.loads(recording.written.split(b"\r\n")[1]) == {
+        "kind": "fault",
+        "fault": "no-live-session",
+    }
+    assert recording.written.endswith(b"0\r\n\r\n")
+    assert recording.closed
+    # §4's disposition for a stalled stream is taken in full: it is abandoned, so the
+    # body stops waiting on a browser rather than on a socket that is about to go.
+    assert delivery.abandoned.is_set()
+
+
+async def test_a_session_reaching_its_absolute_lifetime_names_the_ending_too() -> None:
+    """§7's fourth clause is about the session ending, not about which bound ended it.
+
+    "A stream ends no later than the session that admitted it, and the gateway ends
+    every stream a session held at the moment that session ends." ADR-0168 §4 gives a
+    session two bounds, and this is the other one: the request at nine minutes refreshes
+    ``gateway_session_idle_timeout`` past the point the clock is moved to, so what falls
+    due at eleven is ``gateway_session_ttl`` and only that.
+
+    The value is the same, because the condition is: there is no live session. The
+    *page* does not claim the hour passed — ``IDLE_WHILE_WATCHING`` names all three
+    endings a session has, which is what adversarial review's round 1 found it saying
+    only the first of.
+    """
+    engine = _Delivering([None, None, None])
+    async with _harness(
+        engine,
+        gateway_session_ttl=timedelta(minutes=10),
+        gateway_session_idle_timeout=timedelta(minutes=10),
+    ) as one:
+        reader, _, _ = await one.send("GET", "/deliveries")
+        await engine.answer_one_poll()
+        assert (await anext(_values(reader)))["kind"] == "alive"
+
+        one.clock.advance(timedelta(minutes=9))
+        status, _ = await one.whole("POST", "/conversations", {})
+        assert status == 200
+
+        one.clock.advance(timedelta(minutes=2))
+        one.timers.fire_all()
+        await asyncio.sleep(0)
+
+        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
+
+
+async def test_a_gateway_on_the_way_down_names_the_ending_of_every_stream_it_held() -> None:
+    """ADR-0168 §4's third ending, reached through the same callback (ADR-0175 §7).
+
+    "Every session ends when the gateway process ends", and :meth:`Gateway.close`
+    clears the table, "which announces every handle, so each session's streams end with
+    it". The condition is the one the other two leave as well — there is no live
+    session — so the ending is named rather than dropped, and a browser that reads the
+    value before the process goes learns what happened instead of meeting §2's other
+    ending. One that does not read in time meets that other ending, which is legible as
+    what it is.
+    """
+    engine = _Delivering([None, None])
+    async with _harness(engine) as one:
+        reader, _, _ = await one.send("GET", "/deliveries")
+        await engine.answer_one_poll()
+        assert (await anext(_values(reader)))["kind"] == "alive"
+
+        one.gateway.close()
+        await asyncio.sleep(0)
+
+        assert await _read_all(reader) == [{"kind": "fault", "fault": "no-live-session"}]
 
 
 # --- ADR-0175 §6: the conversation surface, and the enumeration --------------
