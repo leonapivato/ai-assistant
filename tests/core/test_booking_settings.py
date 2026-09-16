@@ -21,7 +21,7 @@ which is the half-configured provider ADR-0260 §11 refused for the forecaster.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
@@ -266,3 +266,59 @@ def test_an_uncertain_day_beside_a_whole_configuration_loads() -> None:
     settings = _settings(booking_indeterminate_date=date(2026, 10, 5))
 
     assert settings.booking_indeterminate_date == date(2026, 10, 5)
+
+
+# --------------------------------------------------------------------------- #
+# what the fifth adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "field", ["booking_available_from", "booking_available_to", "booking_indeterminate_date"]
+)
+@pytest.mark.parametrize(
+    ("instant", "why"),
+    [
+        # Naive on purpose — a configuration file is exactly where a naive instant
+        # arrives, and it is the shape pydantic coerces most quietly.
+        (datetime(2026, 10, 1), "a naive datetime at midnight"),  # noqa: DTZ001
+        (datetime(2026, 10, 1, 9, 30), "a naive datetime carrying a time"),  # noqa: DTZ001
+        (datetime(2026, 10, 1, tzinfo=UTC), "an aware datetime at midnight"),
+        ("2026-10-01T00:00:00", "the ISO spelling of one, at midnight"),
+        ("2026-10-01T09:30:00+02:00", "and the ISO spelling of one with an offset"),
+    ],
+)
+def test_a_configured_day_refuses_an_instant(field: str, instant: object, why: str) -> None:
+    """An instant is refused rather than truncated (ADR-0273 §5).
+
+    **Pydantic's non-strict ``date`` is the defect this closes.** It accepts a
+    **midnight** ``datetime`` *and* the ISO ``datetime`` string ``"2026-10-01T00:00:00"``
+    and yields ``date(2026, 10, 1)`` from each — so the factory's own refusal of an
+    instant never saw the original value, and ``ASSISTANT_BOOKING_AVAILABLE_FROM``
+    carrying a time would load as that day or be refused **depending on the hour the
+    operator wrote**, which is the worst of the two behaviours.
+
+    It is the same defect ``_exactly_an_integer`` closes for counts and
+    ``_only_a_decimal_amount_or_absent`` closes for prices: a value the type would
+    silently coerce, refused before the coercion.
+    """
+    overrides: dict[str, object] = {field: instant}
+    if field == "booking_indeterminate_date":
+        overrides = {**_WHOLE, **overrides}
+    with pytest.raises(ValidationError, match=field):
+        Settings(**overrides)  # type: ignore[arg-type]  # a case supplies a refused shape
+    assert why
+
+
+def test_a_configured_day_still_loads_from_its_ordinary_spelling() -> None:
+    """And a calendar day loads, which is what makes the refusals above refusals.
+
+    The guard refuses a *time of day* and nothing else: the extended form a deployment
+    writes into an environment variable passes through it untouched, and what pydantic
+    then admits for a ``date`` field is pydantic's own domain rather than a second
+    grammar stated here.
+    """
+    loaded = _settings(booking_available_from="2026-10-01", booking_available_to="2026-12-31")
+
+    assert loaded.booking_available_from == date(2026, 10, 1)
+    assert not isinstance(loaded.booking_available_from, datetime)

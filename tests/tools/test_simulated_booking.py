@@ -2104,3 +2104,65 @@ async def test_a_reopen_of_an_untouched_store_keeps_its_count(tmp_path: Path) ->
         assert len(await reopened.records()) == 1
     finally:
         reopened.close()
+
+
+# --------------------------------------------------------------------------- #
+# what the fifth adversarial round found
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_established_store_whose_records_table_is_gone_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Exactly two complete states are accepted (ADR-0273 §2).
+
+    §2 makes the durable state **two things that survive a restart together**. A
+    surviving count beside a dropped table is neither shape: reopening it would report
+    bookings the store retains no record of *and no pruning explains*, which is as false
+    a claim as a reset count is — and ``CREATE TABLE IF NOT EXISTS`` would have made
+    that repair silently.
+
+    So a store is new only when the table and **both** metadata rows are absent, and
+    established only when all three are present. This is the third shape, and it is the
+    one the previous repair still admitted.
+    """
+    path = tmp_path / "bookings.db"
+    await _an_established_store(path)
+    _edit(path, "DROP TABLE bookings")
+
+    with pytest.raises(BookingStoreError, match="corrupt"):
+        SqliteBookingStore(path=path, retained=1)
+
+
+async def test_a_count_removed_while_the_store_is_open_fails_closed(tmp_path: Path) -> None:
+    """A live corruption cannot reset the count either (ADR-0273 §2).
+
+    Reopen-time validation cannot catch this one: the row is removed by a second
+    connection **while the store is open**, so nothing reopens. The read used to answer
+    ``0``, and the next commit would then write ``1`` over a count of two — the reset the
+    figure exists to make impossible, reached without a restart and leaving a count
+    *lower* than the number of bookings the store had already made.
+
+    So an absent count is an error on **every** read. :meth:`_initialise` writes the row
+    inside the setup transaction before any reader of this store can run, so an absent
+    row is always a row something removed.
+    """
+    path = tmp_path / "bookings.db"
+    store = SqliteBookingStore(path=path, retained=4)
+    try:
+        await store.commit({DATE_ARGUMENT: "2026-10-01"})
+        await store.commit({DATE_ARGUMENT: "2026-10-02"})
+        assert await store.commit_count() == 2
+
+        _edit(path, "DELETE FROM meta WHERE key = 'commit_count'")
+
+        with pytest.raises(BookingStoreError, match="corrupt"):
+            await store.commit_count()
+        # And the commit that would have written `1` over a count of two is refused
+        # **before** it lands, so the store is left as the corruption found it.
+        with pytest.raises(BookingStoreError) as caught:
+            await store.commit({DATE_ARGUMENT: "2026-10-03"})
+        assert caught.value.may_have_committed is False
+        assert len(await store.records()) == 2
+    finally:
+        store.close()

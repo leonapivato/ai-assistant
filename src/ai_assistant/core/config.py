@@ -13,7 +13,7 @@ import os
 import re
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -498,6 +498,69 @@ def _only_a_decimal_amount_or_absent(value: object) -> object:
         f"silently rounded into a price (ADR-0273 §5, ADR-0254 §4)"
     )
     raise ValueError(msg)
+
+
+def _only_a_calendar_day_or_absent(value: object) -> object:
+    """Refuse a configured day that is an instant rather than a calendar date.
+
+    **The ``datetime`` half of the defect :func:`_exactly_an_integer` closes for
+    integers and :func:`_only_a_decimal_amount_or_absent` closes for amounts.**
+    ``datetime`` is a subclass of ``date``, and pydantic's non-strict ``date`` goes
+    further: it accepts a **midnight** ``datetime`` and the ISO ``datetime`` *string*
+    ``"2026-10-01T00:00:00"`` and yields ``date(2026, 10, 1)`` from each — silently
+    discarding a time of day, and a timezone with it. So ``ASSISTANT_BOOKING_AVAILABLE_
+    FROM=2026-10-01T09:00:00`` would either load as the 1st or be refused depending on
+    the hour the operator wrote, which is the worst of the two behaviours.
+
+    An instant is refused rather than truncated (ADR-0273 §5): this provider has no
+    meaning for a time of day, and a configuration that states one is a configuration
+    whose author expected something this component does not do.
+
+    **The string form is narrowed by rejecting a time rather than by restating a date
+    grammar**, so the refusal cannot be walked around by spelling the instant and no
+    second reading of ISO-8601 is introduced here: what a ``date`` field admits once the
+    time is ruled out stays pydantic's own domain.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is a ``datetime``, or a string carrying a time.
+    """
+    if value is None or (type(value) is date):
+        return value
+    if isinstance(value, datetime):
+        msg = (
+            f"expected a calendar date, got the instant {describe_untrusted(value)}: a "
+            f"day carries no time of day, and truncating one would discard what the "
+            f"operator wrote (ADR-0273 §5)"
+        )
+        raise ValueError(msg)
+    if isinstance(value, str):
+        if "T" in value or " " in value.strip():
+            msg = (
+                "expected a calendar date such as 2026-10-01, got a value carrying a "
+                "time of day; a day carries none, and truncating one would discard "
+                "what the operator wrote (ADR-0273 §5)"
+            )
+            raise ValueError(msg)
+        return value
+    msg = (
+        f"expected a calendar date, got {describe_untrusted(value)} of type "
+        f"{describe_untrusted(type(value))}; only a date or its ISO-8601 spelling is "
+        f"accepted (ADR-0273 §5)"
+    )
+    raise ValueError(msg)
+
+
+#: An **optional** calendar-day setting: a ``date`` or its ISO-8601 spelling, with an
+#: instant refused rather than truncated. Applied to every ``date | None``-typed field,
+#: for the reason :data:`_OptionalRealSetting` is applied to every ``float | None`` one
+#: — the coercion is a property of the type rather than of any one field.
+_OptionalDaySetting = Annotated[date | None, BeforeValidator(_only_a_calendar_day_or_absent)]
 
 
 #: An **optional** money amount read from configuration, in ADR-0267 §4's own domain.
@@ -4194,7 +4257,7 @@ class Settings(BaseSettings):
             "pinned to and what ADR-0148 §6's four conditions compare."
         ),
     )
-    booking_available_from: date | None = Field(
+    booking_available_from: _OptionalDaySetting = Field(
         default=None,
         description=(
             "The first day the simulated provider has a stay for, inclusive, as an "
@@ -4203,7 +4266,7 @@ class Settings(BaseSettings):
             "written (ADR-0273 §5, §10 arm 6)."
         ),
     )
-    booking_available_to: date | None = Field(
+    booking_available_to: _OptionalDaySetting = Field(
         default=None,
         description=("The last day the simulated provider has a stay for, inclusive."),
     )
@@ -4266,7 +4329,7 @@ class Settings(BaseSettings):
             "of one."
         ),
     )
-    booking_indeterminate_date: date | None = Field(
+    booking_indeterminate_date: _OptionalDaySetting = Field(
         default=None,
         description=(
             "The one day whose booking commits and is then reported as one that may "
