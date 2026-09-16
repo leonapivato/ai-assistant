@@ -1619,6 +1619,13 @@ source_modules = [
     "ai_assistant.tools",
     "ai_assistant.tools._transactions",
     "ai_assistant.tools.admission",
+    # ADR-0273's simulated booking provider: its two declarations, its four-condition
+    # check and its durable store. It **opens nothing and takes no transport
+    # parameter**, which is precisely why it is bound here rather than exempted — §3
+    # requires the entry "in the same change", so that a later edit giving it a
+    # transport fails `lint-imports` rather than passing review. The seam is still the
+    # one absence.
+    "ai_assistant.tools.booking",
     "ai_assistant.tools.builtin",
     "ai_assistant.tools.connection_store",
     "ai_assistant.tools.consume",

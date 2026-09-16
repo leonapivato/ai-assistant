@@ -13,7 +13,7 @@ import os
 import re
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -426,6 +426,87 @@ def _only_a_real_number_or_absent(value: object) -> object:
 #: :data:`_RealSetting` is applied to every ``float`` one — the defect #500 closes
 #: is a property of the type rather than of any one field.
 _OptionalRealSetting = Annotated[float | None, BeforeValidator(_only_a_real_number_or_absent)]
+
+
+def _exactly_an_integer_or_absent(value: object) -> object:
+    """:func:`_exactly_an_integer`, with absence admitted (ADR-0273 §5).
+
+    The same allowlist, for an ``int | None`` field. ``None`` is *unset* rather than a
+    malformed count, so it passes through before the allowlist is consulted; everything
+    else is judged exactly as it is on a required field, which is what keeps
+    ``booking_retained_records=True`` refused as the flag it is rather than loaded as a
+    bound of one.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is neither ``None`` nor one of the two accepted forms.
+    """
+    return None if value is None else _exactly_an_integer(value)
+
+
+#: An **optional** integer-valued setting: :data:`_IntegerSetting`'s allowlist with
+#: absence admitted, for the same reason :data:`_OptionalRealSetting` mirrors
+#: :data:`_RealSetting` — the defect #471 closes is a property of the type.
+_OptionalIntegerSetting = Annotated[int | None, BeforeValidator(_exactly_an_integer_or_absent)]
+
+
+def _only_a_decimal_amount_or_absent(value: object) -> object:
+    """Refuse a configured money amount that is not one ADR-0267 §4's reading admits.
+
+    ADR-0273 §5 fixes the domain of a configured price or charge as the one the landed
+    reader accepts: *"a JSON **string** a ``Decimal`` accepts or a JSON **integer**"*.
+    So a **binary float** is refused — ADR-0254 §4's own refusal taken at the
+    configuration, because a float rounded into a ``Decimal`` here would be an unproven
+    comparison the policy could no longer see — and so is a **flag**, because ``bool``
+    is a subclass of ``int`` in Python and a check written as an ``int`` instance test
+    would admit ``True`` as ``Decimal(1)`` and configure a one-unit price that satisfies
+    almost any ceiling. Finiteness and sign are the field validator's, one layer down,
+    because ``"NaN"`` and ``"Infinity"`` are strings ``Decimal`` **accepts**.
+
+    A ``Decimal`` itself is admitted: it is the field's own declared type, and a caller
+    constructing one in Python has not made the coercion mistake this guard exists for.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is neither ``None`` nor a ``str``, an exact ``int`` or
+            a ``Decimal``.
+    """
+    if value is None or isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        msg = (
+            f"expected a money amount, got the flag {describe_untrusted(value)}: "
+            f"a flag is not a price"
+        )
+        raise ValueError(msg)
+    if type(value) is int or isinstance(value, str):
+        return value
+    msg = (
+        f"expected a decimal amount or its decimal spelling, got "
+        f"{describe_untrusted(value)} of type {describe_untrusted(type(value))}; only a "
+        f"str, an exact int or a Decimal is accepted, so a binary float is never "
+        f"silently rounded into a price (ADR-0273 §5, ADR-0254 §4)"
+    )
+    raise ValueError(msg)
+
+
+#: An **optional** money amount read from configuration, in ADR-0267 §4's own domain.
+#: Applied to the simulated booking provider's configured price and charge (ADR-0273
+#: §5), whose values are read back by ``quote_read`` and ``charge_read``, each of which
+#: *"raises nothing"* — so a bad configuration has no other place to be caught.
+_OptionalDecimalAmount = Annotated[
+    Decimal | None, BeforeValidator(_only_a_decimal_amount_or_absent)
+]
 
 
 def _only_a_duration(value: object) -> object:
@@ -4070,6 +4151,120 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The simulated booking provider (ADR-0273 §1, §5) -----------------
+    # **Absent by default, and absence is the whole-or-absent shape these settings
+    # already use rather than a boolean flag.** ADR-0273 §1: a deployment supplying
+    # **none** of these builds no provider object at all, registers nothing in any
+    # registry and adds no entry to the seam's table; a deployment supplying **some but
+    # not all** is refused by the model validator below. *"A boolean flag beside an
+    # incomplete configuration is not an implementation of this clause"*: it makes
+    # *enabled but unusable* a representable state, which is the half-configured
+    # provider ADR-0260 §11 refused for the forecaster.
+    #
+    # **Configuring it is an operator act and nothing else can perform it** (§1). No
+    # model, no plan, no planner, no tool, no user-facing surface and no API enables
+    # this provider, and none is given a way to: it is enabled by editing the
+    # deployment's configuration and restarting, and **no lane adds a second route.**
+    #
+    # **Nothing here makes the provider real.** §7 creates no route by which it becomes
+    # one: not by editing this configuration, not by re-pointing its endpoint, not by
+    # granting it a transport (§3) and not by registering a different implementation
+    # behind its declarations. **The first real booking provider is its own ADR.**
+    #
+    # **Every shape of every value below is refused at the read** (§5), because
+    # ADR-0267 §4's and ADR-0271 §2's readings each *"raise nothing"* by design — so a
+    # bad configuration has no other place to be caught, and a deployment carrying one
+    # would start, pass every arm on its own fixtures, and yield nothing at the quote.
+    booking_connection: str | None = Field(
+        default=None,
+        description=(
+            "The connection reference the simulated booking provider's two tools are "
+            "registered against — a handle the provisioner minted, read out of the "
+            "connections listing (ADR-0149 §4). The provider accepts the credential it "
+            "names and does not use it. Set it together with every other booking_* "
+            "field below, or set none of them and no provider is built."
+        ),
+    )
+    booking_endpoint: str | None = Field(
+        default=None,
+        description=(
+            "The one HTTPS origin the connected booking account names, as "
+            "https://host[:port]. **Nothing is transmitted to it** (ADR-0273 §3): the "
+            "provider opens no socket and takes no transport. It is what the binding is "
+            "pinned to and what ADR-0148 §6's four conditions compare."
+        ),
+    )
+    booking_available_from: date | None = Field(
+        default=None,
+        description=(
+            "The first day the simulated provider has a stay for, inclusive, as an "
+            "ISO-8601 date. A day outside the window is unavailable: the availability "
+            "read answers as such and a booking for it is refused before anything is "
+            "written (ADR-0273 §5, §10 arm 6)."
+        ),
+    )
+    booking_available_to: date | None = Field(
+        default=None,
+        description=("The last day the simulated provider has a stay for, inclusive."),
+    )
+    booking_price_amount: _OptionalDecimalAmount = Field(
+        default=None,
+        description=(
+            "The whole price the availability read quotes for a booking, in ADR-0267 "
+            "§3's sense. A decimal string or an exact integer, finite and not negative; "
+            "a binary float, a flag, 'NaN' and 'Infinity' are each refused here rather "
+            "than yielding no quote at the read. Configure it under a stated bound or "
+            "over one to reach either of ADR-0273 §5's first two cases."
+        ),
+    )
+    booking_price_currency: str | None = Field(
+        default=None,
+        description=(
+            "The ISO-4217 alphabetic code booking_price_amount is denominated in — "
+            "three uppercase ASCII letters, shape and never a register (ADR-0267 §1)."
+        ),
+    )
+    booking_charge_amount: _OptionalDecimalAmount = Field(
+        default=None,
+        description=(
+            "The whole amount a booking charges, in ADR-0271 §2's sense. **It need not "
+            "equal booking_price_amount**: a quote is prospective and a charge is "
+            "retrospective, and a charge that disagrees with the quote it was pinned to "
+            "is the case ADR-0271 §3 wrote a finding for, not a provider whose "
+            "declaration lies (ADR-0273 §5)."
+        ),
+    )
+    booking_charge_currency: str | None = Field(
+        default=None,
+        description=(
+            "The ISO-4217 alphabetic code booking_charge_amount is denominated in. "
+            "Independently configurable from booking_price_currency, so a charge may "
+            "disagree with its quote in currency as well as in amount (ADR-0273 §5)."
+        ),
+    )
+    booking_retained_records: _OptionalIntegerSetting = Field(
+        default=None,
+        ge=1,
+        lt=2**63,
+        description=(
+            "How many booking records the provider's store retains, beyond which the "
+            "oldest are pruned (ADR-0273 §2, ADR-0004 §6's retention limb). A strictly "
+            "positive integer: 0 would prune the record its own booking had just "
+            "inserted. **The commit count is not bounded by it and is never "
+            "decremented** — pruning removes detail about bookings and never the fact "
+            "of one."
+        ),
+    )
+    booking_indeterminate_date: date | None = Field(
+        default=None,
+        description=(
+            "The one day whose booking commits and is then reported as one that may "
+            "have committed, so the INDETERMINATE outcome ADR-0273 §4 requires is "
+            "producible by a production component rather than asserted over a fake. "
+            "Optional, and settable only where a booking provider is configured."
+        ),
+    )
+
     # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
     # **Which connected account `send_email` is registered against, and where it
     # submits.** Both, or neither: a deployment that names both gets the tool
@@ -4350,7 +4545,13 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("world_spend_currency", "web_search_cost_currency", "forecast_cost_currency")
+    @field_validator(
+        "world_spend_currency",
+        "web_search_cost_currency",
+        "forecast_cost_currency",
+        "booking_price_currency",
+        "booking_charge_currency",
+    )
     @classmethod
     def _spend_currency_is_iso_4217_alphabetic(cls, value: str | None) -> str | None:
         """Require ADR-0194 §1's shape, or nothing at all.
@@ -4371,6 +4572,13 @@ class Settings(BaseSettings):
         The two settings are still **independent** (§6): nothing here compares
         them, and a deployment may denominate its search in one currency and meter
         its spend in another.
+
+        **``booking_price_currency`` and ``booking_charge_currency`` are validated by
+        this same validator too** (ADR-0273 §5), which states the domain as ADR-0267
+        §1's ISO-4217 *shape* — the same three-uppercase-letters rule, *"shape and never
+        a register"*. They are likewise **independent of each other**: nothing here
+        compares them, and a deployment configuring a charge whose currency disagrees
+        with its quote's is reaching ADR-0271 §3's finding on purpose (§5).
         """
         if value is None:
             return value
@@ -4411,6 +4619,48 @@ class Settings(BaseSettings):
         one direction the mechanism must never move in.
         """
         return _checked_spend_amount(value, info.field_name, floor="positive")
+
+    @field_validator("booking_price_amount", "booking_charge_amount")
+    @classmethod
+    def _booking_amount_is_in_the_readers_domain(
+        cls, value: Decimal | None, info: ValidationInfo
+    ) -> Decimal | None:
+        """Require ADR-0267 §4's own domain for a configured price or charge.
+
+        **The reader's domain and not a second one** (ADR-0273 §5): *"an amount is a
+        value ADR-0267 §4's reading admits — a JSON string a ``Decimal`` accepts or a
+        JSON integer, whose ``Decimal`` is **finite and not negative**"*. The type's
+        own :func:`_only_a_decimal_amount_or_absent` has already refused a binary float
+        and a flag; what is left is exactly the pair a natural implementation reaches by
+        accident, because ``"NaN"``, ``"Infinity"`` and ``"-Infinity"`` are strings
+        ``Decimal`` **accepts**.
+
+        **Ordered: finiteness before the sign**, because ``Decimal("sNaN") < 0``
+        **raises** rather than answering — the same order
+        :func:`~ai_assistant.orchestration.charges.charge_read` and
+        :class:`~ai_assistant.core.types.ValueBound` take for the same pair.
+
+        **No countability rule is imposed here**, unlike a spend ceiling's: ADR-0267
+        §4's reading admits any finite non-negative ``Decimal``, and a narrower
+        configuration domain would refuse a price the mint would have accepted — two
+        answers to one question.
+
+        Raises:
+            ValueError: If the amount is non-finite or negative.
+        """
+        if value is None:
+            return value
+        name = info.field_name if info.field_name is not None else "the booking amount"
+        if not value.is_finite():
+            msg = (
+                f"{name} must be finite (ADR-0273 §5, ADR-0267 §4); 'NaN' and 'Infinity' "
+                f"are strings Decimal accepts and neither is a price"
+            )
+            raise ValueError(msg)
+        if value < 0:
+            msg = f"{name} must not be negative (ADR-0273 §5, ADR-0267 §4), got {value!r}"
+            raise ValueError(msg)
+        return value
 
     @field_validator("web_search_cost_per_call", "forecast_cost_per_call")
     @classmethod
@@ -4608,6 +4858,105 @@ class Settings(BaseSettings):
             "account is connected; a per-call figure for a searcher no deployment builds "
             "is a value nothing reads (ADR-0236 §2), so set web_search_connection and "
             "web_search_origin as well or unset both cost fields"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_booking_registration_is_whole_or_absent(self) -> Settings:
+        """Refuse a half-configured simulated booking provider (ADR-0273 §1, §5).
+
+        :meth:`_the_forecast_registration_is_whole_or_absent`'s form, which §1 names by
+        reference: *"a deployment supplying **none** of them builds **no provider object
+        at all** … and a deployment supplying **some but not all** is **refused by a
+        ``Settings`` model validator**, in ``_the_forecast_registration_is_whole_or_
+        absent``'s form"*.
+
+        **And explicitly not a boolean flag.** §1: *"A boolean flag beside an incomplete
+        configuration is not an implementation of this clause"* — it makes *enabled but
+        unusable* a representable state, which is the half-configured provider ADR-0260
+        §11 refused one integration over. There is no ``booking_enabled`` field here and
+        no lane adds one.
+
+        **One refusal over the nine rather than four pairwise ones**, for the forecast
+        validator's reason: the condition is over the nine *together*, and pairwise
+        validators would admit exactly the combinations that leave a provider unbuildable
+        — an account with no prices, prices with no store bound, a window with no
+        account. The quiet reading — starting and being inert — is the unsafe one,
+        because "later" here is a turn whose planner proposed a booking and whose
+        provider was never built.
+
+        Raises:
+            ValueError: If some of the nine are set and some are not.
+        """
+        fields = (
+            "booking_connection",
+            "booking_endpoint",
+            "booking_available_from",
+            "booking_available_to",
+            "booking_price_amount",
+            "booking_price_currency",
+            "booking_charge_amount",
+            "booking_charge_currency",
+            "booking_retained_records",
+        )
+        supplied = tuple(name for name in fields if getattr(self, name) is not None)
+        if len(supplied) in {0, len(fields)}:
+            return self
+        missing = tuple(name for name in fields if getattr(self, name) is None)
+        msg = (
+            f"{', '.join(supplied)} is set and {', '.join(missing)} is not; configuring "
+            f"the simulated booking provider needs the connection it asks under, the "
+            f"endpoint it is bound to, the days it has a stay for, the price it quotes, "
+            f"the charge it makes and the bound on the records it keeps, which are one "
+            f"configuration and not several (ADR-0273 §1, §5) — so set "
+            f"{', '.join(missing)} as well, or unset {', '.join(supplied)} to leave no "
+            f"booking provider built"
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _the_booking_window_is_orderable_and_its_uncertain_day_is_configured(self) -> Settings:
+        """Refuse an empty availability window, and a day no provider would read.
+
+        Two refusals over the fields the validator above has already established are
+        whole or absent together:
+
+        - an ``available_to`` **before** ``available_from`` would configure a provider
+          with no available day at all, so every arm of ADR-0273 §10 that needs one
+          would pass vacuously; and
+        - a ``booking_indeterminate_date`` set while **no** provider is configured is a
+          value nothing reads, because ``app/composition.py`` constructs no booking
+          integration at all unless the nine above are set — which is
+          :meth:`_the_forecast_cost_is_whole_and_only_where_a_provider_is`'s second
+          refusal, one provider along and for exactly its reason.
+
+        **The uncertain day is not required to be inside the window**, and that is
+        deliberate rather than an omission: a booking for a day outside it is refused
+        before any commit (§10 arm 6), so such a configuration reaches §4's
+        ``INDETERMINATE`` outcome not at all. That is a configuration which fails to
+        demonstrate something, not one that states something untrue, and §5 fixes no
+        rule about it.
+
+        Raises:
+            ValueError: If the window ends before it begins, or if an uncertain day is
+                set while no provider is configured.
+        """
+        first, last = self.booking_available_from, self.booking_available_to
+        if first is not None and last is not None and last < first:
+            msg = (
+                "booking_available_to is before booking_available_from, so the simulated "
+                "provider would have no available day at all (ADR-0273 §5)"
+            )
+            raise ValueError(msg)
+        if self.booking_indeterminate_date is None or self.booking_connection is not None:
+            # The validator above has already refused every half-set combination of the
+            # nine, so one of them being set establishes that all nine are.
+            return self
+        msg = (
+            "booking_indeterminate_date is set and no simulated booking provider is "
+            "configured; a day whose booking reports an uncertain effect is a value "
+            "nothing reads when no provider is built (ADR-0273 §1, §4), so set the "
+            "booking_* fields as well or unset it"
         )
         raise ValueError(msg)
 
