@@ -226,15 +226,27 @@ act it stands in for; that they come out differently is the whole content of §2
 > The two clauses are one rule — narrow the window, and classify honestly whatever
 > is left in it.
 
-> **Normative — the store carries exactly the data rights every other store in
-> this tree carries, and this decision claims no exemption from ADR-0004 §6 and
-> creates none.** It sits **in the data directory**, so `ai-assistant-purge`
-> (ADR-0126, ADR-0153) destroys it with every other store. A **per-subject** view,
-> export or deletion surface exists for **no** store here — ADR-0101 §7 records
-> that ADR-0004 §6's export right *"has none"* and defers both surfaces jointly,
-> *"land together or neither lands"* — and this store is on exactly that footing,
-> neither better nor worse. **The lane that gives that right a surface owes this
-> store's rows in the same change**, as it owes every other store's; §8 books it.
+> **Normative — the store is an ordinary store of this deployment and this
+> decision invents no regime for it.** It sits **in the data directory**, so
+> `ai-assistant-purge` (ADR-0126, ADR-0153) destroys it with every other store; it
+> carries a **bound on how much it retains**, which ADR-0004 §6 requires of
+> retained data and which this decision states as a requirement rather than as a
+> number; it **validates a booking's arguments against the declaration's own
+> `parameters_schema` before it writes, and persists only the fields that schema
+> names**, so that nothing a caller supplied off-schema is ever stored; and the
+> **lane owes it exactly what every store's lane owes, and nothing more**. **This
+> decision fixes no schema, no format, no path, no retention figure and no
+> pruning rule**, and **no lane reads its silence on any of those as permission to
+> omit them** — they are the lane's under the rules that already govern every
+> store here.
+
+> **Normative — and it claims no exemption from ADR-0004 §6.** A **per-subject**
+> view, export or deletion surface exists for **no** store in this tree —
+> ADR-0101 §7 records that ADR-0004 §6's export right *"has none"* and defers both
+> surfaces jointly, *"land together or neither lands"* — and this store is on
+> exactly that footing, neither better nor worse. **The lane that gives that right
+> a surface owes this store's rows in the same change**, as it owes every other
+> store's; §8 books it.
 
 > **Normative — and `IRREVERSIBLE` does not rest on the record being
 > unpurgeable.** ADR-0016 §2's scale asks whether **the change the tool made can be
@@ -413,6 +425,18 @@ integration exists. §8 carries it with what fires it.
 > network**, so one configuration answers identically on every run — which is what
 > makes §10's arms and the M33 walkthrough **deterministic and offline in the
 > ordinary gate**, ADR-0260 §13's standing requirement rather than a new one.
+
+> **Normative — every configured amount and currency is validated when the
+> configuration is read, in the domains the landed readers accept.** An amount is
+> a value ADR-0267 §4's reading admits — a JSON **string** a `Decimal` accepts or a
+> JSON **integer**, whose `Decimal` is **finite and not negative** — and a currency
+> is a string of ADR-0267 §1's ISO-4217 shape. **A configuration carrying a JSON
+> float, a JSON boolean, a negative amount, `"NaN"`, `"Infinity"` or a malformed
+> currency is refused when it is read, and no provider is built from it.**
+> Otherwise a deployment starts, every arm below passes on its own fixtures, and
+> the walkthrough's quote or charge silently yields nothing — ADR-0267 §4's and
+> ADR-0271 §2's readings each *"raise nothing"* by design, so a bad configuration
+> has no other place to be caught.
 
 > **Normative — the configuration must be able to express each of these without a
 > code change:** an availability answer whose quoted price is **under** a stated
@@ -695,8 +719,11 @@ clauses more widely than it now holds?*
 >    `quoted_output`, **once from a configuration whose price is under a stated
 >    bound and once from one whose price is over it**, the two differing in
 >    configuration alone.
-> 6. **An unavailable date** — a configuration under which the requested date is
->    unavailable, answered as such and yielding no booking.
+> 6. **An unavailable date, read *and* booked** — a configuration under which the
+>    requested date is unavailable: the availability read answers as such, **and a
+>    booking attempted for that same date is refused by the provider and appends
+>    no record**. The second half is what stops a provider that answers
+>    *unavailable* and books anyway.
 > 7. **The charge is readable, agreeing and disagreeing** — ADR-0271 §2's reading
 >    yields the charge from the booking step's `output` under the registered
 >    `charged_output`, over **three** configurations: one whose charge equals the
@@ -705,31 +732,39 @@ clauses more widely than it now holds?*
 > 8. **The effect key** — two dispatches of one intended action under one goal
 >    carry one derived `EffectKey`, and the second is not dispatched (ADR-0259 §2).
 > 9. **The durable record** — a booking appends one; the record is readable
->     **after a restart**; and the provider exposes no operation that removes or
->     amends it (§2).
-> 10. **The provider deduplicates nothing, which is what `Idempotency.NONE`
+>     **after a restart**; the provider exposes no operation that removes or
+>     amends it; the store leaves **no artifact outside the configured data
+>     directory**; and after `ai-assistant-purge` over that directory a reopened
+>     store holds **no booking record** (§2).
+> 10. **Off-schema arguments** — a booking request carrying a field the
+>     declaration's `parameters_schema` does not name is refused, and **no record
+>     is appended** (§2).
+> 11. **A refused configuration** — a configured amount or currency outside the
+>     readers' accepted domains is refused when the configuration is read, one arm
+>     per refused shape (§5).
+> 12. **The provider deduplicates nothing, which is what `Idempotency.NONE`
 >     declares** — **two separately authorised intended actions carrying identical
 >     booking arguments append two records**. Arm 8 shows the system's effect claim
 >     stopping a repeat; this arm shows that **nothing but that claim would have**,
 >     which is the ground §2 states for `NONE` and would otherwise go
 >     unestablished.
-> 11. **Two concurrent bookings** — two calls entering the provider at once leave
+> 13. **Two concurrent bookings** — two calls entering the provider at once leave
 >     **two whole records** and a store readable afterwards, which is §2's
 >     serialised, failure-atomic append with a subject.
-> 12. **The commit boundary, both sides** — a fault injected **before** the commit
+> 14. **The commit boundary, both sides** — a fault injected **before** the commit
 >     leaves **no** record and is reported as a certain failure; a fault injected
 >     **at or after** it raises
 >     `ClassifiedToolError(effect_may_have_committed=True)` and the step completes
 >     **`INDETERMINATE`**; and after an interruption at the commit boundary the
 >     store **reads back whole**, carrying every record that preceded it (§2).
-> 13. **The four conditions** — a binding whose connectability, endpoint,
+> 15. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
-> 14. **No network** — the transport-confinement contract covers the new module and
+> 16. **No network** — the transport-confinement contract covers the new module and
 >     fails if the entry is removed.
-> 15. **The uncertain booking** — a configuration producing an `INDETERMINATE`
+> 17. **The uncertain booking** — a configuration producing an `INDETERMINATE`
 >     step, which stays `INDETERMINATE` and is not reconciled (§4).
-> 16. **The honesty statement** — the field on every successful output, and the
+> 18. **The honesty statement** — the field on every successful output, and the
 >     statement in the `message` of a `ToolFailure` **this provider returns** (§6).
 
 > **Normative — arm 7 asserts the *reading* and not ADR-0271 §3's finding, because
