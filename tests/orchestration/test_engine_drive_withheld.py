@@ -36,7 +36,13 @@ from test_engine import (
     tool,
 )
 
-from ai_assistant.core.errors import ClaimRefused, ClassifiedToolError, PlanningError
+from ai_assistant.core.errors import (
+    ClaimRefused,
+    ClassifiedToolError,
+    IllegalTransitionError,
+    PlanningError,
+    StaleExecutionError,
+)
 from ai_assistant.core.types import (
     AttemptOutcome,
     AttemptState,
@@ -50,7 +56,9 @@ from ai_assistant.core.types import (
     GoalStatus,
     Ground,
     OutboundReach,
+    SkipReason,
     StepStatus,
+    StepTransition,
     ToolFailure,
     ToolFailureKind,
 )
@@ -60,7 +68,7 @@ from ai_assistant.testing import FakePlanStore, FakeRecipientGrantStore
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from ai_assistant.core.types import ExecutionState, Goal, StepTransition
+    from ai_assistant.core.types import ExecutionState, Goal
 
 _ASKED: Final = "send the note"
 
@@ -86,14 +94,24 @@ class _Interposing(FakePlanStore):
     def __init__(self, *, now: Callable[[], Any]) -> None:
         super().__init__(now=now)
         self.before_claim: Callable[[_Interposing], Awaitable[None]] | None = None
+        #: Substitutes the claim a **defective walk** would have built, applied after
+        #: :attr:`before_claim` so it can read what that hook left. A correct engine
+        #: never builds one, which is exactly what ADR-0261 §14 arm 8's negative list
+        #: is about — *"a defect of the walk that built them"* — so presenting one is
+        #: the only way to put it to the store's real refusals.
+        self.mangle: Callable[[_Interposing, StepTransition], StepTransition] | None = None
         self.claims = 0
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         if transition.to_status is StepStatus.RUNNING:
             self.claims += 1
-            if self.claims == self.on_claim and self.before_claim is not None:
-                hook, self.before_claim = self.before_claim, None
-                await hook(self)
+            if self.claims == self.on_claim:
+                if self.before_claim is not None:
+                    hook, self.before_claim = self.before_claim, None
+                    await hook(self)
+                if self.mangle is not None:
+                    mangle, self.mangle = self.mangle, None
+                    transition = mangle(self, transition)
         return await super().commit_transition(transition)
 
 
@@ -442,15 +460,89 @@ async def _a_second_owner(plans: _Interposing) -> None:
     )
 
 
+async def _a_stranger_attempt(plans: _Interposing) -> None:
+    """Open a second attempt of the goal that names **no** execution (§3, limb 2).
+
+    ``execution_ids`` is the binding and it is append-only, so the way to present a
+    claim naming an attempt that did not open this execution is an attempt that opened
+    none — which is what a walk supplying the wrong id would have named.
+    """
+    export = await plans.export()
+    (plan,) = export.plans
+    await plans.open_attempt(
+        GoalAttempt(
+            id="attempt-stranger",
+            goal_id=plan.goal_id,
+            opened_at=AT,
+            plan_ids=(plan.id,),
+        )
+    )
+
+
+async def _a_settled_step(plans: _Interposing) -> None:
+    """Take the step out of ``PENDING``, which ADR-0014 §4 admits no ``→ RUNNING`` from.
+
+    The skip advances the execution's version, so the mangle below re-points the claim
+    at the version the store now holds: without that the write loses the
+    compare-and-swap first and the arm would assert the **stale** class instead of the
+    illegal-move one it is stated over.
+    """
+    export = await plans.export()
+    (execution,) = export.executions
+    settled = await plans.commit_transition(
+        StepTransition(
+            execution_id=execution.id,
+            step_id="step-1",
+            to_status=StepStatus.SKIPPED,
+            expected_version=execution.version,
+            skip_reason=SkipReason.UNMET_DEPENDENCY,
+        )
+    )
+    plans.settled_version = settled.version  # type: ignore[attr-defined]  # the case's own note
+
+
+def _naming_no_execution(plans: _Interposing, transition: StepTransition) -> StepTransition:
+    del plans
+    return transition.model_copy(update={"execution_id": "execution-nobody-opened"})
+
+
+def _naming_a_stranger(plans: _Interposing, transition: StepTransition) -> StepTransition:
+    del plans
+    return transition.model_copy(update={"attempt_id": "attempt-stranger"})
+
+
+def _at_the_settled_version(plans: _Interposing, transition: StepTransition) -> StepTransition:
+    return transition.model_copy(
+        update={"expected_version": plans.settled_version}  # type: ignore[attr-defined]
+    )
+
+
 @pytest.mark.parametrize(
-    "arrange",
+    ("arrange", "mangle", "expected"),
     [
-        pytest.param(_a_successor_plan, id="a-step-of-a-superseded-plan"),
-        pytest.param(_a_second_owner, id="two-attempts-owning-one-execution"),
+        pytest.param(_a_successor_plan, None, PlanningError, id="a-step-of-a-superseded-plan"),
+        pytest.param(_a_second_owner, None, PlanningError, id="two-attempts-owning-one-execution"),
+        pytest.param(
+            None, _naming_no_execution, PlanningError, id="an-execution-the-store-does-not-hold"
+        ),
+        pytest.param(
+            _a_stranger_attempt,
+            _naming_a_stranger,
+            PlanningError,
+            id="an-attempt-that-did-not-open-it",
+        ),
+        pytest.param(
+            _a_settled_step,
+            _at_the_settled_version,
+            IllegalTransitionError,
+            id="a-move-the-graph-admits-no-running-from",
+        ),
     ],
 )
 async def test_a_refusal_that_is_not_a_claim_refused_propagates_over_a_closed_goal(
-    arrange: Callable[[_Interposing], Awaitable[None]],
+    arrange: Callable[[_Interposing], Awaitable[None]] | None,
+    mangle: Callable[[_Interposing, StepTransition], StepTransition] | None,
+    expected: type[PlanningError],
 ) -> None:
     """Arm 8's negative, "each stated over a goal whose own state would have answered".
 
@@ -467,18 +559,57 @@ async def test_a_refusal_that_is_not_a_claim_refused_propagates_over_a_closed_go
     """
 
     async def _both(plans: _Interposing) -> None:
-        await arrange(plans)
+        if arrange is not None:
+            await arrange(plans)
         await _close_the_goal(plans, status=GoalStatus.BLOCKED)
 
     plans = _Interposing(now=lambda: AT)
     plans.before_claim = _both
+    plans.mangle = mangle
     harness = Harness(planner=_CountingPlanner(), plans=plans, tools=(tool(),))
 
-    with pytest.raises(PlanningError) as raised:
+    with pytest.raises(expected) as raised:
         await harness.engine.converse(_ASKED, timeout=PATIENT)
 
     assert not isinstance(raised.value, ClaimRefused)
+    assert not isinstance(raised.value, StaleExecutionError), (
+        "a lost compare-and-swap is its own case and is not what this arm is stated over"
+    )
     assert harness.invoker.invocations == []
+
+
+async def test_a_re_claim_carrying_a_tool_the_step_is_not_bound_to_propagates() -> None:
+    """Arm 8's fifth negative input, which only a **re-claim** can present.
+
+    ADR-0014 §4 refuses a claim that switches the bound tool — *"the approval covers the
+    tool it was granted for"* — and the refusal can only fire where the step already
+    carries a binding, which a first ``PENDING`` claim does not. So this is stated over
+    the re-claim a retry spends, with the goal ``BLOCKED`` in the same instant: a member
+    was there for the taking and is not taken, because a claim naming another tool is the
+    walk's own defect and never a user act.
+    """
+
+    def _another_tool(plans: _Interposing, transition: StepTransition) -> StepTransition:
+        del plans
+        return transition.model_copy(update={"bound_tool": "some-other-tool"})
+
+    async def _block_it(plans: _Interposing) -> None:
+        await _close_the_goal(plans, status=GoalStatus.BLOCKED)
+
+    plans = _Interposing(now=lambda: AT)
+    plans.on_claim = 2
+    plans.before_claim = _block_it
+    plans.mangle = _another_tool
+    handler = _UnavailableOnce()
+    harness = Harness(
+        planner=_CountingPlanner(), plans=plans, tools=(tool(),), tool_handler=handler
+    )
+
+    with pytest.raises(IllegalTransitionError) as raised:
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert not isinstance(raised.value, ClaimRefused)
+    assert handler.calls == 1, "the first attempt ran; the re-claim was the defective one"
 
 
 async def test_a_claim_refused_whose_state_the_read_cannot_see_propagates() -> None:
