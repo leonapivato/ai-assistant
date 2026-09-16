@@ -9157,6 +9157,29 @@ class Engine:
             recorded=record.revisions,
         )
 
+    async def _attempt_now(self, attempt: GoalAttempt | None) -> GoalAttempt | None:
+        """The attempt as the store holds it, re-read after ADR-0259 §4's pass.
+
+        **A row the store no longer holds leaves the carrier as it stood**, rather than
+        becoming ``None``: this turn is continuing that attempt, and dropping it here
+        would silently open a second one — ADR-0249 §5 gives an attempt one opener, and
+        it is a user act. A read that raises is the store failing, which fails this turn
+        as every other store read of it does.
+
+        Args:
+            attempt: The row the association read, or ``None`` where this turn opens one
+                — which has nothing to re-read and is left alone.
+
+        Returns:
+            The current row, or the one passed in.
+
+        Raises:
+            PlanningError: As ``get_attempt`` raises it.
+        """
+        if attempt is None:
+            return None
+        return await self._plans.get_attempt(attempt.id) or attempt
+
     async def _record_evidence(self, rows: Sequence[GoalEvidence]) -> None:
         """Write this turn's evidence rows, each with the set it refreshes (ADR-0252).
 
@@ -10801,6 +10824,15 @@ class Engine:
         reconciled = Reconciled()
         if self._reconciliation is not None and association.goal is not None:
             reconciled = await self._reconciliation.run(association.goal.id, budget=timeout)
+            # **The attempt is re-read after the pass, because act 3 may have moved
+            # it.** ADR-0250 §12's carrier holds the row the association read, and
+            # every later compare-and-swap of this turn is computed against what the
+            # last one returned — so a pass that committed `EFFECT_UNRESOLVED` would
+            # otherwise leave this turn writing against a version the store has left
+            # behind, and the turn would fail on a repair it asked for. Re-reading is
+            # ADR-0014 §5's own instruction for exactly this, and it costs one read on
+            # the turns that continue an attempt at all.
+            association = replace(association, attempt=await self._attempt_now(association.attempt))
         # ADR-0251 §12's second case, wired as a callable and never as a store (#2294).
         # `charged` follows the stored row, because each charge advances the attempt's
         # `version` and the next compare-and-swap is computed against what the last one
