@@ -266,11 +266,7 @@ def _identical(left: FrozenJson, right: FrozenJson) -> bool:
     Adversarial review, round 1, ``blocker``.
     """
     if isinstance(left, Mapping) or isinstance(right, Mapping):
-        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
-            return False
-        return left.keys() == right.keys() and all(
-            _identical(left[key], right[key]) for key in left
-        )
+        return isinstance(left, Mapping) and isinstance(right, Mapping) and _objects(left, right)
     if isinstance(left, tuple | list) or isinstance(right, tuple | list):
         if not isinstance(left, tuple | list) or not isinstance(right, tuple | list):
             return False
@@ -280,6 +276,31 @@ def _identical(left: FrozenJson, right: FrozenJson) -> bool:
     if isinstance(left, _NUMERIC) or isinstance(right, _NUMERIC):
         return type(left) is type(right) and left == right
     return left == right
+
+
+def _objects(left: Mapping[str, FrozenJson], right: Mapping[str, FrozenJson]) -> bool:
+    """Whether two JSON objects are identical, member by member (§4).
+
+    **The size first, because it is the one comparison that is free.** A
+    :class:`~ai_assistant.core.types.FrozenDict` holds its pairs as a tuple and looks a
+    key up by scanning it — *"Lookup is therefore a linear scan; plan parameters are a
+    handful of keys"* — so every other test here costs a scan per key, and an object of
+    a different size than the literal it is compared against is refused before any of
+    them is made. Within one size the walk takes **one** lookup on each side per key and
+    no key-set comparison beside them, which is the cheapest shape the mapping protocol
+    admits; a linear one would need a view `FrozenDict` does not offer, and `core` owns
+    that trade. Adversarial review, round 2, ``major``.
+    """
+    if len(left) != len(right):
+        return False
+    for key, mine in left.items():
+        try:
+            theirs = right[key]
+        except KeyError:
+            return False
+        if not _identical(mine, theirs):
+            return False
+    return True
 
 
 def told_once(step_ids: Sequence[str]) -> tuple[str, ...] | None:
