@@ -14,8 +14,7 @@ from ai_assistant.planning import InMemoryPlanStore
 from ai_assistant.planning.execution import PlanExecution
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from contextlib import AbstractContextManager
 
     from ai_assistant.core.protocols import PlanStore
@@ -73,6 +72,7 @@ class TestInMemoryPlanStoreContract(PlanStoreContract):
     async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
         """A subclass carrying the fault; nothing to dispose of, hence the bare yield."""
         yield _FailsMidAbandonment(now=_fixed_now)
+
     def store_on(self, now: Callable[[], datetime]) -> AbstractContextManager[PlanStore]:
         """A fresh subject on ``now``; nothing to dispose of, so a null context."""
         return contextlib.nullcontext(InMemoryPlanStore(now=now))

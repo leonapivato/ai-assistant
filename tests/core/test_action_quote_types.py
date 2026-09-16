@@ -458,9 +458,9 @@ def test_the_export_carries_the_quotes_inside_its_goals_and_gains_no_member() ->
         goals=(_goal(quotes=(quote,)),),
         evidence=(EvidenceHistory(goal_id="g1"),),
     )
-    assert export.schema_version == 15
+    assert export.schema_version == 16
     assert "quotes" not in PlanExport.model_fields
     assert export.goals[0].quotes == (quote,)
     restored = PlanExport.model_validate_json(export.model_dump_json())
     assert restored.goals[0].quotes == (quote,)
-    assert restored.schema_version == 15
+    assert restored.schema_version == 16
