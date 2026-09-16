@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     ToolFailure,
     ToolFailureKind,
 )
+from ai_assistant.orchestration.engine import _GOAL_WITHHELD
 from ai_assistant.testing import FakePlanStore
 
 if TYPE_CHECKING:
@@ -506,3 +507,29 @@ async def test_a_turn_that_dispatched_carries_no_withheld_member() -> None:
     assert outcome.step is not None
     assert outcome.step.disposition is Disposition.EXECUTED
     assert outcome.drive_withheld is None
+
+
+# --- the one goal test the engine reaches by division rather than by name -----
+
+
+def test_the_goal_test_the_engine_does_not_name_is_exactly_achieved() -> None:
+    """The remainder ADR-0250 §1's division leaves is one member, and it is ``ACHIEVED``.
+
+    ``Engine`` reaches ADR-0261 §7's third goal test as *"closed and not ``ABANDONED``"*
+    rather than by naming ``GoalStatus.ACHIEVED``, because ADR-0249 §16 item 7's guard
+    over ``src/`` reports every mention of that member and cannot tell this lane's **read**
+    from A10's **write** — and ADR-0261 §12 records ADR-0249 §4 as superseded in nothing,
+    so the guard is left exactly as it stands.
+
+    **This is what keeps that spelling honest.** The division is ADR-0250 §1's and is
+    stated over four members; a fifth, closed one would otherwise reach ``GOAL_ACHIEVED``
+    by silence and tell a user their goal was reached. Here the remainder is pinned, so
+    such a member fails this arm rather than the user.
+
+    The member itself is produced end to end by
+    :func:`test_a_re_claim_under_an_ended_attempt_is_withheld`, over a goal a real
+    ``set_goal_status`` write reached.
+    """
+    unnamed = set(GoalStatus) - set(_GOAL_WITHHELD) - {GoalStatus.ACTIVE}
+
+    assert unnamed == {GoalStatus.ACHIEVED}

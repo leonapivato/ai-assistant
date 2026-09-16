@@ -1687,15 +1687,30 @@ _PAUSED_ATTEMPT_STATES: Final[frozenset[AttemptState]] = frozenset(
 )
 
 
-#: ADR-0261 §7's three **goal** tests, which take priority over the attempt's three.
+#: Two of ADR-0261 §7's three **goal** tests, which take priority over the attempt's three.
 #:
-#: Stated as a mapping so the three cannot drift apart from the three members that name
-#: them. ``ACTIVE`` is absent deliberately: an open goal says nothing about why a claim
-#: was refused, and the attempt's own state answers for it below.
+#: Stated as a mapping so the members cannot drift apart from the statuses that name them.
+#: ``ACTIVE`` is absent deliberately: an open goal says nothing about why a claim was
+#: refused, and the attempt's own state answers for it.
+#:
+#: **``ACHIEVED`` is absent for a different reason, and is derived rather than named.**
+#: ADR-0249 §16 item 7 asks for a guard *"over the shipped tree, not as a review
+#: convention, so that a later lane cannot supply [a producer of ``ACHIEVED``] without the
+#: ADR that decides it"*, and ADR-0261 §12 records ADR-0249 §4 as superseded in
+#: **nothing** — so that refusal stands whole. The guard reads the AST and reports every
+#: ``GoalStatus.ACHIEVED`` under ``src/`` outside its own declaration, which cannot tell
+#: this lane's **read** from A10's **write**. Rather than weaken it, §7's third test is
+#: taken as ADR-0250 §1's own division — *"a goal is **open** where its ``GoalStatus`` is
+#: ``ACTIVE`` or ``BLOCKED``, and **closed** where it is ``ACHIEVED`` or ``ABANDONED``"* —
+#: so a **closed** goal that is not ``ABANDONED`` is the member. **That is one test spelled
+#: over the division and not a second definition of it**, and it derives nothing from
+#: another record: the status is still the only thing read. ``test_engine_drive_withheld``
+#: pins the remainder to exactly ``ACHIEVED``, so a fifth ``GoalStatus`` cannot reach
+#: ``GOAL_ACHIEVED`` by silence, and the end-to-end arm there produces the member from a
+#: goal a real act reached.
 _GOAL_WITHHELD: Final[Mapping[GoalStatus, DriveWithheld]] = MappingProxyType(
     {
         GoalStatus.ABANDONED: DriveWithheld.GOAL_CANCELLED,
-        GoalStatus.ACHIEVED: DriveWithheld.GOAL_ACHIEVED,
         GoalStatus.BLOCKED: DriveWithheld.GOAL_BLOCKED,
     }
 )
@@ -1758,8 +1773,13 @@ def _withheld_member(
     Returns:
         The member the read established, or ``None`` where it established none.
     """
-    if goal is not None and (member := _GOAL_WITHHELD.get(goal.status)) is not None:
-        return member
+    if goal is not None:
+        if (named := _GOAL_WITHHELD.get(goal.status)) is not None:
+            return named
+        if not is_open(goal):
+            # ADR-0250 §1's other closed member, reached by the division rather than by
+            # name (see :data:`_GOAL_WITHHELD`): the goal is already reached.
+            return DriveWithheld.GOAL_ACHIEVED
     if attempt is not None and (member := _ATTEMPT_WITHHELD.get(attempt.state)) is not None:
         return member
     if goal is not None and plan is not None and plan.targets_revision != goal.revision:
