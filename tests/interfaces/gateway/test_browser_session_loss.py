@@ -668,8 +668,11 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
     ``sayForgotten`` fills a node inside the conversations panel and reveals nothing, so
     the account of a destruction that really happened waits there for an owner who opens
     that panel again. Which is #2451's first reading, arrived at here by construction
-    rather than by ruling — the ruling is still owed, and what is asserted is only that
-    nothing opened.
+    rather than by ruling — the ruling is still owed, and what is asserted is that the
+    destruction was *answered*, that its account reached that node, and that nothing
+    opened. The account is read through ``textContent`` rather than ``inner_text``
+    because the node sits inside a panel that stayed hidden, which is the other half of
+    the claim this case makes.
 
     **Both endings**, because they are different code and only one of them was driven
     when round 6 read this. A destruction that comes *back* resumes into the account
@@ -714,8 +717,18 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
         else:
             async with drive.page.expect_response("**/conversation/forget") as stale:
                 release.set_result(None)
-            await (await stale.value).finished()
+            answered = await stale.value
+            assert answered.status == 200
+            await answered.finished()
         await drive.admit()
+
+        # The destruction really happened, and its account really was written -- into
+        # the panel, not onto the screen. Asserted because the hidden-panel claim below
+        # is satisfied by *every* ending: a refusal answering `null` returns early and
+        # leaves the panel just as closed, so without this the answered arm would be
+        # claiming a success path it never drove (adversarial review, round 7).
+        if not reaching:
+            await expect(drive.page.locator("#forget-outcome")).to_contain_text("is gone")
 
         # The panel the act belonged to is closed and stays closed. Its rows are the ones
         # the listing rendered *before* the session ended -- the late continuation's own
