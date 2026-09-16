@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     Idempotency,
     PlannerOutput,
     PlanStep,
+    ProposedAction,
     ReadAskOutcome,
     Reversibility,
     RiskLevel,
@@ -288,13 +289,21 @@ class _OneStepPlanner:
         read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
+        # ADR-0265 §4's label, and ADR-0259 §2 is why it is here: a side-effecting step
+        # whose plan names no act is refused `EFFECT_UNSCOPED` before any ruling is
+        # sought. One act proposed per call, so each turn is an act of its own.
         step = PlanStep(
-            id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
+            id="step-1",
+            intent="send the note",
+            capability=CAPABILITY,
+            parameters=PARAMETERS,
+            intended_action=f"A{len(goal.actions) + 1}",
         )
         return PlannerOutput(
+            actions=(ProposedAction(intent="send the note"),),
             plan=ActionPlan(
                 id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
-            )
+            ),
         )
 
 

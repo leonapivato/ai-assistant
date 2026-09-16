@@ -81,6 +81,7 @@ from ai_assistant.core.types import (
     OriginUnrecordedBinding,
     PlannerOutput,
     PlanStep,
+    ProposedAction,
     Provenance,
     ProvisioningState,
     QuestionState,
@@ -489,20 +490,31 @@ class OneStepPlanner:
         read_outcomes: Sequence[ReadAskOutcome] = (),
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
+        # **One act proposed per call, and the step names it** (ADR-0265 §4). Every
+        # declaration these cases drive is `side_effecting`, and ADR-0259 §2 refuses to
+        # dispatch such a step whose plan cannot say which act it is an attempt at. A
+        # *fresh* act each turn rather than the goal's existing one, because that is what
+        # keeps a second turn over one goal a second dispatch: two acts the user asked
+        # for, which is §2's own reading of "book another one just like it". A case about
+        # the **reuse** — one act, two turns — says so, and
+        # `test_engine_effect_claim.py` is where it says it.
+        label = f"A{len(goal.actions) + 1}"
         step = PlanStep(
             id="step-1",
             intent="send the note",
             capability=self._capability,
             parameters=self._parameters,  # type: ignore[arg-type]  # heterogeneous test arguments
+            intended_action=label,
         )
         self._calls += 1
         return PlannerOutput(
+            actions=(ProposedAction(intent="send the note"),),
             plan=ActionPlan(
                 id=plan_id(goal.goal_id, self._calls),
                 goal_id=goal.goal_id,
                 steps=(step,),
                 created_at=AT,
-            )
+            ),
         )
 
 

@@ -67,6 +67,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlannerOutput,
     PlanStep,
+    ProposedAction,
     Provenance,
     ReadAskOutcome,
     Role,
@@ -719,19 +720,23 @@ class _EchoingPlanner:
                     intent="send the note",
                     capability=CAPABILITY,
                     parameters=PARAMETERS,
+                    # ADR-0265 §4's label, proposed on the same call: ADR-0259 §2 refuses
+                    # to dispatch a side-effecting step whose plan names no act.
+                    intended_action=f"A{len(goal.actions) + 1}",
                 ),
             )
             if planned
             else ()
         )
         return PlannerOutput(
+            actions=(ProposedAction(intent="send the note"),) if planned else (),
             plan=ActionPlan(
                 id=f"{goal.goal_id}-plan",
                 goal_id=goal.goal_id,
                 steps=steps,
                 created_at=AT,
                 rationale=" | ".join(one.content for one in supplied) or "nothing was supplied",
-            )
+            ),
         )
 
 

@@ -96,6 +96,7 @@ from ai_assistant.core.types import (
     PlacementSetter,
     PlannerOutput,
     PlanStep,
+    ProposedAction,
     Provenance,
     ReadAskOutcome,
     Reversibility,
@@ -295,13 +296,21 @@ class _OneStepPlanner:
         evidence: Sequence[EvidenceDigest] = (),
     ) -> PlannerOutput:
         """Return a one-step plan for the goal."""
+        # ADR-0265 §4's label, and ADR-0259 §2 is why it is here: a side-effecting step
+        # whose plan names no act is refused `EFFECT_UNSCOPED` before any ruling is
+        # sought. One act proposed per call, so each turn is an act of its own.
         step = PlanStep(
-            id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
+            id="step-1",
+            intent="send the note",
+            capability=CAPABILITY,
+            parameters=PARAMETERS,
+            intended_action=f"A{len(goal.actions) + 1}",
         )
         return PlannerOutput(
+            actions=(ProposedAction(intent="send the note"),),
             plan=ActionPlan(
                 id=f"{goal.goal_id}-plan", goal_id=goal.goal_id, steps=(step,), created_at=AT
-            )
+            ),
         )
 
 

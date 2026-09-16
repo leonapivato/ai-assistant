@@ -39,6 +39,8 @@ from ai_assistant.core.types import (
     GoalInterpretation,
     Ground,
     Idempotency,
+    IntendedAction,
+    IntendedActionMinting,
     MemorySource,
     PermissionDecision,
     PermissionOutcome,
@@ -91,6 +93,11 @@ STEP = "step-1"
 #: The attempt every execution here is opened under, and the one each claim names
 #: (ADR-0255 §3). The store refuses a claim whose attempt does not own the execution.
 ATTEMPT = "a-1"
+
+#: The act every step here is an attempt at (ADR-0265 §4). ADR-0259 §2 refuses to
+#: dispatch a side-effecting step whose plan names none, which is every declaration
+#: below but ``read_only``.
+ACT = "act-1"
 
 
 class _AdmittingLedger:
@@ -197,18 +204,27 @@ def call_for(
     decision_id: str = "d-1",
     step_id: str = STEP,
     execution_id: str | None = None,
+    action: str | None = ACT,
 ) -> ToolCall:
     """Build an authorised call, through the path the contract asks callers to use.
 
     ``execution_id`` binds the call to an execution (ADR-0044 §1); the executor
     refuses a call whose ``execution_id`` does not match the ``state`` it is asked
     to claim, so a test running against a real ``state`` passes ``state.id`` here.
+
+    ``action`` is the act the step this call serves is an attempt at (ADR-0265 §4),
+    which ``StepRunner`` copies from the plan step onto the request and which
+    ``authorises`` compares as its sixth conjunct. It **defaults to one** because
+    ADR-0259 §2 refuses to dispatch a side-effecting call whose authorised request names
+    none — ``EFFECT_UNSCOPED``, with no ``claim_effect`` call at all. A case about that
+    refusal passes ``action=None`` and says so.
     """
     request = ActionRequest(
         tool=definition,
         parameters={"to": "someone@example.com"},
         step_id=step_id,
         execution_id=execution_id,
+        intended_action=action,
     )
     decision = PermissionDecision.from_request(
         request,
@@ -239,10 +255,23 @@ async def a_claimed_execution(
         created_at=AT,
     )
     await store.save_goal(goal)
+    # ADR-0265 §4's act, minted before the plan names it because ``save_plan`` refuses a
+    # step naming an action the goal does not hold — and named at all because ADR-0259
+    # §2 refuses to dispatch a side-effecting step whose plan names none, which every
+    # declaration but ``read_only`` here is.
+    await store.record_intended_actions(
+        IntendedActionMinting(
+            goal_id=goal.id,
+            actions=(IntendedAction(id=ACT, intent="send the note"),),
+            expected_version=0,
+        )
+    )
     plan = ActionPlan(
         id="p-1",
         goal_id=goal.id,
-        steps=(PlanStep(id=STEP, intent="send the note", capability=capability),),
+        steps=(
+            PlanStep(id=STEP, intent="send the note", capability=capability, intended_action=ACT),
+        ),
         created_at=AT,
         targets_revision=1,
     )

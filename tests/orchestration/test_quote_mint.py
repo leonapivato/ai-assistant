@@ -93,14 +93,23 @@ QUOTED: Final = QuotedOutput(amount="price", currency="currency")
 
 
 def declaration(tool_id: str = "rooms", **overrides: object) -> ToolDefinition:
-    """A declaration ``FakeActionPolicy`` allows outright, quoting its output."""
+    """A declaration ``FakeActionPolicy`` allows outright, quoting its output.
+
+    **It is not ``side_effecting``, and that is what lets a price be read twice.**
+    Reading a price is a read; and a side-effecting declaration would carry an
+    ``EffectKey`` (ADR-0259 §1), so its second dispatch **under one intended action** is
+    answered ``COMPLETED`` or ``COMPLETED_OTHERWISE`` and never happens — which would
+    make §4's *"a second reading is an append and never an edit"* unreachable. The two
+    decisions agree: a price a goal re-reads is read by a step that acts on nothing, and
+    the act it prices is a different step.
+    """
     fields: dict[str, object] = {
         "id": tool_id,
         "capability": CAPABILITY,
         "description": "Quote a room.",
         "risk_level": RiskLevel.LOW,
         "reversibility": Reversibility.REVERSIBLE,
-        "side_effecting": True,
+        "side_effecting": False,
         "reads": (),
         "writes": (),
         "discloses": (),
@@ -992,7 +1001,10 @@ async def test_the_answered_step_mints_on_the_resume_path_too() -> None:
     approve records the price its output states exactly as an allowed one does. A
     declaration that discloses off-device parks, and the answer releases it.
     """
-    disclosing = declaration(discloses=(DataTier.PERSONAL,))
+    # A tool that discloses off-device is side-effecting by construction, so this one
+    # parks *and* carries an `EffectKey` — which is fine here: it is dispatched once,
+    # under a goal that holds no completed effect for its act (ADR-0259 §2).
+    disclosing = declaration(discloses=(DataTier.PERSONAL,), side_effecting=True)
     harness = Harness(tools=((disclosing, returning(PRICED)),))
     state = await an_execution(harness.plans, step())
 
