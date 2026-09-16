@@ -189,14 +189,27 @@ act it stands in for; that they come out differently is the whole content of §2
 > the key carrying **the whole amount that invocation charged** and the key
 > carrying its ISO-4217 code (ADR-0271 §2). It declares **`quoted_output: None`**.
 
-> **Normative — `IRREVERSIBLE` is true of this provider and not merely of the act
-> it models.** ADR-0016 §2 fixes `IRREVERSIBLE` as *"it cannot be taken back"*, and
-> **this provider offers no act that undoes a booking** — §8 keeps cancellation,
-> modification and refunds out of this decision entirely, so there is nothing for a
-> `REVERSIBLE` claim to name. A declaration reading `REVERSIBLE` would auto-grant
+> **Normative — the booking has a state change, it is durable, and this provider
+> never undoes or amends it.** A booking **appends a record** to durable state the
+> provider holds under the deployment's data directory, carrying what it was asked
+> and what it charged. **The provider offers no operation that removes or amends
+> one**, and the record **survives a restart**. **Without that, `IRREVERSIBLE`
+> would be a claim about nothing** — an implementation returning configured JSON
+> and changing no state would satisfy every arm below while reproducing neither
+> the double booking nor the failed cancellation the walkthrough exists to
+> demonstrate. This decision fixes **no store, no schema and no file format**; it
+> fixes that the state is durable, appended to, and never undone here.
+
+> **Normative — `IRREVERSIBLE` then states what is true of this provider.**
+> ADR-0016 §2 fixes `IRREVERSIBLE` as *"it cannot be taken back"* and
+> `RECOVERABLE` as *"undoable, but not by this tool"*. **Neither this tool nor
+> anything else in this system undoes a booking record**: §8 keeps cancellation,
+> modification and refunds out of this decision entirely, and no other component is
+> given a route to the store. A declaration reading `REVERSIBLE` would auto-grant
 > against a policy threshold written for exactly this act, and ADR-0016 §2's
 > *"`reversibility` alone is not sufficient to auto-grant"* is relied on here in
-> both directions.
+> both directions. **A later decision that gives this provider a cancellation
+> re-declares `reversibility` in the same change.**
 
 > **Normative — `risk_level` is not lowered because the provider is simulated.**
 > `risk_level` is what a policy reads to decide whether the user is asked, and a
@@ -214,11 +227,22 @@ act it stands in for; that they come out differently is the whole content of §2
 > `KEYED` declaration would hide behind the provider's own dedupe.
 
 > **Normative — `reads`, `writes` and `discloses` state only what this component
-> touches, and `discloses` is therefore empty.** Nothing this provider is given
-> leaves the device (§3), so `discloses` is `()`. **A real booking provider's
-> declaration differs in exactly these fields and in no other field this section
-> names**, and **no lane copies `discloses: ()` into one**. The stated cost is that
-> the walkthrough exercises no disclosure gating; §8 books it.
+> touches, and each is fixed here rather than left to the lane.** Both
+> declarations declare **`reads: (DataTier.SECRET, DataTier.OPERATIONAL)`** — the
+> credential the bound connection names, which ADR-0148 §6's conditions 2 and 3
+> make it read on every call, and the configured availability and prices (§5).
+> Both declare **`discloses: ()`**, because nothing this provider is given leaves
+> the device (§3). The **availability read** declares **`writes: ()`**; the
+> **booking act** declares **`writes: (DataTier.PERSONAL,)`**, the record §2 below
+> requires it to keep, which carries what the user asked for. **A lane that
+> declares `reads: ()` or `writes: ()` on the booking has declared the silent
+> no-reach claim ADR-0016 §1 makes these fields required to prevent**, and arm 4
+> asserts all three over the registered definitions.
+
+> **Normative — a real booking provider's declaration differs in `discloses`, and
+> in no other field this section names.** **No lane copies `discloses: ()` into
+> one.** The stated cost is that the walkthrough exercises no disclosure gating;
+> §8 books it.
 
 > **Normative — `cost` declares what invoking costs and is never the charge.**
 > ADR-0271 §2 rules that *"No lane substitutes `ToolDefinition.cost`,
@@ -338,12 +362,24 @@ would make that case unreachable and the finding undemonstrable.
 
 ### 6. Honesty: in every output, in what the user is shown, and not yet in the listing
 
-> **Normative.** **Every output the simulated provider returns carries a field
-> stating that no real reservation was made and no money moved**, on every path —
-> an availability answer, a booking, a refusal and an error alike. It is carried by
-> the record whether or not any surface renders it, so a trail, an export or an
-> audit of a walkthrough is **self-describing** to a reader who was not present
-> when the deployment was configured.
+> **Normative.** **Every *successful* output the simulated provider returns
+> carries a field stating that no real reservation was made and no money moved** —
+> an availability answer and a booking alike. It is carried by the record whether
+> or not any surface renders it, so a trail, an export or an audit of a
+> walkthrough is **self-describing** to a reader who was not present when the
+> deployment was configured.
+
+> **Normative — on an unsuccessful outcome the statement rides in the failure's
+> own message, and no output is returned beside it.** `ToolResult` refuses a
+> non-`SUCCEEDED` result carrying an `output` — *"a non-`SUCCEEDED` result carrying
+> an output is a **partial** result an executor could record as a whole one, which
+> is worse than an absent one"* — and a `FAILED` or `INDETERMINATE` step records a
+> `failure` and no `output` (ADR-0039 §2). So a refusal, a failure and an
+> `INDETERMINATE` outcome carry the statement in **`ToolFailure.message`**, which
+> is operator-facing Tier 2 text and admits it. **This decision adds no field to
+> `ToolResult`, `ToolFailure` or `StepExecution`, and no lane adds one on its
+> authority**; a structured failure carrier is its own contract ADR and §8 books
+> it.
 
 > **Normative — that field is not a mechanism.** **No policy, criterion,
 > comparison, disposition, validator or `ToolDefinition` field is keyed on it, and
@@ -389,13 +425,45 @@ this provider does not.
 > **This decision discharges none of them, and no lane cites it toward any.**
 
 > **Normative — the ground on which this provider may nevertheless be built and
-> configured is that its act reaches no system outside this deployment and moves no
-> money, and the ground is *that* and not that it is called simulated.** The
-> failures §13 gates against — a double booking, a charge over a ceiling, an act
-> that outlives a cancellation — are **reproduced in full inside the deployment**
-> here and **cost nothing outside it**. **A provider that reached any system
-> outside this deployment, or moved any money, is a consequential capability
-> whatever it is named**, and §13's seven bind it entire.
+> configured is §13's own second sentence, and not an exemption invented here.**
+> That sentence reads: *"A milestone may demonstrate dependent execution against
+> **controlled integrations** with no such capability wired; **wiring one is what
+> this rule binds.**"* **This provider is such a controlled integration**: its act
+> reaches no system outside the deployment, moves no money and confers no
+> capability in the world, so the milestone that drives it wires no consequential
+> capability and §13's first sentence is **not reached** rather than narrowed.
+> **A provider that reached any system outside this deployment, or moved any
+> money, is a consequential capability whatever it is named**, and §13's seven bind
+> it entire.
+
+> **Normative — ADR-0262 §3's consequence class is satisfied at rung 2, and that
+> is required rather than avoided.** That section computes the strength a goal's
+> verification owes from `ToolDefinition`'s declarations: **rung 2** is a step
+> whose definition is `side_effecting` and whose `reversibility` is more severe
+> than `REVERSIBLE`, or whose `discloses` is non-empty, or whose decision carries
+> an `egress_binding`. §2's booking is `side_effecting` and `IRREVERSIBLE` and its
+> decision carries a binding, **so it classifies at rung 2 and this decision
+> requires that it does** — a reference provider classifying at rung 1 would
+> demonstrate the wrong rung of the ladder M33 exists to exercise.
+
+> **Normative — and ADR-0262 §3's class is not ADR-0255 §13's test, which is why
+> the two answers differ without contradicting.** §3 asks *what did this attempt
+> do, and how strongly must it be verified* — a question about **evidence inside
+> this system**, answered from declarations, and it is answered here in the
+> strictest direction. §13 asks *may this deployment be given a capability whose
+> acts it cannot take back in the world* — a question about **consequence outside
+> this system**, which §13's own second sentence answers for a controlled
+> integration. **No lane reads ADR-0262 §3 as defining what §13 gates**, and
+> **no lane reads this clause as licence to lower a rung**: the whole of what it
+> says is that a rung-2 classification does not by itself make a component a wired
+> consequential capability.
+
+> **Normative — ADR-0255 §13's last clause is about that decision's own lanes and
+> is untouched here.** *"**The lanes of this decision** wire no consequential
+> capability, register no booking integration, and enable nothing in a production
+> deployment."* This is not a lane of that decision, and its own lanes registered
+> none. **That clause binds entire and this decision neither widens nor narrows
+> it.**
 
 > **Normative — and this decision creates no route by which this provider becomes
 > a real one.** **The first real booking provider is its own ADR**, and it is not
@@ -453,6 +521,10 @@ clearance it was never granted.
   **a lane that concludes otherwise raises it rather than acting on it.**
 - **Disclosure gating over a booking's arguments.** **Not decided**, and it is the
   stated cost of §2's empty `discloses`. **Fired by** the real provider's ADR.
+- **A structured carrier for metadata on an unsuccessful outcome.** **Not
+  decided** (§6). `ToolResult` refuses an `output` on a non-`SUCCEEDED` result and
+  `ToolFailure` carries `kind` and `message` alone; adding one is a `core/types.py`
+  change and its own contract ADR. **Fired by** a decision that takes it.
 
 ### 9. Scope, marking, and this ADR classified
 
@@ -477,6 +549,13 @@ clauses more widely than it now holds?*
   added to.
 - **ADR-0259 §3 and §10** — no. §3's conjunction is applied as written; §10's entry
   is pointed at and left standing.
+- **ADR-0262 §3** — no. Its ladder is applied and §7 requires the booking to
+  classify at its **rung 2**; no rung, limb or comparison is changed, and the
+  clause distinguishing its question from ADR-0255 §13's states what each already
+  asks rather than narrowing either.
+- **ADR-0014 §3, ADR-0029 §3, ADR-0039 §2** — no. §6's statement rides in the
+  carriers those decisions already provide and adds no field to `ToolResult`,
+  `ToolFailure` or `StepExecution`.
 - **ADR-0016, ADR-0148 §6, ADR-0149 §4, ADR-0151 §18, ADR-0267 §3, ADR-0271 §2** —
   no. Each is a declaration, a condition or an open question this decision
   **satisfies** or **leaves open**; a new integration that declares honestly is
@@ -517,27 +596,39 @@ clauses more widely than it now holds?*
 >    `reversibility`, `risk_level`, `discloses`, `cost`, `quoted_output`,
 >    `charged_output`, `bounded_arguments` and the booking's postcondition,
 >    exactly as §2 states, asserted over the registered definition.
-> 5. **The quote is read** — ADR-0267 §4's mint yields an `ActionQuote` from the
->    availability step's `output` under the registered `quoted_output`.
-> 6. **The charge is readable** — ADR-0271 §2's reading yields the charge from the
->    booking step's `output` under the registered `charged_output`, over both an
->    agreeing and a disagreeing configuration.
-> 7. **The effect key** — two dispatches of one intended action under one goal
+> 5. **The quote is read, under and over a bound** — ADR-0267 §4's mint yields an
+>    `ActionQuote` from the availability step's `output` under the registered
+>    `quoted_output`, **once from a configuration whose price is under a stated
+>    bound and once from one whose price is over it**, the two differing in
+>    configuration alone.
+> 6. **An unavailable date** — a configuration under which the requested date is
+>    unavailable, answered as such and yielding no booking.
+> 7. **The charge is readable, agreeing and disagreeing** — ADR-0271 §2's reading
+>    yields the charge from the booking step's `output` under the registered
+>    `charged_output`, over **three** configurations: one whose charge equals the
+>    pinned quote, one whose **amount** disagrees, and one whose **currency**
+>    disagrees, the last two independently configurable.
+> 8. **The effect key** — two dispatches of one intended action under one goal
 >    carry one derived `EffectKey`, and the second is not dispatched (ADR-0259 §2).
-> 8. **The four conditions** — a binding whose connectability, endpoint,
->    connection reference or recorded identity does not match refuses the call,
->    **one arm per condition** (ADR-0148 §6).
-> 9. **No network** — the transport-confinement contract covers the new module and
->    fails if the entry is removed.
-> 10. **The uncertain booking** — a configuration producing an `INDETERMINATE`
+> 9. **The durable record** — a booking appends one; a second dispatch of the same
+>    intended action appends **no second**; the record is readable **after a
+>    restart**; and the provider exposes no operation that removes or amends it
+>    (§2).
+> 10. **The four conditions** — a binding whose connectability, endpoint,
+>     connection reference or recorded identity does not match refuses the call,
+>     **one arm per condition** (ADR-0148 §6).
+> 11. **No network** — the transport-confinement contract covers the new module and
+>     fails if the entry is removed.
+> 12. **The uncertain booking** — a configuration producing an `INDETERMINATE`
 >     step, which stays `INDETERMINATE` and is not reconciled (§4).
-> 11. **The honesty field** — present on every output, including a refusal.
+> 13. **The honesty statement** — the field on every successful output, and the
+>     statement in `ToolFailure.message` on a refusal (§6).
 
-> **Normative — arm 6 asserts the *reading* and not ADR-0271 §3's finding, because
+> **Normative — arm 7 asserts the *reading* and not ADR-0271 §3's finding, because
 > that comparison has not landed in `src/`.** An arm demanding a demonstration a
 > lane cannot make is a demonstration nobody gives — ADR-0255 §15's own reason for
 > keeping such an arm out. **Where the comparison has landed by the time this lane
-> runs, the lane extends arm 6 to assert the finding**; **where it has not, the
+> runs, the lane extends arm 7 to assert the finding**; **where it has not, the
 > finding's arm is owed by the lane that lands the comparison**, and this
 > decision's §5 configuration requirement is what makes it available to that lane.
 
@@ -556,10 +647,10 @@ over-bound quote, a disagreeing charge and an uncertain booking without a code
 change, and a later real provider has a worked example of what a booking
 declaration looks like, with §2's clause naming the three fields it must not copy.
 
-**What becomes harder.** There is now a component in the tree that acts, charges
-and is declared `IRREVERSIBLE`, whose only protections against becoming a real one
-are §7's prohibition, the transport-confinement contract and its taking no
-transport parameter. That is a deliberate trade: the alternative — a fake in
+**What becomes harder.** There is now a component in the tree that acts, charges,
+keeps durable state it never undoes and is declared `IRREVERSIBLE`, whose only
+protections against becoming a real one are §7's prohibition, the
+transport-confinement contract and its taking no transport parameter. That is a deliberate trade: the alternative — a fake in
 `ai_assistant.testing` — cannot be registered, cannot be bound, and never reaches
 ADR-0148 §6's conditions.
 
@@ -567,9 +658,11 @@ ADR-0148 §6's conditions.
 supersedes §7's ground for its own capability and must satisfy ADR-0255 §13's
 seven. A decision taking ADR-0259 §10's third reconciliation route, which would
 give §4 a lookup to declare. A decision adding an integration fact to
-`ConnectedAccount`, which would move §6's announcement into the listing. A
-measured case in which §2's declarations turn out to be the wrong ones for a real
-provider to start from.
+`ConnectedAccount`, which would move §6's announcement into the listing. A decision
+adding a structured carrier for metadata on an unsuccessful outcome, which would
+move §6's failure statement out of `ToolFailure.message`. A measured case in which
+§2's declarations turn out to be the wrong ones for a real provider to start
+from.
 
 ## Alternatives considered
 
