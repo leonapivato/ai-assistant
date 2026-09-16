@@ -23,8 +23,10 @@ from ai_assistant.core.types import (
     AssociationVerdict,
     AttemptEffort,
     AttemptKind,
+    AttemptOutcome,
     AttemptPhase,
     AttemptState,
+    AttemptTransition,
     EngagementDisposition,
     Goal,
     GoalAssociation,
@@ -1172,6 +1174,12 @@ async def test_reopening_a_closed_goal_opens_an_attempt_and_supersedes_its_quest
     "Reopening a closed goal whose earlier attempt's question is still ``OPEN`` settles
     it ``SUPERSEDED`` and clears its content in the same sequence that opens the new
     attempt." And "a turn that **reopens** a closed goal opens a new attempt".
+
+    **The paused attempt is ended before the goal is closed**, which is the sequence
+    ADR-0262 §5 fixes — "the two writes are ordered, the attempt first" — and which its
+    ``→ ACHIEVED`` conjunct now obliges of every caller: an ``ACHIEVED`` goal never
+    carries a live attempt. The attempt names no execution, so it ends on the empty
+    snapshot §4 gives such an attempt.
     """
     planner = _Asking()
     harness = Harness(planner=planner)
@@ -1179,6 +1187,17 @@ async def test_reopening_a_closed_goal_opens_an_attempt_and_supersedes_its_quest
     assert paused.turn is not None
     assert paused.clarification is not None
     goal_id = paused.turn.goal.goal_id
+    live = await harness.plans.attempts_of(goal_id)
+    assert len(live) == 1
+    await harness.plans.commit_attempt(
+        AttemptTransition(
+            attempt_id=live[0].id,
+            expected_version=live[0].version,
+            to_state=AttemptState.ENDED,
+            outcome=AttemptOutcome.ANSWERED,
+            ended_at=AT,
+        )
+    )
     stored = await harness.plans.get_goal(goal_id)
     assert stored is not None
     await harness.plans.set_goal_status(

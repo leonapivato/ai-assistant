@@ -1176,6 +1176,30 @@ class PlanStoreContract:
         assert step is not None
         return step
 
+    async def _snapshot(
+        self, store: PlanStore, attempt: GoalAttempt
+    ) -> tuple[tuple[str, int], ...]:
+        """The ``execution_versions`` ADR-0262 §4 obliges a ``→ ENDED`` transition to carry.
+
+        **The complete set**, built from the attempt's own ``execution_ids``, which is
+        what §4 requires of a caller: "a subset would leave the omitted execution free
+        to move between the comparison and the commit, which is the whole of the race".
+        Empty for an attempt naming no execution, which is what such an attempt carries.
+
+        Args:
+            store: The subject.
+            attempt: The attempt as the caller read it.
+
+        Returns:
+            One pair per execution the attempt names, in ``execution_ids``' own order.
+        """
+        pairs: list[tuple[str, int]] = []
+        for execution_id in attempt.execution_ids:
+            held = await store.get_execution(execution_id)
+            assert held is not None
+            pairs.append((execution_id, held.version))
+        return tuple(pairs)
+
     async def seed_a_second_owner(self, store: PlanStore, attempt: GoalAttempt) -> None:
         """Write ``attempt`` **beneath** ADR-0255 §3's refusals, as a legacy store holds it.
 
@@ -1744,14 +1768,20 @@ class PlanStoreContract:
         current revision — and is refused anyway, because the binding is the execution's
         membership and never the goal's. Without that, the cancellation of A would be
         defeated by naming B (ADR-0255 §3).
+
+        **A is taken terminal through ``→ CANCELLED``, which is the transition this arm
+        is about.** ADR-0262 §4 refuses ``→ ENDED`` while a step stands ``PENDING``, and
+        E's step must stay ``PENDING`` for the claim to have anywhere to land; §4 leaves
+        ``→ CANCELLED`` untouched, and ADR-0261 §3's limb 4 fixes its member over an
+        attempt whose every step is ``PENDING``.
         """
         state = await self._started(store)
         await store.commit_attempt(
             AttemptTransition(
                 attempt_id="a1",
                 expected_version=0,
-                to_state=AttemptState.ENDED,
-                outcome=AttemptOutcome.ANSWERED,
+                to_state=AttemptState.CANCELLED,
+                outcome=AttemptOutcome.CANCELLED,
                 ended_at=_WHEN,
             )
         )
@@ -1770,7 +1800,6 @@ class PlanStoreContract:
         "state",
         [
             AttemptState.CANCELLED,
-            AttemptState.ENDED,
             AttemptState.AWAITING_CLARIFICATION,
             AttemptState.AWAITING_AUTHORIZATION,
             AttemptState.BLOCKED,
@@ -1779,15 +1808,20 @@ class PlanStoreContract:
     async def test_a_claim_under_a_terminal_or_paused_attempt_is_refused(
         self, store: PlanStore, state: AttemptState
     ) -> None:
-        """§15 arm 6's state-limb arms: **five** of ``AttemptState``'s seven members.
+        """§15 arm 6's state-limb arms: four of ``AttemptState``'s seven members.
 
-        The two terminal members and the three ADR-0249 §5 derives *paused* from, because
+        One terminal member and the three ADR-0249 §5 derives *paused* from, because
         *paused* is as disqualifying as *ended*: a store that accepted every non-terminal
         state would let a step reach the tool under an attempt the system is reporting as
         paused, in the one surface a user reads to find out whether anything is happening.
         The paused limb raises the same non-stale class, and its ground is what a caller
         can do rather than permanence — what lifts the pause is a **user act**, never a
         re-read.
+
+        **``ENDED`` is the fifth member and takes the arm below**, because ADR-0262 §4
+        makes the state this body seeds — a ``PENDING`` step under an ``ENDED``
+        attempt — unreachable through the contract, which is that decision's point
+        rather than a gap in this one.
         """
         execution = await self._started(store)
         terminal = state in TERMINAL_ATTEMPT_STATES
@@ -1809,6 +1843,37 @@ class PlanStoreContract:
 
         assert not isinstance(refusal.value, StaleExecutionError)
         assert (await self._step(store, execution)).status is StepStatus.PENDING
+
+    async def test_a_claim_under_an_ended_attempt_is_refused(self, store: PlanStore) -> None:
+        """§15 arm 6's fifth state limb, reached the one way ADR-0262 §4 leaves open.
+
+        An ``ENDED`` attempt's every step has settled ``SUCCEEDED``, ``FAILED`` or
+        ``SKIPPED`` (ADR-0262 §4), so the only claimable step under one is a **``FAILED``
+        step being retried** — ``FAILED`` sitting outside ``TERMINAL_STEP_STATUSES``
+        "(it may still be retried)", which is exactly why §4 needs the version conjunct
+        beside the status one. That makes this the case ADR-0255 §3's ``ENDED`` limb
+        actually exists for, rather than the ``PENDING`` state the arm above seeds: the
+        retry is refused with the same non-stale class, and the step keeps its status.
+        """
+        execution = await self._with_steps(store, StepStatus.FAILED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=_WHEN,
+                execution_versions=await self._snapshot(store, stored),
+            )
+        )
+
+        with pytest.raises(ClaimRefused) as refusal:
+            await store.commit_transition(_claim(execution))
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        assert (await self._step(store, execution)).status is StepStatus.FAILED
 
     @staticmethod
     def _terminal_outcome(state: AttemptState) -> AttemptOutcome:
@@ -6023,12 +6088,16 @@ class PlanStoreContract:
     ) -> None:
         """§3: "the conjunct binds on ``to_state=CANCELLED`` and on nothing else".
 
-        An attempt holding an ``INDETERMINATE`` step — whose cancellation the limbs
-        would fix at ``UNCERTAIN`` — is ended ``ENDED`` with ``ANSWERED`` and the write
-        lands, because which member a **non-cancelled** attempt earns stays A10's. A
-        store that read the conjunct as a general outcome check would refuse this.
+        An attempt whose steps stand ``SUCCEEDED`` and ``FAILED`` — whose cancellation
+        the limbs would fix at ``PARTIAL`` — is ended ``ENDED`` with ``ANSWERED`` and the
+        write lands, because which member a **non-cancelled** attempt earns stays A10's.
+        A store that read the conjunct as a general outcome check would refuse this.
+
+        **Both steps are settled, because ADR-0262 §4 now requires that of a ``→ ENDED``
+        transition**; the pair chosen is one no cancellation limb would admit, which is
+        what keeps this arm about the conjunct it names.
         """
-        await self._with_steps(store, StepStatus.INDETERMINATE)
+        await self._with_steps(store, StepStatus.SUCCEEDED, StepStatus.FAILED)
         stored = await store.get_attempt("a1")
         assert stored is not None
 
@@ -6039,6 +6108,7 @@ class PlanStoreContract:
                 to_state=AttemptState.ENDED,
                 outcome=AttemptOutcome.ANSWERED,
                 ended_at=_WHEN,
+                execution_versions=await self._snapshot(store, stored),
             )
         )
 
@@ -6163,6 +6233,7 @@ class PlanStoreContract:
                 to_state=AttemptState.ENDED,
                 outcome=AttemptOutcome.VERIFIED,
                 ended_at=_LATER_ENGAGED,
+                execution_versions=await self._snapshot(store, stored),
             )
         )
 
@@ -6190,6 +6261,11 @@ class PlanStoreContract:
         act answer **true** though it ends no attempt at all. No per-attempt fact and no
         fact about what the act itself wrote can pass this: the answer is about the
         goal, which is what keeps it in step with the listing read beside it.
+
+        **The older attempt is terminal through ``→ CANCELLED``**, ADR-0262 §4 having
+        made ``→ ENDED`` unreachable beside an ``INDETERMINATE`` step — which is that
+        decision's own account of why ``EFFECT_UNRESOLVED`` stays reachable — while
+        leaving ``→ CANCELLED`` untouched. ADR-0261 §3's limb 1 fixes the member.
         """
         await self._with_steps(store, StepStatus.INDETERMINATE)
         stored = await store.get_attempt("a1")
@@ -6198,7 +6274,7 @@ class PlanStoreContract:
             AttemptTransition(
                 attempt_id="a1",
                 expected_version=stored.version,
-                to_state=AttemptState.ENDED,
+                to_state=AttemptState.CANCELLED,
                 outcome=AttemptOutcome.UNCERTAIN,
                 ended_at=_WHEN,
             )
@@ -6440,16 +6516,22 @@ class PlanStoreContract:
         )
         assert written.status is GoalStatus.ABANDONED, "and it lands once nothing is live"
 
-    @pytest.mark.parametrize("status", [GoalStatus.ACHIEVED, GoalStatus.BLOCKED, GoalStatus.ACTIVE])
-    async def test_the_live_attempt_conjunct_binds_on_abandoned_alone(
+    @pytest.mark.parametrize("status", [GoalStatus.BLOCKED, GoalStatus.ACTIVE])
+    async def test_the_live_attempt_conjunct_binds_on_the_closing_pair_alone(
         self, store: PlanStore, status: GoalStatus
     ) -> None:
-        """§2: "the conjunct binds on ``ABANDONED`` alone and decides no vocabulary".
+        """ADR-0261 §2 and ADR-0262 §5: the two limbs decide no vocabulary.
 
-        ``ACHIEVED`` is A10's and ``BLOCKED`` is A3's, and neither is constrained by it;
-        ``ACTIVE`` on ADR-0250 §13's reopen is untouched, which is what keeps the reopen
-        sequence — status first, then the new attempt — the one sequence that works. So
-        each of the three lands over a goal holding a live attempt.
+        ``BLOCKED`` is A3's and is constrained by neither limb; ``ACTIVE`` on ADR-0250
+        §13's **reopen** is untouched, which is what keeps the reopen sequence — status
+        first, then the new attempt — the one sequence that works, and what makes an
+        ``→ ACTIVE`` write over a *live* attempt a case rather than an oversight. So
+        each of the two lands over a goal holding a live attempt.
+
+        **``ACHIEVED`` has moved to the arm below**: ADR-0262 §5 makes it the exact
+        mirror of the abandonment limb, so it is no longer one of the members this
+        conjunct lets through — which is the half of §12 arm 8 that fails against a
+        store still reading ADR-0261 §2 alone.
         """
         await store.save_goal(_goal())
         await store.open_attempt(_attempt())
@@ -7888,3 +7970,508 @@ class PlanStoreContract:
 
             rows = {row.intended_action_id: row for row in (await store.export()).effects}
             assert rows["ia1"].key == _KEY, "the row records the key the call was made with"
+
+    # --- ADR-0262 §12 arm 8: the two store conjuncts -----------------------
+
+    @pytest.mark.parametrize(
+        "unsettled",
+        [
+            StepStatus.PENDING,
+            StepStatus.AWAITING_APPROVAL,
+            StepStatus.RUNNING,
+            StepStatus.INDETERMINATE,
+        ],
+    )
+    async def test_commit_attempt_refuses_an_ending_over_an_unsettled_step(
+        self, store: PlanStore, unsettled: StepStatus
+    ) -> None:
+        """§4's third ending condition, over each of the four statuses it names.
+
+        A ``→ ENDED`` transition is refused with ``StaleExecutionError`` and **writes
+        nothing** where any step of any execution the attempt names stands ``PENDING``,
+        ``AWAITING_APPROVAL``, ``RUNNING`` or ``INDETERMINATE``. The set reaches
+        ``PENDING`` and ``AWAITING_APPROVAL`` as well as ADR-0261 §3's *outstanding*
+        pair, because "a set testing only ``RUNNING`` and ``INDETERMINATE`` is silent by
+        the time it runs" — an arm that seeded only the pair would pass against exactly
+        the implementation §4 is warning about.
+
+        **The ``INDETERMINATE`` limb is the load-bearing one**: it is what makes
+        ``VERIFIED``, and with it ``ACHIEVED``, unreachable beside a step that may have
+        acted, and what keeps ADR-0259 §4's acts 3 and 4 — neither reachable from a
+        terminal member — reachable on the next turn.
+        """
+        await self._with_steps(store, StepStatus.SUCCEEDED, unsettled)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                    execution_versions=await self._snapshot(store, stored),
+                )
+            )
+
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state, "the refusal wrote nothing"
+        assert unmoved.version == stored.version
+        assert unmoved.outcome is None
+        assert unmoved.ended_at is None
+
+    @pytest.mark.parametrize(
+        "settled", [StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.SKIPPED]
+    )
+    async def test_commit_attempt_accepts_an_ending_over_settled_steps(
+        self, store: PlanStore, settled: StepStatus
+    ) -> None:
+        """§4's third condition from the other side: the three statuses that satisfy it.
+
+        "Every step of every execution it names stands ``SUCCEEDED``, ``FAILED`` or
+        ``SKIPPED``" — each admitted, ``FAILED`` included, because a failed step
+        contradicts no criterion and "an attempt whose every criterion is met is
+        ``VERIFIED`` though a step failed beside it".
+        """
+        await self._with_steps(store, settled)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+
+        ended = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.VERIFIED,
+                ended_at=_WHEN,
+                execution_versions=await self._snapshot(store, stored),
+            )
+        )
+
+        assert ended.state is AttemptState.ENDED
+        assert ended.outcome is AttemptOutcome.VERIFIED
+
+    async def test_a_claim_between_the_read_and_the_ending_is_refused(
+        self, store: PlanStore
+    ) -> None:
+        """§4's first interleaving: the claim the status conjunct exists to catch.
+
+        A step stands ``PENDING`` when the caller reads it and is **claimed** before the
+        commit. A ``commit_transition`` advances no ``GoalAttempt.version``, so the
+        attempt's own compare-and-swap is silent and the snapshot the caller built is
+        still complete — only the status set sees it. Without this, a terminal, possibly
+        ``VERIFIED`` attempt would be recorded over a step whose answer the comparison
+        never saw.
+        """
+        state = await self._with_steps(store, StepStatus.PENDING)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        snapshot = await self._snapshot(store, stored)
+
+        await store.commit_transition(_claim(state))  # the concurrent claim
+
+        with pytest.raises(StaleExecutionError):
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.ANSWERED,
+                    ended_at=_WHEN,
+                    execution_versions=snapshot,
+                )
+            )
+
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state
+        assert unmoved.version == stored.version
+
+    async def test_an_execution_appended_after_the_read_is_refused_on_the_expected_version(
+        self, store: PlanStore
+    ) -> None:
+        """§4's second interleaving, **and the arm that pins the order of the two tests**.
+
+        An execution appended to the attempt after the caller's read **advances
+        ``GoalAttempt.version``**, so the transition is refused on its
+        ``expected_version`` — and never as a malformed set, though the caller's
+        snapshot is now genuinely incomplete and both tests could fire. "The attempt's
+        own ``expected_version`` compare-and-swap is decided **first** … the set can
+        only be wrong because the caller built it wrongly."
+
+        An implementation that tested the id set before the compare-and-swap would raise
+        ``ValueError`` here, telling the caller its command was malformed when what
+        actually happened was a lost race.
+        """
+        await self._with_steps(store, StepStatus.SUCCEEDED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        snapshot = await self._snapshot(store, stored)
+
+        await store.save_plan(_plan("p2"))
+        second = await store.start_execution("p2")
+        await _owned(store, second)  # appended after the caller's read
+
+        with pytest.raises(StaleExecutionError) as refusal:
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.ANSWERED,
+                    ended_at=_WHEN,
+                    execution_versions=snapshot,
+                )
+            )
+
+        assert not isinstance(refusal.value, ValueError), "a lost race, not a malformed command"
+        held = await store.get_attempt("a1")
+        assert held is not None
+        assert held.state is stored.state, "the refusal wrote nothing"
+
+    async def test_a_retried_step_terminal_at_both_instants_is_refused_on_the_versions(
+        self, store: PlanStore
+    ) -> None:
+        """§4's third interleaving: **the arm the status conjunct cannot pass**.
+
+        A step stands ``FAILED`` when the caller reads it, and is taken ``RUNNING`` and
+        then ``SUCCEEDED`` before the commit. ``FAILED`` is outside
+        ``TERMINAL_STEP_STATUSES`` "(it may still be retried)", so **every step is
+        settled at both instants and the status conjunct is silent**; the attempt's own
+        version has not moved either, a claim advancing none. Only the version pairs
+        see it, and this is the arm "that fails against an implementation carrying the
+        field and not comparing it".
+        """
+        state = await self._with_steps(store, StepStatus.FAILED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        snapshot = await self._snapshot(store, stored)
+
+        state = await store.commit_transition(_claim(state))  # the retry
+        await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                output={"sent": True},
+            )
+        )
+
+        with pytest.raises(StaleExecutionError) as refusal:
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                    execution_versions=snapshot,
+                )
+            )
+
+        assert not isinstance(refusal.value, ValueError), "a lost race, not a malformed command"
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state, "the refusal wrote nothing"
+        assert unmoved.outcome is None
+
+        recomputed = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.VERIFIED,
+                ended_at=_WHEN,
+                execution_versions=await self._snapshot(store, stored),
+            )
+        )
+        assert recomputed.state is AttemptState.ENDED, "and the re-read snapshot lands"
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            pytest.param("unknown", id="an-execution-the-attempt-does-not-name"),
+            pytest.param("missing", id="a-missing-id"),
+            pytest.param("duplicate", id="a-duplicate-id"),
+            pytest.param("partial", id="a-partial-snapshot"),
+        ],
+    )
+    async def test_commit_attempt_refuses_a_malformed_snapshot_with_a_value_error(
+        self, store: PlanStore, malformed: str
+    ) -> None:
+        """§4's ``ValueError`` limbs, **each asserted not to be ``StaleExecutionError``**.
+
+        "An id set that is not the attempt's is a malformed command and refuses with
+        ``ValueError``, no write taken: nothing advanced, so a class promising a fruitful
+        retry would be a false statement about the store." The class is the whole point
+        of these arms: a store raising the stale class here would send a caller round a
+        re-read loop no re-read can end.
+
+        **The partial limb is the load-bearing one** — "the arm that fails against a
+        subset the omitted execution could move under" — because a subset leaves that
+        execution free to move between the comparison and the commit, which is the whole
+        of the race the field exists to close.
+        """
+        await self._with_steps(store, StepStatus.SUCCEEDED)
+        await store.save_plan(_plan("p2"))
+        second = await store.start_execution("p2")
+        await _owned(store, second)
+        await self._driven(store, second, "s1", StepStatus.SUCCEEDED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        complete = await self._snapshot(store, stored)
+        assert len(complete) == 2, "the attempt names two executions"
+
+        declared = {
+            "unknown": (*complete, ("no-such-execution", 0)),
+            "missing": (*complete[:1], ("not-this-attempts", 0)),
+            "duplicate": (*complete, complete[0]),
+            "partial": complete[:1],
+        }[malformed]
+
+        with pytest.raises(ValueError) as refusal:  # noqa: PT011 — the class is the assertion
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                    execution_versions=declared,
+                )
+            )
+
+        assert not isinstance(refusal.value, StaleExecutionError), (
+            "a malformed command promises no fruitful retry"
+        )
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state, "the refusal wrote nothing"
+        assert unmoved.version == stored.version
+
+    async def test_the_empty_snapshot_is_accepted_for_an_attempt_naming_no_execution(
+        self, store: PlanStore
+    ) -> None:
+        """§4: "an attempt naming no execution therefore takes an empty tuple".
+
+        The field's default, and the value every caller this decision does not touch
+        already passes — so an attempt that opened, planned and answered without
+        starting an execution ends exactly as it did before.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        assert stored.execution_ids == ()
+
+        ended = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.ENDED,
+                outcome=AttemptOutcome.ANSWERED,
+                ended_at=_WHEN,
+            )
+        )
+
+        assert ended.state is AttemptState.ENDED
+
+    async def test_the_empty_snapshot_is_refused_for_an_attempt_that_names_one(
+        self, store: PlanStore
+    ) -> None:
+        """§4's other half: the default is **not** a licence to omit the snapshot.
+
+        The arm that fails against a store carrying the field and never testing
+        completeness, which is the shape every caller predating this decision has: it
+        passes nothing, and an attempt that named an execution would end over a set the
+        comparison never read.
+        """
+        await self._with_steps(store, StepStatus.SUCCEEDED)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+
+        with pytest.raises(ValueError) as refusal:  # noqa: PT011 — the class is the assertion
+            await store.commit_attempt(
+                AttemptTransition(
+                    attempt_id="a1",
+                    expected_version=stored.version,
+                    to_state=AttemptState.ENDED,
+                    outcome=AttemptOutcome.VERIFIED,
+                    ended_at=_WHEN,
+                )
+            )
+
+        assert not isinstance(refusal.value, StaleExecutionError)
+        unmoved = await store.get_attempt("a1")
+        assert unmoved is not None
+        assert unmoved.state is stored.state, "the refusal wrote nothing"
+
+    async def test_a_cancellation_carrying_a_stale_pair_still_commits(
+        self, store: PlanStore
+    ) -> None:
+        """§4: "it is the ``ENDED`` limb **alone** that reads the field".
+
+        A ``→ CANCELLED`` transition carrying a ``version`` the store has moved past
+        commits, because every other transition ignores the field — so ADR-0261 §2's act
+        is unaffected whatever it passes, and a store reading the conjunct as a general
+        optimistic lock fails here.
+        """
+        state = await self._with_steps(store, StepStatus.PENDING)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        stale = ((state.id, state.version + 99),)
+
+        committed = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.CANCELLED,
+                outcome=AttemptOutcome.CANCELLED,
+                ended_at=_WHEN,
+                execution_versions=stale,
+            )
+        )
+
+        assert committed.state is AttemptState.CANCELLED
+        assert committed.outcome is AttemptOutcome.CANCELLED
+
+    async def test_adr_0261_s_cancelled_uncertain_case_still_commits_over_an_indeterminate_step(
+        self, store: PlanStore
+    ) -> None:
+        """§4: ``→ CANCELLED`` "takes over exactly the outstanding steps this one refuses".
+
+        ADR-0261 §3's own ``(CANCELLED, UNCERTAIN)`` case, asserted **after** this
+        decision: an ``INDETERMINATE`` step refuses a ``→ ENDED`` transition and admits
+        the cancellation that ADR-0261 §2's act performs over precisely such an attempt.
+        A store that read §4's status conjunct as a general check would have closed the
+        route ADR-0261 exists to keep open.
+        """
+        await self._with_steps(store, StepStatus.INDETERMINATE)
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+
+        committed = await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=AttemptState.CANCELLED,
+                outcome=AttemptOutcome.UNCERTAIN,
+                ended_at=_WHEN,
+            )
+        )
+
+        assert committed.state is AttemptState.CANCELLED
+        assert committed.outcome is AttemptOutcome.UNCERTAIN
+
+    async def test_set_goal_status_refuses_an_achievement_over_a_live_attempt(
+        self, store: PlanStore
+    ) -> None:
+        """ADR-0262 §5's conjunct: the **exact mirror** of ADR-0261 §2's abandonment limb.
+
+        An ``→ ACHIEVED`` write is refused with ``StaleExecutionError`` and **writes
+        nothing** where the goal has an attempt in a non-terminal ``AttemptState`` —
+        **including one opened after the caller read the goal**, which is the
+        interleaving it exists for: ``open_attempt`` advances no ``Goal.version``, so
+        such an attempt is invisible to the goal's own compare-and-swap.
+
+        **The refusal is not retried by the act that takes this write** (§5): a lost race
+        leaves the attempt ``ENDED``/``VERIFIED`` under an open goal, which is legible and
+        self-healing, and a retry could close a goal against criteria nothing compared.
+        The arm asserts the store's half — nothing written and the version unmoved.
+        """
+        await store.save_goal(_goal())
+        read = await store.get_goal("g1")
+        assert read is not None
+
+        await store.open_attempt(_attempt())  # opened *after* the caller's read
+
+        with pytest.raises(StaleExecutionError):
+            await store.set_goal_status(
+                "g1", status=GoalStatus.ACHIEVED, at=_WHEN, expected_version=read.version
+            )
+
+        held = await store.get_goal("g1")
+        assert held is not None
+        assert held.status is GoalStatus.ACTIVE, "the refusal wrote nothing"
+        assert held.version == read.version
+
+    @pytest.mark.parametrize("terminal", [AttemptState.ENDED, AttemptState.CANCELLED])
+    async def test_set_goal_status_accepts_an_achievement_where_every_attempt_is_terminal(
+        self, store: PlanStore, terminal: AttemptState
+    ) -> None:
+        """§5's other half, over both terminal members.
+
+        The conjunct is about *live* attempts and not about attempts, so a goal whose
+        every attempt has reached a terminal state takes the write — which is the
+        ordinary path §5 describes, the attempt's own commit having landed first.
+        """
+        await store.save_goal(_goal())
+        await store.open_attempt(_attempt())
+        stored = await store.get_attempt("a1")
+        assert stored is not None
+        await store.commit_attempt(
+            AttemptTransition(
+                attempt_id="a1",
+                expected_version=stored.version,
+                to_state=terminal,
+                outcome=AttemptOutcome.VERIFIED
+                if terminal is AttemptState.ENDED
+                else AttemptOutcome.CANCELLED,
+                ended_at=_WHEN,
+            )
+        )
+        goal = await store.get_goal("g1")
+        assert goal is not None
+
+        written = await store.set_goal_status(
+            "g1", status=GoalStatus.ACHIEVED, at=_WHEN, expected_version=goal.version
+        )
+
+        assert written.status is GoalStatus.ACHIEVED
+
+    async def test_set_goal_status_accepts_an_achievement_over_a_goal_with_no_attempt(
+        self, store: PlanStore
+    ) -> None:
+        """§5: and where the goal has **no attempt at all**, which is not a live one."""
+        await store.save_goal(_goal())
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert await store.attempts_of("g1") == ()
+
+        written = await store.set_goal_status(
+            "g1", status=GoalStatus.ACHIEVED, at=_WHEN, expected_version=goal.version
+        )
+
+        assert written.status is GoalStatus.ACHIEVED
+
+    async def test_the_achieved_conjunct_and_the_closed_goal_limb_are_exhaustive(
+        self, store: PlanStore
+    ) -> None:
+        """§5: "there is no third case once that limb exists", shown as the pair it is.
+
+        An ``open_attempt`` landing **before** the status write is one the conjunct sees
+        and refuses the write for — the arm above — and one landing **after** it meets a
+        goal closed in that same step, which is ADR-0261 §2's ``open_attempt`` limb
+        asserted here over an **``ACHIEVED``** goal rather than an abandoned one. Between
+        them no interleaving leaves an ``ACHIEVED`` goal carrying a live, claimable
+        attempt, which is why §11 makes ADR-0261's implementing lane a prerequisite
+        rather than an assumption.
+        """
+        await store.save_goal(_goal())
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        await store.set_goal_status(
+            "g1", status=GoalStatus.ACHIEVED, at=_WHEN, expected_version=goal.version
+        )
+
+        with pytest.raises(PlanningError) as refusal:
+            await store.open_attempt(_attempt())
+
+        assert not isinstance(refusal.value, StaleExecutionError), (
+            "no re-read reopens a closed goal; only ADR-0250 §13's user act does"
+        )
+        assert await store.attempts_of("g1") == ()
