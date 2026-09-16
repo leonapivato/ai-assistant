@@ -272,18 +272,34 @@ class _Planned:
     phase 4 over that plan's **other** steps — two questions that must be about
     one plan, where a second read could answer about a plan that moved in between.
 
+    **The two identifiers are held by value and not read off ``plan`` again.** That
+    read is what makes the sentence above literally true rather than nearly true:
+    ``PlanStore`` contracts no detached snapshot, so ``plan`` is an object a holder
+    still has and ``plan.__dict__`` is open (ADR-0018 §3, ``LeakyPlanStore``) — and
+    ``goal_id`` is read at two moments separated by every awaited collaborator this
+    stage has, the request builder before the ruling (ADR-0254 §15) and ADR-0267 §4's
+    mint after the act. Read twice, those two can differ: a repointed ``goal_id``
+    appends a price to a goal the act was never authorised against, and a repointed
+    ``id`` records it as read in a plan it was not read in, which ADR-0267 §1 makes
+    unresolvable rather than wrong-looking. Taken once, at the instant the plan is
+    read and before any await, they cannot. Adversarial review, round 4, ``blocker``.
+
+    ``plan`` itself stays as the store handed it over, because phase 4 reads its
+    **steps** and detaching the whole plan is a wider change than the two facts this
+    stage carries out of the read (:meth:`StepRunner._phase_four`).
+
     Attributes:
-        plan: The plan the stored execution names.
+        plan: The plan the stored execution names, for phase 4's read of its steps.
         step: The step being disposed of, detached from the store's copy.
+        plan_id: That plan's ``id``, by value.
+        goal_id: That plan's ``goal_id``, by value — the goal the request carries
+            (ADR-0254 §15) and the goal a quote read at this step is appended to.
     """
 
     plan: ActionPlan
     step: PlanStep
-
-    @property
-    def goal_id(self) -> str:
-        """The goal the request carries (ADR-0254 §15)."""
-        return self.plan.goal_id
+    plan_id: str
+    goal_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,14 +313,12 @@ class _Quoting:
     *"``frozen=True`` refuses ``request.tool = ...`` and does nothing about
     ``request.__dict__``"* (ADR-0018 §3).
 
-    **The plan and the goal are the reachable half, and they are the sharp one.**
-    ``PlanStore`` contracts no detached snapshot (:class:`_Planned`, ``LeakyPlanStore``),
-    so ``planned.plan`` is an object a holder still has, and ``plan.__dict__`` is open.
-    A ``goal_id`` repointed while the tool was running would append the price to
-    **another goal**; an ``id`` repointed would record it as read in a plan it was not
-    read in, which no later reader could detect — ADR-0267 §1's *"a step id alone names
-    no place"*, defeated. Both are ``str`` and are taken **by value** here, which closes
-    it outright.
+    **The plan and the goal are the reachable half, and they are taken from
+    :class:`_Planned`'s own by-value copies rather than snapshotted again here.** That
+    is the point of taking them there: ``ActionRequest.goal`` is built from the same
+    two fields *before* the ruling, so a second read at this line would be a second
+    fact — a quote could be appended to a goal the act was never authorised against.
+    One read, at ``_planned``, and every use after it is that read.
 
     **The request's copy is defence in depth and is not load-bearing**, which is stated
     rather than implied: ``ActionRequest.tool`` is rebuilt through validation
@@ -2232,7 +2246,11 @@ class StepRunner:
         if planned is None:
             msg = f"plan {plan.id!r} has no step {step_id!r}"
             raise PlanningError(msg)
-        return _Planned(plan=plan, step=_detached_step(planned))
+        # The two identifiers are taken **here**, with no await between this line and
+        # the read above, so every later use is the same fact (:class:`_Planned`).
+        return _Planned(
+            plan=plan, step=_detached_step(planned), plan_id=plan.id, goal_id=plan.goal_id
+        )
 
     def _select(
         self,
@@ -2451,7 +2469,7 @@ class StepRunner:
         quoting = _Quoting(
             request=detached_request(request),
             step=planned.step,
-            plan=planned.plan.id,
+            plan=planned.plan_id,
             goal=planned.goal_id,
         )
         reach = CallableReach()

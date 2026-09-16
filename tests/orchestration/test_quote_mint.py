@@ -58,7 +58,8 @@ from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from ai_assistant.core.types import ExecutionState, FrozenJson
+    from ai_assistant.core.types import ExecutionState, FrozenJson, PermissionDecision
+    from ai_assistant.orchestration.runner import Ruled
     from ai_assistant.testing.invoker import FakeToolImplementation
 
 #: The **store's** clock. Every durable instant here is this one, ``finished_at``
@@ -253,11 +254,23 @@ class Harness:
             id_factory=lambda: next(ids),
         )
 
-    async def drive(self, state: ExecutionState, step_id: str = STEP) -> Disposition:
-        """Run one step and report how it was disposed of."""
+    async def drive(
+        self, state: ExecutionState, step_id: str = STEP, *, on_ruled: Ruled | None = None
+    ) -> Disposition:
+        """Run one step and report how it was disposed of.
+
+        ``on_ruled`` is ADR-0249 §12's boundary — the earliest ``await`` after the
+        request is built and before the step is claimed, and therefore the earliest
+        place a collaborator of this stage can act.
+        """
         self.drove = state
         result = await self.runner.run(
-            state, step_id, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
+            state,
+            step_id,
+            attempt_id=ATTEMPT,
+            timeout=PATIENT,
+            origin=NOTHING_EXTERNAL,
+            on_ruled=on_ruled,
         )
         return result.disposition
 
@@ -938,3 +951,32 @@ async def test_the_selector_is_the_requests_own_declaration_and_never_the_regist
     assert minted.amount == Decimal("200"), "the key the call was dispatched under"
     assert minted.read_from.field == "price"
     assert rewriting.quoted_key("rooms") == "stars", "the rewrite landed, and reached nothing"
+
+
+async def test_the_plan_and_goal_are_the_ones_the_request_was_built_from() -> None:
+    """One read of one stored plan, used by the request builder **and** by the mint.
+
+    ADR-0254 §15 sources ``ActionRequest.goal`` from *"the plan the execution names"*,
+    and that read happens before the ruling; ADR-0267 §4's mint happens after the act.
+    Every awaited collaborator of this stage sits between them — the registry, the
+    binder, the policy, the trail, ADR-0249 §12's boundary — and the store hands the
+    plan over attached. A repoint landed at the **earliest** of those awaits must
+    therefore reach neither: the request is about ``g-1`` and so is the quote, or one
+    authorised act has quoted a price onto another goal entirely.
+    """
+    plans = _Leaky(now=lambda: AT)
+    harness = Harness(tools=((declaration(), returning(PRICED)),), plans=plans)
+    state = await an_execution(harness.plans, step())
+
+    async def repoint(decision: PermissionDecision) -> None:
+        """Rewrite the plan the runner is holding, at the first await after it read it."""
+        plans.rewrite(plan="p-elsewhere", goal="g-elsewhere")
+
+    assert await harness.drive(state, on_ruled=repoint) is Disposition.EXECUTED
+
+    (ruled,) = harness.policy.requests
+    assert ruled.goal == GOAL
+    (minted,) = await harness.quotes()
+    assert minted.plan == PLAN, "the plan the request was built from"
+    assert plans.handed_out is not None
+    assert plans.handed_out.goal_id == "g-elsewhere", "the rewrite landed, and reached nothing"
