@@ -18963,6 +18963,41 @@ class ActionRequest(BaseModel):
         return self
 
 
+def _detached_quote(value: ActionQuote | None) -> ActionQuote | None:
+    """Take the ruling's own copy of the pinned quote, rebuilt through validation.
+
+    The discipline :func:`_detached_tool` already carries for the declaration and
+    :func:`_detached_binding` for the binding (ADR-0018 §3), applied to the one field
+    ADR-0271 §1 says is *"carried **by value**"*. Pydantic passes an already-valid
+    model instance through without copying, so a :class:`PermissionRuling` would
+    otherwise share whatever instance
+    :meth:`~ai_assistant.core.protocols.GoalQuotes.for_action` returned — and
+    ``object.__setattr__`` on that original would change which price the row says
+    condition 6 was proved against, **after** the comparison was made. The window is
+    narrow, since :meth:`PermissionDecision.from_request` deep-copies the ruling on the
+    way to the durable record, but it is the window ADR-0018 §3 drew the boundary at:
+    *"between them no reference a caller still holds reaches recorded state"*, and a
+    seam's cached row is exactly the registry query that clause was written about.
+
+    **This is what makes "by value" true rather than nominal**, which is
+    ``from_request``'s own words for the same discipline one record over. It does not
+    relax §1's other sense of by-value — no id is minted and nothing is keyed on the
+    quote — it makes that sense hold against a holder that still has the object.
+
+    Rebuilt through ``model_validate`` rather than merely deep-copied, for the reason
+    the two beside it are: a quote assembled by ``model_construct``, or corrupted past
+    its frozen model's guard, skips every validator — a ``currency`` written back as
+    ``"eur"`` is the ordinary case, matching no ``MONEY`` bound's ``"EUR"`` ever — and
+    the pin reaches a durable record that
+    ADR-0021 §4 requires to survive a ``model_dump(mode="json")`` round trip. Revalidating
+    here means the ruling's own copy has passed them whatever the caller handed over,
+    and the refusal lands at the ruling rather than at the trail.
+    """
+    if value is None:
+        return None
+    return ActionQuote.model_validate(value.model_dump())
+
+
 class PermissionRuling(BaseModel):
     """What a policy said about an :class:`ActionRequest` (ADR-0021 §3).
 
@@ -19037,7 +19072,7 @@ class PermissionRuling(BaseModel):
             "breaks none of it."
         ),
     )
-    proved_quote: ActionQuote | None = Field(
+    proved_quote: Annotated[ActionQuote | None, AfterValidator(_detached_quote)] = Field(
         default=None,
         description=(
             "The :class:`ActionQuote` the coverage comparison at ``ActionPolicy.decide`` "
@@ -19076,7 +19111,10 @@ class PermissionRuling(BaseModel):
             "decision whose dispatch was not proved against a quote, and no pass supplies "
             "one afterwards. It reaches the durable :class:`PermissionDecision` by the "
             "path that exists today, :meth:`PermissionDecision.from_request` transcribing "
-            "the ruling whole, so **``PermissionDecision`` gains no field**."
+            "the ruling whole, so **``PermissionDecision`` gains no field**. The value is "
+            "**detached** on the way in (:func:`_detached_quote`), which is what makes "
+            "*by value* true rather than nominal against a seam that still holds the row "
+            "it returned."
         ),
     )
 

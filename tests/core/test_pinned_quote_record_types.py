@@ -329,6 +329,45 @@ def test_the_pin_is_a_value_and_the_record_holds_no_handle_on_one() -> None:
     }
 
 
+def test_the_ruling_takes_its_own_copy_of_the_quote_it_pins() -> None:
+    """§1's *"carried by value"*, made true against a holder that still has the object.
+
+    Pydantic passes an already-valid model instance through without copying, so without
+    :func:`~ai_assistant.core.types._detached_quote` a ruling would share whatever
+    instance ``GoalQuotes.for_action`` returned — and ``object.__setattr__`` on that
+    original would change which price the row says condition 6 was proved against,
+    **after** the comparison was made. ``from_request`` deep-copies the ruling on the
+    way to the record, so the window is narrow; it is nonetheless the window ADR-0018
+    §3 drew the boundary at, and the two detachments beside this one
+    (``ActionRequest.tool``, ``ActionRequest.egress_binding``) close the same shape.
+    The arm that fails an implementation taking the caller's instance.
+    """
+    quote = _quote(amount="120")
+    ruling = PermissionRuling(**_route_d(proved_quote=quote))
+
+    object.__setattr__(quote, "amount", Decimal("999"))
+
+    assert ruling.proved_quote is not None
+    assert ruling.proved_quote.amount == Decimal("120")
+    assert ruling.proved_quote is not quote
+
+
+def test_a_quote_corrupted_past_its_own_guard_is_refused_at_the_ruling() -> None:
+    """§1's detachment rebuilds through validation rather than merely deep-copying.
+
+    ``_detached_tool``'s reason, one record over: a value assembled by
+    ``model_construct``, or written back past its frozen model's guard, has passed no
+    validator, and the pin reaches a durable record ADR-0021 §4 requires to survive a
+    ``model_dump(mode="json")`` round trip. Revalidating at the ruling is what puts the
+    refusal where it can be read instead of at the trail, a restart later.
+    """
+    quote = _quote()
+    object.__setattr__(quote, "currency", "eur")
+
+    with pytest.raises(ValidationError, match="three uppercase"):
+        PermissionRuling(**_route_d(proved_quote=quote))
+
+
 def test_a_later_quote_leaves_a_pinned_one_untouched() -> None:
     """Arm 2's by-value limb, at the type: *"a value and not a pointer"*.
 
