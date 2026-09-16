@@ -1314,6 +1314,38 @@ SETTLED_STEP_STATUSES: Final[frozenset[StepStatus]] = frozenset(
 )
 
 
+def ending_execution_ids(attempt: GoalAttempt, appended: str | None) -> tuple[str, ...]:
+    """The executions the attempt names **once this transition lands** (ADR-0262 §4).
+
+    **The conjuncts are stated over the attempt as it will stand, not as it stands.** §4
+    refuses an ending "where any step of any execution **that attempt names**" is
+    unsettled, and requires the snapshot to be "*exactly* the attempt's
+    ``execution_ids``" — and a single ``AttemptTransition`` may **append** an execution
+    and end the attempt in the same indivisible step. Read against the stored tuple
+    alone, such a transition would end an attempt carrying an execution neither conjunct
+    ever looked at: an empty snapshot and an empty status set both pass, ``advanced``
+    then appends, and the store holds a terminal — possibly ``VERIFIED`` — attempt over
+    a ``PENDING`` step. That is the exact record §4 exists to make unreachable, so the
+    set the conjuncts are decided over is the **post-transition** one.
+
+    **ADR-0249 §12's append rule is untouched**: "an identifier the tuple already holds
+    is **ignored** rather than duplicated or refused", so an append of an id the attempt
+    already carries leaves the set exactly where it was — and the snapshot that was
+    correct before it is correct after it.
+
+    Args:
+        attempt: The attempt as stored, before the transition.
+        appended: The transition's ``add_execution_id``, or ``None`` where it appends
+            nothing — which is every ending this decision's own callers take today.
+
+    Returns:
+        The attempt's ``execution_ids`` as they will read after the write.
+    """
+    if appended is None or appended in attempt.execution_ids:
+        return attempt.execution_ids
+    return (*attempt.execution_ids, appended)
+
+
 def refuse_an_unendable_attempt(
     *,
     attempt_id: str,
@@ -1350,9 +1382,14 @@ def refuse_an_unendable_attempt(
 
     Args:
         attempt_id: The attempt being ended, for the messages.
-        named: The attempt's own ``execution_ids``, as stored.
+        named: The executions the attempt names **once this transition lands** —
+            :func:`ending_execution_ids`, which is the stored tuple plus anything this
+            same transition appends. Stated over the post-transition set because a
+            transition may append and end in one step, and an execution appended there
+            would otherwise reach a terminal attempt unexamined by either conjunct.
         declared: The transition's ``execution_versions``, as the caller built it.
-        statuses: The status of every step of every execution ``named`` lists, read
+        statuses: The status of every step of every execution ``named`` lists — the
+            appended one included — read
             **inside the same indivisible step as the write**. Order is irrelevant.
         versions: The ``ExecutionState.version`` of each execution ``named`` lists, read
             in that same step. An id ``named`` lists that the store does not hold

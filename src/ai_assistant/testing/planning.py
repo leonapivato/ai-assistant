@@ -1613,13 +1613,28 @@ class FakePlanStore:
             attempt: The attempt whose ``execution_ids`` are walked.
 
         Returns:
+            One status per step, over the executions this store holds.
+        """
+        return self._step_statuses_of(attempt.execution_ids)
+
+    def _step_statuses_of(self, execution_ids: Sequence[str]) -> list[StepStatus]:
+        """Every step status of every execution ``execution_ids`` names.
+
+        Taken as an id sequence rather than as an attempt, because ADR-0262 §4's ending
+        conjuncts are decided over the **post-transition** set — the stored tuple plus
+        anything the same transition appends — which is no attempt this store holds yet.
+
+        Args:
+            execution_ids: The executions to walk.
+
+        Returns:
             One status per step. An entry this store does not hold contributes
             nothing, which :meth:`_refuse_a_dangling_execution` makes unreachable
             through the contract.
         """
         return [
             step.status
-            for execution_id in attempt.execution_ids
+            for execution_id in execution_ids
             if (held := self._executions.get(execution_id)) is not None
             for step in held.steps
         ]
@@ -1711,7 +1726,7 @@ class FakePlanStore:
         raise StaleExecutionError(msg)
 
     def _refuse_an_unendable_attempt(
-        self, attempt: GoalAttempt, declared: Sequence[tuple[str, int]]
+        self, attempt: GoalAttempt, declared: Sequence[tuple[str, int]], appended: str | None
     ) -> None:
         """Refuse a ``→ ENDED`` transition ADR-0262 §4 does not admit, in two conjuncts.
 
@@ -1728,9 +1743,18 @@ class FakePlanStore:
         because a claim advances no ``GoalAttempt.version``, so the attempt's own
         compare-and-swap cannot see one land.
 
+        **Both are decided over the set the attempt *will* name.** A single
+        ``AttemptTransition`` may append an execution and end the attempt in the same
+        indivisible step, and one read against the stored tuple alone would let that
+        execution reach a terminal — possibly ``VERIFIED`` — attempt unexamined by
+        either conjunct, which is the exact record §4 exists to make unreachable.
+        ADR-0249 §12's append rule is untouched: an id the attempt already holds is
+        ignored, so appending one leaves the set where it was.
+
         Args:
             attempt: The attempt as stored.
             declared: The transition's ``execution_versions``, as the caller built it.
+            appended: The transition's ``add_execution_id``, or ``None``.
 
         Raises:
             ValueError: If ``declared``'s ids are not exactly the attempt's
@@ -1753,7 +1777,7 @@ class FakePlanStore:
                 )
                 raise ValueError(msg)
             seen.add(execution_id)
-        wanted = set(attempt.execution_ids)
+        wanted = set(attempt.execution_ids) | ({appended} if appended is not None else set())
         if seen != wanted:
             msg = (
                 f"attempt {attempt.id} is being ended with an execution_versions naming "
@@ -1764,7 +1788,11 @@ class FakePlanStore:
             )
             raise ValueError(msg)
         live = sorted(
-            {one.value for one in self._step_statuses(attempt) if one not in _SETTLED_STEP_STATUSES}
+            {
+                one.value
+                for one in self._step_statuses_of(sorted(wanted))
+                if one not in _SETTLED_STEP_STATUSES
+            }
         )
         if live:
             msg = (
@@ -1777,7 +1805,7 @@ class FakePlanStore:
             raise StaleExecutionError(msg)
         stored = {
             execution_id: held.version
-            for execution_id in attempt.execution_ids
+            for execution_id in sorted(wanted)
             if (held := self._executions.get(execution_id)) is not None
         }
         moved = sorted(
@@ -2296,7 +2324,9 @@ class FakePlanStore:
             if transition.to_state is AttemptState.CANCELLED:
                 self._refuse_a_wrong_cancellation_outcome(stored, transition.outcome)
             if transition.to_state is AttemptState.ENDED:
-                self._refuse_an_unendable_attempt(stored, transition.execution_versions)
+                self._refuse_an_unendable_attempt(
+                    stored, transition.execution_versions, transition.add_execution_id
+                )
             updated = self._advanced_attempt(stored, transition)
             self._attempts[updated.id] = updated
             return updated.model_copy(deep=True)

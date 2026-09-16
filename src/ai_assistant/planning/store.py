@@ -58,6 +58,7 @@ from ai_assistant.planning.goals import (
     cancellation_outcome,
     cancelled,
     capped,
+    ending_execution_ids,
     engaged,
     invalidated,
     minted,
@@ -485,14 +486,30 @@ class InMemoryPlanStore:
             attempt: The attempt whose ``execution_ids`` are walked.
 
         Returns:
-            One status per step, over the executions this store holds. An
-            ``execution_ids`` entry the store does not hold contributes nothing, which
+            One status per step, over the executions this store holds.
+        """
+        return self._step_statuses_of(attempt.execution_ids)
+
+    def _step_statuses_of(self, execution_ids: Sequence[str]) -> list[StepStatus]:
+        """Every step status of every execution ``execution_ids`` names.
+
+        Taken as an id sequence rather than as an attempt, because ADR-0262 §4's ending
+        conjuncts are decided over the **post-transition** set
+        (:func:`~ai_assistant.planning.goals.ending_execution_ids`), which is no attempt
+        this store holds yet.
+
+        Args:
+            execution_ids: The executions to walk.
+
+        Returns:
+            One status per step, over the executions this store holds. An entry the
+            store does not hold contributes nothing, which
             :meth:`_refuse_a_dangling_execution` makes unreachable through the
             contract.
         """
         return [
             step.status
-            for execution_id in attempt.execution_ids
+            for execution_id in execution_ids
             if (held := self._executions.get(execution_id)) is not None
             for step in held.steps
         ]
@@ -985,37 +1002,42 @@ class InMemoryPlanStore:
                 yielded=cancellation_outcome(self._step_statuses(stored)),
             )
         if transition.to_state is AttemptState.ENDED:
+            # Over the set the attempt **will** name, not the one it names: this same
+            # transition may append an execution, and one appended here would otherwise
+            # reach a terminal attempt unexamined by either conjunct (ADR-0262 §4).
+            ending = ending_execution_ids(stored, transition.add_execution_id)
             refuse_an_unendable_attempt(
                 attempt_id=stored.id,
-                named=stored.execution_ids,
+                named=ending,
                 declared=transition.execution_versions,
-                statuses=self._step_statuses(stored),
-                versions=self._execution_versions(stored),
+                statuses=self._step_statuses_of(ending),
+                versions=self._execution_versions(ending),
             )
         updated = advanced(stored, transition)
         self._attempts[updated.id] = updated
         return updated.model_copy(deep=True)
 
-    def _execution_versions(self, attempt: GoalAttempt) -> dict[str, int]:
-        """The stored ``version`` of every execution ``attempt`` names (ADR-0262 §4).
+    def _execution_versions(self, execution_ids: Sequence[str]) -> dict[str, int]:
+        """The stored ``version`` of every execution ``execution_ids`` names (§4).
 
-        :meth:`_step_statuses`' companion over the same walk, read with no ``await``
+        :meth:`_step_statuses_of`'s companion over the same walk, read with no ``await``
         between it and the write it decides — so the versions, the statuses and the
         write are one step, which is the whole of why §4 puts this conjunct in the
         store.
 
         Args:
-            attempt: The attempt whose ``execution_ids`` are walked.
+            execution_ids: The executions to walk — the **post-transition** set, for
+                :meth:`_step_statuses_of`'s reason.
 
         Returns:
-            One entry per execution this store holds, keyed by id. An ``execution_ids``
-            entry the store does not hold contributes none, which
+            One entry per execution this store holds, keyed by id. An entry the store
+            does not hold contributes none, which
             :meth:`_refuse_a_dangling_execution` makes unreachable through the contract
-            — the same posture :meth:`_step_statuses` takes for the same reason.
+            — the same posture :meth:`_step_statuses_of` takes for the same reason.
         """
         return {
             execution_id: held.version
-            for execution_id in attempt.execution_ids
+            for execution_id in execution_ids
             if (held := self._executions.get(execution_id)) is not None
         }
 
