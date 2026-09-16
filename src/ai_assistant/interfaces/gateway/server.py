@@ -188,6 +188,7 @@ from ai_assistant.core.types import (
     PermissionDecision,
     Question,
     QuietWindow,
+    QuoteView,
     RecordedInvocation,
     SourceGrant,
     SourceReadRecord,
@@ -4935,10 +4936,35 @@ def _bound_view(bound: ValueBound) -> dict[str, Any]:
     }
 
 
+def _quote_view(quote: QuoteView) -> dict[str, Any]:
+    """The figure an act was quoted at, as the page receives it (ADR-0267 §7).
+
+    **Every field of the type and nothing beside it.** The rendering bar is enforced
+    by the carrier rather than restated here: :class:`~ai_assistant.core.types.QuoteView`
+    has no field for a digest, an intended action, a plan, a step, a goal id or an
+    authorization id, so this translator cannot leak one by forgetting a rule.
+
+    **The amount crosses as its exact characters and the instant as ISO-8601**, which
+    is :func:`_bound_view`'s convention for the same two kinds of value: a decimal read
+    back through ``JSON.parse`` as a double is a price the record does not hold.
+
+    Args:
+        quote: The governing quote the proposed row was built over.
+
+    Returns:
+        The quote, as the page receives it.
+    """
+    return {
+        "amount": str(quote.amount),
+        "currency": quote.currency,
+        "read_at": quote.read_at.isoformat(),
+    }
+
+
 def _authorization_projection_view(projection: AuthorizationProjection) -> dict[str, Any]:
     """What answering a question would establish, as the page receives it (§11).
 
-    **Two members and no third, because the type carries two.** It names **no
+    **Three members and no fourth, because the type carries three.** It names **no
     identifier of any kind** — not the goal's id, not the row's, not a connection
     reference, not a credential slot and not a ``Settings`` field — since a
     confirmation is about a row the user has not established and there is therefore
@@ -4947,6 +4973,17 @@ def _authorization_projection_view(projection: AuthorizationProjection) -> dict[
     **``coverage`` may be empty and the page must say so rather than say nothing**
     (§1, §11): an empty projection is an authority over an argument-free call, and a
     blank there would read as *"no limits"*, which is the opposite of what it states.
+
+    **``quote`` is the third and it crosses as absence or as three values** (ADR-0267
+    §7): the figure the proposed row was built over, ``null`` exactly where the row
+    records none. It is a **disclosure and not a check** (§6) — the page renders the
+    number the proof rests on and how old it is, and nothing here or on the page makes
+    the owner's answer a warrant that the price is still current.
+
+    **The amount crosses as its exact characters and never as a JSON number**, which
+    is :func:`_bound_view`'s own rule one value over: ``JSON.parse`` turns a number
+    into a double, so a price would reach the person **changed**, and a rendering
+    showing a figure the record does not hold is worse than one showing none.
 
     Args:
         projection: What the answer would establish.
@@ -4957,6 +4994,7 @@ def _authorization_projection_view(projection: AuthorizationProjection) -> dict[
     return {
         "coverage": [_coverage_view(one) for one in projection.coverage],
         "expires_at": projection.expires_at.isoformat(),
+        "quote": None if projection.quote is None else _quote_view(projection.quote),
     }
 
 

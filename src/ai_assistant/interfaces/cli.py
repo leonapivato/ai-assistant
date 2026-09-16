@@ -339,6 +339,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueueOutcome,
     QuietWindow,
+    QuoteView,
     ReadAnswerOutcome,
     ReadCancellation,
     ReadOutcome,
@@ -13543,6 +13544,52 @@ def _render_coverage(coverage: Sequence[CoverageView], *, indent: str) -> None:
         _print(f'{indent}  [dim]from what you said: "{_safe(view.span)}"[/]')
 
 
+def _render_confirmation_quote(quote: QuoteView | None, *, indent: str) -> None:
+    """The figure the act was quoted at, beside the ceiling (ADR-0267 §6, §7).
+
+    **A disclosure and not a check** (§6). Nothing in that decision expires a quote,
+    no comparison reads its age, and the window between the reading and the charge is
+    open; what closes it is provider-side and is a condition on wiring rather than a
+    rule this surface could state. So what is owed here is the residual said plainly:
+    the number the proof rests on and **how old it is**, so that a reader answering
+    is shown both. **No sentence here makes their assent a warrant that the price is
+    still current**, which is §6's own bar — and none of it discharges ADR-0255 §15
+    item 19's seventh condition.
+
+    **Beside the ceiling and not in place of it** (§7). The bound the answer would
+    establish is what :func:`_render_coverage` has just printed above; this is the
+    figure the row was **built over**, and *"a confirmation that renders a ceiling
+    without the figure the act was quoted at is not a confirmation of that charge"*.
+
+    **Absence prints nothing at all** (ADR-0178 §4), exactly as
+    :func:`_render_confirmation_authorization`'s own absence does. ADR-0267 §7 gives
+    the field three absent cases on the one path that writes it — no ``MONEY`` member,
+    no intended action, or no quote of the goal naming that action — and none of them
+    is a figure this surface could invent. **Nothing is re-selected here** (§7): a
+    refresh landing between the question and the answer changes the *ruling* at
+    dispatch and not this rendering.
+
+    **Nothing is rounded, re-denominated or localised.** The amount is printed as the
+    record spells it, which is :func:`_bound_sentence`'s rule one value over: ADR-0254
+    §10 puts whatever normalising an act needed at the moment the value was minted.
+
+    Args:
+        quote: The governing quote the proposed row was built over, or ``None``
+            where the row records none.
+        indent: The leading whitespace this block sits at.
+    """
+    if quote is None:
+        return
+    _print(
+        f"{indent}quoted at {_safe(str(quote.amount))} {_safe(quote.currency)}, "
+        f"read {_safe(_when(quote.read_at))}"
+    )
+    _print(
+        f"{indent}  [dim]That is what the price was when it was read. Answering is not "
+        f"a warrant that it is still current.[/]"
+    )
+
+
 def _render_confirmation_authorization(projection: AuthorizationProjection | None) -> None:
     """What answering *yes* would leave standing (ADR-0254 §11).
 
@@ -13575,6 +13622,7 @@ def _render_confirmation_authorization(projection: AuthorizationProjection | Non
         return
     _print("  [bold]Answering yes also leaves a standing authority:[/]")
     _render_coverage(projection.coverage, indent="    ")
+    _render_confirmation_quote(projection.quote, indent="    ")
     _print(f"    [dim]It lapses at {_safe(_when(projection.expires_at))}.[/]")
     _print(
         "    [dim]Until then I can make this call for this piece of work again "

@@ -11079,6 +11079,61 @@ function renderCoverage(item, coverage) {
   });
 }
 
+// The figure the act was quoted at, beside the ceiling (ADR-0267 §6, §7).
+//
+// **A disclosure and not a check** (§6). Nothing expires a quote, no comparison reads
+// its age, and the window between the reading and the charge is open; what would close
+// it is provider-side and is a condition on wiring rather than anything this page could
+// state. So what is owed here is the residual said plainly — the number the proof rests
+// on and **how old it is** — and **no sentence here makes the owner's answer a warrant
+// that the price is still current**.
+//
+// **Beside the ceiling and never in place of it** (§7): the bound is what
+// `renderCoverage` has just put above, and this is the figure the row was built over.
+// "A confirmation that renders a ceiling without the figure the act was quoted at is
+// not a confirmation of that charge."
+//
+// **Absence renders nothing at all** (ADR-0178 §4), which is the projection's own
+// absence rule one member in: §7 gives the field three absent cases and none of them is
+// a figure this page could invent.
+//
+// **The instant is rendered as the gateway sent it**, this page's convention for every
+// instant it shows (issue #1392's open lane, not this one's), and the amount as the
+// exact characters that crossed — nothing rounded, re-denominated or localised.
+function renderQuote(item, quote) {
+  if (quote === null || quote === undefined) {
+    return;
+  }
+  line(
+    item,
+    `quoted at ${quote.amount} ${quote.currency}, read ${quote.read_at}`,
+    "notification-summary"
+  );
+  line(
+    item,
+    "That is what the price was when it was read. Answering is not a warrant that it " +
+      "is still current.",
+    "hint"
+  );
+}
+
+// Whether a quote arrived whole (ADR-0267 §7).
+//
+// **All three fields or none**, because `QuoteView` has exactly three and every one of
+// them is part of the disclosure: an amount with no currency denominates nothing, and a
+// figure with no `read_at` is the half §6 rests on — "how old it is" — dropped.
+//
+// **A malformed one refuses the confirmation rather than being skipped**, which is
+// `readCoverageView`'s own arrangement and §7's reason: a rendering showing the ceiling
+// and silently dropping the figure "is not a confirmation of that charge", so the page
+// declines that one question rather than answering it wrongly (ADR-0178 §4 permits
+// refusing *that* confirmation and not every confirmation).
+function readQuoteView(quote) {
+  return (
+    isRecord(quote) && isText(quote.amount) && isText(quote.currency) && isText(quote.read_at)
+  );
+}
+
 // What answering *yes* would leave standing (ADR-0254 §11).
 //
 // **Rendered before the answer is collected**, because §11's whole point is that "a
@@ -11104,6 +11159,7 @@ function renderAuthorizationProjection(item, projection) {
   }
   line(item, "Answering yes also leaves a standing authority:", "notice");
   renderCoverage(item, projection.coverage);
+  renderQuote(item, projection.quote);
   line(
     item,
     `It lapses at ${projection.expires_at}. Until then I can make this call for this ` +
@@ -11119,7 +11175,13 @@ function readAuthorizationProjection(projection) {
     isRecord(projection) &&
     isText(projection.expires_at) &&
     Array.isArray(projection.coverage) &&
-    projection.coverage.every(readCoverageView)
+    projection.coverage.every(readCoverageView) &&
+    // ADR-0267 §7: `quote` is **required with no default**, so a projection arriving
+    // without the key has not arrived whole — tested as `expires_at` beside it is
+    // tested, and for the same reason. `null` is the absence the field itself carries
+    // and is a value this page renders as nothing; a missing key is a projection this
+    // page cannot tell an absent figure from a lost one.
+    (projection.quote === null || readQuoteView(projection.quote))
   );
 }
 
