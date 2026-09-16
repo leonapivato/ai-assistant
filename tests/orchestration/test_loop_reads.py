@@ -1290,6 +1290,17 @@ async def test_the_audit_copies_no_text_and_carries_only_the_correlation_id() ->
         # class: no query, no fragment, no length, no origin, no host, no address, no
         # title, no snippet and no provider message can reach this record.
         "disposition",
+        # ADR-0260 §7's **two** added fields, on identical terms — "the audit gains
+        # two fields on ADR-0226 §9's existing per-turn record and no second audit:
+        # whether the ask was serviced, and its `ForecastDisposition` where it has one".
+        # A boolean and a class: `forecast_serviced` is `False` on a servicing that
+        # carried no `FORECAST_READ` ask, and `forecast` is `None`, which is one of the
+        # two absences §8 enumerates. The pin stays closed over both because neither can
+        # carry a value the provider returned — no day, no place, no coordinate, no
+        # origin, no account and no `Settings` field name — and because §7 refuses a
+        # **count of dropped days** beside them in terms.
+        "forecast_serviced",
+        "forecast",
         # ADR-0240 §10's **two** added fields, on the same terms as the two above.
         # `structured_axes` is a tuple of closed-enumeration members — the classes of
         # the axes an ask applied, and never an instant, a person label, a topic label
@@ -1958,6 +1969,7 @@ async def test_no_caller_can_raise_the_budget() -> None:
             fetcher=None,
             listing=None,
             search=None,
+            forecast=None,
             utterance="when is billing due",
             audit=TurnReadAudit(),
             budget=100,  # type: ignore[call-arg]  # the point of the case

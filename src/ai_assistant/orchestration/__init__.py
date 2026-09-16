@@ -226,7 +226,7 @@ from ai_assistant.orchestration.payloads import (
     canonical_payload,
 )
 from ai_assistant.orchestration.questions import QuestionStage, question_state
-from ai_assistant.orchestration.reads import SearchFooting, SearchServicer
+from ai_assistant.orchestration.reads import ForecastServicer, SearchFooting, SearchServicer
 from ai_assistant.orchestration.recipient_grants import RecipientGrantOperations
 from ai_assistant.orchestration.recovery import RecoveryScan
 from ai_assistant.orchestration.routing import RoutedRoute, RoutingStage
@@ -250,6 +250,7 @@ __all__ = [
     "DataExport",
     "DestinationTrustOperations",
     "Engine",
+    "ForecastServicer",
     "GrantOperations",
     "HeldSource",
     "IngestionReport",

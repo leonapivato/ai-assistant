@@ -63,11 +63,16 @@ if TYPE_CHECKING:
 #: ADR-0208 §1's "records the turn already names, fetched by identifier", and a
 #: ``STRUCTURED_READ`` is ADR-0240 §1's structured filter over it.
 #:
-#: **The split is by where the record lives and not by which ADR minted it.** The two
+#: **The split is by where the record lives and not by which ADR minted it.** The three
 #: absent members each mint a record for one turn that "resolves in no store"
-#: (ADR-0231 §16, ADR-0230 §10), so their rows carry ``records`` empty and the count
-#: stands alone — which is ADR-0086 §4's shape reached "because the ids would not
-#: resolve rather than because they are the payload".
+#: (ADR-0231 §16, ADR-0230 §10, ADR-0260 §9), so their rows carry ``records`` empty and
+#: the count stands alone — which is ADR-0086 §4's shape reached "because the ids would
+#: not resolve rather than because they are the payload".
+#:
+#: **ADR-0260 §9 puts ``FORECAST_READ`` on the ephemeral side for that same stated
+#: reason**, which ADR-0260 §15 records as an amendment to ADR-0252 §1's second axis in
+#: its ephemeral-kind list alone: a minted forecast record is minted for one turn, is
+#: written to no store, and "a forecast row names no record and its count stands alone".
 DURABLE_KINDS: Final[frozenset[ReadKind]] = frozenset(
     {ReadKind.SIGHTED_QUERY, ReadKind.CITATION_HOP, ReadKind.STRUCTURED_READ}
 )
@@ -276,7 +281,7 @@ def supported_of(
 def requested_of(ask: ReadAsk) -> EvidenceApplicability | None:
     """Compose a row's ``requested`` from the *typed* part of the ask (§3).
 
-    **One kind of five produces a ``requested``, and that is the rule working rather
+    **One kind of six produces a ``requested``, and that is the rule working rather
     than a gap.** A ``STRUCTURED_READ``'s four axes are carried across **byte for
     byte** into one region, and an ask carrying a ``query`` beside its structure
     contributes the structure alone. Every other kind is **absent**, each on a clause
@@ -292,6 +297,12 @@ def requested_of(ask: ReadAsk) -> EvidenceApplicability | None:
       path besides, and a durable row is a worse place for one than an audit is.
     * **``WEB_SEARCH``** — **necessarily** absent: ADR-0231 §1 gives the ask "no
       field", which is "the whole safety mechanism and a property of the type".
+    * **``FORECAST_READ``** — necessarily absent for the same reason one kind further
+      (ADR-0260 §3, §9). The ask has **no part at all**, and §9 forbids composing one
+      out of what came back in terms: "no lane composes a ``requested`` from the
+      configured place, the configured horizon, the provider's answer or the days it
+      returned — none of those is the ask, and a ``requested`` built from what came back
+      is the manufactured applicability ADR-0252 §2 exists to prevent".
 
     **``requested`` comes from the ask and ``supported`` from the records**, and the
     asymmetry is structural rather than a rule to remember: they are written from two
@@ -396,6 +407,7 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
     records: Sequence[MemoryRecord],
     admitted: int,
     read_at: datetime,
+    source: str | None = None,
 ) -> GoalEvidence:
     """Compose one ``READ_OUTCOME`` row from one outcome entry (ADR-0252 §14).
 
@@ -413,11 +425,21 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
     ``supported``, into ``verdict`` or into any field, and **no row is recorded on
     account of one**.
 
-    **``source`` is absent on every row this decision's producers write** (§1). The
-    five ``ReadKind`` members each name their own source, and the one shape that would
-    carry a finer identity is a ``Reader``'s ``SourceReading.source``, whose producer
-    is not built here. No lane fills it with a provider name, a host, an address, a
-    path, a ``Settings`` field name or a credential identity.
+    **``source`` is absent on every row ADR-0252's own producers write** (§1), and it
+    stays absent on five of the six kinds: each of those ``ReadKind`` members *is* the
+    whole of its source identity, and the shape that would carry a finer one is a
+    ``Reader``'s ``SourceReading.source``, whose producer is not built here. No lane
+    fills it with a provider name, a host, an address, a path, a ``Settings`` field name
+    or a credential identity.
+
+    **A ``FORECAST_READ`` row is the one that declares one** (ADR-0260 §9): it is "the
+    forecaster's ``name``", which ADR-0260 §4 defines as the **source instance** — "the
+    owner's forecast" — and "never a vendor, never an origin, never a URL, never a
+    credential and **never a place**". That is what keeps it inside §1's prohibition
+    rather than an exception to it, and it is what makes ADR-0252 §8's limb 3 finer than
+    the kind. **It is supplied by the servicing that knows it and never composed here**:
+    this function copies the value it was handed and reaches for no forecaster, no
+    ``Settings`` field and no configuration of its own.
 
     **The row is born ``STANDING``.** The two terminal members are marks a later write
     applies — a supersession rides on ``record_evidence`` and an invalidation on
@@ -433,6 +455,9 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
         admitted: How many of those the supply did not already hold, which is
             ADR-0226 §9's ``new``.
         read_at: The instant this system performed the read, from the injected clock.
+        source: The reading's own declared identity, where the servicing has one
+            (ADR-0252 §1, ADR-0260 §9) — the forecaster's ``name`` on a
+            ``FORECAST_READ`` row, and ``None`` on every other kind.
 
     Returns:
         The row to persist.
@@ -444,6 +469,7 @@ def composed_row(  # noqa: PLR0913 — one parameter per thing a row is composed
         attempt_id=attempt_id,
         basis=EvidenceBasis.READ_OUTCOME,
         read_kind=ask.kind,
+        source=source,
         requested=requested_of(ask),
         supported=supported,
         supported_elided=supported_elided,

@@ -524,18 +524,23 @@ def test_every_member_of_every_source_vocabulary_is_placed_by_name() -> None:
     """§2: "no default branch and no fallback member", held mechanically.
 
     The classifier reads exactly one table, and this asserts the table is total over the
-    four vocabularies — so a member added to any of them without a class fails here (and
+    six vocabularies — so a member added to any of them without a class fails here (and
     at import, which is the harder failure) rather than falling through to a silent
     fifth outcome.
+
+    **Six and not four since ADR-0260 §8**, which adds that decision's two vocabularies
+    to ADR-0251 §2's per-member source lists: ``ForecastDisposition``'s twelve and
+    ``ForecastRefusal``'s six.
     """
     every = {
         _vocabulary_key(member) for vocabulary in _NON_YIELD_VOCABULARIES for member in vocabulary
     }
 
     assert set(_NON_YIELD_CLASSES) == every
-    assert len(every) == 34, (
-        "seventeen SearchDisposition, seven SearchRefusal, five FetchRefusal and five "
-        "StructuredOutcome; a change to any of those four counts is a change to this table"
+    assert len(every) == 52, (
+        "seventeen SearchDisposition, seven SearchRefusal, five FetchRefusal, five "
+        "StructuredOutcome, twelve ForecastDisposition and six ForecastRefusal; a change "
+        "to any of those six counts is a change to this table"
     )
     assert set(_NON_YIELD_CLASSES.values()) == set(_NonYieldClass), (
         "every limb is reached by some member, so none is dead"
@@ -909,6 +914,12 @@ def test_the_audit_gained_exactly_the_outcome_sequence_for_the_classifier() -> N
     servicing order, with the asks left behind. The turn-level additions and the
     no-copy rule are ``test_loop_investigation``'s arms; what is pinned here is that the
     per-servicing enumeration grew by one field and by one field only.
+
+    **ADR-0260 §7 adds its own two and no more**, and they are pinned in the same list
+    for the same reason: "the audit gains two fields on ADR-0226 §9's existing per-turn
+    record and no second audit — whether the ask was serviced, and its
+    ``ForecastDisposition`` where it has one", with **no count of dropped days** beside
+    them.
     """
     assert [field.name for field in fields(ServicedRead)] == [
         "kinds",
@@ -919,6 +930,8 @@ def test_the_audit_gained_exactly_the_outcome_sequence_for_the_classifier() -> N
         "labels_unresolved",
         "refusal",
         "disposition",
+        "forecast_serviced",
+        "forecast",
         "supplied",
         "withheld",
         "supplied_narrowed",

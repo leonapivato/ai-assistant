@@ -135,6 +135,7 @@ from ai_assistant.core.types import (
     EngagementDisposition,
     Evidence,
     ExchangeDisposition,
+    ForecastNotRead,
     Goal,
     GoalAbandonment,
     GoalAttempt,
@@ -10853,6 +10854,14 @@ class Engine:
         # only the branch that drives a step has (§6).
         searched_reach = responded.outbound_reach
         searched_records = responded.outbound_records
+        # ADR-0260 §10's two carriers, threaded exactly as the three above are and
+        # **never inferred here** — not from the supply, not from the reply and not from
+        # the audit. The reach is a **second** value beside the search's because ADR-0264
+        # §4's statement names *each class* a turn contacted, so folding the two into one
+        # would leave the assembly unable to say which seam established what; and the
+        # member is the fold ADR-0260 §10 declares, which no site recomputes.
+        forecast_reach = responded.forecast_reach
+        forecast_not_read = responded.forecast_not_read
         # ADR-0244 §9: the question **this turn parked**, assembled once here so it
         # appears in the exchange that raised it. Threaded exactly as the four carriers
         # above are and never inferred: the servicing site wrote the park and carried
@@ -10974,6 +10983,9 @@ class Engine:
             # That is #2365's shape: `servicing=not_asked`, and the member it needed.
             outbound = outbound_statement(
                 search=searched_reach,
+                # ADR-0260 §10's second class, folded here beside the first and neither
+                # displacing the other (§13's arm (l)).
+                forecast=forecast_reach,
                 egress=None,
                 records=searched_records,
                 # An answer is owed on this pass, which is the fact §7's `None` rule is
@@ -11060,6 +11072,12 @@ class Engine:
                 # ADR-0242 §9's field, folded in at the one place a ``TurnOutcome`` is
                 # built. It is the member the servicing site computed, by value.
                 search_not_serviced=search_not_serviced,
+                # ADR-0260 §10's field, on the identical terms and folded from the same
+                # servicings — a **second** member and never a second spelling of the
+                # first: a turn may carry both, one servicing having refused before it
+                # sent and another having read a forecast it could not use, and neither
+                # suppresses or qualifies the other (ADR-0264 §8's both-statements rule).
+                forecast_not_read=forecast_not_read,
                 # ADR-0264 §7's field, on the same terms: the value assembled above,
                 # by value and never a second computation.
                 outbound_statement=outbound,
@@ -11223,6 +11241,8 @@ class Engine:
         # standing (§13 item 8).
         outbound = outbound_statement(
             search=searched_reach,
+            # ADR-0260 §10's second class, as on the branch above and for its reason.
+            forecast=forecast_reach,
             egress=disposition.outbound,
             records=searched_records,
             # ADR-0170 §4: a pass whose step parked for confirmation owes no answer, and
@@ -11309,6 +11329,8 @@ class Engine:
             # ADR-0242 §9's field, as on the branch above and for its reason: the same
             # member, by value, and never a second computation.
             search_not_serviced=search_not_serviced,
+            # ADR-0260 §10's field, on the same terms and from the same fold.
+            forecast_not_read=forecast_not_read,
             # ADR-0264 §7's field, on the same terms and from the same assembly.
             outbound_statement=outbound,
             # ADR-0244 §9's first member, on the same terms. **A turn may park a read
@@ -13266,6 +13288,7 @@ class Engine:
         spoken: _SpokenCapture | None = None,
         recipient_grant: RecipientGrantOutcome | None = None,
         search_not_serviced: SearchNotServiced | None = None,
+        forecast_not_read: ForecastNotRead | None = None,
         outbound_statement: OutboundStatement | None = None,
         read_confirmation: Confirmation | None = None,
         read_answer: ReadAnswerOutcome | None = None,
@@ -13432,6 +13455,13 @@ class Engine:
             # ``converse_streaming`` and ``resume``, and ADR-0198 §1's restatement,
             # which drives nothing and searches nothing.
             search_not_serviced=search_not_serviced,
+            # ADR-0260 §10's field, on the identical terms: **the member the servicing
+            # computed, by value, and never a second computation**, folded in at the one
+            # place a ``TurnOutcome`` is built. ``None`` means the servicing recorded no
+            # ``ForecastDisposition``, and **means nothing else** — a turn that serviced
+            # no forecast read, and a read the provider answered. It is never derived
+            # from the outbound statement and nothing derives that from it (§10).
+            forecast_not_read=forecast_not_read,
             # ADR-0264 §7: **the same value ADR-0264 §6 assembled, by value, and never
             # a second computation.** The capture point is the one place a
             # ``TurnOutcome`` is built, so folding the already-assembled statement in

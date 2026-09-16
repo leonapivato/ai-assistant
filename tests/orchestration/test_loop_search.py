@@ -1088,6 +1088,9 @@ async def test_the_composers_model_is_shown_the_utterance_and_no_supply_span() -
         fetcher=None,
         listing=None,
         search=_servicer(composer=ModelBackedQueryComposer(model), granted=True),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=_ASK,
         audit=audit,
         footing=_footing(),
@@ -1127,6 +1130,9 @@ async def test_the_searcher_receives_the_composers_output_byte_for_byte() -> Non
         fetcher=None,
         listing=None,
         search=_servicer(composer=composer, searcher=_CostedSearcher(inner), granted=True),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=_ASK,
         audit=TurnReadAudit(),
         footing=_footing(),
@@ -1165,6 +1171,9 @@ async def test_a_refused_composition_reaches_the_searcher_not_at_all() -> None:
             trail=trail,
             granted=True,
         ),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=_ASK,
         audit=audit,
         footing=_footing(),
@@ -1196,6 +1205,9 @@ async def test_no_span_of_the_supply_reaches_any_value_the_searcher_received() -
         fetcher=None,
         listing=None,
         search=_servicer(searcher=_CostedSearcher(inner), granted=True),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=_ASK,
         audit=TurnReadAudit(),
         footing=_footing(),
@@ -1858,6 +1870,9 @@ async def test_the_disposition_rides_on_a_failing_record_too() -> None:
         fetcher=None,
         listing=None,
         search=_servicer(granted=False),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=_ASK,
         audit=audit,
         footing=_footing(),
@@ -2264,6 +2279,9 @@ async def test_the_degradation_line_carries_the_class_and_no_tier_1_value(
             searcher=_FaultingSearcher(ConnectionStoreError("conn-0001 could not be read")),
             granted=True,
         ),
+        # ADR-0260 §7's sixth kind is not this module's subject: every case here is
+        # stated over a deployment that configured no forecast provider.
+        forecast=None,
         utterance=utterance,
         audit=TurnReadAudit(),
         footing=_footing(),

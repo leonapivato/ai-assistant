@@ -75,6 +75,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
+    ForecastServicer,
     GrantOperations,
     HeldSource,
     IngestionStage,
@@ -1760,6 +1761,61 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             )
         )
 
+        # --- the forecast servicing site (ADR-0260 §7, §12's L3) --------------
+        #
+        # **One site, and this root wires the forecaster into it and into nothing
+        # else** (§7). §12 makes this the one file outside `orchestration/` that
+        # lane touches, and the reason is golden rule 1: the engine receives
+        # implementations by injection and `app/` is the only place a concrete is
+        # wired, so the call site and its wiring cannot land in different lanes.
+        # **No lane adds a second caller**: `ForecastServicer` is the only holder of
+        # the `Forecaster` reference below this line.
+        #
+        # **`None` where this deployment configured no provider**, which is not a
+        # special case but §8's `NOT_CONFIGURED` stated by a caller — the same shape
+        # `search_servicer` and `fetcher` already have, and the reason
+        # `service_read_request` takes the seam as a required keyword with no
+        # default.
+        #
+        # **The binder, the policy and the trail are the objects this root already
+        # holds**, and that is an obligation rather than a convenience. The policy is
+        # the one `StepRunner` and the search servicing rule with, so one deployment
+        # has one set of thresholds and one configured-provider comparison — ADR-0260
+        # §6 compares **each kind against its own configured pair**, and two policies
+        # could disagree about which pair a request was at. The trail is the one the
+        # runner and the ledger hold, for ADR-0192 §1's reason. The clock and the id
+        # factory are the recorder's (ADR-0021 §3).
+        #
+        # **No `ParkedReads` and no park lifetime** (ADR-0260 §11): this decision
+        # mints **no** park for a forecast read, so a `CONFIRM` recorded here "is
+        # recorded, is not made, is not parked" and is reported under §10's
+        # `AUTHORISATION_AWAITED`. The absence is a property of the signature rather
+        # than of a line somebody remembered not to write.
+        #
+        # **The deadline is the one figure ADR-0241 §3 gives the servicing, and
+        # ADR-0260 §11 forbids a second.** That section rules that "the forecast read
+        # runs under the deadline ADR-0241 §1 already hands the servicing" and that "a
+        # `Settings` figure of its own would be a second bound on one turn", so this
+        # root forwards `search_call_deadline` to both seams rather than reading a
+        # field this decision declined to add.
+        forecast_servicer = (
+            None
+            if forecast is None
+            else ForecastServicer(
+                # The integration's **forecaster** and never the integration: its
+                # `registration` is the binding seam's half of the same value and
+                # reached `EgressBindingSeam` above, and a servicer handed both would
+                # hold a registration table it has no use for.
+                forecaster=forecast.forecaster,
+                binder=binder,
+                policy=policy,
+                trail=trail,
+                now=_utcnow,
+                id_factory=_uuid,
+                deadline=settings.search_call_deadline,
+            )
+        )
+
         loop = LearningLoop(
             context=context,
             memory=memory,
@@ -1836,6 +1892,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # read through the very object that parked its question, and two would
             # hold two search budgets, two composers and two views of one park.
             search=search_servicer,
+            # The forecast servicing site built above (ADR-0260 §7, §12's L3), where
+            # this deployment configured a provider. **The loop is its only holder and
+            # `service_read_request` its only caller**, which is what keeps §7's
+            # "wires the forecaster into that one site and into nothing else, and no
+            # lane adds a second caller" a property of this wiring.
+            forecast=forecast_servicer,
             # Passed rather than defaulted, for the reason the ingestor's
             # ``conflict_limit`` is (ADR-0119 §9): this is the second cardinality
             # control, and its effective ``search`` limit is its own value —

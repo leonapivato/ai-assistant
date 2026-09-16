@@ -44,6 +44,18 @@ made through ``ToolInvoker.invoke``, because taking the invoker's route would re
 a registry entry and a registry entry would put a search in front of the planner —
 the outcome ADR-0231 §5 exists to prevent (§6).
 
+**And the sixth kind is the second that leaves the machine, one stage shorter**
+(ADR-0260 §7). A ``FORECAST_READ`` ask is serviced here too, under the same budget, into
+the same fourth group and onto the same record — no second servicing site, no second
+budget, no second audit, no second seam — and it adds one further position in the order,
+**third**, between the search and the hop, and two further fields on §9's record. What is
+genuinely different from a search is that there is **no compose step**: ADR-0260 §3 gives
+the ask no argument at all, so the order is "bind, then rule, then record, then send",
+nothing this turn produced reaches the request, and the place and the horizon are the
+deployment's own configuration. The authority is ADR-0247 §2's route (c) as ADR-0260 §6
+widens it — each kind compared against **its own** configured pair — and what the user is
+told is ADR-0260 §10's fold, computed here and carried out as data.
+
 **No filesystem address is ever composed here** (ADR-0230 §2). This module parses an
 ordinal and indexes the listing it was handed; the value it passes ``Fetcher.fetch``
 is a :class:`~ai_assistant.core.types.SourceListingEntry` the *fetcher* minted,
@@ -90,7 +102,7 @@ import structlog
 
 from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.correlation import current_correlation
-from ai_assistant.core.errors import AssistantError, MemoryStoreError
+from ai_assistant.core.errors import AssistantError, MemoryStoreError, ToolBindingError
 from ai_assistant.core.types import (
     ActionRequest,
     AttemptKind,
@@ -98,6 +110,8 @@ from ai_assistant.core.types import (
     DestinationTrust,
     EgressBinding,
     FetchRefusal,
+    ForecastNotRead,
+    ForecastRefusal,
     MemoryKind,
     OutboundDestination,
     OutboundReach,
@@ -132,6 +146,7 @@ if TYPE_CHECKING:
         AuditTrail,
         EgressBinder,
         Fetcher,
+        Forecaster,
         MemoryStore,
         ParkedReads,
         QueryComposer,
@@ -640,6 +655,288 @@ def contact_of(disposition: SearchDisposition | None) -> OutboundReach:
     return SEARCH_CONTACTS[disposition]
 
 
+class ForecastDisposition(StrEnum):
+    """Why a ``FORECAST_READ`` ask put no record into the supply (ADR-0260 §8).
+
+    **A closed enumeration of exactly twelve members, each valued by its lower-cased
+    name** — the servicing's own account of what became of the ask, beside
+    :class:`SearchDisposition`, which is where ADR-0260 §8 puts it: it *"crosses no
+    subsystem boundary, being the servicer's own account"*, where
+    :class:`~ai_assistant.core.types.ForecastRefusal`,
+    :class:`~ai_assistant.core.types.ForecastOutcome`,
+    :class:`~ai_assistant.core.types.ReadOutcomeKind` and
+    :class:`~ai_assistant.core.types.ForecastNotRead` each cross one and are
+    ``core``'s. The vocabulary is **added to and never renamed**, and no
+    implementation, setting or later lane adds a thirteenth without the ADR that
+    decides it.
+
+    **Two vocabularies and not one, which is ADR-0231's shape taken for its reason**
+    (§8). The seam answers for what *it* did —
+    :class:`~ai_assistant.core.types.ForecastRefusal`, six members, every one of them
+    a value :meth:`~ai_assistant.core.protocols.Forecaster.read` returns — and this
+    answers for the stages the seam never sees: no registration, no budget, no
+    derivable binding, no ``ALLOW``.
+
+    **A read that reached the provider and was answered records *no* member of this
+    vocabulary**, records or none (§8):
+    :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` maps to no disposition,
+    which is what §10's contact rule is computed from and is ADR-0231 §13's own
+    construction one seam over.
+
+    **A class and nothing else** (§8, ADR-0004 §5). No member carries a message, a
+    ground, a provider name, a destination, a place, a coordinate, a day, a monetary
+    figure, a duration, a count or a ``Settings`` field name, and no statement
+    rendered for one carries any of them: ADR-0242 §9's bar binds this vocabulary as
+    it binds ``SearchNotServiced``, so **these members state what became of the ask
+    and never why a source ruled the way it did**. The whole value is one of them, so
+    there is nowhere in ADR-0226 §9's record for one to sit.
+    """
+
+    NOT_CONFIGURED = "not_configured"
+    """This deployment configured no forecast provider (ADR-0260 §8, §11).
+
+    Both routes to it are the same fact about the same stage, exactly as
+    :attr:`SearchDisposition.NOT_CONFIGURED`'s two are: no forecaster is wired into
+    the loop at all, and a wired forecaster whose
+    :meth:`~ai_assistant.core.protocols.Forecaster.request` answered ``None`` because
+    the four-field registration is absent. A provisioning fact, and the one §10 folds
+    to :attr:`~ai_assistant.core.types.ForecastNotRead.NOT_CONFIGURED` — the member
+    whose statement names an **operator** setting and no user act."""
+
+    NO_BUDGET = "no_budget"
+    """Fewer than one slot of ADR-0226 §6's ten remained when the forecast was reached.
+
+    §7: *"no request is composed, no ruling is sought and no channel is opened"*, and
+    §8's classifier produces **no outcome entry at all** for the ask — ADR-0251 §2's
+    precedence case 1, because *"a read the budget did not reach is not in it"*. **A
+    read the budget prevented is not a read that found nothing**, and no
+    implementation, carrier or audit field conflates them.
+
+    **Reachable on the order §7 fixes**, unlike the search's member of the same name:
+    the forecast is serviced third, so a file that took one slot and a search that
+    took as many as nine leave it with none — which is §13's arm (f)."""
+
+    BINDING_FAILED = "binding_failed"
+    """A stage before the send refused, and no channel was opened (ADR-0260 §6, §8).
+
+    Two producers and one member, because both are the same stage: ``EgressBinder.bind``
+    refused, raised or held no registration for this declaration; and **ADR-0029 §2's
+    three pre-execution checks**, which §6 makes :meth:`Forecaster.read` perform itself
+    and which raise ``ToolBindingError`` *"before any credential is read and any channel
+    is opened"* — a mutated call, one carrying a definition the forecaster did not
+    register, and one its decision does not authorise. §6 states the recording in terms:
+    such a failure *"**is recorded by the servicing as `BINDING_FAILED`**"*.
+
+    **It is not ADR-0148 §6's pre-transmit refusal**, which is
+    :attr:`PROVIDER_REFUSED` returned as a value: §6 separates them by what moved —
+    these raise because *the thing about to run is not the thing that was authorised*,
+    where those fire on a call that was and stayed exactly that and whose connection
+    record moved beneath it.
+
+    **No message, no exception type and no store detail** (ADR-0004 §5): a fault is an
+    operator's fact and the class is the whole of what this Tier 2 event may say about
+    one."""
+
+    RULING_CONFIRM = "ruling_confirm"
+    """The recorded ruling was ``CONFIRM`` (ADR-0260 §6, §8).
+
+    **Not the ordinary ruling for this kind.** A forecast read at the configured
+    forecast provider reaches an ``ALLOW`` on ADR-0247 §2's route (c) as ADR-0260 §6
+    widens it, with no confirmation sought and no grant seam consulted. What still
+    draws this row is a ground of its own: the per-call cost the deployment declared no
+    figure for (ADR-0236 §4's unknown-cost floor, which §11 leaves untouched), a
+    ``DENY``-free policy that confirms on some other threshold, or a binding whose
+    account or origin is not the configured forecast pair.
+
+    **Nothing is parked** (§11). ADR-0244's park is a ``CONFIRM`` on a **search** and
+    nothing here widens it, so a forecast read ruled ``CONFIRM`` *"is recorded, is not
+    made, is not parked"* and is reported under §10's
+    :attr:`~ai_assistant.core.types.ForecastNotRead.AUTHORISATION_AWAITED`. No lane
+    resumes it and none treats it as outstanding work."""
+
+    RULING_DENY = "ruling_deny"
+    """The recorded ruling was ``DENY`` — a policy the operator set (ADR-0260 §8)."""
+
+    RULING_UNAVAILABLE = "ruling_unavailable"
+    """``ActionPolicy`` raised, or the decision could not be recorded (ADR-0260 §8).
+
+    :attr:`SearchDisposition.RULING_UNAVAILABLE`'s two limbs at a second seam and for
+    its reasons. A trail that accepted the append and does not hand the record back is
+    one that could not record the decision, so it resolves here rather than opening a
+    channel on a decision nothing holds. It carries no message, no exception type and
+    no store detail."""
+
+    SPEND_REFUSED = "spend_refused"
+    """A spend ceiling refused the call before it was made (ADR-0260 §8).
+
+    **The member has no producer in this tree, and that is ADR-0260 read rather than
+    an omission.** §6 enumerates what :meth:`Forecaster.read` performs and names
+    neither ADR-0194 §3's admission nor ADR-0192's claim; ``tools/forecast.py`` says so
+    in terms — *"No spend gate and no invocation ledger"* — and
+    :class:`~ai_assistant.core.types.ForecastRefusal` carries no ``SPEND_REFUSED``
+    member where ``SearchRefusal`` has one. §8 nonetheless states the vocabulary at
+    twelve, §10 folds this to
+    :attr:`~ai_assistant.core.types.ForecastNotRead.SPEND_EXHAUSTED` and places it on
+    the no-contact side, and §13's arm (k) walks it; so it is written exactly as the
+    decision states it and simply has nothing that reaches it, which is
+    :attr:`~ai_assistant.core.types.SearchNotServiced.TRUST_MISSING`'s standing one
+    vocabulary over. **No lane removes it** on the ground that nothing produces it."""
+
+    TRANSPORT_FAILED = "transport_failed"
+    """:attr:`~ai_assistant.core.types.ForecastRefusal.TRANSPORT_FAILED`, carried across.
+
+    An outage — a refused connection, a TLS failure, a channel closed mid-response. It
+    is **not** a slow provider, which is :attr:`DEADLINE_EXPIRED`: an operator reading
+    a population cannot act on one field meaning both *"the provider is unreachable"*
+    and *"the provider is slow"*."""
+
+    DEADLINE_EXPIRED = "deadline_expired"
+    """:attr:`~ai_assistant.core.types.ForecastRefusal.DEADLINE_EXPIRED`, carried across.
+
+    The bound this site handed :meth:`Forecaster.read` expired before it answered
+    (ADR-0241 §1, ADR-0260 §11). It carries no duration, no bound, no elapsed figure
+    and no place: ADR-0004 §5 binds without qualification, and a duration in a per-turn
+    event is a fact about the *system* ADR-0228 §10 has already refused to render.
+
+    **It is the seam's own expiry and never an outer one** (ADR-0241 §4). A read
+    cancelled from outside while suspended re-raises ``CancelledError`` and reaches no
+    member of this vocabulary at all."""
+
+    RESPONSE_TOO_LARGE = "response_too_large"
+    """:attr:`~ai_assistant.core.types.ForecastRefusal.RESPONSE_TOO_LARGE`, carried across.
+
+    The response passed ``forecast_max_response_bytes`` and was abandoned while being
+    read, nothing was parsed and no record was minted (ADR-0260 §11). **It establishes
+    a contact** (§10): this system reaches the member only from octets the provider's
+    channel had already returned."""
+
+    PROVIDER_REFUSED = "provider_refused"
+    """:attr:`~ai_assistant.core.types.ForecastRefusal.PROVIDER_REFUSED`, carried across.
+
+    **Two causes under one member, and no value separates them** (ADR-0260 §6): a
+    response the provider gave and this system refused — a non-success status, a
+    blocked origin, a body its documented format does not admit — and **ADR-0148 §6's
+    pre-transmit refusal**, whose limbs discard the credential and open no channel.
+
+    **So it establishes nothing either way** (§10), over *both* its causes, which is
+    ADR-0264 §13's third arm taken at its word rather than one member read two ways at
+    two seams: a site holding it cannot tell whether octets arrived, and ADR-0264 §1
+    ranks silence above a false claim."""
+
+    UNATTESTED = "unattested"
+    """:attr:`~ai_assistant.core.types.ForecastRefusal.UNATTESTED`, carried across.
+
+    The response declared no instant this system could read as one, so ADR-0260 §5
+    minted nothing rather than substituting a clock of its own (ADR-0092 §3). **It
+    establishes a contact** (§10), for :attr:`RESPONSE_TOO_LARGE`'s reason."""
+
+
+#: ADR-0260 §8's carry-across from the forecast seam's vocabulary, **injective** for
+#: :data:`SEARCH_DISPOSITIONS`' reason, over the five members that reach the servicer.
+#:
+#: :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` is deliberately absent and
+#: maps to no disposition at all: §8 rules that *"a read that reached the provider and
+#: was answered records **no** disposition, records or none"*, and a completed servicing
+#: whose returned count is zero is what ADR-0226 §9 already records — *"calling it a
+#: disposition would double-count it"*. §13's arm (k) asserts that absence over the enum
+#: itself, so a lane that adds an arm for it fails.
+FORECAST_DISPOSITIONS: Final[Mapping[ForecastRefusal, ForecastDisposition]] = MappingProxyType(
+    {
+        ForecastRefusal.TRANSPORT_FAILED: ForecastDisposition.TRANSPORT_FAILED,
+        ForecastRefusal.DEADLINE_EXPIRED: ForecastDisposition.DEADLINE_EXPIRED,
+        ForecastRefusal.RESPONSE_TOO_LARGE: ForecastDisposition.RESPONSE_TOO_LARGE,
+        ForecastRefusal.PROVIDER_REFUSED: ForecastDisposition.PROVIDER_REFUSED,
+        ForecastRefusal.UNATTESTED: ForecastDisposition.UNATTESTED,
+    }
+)
+
+
+#: ADR-0260 §10's establishment partition of :class:`ForecastDisposition`, **total over
+#: the twelve members the vocabulary is closed at** and written once here, beside the
+#: carry-across whose discipline it shares: a member added without an arm fails rather
+#: than falling to a default. §13's arm (k) asserts it over the enum itself.
+#:
+#: * :attr:`~ai_assistant.core.types.OutboundReach.REACHED` — **a contact**, because
+#:   this system reaches the member only from octets the provider's channel had already
+#:   returned. :attr:`ForecastDisposition.RESPONSE_TOO_LARGE` is reached only from a
+#:   reader counting octets off the channel and
+#:   :attr:`ForecastDisposition.UNATTESTED` only from a response that declared no
+#:   instant, so both arrived. **Either folded to ``INDETERMINATE`` would deny a contact
+#:   the trail recorded**, which is what §13's arm (h) asserts them separately for.
+#: * :attr:`~ai_assistant.core.types.OutboundReach.INDETERMINATE` — **nothing either
+#:   way**, and the least-claiming direction taken deliberately (§10). A refused
+#:   connection and an expiry of the caller's bound are each consistent with a request
+#:   that left and with one that did not; and
+#:   :attr:`ForecastDisposition.PROVIDER_REFUSED` is recorded **both** for a response
+#:   the provider gave and this system refused **and** for ADR-0148 §6's pre-transmit
+#:   refusal, which *"discards the credential and opens no channel"*. None of the three
+#:   carries a value separating its causes, and §10 takes ADR-0264 §13's third arm at
+#:   its word: *"an implementation reading it as a response is what this arm exists to
+#:   catch"*.
+#: * :attr:`~ai_assistant.core.types.OutboundReach.NOT_REACHED` — **no contact**, every
+#:   one of them a stage before the send: no provider configured, no slot, no derivable
+#:   binding, no ``ALLOW``, or a ceiling that refused.
+#:
+#: **The absence of a member is the thirteenth case and is not in this table** (§10): a
+#: call that completed and recorded no disposition reached the provider and was
+#: answered, which is :func:`forecast_contact_of`'s own first branch.
+FORECAST_CONTACTS: Final[Mapping[ForecastDisposition, OutboundReach]] = MappingProxyType(
+    {
+        ForecastDisposition.NOT_CONFIGURED: OutboundReach.NOT_REACHED,
+        ForecastDisposition.NO_BUDGET: OutboundReach.NOT_REACHED,
+        ForecastDisposition.BINDING_FAILED: OutboundReach.NOT_REACHED,
+        ForecastDisposition.RULING_CONFIRM: OutboundReach.NOT_REACHED,
+        ForecastDisposition.RULING_DENY: OutboundReach.NOT_REACHED,
+        ForecastDisposition.RULING_UNAVAILABLE: OutboundReach.NOT_REACHED,
+        ForecastDisposition.SPEND_REFUSED: OutboundReach.NOT_REACHED,
+        ForecastDisposition.RESPONSE_TOO_LARGE: OutboundReach.REACHED,
+        ForecastDisposition.UNATTESTED: OutboundReach.REACHED,
+        ForecastDisposition.TRANSPORT_FAILED: OutboundReach.INDETERMINATE,
+        ForecastDisposition.DEADLINE_EXPIRED: OutboundReach.INDETERMINATE,
+        ForecastDisposition.PROVIDER_REFUSED: OutboundReach.INDETERMINATE,
+    }
+)
+
+
+def forecast_contact_of(disposition: ForecastDisposition | None) -> OutboundReach:
+    """What one **performed** forecast call established (ADR-0260 §10, ADR-0264 §2).
+
+    **The caller must have performed a call.** The absent disposition is §10's
+    thirteenth case — *"a forecast read establishes an outbound contact where its call
+    completed and recorded no ``ForecastDisposition``"*, which is a read that reached
+    the provider and was answered, records or none, because
+    :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` maps to no disposition
+    (§8). A site that performed **no** call establishes nothing either way and does not
+    call this: it contributes nothing to the fold, and a turn every one of whose sites
+    contributed nothing is ``NOT_REACHED`` (ADR-0264 §1).
+
+    **The fact is never derived from**
+    :class:`~ai_assistant.core.types.ForecastNotRead` (§10), which is non-injective by
+    design: ``UNAVAILABLE`` covers a response that arrived and was refused *and* a
+    transport that failed, which this partition's first and second groups separate. A
+    site holding only the folded member cannot compute this and does not try.
+
+    **It is computed at the performing site and no site recomputes another's** (§10).
+    A response that arrived is a contact whatever the enclosing servicing's fate, so
+    this is called where the call was made and never re-derived from
+    :attr:`ServicedRead.forecast` after the servicing has ended — an absent disposition
+    on a *failed* servicing covers both a read that was answered and a servicing that
+    raised before its forecast was serviced, and the record holds nothing that
+    separates them.
+
+    Args:
+        disposition: What the call resolved to, or ``None`` where it completed and
+            recorded none.
+
+    Returns:
+        The member of :class:`~ai_assistant.core.types.OutboundReach` §10 places this
+        call in.
+    """
+    if disposition is None:
+        return OutboundReach.REACHED
+    return FORECAST_CONTACTS[disposition]
+
+
 #: ADR-0264 §2's fold order, least-claiming first, read by :func:`folded_reach`.
 _REACH_RANK: Final[Mapping[OutboundReach, int]] = MappingProxyType(
     {
@@ -686,6 +983,7 @@ def folded_reach(carried: OutboundReach | None, one: OutboundReach | None) -> Ou
 def outbound_statement(
     *,
     search: OutboundReach | None,
+    forecast: OutboundReach | None = None,
     egress: OutboundReach | None,
     records: int,
     composes: bool,
@@ -698,12 +996,23 @@ def outbound_statement(
     and the executed-egress fact the component that drove the step computed — never an
     ``EgressBinding``, a ``Disposition`` or a ``StepExecution`` read here.
 
-    **The destination class is derived from the *search* reach and from nothing else**,
-    which is §3 written as code rather than as a rule to remember: this decision
-    establishes a contact from a ``WEB_SEARCH`` call and from nothing else, so
-    ``egress`` can make a turn ``INDETERMINATE`` and can never name a class or make it
-    ``REACHED``. A turn that contacted one class through three servicings names it once,
-    because the classes are a set of kinds and never an enumeration of servicings (§4).
+    **Each destination class is derived from its own seam's reach and from no other's**
+    — §3 as ADR-0260 §15 amends it, written as code rather than as a rule to remember.
+    ADR-0264 §3's *"from a ``WEB_SEARCH`` call and from nothing else"* stops being
+    readable as a closure over the corpus the moment a second seam establishes a
+    contact, which is that ADR working rather than a departure from it: §5 requires a
+    later outbound seam to add its own member, and *"a member that renders is a contact
+    that was established"*. So ``search`` decides
+    :attr:`~ai_assistant.core.types.OutboundDestination.SEARCH_PROVIDER` and
+    ``forecast`` decides
+    :attr:`~ai_assistant.core.types.OutboundDestination.FORECAST_PROVIDER`, **neither
+    displacing the other** — ADR-0260 §13's arm (l) is exactly that: a turn that reached
+    both carries **one** statement naming **both** classes, in §5's declared order,
+    because an implementation overwriting one with the other would deny a contact the
+    trail recorded. ``egress`` still names no class and can only make a turn
+    ``INDETERMINATE`` (§3's prohibition, which binds entire). A turn that contacted one
+    class through three servicings names it once, because the classes are a set of kinds
+    and never an enumeration of servicings (§4).
 
     **A turn that carries nothing carries** ``NOT_REACHED`` **and not** ``None``
     (§1, §7): #2365's shape is a turn that made no call at all, and leaving the member
@@ -713,12 +1022,21 @@ def outbound_statement(
     Args:
         search: What this turn's ``WEB_SEARCH`` calls established, folded by
             :func:`folded_reach`, or ``None`` where it performed none.
+        forecast: What this turn's forecast calls established, folded by
+            :func:`folded_reach`, or ``None`` where it performed none (ADR-0260 §10).
+            **Defaulted**, and that is the one seam where a default is honest here: a
+            pass that services no read at all — a resumed park, a resolved step —
+            performs no forecast call by construction, and ``None`` is what such a site
+            already says about the search by passing it.
         egress: What the driven egress step established, or ``None`` where the turn
             drove none, the step carried no ``EgressBinding``, or the executor proved
             the callable was never reached (ADR-0192 §1's three windows).
         records: How many records this turn's established contacts put into its supply
             (§4). Read only where a contact was established, because §4 couples the
-            two and the model refuses an uncoupled value.
+            two and the model refuses an uncoupled value. **One population over the
+            turn**, so a turn that reached two classes states the sum of what both
+            admitted and never one figure per class: the statement names a set of kinds
+            and carries one count.
         composes: Whether an answer is owed on this pass — that is, whether the
             composing stage is **reached**. ``False`` on a routed park, on which
             ADR-0197 §10 rules "the composing stage is not reached", and on the two
@@ -748,15 +1066,25 @@ def outbound_statement(
         The statement this turn carries, or ``None`` on a pass that **neither
         established a contact nor composed a reply** (§7).
     """
-    reach = folded_reach(search, egress) or OutboundReach.NOT_REACHED
+    reach = folded_reach(folded_reach(search, forecast), egress) or OutboundReach.NOT_REACHED
     if reach is OutboundReach.REACHED:
-        # Only a `WEB_SEARCH` call reaches this member (§3), so the class is known by
-        # construction and the model's own coupling check cannot be tripped here.
-        return OutboundStatement(
-            reach=reach,
-            destinations=(OutboundDestination.SEARCH_PROVIDER,),
-            records=records,
+        # **The classes are read off the two seams' own answers and are never inferred
+        # from the fold** (§4, ADR-0260 §10). `egress` reaches no class at all (§3), so
+        # a `REACHED` fold is a `REACHED` on at least one of the two below and the
+        # tuple cannot be empty — which is what keeps the model's own coupling check
+        # from being tripped here. The order is `OutboundDestination`'s own, stated by
+        # the order of these two lines and validated again on the model, because §4
+        # forbids an encounter order and ADR-0260 §10 puts `FORECAST_PROVIDER`
+        # **after** `SEARCH_PROVIDER`.
+        contacted = tuple(
+            member
+            for member, reached in (
+                (OutboundDestination.SEARCH_PROVIDER, search),
+                (OutboundDestination.FORECAST_PROVIDER, forecast),
+            )
+            if reached is OutboundReach.REACHED
         )
+        return OutboundStatement(reach=reach, destinations=contacted, records=records)
     if composes:
         # §4: on `NOT_REACHED` and `INDETERMINATE` the classes are empty and the count
         # is `0` — there is no contact for a record to have entered the supply on.
@@ -846,7 +1174,14 @@ class StructuredOutcome(StrEnum):
 
 #: Every typed non-yield a source of this system can produce, as one annotation
 #: (ADR-0251 §2). Four vocabularies: two ``orchestration``'s own and two ``core``'s.
-_NonYield = SearchDisposition | SearchRefusal | FetchRefusal | StructuredOutcome
+_NonYield = (
+    SearchDisposition
+    | SearchRefusal
+    | FetchRefusal
+    | StructuredOutcome
+    | ForecastDisposition
+    | ForecastRefusal
+)
 
 
 class _NonYieldClass(StrEnum):
@@ -886,18 +1221,19 @@ class _NonYieldClass(StrEnum):
 def _vocabulary_key(member: _NonYield) -> tuple[str, str]:
     """The key one typed non-yield is placed under, and why it is not the member.
 
-    **Four ``StrEnum`` vocabularies share six member names**, and a ``StrEnum`` member
+    **Six ``StrEnum`` vocabularies share many member names**, and a ``StrEnum`` member
     hashes and compares as its value — so ``SearchDisposition.SPEND_REFUSED`` and
     ``SearchRefusal.SPEND_REFUSED`` are one key in any mapping keyed on the member
-    itself. Today both must reach the same class, and do; a table that *collapsed* them
-    would make that agreement silent rather than checked, and would let a member added
-    to one vocabulary tomorrow inherit a class a different vocabulary decided. Keying on
-    the vocabulary's own name beside the member's makes the thirty-four placements
-    thirty-four rows, so §2's "no default branch and no fallback member" is checkable by
-    counting.
+    itself, as are the three spellings of ``TRANSPORT_FAILED`` ADR-0260 §8 adds to.
+    Today every such pair must reach the same class, and does; a table that *collapsed*
+    them would make that agreement silent rather than checked, and would let a member
+    added to one vocabulary tomorrow inherit a class a different vocabulary decided.
+    Keying on the vocabulary's own name beside the member's makes the fifty-two
+    placements fifty-two rows, so §2's "no default branch and no fallback member" is
+    checkable by counting.
 
     Args:
-        member: One member of one of the four source vocabularies.
+        member: One member of one of the six source vocabularies.
 
     Returns:
         Its vocabulary's name and its own, which no two members share.
@@ -908,13 +1244,21 @@ def _vocabulary_key(member: _NonYield) -> tuple[str, str]:
 #: ADR-0251 §2's class per typed non-yield, **stated member by member and never
 #: derived from a name, a prefix or a substring**. It is the whole of the enum-facing
 #: half of the classifier, and the classifier itself reads no vocabulary but this
-#: mapping — so a member added to any of the four without a class here fails at import
+#: mapping — so a member added to any of the six without a class here fails at import
 #: rather than falling through to a default, which is §2's "no default branch and no
 #: fallback member" held mechanically rather than by review.
 #:
 #: **Keyed by :func:`_vocabulary_key` rather than by the member**, for the collapse that
-#: function records: four ``StrEnum``s sharing six member names would otherwise be
-#: twenty-eight rows rather than thirty-four.
+#: function records: six ``StrEnum``s sharing member names would otherwise be fewer rows
+#: than the fifty-two placements this table makes.
+#:
+#: **ADR-0260 §8's two vocabularies are placed here member for member** (its own
+#: per-member lists), and the placements agree with the search's on every shared
+#: spelling: the forecast disposition vocabulary's configuration, ruling, spend and
+#: attestation members are ``REFUSED`` and its failure members ``FAILED``, its
+#: ``NO_BUDGET`` is ``UNREACHED`` under §2's case 1, and
+#: ``ForecastRefusal.NO_RESULT`` is ``ANSWERED`` for ``SearchRefusal.NO_RESULT``'s
+#: reason — §8 puts it under ``EMPTY``, which is exactly what the counts then say.
 #:
 #: **``SearchRefusal.RESPONSE_TOO_LARGE`` is a failure and
 #: ``SearchDisposition.RESPONSE_TOO_LARGE`` is read the same way**, as are the two
@@ -971,17 +1315,39 @@ _NON_YIELD_CLASSES: Final[Mapping[tuple[str, str], _NonYieldClass]] = MappingPro
         _vocabulary_key(StructuredOutcome.NO_SLOT): _NonYieldClass.UNREACHED,
         _vocabulary_key(StructuredOutcome.RETURNED_NOTHING): _NonYieldClass.ANSWERED,
         _vocabulary_key(StructuredOutcome.RETURNED_RECORDS): _NonYieldClass.ANSWERED,
+        # --- ForecastDisposition (ADR-0260 §8, twelve members) ------------------
+        _vocabulary_key(ForecastDisposition.NOT_CONFIGURED): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.NO_BUDGET): _NonYieldClass.UNREACHED,
+        _vocabulary_key(ForecastDisposition.BINDING_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(ForecastDisposition.RULING_CONFIRM): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.RULING_DENY): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.RULING_UNAVAILABLE): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.SPEND_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.TRANSPORT_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(ForecastDisposition.DEADLINE_EXPIRED): _NonYieldClass.EXPIRED,
+        _vocabulary_key(ForecastDisposition.RESPONSE_TOO_LARGE): _NonYieldClass.FAILED,
+        _vocabulary_key(ForecastDisposition.PROVIDER_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastDisposition.UNATTESTED): _NonYieldClass.REFUSED,
+        # --- ForecastRefusal (ADR-0260 §4, §8, six members) ---------------------
+        _vocabulary_key(ForecastRefusal.TRANSPORT_FAILED): _NonYieldClass.FAILED,
+        _vocabulary_key(ForecastRefusal.DEADLINE_EXPIRED): _NonYieldClass.EXPIRED,
+        _vocabulary_key(ForecastRefusal.RESPONSE_TOO_LARGE): _NonYieldClass.FAILED,
+        _vocabulary_key(ForecastRefusal.PROVIDER_REFUSED): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastRefusal.UNATTESTED): _NonYieldClass.REFUSED,
+        _vocabulary_key(ForecastRefusal.NO_RESULT): _NonYieldClass.ANSWERED,
     }
 )
 
 
-#: The four vocabularies :data:`_NON_YIELD_CLASSES` must be total over, named once so
+#: The six vocabularies :data:`_NON_YIELD_CLASSES` must be total over, named once so
 #: the import-time check and the test that pins it cannot disagree about the set.
 _NON_YIELD_VOCABULARIES: Final = (
     SearchDisposition,
     SearchRefusal,
     FetchRefusal,
     StructuredOutcome,
+    ForecastDisposition,
+    ForecastRefusal,
 )
 
 _unplaced = sorted(
@@ -1038,6 +1404,20 @@ class AskFacts:
             where ADR-0226 §6's budget cut this kind's yield, where
             ``MemorySearchResult.capped`` was ``True`` (ADR-0128 §2), or where a
             structured read's own window ceiling bound it.
+        source: The **reading's own declared identity**, where the servicing has one
+            (ADR-0252 §1, ADR-0260 §9). ``None`` on every kind whose ``ReadKind``
+            member is the whole of the source identity, which is the five ADR-0252 §1's
+            producers write and is why that clause says ``source`` "is absent on every
+            row this decision's producers write".
+
+            **A forecast read is the one kind that has a finer one**: §9 makes it "the
+            forecaster's ``name``", which ADR-0260 §4 defines as the **source
+            instance** — "the owner's forecast" — and "never a vendor, never an origin,
+            never a URL, never a credential and **never a place**". That is what admits
+            it into a durable row at all, ADR-0252 §1 forbidding a provider name, a
+            host, an address, a path, a ``Settings`` field name or a credential
+            identity there; and it is what makes ADR-0252 §8's limb 3 finer than the
+            kind, so two deployments' forecasters never refresh one another's rows.
     """
 
     ask: ReadAsk
@@ -1046,6 +1426,7 @@ class AskFacts:
     records: tuple[MemoryRecord, ...]
     admitted: int
     certified: bool
+    source: str | None = None
 
     @property
     def returned(self) -> int:
@@ -1162,7 +1543,7 @@ class _AskLedger:
     _returned: int = 0
     _admitted: int = 0
 
-    def note(
+    def note(  # noqa: PLR0913 — ADR-0251 §2's four facts, ADR-0226 §7's records and ADR-0252 §1's source identity; each is a distinct fact about one ask and none is derivable from another
         self,
         ask: ReadAsk,
         *,
@@ -1170,6 +1551,7 @@ class _AskLedger:
         non_yield: _NonYield | None,
         certified: bool = True,
         records: Sequence[MemoryRecord] | None = None,
+        source: str | None = None,
     ) -> None:
         """Record what became of one ask, and advance the mark.
 
@@ -1196,6 +1578,10 @@ class _AskLedger:
                 the records themselves, "one region per record the ask **returned**" —
                 so the records are recorded and :attr:`AskFacts.returned` reads their
                 length, rather than a producer keeping the two in step by hand.
+            source: The reading's own declared identity, where this kind's servicing has
+                one (ADR-0252 §1, ADR-0260 §9). ``None`` — every kind but the forecast
+                read — leaves the row's ``source`` absent, which is what ADR-0252 §1
+                says of every row its own producers write.
         """
         offered, admitted = len(self.union.offered), len(self.union.admitted)
         self.facts.append(
@@ -1210,6 +1596,7 @@ class _AskLedger:
                 ),
                 admitted=admitted - self._admitted,
                 certified=certified and ask.kind not in self.truncated,
+                source=source,
             )
         )
         self._returned, self._admitted = offered, admitted
@@ -1240,12 +1627,18 @@ class AskYield:
             no record at all.
         admitted: How many of those the supply did not already hold, which is ADR-0226
             §9's ``new`` and ADR-0252 §1's ``admitted``.
+        source: The reading's own declared identity, or ``None`` (ADR-0252 §1, ADR-0260
+            §9). It travels on this value for :attr:`records`' reason: the row and the
+            planner's entry are two consumers of one classification, and a source paired
+            with the entry downstream would be a second authority on which reading a row
+            is about.
     """
 
     ask: ReadAsk
     outcome: ReadOutcomeKind
     records: tuple[MemoryRecord, ...]
     admitted: int
+    source: str | None = None
 
     @property
     def entry(self) -> ReadAskOutcome:
@@ -1278,7 +1671,13 @@ def classified_reads(facts: Sequence[AskFacts]) -> tuple[AskYield, ...]:
         The yields, each carrying the planner's own ask byte for byte.
     """
     return tuple(
-        AskYield(ask=one.ask, outcome=outcome, records=one.records, admitted=one.admitted)
+        AskYield(
+            ask=one.ask,
+            outcome=outcome,
+            records=one.records,
+            admitted=one.admitted,
+            source=one.source,
+        )
         for one in facts
         if (outcome := classify_read_outcome(one)) is not None
     )
@@ -1566,6 +1965,130 @@ def earliest(
     return min(held, produced, key=order.index)
 
 
+#: ADR-0260 §10's fold, **stated totally over the twelve dispositions** — "because a
+#: fold whose domain is not enumerated is a fold two implementations will disagree
+#: about" — and read by :func:`forecast_not_read`.
+#:
+#: **It is non-injective and that is the point** (ADR-0242 §8): :class:`ForecastDisposition`
+#: names *the stage that produced the outcome*, for an operator reading an audit;
+#: :class:`~ai_assistant.core.types.ForecastNotRead` names *the class of act*, for the
+#: user reading a reply. **Seven dispositions the user has no act for fold onto
+#: ``UNAVAILABLE``**, which names none — and §10's statement for that member names no
+#: cause and no act, so the collapse costs the user nothing they could have used.
+#:
+#: **A contact and an ``UNAVAILABLE`` ride together where both hold** (§10): a
+#: ``RESPONSE_TOO_LARGE`` and an ``UNATTESTED`` each reached the provider and yielded
+#: nothing usable, which is ADR-0264 §8's both-statements rule and not an exception to
+#: it. Nothing here reads :data:`FORECAST_CONTACTS` and nothing there reads this.
+#:
+#: **No member of this mapping is derived from a name, a prefix or a substring**, and
+#: §13's arm (k) walks all twelve — "a rule stated totally and tested selectively is one
+#: an implementation can leave partial while passing every other arm".
+FORECAST_NOT_READ: Final[Mapping[ForecastDisposition, ForecastNotRead]] = MappingProxyType(
+    {
+        ForecastDisposition.NOT_CONFIGURED: ForecastNotRead.NOT_CONFIGURED,
+        ForecastDisposition.RULING_CONFIRM: ForecastNotRead.AUTHORISATION_AWAITED,
+        ForecastDisposition.SPEND_REFUSED: ForecastNotRead.SPEND_EXHAUSTED,
+        ForecastDisposition.RULING_DENY: ForecastNotRead.DECLINED,
+        ForecastDisposition.DEADLINE_EXPIRED: ForecastNotRead.INTERRUPTED,
+        ForecastDisposition.NO_BUDGET: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.BINDING_FAILED: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.RULING_UNAVAILABLE: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.TRANSPORT_FAILED: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.RESPONSE_TOO_LARGE: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.PROVIDER_REFUSED: ForecastNotRead.UNAVAILABLE,
+        ForecastDisposition.UNATTESTED: ForecastNotRead.UNAVAILABLE,
+    }
+)
+
+_unfolded = sorted(member.name for member in ForecastDisposition if member not in FORECAST_NOT_READ)
+if _unfolded:  # pragma: no cover — an unfolded member is a build-time defect
+    _fold_message = (
+        "ADR-0260 §10's fold is stated totally over the twelve dispositions; "
+        f"unfolded: {', '.join(_unfolded)}"
+    )
+    raise RuntimeError(_fold_message)
+del _unfolded
+
+_unplaced_contacts = sorted(
+    member.name for member in ForecastDisposition if member not in FORECAST_CONTACTS
+)
+if _unplaced_contacts:  # pragma: no cover — an unplaced member is a build-time defect
+    _contact_message = (
+        "ADR-0260 §10's establishment partition is total over the twelve dispositions; "
+        f"unplaced: {', '.join(_unplaced_contacts)}"
+    )
+    raise RuntimeError(_contact_message)
+del _unplaced_contacts
+
+
+def forecast_not_read(disposition: ForecastDisposition | None) -> ForecastNotRead | None:
+    """ADR-0260 §10's fold, at the servicing site (§8, ADR-0242 §8).
+
+    **Total over the twelve and non-injective by design.** The member is read straight
+    off :data:`FORECAST_NOT_READ`, which states the fold member for member; there is no
+    default branch, because §10 enumerates its whole domain precisely so that two
+    implementations cannot disagree about one.
+
+    **A servicing that yielded carries no member** (§10). ``None`` in means ``None``
+    out, and that absence covers exactly two states: a read the provider answered,
+    records or none, and a turn that serviced no forecast read at all. **It means
+    nothing else**, and in particular it is not a report that the provider answered —
+    the site that needs that distinction holds :attr:`ServicedRead.forecast_serviced`
+    and the contact, not this member.
+
+    **Nothing is discriminated here** (§10). Where ADR-0242 §8's search mapping reads a
+    binding's fact, a destination's standing and a written park, this reads its one
+    argument: §6's route (c) leaves a forecast read no park, no grant seam and no trust
+    question, so there is no second input for a row to turn on.
+
+    Args:
+        disposition: What this servicing's forecast ask resolved to, or ``None`` where
+            it yielded, where the provider answered with nothing, or where no such ask
+            was serviced.
+
+    Returns:
+        The member the turn would carry for it, or ``None``.
+    """
+    if disposition is None:
+        return None
+    return FORECAST_NOT_READ[disposition]
+
+
+def earliest_not_read(
+    held: ForecastNotRead | None, produced: ForecastNotRead | None
+) -> ForecastNotRead | None:
+    """Fold one servicing's member into the turn's, by ADR-0260 §10's precedence.
+
+    **At most one member is carried per turn**, and where a revising turn serviced more
+    than one forecast read the member carried is the one **earliest in
+    ``ForecastNotRead``'s declared order** among them — §10 declares the members *"in
+    precedence order"* and applies ADR-0242 §7's rule at this seam unchanged. **The
+    order and not the encounter order decides it**, so an implementation carrying the
+    last member it computed is wrong even where every individual fold is right, as is
+    one assigning only while the carrier is ``None`` — which is why §13's arm (h)
+    requires **both** encounter orders.
+
+    **A later read does not clear an earlier one's member** (§10): "a turn that was
+    denied and then answered still reports ``DECLINED``, because the user was told
+    about a read this turn did not make and a second read does not unmake it". So a
+    ``None`` here leaves ``held`` exactly as it was.
+
+    Args:
+        held: What the turn carries so far, or ``None``.
+        produced: What this servicing computed, or ``None``.
+
+    Returns:
+        The one member the turn carries after this servicing.
+    """
+    if produced is None:
+        return held
+    if held is None:
+        return produced
+    order = tuple(ForecastNotRead)
+    return min(held, produced, key=order.index)
+
+
 @dataclass(frozen=True, slots=True)
 class ServicedRead:
     """What one servicing carried into the turn, and what §9 records of it.
@@ -1656,6 +2179,45 @@ class ServicedRead:
             all-or-nothing degradation is the ratified answer to such a fault, and
             it is a record an operator can read; what it is not is a *ninth cause*
             beside the eight §13 enumerates.
+        forecast_serviced: ADR-0260 §7's first added field: whether this servicing
+            **put a ``FORECAST_READ`` ask to the forecast stage at all**. ``True`` on
+            every outcome of an ask this servicing reached, ``NO_BUDGET`` and
+            ``NOT_CONFIGURED`` included; ``False`` where the request carried no such
+            ask and where the servicing raised before the forecast's position in §7's
+            order.
+
+            **Two fields and not one, because neither is derivable from the other**
+            (§7). An absent :attr:`forecast` covers both a read the provider answered
+            and an ask this servicing never reached, so a record holding only the
+            disposition cannot tell a deployment reading a 0% yield for this kind which
+            of the two it is looking at — the collapse ADR-0226 §9 refuses one field
+            over for the unresolved-label count. **A boolean and never a count**: no
+            day, no place, no coordinate, no origin, no account and no ``Settings``
+            field name is anywhere near it, which is §9's counts-and-no-copy rule
+            binding unchanged.
+        forecast: ADR-0260 §7's second added field: the :class:`ForecastDisposition`
+            this servicing's ``FORECAST_READ`` ask resolved to, where it resolved to
+            one, and ``None`` in the two cases §8 leaves it empty — where the read
+            yielded records, and where it **reached the provider and returned none**,
+            which :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` maps to no
+            disposition precisely so that ADR-0226 §9's returned count is not
+            double-counted.
+
+            A **member of a closed enumeration and never free text**, for
+            :attr:`disposition`'s reason and ADR-0004 §5's: there is nowhere here for a
+            place, a coordinate, a day, an origin, a provider message, a monetary figure
+            or an exception type to sit. It **rides on a failing record too**, exactly
+            as :attr:`refusal` and :attr:`disposition` do: a forecast that declined
+            before a later kind's read raised is neither of §8's two empty cases, and
+            dropping it would report that turn as one whose planner never asked for a
+            forecast.
+
+            **No count of dropped days is beside it** (§7). Such a count is a
+            *within-ask* fidelity fact, and ADR-0226 §9 refuses that class in terms —
+            every count there "is taken over a servicing that completed" and is zero on
+            one that failed. The honest consequence, that a response this system thinned
+            is not distinguishable here from one the provider gave thin, is ADR-0260
+            §14's deferral rather than a gap this record fills.
         structured_axes: ADR-0240 §10's first added field: which axes this
             servicing's ``STRUCTURED_READ`` ask applied, in
             :class:`~ai_assistant.core.types.StructuredAsk`'s own field order with
@@ -1710,6 +2272,8 @@ class ServicedRead:
     labels_unresolved: int = 0
     refusal: FetchRefusal | None = None
     disposition: SearchDisposition | None = None
+    forecast_serviced: bool = False
+    forecast: ForecastDisposition | None = None
     supplied: int = 0
     withheld: int = 0
     supplied_narrowed: int = 0
@@ -2276,6 +2840,38 @@ class ServicedCarriers:
             non-injective and ``UNAVAILABLE`` covers both a response that arrived and
             was refused and a transport that failed, which §2's second and third groups
             separate.
+        forecast_not_read: ADR-0260 §10's carrier: which **class of act** would have let
+            this servicing's forecast read happen, or ``None`` where it yielded, where
+            it reached the provider and found nothing, and where the request carried no
+            ``FORECAST_READ`` ask. **Computed at the servicing site** by the component
+            that recorded the disposition, and carried from there as data — the shape
+            :attr:`not_serviced` already has one vocabulary over.
+
+            **It rides on the failing record's carriers too**, exactly as
+            :attr:`not_serviced` does: a servicing whose forecast declined before a
+            later kind's read raised carries its member, and dropping it would report
+            that turn as one whose planner never asked for a forecast.
+        forecast_contact: ADR-0260 §10's carrier: what this servicing's forecast
+            **call** established, or ``None`` where it performed none at all — a
+            request carrying no such ask, and one that raised before the forecast was
+            serviced.
+
+            **Computed at the performing site and never re-derived here** (§10), and
+            **never read off** :attr:`forecast_not_read`, which is non-injective: a
+            ``UNAVAILABLE`` covers both a response that arrived and was refused and a
+            transport that failed, which §10's first and second groups separate. It
+            **rides on the failing record's carriers** for :attr:`contact`'s reason and
+            in §10's own words — "nothing that happens to the enclosing servicing
+            afterwards unmakes it", which is §13's arm (n).
+        forecast_records: ADR-0264 §4's count for this servicing's forecast contact:
+            how many records it put into the **turn's supply**, after ADR-0226 §7's
+            deduplication and §6's budget.
+
+            **Zero on a servicing that failed**, whatever its forecast admitted before
+            the fault, because ADR-0226 §5 leaves the supply as planning saw it — §13's
+            arm (n) asserts exactly that pairing, a contact standing beside a ``0``.
+            It is a **second count and not a second population**: the turn sums it with
+            :attr:`contact_records` into the one figure §4 states over the turn.
         contact_records: ADR-0264 §4's count: how many records this servicing's contact
             put into the **turn's supply**.
 
@@ -2289,6 +2885,9 @@ class ServicedCarriers:
 
     hop_reached: tuple[str, ...] = ()
     minted: tuple[str, ...] = ()
+    forecast_not_read: ForecastNotRead | None = None
+    forecast_contact: OutboundReach | None = None
+    forecast_records: int = 0
     yields: tuple[AskYield, ...] = ()
     empty_read: ReadAsk | None = None
     structured_ran: bool = False
@@ -3371,6 +3970,479 @@ class SearchServicer:
         return recorded if recorded == decision else None
 
 
+@dataclass(frozen=True, slots=True)
+class _Forecast:
+    """What one ``FORECAST_READ`` ask produced, in the shapes the servicing needs.
+
+    Attributes:
+        records: The records ADR-0260 §5 minted, in the order it minted them, offered
+            to :class:`_Union` exactly as every other kind's candidates are. Empty on
+            every non-yield.
+        disposition: §8's field for this servicing, or ``None`` in the two cases §8
+            leaves it empty: where the read yielded records, and where it reached the
+            provider and returned none —
+            :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` mapping to no
+            disposition at all.
+        not_read: §10's carrier for this servicing — which **class of act** would have
+            let the read happen, computed **here at the servicing site** from
+            :attr:`disposition` alone and ``None`` exactly where that is. It is never
+            recomputed downstream and never inferred at a render site.
+
+            **Two vocabularies over one event** (§8, ADR-0242 §8): the disposition
+            names the stage for an operator reading the audit, and this names the class
+            for the user reading a reply. §7 keeps this one **out** of the audit — a
+            member computed for a user is not a second spelling of a fact the audit
+            already records, and writing both would make the two drift.
+        contact: §10's carrier — what this site's forecast **call** established,
+            computed here by :func:`forecast_contact_of` from the outcome this site
+            holds, and ``None`` where **no call was performed at all**.
+
+            **It is not derivable from** :attr:`disposition` (§10). An absent
+            disposition is a call that completed and recorded none *and* a servicing
+            that never reached its forecast, and this field is what tells those apart:
+            the branch that answers an absent ask carries ``None`` here, and the branch
+            whose provider answered ``NO_RESULT`` carries
+            :attr:`~ai_assistant.core.types.OutboundReach.REACHED`.
+
+            **A contact is established the moment a response arrived, and nothing that
+            happens to the enclosing servicing afterwards unmakes it** (§10, quoting
+            ADR-0264 §2), which is why it rides out on the failing record's carriers
+            exactly as :attr:`not_read` does — §13's arm (n).
+        admitted: ADR-0264 §4's count for this servicing: how many records this call's
+            contact put into the **turn's supply**, taken as the delta of
+            ``_Union.admitted`` across the admission and so **after** ADR-0226 §7's
+            deduplication and §6's budget. **Recorded by the site that performs the
+            admission and never reconstructed**, and in particular it is not
+            ``len(records)``: where the budget cut the rest this counts what fit, which
+            is §13's arm (f). Zero on every non-yield, which §4 rules never suppresses
+            the statement.
+        serviced: ADR-0260 §7's first audit field: whether this servicing **put a
+            ``FORECAST_READ`` ask to the forecast stage at all**. ``True`` on every
+            branch below, ``NO_BUDGET`` and ``NOT_CONFIGURED`` included, because each
+            is an account of an ask this servicing reached; ``False`` where the
+            request carried no such ask, and where the servicing raised before the
+            forecast's position in §7's order.
+
+            **It is not derivable from** :attr:`disposition` **and that is why §7 asks
+            for two fields.** An absent disposition covers both a read the provider
+            answered and an ask this servicing never reached, and an audit holding only
+            the disposition cannot tell a deployment reading a 0% yield for this kind
+            which of the two it is looking at — the collapse ADR-0226 §9 refuses one
+            field over for the unresolved-label count.
+    """
+
+    records: tuple[MemoryRecord, ...] = ()
+    disposition: ForecastDisposition | None = None
+    not_read: ForecastNotRead | None = None
+    contact: OutboundReach | None = None
+    admitted: int = 0
+    serviced: bool = False
+
+
+class ForecastServicer:
+    """The four contracts one ``FORECAST_READ`` servicing is answered against (ADR-0260 §6).
+
+    **A wiring value and not a seam.** It names no capability of its own, is registered
+    nowhere, and adds no route: it is the composition root's statement that this
+    deployment configured a forecast provider, holding the objects §6 and §7 name in the
+    order those sections perform them. A deployment that configured none holds no
+    instance at all, and :func:`service_read_request` is handed ``None`` — which is §8's
+    :attr:`ForecastDisposition.NOT_CONFIGURED`, stated by a caller rather than
+    defaulted, exactly as the ``fetcher`` and ``search`` parameters are.
+
+    **The one caller of** :meth:`~ai_assistant.core.protocols.Forecaster.request` **and
+    of** :meth:`~ai_assistant.core.protocols.Forecaster.read` (§7). ``app/composition.py``
+    wires the forecaster into this object and into nothing else, no other subsystem
+    holds the reference, and §7's "no lane adds a second caller" is what keeps that
+    true.
+
+    **One stage fewer than a search, and that is the whole of the difference** (§7).
+    The order is **bind, then rule, then record, then send**, with no compose step,
+    because §3 gives the ask no argument to compose: no ``QueryComposer`` is held, no
+    model call precedes the send, and no value of this turn's own reaches the request.
+
+    **Nothing is parked here** (§11). ADR-0244's park is a ``CONFIRM`` on a **search**,
+    this decision mints no park for a forecast read, and a ``CONFIRM`` recorded here is
+    recorded, not made, not parked, and reported under §10's ``AUTHORISATION_AWAITED``.
+    So this object holds no ``ParkedReads`` and takes no park lifetime.
+
+    **The id and the clock are the recorder's** (ADR-0021 §3, ADR-0059 §1), passed
+    rather than defaulted for :class:`SearchServicer`'s reason: a deployment states the
+    clock its audit rows are stamped from instead of inheriting one.
+    """
+
+    def __init__(  # noqa: PLR0913 — one parameter per contract ADR-0260 §6 names, plus the recorder's id and clock and ADR-0241 §1's deadline; the two sections fix the list
+        self,
+        *,
+        forecaster: Forecaster,
+        binder: EgressBinder,
+        policy: ActionPolicy,
+        trail: AuditTrail,
+        now: Clock,
+        id_factory: Callable[[], str],
+        deadline: timedelta,
+    ) -> None:
+        """Wire one forecast servicing from the contracts ADR-0260 §6 names.
+
+        Args:
+            forecaster: Proposes the act and, once it is authorised, performs it (§4).
+                This object is its only caller.
+            binder: Derives the ``EgressBinding`` whole, before the ruling (ADR-0148
+                §1, ADR-0152 §1). It accepts no part of the binding.
+            policy: Rules on the request (§6). The **same object** the step runner and
+                the search servicing rule with, so one deployment has one set of
+                thresholds and one configured-provider comparison rather than several
+                that could disagree.
+            trail: Records the ``PermissionDecision`` before any channel opens (§7's
+                "bind, then rule, then record, then send"). The same object the runner
+                and the ledger hold.
+            now: The clock the recorded decision is stamped from, guarded once here
+                (ADR-0026 §4).
+            id_factory: Mints the decision's id (ADR-0021 §3).
+            deadline: The bound this site passes as ``timeout`` on **every**
+                :meth:`Forecaster.read` (ADR-0241 §1).
+
+                **It is the one call deadline this deployment configures, and ADR-0260
+                §11 forbids a second.** That section rules that "the forecast read runs
+                under the deadline ADR-0241 §1 already hands the servicing" and that "a
+                ``Settings`` figure of its own would be a second bound on one turn", so
+                the composition root hands this seam the same figure ADR-0241 §3 hands
+                the search servicing and no field is added. The corpus holds no
+                servicing-wide clock to subtract a remainder from, and opening one here
+                would be the second bound §11 refuses rather than the one it names.
+
+                **Read by the composition root and passed here** rather than read below
+                ``orchestration`` (ADR-0241 §3), so nothing a model produced, a request
+                carried or a result contained can reach the comparison.
+
+        Raises:
+            ValueError: If ``deadline`` is not a strictly positive ``timedelta``.
+                ``Settings`` already refuses it at load; this is the guard at the seam a
+                test or a dynamically-wired caller can reach directly, and it fires here
+                rather than at the first read (ADR-0241 §1).
+        """
+        self._forecaster = forecaster
+        self._binder = binder
+        self._policy = policy
+        self._trail = trail
+        self._now = checked_clock(now, owner="ForecastServicer")
+        self._id_factory = id_factory
+        if not isinstance(deadline, timedelta) or deadline <= timedelta(0):
+            msg = (
+                f"deadline must be a strictly positive timedelta "
+                f"(ADR-0241 §1, ADR-0260 §11); got {deadline!r}"
+            )
+            raise ValueError(msg)
+        self._deadline = deadline
+
+    @property
+    def name(self) -> str:
+        """The configured source's own identity (ADR-0260 §4, §9).
+
+        Read by the servicing so that a ``READ_OUTCOME`` row written for this kind
+        carries §9's ``source`` — "the forecaster's ``name``, which is what makes
+        ADR-0252 §8's limb 3 finer than the kind". It names the **source instance** and
+        never a vendor, an origin, a URL, a credential or a place, which is what admits
+        it into a durable row at all (ADR-0252 §1).
+
+        Returns:
+            What this deployment's forecaster answers to.
+        """
+        return self._forecaster.name
+
+    async def service(  # noqa: PLR0911 — one exit per stage ADR-0260 §8 names as a decline; §8 requires the member to name the stage that produced it, so collapsing any pair would report one stage's outcome as another's
+        self, *, remaining: int, external: bool
+    ) -> _Forecast:
+        """Bind, rule, record and send — in that order and no other (ADR-0260 §7).
+
+        **No channel is opened before a recorded ``ALLOW`` exists**, and there is **no
+        compose step**: §3 gives the ask no argument, so the request this method rules
+        on is built from the forecaster's own proposal and from nothing this turn
+        produced. That is one stage fewer than a search and is the whole of the
+        difference between the two servicings.
+
+        **Every non-``ALLOW`` declines, and declining is not failing** (§7, ADR-0226
+        §5). On a ``CONFIRM``, a ``DENY``, a binder that refused or raised, a policy
+        that raised or a trail that could not record the decision: no channel is opened,
+        no credential is read, no record is minted, the read budget is untouched, and
+        this kind yields nothing. **Nothing is parked and nobody is asked** (§11) — the
+        decision carries no ``execution_id`` and no ``step_id``, so no recovery query
+        and no park can reach it.
+
+        **The send is not made through ``ToolInvoker.invoke``** (§6, §1). Taking the
+        invoker's route would require a ``ToolRegistry`` entry, and a registry entry
+        would put a forecast in front of the planner — the outcome the whole design
+        exists to prevent. So the ``ToolCall`` this method constructs is handed to the
+        forecaster, which owns everything after it: ADR-0029 §2's three pre-execution
+        checks, the credential read and ADR-0148 §6's four pre-transmit conditions.
+        **This package claims nothing and spends nothing**: §6 names neither ADR-0194's
+        admission nor ADR-0192's claim at this seam.
+
+        **A ``ToolBindingError`` is §8's ``BINDING_FAILED`` and not a degradation**
+        (§6). That section states it in terms — a failure at any of the three checks
+        "raises ``ToolBindingError`` … and **is recorded by the servicing as**
+        ``BINDING_FAILED``" — and §13's arm (h) asserts the member through to the turn
+        beside an ``UNAVAILABLE`` and **no** contact, "because a path recording nothing
+        would leave §10's ``None`` saying the provider answered". **Every other fault
+        the seam raises degrades the turn** and is carried to ADR-0226 §5's one
+        degradation site by :func:`_serviced_forecast`, because §8 closes this
+        vocabulary at twelve with no member for a fault at the send and §12 forbids a
+        lane adding one.
+
+        Args:
+            remaining: How many slots of ADR-0226 §6's budget are unspent when the
+                forecast is reached. Fewer than one composes no request, seeks no
+                ruling and opens no channel (§7).
+            external: ADR-0181 §4's fact for **this** request, computed by the caller
+                over the turn's pre-servicing supply and every record this servicing has
+                already contributed (§7). It is written onto the carrier before ``bind``
+                and is discarded, never merged, if any producer emitted one.
+
+        Returns:
+            The minted records, §8's disposition, §10's folded member and §10's contact.
+            The records are empty on every non-yield, and the disposition is ``None``
+            exactly where the read yielded or reached the provider and returned nothing.
+
+        Raises:
+            ToolError: A fault the forecaster raised that is not one of §6's three
+                pre-execution checks — caught by :func:`_serviced_forecast` and carried
+                to ADR-0226 §5's degradation, never reported as a disposition.
+        """
+        if remaining < 1:
+            # §7: "Where fewer than one slot remains when the forecast is reached, no
+            # request is composed, no ruling is sought and no channel is opened".
+            # Checked before the forecaster is consulted, so this branch genuinely makes
+            # no call. **Reachable on the order §7 fixes**, unlike the search's branch
+            # of the same name: the forecast is serviced third, behind a file capped at
+            # one and a search capped at three, so a servicing that admitted ten before
+            # it arrives here with nothing left.
+            return self._not_serviced(ForecastDisposition.NO_BUDGET)
+        proposal = await self._forecaster.request()
+        if proposal is None:
+            # §4: `request` "returns ``None`` where the deployment has configured no
+            # forecast provider, **which is a configuration fact and never a failure**".
+            # The same provisioning fact a servicer holding no forecaster at all reports,
+            # under the same member — §8 admits one member for two outcomes of one stage
+            # an operator would act on identically.
+            return self._not_serviced(ForecastDisposition.NOT_CONFIGURED)
+        bound = await self._bound(proposal, external=external)
+        if bound is None:
+            return self._not_serviced(ForecastDisposition.BINDING_FAILED)
+        # ADR-0152 §1: the request is built from what the seam returned and never from
+        # objects held across the call, with no `await` between the two. `step_id` and
+        # `execution_id` are `None` (§6): no plan step is synthesised, no
+        # `ExecutionState` and no execution, and no clause written about steps is given
+        # a subject here.
+        #
+        # **`intended_action` is `None` for exactly that reason**, as it is at the
+        # search's own site: this request serves no plan step, so there is no act to
+        # name and naming one would be this stage's word rather than the plan's.
+        request = ActionRequest(
+            tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
+        )
+        recorded = await self._ruled(request)
+        if recorded is None:
+            return self._not_serviced(ForecastDisposition.RULING_UNAVAILABLE)
+        outcome = recorded.ruling.outcome
+        if outcome is not PermissionOutcome.ALLOW:
+            # **A forecast read at the configured forecast provider does not reach here
+            # on a lineage or a coverage ground** (§6). Route (c) rules it `ALLOW` on
+            # the deployment's own configuration, before the grant seam is consulted at
+            # all, and §6 restates both `_only_the_disclosure_floor` limbs over the
+            # generalised derived fact. **So what still reaches this branch is an
+            # independent ground** — the per-call cost the deployment declared no figure
+            # for (ADR-0236 §4, which §11 leaves untouched), a `DENY`, or a binding the
+            # comparison finds is not the configured forecast provider's.
+            #
+            # **Nothing is parked either way** (§11): "a forecast read ruled `CONFIRM`
+            # is recorded, is not made, is not parked, and is reported under §10's
+            # `AUTHORISATION_AWAITED`". There is no `ParkedReads` on this object to
+            # write one with, which is that clause held structurally.
+            return self._not_serviced(
+                ForecastDisposition.RULING_DENY
+                if outcome is PermissionOutcome.DENY
+                else ForecastDisposition.RULING_CONFIRM
+            )
+        # ADR-0021 §1's `authorises` runs inside `ToolCall`'s own validator, so an
+        # unauthorised forecast read is unconstructable at the type level — which is
+        # `ToolInvoker.invoke`'s guarantee obtained without `ToolInvoker` (§1, §6). It
+        # cannot refuse here: `recorded` equals the decision `from_request` transcribed
+        # from this very request, and the outcome above is `ALLOW`.
+        call = ToolCall(request=request, decision=recorded)
+        try:
+            read = await self._forecaster.read(call, timeout=self._deadline)
+        except ToolBindingError:
+            # §6's three pre-execution checks, each refusing "before any credential is
+            # read and any channel is opened". **The exception is not held and its
+            # message is not copied** (ADR-0004 §5): what the audit gets is the class
+            # §8 names, and §13's arm (h) is what pins the member, the fold and the
+            # absent contact together.
+            return self._not_serviced(ForecastDisposition.BINDING_FAILED)
+        refusal = read.refusal
+        if refusal is not None:
+            # §8: five of the six members are carried across one for one, and
+            # `NO_RESULT` maps to **none** — a read that reached the provider and was
+            # answered is a completed servicing whose returned count is zero, which
+            # ADR-0226 §9 already records.
+            return self._not_serviced(FORECAST_DISPOSITIONS.get(refusal))
+        # §10's thirteenth case, at the site that performed the call: the call completed
+        # and recorded no disposition, which is a read that reached the provider and was
+        # answered. `admitted` is filled by the admission site, which is
+        # :func:`_serviced_forecast` — this frame has not offered the records to the
+        # union.
+        return _Forecast(read.records, None, None, contact=OutboundReach.REACHED, serviced=True)
+
+    @staticmethod
+    def _not_serviced(disposition: ForecastDisposition | None) -> _Forecast:
+        """One non-yield, carrying §8's disposition, §10's member and §10's contact.
+
+        **The three are computed together, at this site, and never apart** (§10). A
+        branch that returned one without the others would either put a disposition in
+        the audit with nothing for the user, or a member in the reply with nothing in
+        the audit, or a contact nobody computed where the call was made — and none of
+        the three is derivable from another downstream.
+
+        Args:
+            disposition: What this branch resolved to. ``None`` reaches this method from
+                exactly one branch — the one that passes
+                :data:`FORECAST_DISPOSITIONS` a
+                :attr:`~ai_assistant.core.types.ForecastRefusal.NO_RESULT` the mapping
+                does not carry — so it is a call that completed and recorded none, which
+                is §10's thirteenth case and a contact.
+
+        Returns:
+            The empty records, the disposition, the folded member and what the call
+            established.
+        """
+        return _Forecast(
+            (),
+            disposition,
+            forecast_not_read(disposition),
+            contact=forecast_contact_of(disposition),
+            serviced=True,
+        )
+
+    async def _bound(self, proposal: ActionRequest, *, external: bool) -> BoundEgressCall | None:
+        """Derive this request's binding, or answer that there is none (ADR-0260 §6, §11).
+
+        **``forecast_reach`` is ``True`` on every request this method builds** (§11),
+        and the clause is satisfied by position rather than by a test: it is written
+        "exactly where the request's kind is a forecast read and this deployment holds a
+        forecast registration, which ``orchestration`` knows because ``Forecaster.request``
+        answered a proposal rather than ``None``" — and this method is reached only past
+        that answer. It is written by ``orchestration`` alone, at the moment the request
+        is built, from a value this frame already holds; **discarded, never merged**, if
+        any producer emitted one; and no model output, request content or provider
+        answer contributes to it.
+
+        **``closed_loop`` stays ``False`` and is untouched** (§11). It keeps meaning
+        "this deployment's own search" and nothing else, and ADR-0272 §1 makes the
+        trail refuse a binding carrying neither of the two facts or both — so writing
+        it here would make this very row unrecordable.
+
+        **``coverage`` is ``NOT_COVERED`` and is computed rather than defaulted**
+        (ADR-0233 §4, §5). That clause puts the value on "the component that composed
+        the call's arguments, from the membership and path character of what it supplied
+        to the operations that produced them", and this servicing supplied **nothing**
+        to any model call: §3 gives the ask no argument, the parameters are the
+        deployment's own configured values, and no record, utterance or completion
+        reaches them. So there is no covered content on any path of this call, which is
+        ADR-0231 §4's state at the neighbouring seam reached here by construction rather
+        than by an empty supply.
+
+        **``planned_with_external_content`` is the caller's ``external``** (§7,
+        ADR-0181 §4) — a fact about an act this system performed, never an inference
+        about how a model produced an argument.
+
+        The ``spans`` mapping is empty, which is ADR-0152 §5's named residue at a third
+        call site rather than an omission: nothing in this tree records a span's origin,
+        so every span the seam describes is ``SYSTEM_SELECTED``.
+
+        **A refusal, a raise and a ``None`` are one answer here** (§8). A forecast sent
+        under no binding is a send to a destination no policy ruled on, so the
+        fail-closed reading is the only one available.
+
+        Args:
+            proposal: What ``Forecaster.request`` returned — its ``tool`` is the
+                forecaster's own registered declaration and its ``parameters`` are the
+                arguments that declaration's schema declares.
+            external: ADR-0181 §4's fact for this request.
+
+        Returns:
+            The derived binding beside the detached call, or ``None`` where the seam
+            refused, raised or held no registration.
+        """
+        try:
+            return await self._binder.bind(
+                proposal.tool,
+                parameters=proposal.parameters,
+                provenance=CarriedProvenance(
+                    spans={},
+                    planned_with_external_content=external,
+                    coverage=SpanCoverage.NOT_COVERED,
+                    forecast_reach=True,
+                ),
+            )
+        except AssistantError:
+            # `EgressBindingError` for a refusal and `ConnectionStoreError` for a
+            # connection that could not be read are what this seam contracts (ADR-0152
+            # §1, §9); the net is their common root because a fault at this stage is an
+            # operator's fact whose class §8 refuses to copy into the record. A
+            # `CancelledError` is a `BaseException` and passes through untouched
+            # (ADR-0060), and a `TypeError` from a non-conforming implementation is a
+            # defect rather than a fault and reaches the turn.
+            return None
+
+    async def _ruled(self, request: ActionRequest) -> PermissionDecision | None:
+        """Rule on ``request`` and record the decision, or answer that neither held.
+
+        **Every branch is recorded, including a ``DENY``** (ADR-0004 §7), and **every
+        branch reads back what the trail holds, not what was written**:
+        :class:`SearchServicer`'s own reasoning at a second seam, because a trail that
+        accepted the append and lost it would have this method open a channel under a
+        decision nothing holds.
+
+        **No ``expires_at`` is ever stamped** (ADR-0260 §11). A deadline is a property
+        of a question somebody will answer, and this decision mints **no park** for a
+        forecast read: a ``CONFIRM`` recorded here is not parked, holds no question and
+        resolves in no turn, so there is nothing for a lifetime to bound.
+
+        Args:
+            request: The request carrying its whole binding (ADR-0148 §1).
+
+        Returns:
+            The trail's own copy of the recorded decision, or ``None`` where the policy
+            raised, the append was refused, or what came back is not what was written.
+
+        Raises:
+            ClockReadingError: If the injected clock's reading is not a conforming one.
+                Not translated and not swallowed: ADR-0260 adds **no** error class, and
+                a clock this process cannot read is not one of §8's decline causes —
+                reporting it as ``RULING_UNAVAILABLE`` would report one stage's fault
+                under another stage's member.
+        """
+        try:
+            ruling = await self._policy.decide(request)
+        except AssistantError:
+            # §8's `RULING_UNAVAILABLE`, first limb: `ActionPolicy` raised.
+            return None
+        decision = PermissionDecision.from_request(
+            request, ruling, id=self._id_factory(), decided_at=self._now()
+        )
+        try:
+            await self._trail.record(decision)
+            recorded = await self._trail.get(decision.id)
+        except AssistantError:
+            # §8's second limb: the decision could not be recorded — a refused append,
+            # or a read that raised.
+            return None
+        # Equality over the whole record and not its subject, for `StepRunner._record`'s
+        # reason: comparing the tool and the digest leaves the ruling unexamined, so a
+        # trail returning a same-subject record with the outcome flipped would have this
+        # servicing send a read the policy refused.
+        return recorded if recorded == decision else None
+
+
 def _degraded(refused_by: str) -> None:
     """Say that one servicing degraded, and say it in Tier 2 alone (ADR-0004 §5).
 
@@ -3401,6 +4473,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     fetcher: Fetcher | None,
     listing: SourceListing | None,
     search: SearchServicer | None,
+    forecast: ForecastServicer | None,
     utterance: str,
     audit: TurnReadAudit,
     goal: GoalBrief,
@@ -3409,10 +4482,11 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
 ) -> ServicedCarriers:
     """Service one emission, once, into the fourth group (ADR-0226 §§2, 6, 7).
 
-    **The local file is serviced first, then the web search, then the citation hop,
-    then the structured read, then the sighted query** (ADR-0240 §5, amending
-    ADR-0231 §11's own amendment of ADR-0230 §7's amendment of ADR-0226 §6's
-    cross-kind precedence sentence in one further respect). §6's
+    **The local file is serviced first, then the web search, then the forecast read,
+    then the citation hop, then the structured read, then the sighted query**
+    (ADR-0260 §7, amending ADR-0240 §5's own amendment of ADR-0231 §11's amendment of
+    ADR-0230 §7's amendment of ADR-0226 §6's cross-kind precedence sentence in one
+    further respect). §6's
     decision is applied and not moved — the capped read ahead
     of the uncapped one — and ADR-0230 §1 caps the fetch hardest of the four: one
     label, one file, one record, always. "Where the fetch takes its slot the hop is
@@ -3595,6 +4669,14 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             silently service no search and read, in §9's record, exactly like a
             turn on which the planner asked for none. ``None`` is §13's
             :attr:`SearchDisposition.NOT_CONFIGURED` and never an error.
+        forecast: The four contracts a ``FORECAST_READ`` ask is answered against
+            (ADR-0260 §6, §7), or ``None`` where this deployment configured no
+            forecast provider. **Passed rather than defaulted**, for ``search``'s
+            reason one kind over: a defaulted seam would let a later call site
+            silently service no forecast and read, in §9's record, exactly like a
+            turn on which the planner asked for none — which is the very collapse
+            ADR-0260 §7's ``forecast_serviced`` field exists to close. ``None`` is
+            §8's :attr:`ForecastDisposition.NOT_CONFIGURED` and never an error.
         utterance: The turn's own words, unrewritten — **the only value the
             composer is supplied** and the whole of what a search request is
             composed from (ADR-0231 §3, §4). It is not the label space, not a
@@ -3644,6 +4726,7 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     query = _ask_of(request, ReadKind.SIGHTED_QUERY)
     local_file = _ask_of(request, ReadKind.LOCAL_FILE)
     web = _ask_of(request, ReadKind.WEB_SEARCH)
+    forecast_ask = _ask_of(request, ReadKind.FORECAST_READ)
     structured = _ask_of(request, ReadKind.STRUCTURED_READ)
     # `ReadAsk`'s validator makes a `STRUCTURED_READ` ask's `structure` non-``None``
     # (ADR-0240 §2), read here as the guarantee it is rather than restated as a
@@ -3683,6 +4766,15 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
     # what tells it from the first shape, whose search was answered and which carries a
     # contact with `records` `0`.
     searched = _Searched((), None, None)
+    # ADR-0260 §7's two audit fields and §10's two carriers ride on the failing record
+    # too, for the reason the search's disposition does: a forecast that declined before
+    # a later kind's read raised is neither of §8's two empty cases, and the contact its
+    # call established is one "nothing that happens to the enclosing servicing
+    # afterwards unmakes" (§10). Assigned before the `try` so that a fault raised *by*
+    # the forecast leaves behind the honest empty value — an ask this servicing never
+    # reached, which `serviced=False` and `contact=None` say together and which neither
+    # says alone.
+    forecasted = _Forecast()
     # **ADR-0238 §11's three counts are *written* rather than returned**, for the reason
     # `_Reads` is: a fault the searcher raised after the ruling unwinds past the call
     # that would have returned them, and a record saying a servicing admitted no call
@@ -3738,6 +4830,47 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             # §2's precedence to the counts — which is where `NO_RESULT` belongs and
             # where a search whose every record deduplicated out belongs too.
             ledger.note(web, reached=True, non_yield=searched.disposition)
+        # ADR-0260 §7: **third**, after the one-record local file and the search and
+        # ahead of the hop, the structured read and the query. §7 fixes the position by
+        # ADR-0226 §6's own rule rather than by preference — the capped read ahead of
+        # the uncapped one, and "where two kinds declare the same cap the earlier-admitted
+        # kind is serviced first" — so the order runs one record, then at most
+        # `search_max_results`, then at most `forecast_max_days`, then ten through two
+        # labels, then what remains twice over. **No configuration reorders them.**
+        #
+        # A `FORECAST_READ` ask carries no argument at all (§3), so there is nothing to
+        # read off it: its presence *is* the whole of the ask, and the place and the
+        # horizon are the deployment's own — which is why the ask is passed whole and
+        # every absence this kind has is answered in :func:`_serviced_forecast`.
+        forecasted = await _serviced_forecast(
+            forecast,
+            forecast_ask,
+            union=union,
+            supply=supply,
+            reads=reads,
+            truncated=truncated,
+        )
+        if forecast_ask is not None:
+            # ADR-0260 §8 leaves the disposition empty where the read yielded and where
+            # it reached the provider and found nothing, so a `None` here sends ADR-0251
+            # §2's precedence to the counts — which is where `NO_RESULT` belongs and
+            # where a read whose every record deduplicated out belongs too. **`NO_BUDGET`
+            # produces no entry at all** and needs no branch here: §8's classifier entry
+            # puts it under case 1, which :data:`_NON_YIELD_CLASSES` states as
+            # `UNREACHED`.
+            #
+            # **`source` is ADR-0252 §1's field as ADR-0260 §9 fills it** — "the
+            # forecaster's ``name``" — read off the wired servicer and never composed
+            # here. A deployment holding none has no source to declare, and the row it
+            # writes for a `NOT_CONFIGURED` ask leaves the field absent, which is what
+            # ADR-0252 §1 says of every row whose kind is the whole of its source
+            # identity.
+            ledger.note(
+                forecast_ask,
+                reached=True,
+                non_yield=forecasted.disposition,
+                source=None if forecast is None else forecast.name,
+            )
         if hop is not None:
             reach = await _hop_records(store, hop, supply=supply, reads=reads)
             # **Accumulated and never assigned** (ADR-0230 §9). The count is one
@@ -3842,6 +4975,16 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
             labels_unresolved=unresolved,
             refusal=refusal,
             disposition=searched.disposition,
+            # ADR-0260 §7's two added fields, and they answer different questions:
+            # whether this servicing put a `FORECAST_READ` ask to the forecast stage at
+            # all, and what became of it where it has a member. **Neither is derivable
+            # from the other** — an absent disposition covers both a read the provider
+            # answered and an ask nothing reached — and **no value the provider returned,
+            # no day, no place, no coordinate, no origin, no account and no `Settings`
+            # field name** is anywhere near either, which is §9's counts-and-no-copy rule
+            # binding unchanged.
+            forecast_serviced=forecasted.serviced,
+            forecast=forecasted.disposition,
             # ADR-0238 §11's two and ADR-0245 §7's third, per turn and per servicing:
             # how many records were supplied to the composer, how many §3's filter
             # withheld — zero on every path since ADR-0246 §1 — and how many of the
@@ -3966,6 +5109,16 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
                 kinds=tuple(ask.kind for ask in request.asks),
                 refusal=refusal,
                 disposition=searched.disposition,
+                # ADR-0260 §7's pair rides on the failing record for the disposition's
+                # own reason: §8 enumerates the two cases in which its field is empty —
+                # where the read yielded records, and where no `FORECAST_READ` ask was
+                # made — and a forecast that declined before a later kind's read raised
+                # is neither. `forecast_serviced` rides beside it because that is exactly
+                # the turn on which the pair earns its keep: it says whether the ask was
+                # reached at all, which an empty disposition on a degraded servicing
+                # cannot.
+                forecast_serviced=forecasted.serviced,
+                forecast=forecasted.disposition,
                 supplied=counts.supplied,
                 withheld=counts.withheld,
                 supplied_narrowed=counts.supplied_narrowed,
@@ -4003,6 +5156,14 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # and one that raised *before* its search was serviced carries `None` — which is
         # the pair §2 says no site can tell apart from the ended servicing's record.
         contact=searched.contact,
+        # ADR-0260 §10's two carriers, folded on **every** path out of the body above for
+        # the identical reason: `forecasted` is assigned on each of them and `carried` is
+        # rebuilt only on the success path. A servicing whose forecast was answered and
+        # whose later read then raised carries the contact here — §13's arm (n) — and one
+        # that raised *before* the forecast was serviced carries `None`, which is the pair
+        # §10 says no site can tell apart from the ended servicing's record.
+        forecast_not_read=forecasted.not_read,
+        forecast_contact=forecasted.contact,
         # ADR-0264 §4 over ADR-0226 §5: `records` counts what entered the supply, and a
         # failed servicing entered nothing — §5 "leaves the supply as planning saw it"
         # and the caller appends `ServicedRead.records`, which the failing record leaves
@@ -4010,6 +5171,10 @@ async def service_read_request(  # noqa: PLR0913, PLR0915 — the store, the emi
         # servicing's own all-or-nothing posture reaching the count rather than a second
         # rule about it. §4 rules that the resulting `0` never suppresses the statement.
         contact_records=searched.admitted if completed is not None else 0,
+        # ADR-0264 §4 over ADR-0226 §5, exactly as above: a failed servicing entered
+        # nothing, so the contact §13's arm (n) requires to survive it stands beside a
+        # `0` — which §4 rules never suppresses the statement.
+        forecast_records=forecasted.admitted if completed is not None else 0,
     )
 
 
@@ -4318,6 +5483,134 @@ async def _serviced_search(  # noqa: PLR0913 — the seam, the ask, the composer
     if union.admit(found.records):
         truncated.append(ReadKind.WEB_SEARCH)
     return replace(found, admitted=len(union.admitted) - before)
+
+
+async def _serviced_forecast(  # noqa: PLR0913 — the seam, the ask, and the three things ADR-0260 §7 states this kind's budget and origin clauses over; §7 admits one servicing site and this is that site's third kind
+    forecast: ForecastServicer | None,
+    ask: ReadAsk | None,
+    *,
+    union: _Union,
+    supply: Sequence[MemoryRecord],
+    reads: _Reads,
+    truncated: list[ReadKind],
+) -> _Forecast:
+    """Service one ``FORECAST_READ`` ask into the fourth group (ADR-0260 §7).
+
+    **This kind's whole budget clause is here**, because §7 states it over this kind
+    rather than over the union: "where the slots remaining when the forecast is reached
+    are fewer than the days minted, the servicer admits the records that fit, in the
+    order §5 minted them, and admits no more", and "where fewer than one slot remains …
+    no request is composed, no ruling is sought and no channel is opened". Both are
+    branches of one arithmetic, so both live at one site. The union and the truncation
+    record are the same ones every other kind draws on and writes to — "one budget, and
+    the forecast draws at most ``forecast_max_days`` slots of it", "not a share, not a
+    second budget" — so this kind is truncated exactly as the search and the hop are,
+    and **no lane funds it by lowering** ``RETRIEVAL_LIMIT`` **or**
+    ``EPISODIC_SUPPLEMENT_LIMIT``.
+
+    **The origin fact is computed here, by the component that holds the records** (§7).
+    It is "the disjunction of ``rests_on_recorded_external_content`` over the turn's
+    pre-servicing supply and over every record this servicing has already contributed",
+    evaluated at the moment the request is built, from records ``orchestration`` holds
+    as data it fetched — which is why the file **and the search** serviced ahead of it
+    are both in view, and is what §13's arm (m) asserts: a servicing whose pre-servicing
+    supply carried no external record and whose web search then contributed one builds a
+    forecast binding carrying ``True``.
+
+    **This is not ADR-0223 §2's externality value and not ADR-0204 §2's withholding
+    value** (§7). Those two are computed once, at the loop, over the turn's *final*
+    supply; this is a per-request fact at a per-request instant, and neither is read off
+    the other.
+
+    Args:
+        forecast: The wired servicer, or ``None`` where this deployment configured no
+            forecast provider — §8's :attr:`ForecastDisposition.NOT_CONFIGURED`, and
+            never an error.
+        ask: The emission's ``FORECAST_READ`` ask, or ``None`` where it carried none.
+            Passed whole rather than as a boolean because §3 makes its presence the
+            entire content of the ask: it has no argument to read, so there is nothing
+            else this function could want from it.
+        union: The fourth group under construction. Its unspent slot count is what §7's
+            two budget branches are decided on, and it is what the minted records are
+            admitted into — under ADR-0226 §7's whole-union deduplication, which binds a
+            minted forecast record as it binds any other.
+        supply: The three groups the loop passed the planner on this call, which is half
+            of §7's disjunction. The other half is what this servicing has already
+            admitted into ``union``.
+        reads: The servicing's read observer, noted when a read returns records —
+            ADR-0226 §9's second failure field is stated over *reads*, and a forecast
+            that came back with records is a read this servicing performed that returned
+            some.
+        truncated: The servicing's truncation record, appended to where the budget cut
+            this kind short. ADR-0251 §2's ``TRUNCATED`` then displaces ``EMPTY``,
+            ``DUPLICATE`` and ``RETURNED_RECORDS`` through the one test the ledger
+            applies for all six kinds.
+
+    Returns:
+        The minted records, §8's disposition, §10's folded member, §10's contact and the
+        count this servicing admitted. The disposition is ``None`` in each of the cases
+        §8 leaves the field empty: where no ``FORECAST_READ`` ask was made, where the
+        read yielded records, and where it reached the provider and returned none.
+
+    Raises:
+        _ServicingFailedError: If the forecaster raised a fault that is **not** one of
+            §6's three pre-execution checks. Carried to ADR-0226 §5's degradation rather
+            than reported as a disposition, because §8 closes this vocabulary at twelve
+            with no member for a fault at the send — ``SearchDisposition.SEARCH_FAILED``
+            has no forecast twin, and §12 forbids a lane adding one.
+    """
+    if ask is None:
+        # §8's second absence: no ``FORECAST_READ`` ask was made. Answered before the
+        # deployment is consulted, so a turn nobody asked a forecast of reads the same
+        # on a configured deployment and an unconfigured one. **`serviced` is ``False``
+        # and `contact` is ``None``** — no call was performed, so this establishes
+        # nothing either way and contributes nothing to the fold (§10).
+        return _Forecast()
+    if forecast is None:
+        # §8's first route to `NOT_CONFIGURED`: no forecaster is wired into the loop at
+        # all. §10 places it in the no-contact group — no channel was opened — and folds
+        # it to `NOT_CONFIGURED`, whose statement names an **operator** setting.
+        return _Forecast(
+            (),
+            ForecastDisposition.NOT_CONFIGURED,
+            forecast_not_read(ForecastDisposition.NOT_CONFIGURED),
+            contact=forecast_contact_of(ForecastDisposition.NOT_CONFIGURED),
+            serviced=True,
+        )
+    # §7's own words for what this holds: "the turn's pre-servicing supply and over every
+    # record this servicing has already contributed", read once here so that ADR-0181
+    # §4's fact is computed from **one** value at **one** instant.
+    in_view = (*supply, *union.admitted)
+    try:
+        read = await forecast.service(
+            remaining=union.remaining,
+            external=any(
+                rests_on_recorded_external_content(record.provenance) for record in in_view
+            ),
+        )
+    except AssistantError as exc:
+        # ADR-0226 §5, and the reason :class:`_ServicingFailedError` exists. §6's three
+        # pre-execution checks resolve to `BINDING_FAILED` inside `service` without
+        # reaching here; what reaches here is a fault that is none of them — a call bound
+        # to another account or another origin, a transport pin refused, a cancellation
+        # the transport invented with nothing cancelled. §8 gives the vocabulary no
+        # member for any of them, so the ratified answer is the all-or-nothing
+        # degradation, which leaves the supply as planning saw it with every count zero.
+        #
+        # **``from None``, and the class name rather than the exception** (ADR-0004 §5):
+        # the chain this suppresses would put `service`'s frames — the request, the
+        # bound call and the decision — into any rendered traceback.
+        raise _ServicingFailedError(type(exc).__name__) from None
+    reads.note(len(read.records))
+    # ADR-0264 §4's count, taken **here, at the site that performs the admission**, and
+    # never reconstructed: the delta is what the union took after ADR-0226 §7's
+    # deduplication over the whole union and §6's budget, so a response whose days the
+    # budget cut contributes what fit — §13's arm (f), where nine spent slots admit
+    # exactly one day and the kind is recorded as truncated.
+    before = len(union.admitted)
+    if union.admit(read.records):
+        truncated.append(ReadKind.FORECAST_READ)
+    return replace(read, admitted=len(union.admitted) - before)
 
 
 async def _serviced_file(
@@ -4843,6 +6136,19 @@ def emit_read_audit(  # noqa: PLR0913 — one keyword per field of ADR-0226 §9'
     reading of a trigger — the disposition is what tells the two apart, and no figure
     for this kind is reported without saying which it is.
 
+    **And no value the forecast provider returned, in any form** (ADR-0260 §7). No day,
+    no place, no coordinate, no origin, no account, no provider message and no
+    ``Settings`` field name appears anywhere in this event on account of a
+    ``FORECAST_READ``, and **no count of the days ADR-0260 §5 dropped**: §7 refuses that
+    class because every count here "is taken over a servicing that completed" and is
+    zero on one that failed, so a drop count would have to be zeroed by a later ask's
+    failure to obey §9 and non-zero to be worth having. The two fields this kind adds
+    are a **boolean** and a **class**: ``forecast_serviced`` says whether the ask was
+    put to the forecast stage at all, and ``forecast`` is a :class:`ForecastDisposition`
+    member or absent. The honest consequence — that a response this system thinned is
+    not distinguishable here from one the provider gave thin — is ADR-0260 §14's
+    deferral rather than a gap this record fills.
+
     **And no value on any axis, in any form** (ADR-0240 §10). No instant, no window,
     no person label, no topic label, no query, no record, no excerpt and no count of a
     label's characters appears anywhere in this event on account of a
@@ -4952,6 +6258,18 @@ def emit_read_audit(  # noqa: PLR0913 — one keyword per field of ADR-0226 §9'
                 "labels_unresolved": read.labels_unresolved,
                 "refusal": None if read.refusal is None else read.refusal.value,
                 "disposition": None if read.disposition is None else read.disposition.value,
+                # ADR-0260 §7's two added fields, on the one event and under the one key:
+                # **no second audit**, no second event key and no new emission point.
+                # A boolean and a **class** — `forecast` is a `ForecastDisposition`
+                # member or absent — which is what §9's no-copy rule admits, exactly as
+                # it admits `refusal`, `disposition` and `structured` above. **No value
+                # the provider returned, no day, no place, no coordinate, no origin, no
+                # account and no `Settings` field name** is anywhere in this record on
+                # account of a forecast, and **no count of dropped days**: §7 refuses
+                # that class in terms and §14 defers the consequence rather than
+                # glossing it.
+                "forecast_serviced": read.forecast_serviced,
+                "forecast": None if read.forecast is None else read.forecast.value,
                 # ADR-0238 §11's two and ADR-0245 §7's third, on the one event and
                 # under the one key: no second audit, no second event key and no new
                 # emission point. Counts only, and the destination's recorded trust is
