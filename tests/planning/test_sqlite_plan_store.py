@@ -3425,6 +3425,155 @@ def _version_4_database(path: Path) -> None:
         conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
 
 
+async def test_an_attempt_past_the_bound_variable_limit_is_still_answered(
+    tmp_path: Path,
+) -> None:
+    """ADR-0261 §6's unbounded history, driven over this backend's own cliff.
+
+    An attempt's ``execution_ids`` are **append-only and unbounded** (ADR-0249 §5,
+    §12), which is §6's own reason for the goal-wide member existing rather than the
+    engine walking ``attempts_of`` and ``get_execution``. A single
+    ``SELECT ... IN (...)`` over the whole tuple binds one variable per id, and every
+    SQLite connection has a finite ``SQLITE_LIMIT_VARIABLE_NUMBER`` — so past it the
+    predicate raised *too many SQL variables* instead of answering, and so did the act,
+    ``commit_attempt``'s cancellation and the upgrade repair, every one of them through
+    the same helper.
+
+    **Driven against a deliberately lowered limit rather than against 32,766 rows**,
+    which is what makes it a test rather than a soak: ``setlimit`` moves the boundary
+    to a figure a fixture can reach, and the assertion is that the answer comes back
+    at all. Both members are driven, because both read through that helper and a fix
+    applied to one would leave the other on the cliff.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        ids: list[str] = []
+        for index in range(1, 9):
+            await store.save_plan(_plan(plan_id=f"p{index}"))
+            ids.append((await store.start_execution(f"p{index}")).id)
+        await store.open_attempt(
+            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=tuple(ids))
+        )
+        # Below the number of ids the attempt holds, so the helper must issue more than
+        # one statement or raise. `sqlite3` refuses a limit under 1.
+        store._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)
+
+        assert await store.has_outstanding_effect("g1") is False
+        goal = await store.get_goal("g1")
+        assert goal is not None
+        assert (
+            await store.close_goal_abandoned("g1", at=_LATER, expected_version=goal.version)
+            is False
+        )
+        ended = await store.get_attempt("a1")
+        assert ended is not None
+        assert ended.state is AttemptState.CANCELLED
+        assert ended.outcome is AttemptOutcome.CANCELLED
+    finally:
+        store.close()
+
+
+#: The write a second connection attempts while the scan is mid-flight. A no-op
+#: update — it sets a column to itself — because what the case is about is whether the
+#: write can *commit* under the scan's snapshot, not what it would have changed.
+_SECOND_WRITER = "UPDATE executions SET version = version WHERE id = ?"
+
+
+class _PausingScan(SqlitePlanStore):
+    """A store whose outstanding-effect scan stops between two attempts' reads.
+
+    The hook ADR-0261 §14 arm 9's **second connection** case needs, supplied by the
+    *fixture* rather than by any member of ``PlanStore`` — ADR-0060 §3's own division,
+    "a test-only affordance does not go on the Protocol". It is a subclass and not a
+    monkeypatch so that the override is type-checked against the method it replaces.
+    """
+
+    #: Set by the scan once it has read one attempt's executions and is waiting.
+    paused: threading.Event
+
+    #: Released by the case once the second connection has had its chance.
+    resume: threading.Event
+
+    def _step_statuses(self, conn: sqlite3.Connection, attempt: GoalAttempt) -> list[StepStatus]:
+        """Read as the store does, then hold the scan open after the first attempt."""
+        found = super()._step_statuses(conn, attempt)
+        if attempt.id == "a1":
+            self.paused.set()
+            self.resume.wait(timeout=10)
+        return found
+
+
+async def test_the_scan_is_one_snapshot_against_a_second_connection(tmp_path: Path) -> None:
+    """ADR-0261 §14 arm 9's indivisibility, over the interleaving that actually broke it.
+
+    **The shared suite's arm cannot see this, and that is why this one exists.** It
+    drives the query and the two transitions through one ``SqlitePlanStore``, whose
+    ``asyncio.Lock`` serialises them — so the implementation this case refuses, the one
+    whose scan issued its ``SELECT``s with no transaction around them, passes it. The
+    lock excludes no **second connection to the same file**, which is the concrete
+    failure: another holder claims a step this scan has already passed and resolves one
+    it has not yet reached, and the scan answers ``False`` though something was
+    outstanding throughout.
+
+    **The second connection is a raw ``sqlite3`` one on the case's own thread**, and
+    deliberately not a second store: what is being demonstrated is a property of the
+    *file's* locking, one parked worker is all the concurrency the case needs, and a
+    second store would add a worker thread and an event loop task to a case whose whole
+    value is being deterministic.
+
+    **Asserted as the refusal, which is arm 9's own "answer ``true`` or block until it
+    can"**: with ``busy_timeout`` at zero the write is refused *immediately* rather
+    than waiting, so the case decides in microseconds and never hangs. A scan holding
+    no snapshot lets that same commit through.
+    """
+    path = tmp_path / "plans.db"
+    scanning = _PausingScan(path=path, now=_fixed_now)
+    scanning.paused, scanning.resume = threading.Event(), threading.Event()
+    try:
+        await scanning.save_goal(_goal())
+        await scanning.save_plan(_plan(plan_id="p1"))
+        await scanning.save_plan(_plan(plan_id="p2"))
+        first = await scanning.start_execution("p1")
+        second = await scanning.start_execution("p2")
+        await scanning.open_attempt(
+            GoalAttempt(id="a1", goal_id="g1", opened_at=_AT, execution_ids=(first.id,))
+        )
+        await scanning.open_attempt(
+            GoalAttempt(
+                id="a2",
+                goal_id="g1",
+                opened_at=_AT + timedelta(minutes=1),
+                execution_ids=(second.id,),
+            )
+        )
+        await scanning.commit_transition(_claim(second, attempt_id="a2"))
+
+        asking = asyncio.ensure_future(scanning.has_outstanding_effect("g1"))
+        await asyncio.to_thread(scanning.paused.wait, 10)
+
+        outsider = sqlite3.connect(path, timeout=0)
+        try:
+            outsider.execute("BEGIN IMMEDIATE")
+            outsider.execute(_SECOND_WRITER, (second.id,))
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                outsider.execute("COMMIT")
+        finally:
+            with contextlib.suppress(sqlite3.Error):
+                outsider.execute("ROLLBACK")
+            outsider.close()
+            scanning.resume.set()
+
+        assert await asking is True, (
+            "something was outstanding at every instant, so the scan must answer true "
+            "— ADR-0261 §14 arm 9's 'answer true or block until it can'"
+        )
+    finally:
+        scanning.resume.set()
+        scanning.close()
+
+
 def _version_5_database(path: Path) -> None:
     """Build the database this store shipped **after** ADR-0265 and before ADR-0267.
 
