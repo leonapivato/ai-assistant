@@ -142,6 +142,20 @@ BOOKED_KEY: Final = "booked"
 CHARGED_AMOUNT_KEY: Final = "charged_amount"
 CHARGED_CURRENCY_KEY: Final = "charged_currency"
 
+#: **What every persisted booking record carries, and nothing else** (ADR-0273 §2):
+#: *"a booking record carrying what it was asked and what it charged"*, where *asked* is
+#: both declared arguments and *charged* is the amount with its code. §2 also fixes the
+#: *"and nothing else"* half — the store *"persists only the fields that schema names"* —
+#: so a record with a field missing and a record with a field added are each not one.
+#: **Stated once and read at both ends** (:func:`_record_fault`), so the store cannot
+#: write a record it would refuse to read back.
+_RECORD_FIELDS: Final = (
+    ORIGIN_ARGUMENT,
+    DATE_ARGUMENT,
+    CHARGED_AMOUNT_KEY,
+    CHARGED_CURRENCY_KEY,
+)
+
 #: The honesty field ADR-0273 §6 requires on **every** successful output, availability
 #: answer and booking alike, and in the ``message`` of every ``ToolFailure`` this module
 #: returns. **It is a statement in a record and nothing more**: §6 forbids any policy,
@@ -533,6 +547,86 @@ def _checked_retained(value: int) -> int:
         )
         raise BookingConfigurationError(msg)
     return value
+
+
+def _field_fault(field: str, value: FrozenJson) -> str | None:
+    """Why ``value`` is not what a booking record's ``field`` holds, or ``None``.
+
+    **Every field is a JSON string**, which is the one shape the store writes: the two
+    declared arguments arrive as strings and the charge is serialised as one, so an
+    object holding a number, a flag, ``null`` or a nested document under any of them is
+    not a record this store produced.
+
+    **And the three fields with a domain are read through this module's own readers
+    rather than through a second statement of the same rule.** The day's shape, the
+    amount's domain and the currency's shape are each stated once
+    (:func:`_checked_day`, :func:`_checked_amount`, :func:`_checked_currency`); a copy
+    here is how a record the commit wrote becomes a record the read refuses. ``origin``
+    has no domain beyond *string* — :func:`_origin_subschema` states none, and the
+    record outlives the configuration it was equal to, so nothing narrower is true of
+    every retained row.
+
+    Args:
+        field: The record field being read. One of :data:`_RECORD_FIELDS`.
+        value: What the mapping holds under it.
+
+    Returns:
+        A short reason, or ``None`` if ``value`` is what ``field`` holds. **It names the
+        field and never the value**, because it reaches a message about a corrupt store
+        and a row's values are the user's booking detail (ADR-0273 §2).
+    """
+    if not isinstance(value, str):
+        return f"its {field} is not a string"
+    try:
+        if field == DATE_ARGUMENT:
+            _checked_day(value, field=field)
+        elif field == CHARGED_AMOUNT_KEY:
+            _checked_amount(value, field=field)
+        elif field == CHARGED_CURRENCY_KEY:
+            _checked_currency(value, field=field)
+    except BookingConfigurationError as exc:
+        # Those readers report a **setting** being outside its domain, which is not what
+        # happened here; the sentence states the rule, so it is carried as a reason and
+        # the class is not propagated.
+        return str(exc)
+    return None
+
+
+def _record_fault(record: Mapping[str, FrozenJson]) -> str | None:
+    """Why ``record`` is not a booking record, or ``None`` if it is one.
+
+    **The shape ADR-0273 §2 fixes, checked at both ends.** §2 requires every record to
+    carry *"what it was asked and what it charged"* — both declared arguments and the
+    charge with its code — and *"persists only the fields that schema names"*, so a
+    field missing, a field added and a field of the wrong shape each make the mapping
+    something other than a booking record. A reader is promised a record it can index:
+    a consumer taking ``origin``, ``charged_amount`` or ``charged_currency`` out of a
+    fragment would get incomplete durable state, or a bare ``KeyError`` past this
+    layer's own error boundary.
+
+    **Read at the commit as well as at the decode**, from this one statement: a store
+    that wrote a record it could not read back would turn one caller's mistake into a
+    store that fails to open on the next run.
+
+    Args:
+        record: The mapping to test — one the provider composed, or one decoded from a
+            row the store read back.
+
+    Returns:
+        A short reason, for the caller's own message, or ``None`` if ``record`` is a
+        booking record. **It names fields and never values** (:func:`_field_fault`).
+    """
+    missing = [field for field in _RECORD_FIELDS if field not in record]
+    if missing:
+        return f"it carries no {', no '.join(missing)}"
+    extra = sorted(set(record) - set(_RECORD_FIELDS))
+    if extra:
+        return f"it carries {', '.join(extra)}, which a booking record does not"
+    for field in _RECORD_FIELDS:
+        fault = _field_fault(field, record[field])
+        if fault is not None:
+            return fault
+    return None
 
 
 @final
@@ -1072,9 +1166,10 @@ class SqliteBookingStore:
         """Insert ``record``, advance the count and prune, as one transaction (§2).
 
         Args:
-            record: What the provider was asked and what it charged. Serialised to JSON
-                and rebuilt on every read, which is how a detached snapshot is obtained
-                here without a copy step to forget.
+            record: What the provider was asked and what it charged — ADR-0273 §2's
+                shape exactly, refused otherwise (:func:`_record_fault`). Serialised to
+                JSON and rebuilt on every read, which is how a detached snapshot is
+                obtained here without a copy step to forget.
             confirmed: Whether the caller may learn the transaction's outcome.
                 ``False`` is **ADR-0273 §4's configured uncertainty**: the transaction
                 is committed and its outcome is then reported as unobtainable, so a
@@ -1086,10 +1181,25 @@ class SqliteBookingStore:
                 demonstrates a pessimistic misreport rather than an uncertain effect"*.
 
         Raises:
-            BookingStoreError: If the transaction failed, carrying which side of the
-                commit boundary it failed on; or, where ``confirmed`` is ``False``,
+            BookingStoreError: If ``record`` is not a booking record — §2's shape,
+                checked before the transaction is opened, so nothing is written and the
+                count does not move; if the transaction failed, carrying which side of
+                the commit boundary it failed on; or, where ``confirmed`` is ``False``,
                 after it landed, carrying ``may_have_committed=True``.
         """
+        fault = _record_fault(record)
+        if fault is not None:
+            # **Refused before the transaction is opened**, so nothing is inserted, the
+            # count does not move and no pruning runs — §2's *"commits none of the
+            # three"*. And refused here at all because the read refuses the same shape:
+            # a store that wrote a record it could not read back would turn a caller's
+            # mistake into a corrupt store on the next open.
+            msg = (
+                f"refusing to commit to the booking store at {self._path!r} something "
+                f"that is not a booking record: {fault} (ADR-0273 §2). The value is not "
+                f"rendered."
+            )
+            raise BookingStoreError(msg, may_have_committed=False)
         serialised = json.dumps(dict(record), sort_keys=True, separators=(",", ":"))
         async with self._lock:
             await _run_to_completion(self._commit_sync_confirmed, serialised, confirmed)
@@ -1227,12 +1337,17 @@ class SqliteBookingStore:
     async def records(self) -> tuple[Mapping[str, FrozenJson], ...]:
         """Every retained booking record, oldest first.
 
+        **Each one carries ADR-0273 §2's fields**, so a caller may index the origin, the
+        day, the charge and its code without testing for them; a row that does not is a
+        corrupt store and is reported as one.
+
         Returns:
             The records, rebuilt from their stored JSON so nothing shares an object
             graph with the store.
 
         Raises:
-            BookingStoreError: If the store could not be read.
+            BookingStoreError: If the store could not be read, or holds a row that is
+                not a booking record.
         """
         async with self._lock:
             return await _run_to_completion(self._read_records_sync)
@@ -1263,9 +1378,11 @@ class SqliteBookingStore:
         **The decode happens inside this store's error boundary and not above it.** A
         row that is not a JSON object — malformed text, or a bare scalar — is a corrupt
         store, which is this layer's fault to report rather than a ``JSONDecodeError``
-        escaping past its own seam (#238's rule, one store along). Callers are promised
-        a mapping per record and a :class:`BookingStoreError` otherwise, and that
-        promise is kept here.
+        escaping past its own seam (#238's rule, one store along). **And a JSON object
+        is not enough**: callers are promised a record carrying ADR-0273 §2's fields,
+        not merely a mapping, so a row decoding to one that is not a booking record is
+        a corrupt store too and a :class:`BookingStoreError` is what they get. Both
+        promises are kept here.
 
         Returns:
             The records, rebuilt from their stored JSON so nothing shares an object
@@ -1273,7 +1390,8 @@ class SqliteBookingStore:
 
         Raises:
             BookingStoreError: If the store could not be read, or holds a row this
-                code cannot read as a booking record.
+                code cannot read as a booking record — unreadable text, a JSON value
+                that is not an object, or an object that is not §2's record.
         """
         try:
             rows = self._conn.execute(_READ_BOOKINGS).fetchall()
@@ -1300,6 +1418,20 @@ class SqliteBookingStore:
                 msg = (
                     f"the booking store at {self._path!r} holds a row that is not a "
                     f"booking record; the store is corrupt. The row is not rendered."
+                )
+                raise BookingStoreError(msg, may_have_committed=False)
+            # **A JSON object is not yet a record** (§2). ``{}``, a row with the charge
+            # removed and a row with a field added each decode to a ``dict``, and each
+            # would reach a caller promised *"what it was asked and what it charged"* —
+            # as incomplete durable state, or as a bare ``KeyError`` out of an index
+            # this layer said it would not raise. The commit refuses the same shape, so
+            # a row this fails is a row something outside this store wrote.
+            fault = _record_fault(record)
+            if fault is not None:
+                msg = (
+                    f"the booking store at {self._path!r} holds a row that is not a "
+                    f"booking record: {fault} (ADR-0273 §2); the store is corrupt. The "
+                    f"row is not rendered."
                 )
                 raise BookingStoreError(msg, may_have_committed=False)
             decoded.append(record)
