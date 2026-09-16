@@ -10771,6 +10771,13 @@ class Engine:
         supply filter, so a turn whose episode was withheld under ADR-0199 §3 or
         ADR-0204 §3 contributes no delivery fact either.
         """
+        # ADR-0255 §9's remainder, opened **here** — at the turn's entry, before its
+        # first await — and not where it is first read. §9's rule is over "the turn's
+        # remaining budget", so a turn that spends most of its figure resolving its
+        # conversation, its history and its goal reaches ADR-0259 §4's pass with that
+        # much less left; a remainder opened at the pass would hand §3's one call the
+        # whole budget again. Adversarial review, round 1, `blocker`.
+        remaining = None if self._reconciliation is None else self._reconciliation.opened(timeout)
         # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
         # does and a continuation marks the conversation active before a reclaim
         # could judge it idle.
@@ -10822,8 +10829,12 @@ class Engine:
         # resolved before it plans — and before `respond`. A turn that opens a goal has
         # no residual to repair and takes neither half.
         reconciled = Reconciled()
-        if self._reconciliation is not None and association.goal is not None:
-            reconciled = await self._reconciliation.run(association.goal.id, budget=timeout)
+        if (
+            self._reconciliation is not None
+            and remaining is not None
+            and association.goal is not None
+        ):
+            reconciled = await self._reconciliation.run(association.goal.id, remaining=remaining)
             # **The attempt is re-read after the pass, because act 3 may have moved
             # it.** ADR-0250 §12's carrier holds the row the association read, and
             # every later compare-and-swap of this turn is computed against what the

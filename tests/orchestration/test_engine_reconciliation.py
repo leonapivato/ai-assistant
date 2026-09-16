@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
-from test_engine import AT, PATIENT, Harness, NoStepPlanner, tool
+from test_engine import AT, PATIENT, Harness, NoStepPlanner, confirmable, tool
 
 from ai_assistant.core.types import (
     ActionPlan,
@@ -318,3 +318,53 @@ async def test_a_turn_over_a_goal_with_no_residual_says_nothing_and_calls_nothin
     assert seam.calls == []
     system = next(message for message in provider.last_messages if message.role is Role.SYSTEM)
     assert "whether it went through" not in system.content
+
+
+async def test_a_turn_whose_new_step_parks_still_reconciles_and_composes_no_prose() -> None:
+    """A parked turn reconciles and tells nothing, because ADR-0170 §4 says it may not.
+
+    Adversarial review, round 1, ``blocker``, **waived with this row as its record.**
+    The finding is true as stated — a turn whose plan parks for confirmation returns the
+    confirmation and never says the earlier effect is uncertain — but the rule that
+    produces it is not this decision's. ADR-0170 §4 rules that *"a pass whose step parked
+    for confirmation"* composes no reply at all, *"because what the user must answer is
+    the confirmation"* and *"prose beside it competes with the question"* (ADR-0197 §10
+    states it again for a routed park). Every other statement this system composes rides
+    the same way and is lost on the same shape — ``outbound_statement`` is documented as
+    ``None`` on exactly that pass — so surfacing here would be **this lane** overturning
+    ADR-0170 §4 for one clause, which ADR-0259 §10 expressly does not authorise: *"this
+    decision fixes no reply, no phrasing and no channel"*, and **A9** owns what the user
+    is told about an uncertain effect and whether *told once* survives a park.
+
+    What this row pins is that nothing is **lost but the telling**: the pass and the
+    check both ran, the step is established, and the record the A9 report will read is
+    exactly the record §3 asks be preserved. Filed for A9 as an issue.
+    """
+    ordering = _Ordering()
+    seam = _RecordingInvoker(ordering)
+    provider = FakeModelProvider()
+    plans = FakePlanStore(now=lambda: AT)
+    trail = FakeAuditTrail()
+    harness = Harness(
+        composing=ComposingStage(model=provider, streaming=FakeStreamingCompleter()),
+        tools=(_reading(), confirmable()),
+        associator=FakeGoalAssociator(answer=GoalAssociation(verdict=AssociationVerdict.CONTINUES)),
+        plans=plans,
+        trail=trail,
+        reconciliation=ReconciliationStage(plans=plans, trail=trail, invoker=seam),
+        now=lambda: AT,
+    )
+    conversation = (await harness.conversations.begin(None)).id
+    execution_id = await _a_goal_with_an_uncertain_read(plans, trail, conversation=conversation)
+
+    outcome = await harness.engine.converse(ASKED, timeout=PATIENT, conversation_id=conversation)
+
+    assert outcome.step is not None
+    assert outcome.step.confirmation is not None, "the new step parked"
+    assert outcome.reply is None, "ADR-0170 §4: a parked pass owes no answer"
+    assert len(seam.calls) == 1, "and the reconciliation still happened"
+    held = await plans.get_execution(execution_id)
+    assert held is not None
+    record = held.step("s-1")
+    assert record is not None
+    assert record.status is StepStatus.SUCCEEDED, "the record §3 asks be preserved is settled"
