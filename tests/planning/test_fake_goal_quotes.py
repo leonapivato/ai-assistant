@@ -17,6 +17,7 @@ failing, and the durable store is where that actually happens.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
@@ -133,6 +134,35 @@ class TestSqlitePlanStoreGoalQuotesContract(GoalQuotesContract):
     async def quotes(self, tmp_path: Path) -> GoalQuotes:
         """The durable store, holding the goal, its two acts and the suite's quotes."""
         return await _seeded(SqlitePlanStore(path=tmp_path / "plans.db"), HELD)
+
+
+async def test_the_fake_detaches_a_quote_on_the_way_in_as_well_as_out() -> None:
+    """§5's detachment, on the **input** side, which the shared suite cannot reach.
+
+    The suite is handed a subject already holding its corpus, so the objects that were
+    seeded are not in its hands; here they are. A caller that keeps a reference to a
+    quote it seeded — or, as every binding in this module does, seeds from a **module
+    constant** — could otherwise rewrite the amount afterwards and move what the seam
+    answers, which would make one case's mutation leak into the next.
+
+    Driven through both routes a quote enters by: the constructor and
+    :meth:`~ai_assistant.testing.FakeGoalQuotes.hold_for`.
+    """
+    seeded = HELD[0]
+    seam = FakeGoalQuotes([seeded], goal=GOAL)
+    later = HELD[2]
+    seam.hold_for(GOAL, later)
+
+    seeded.__dict__["amount"] = Decimal("999999")
+    later.__dict__["amount"] = Decimal("999999")
+    try:
+        answered = await seam.for_action(GOAL, ACTION)
+        assert [one.amount for one in answered] == [Decimal("120"), Decimal("135")]
+    finally:
+        # ``HELD`` is this suite's shared corpus; leaving it rewritten would move
+        # every other case's expectations.
+        seeded.__dict__["amount"] = Decimal("120")
+        later.__dict__["amount"] = Decimal("135")
 
 
 async def test_a_fault_behind_the_fake_is_raised_and_never_an_empty_tuple() -> None:

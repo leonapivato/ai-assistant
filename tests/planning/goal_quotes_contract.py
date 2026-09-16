@@ -206,6 +206,31 @@ class GoalQuotesContract:
         first = await quotes.for_action(GOAL, ACTION)
         assert await quotes.for_action(GOAL, ACTION) == first
 
+    async def test_the_answer_is_a_detached_snapshot_a_caller_cannot_rewrite(
+        self, quotes: GoalQuotes
+    ) -> None:
+        """§5 takes ``GoalAuthorizations.live_for``'s direction, detachment included.
+
+        *"``frozen=True`` does not close the bypass: a caller could rewrite …
+        through ``__dict__`` on a shared object, which is a widening of what the user
+        authorised, reached through the gate's own answer."* One record over that is an
+        **amount**: a caller holding this seam's answer could raise the figure a
+        ``MONEY`` ceiling is proved against to one no provider ever quoted, and
+        ADR-0266 §7 would compare against it.
+
+        **Asserted by rewriting a returned quote and reading again** — not by comparing
+        two consecutive answers, which an implementation handing back the *same*
+        aliased objects passes trivially. ``__dict__`` rather than assignment, because
+        the model is frozen and assignment is not the bypass this is about.
+        """
+        answered = await quotes.for_action(GOAL, ACTION)
+        before = answered[0].amount
+        answered[0].__dict__["amount"] = before + Decimal("1000")
+
+        again = await quotes.for_action(GOAL, ACTION)
+        assert again[0].amount == before, "a rewritten answer moved what the seam holds"
+        assert [one.amount for one in again] == [one.amount for one in FOR_ACTION]
+
     @pytest.mark.parametrize("act", ["ia1 ", " ia1", "IA1", "ia11", "ia"])
     async def test_the_key_is_compared_whole_and_never_by_prefix_or_fold(
         self, quotes: GoalQuotes, act: str
