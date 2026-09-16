@@ -205,6 +205,7 @@ from ai_assistant.orchestration.disclosure import (
     UnboundedAudienceSupply,
     notification_is_speakable,
 )
+from ai_assistant.orchestration.effects import told_once
 from ai_assistant.orchestration.evidence import refresh_set
 from ai_assistant.orchestration.goals import (
     GoalFacts,
@@ -11327,6 +11328,16 @@ class Engine:
             # member. A driver dispatching **outside** a turn is §19's booked case and
             # is A7's, not this decision's.
             authorizations=self._announced_authorizations(disposition, goal_record),
+            # ADR-0259 §2: the ids of the steps this turn satisfied from an effect the
+            # goal had already completed, **in walk order**. This tree drives one step
+            # per turn (`turn.plan.steps[0]`), so the sequence is at most one long; the
+            # accumulator is written over a sequence rather than over a single optional
+            # id because ADR-0255's own L2 lands the walk that fills it, and an
+            # implementation that folded one id here would be the one arm 1 fails for
+            # overwriting at each satisfaction.
+            satisfied_from_earlier=told_once(
+                () if disposition.satisfied is None else (disposition.satisfied,)
+            ),
         )
 
     # --- ADR-0197's routing stage, driven --------------------------------
@@ -12482,7 +12493,7 @@ class Engine:
         # is the ruling it was recorded under rather than the moved row — the finishing
         # commit reads the attempt itself, which is what lets it record the facts a
         # refused boundary write did not (:meth:`_finished_attempt`).
-        parked, step, establishing, allowed_by, egress = await self._resolve_park(
+        parked, step, establishing, allowed_by, egress, satisfied = await self._resolve_park(
             token,
             approved=approved,
             timeout=timeout,
@@ -12541,7 +12552,12 @@ class Engine:
         # own work and not the interval the park spent waiting for the user (§5).
         await self._finished_attempt(step, composed, since=resumed_from, allowed_by=allowed_by)
         return await self._capture_resumption(
-            parked, step, composed, recipient_grant=recipient_grant, outbound_statement=outbound
+            parked,
+            step,
+            composed,
+            recipient_grant=recipient_grant,
+            outbound_statement=outbound,
+            satisfied=satisfied,
         )
 
     async def _resume_read(
@@ -12847,7 +12863,12 @@ class Engine:
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         remember_recipients_until: UtcInstant | None = None,
     ) -> tuple[
-        _Parked | None, StepOutcome, EstablishingAnswer | None, str | None, OutboundReach | None
+        _Parked | None,
+        StepOutcome,
+        EstablishingAnswer | None,
+        str | None,
+        OutboundReach | None,
+        str | None,
     ]:
         """Record the answer and drive it, or restate an answer already recorded.
 
@@ -12903,7 +12924,7 @@ class Engine:
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
             if parked is None:
-                return None, await self._restate(token), None, None, None
+                return None, await self._restate(token), None, None, None, None
             state = await self._plans.get_execution(parked.execution_id)
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
@@ -12983,7 +13004,18 @@ class Engine:
             # ADR-0264 §2's egress contribution, carried out of the drive on the
             # disposition and never recomputed here — a resolved step is a driven step,
             # and §3's rule binds on it exactly as on one driven inside a turn.
-            return parked, step, disposition.establishing, allowed_by, disposition.outbound
+            # ADR-0259 §2's sixth value: the step this resolution **satisfied** from an
+            # effect the goal had already completed, which a resumed step reaches
+            # exactly as a `run` one does — §2 admits `AWAITING_APPROVAL → SUCCEEDED`
+            # as the second of the two commits, and a silent reuse is not conforming.
+            return (
+                parked,
+                step,
+                disposition.establishing,
+                allowed_by,
+                disposition.outbound,
+                disposition.satisfied,
+            )
 
     def _retain(self, handle: str, settled: _Settled) -> None:
         """Record one answered binding under its handle, within §4's bound.
@@ -13119,7 +13151,7 @@ class Engine:
             confirmation=None,
         )
 
-    async def _capture_resumption(
+    async def _capture_resumption(  # noqa: PLR0913 — the park, what became of its step, the reply, and the three facts about the act the capture cannot re-derive; each is a distinct fact about the resolution
         self,
         parked: _Parked,
         step: StepOutcome,
@@ -13127,6 +13159,7 @@ class Engine:
         *,
         recipient_grant: RecipientGrantOutcome | None = None,
         outbound_statement: OutboundStatement | None = None,
+        satisfied: str | None = None,
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
@@ -13160,6 +13193,10 @@ class Engine:
                 # this pass assembled, by value. A capture that could not be written
                 # leaves what the turn *did* exactly as true as it was.
                 outbound_statement=outbound_statement,
+                # ADR-0259 §2, on those same terms and for that same reason: a capture
+                # the conversation index could not resolve does not unmake the fact
+                # that this resolution satisfied its step from an earlier act.
+                satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
             )
         return await self._capture(
             origin.conversation_id,
@@ -13206,6 +13243,9 @@ class Engine:
             # retained `False`, which is §3's third case and true of an episode that
             # renders no turn's goal statement and no turn's plan rationale.
             derived_from_external=parked.derived_from_external,
+            # ADR-0259 §2: what this resolution satisfied, carried by value from the
+            # drive exactly as on the `converse` path.
+            satisfied_from_earlier=told_once(() if satisfied is None else (satisfied,)),
         )
 
     async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding, the routed account, the utterance a routed pass has no turn to carry, the user's own words the transcript archive keeps, the turn's disclosure evaluation, its origin mark and its spoken capture; every one is a distinct fact about the pass
@@ -13234,6 +13274,7 @@ class Engine:
         reference: ReferenceOutcome | None = None,
         disambiguation: GoalDisambiguation | None = None,
         authorizations: tuple[AuthorizationView, ...] = (),
+        satisfied_from_earlier: tuple[str, ...] | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
 
@@ -13423,6 +13464,14 @@ class Engine:
             # that drove no step: a path-(iii) row is written only during a turn that
             # dispatches one, and §19 books the outside-a-turn driver as A7's.
             authorizations=authorizations,
+            # ADR-0259 §2's told-once fact, folded in at the one place a `TurnOutcome`
+            # is built and **carried by value from what the stage computed** — never a
+            # second computation and never a read of the durable record, which
+            # `StepExecution.satisfied_by_execution` holds for its own purposes. `None`
+            # on every pass that satisfied no step this way, which is every pass that
+            # drove none; `()` is unconstructable, so `None` is the one spelling of it
+            # (:func:`~ai_assistant.orchestration.effects.told_once`).
+            satisfied_from_earlier=satisfied_from_earlier,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
