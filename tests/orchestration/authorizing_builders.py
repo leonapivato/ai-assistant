@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     EgressSpan,
     FrozenJson,
     Goal,
+    GoalElement,
     GoalInterpretation,
     Ground,
     Idempotency,
@@ -110,8 +111,18 @@ def a_described_binding(parameters: Mapping[str, FrozenJson], **overrides: objec
     return a_binding(spans=spans, **overrides)
 
 
-def a_goal(*, deadline: datetime | None) -> Goal:
-    """A goal carrying ``deadline``, for the ladder's rung 2."""
+#: The turn the one revision below was raised by, and therefore the ``act`` every
+#: member minted from its constraints names (ADR-0266 §2).
+ACT_TURN: Final = "t-1"
+
+
+def a_goal(*, deadline: datetime | None, constraints: tuple[GoalElement, ...] = ()) -> Goal:
+    """A goal carrying ``deadline``, for the ladder's rung 2.
+
+    ``constraints`` are the elements of its **current** interpretation, which is
+    what ADR-0266 §1 mints from. The default is none, so a goal built without them
+    mints no coverage and every case about the ladder is unaffected by the mint.
+    """
     return Goal(
         id=GOAL,
         interpretation=(
@@ -120,8 +131,9 @@ def a_goal(*, deadline: datetime | None) -> Goal:
                 outcome="send the note",
                 outcome_ground=Ground.USER_STATED,
                 outcome_span="send the note",
+                constraints=constraints,
                 recorded_at=AT,
-                raised_by="t-1",
+                raised_by=ACT_TURN,
             ),
         ),
         deadline=deadline,

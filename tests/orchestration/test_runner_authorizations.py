@@ -8,29 +8,50 @@ re-derives.
 Every collaborator is a canonical fake from ``ai_assistant.testing``, so nothing
 here imports ``permissions/`` or ``planning/`` (CLAUDE.md golden rule 1).
 
-**No row here carries a coverage member** (#2373, ruled into ADR-0266); see
-``test_authorizing.py``'s own docstring and the pull request.
+**The coverage a row carries is minted from the goal** (ADR-0266 §11's L2), so a
+case whose goal states no bound writes an empty one and the cases at the end of this
+module state a ceiling and read it back off the row. The mint itself is
+``test_stated_bounds.py``'s; what is pinned here is that this stage asks about what
+it minted and writes what it asked about.
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
-from authorizing_builders import ACCOUNT, AT, GOAL, RETENTION, a_binding, a_goal, a_tool
+from authorizing_builders import (
+    ACCOUNT,
+    ACT_TURN,
+    AT,
+    GOAL,
+    RETENTION,
+    a_binding,
+    a_goal,
+    a_tool,
+)
 
 from ai_assistant.core.errors import AuthorizationError
 from ai_assistant.core.types import (
     ActionPlan,
+    ActionQuote,
     AttemptTransition,
     Authorization,
     AuthorizationDisposition,
     AuthorizationOrigin,
+    BoundKind,
     DataTier,
     Disposition,
     GoalAttempt,
+    GoalElement,
+    Ground,
+    IntendedAction,
+    IntendedActionMinting,
     PlanStep,
+    ResolutionRule,
+    StepOutputRef,
     StepStatus,
 )
 from ai_assistant.orchestration import StepExecutor, StepRunner
@@ -54,8 +75,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import ExecutionState, Goal, ToolDefinition
 
 #: The one step every test here disposes of. It carries **no argument**, which is
-#: the request ADR-0254 §20's arm 54 is stated over and the only shape this lane
-#: can found an authority on (#2373).
+#: the request ADR-0254 §20's arm 54 is stated over.
 STEP = "step-1"
 ATTEMPT = "a-1"
 CAPABILITY = "send_email"
@@ -131,10 +151,25 @@ class Harness:
             id_factory=lambda: next(self.ids),
         )
 
-    async def an_execution(self, goal: Goal) -> ExecutionState:
-        """Store ``goal``, a one-step argument-free plan, and open an execution."""
+    async def an_execution(self, goal: Goal, *, act: str | None = None) -> ExecutionState:
+        """Store ``goal``, a one-step argument-free plan, and open an execution.
+
+        ``act`` is the :class:`~ai_assistant.core.types.IntendedAction` the step is
+        an attempt at (ADR-0265 §1), minted onto the goal first because
+        ``save_plan`` refuses a step naming an action the goal does not hold. The
+        default is ``None``, which is a conforming plan rather than a degraded one
+        and is what every case here that is not about the request builder wants.
+        """
         await self.plans.save_goal(goal)
-        step = PlanStep(id=STEP, intent="send the note", capability=CAPABILITY)
+        if act is not None:
+            await self.plans.record_intended_actions(
+                IntendedActionMinting(
+                    goal_id=goal.id,
+                    actions=(IntendedAction(id=act, intent="send the note"),),
+                    expected_version=0,
+                )
+            )
+        step = PlanStep(id=STEP, intent="send the note", capability=CAPABILITY, intended_action=act)
         plan = ActionPlan(
             id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1
         )
@@ -159,9 +194,9 @@ def _appends_execution(execution_id: str) -> AttemptTransition:
     return AttemptTransition(attempt_id=ATTEMPT, expected_version=0, add_execution_id=execution_id)
 
 
-async def _parked(harness: Harness, goal: Goal) -> ExecutionState:
+async def _parked(harness: Harness, goal: Goal, *, act: str | None = None) -> ExecutionState:
     """Drive the step to its `CONFIRM` park and return the execution."""
-    state = await harness.an_execution(goal)
+    state = await harness.an_execution(goal, act=act)
     result = await harness.runner.run(
         state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
     )
@@ -287,8 +322,7 @@ async def test_the_stage_asks_the_seam_once_per_recorded_confirm() -> None:
 async def test_the_stage_asks_about_the_request_and_the_coverage_it_would_write() -> None:
     """ADR-0270 §1: the operands are the request and the tuple, *"and never the row"*.
 
-    The coverage is empty because nothing on this tree mints a member until
-    ADR-0266 §11's L2 lands, and
+    The coverage is empty because this goal states no bound ADR-0266 §4 reads, and
     the row is written with the very tuple that was asked about — which is what
     makes the answer an answer about *this* proposal.
     """
@@ -572,3 +606,177 @@ async def test_the_store_is_read_and_written_and_never_raises_into_the_turn(
     )
 
     assert result.disposition is (Disposition.EXECUTED if approved else Disposition.DENIED)
+
+
+# --- ADR-0266 §11's L2: the mint at its call site, and the request builder ----
+
+#: The act the builder cases put on the step, and the one the goal holds.
+ACT = "ia-1"
+
+#: A goal whose one ``USER_STATED`` constraint states a ceiling ADR-0266 §4 reads.
+CEILING = (
+    GoalElement(
+        id="e-1", text="the ceiling for the trip", ground=Ground.USER_STATED, span="up to 150 euros"
+    ),
+)
+
+#: A quote the seam rides back with, so a ``MONEY``-carrying coverage can be
+#: answered met at all (``FakeCoverageAnswers``' second override).
+QUOTED = ActionQuote(
+    intended_action=ACT,
+    arguments_digest="a" * 64,
+    amount=Decimal("120"),
+    currency="EUR",
+    plan="p-1",
+    read_from=StepOutputRef(step="s-1", field="price"),
+    read_at=AT,
+)
+
+
+async def test_the_stage_asks_about_the_member_the_goal_minted_and_writes_it() -> None:
+    """ADR-0266 §11's L2 at its call site, and ADR-0270 §1's operand rule with it.
+
+    The goal states a ceiling, so the coverage this stage puts to ``coverage_met``
+    is the member ADR-0266 §4 mints from it — not an empty tuple and not a literal
+    — and the row is written with the very tuple that was asked about.
+    """
+    answers = FakeCoverageAnswers(quote=QUOTED)
+    harness = Harness(answers=answers)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT)
+
+    ((_, asked),) = answers.calls
+    (member,) = asked
+    assert member.kind is BoundKind.MONEY
+    assert member.bound is not None
+    assert member.bound.maximum == Decimal("150")
+    assert member.bound.maximum_exclusive is False
+    assert member.bound.currency == "EUR"
+    assert member.basis.act == ACT_TURN
+    assert member.basis.span == "up to 150 euros"
+    assert member.basis.resolution.rule is ResolutionRule.STATED_BOUND
+    (row,) = await harness.rows()
+    assert row.coverage == asked
+    assert row.quoted == QUOTED
+
+
+async def test_a_row_carrying_a_minted_member_is_proposed_and_never_an_opening_act() -> None:
+    """ADR-0266 §4: a `STATED_BOUND` member *"reaches a path-(iii) opening act in no case"*.
+
+    ``orchestration`` constructs an ``Authorization`` in exactly one place —
+    ``proposed_authorization`` — and that one writes ``PROPOSED`` under
+    ``CONFIRMED`` unconditionally. So the ceiling is on the screen before it is an
+    authority, and the user's answer is the whole of what establishes it.
+    """
+    harness = Harness(answers=FakeCoverageAnswers(quote=QUOTED))
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT)
+
+    (row,) = await harness.rows()
+    assert row.disposition is AuthorizationDisposition.PROPOSED
+    assert row.origin is AuthorizationOrigin.CONFIRMED
+    assert row.settled_at is None
+    assert row.coverage != ()
+
+
+async def test_a_declined_ceiling_establishes_nothing() -> None:
+    """ADR-0266 §4: the user *"answers no, and no authority exists"*.
+
+    The row carrying the minted member is settled `DECLINED`, and the goal is left
+    with nothing standing for that declaration.
+    """
+    harness = Harness(answers=FakeCoverageAnswers(quote=QUOTED))
+    parked = await _parked(
+        harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT
+    )
+
+    await harness.runner.resume(parked, STEP, attempt_id=ATTEMPT, approved=False, timeout=PATIENT)
+
+    (row,) = await harness.rows()
+    assert row.disposition is AuthorizationDisposition.DECLINED
+    assert await harness.authorizations.standing(GOAL) == ()
+
+
+async def test_the_same_goal_mints_the_same_member_against_a_different_declaration() -> None:
+    """ADR-0266 §11 arm 7: *"two different requests, two different plans and two
+    different declarations"*.
+
+    One declaring a bounded argument and one declaring nothing, over two plans and
+    two requests, leave byte-identical coverage — because §5's mint reads the goal
+    and none of the three.
+    """
+    goal = a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING)
+    declaring_nothing = Harness(answers=FakeCoverageAnswers(quote=QUOTED))
+    declaring_a_period = Harness(
+        tool=a_tool(
+            tool_id="smtp-2",
+            discloses=(DataTier.PERSONAL,),
+            bounded_arguments=(
+                {"argument": "nights", "kind": "period", "currency_argument": None},
+            ),
+        ),
+        answers=FakeCoverageAnswers(quote=QUOTED),
+    )
+
+    await _parked(declaring_nothing, goal, act=ACT)
+    await _parked(declaring_a_period, goal, act=ACT)
+
+    (bare,) = await declaring_nothing.rows()
+    (declared,) = await declaring_a_period.rows()
+    assert bare.coverage == declared.coverage
+    assert bare.tool.id != declared.tool.id
+
+
+async def test_the_request_carries_the_act_the_step_names() -> None:
+    """ADR-0266 §11's L2, and it is ADR-0254 §6's clause for ``goal`` one field over.
+
+    *"`orchestration` sets it from the plan step the request serves"* — read off the
+    request the stage actually built, never a hand-built one, and taken from the
+    **stored** plan rather than from the caller's state.
+    """
+    answers = FakeCoverageAnswers(quote=QUOTED)
+    harness = Harness(answers=answers)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT)
+
+    ((asked, _),) = answers.calls
+    assert asked.intended_action == ACT
+    (decision,) = await harness.trail.export()
+    assert decision.intended_action == ACT
+
+
+async def test_the_resumed_request_carries_it_too() -> None:
+    """ADR-0266 §11's L2: *"on every construction and resume path"*.
+
+    ``resume`` rebuilds the request after the answer, and it takes the act from the
+    same expression ``run`` does — so a resumed dispatch says which act it is, and
+    the resolving decision on the trail carries it.
+    """
+    harness = Harness(answers=FakeCoverageAnswers(quote=QUOTED))
+    parked = await _parked(
+        harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING), act=ACT
+    )
+
+    await harness.runner.resume(parked, STEP, attempt_id=ATTEMPT, approved=True, timeout=PATIENT)
+
+    confirmed, resolving = await harness.trail.export()
+    assert confirmed.intended_action == ACT
+    assert resolving.intended_action == ACT
+
+
+async def test_a_step_naming_no_act_yields_a_request_carrying_none() -> None:
+    """ADR-0266 §11 arm 7: *"a step carrying none yielding a request carrying `None`"*.
+
+    ``None`` is a conforming plan rather than a degraded one, and it is the
+    fail-closed direction: ADR-0266 §7's evidence route meets such a request in no
+    case, so no ``MONEY`` member is met and the act asks.
+    """
+    answers = FakeCoverageAnswers(quote=QUOTED)
+    harness = Harness(answers=answers)
+
+    await _parked(harness, a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING))
+
+    ((asked, _),) = answers.calls
+    assert asked.intended_action is None
+    (decision,) = await harness.trail.export()
+    assert decision.intended_action is None

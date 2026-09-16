@@ -936,8 +936,8 @@ class Harness:
             # here is refused or allowed by is the real comparison and not a
             # configuration. `ThresholdActionPolicy` holding no `GoalQuotes` answers
             # unmet for every `MONEY` member, which is the fail-closed direction and
-            # the shape of this tree — no member is minted anywhere (#2373), so every
-            # coverage the writer puts to it is empty. A case that needs the answer
+            # the shape of this harness — no goal here states a bound ADR-0266 §4
+            # reads, so every coverage the writer puts to it is empty. A case that needs the answer
             # controlled, counted or faulted passes `FakeCoverageAnswers` instead.
             coverage_answers=(
                 ThresholdActionPolicy() if coverage_answers is None else coverage_answers

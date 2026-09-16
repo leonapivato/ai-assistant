@@ -13,13 +13,13 @@ annotation, so what they pin is the answer the one implementation gives; the one
 that need a fault, a call count or an answer no tree can produce name
 `FakeCoverageAnswers` instead.
 
-**No caller in `orchestration` mints a coverage member**, because no clause of the
-corpus said how one is minted from a recorded act until ADR-0266 (#2373, ruled
-there), and that decision's §11 **L2** lands the mint and has not landed. So the
-runner passes an empty tuple and ADR-0254 §1's completeness
-condition holds only vacuously — §10's own fail-closed sentence and §20 arm 59's
-third case. The arms that need a non-empty ``coverage`` drive it **through this
-function's parameter**, which is the shape a minter will fill.
+**The coverage is a parameter here and is minted from the goal at the call site**
+(ADR-0266 §11's L2, ``stated_bound_coverage``). Most arms below vary it directly,
+because what they are about is *which* `CONFIRM` proposes a row rather than where
+the members came from; the two at the end compose the real mint with the real
+comparison, which is the one thing a hand-built member cannot show. A goal stating
+no bound mints nothing, and ADR-0254 §1's completeness condition then holds only
+vacuously — §10's own fail-closed sentence and §20 arm 59's third case.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Final, final
 import pytest
 from authorizing_builders import (
     ACCOUNT,
+    ACT_TURN,
     AT,
     GOAL,
     RETENTION,
@@ -52,6 +53,8 @@ from ai_assistant.core.types import (
     CoverageAnswer,
     CoverageMember,
     Goal,
+    GoalElement,
+    Ground,
     PermissionOutcome,
     PermissionRuling,
     QuoteView,
@@ -70,6 +73,7 @@ from ai_assistant.orchestration.authorizing import (
     horizon,
     proposed_authorization,
 )
+from ai_assistant.orchestration.stated_bounds import stated_bound_coverage
 from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing import (
     FakeCoverageAnswers,
@@ -1140,3 +1144,92 @@ async def test_the_answer_is_about_the_operands_the_row_carries(
     # a comparison of two copies of something nothing touched.
     assert request.tool.id == "substitute"
     assert covered[0].fixed == "widened"
+
+
+# --- the mint composed with the proposal (ADR-0266 §11's L2) -------------
+
+
+async def test_a_ceiling_the_goal_states_is_proposed_and_proved_against_the_quote() -> None:
+    """ADR-0266 §§1-5 composed with §1's path (i), over the real comparison.
+
+    The one composition this lane can drive end to end: a goal whose own recorded
+    words state *"up to 150 euros"*, the member §4 mints from it, condition 6 taken
+    by the **one** implementation against a quote of `120`/`EUR` for the request's
+    act, and the row written carrying both. No literal coverage and no configured
+    answer — what is pinned is that a minted member is one the evidence route can
+    actually meet, which no arm over a hand-built member can show.
+
+    **What this is not**: the end-to-end proposal, its question and its answer are
+    ADR-0254 §20's Lane 2's (ADR-0266 §11's 3(c) note). Nothing here puts a question.
+    """
+    goal = a_goal(
+        deadline=AT + timedelta(hours=12),
+        constraints=(
+            GoalElement(
+                id="e-1",
+                text="the ceiling for the trip",
+                ground=Ground.USER_STATED,
+                span="up to 150 euros",
+            ),
+        ),
+    )
+    request = a_priced_request()
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=stated_bound_coverage(goal),
+        answers=an_answerer(quotes=FakeGoalQuotes([a_quote(request)], goal=GOAL)),
+        goal=goal,
+    )
+
+    assert row is not None
+    (member,) = row.coverage
+    assert member.kind is BoundKind.MONEY
+    assert member.bound is not None
+    assert member.bound.maximum == Decimal("150")
+    assert member.bound.currency == "EUR"
+    assert member.basis.span == "up to 150 euros"
+    assert member.basis.act == ACT_TURN
+    assert row.quoted is not None
+    assert row.quoted.amount == Decimal("120")
+    assert row.quoted.currency == "EUR"
+
+
+async def test_a_quote_above_the_ceiling_the_goal_states_proposes_no_row() -> None:
+    """The same composition, refusing: §1's completeness condition is not met.
+
+    The ceiling is `150` and the act is quoted at `170`, so condition 6's first
+    conjunct fails at the one implementation, no row is proposed,
+    `Confirmation.authorization` is absent and the one call is authorised by
+    ADR-0148 §3's route (a) — the user is asked about this call instead of granting
+    a standing authority the price does not fit.
+    """
+    goal = a_goal(
+        deadline=AT + timedelta(hours=12),
+        constraints=(
+            GoalElement(
+                id="e-1",
+                text="the ceiling for the trip",
+                ground=Ground.USER_STATED,
+                span="up to 150 euros",
+            ),
+        ),
+    )
+    request = a_priced_request()
+
+    row = await _proposed(
+        request_kwargs={
+            "tool": PRICED_TOOL,
+            "parameters": {"site": "hotel-1"},
+            "intended_action": ACT,
+        },
+        coverage=stated_bound_coverage(goal),
+        answers=an_answerer(quotes=FakeGoalQuotes([a_quote(request, amount="170")], goal=GOAL)),
+        goal=goal,
+    )
+
+    assert row is None

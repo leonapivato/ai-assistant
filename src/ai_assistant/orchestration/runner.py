@@ -535,10 +535,13 @@ class StepDisposition:
             therefore announced at the act and revocable at any moment after it"*.
 
             **It is empty on this tree**, because the path-(iii) writer §20 assigns to
-            Lane 2 is not implemented: minting the `CoverageMember` such an act rests
-            on has no clause saying how a span becomes a member for a named argument
-            (issue #2373), so :func:`~ai_assistant.orchestration.authorizing.
-            proposed_authorization` mints none and no opening act is written at all.
+            Lane 2 is not implemented: this package writes an `Authorization` in
+            exactly one place, :func:`~ai_assistant.orchestration.authorizing.
+            proposed_authorization`, and that one writes `PROPOSED` under `CONFIRMED`
+            unconditionally — so no opening act is written at all. ADR-0266 §4 rules
+            that the member this tree does mint reaches such an act **in no case**:
+            *"It reaches a path-(iii) opening act in no case, that path writing
+            `ESTABLISHED` directly with no question put."*
             The channel is declared with the carrier it feeds so that the writer, when
             it lands, announces by filling this rather than by growing a second
             mechanism.
