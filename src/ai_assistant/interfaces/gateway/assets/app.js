@@ -1751,11 +1751,18 @@ const CLARIFICATION_WITHDRAWAL_WORDS = {
 // permissibly degraded" — landed here because the member itself lands in L1 while §13
 // books this surface on L3 (issue #2435). §6 fixes **which fact** it names and leaves
 // the wording to the lane: the goal was given up **and an action of it had been claimed
-// and may have been sent**, naming `assistant goals` as where that goal's state, and
-// any outcome since established, is read. **No statement says the action did not
-// happen, that it did, or that anything the user does will withdraw it**, and *in
-// flight* means the claim landed rather than that the call left. Producing the member
-// is L2's, so nothing on this page can receive one yet.
+// and may have been sent**, and where that goal's state, and any outcome since
+// established, is read. **No statement says the action did not happen, that it did, or
+// that anything the user does will withdraw it**, and *in flight* means the claim
+// landed rather than that the call left. Producing the member is L2's, so nothing on
+// this page can receive one yet.
+//
+// **It names this listing and not `assistant goals`**, which §6's own last clause
+// admits — "the exact wording is the lane's; what is fixed is which fact each names".
+// §6 names the terminal's command because that is where a terminal reader looks; this
+// statement is rendered directly above the listing it would be pointing at, so naming
+// a command a browser user cannot run would send them somewhere else to read what is
+// already on screen. Found by driving the page rather than by reading the diff.
 const GOAL_ABANDONMENT_WORDS = {
   abandoned:
     "That goal is given up. I will not take it up again on my own and nothing more is " +
@@ -1764,8 +1771,8 @@ const GOAL_ABANDONMENT_WORDS = {
   abandoned_effect_in_flight:
     "That goal is given up, and an action of it had already been claimed and may have " +
     "been sent. I cannot tell you yet whether it happened. Nothing already done for it " +
-    "was undone, reversed or replayed by this. Open 'assistant goals' to see where that " +
-    "goal stands and any outcome since established.",
+    "was undone, reversed or replayed by this. This listing is where that goal stands, " +
+    "and any outcome since established.",
   already_closed:
     "That goal was already closed, so this moved nothing and recorded nothing. However " +
     "it was closed before is how it still reads.",
