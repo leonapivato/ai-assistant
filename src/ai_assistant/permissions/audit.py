@@ -1350,9 +1350,10 @@ class SqliteAuditTrail:
                 non-resolving ``ALLOW`` carrying an ``egress_binding``, an
                 ``authorised_by`` **and an ``authorised_subject``** — fails any of
                 ADR-0193 §6's eight checks; if a route-(c) one — the same shape
-                carrying **no** ``authorised_subject`` — records a binding that is
-                not closed-loop or a pointer that is not that binding's
-                ``account.reference`` (ADR-0247 §2); or if a **resolving** ``ALLOW``
+                carrying **no** ``authorised_subject`` — records a binding that does
+                not carry exactly one of ``closed_loop`` and ``forecast_reach``, or a
+                pointer that is not that binding's ``account.reference`` (ADR-0247 §2,
+                ADR-0272 §1); or if a **resolving** ``ALLOW``
                 carries an ``authorised_subject`` or an ``authorised_goal`` (ADR-0254
                 §7's partition puts both outside route (a)). A sibling of the two above under
                 ``AuditError`` because a replayed write, a substituted resolution
@@ -3414,11 +3415,12 @@ def _names_a_standing_authorisation(decision: PermissionDecision) -> bool:
     connection references are drawn from disjoint namespaces. They are not: both
     are ``DurableIdentifier``.
 
-    **Narrowed by the digest and never by ``closed_loop``** (ADR-0247 §2), which
-    that decision reserves for route (c)'s *eligibility*. A trail that discriminated
+    **Narrowed by the digest and never by either configured-provider fact**
+    (ADR-0247 §2), which reserves them for route (c)'s *eligibility* — ``closed_loop``
+    and, since ADR-0272 §1, ``forecast_reach`` beside it. A trail that discriminated
     by the kind would classify a pre-ADR-0193 digest-free pointer as route (c) the
-    moment some later row carried the fact, and would leave an ordinary route-(b)
-    row on a closed-loop request unvalidated.
+    moment some later row carried a fact, and would leave an ordinary route-(b) row
+    on a closed-loop or forecast request unvalidated.
     """
     return (
         _rests_on_a_standing_authorisation(decision)
@@ -3488,18 +3490,19 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
     **Since ADR-0247 §2 it decides *which* standing route a row claims, and holds
     each to its own invariant.** The digest is the discriminator: a standing row
     carrying one claims route (b) and is held to §6's eight checks; one carrying
-    none claims route (c) — the deployment's own configured search provider — and is
-    admitted here on two conditions read from the decision alone, its binding's
-    ``closed_loop`` and the equality of its pointer to that binding's
-    ``account.reference``. **No store is read on that branch, no ``Settings`` value
-    is held by this module, and no clock is consulted**; the trail asserts what it
-    can see and the policy asserts the rest, and neither component is offered the
-    other's job.
+    none claims route (c) — the deployment's own configured provider for that kind —
+    and is admitted here on two conditions read from the decision alone, that its
+    binding carries **exactly one** of ``closed_loop`` and ``forecast_reach``
+    (ADR-0272 §1) and that its pointer equals that binding's ``account.reference``.
+    **No store is read on that branch, no ``Settings`` value is held by this module,
+    and no clock is consulted**; the trail asserts what it can see and the policy
+    asserts the rest, and neither component is offered the other's job.
 
     **The ``OriginUnrecordedBinding`` arm is taken before either branch**, so an
     egress call whose origin was never recorded is refused **by name** on both
-    routes (ADR-0247 §2, ADR-0184 §7): such a binding carries no ``closed_loop``
-    either, so no lane reads an unrecorded origin as a configured provider.
+    routes (ADR-0247 §2, ADR-0184 §7): such a binding carries neither
+    configured-provider fact, so no lane reads an unrecorded origin as a configured
+    provider.
 
     **Route (a) carries neither fingerprint nor scope, and both halves are refused
     here** (ADR-0254 §7). That section's partition puts route (a) at *"``resolves``
@@ -3530,8 +3533,9 @@ def _check_standing_shape(decision: PermissionDecision) -> None:
             decision's binding records no origin; if a route-(b) decision's binding
             records that the call was planned over external content **without
             recording that it was closed-loop** (ADR-0238 §6); or if a digest-free
-            standing decision's binding is not closed-loop or its pointer is not
-            that binding's ``account.reference`` (ADR-0247 §2).
+            standing decision's binding does not carry exactly one of ``closed_loop``
+            and ``forecast_reach``, or its pointer is not that binding's
+            ``account.reference`` (ADR-0247 §2, ADR-0272 §1).
     """
     ruling = decision.ruling
     if decision.resolves is not None:
@@ -3668,39 +3672,66 @@ def _check_goal_authority_shape(decision: PermissionDecision, binding: EgressBin
 def _check_configuration_authority(decision: PermissionDecision, binding: EgressBinding) -> None:
     """Admit a digest-free standing row, or refuse it as the pairing clause does.
 
-    ADR-0247 §2's route-(c) invariant, and the whole of what the trail can assert
-    about that route: a non-resolving ``ALLOW`` carrying an ``egress_binding`` and an
-    ``authorised_by`` with **no** ``authorised_subject`` is accepted **only** where
-    its binding's ``closed_loop`` is ``True`` **and** its ``authorised_by`` equals
-    that binding's ``account.reference``. Failing either, it is refused exactly as
-    ADR-0193 §6's pairing clause refuses it — the same words, because it is the same
-    record being refused for the same reason.
+    ADR-0247 §2's route-(c) invariant over ADR-0272 §1's eligibility conjunct, and
+    the whole of what the trail can assert about that route: a non-resolving
+    ``ALLOW`` carrying an ``egress_binding`` and an ``authorised_by`` with **no**
+    ``authorised_subject`` is accepted **only** where **exactly one** of its
+    binding's ``closed_loop`` and ``forecast_reach`` is ``True`` **and** its
+    ``authorised_by`` equals that binding's ``account.reference``. Failing either, it
+    is refused exactly as ADR-0193 §6's pairing clause refuses it — the same record
+    refused for the same reason, the clause after the semicolon naming the fact
+    ADR-0272 moved and nothing else moving with it.
 
-    **``closed_loop`` is the eligibility and the digest is the discriminator, and
-    neither does the other's work** (§2). The digest says which route the row claims,
-    from the row alone and over the whole history; ``closed_loop`` says whether the
-    row is of the one kind ADR-0148 §3's new route covers. So an ``ALLOW`` on an
-    email, a fetch or any other kind — whose binding carries ``closed_loop``
-    ``False`` — is refused with no grant exactly as it is today, and a faulty policy
-    cannot reach past this enforcement by omitting a digest.
+    **The kind's own fact is the eligibility and the digest is the discriminator,
+    and neither does the other's work** (ADR-0247 §2). The digest says which route
+    the row claims, from the row alone and over the whole history; the two facts say
+    whether the row is of a kind ADR-0148 §3's third route covers — ``closed_loop``
+    for a ``WEB_SEARCH`` and ``forecast_reach`` for a forecast read, each written for
+    exactly one kind (ADR-0260 §11). So an ``ALLOW`` on an email, a fetch or any
+    other kind — whose binding carries **neither** fact — is refused with no grant
+    exactly as it is today, and a faulty policy cannot reach past this enforcement by
+    omitting a digest.
+
+    **A binding carrying neither fact is refused, and so is one carrying both**
+    (ADR-0272 §1). A binding asserting both kinds asserts a kind route (c)'s closed
+    two-member set does not contain, and admitting it would let one kind's authority
+    be read off the other's. The both-fact row is the one behaviour this check
+    *removes*: before ADR-0272 it read ``closed_loop`` alone and admitted it. That
+    row is unreachable from a correct policy — ADR-0260 §6 puts a binding asserting
+    both facts at no configured provider at all — and the trail takes the refusal
+    itself rather than resting on that, which is ADR-0247 §2's *"[n]either component
+    is offered the other's job"*.
+
+    **Past those two facts this check is kind-blind, and deliberately.** It reads no
+    declaration, no capability and no origin, so a binding carrying the *other*
+    kind's fact alone carries exactly one fact and is admitted here. That is not an
+    oversight to close: ADR-0272 §1 states the rule over the two booleans and forbids
+    this module a ``Settings`` read, and what keeps a crosswise row from being minted
+    is the policy's own comparison of **each kind against its own configured pair**
+    (ADR-0260 §6). A lane giving this function a kind read to refuse such a row would
+    be handing the trail the configuration §1 denies it.
 
     **The pointer half is :func:`_check_authorisation`'s own reason stated one route
     over**: *"Without this the pointer is a string a policy could invent."* What it
     buys here is that the recorded authority is the one the binding carries, so
     "which configuration authorised this" is answerable from the row (ADR-0247 §8).
+    ADR-0272 leaves it untouched, and it is taken over **each** admitted fact rather
+    than inside one fact's branch.
 
-    **What it cannot assert is §1's account-and-origin comparison**, because this
-    module holds no configuration and is given none: no ``Settings`` value reaches
-    the trail, and a lane that handed it one has breached §2. That comparison is the
-    policy's, taken where the configured values live, and this is stated rather than
-    implied — what the trail checks is the row's internal consistency and the kind.
+    **What it cannot assert is ADR-0247 §1's account-and-origin comparison**, because
+    this module holds no configuration and is given none: no ``Settings`` value
+    reaches the trail, and a lane that handed it one has breached ADR-0247 §2 and
+    ADR-0272 §1 alike. That comparison is the policy's, taken where the configured
+    values live, and this is stated rather than implied — what the trail checks is
+    the row's internal consistency and the kind.
 
-    **A stored digest-free row whose binding carries ``closed_loop`` ``False`` is
-    *neither* route** and ADR-0193 §11 governs it entire. No row of that shape is
-    written after this decision, and none written before it can carry ``closed_loop``
-    ``True`` — the field was added by ADR-0238, which lands after ADR-0193's
-    implementation — so §11's reserved pointer is never classified as route (c).
-    Nothing here revalidates, rewrites or re-derives a stored row of any shape.
+    **A stored digest-free row whose binding carries neither fact is *neither*
+    route** and ADR-0193 §11 governs it entire. No row of that shape is written after
+    this decision, and none written before ADR-0193's implementation can carry either
+    fact — ``closed_loop`` was added by ADR-0238 and ``forecast_reach`` by ADR-0260
+    §11, and both land after it — so §11's reserved pointer is never classified as
+    route (c) (ADR-0272 §2). Nothing here revalidates, rewrites or re-derives a
+    stored row of any shape.
 
     Args:
         decision: The validated snapshot about to be appended.
@@ -3708,17 +3739,26 @@ def _check_configuration_authority(decision: PermissionDecision, binding: Egress
             origin.
 
     Raises:
-        InvalidAuthorisationError: If the binding is not closed-loop, or the
-            pointer is not that binding's ``account.reference``.
+        InvalidAuthorisationError: If the binding does not carry exactly one of
+            ``closed_loop`` and ``forecast_reach``, or the pointer is not that
+            binding's ``account.reference``.
     """
     ruling = decision.ruling
-    if not binding.closed_loop or ruling.authorised_by != binding.account.reference:
+    # **Exactly one**, written as an inequality over the two ``bool`` fields. An ``or``
+    # would admit the both-fact binding ADR-0272 §1 refuses, and a sum reads as an
+    # arithmetic accident rather than as the rule; the inequality is the rule.
+    carries_one_configured_provider_fact = binding.closed_loop != binding.forecast_reach
+    if (
+        not carries_one_configured_provider_fact
+        or ruling.authorised_by != binding.account.reference
+    ):
         msg = (
             f"decision {decision.id!r} names standing authorisation "
             f"{ruling.authorised_by!r} and fingerprints none; a pointer with nothing on "
             f"the row to contradict a rebinding is the record ADR-0193 §6 refuses, "
-            f"unless it is a closed-loop call naming its own binding's connected "
-            f"account, which this is not (ADR-0247 §2)"
+            f"unless it is a call carrying exactly one of its kind's configured-provider "
+            f"facts and naming its own binding's connected account, which this is not "
+            f"(ADR-0247 §2, ADR-0272 §1)"
         )
         raise InvalidAuthorisationError(msg)
 
