@@ -36,8 +36,11 @@ from ai_assistant.core.types import (
     AttemptReport,
     Belief,
     BeliefBand,
+    Clarification,
     CurrentContext,
+    EngagementDisposition,
     GoalBrief,
+    GoalEngagement,
     GoalStatus,
     Ground,
     MemoryKind,
@@ -318,6 +321,43 @@ async def test_a_reply_that_did_not_complete_is_given_none() -> None:
     assert outcome.reply is not None
     assert outcome.reply_degraded is True
     assert outcome.attempt_report is None
+
+
+@pytest.mark.parametrize("scripted", [False, True])
+async def test_a_turn_that_raised_a_question_is_given_none(scripted: bool) -> None:
+    """§4's **second** ending condition: an attempt that is paused does not end.
+
+    A :class:`Clarification` is "the question **this turn raised**", and a question
+    exists only where the store accepted one (ADR-0250 §10) — so the attempt stands
+    ``AWAITING_CLARIFICATION``, which §4 names among the three paused states an attempt
+    may not end from. ADR-0250 §10's *"A turn that raised a question drives no step of
+    its plan and produces no effect"* is the same fact from the other side: this turn
+    planned and asked, and there is no comparison for a report to carry.
+
+    Asserted through the lever **and** through a pre-scripted report, because the two
+    reach the member by different routes and only one of them passes the gate.
+    """
+    engine = FakeAssistantEngine()
+    engine.attempt_report = VERIFIED
+    asked = _scripted(
+        clarification=Clarification(
+            question_id="q-1", text="Which weekend did you mean?", expires_at=_AT
+        ),
+        goal_engagement=GoalEngagement(
+            disposition=EngagementDisposition.OPENED, outcome="book a campsite"
+        ),
+    )
+    engine.turn_outcome = (
+        asked.model_copy(update={"attempt_report": VERIFIED}) if scripted else asked
+    )
+
+    if scripted:
+        with pytest.raises(ValueError, match="ended no attempt"):
+            await engine.converse("book it", timeout=PATIENT)
+    else:
+        outcome = await engine.converse("book it", timeout=PATIENT)
+        assert outcome.clarification is not None
+        assert outcome.attempt_report is None
 
 
 async def test_a_report_scripted_onto_an_ineligible_pass_is_refused() -> None:
