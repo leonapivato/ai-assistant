@@ -204,6 +204,26 @@ async def mint_quote(plans: PlanStore, *, goal_id: str, quote: ActionQuote) -> N
     concurrent writer makes that write stale — which :func:`record_minted_quote` disposes
     of, and never by rebasing.
 
+    **The version is read here and never held across the producing call, and that is
+    §4's own refusal rather than an oversight.** *"No lane rebases a stale quote write,
+    mints a sequence number, **holds a lock across the read**, adds an idempotency key or
+    makes the mint atomic with the transition"* — a ``Goal.version`` carried across a
+    provider call is that lock, and every unrelated write to the goal in that window
+    (an evidence row, an engagement, a revision) would refuse the mint and stop the walk
+    **after the act had happened**.
+
+    **So the order the tuple records is the order of the goal reads the writes were
+    computed against, and not the order the prices were read in.** §4 states that
+    directly — *"**Commit order is not read order, and no clause reads it as one**: a
+    minter can read ``120``, stall, and commit after another has read ``170``"* — and
+    ADR-0267 §10 books the consequence by name: *"**a concurrently read price does not
+    survive** … one of two simultaneous readings is lost … **Commit order is not read
+    order**"*, fired by *"the decision that gives a quote a store-authored order should a
+    plan ever read one price twice at once"*. A stalled minter's reading can therefore
+    land last and govern a ceiling, which is the residual §6 answers at the provider's
+    gate rather than here — this ADR's own title being *"no local check proves it still
+    true"*.
+
     Raises:
         PlanningError: If the goal cannot be read or does not exist, or as
             :func:`record_minted_quote` raises it. **Never a**
