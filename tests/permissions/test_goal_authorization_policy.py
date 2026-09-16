@@ -70,6 +70,7 @@ from ai_assistant.permissions.policy import (
 )
 from ai_assistant.testing import (
     FakeGoalAuthorizations,
+    FakeGoalAuthorizationStore,
     FakeRecipientGrants,
     authorization,
     coverage_member,
@@ -2041,3 +2042,73 @@ class TestARulingIsDecidedOverOneObservationOfItsRequest:
         decided = await ruling
         assert decided.outcome is PermissionOutcome.CONFIRM
         assert decided.authorised_by is None
+
+
+class TestAGoalWhoseRowsAreAllGoalClosedReachesRouteDInNoCase:
+    """ADR-0268 §9 arm 6's second limb, driven at ``decide`` itself.
+
+    *"``decide`` over a goal whose rows are all ``GOAL_CLOSED`` reaches route (d) in
+    **no case**, ``live_for`` answering ``None``."*
+
+    **``live_for`` answering ``None`` is the reason and not the claim**, which is why
+    this is stated here rather than over the seam alone: ADR-0254 §7's route-(d)
+    refusal reads the resolved row's ``disposition`` and requires ``ESTABLISHED``, so
+    the route is closed to a ``GOAL_CLOSED`` row for the same ground as the other
+    four retired dispositions and **needs no conjunct** (ADR-0268 §6). A suite that
+    asserted only the seam's ``None`` would pass against a policy that reached route
+    (d) anyway.
+
+    **The goal is ended through ``end_for_goal``** rather than settled row by row,
+    so what is ruled on is the state this decision's own member leaves; the store
+    fake serves as the query seam here under ADR-0254 §16's *"three faces, one
+    object"*.
+
+    *"In no case"* is taken over both shapes this tree admits: with a covering
+    recipient grant to fall to, and with none.
+    """
+
+    @staticmethod
+    async def _ended() -> FakeGoalAuthorizationStore:
+        """One established row of :data:`GOAL`, its goal then closed by the ending."""
+        store = FakeGoalAuthorizationStore(now=SHARED_CLOCK.reset())
+        await store.record(live(id="a1"))
+        await store.settle("a1", to=AuthorizationDisposition.ESTABLISHED, settled_at=AT)
+        assert await store.live_for(GOAL, TOOL.id) is not None, "a live authority first"
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+        assert await store.live_for(GOAL, TOOL.id) is None, "and none after the ending"
+        return store
+
+    async def test_a_covering_grant_rules_route_b_and_the_ended_record_authorises_nothing(
+        self,
+    ) -> None:
+        """The request is ruled by the **grant**, and by no record of the closed goal.
+
+        ``authorised_goal`` is ``None`` — route (d) is the only route that fills it —
+        and ``authorised_by`` names the **grant**, which is what distinguishes *"route
+        (d) was not taken"* from *"the request was refused"*: an ``ALLOW`` alone would
+        be consistent with either.
+        """
+        store = await self._ended()
+        recipients = grants()
+        gate = ThresholdActionPolicy(grants=recipients, authorizations=store)
+
+        ruling = await gate.decide(booking())
+
+        assert ruling.outcome is PermissionOutcome.ALLOW
+        assert (ruling.authorised_by, ruling.authorised_goal) == ("g-1", None)
+        assert recipients.call_count == 1, "route (b) was reached, which route (d) forecloses"
+
+    async def test_with_no_grant_to_fall_to_the_request_draws_confirm(self) -> None:
+        """And with nothing else standing, the ending costs the user the question.
+
+        The same ``CONFIRM`` arm 2 reaches where the store holds **no** record of that
+        goal at all: a goal that has closed authorises nothing, which is ADR-0268 §1's
+        whole effect at the gate.
+        """
+        store = await self._ended()
+        gate = ThresholdActionPolicy(grants=grants(covering=False), authorizations=store)
+
+        ruling = await gate.decide(booking())
+
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert (ruling.authorised_by, ruling.authorised_goal) == (None, None)
