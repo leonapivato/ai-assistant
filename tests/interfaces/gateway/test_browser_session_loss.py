@@ -652,10 +652,11 @@ async def test_a_destruction_consented_under_a_session_that_ended_ends_no_other(
 
 
 @pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+@pytest.mark.parametrize("reaching", [False, True], ids=["answered", "failed"])
 async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
-    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize, reaching: bool
 ) -> None:
-    """The *second* request of a two-request flow, held (adversarial review, round 5).
+    """The *second* request of a two-request flow, held (adversarial review, rounds 5, 6).
 
     The ceremony is answered while the session is live, the destruction goes out, and the
     session ends under it — so what resumes is the act's own continuation rather than a
@@ -669,10 +670,21 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
     that panel again. Which is #2451's first reading, arrived at here by construction
     rather than by ruling — the ruling is still owed, and what is asserted is only that
     nothing opened.
+
+    **Both endings**, because they are different code and only one of them was driven
+    when round 6 read this. A destruction that comes *back* resumes into the account
+    above; one that fails in transit reaches the caller's ``catch``, where
+    ``fault(GATEWAY_GONE, panel)`` shows the panel it writes into — and that path is
+    exempted from nothing, here or in the census.
     """
     loop = asyncio.get_running_loop()
     release, hang = _held(loop)
     answering: list[asyncio.Task[None]] = []
+
+    async def fails(one: Route) -> None:
+        await release
+        with contextlib.suppress(PlaywrightError):
+            await one.abort("connectionreset")
 
     async def consent(one: Dialog) -> None:
         await one.accept()
@@ -682,7 +694,7 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
         _seed_conversation(drive, "c-1", turns=3)
         await _open_listing(drive)
 
-        await drive.page.route("**/conversation/forget", hang)
+        await drive.page.route("**/conversation/forget", fails if reaching else hang)
         async with drive.page.expect_request("**/conversation/forget"):
             await (
                 drive.page.locator("#conversation-list .conversation-row")
@@ -694,9 +706,15 @@ async def test_a_destruction_that_lands_after_its_session_ended_opens_nothing(
         await drive.page.click("#sources-button")
         await drive.page.wait_for_selector("#bootstrap:not([hidden])")
 
-        async with drive.page.expect_response("**/conversation/forget") as stale:
-            release.set_result(None)
-        await (await stale.value).finished()
+        if reaching:
+            async with drive.page.expect_event(
+                "requestfailed", predicate=lambda one: one.url.endswith("/conversation/forget")
+            ):
+                release.set_result(None)
+        else:
+            async with drive.page.expect_response("**/conversation/forget") as stale:
+                release.set_result(None)
+            await (await stale.value).finished()
         await drive.admit()
 
         # The panel the act belonged to is closed and stays closed. Its rows are the ones
