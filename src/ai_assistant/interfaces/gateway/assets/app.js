@@ -1288,10 +1288,21 @@ function renderOutcome(outcome, chosenAt, provenance) {
   // otherwise have created**: before §7's statement the refused claim reached this page
   // through no route.
   //
-  // **On the member's presence and on all seven**, which is `forecast_not_read`'s term
-  // rather than the one below it. `OutboundReach` and `AttemptOutcome` each have a
-  // member for having attempted nothing; `DriveWithheld` has none — every one of the
-  // seven is a turn that was driving a step and did not claim it.
+  // **On all seven and on nothing else**, which is `forecast_not_read`'s term rather
+  // than the one below it. `OutboundReach` and `AttemptOutcome` each have a member for
+  // having attempted nothing; `DriveWithheld` has none — every one of the seven is a
+  // turn that was driving a step and did not claim it.
+  //
+  // **Written as `isDriveWithheld` rather than as `=== null`, and the difference is a
+  // real one this page meets.** Three values are *not* one of the seven and all three
+  // belong on the notice's side of the guard: `null`, which §7 makes silence; an
+  // **absent** member, which is what a hub at another version sends and what
+  // `renderDriveWithheld` already treats as silence; and a value outside the vocabulary,
+  // which reaches `DRIVE_WITHHELD_UNREADABLE` — a sentence that "asserts nothing the page
+  // has not been told" and so contradicts nothing. A `=== null` term would suppress a
+  // **true** notice on the last two, which is `ATTEMPT_OUTCOMES_THAT_ASSERT_WORK`'s own
+  // reason for being a membership test rather than a presence one (and is what
+  // `test_a_member_outside_the_six_is_said_rather_than_shown_raw` caught).
   //
   // **And it is unreachable on a conforming turn, which is stated rather than relied
   // on.** §7's refusal comes from the claim the walk made on a step of the plan this
@@ -1308,7 +1319,7 @@ function renderOutcome(outcome, chosenAt, provenance) {
     outcome.clarification === null &&
     outcome.disambiguation === null &&
     outcome.forecast_not_read === null &&
-    outcome.drive_withheld === null &&
+    !isDriveWithheld(outcome.drive_withheld) &&
     !ATTEMPT_OUTCOMES_THAT_ASSERT_WORK.has(outcome.attempt_report)
   ) {
     line(body, "No action was needed.", "notice");

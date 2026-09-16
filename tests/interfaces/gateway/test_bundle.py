@@ -8623,6 +8623,14 @@ def test_the_no_action_notice_is_guarded_on_the_withheld_member_being_absent() -
     member for having attempted nothing and ``DriveWithheld`` has none — every one of the
     seven is a turn that was driving a step and did not claim it.
 
+    **A membership test and not a presence one**, which is
+    ``ATTEMPT_OUTCOMES_THAT_ASSERT_WORK``'s own arrangement and is load-bearing here: an
+    **absent** member — what a hub at another version sends — and a value outside the
+    vocabulary are both *not* one of the seven, and both belong on the notice's side. A
+    ``=== null`` term suppresses a true notice on each, which
+    ``test_a_member_outside_the_six_is_said_rather_than_shown_raw`` caught one vocabulary
+    over.
+
     Asserted over the condition's own text, beside the executed arms in
     ``test_browser_cancellation.py``.
     """
@@ -8630,7 +8638,8 @@ def test_the_no_action_notice_is_guarded_on_the_withheld_member_being_absent() -
 
     guard = outcome[outcome.index("outcome.steps.length === 0") :]
     guard = guard[: guard.index('line(body, "No action was needed."')]
-    assert "outcome.drive_withheld === null" in guard
+    assert "!isDriveWithheld(outcome.drive_withheld)" in guard
+    assert "outcome.drive_withheld === null" not in guard
 
 
 def test_no_withheld_statement_asserts_what_the_read_did_not_establish() -> None:
