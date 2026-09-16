@@ -619,6 +619,28 @@ class DeliveryFanOut:
             stream.end()
 
 
+async def _drained(writer: asyncio.StreamWriter, wrote: Callable[[], None]) -> None:
+    """Wait for one write to leave, and record that it has, in one step.
+
+    **The report is inside this task rather than beside the ``await`` of it**, and that
+    is the whole of why it is trustworthy. A drain awaited in the parent leaves a window
+    between the future completing and the parent being rescheduled — and a window is
+    exactly what a session's death is: :class:`.SessionTable` announces it from a timer
+    callback, which the loop may run in that gap and which reads this state to decide
+    whether ADR-0175 §4 lets it write a terminal value. Reporting from the parent, a
+    write that had completed could still read as outstanding, and a healthy browser
+    would lose its ending to a race rather than to the clause. Here the drain returning
+    and the record of it are one task step, so no callback can observe one without the
+    other (adversarial review, round 4, ``blocker``).
+
+    Args:
+        writer: The connection's writer.
+        wrote: What to tell once the write has left.
+    """
+    await writer.drain()
+    wrote()
+
+
 async def write_stream(
     writer: asyncio.StreamWriter,
     stream: DeliveryStream,
@@ -652,14 +674,13 @@ async def write_stream(
     """
     async for value in stream.values():
         writer.write(frame(value))
-        drained = asyncio.ensure_future(writer.drain())
+        drained = asyncio.ensure_future(_drained(writer, wrote))
         abandoned = asyncio.ensure_future(stream.abandoned.wait())
         try:
             await asyncio.wait({drained, abandoned}, return_when=asyncio.FIRST_COMPLETED)
             if not drained.done():
                 return
             await drained
-            wrote()
         finally:
             for pending in (drained, abandoned):
                 pending.cancel()
