@@ -509,6 +509,36 @@ async def test_a_claim_refused_whose_state_the_read_cannot_see_propagates() -> N
         await harness.engine.converse(_ASKED, timeout=PATIENT)
 
 
+async def test_a_goal_deleted_between_the_reads_leaves_a_cancelled_attempt_unexplained() -> None:
+    """§7's propagation rule over the attempt's three, which each assert a goal fact.
+
+    The attempt reads ``CANCELLED`` and the goal is then deleted before the plan and goal
+    reads, so nothing the report could stand on survives: ``ATTEMPT_CANCELLED`` asserts
+    the goal is **open** — *"reached on a goal ADR-0250 §13 has reopened"* — and a goal
+    that is gone is neither open nor closed. **A member chosen here would say of a goal
+    what nothing established**, which is exactly the case §7 leaves propagating.
+
+    An engine that answered the attempt's state alone would pass every other arm in this
+    module and fail only here.
+    """
+
+    class _DeletesBetweenTheReads(_Interposing):
+        async def get_attempt(self, attempt_id: str) -> GoalAttempt | None:
+            attempt = await super().get_attempt(attempt_id)
+            if attempt is not None and attempt.state is AttemptState.CANCELLED:
+                await self.delete_goal(attempt.goal_id)
+            return attempt
+
+    plans = _DeletesBetweenTheReads(now=lambda: AT)
+    plans.before_claim = _cancelled
+    harness = Harness(planner=_CountingPlanner(), plans=plans, tools=(tool(),))
+
+    with pytest.raises(ClaimRefused):
+        await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert harness.invoker.invocations == []
+
+
 async def test_a_turn_that_dispatched_carries_no_withheld_member() -> None:
     """The invariant's other half: ``None`` on every turn that drove (ADR-0261 §7)."""
     harness = Harness(tools=(tool(),))
