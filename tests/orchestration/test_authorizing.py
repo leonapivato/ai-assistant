@@ -859,9 +859,26 @@ class _SubstitutingAnswers:
     declaration — and a wider bound — behind for the row.
     """
 
-    def __init__(self, substitute: ToolDefinition) -> None:
-        """Answer met, having rewritten whatever it is handed."""
+    def __init__(
+        self,
+        substitute: ToolDefinition,
+        *,
+        racing: ActionRequest | None = None,
+        racing_coverage: tuple[CoverageMember, ...] = (),
+    ) -> None:
+        """Answer met, having rewritten whatever it is handed — and ``racing``.
+
+        Args:
+            substitute: The declaration it swaps in.
+            racing: The **caller's own** request, standing in for any holder that
+                rewrites it while this call is suspended. It is reached here
+                because that is the only way a unit can put a mutation inside the
+                await; what it models is a second task, not this collaborator.
+            racing_coverage: The caller's own coverage, for the same reason.
+        """
         self.substitute = substitute
+        self.racing = racing
+        self.racing_coverage = racing_coverage
         self.held: list[ActionRequest] = []
 
     async def coverage_met(
@@ -872,6 +889,16 @@ class _SubstitutingAnswers:
         request.__dict__["tool"] = self.substitute
         request.__dict__["goal"] = "g-substituted"
         for member in coverage:
+            member.__dict__["fixed"] = "widened"
+        if self.racing is not None:
+            # **Nested**, which is the half a top-level rebinding does not reach:
+            # a name bound to ``request.tool`` before the await aliases this very
+            # object, so rewriting a field of it moves what a shallow snapshot
+            # would write. Adversarial review, round 2, ``blocker``.
+            self.racing.__dict__["tool"] = self.substitute
+            self.racing.tool.__dict__["id"] = "substitute"
+            self.racing.__dict__["goal"] = "g-substituted"
+        for member in self.racing_coverage:
             member.__dict__["fixed"] = "widened"
         return CoverageAnswer(met=True)
 
@@ -938,3 +965,50 @@ async def test_the_seam_is_handed_no_object_the_writer_holds() -> None:
     assert request.tool == SITED_TOOL, "the caller's own request is untouched"
     assert request.goal == GOAL
     assert coverage[0].fixed is None, "and so are the caller's own members"
+
+
+async def test_a_holder_racing_the_await_cannot_move_what_the_row_names() -> None:
+    """The snapshot is a **copy** and not a name, nested values included.
+
+    Adversarial review, round 2, ``blocker``: binding ``tool = request.tool``
+    before the await fixes which object the row names and **not** what that object
+    says, so a holder that rewrote ``request.tool.__dict__["id"]`` while the
+    answerer was suspended still moved the declaration the row was written for.
+    ``detached_request`` round-trips through a dump, so the writer's copy shares no
+    object with the caller's request at any depth.
+
+    The answerer is given the caller's own values here because a unit has no other
+    way to land a mutation **inside** the await; what it stands in for is any
+    second holder, and the assertion is about the writer rather than about it.
+    """
+    request = a_request(tool=SITED_TOOL, parameters={"site": "hotel-1"})
+    coverage = (coverage_member(BoundKind.TERMS, bound=terms_bound("hotel-1")),)
+    # Compared against afterwards, because the race rewrites ``coverage`` itself —
+    # which is the whole point, and which makes an assertion against it vacuous.
+    pristine = tuple(member.model_copy(deep=True) for member in coverage)
+    answers = _SubstitutingAnswers(
+        a_tool(tool_id="substitute"), racing=request, racing_coverage=coverage
+    )
+
+    row = await proposed_authorization(
+        request,
+        a_decision(),
+        answers=answers,
+        coverage=coverage,
+        goal=a_goal(deadline=AT + timedelta(hours=12)),
+        retention=RETENTION,
+        standing=(),
+    )
+
+    assert row is not None
+    assert row.tool.id == SITED_TOOL.id, "the row names the declaration that was ruled on"
+    assert row.tool == SITED_TOOL
+    assert row.goal == GOAL
+    assert row.coverage == pristine
+    assert row.coverage[0].fixed is None
+    # The race really did land: the caller's own request and members now say
+    # otherwise, which is what makes the assertions above about the snapshot
+    # rather than about an answerer that did nothing.
+    assert request.tool.id == "substitute"
+    assert request.goal == "g-substituted"
+    assert coverage[0].fixed == "widened"

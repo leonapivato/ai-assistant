@@ -249,21 +249,28 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     `planned_with_external_content` authorises no such dispatch and may still cover
     a later request of that goal that carries none.
 
-    **The seam is given its own copies, and the row is written from values read on
-    this side of the await.** :func:`detached_request` is the rule
-    ``ActionPolicy.decide`` is already held to one seam over, and it reads the same
-    here: ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
-    ``request.__dict__`` (ADR-0018 §3), so an answerer handed the writer's own object
-    could answer ``met`` about a harmless call and substitute another registered
-    declaration — or another coverage member — before returning, and the row written
-    for the substitute would name the ``CONFIRM`` the *original* was recorded under.
-    Approving it would establish an authority the user was never shown. Two things
-    close that, and each closes a different door: the collaborator is handed copies,
-    so it cannot reach the writer's objects at all; and every value the row is
-    written from is read **before** the one await, so a substitution made anywhere
-    reaches nothing. ``decision``, ``goal``, ``retention`` and ``standing`` are not
-    handed to the seam and are reachable by it through no route, which is why the
-    snapshot is exactly the request's operands and the coverage.
+    **Nothing the row carries is a value another holder can still reach.** This
+    function suspends once, and ``frozen=True`` refuses ``request.tool = ...`` while
+    doing nothing about ``request.__dict__`` (ADR-0018 §3) — so any model still
+    aliased across that await is a route to the subject substitution ADR-0021 §3
+    calls *"the security property, not an economy"*: a row written for a declaration
+    the answer was not about, named by a ``CONFIRM`` recorded over the original, and
+    established by an approval of a question the user was shown about something else.
+    :func:`detached_request` is the rule ``ActionPolicy.decide`` is already held to
+    one seam over, and it reads the same here.
+
+    **Two copies, taken before the await, and the distinction is what makes the rule
+    hold.** The **writer** builds the row from ``subject`` and ``written``, its own
+    copies; the **answerer** is handed a second pair it alone holds. A collaborator
+    that rewrites what it was given moves nothing, and a holder that rewrites the
+    caller's request — or a value *nested* inside it — moves nothing either, the
+    copies being round-trips through a dump rather than new names for the same
+    objects. ``retention`` is a ``timedelta`` and ``proposed_at`` and ``confirmation``
+    are read off ``decision`` here, a value being fixed by being read where a model
+    is fixed only by being copied; ``standing`` is consumed before the await. **The
+    capability is removed rather than the reachability argued** — no holder on this
+    tree races this function today, and the guarantee should not rest on that staying
+    true.
 
     **The seam is asked at most once per proposal, and its answer outlives the call
     only as the row's ``quoted``** (ADR-0270 §3). The question is put where the
@@ -306,37 +313,39 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     Raises:
         AuthorizationError: If ``coverage_met`` does. It is not caught here.
     """
-    if request.goal is None:
+    # The writer's own copies, taken here, before the one await. Everything below
+    # reads these and never the caller's values: a `str` or a `datetime` is fixed
+    # by being read, and a model is fixed only by being copied, because binding a
+    # name to it aliases the very object another holder can rewrite.
+    subject = detached_request(request)
+    written = _detached_coverage(coverage)
+    goal_read = None if goal is None else goal.model_copy(deep=True)
+    proposed_at = decision.decided_at
+    confirmation = decision.id
+    if subject.goal is None:
         return None
-    binding = request.egress_binding
+    binding = subject.egress_binding
     if not isinstance(binding, EgressBinding):
         return None
-    # Everything the row is written from, read on this side of the one await. A
-    # value read afterwards would be one the collaborator had a turn to move.
-    row_goal = request.goal
-    tool = request.tool
-    account = binding.account
-    destinations = binding.canonical_destination_set
-    superseded = _superseded(standing, request)
-    written = _detached_coverage(coverage)
+    superseded = _superseded(standing, subject)
     answer = await answers.coverage_met(detached_request(request), _detached_coverage(coverage))
     if not answer.met:
         return None
-    expires_at = horizon(decision.decided_at, goal=goal, retention=retention)
+    expires_at = horizon(proposed_at, goal=goal_read, retention=retention)
     if expires_at is None:
         return None
     return Authorization(
-        id=authorization_id_for(decision.id),
-        goal=row_goal,
-        tool=tool,
-        account=account,
-        destinations=destinations,
+        id=authorization_id_for(confirmation),
+        goal=subject.goal,
+        tool=subject.tool,
+        account=binding.account,
+        destinations=binding.canonical_destination_set,
         origin=AuthorizationOrigin.CONFIRMED,
         coverage=written,
         quoted=answer.quoted,
-        proposed_at=decision.decided_at,
+        proposed_at=proposed_at,
         expires_at=expires_at,
-        confirmation=decision.id,
+        confirmation=confirmation,
         supersedes=superseded,
         disposition=AuthorizationDisposition.PROPOSED,
         settled_at=None,
