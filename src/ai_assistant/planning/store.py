@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     evidence_order,
 )
 from ai_assistant.planning.effects import (
+    BorrowedAct,
     EffectHolder,
     claiming_revision,
     decide_claim,
@@ -91,7 +92,6 @@ if TYPE_CHECKING:
         EffectKey,
         EffectOutcome,
         ExecutionState,
-        FrozenJsonValue,
         Goal,
         GoalAttempt,
         GoalCandidates,
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
         GoalQuestion,
         GoalRevision,
         IntendedActionMinting,
+        StepExecution,
         StepTransition,
         UtcInstant,
     )
@@ -1268,40 +1269,50 @@ class InMemoryPlanStore:
         self._refuse_a_stale_target(stored, transition)
         self._refuse_an_unclaimable_attempt(stored, transition)
         self._refuse_a_superseded_plan(stored, transition)
-        borrowed = self._borrowed_output(stored, transition)
-        updated = self._tracker.apply(stored, transition, borrowed_output=borrowed)
+        updated = self._tracker.apply(
+            stored,
+            transition,
+            satisfaction=(
+                None
+                if transition.satisfied_by_execution is None
+                else lambda source: self._borrowed(stored, transition, source)
+            ),
+        )
         self._executions[updated.id] = updated
         return updated.model_copy(deep=True)
 
-    def _borrowed_output(
-        self, stored: ExecutionState, transition: StepTransition
-    ) -> FrozenJsonValue:
-        """Verify ADR-0259 §9's satisfaction claim condition and return what is borrowed.
+    def _borrowed(
+        self, stored: ExecutionState, transition: StepTransition, source: StepExecution
+    ) -> BorrowedAct:
+        """Verify ADR-0259 §9's satisfaction claim condition and return what is written.
 
-        Five limbs, decided here in the same step as the write and refused on a
-        ``PlanningError`` that is not a ``StaleExecutionError``: no re-read makes one
-        goal's execution another's, one key another, or a run that happened one that
-        did not. The ``output`` it returns is the **holder's own**, which is why the
-        transition is forbidden to carry one — a value the caller never supplies
-        cannot be mis-stated.
+        Five limbs, decided in the same step as the write and refused on a
+        ``PlanningError`` that is **not** a ``StaleExecutionError``: no re-read makes
+        one goal's execution another's, one key another, or a run that happened one
+        that did not. It is called **by the tracker**, once that has compared the
+        version and resolved the step, so a stale write is still a
+        ``StaleExecutionError`` and an unknown step still a plain ``PlanningError``.
+
+        Both values it returns are the store's: the ``output`` is the holder's own, off
+        the row it has just verified, and the instant is this store's clock's rather
+        than the tracker's, which may be injected independently (§9).
 
         Args:
             stored: The execution the transition targets.
             transition: The move being applied.
+            source: The **stored** step being satisfied, as the tracker resolved it.
 
         Returns:
-            The borrowed ``output``, or ``None`` where this is not a satisfaction.
+            What the store writes onto the satisfied step.
 
         Raises:
             PlanningError: On any limb of the condition.
         """
         named, borrowed_step = transition.satisfied_by_execution, transition.satisfied_by_step
-        if named is None or borrowed_step is None:
-            return None
+        assert named is not None  # noqa: S101 — the tracker calls this for a satisfaction alone
+        assert borrowed_step is not None  # noqa: S101 — StepTransition keeps the trio whole
         plan = self._plans.get(stored.plan_id)
         assert plan is not None  # noqa: S101 — save_plan refuses an orphan execution
-        source = stored.step(transition.step_id)
-        assert source is not None  # noqa: S101 — the tracker refuses an unknown step first
         held = self._executions.get(named)
         held_plan = None if held is None else self._plans.get(held.plan_id)
         borrowed = None if held is None else held.step(borrowed_step)
@@ -1318,7 +1329,7 @@ class InMemoryPlanStore:
             source_status=source.status,
         )
         assert borrowed is not None  # noqa: S101 — the refusal's second limb
-        return borrowed.output
+        return BorrowedAct(output=borrowed.output, finished_at=self._now())
 
     def _refuse_a_stale_target(self, stored: ExecutionState, transition: StepTransition) -> None:
         """Refuse a ``→ RUNNING`` claim on a plan targeting a stale revision (§8).
