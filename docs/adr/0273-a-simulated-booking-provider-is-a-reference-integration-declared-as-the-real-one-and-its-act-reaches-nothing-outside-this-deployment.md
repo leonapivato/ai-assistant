@@ -225,7 +225,12 @@ act it stands in for; that they come out differently is the whole content of §2
 > be truncated or interleaved is not an implementation of this clause, and neither
 > is a count incremented outside the transaction that inserts the record** — a
 > store that cannot be read back, or a count that disagrees with what was
-> inserted, proves nothing about at-most-once.
+> inserted, proves nothing about at-most-once. **And a booking the provider
+> refuses before the commit — an unavailable date, an off-schema argument, a
+> condition of §3 unmet — commits none of the three**: no record, no advance and
+> no pruning. **The count counts committed bookings and nothing else**, so a
+> provider that advances it and then refuses has falsified the very figure §2
+> rests the act's irreversibility on.
 
 > **Normative — a failure at or after the commit boundary is reported as one that
 > may have committed, and never as a certain failure.** Where the append has
@@ -261,7 +266,13 @@ act it stands in for; that they come out differently is the whole content of §2
 > oldest are pruned, so the detail does not accumulate indefinitely. **This
 > decision states the requirement and not a figure**, which is the lane's; §5
 > fixes the figure's **domain** and requires the configuration carrying it to be
-> refused at the read when it falls outside. That the limb reaches a store outside
+> refused at the read when it falls outside. **The bound is enforced at every
+> commit *and* whenever the store is opened**, with the same failure-atomicity, so
+> a deployment that **lowers** the figure between runs prunes down to it on the
+> next open rather than holding indefinitely — and invisibly — detail a
+> since-narrowed bound no longer admits. **A bound enforced only on the commit
+> path is not an implementation of this clause**, and that pruning touches the
+> commit count no more than any other does. That the limb reaches a store outside
 > `memory/` is **ADR-0004's own reading of itself**:
 > its ADR-0268 scope note says of the goal authorization store that *"§6's
 > retention limb is reached by those rows before it is reached by the record"*, so
@@ -808,9 +819,9 @@ clauses more widely than it now holds?*
 >    configuration alone.
 > 6. **An unavailable date, read *and* booked** — a configuration under which the
 >    requested date is unavailable: the availability read answers as such, **and a
->    booking attempted for that same date is refused by the provider and appends
->    no record**. The second half is what stops a provider that answers
->    *unavailable* and books anyway.
+>    booking attempted for that same date is refused by the provider, appends **no
+>    record** and **advances no count**. The second half is what stops a provider
+>    that answers *unavailable* and books anyway.
 > 7. **The charge is readable, agreeing and disagreeing** — ADR-0271 §2's reading
 >    yields the charge from the booking step's `output` under the registered
 >    `charged_output`, over **three** configurations: one whose charge equals the
@@ -830,9 +841,18 @@ clauses more widely than it now holds?*
 >     prune the oldest **records**, the store stays readable and within its bound
 >     after a restart, and **the commit count still reports every booking made**
 >     (§2). This is the arm that shows retention removing detail and not the act.
+>     **And a bound *lowered between runs* is enforced on the next open**: a store
+>     filled under a larger bound, stopped, reopened under a smaller one and **not
+>     booked against**, retains no more records than the new figure and reports
+>     **the same commit count as before**. That half is what stops an
+>     implementation that prunes only on the commit path and so keeps, forever,
+>     the detail a narrowed bound was set to drop.
 > 11. **Off-schema arguments** — a booking request carrying a field the
 >     declaration's `parameters_schema` does not name is refused, and **no record
->     is appended** (§2).
+>     is appended and no count advanced** (§2). **Every pre-commit refusal arm
+>     asserts the count as well as the records**, this one and arm 6 alike: a
+>     count advanced before a refusal appends nothing and still corrupts the
+>     figure.
 > 12. **A refused configuration** — a configured amount or currency outside the
 >     readers' accepted domains is refused when the configuration is read, one arm
 >     per refused shape; **and the §2 record bound likewise**, one arm each for
