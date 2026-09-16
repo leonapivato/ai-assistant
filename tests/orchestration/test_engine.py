@@ -192,6 +192,7 @@ if TYPE_CHECKING:
         ShownFile,
     )
     from ai_assistant.orchestration.delivery import DeliveryOutbox
+    from ai_assistant.orchestration.reconciling import ReconciliationStage
     from ai_assistant.testing.invoker import FakeToolImplementation
 
 
@@ -704,6 +705,12 @@ class Harness:
         trail: ConsumingTrail | None = None,
         reads: SourceReadTrail | None = None,
         routing: RoutingStage | None = None,
+        # ADR-0259 §4's turn-start pass and §3's check, wired **together or not at
+        # all** — one object holds both. `None` is the default and is every other
+        # case's deployment: no stage wired, so no goal's residual is repaired and the
+        # pipeline is exactly what it was before that decision, which is why a case
+        # that wires one changes no other case's behaviour.
+        reconciliation: ReconciliationStage | None = None,
         transcriber: SpeechTranscriber | None | _Default = _DEFAULT,
         synthesizer: SpeechSynthesizer | None | _Default = _DEFAULT,
         speakable_attested_sources: frozenset[str] = frozenset(),
@@ -725,6 +732,7 @@ class Harness:
         # this module gets no stage at all, which is the deployment the pipeline had
         # before ADR-0197 and is why they are unaffected by it.
         self.routing = routing
+        self.reconciliation = reconciliation
         # ADR-0200's two seams, wired **together** or not at all — the engine refuses
         # half a pipeline. Defaulted to the canonical fakes so every spoken case in
         # this suite has a subject, and kept on the harness so a case can read what
@@ -1050,6 +1058,7 @@ class Harness:
             ),
             loop=loop,
             runner=runner,
+            reconciliation=reconciliation,
             plans=self.plans,
             trail=self.trail,
             spend=self.trail,
