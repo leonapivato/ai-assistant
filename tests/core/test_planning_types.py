@@ -1362,11 +1362,12 @@ def test_export_pins_the_schema_version_to_exactly_fifteen() -> None:
     """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
 
     ``Literal[15]`` refuses an explicit ``14`` — a document of the shape this export
-    had before ``AttemptOutcome`` gained ``CANCELLED`` does not validate against this
-    contract at all (ADR-0261 §10), which is §10's mechanism applied for the first
-    time to a **value** rather than to a shape: the document carries
-    ``tuple[GoalAttempt, ...]``, so a reader at ``14`` refuses an ``outcome`` of
-    ``"cancelled"`` outright. Exactly as a ``13`` stopped validating when ``Goal``
+    had before it gained ``effects`` and ``StepExecution`` gained the two satisfaction
+    marks does not validate against this contract at all (ADR-0259 §9), exactly as a
+    ``14`` stopped validating when ``AttemptOutcome`` gained ``CANCELLED`` (ADR-0261
+    §10) — §10's mechanism applied for the first time to a **value** rather than to a
+    shape, the document carrying ``tuple[GoalAttempt, ...]`` so that a reader at ``14``
+    refuses an ``outcome`` of ``"cancelled"`` outright — a ``13`` when ``Goal``
     gained ``quotes`` and ``quotes_elided`` (ADR-0267 §11), a ``12`` when ``Goal``
     gained ``intended_actions`` and ``PlanStep`` gained
     ``intended_action`` (ADR-0265 §5), an ``11`` stopped validating when
