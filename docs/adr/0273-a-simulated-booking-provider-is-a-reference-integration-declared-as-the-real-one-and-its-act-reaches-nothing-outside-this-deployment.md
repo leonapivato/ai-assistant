@@ -192,15 +192,22 @@ act it stands in for; that they come out differently is the whole content of §2
 > that invocation charged** and the key carrying its ISO-4217 code (ADR-0271 §2).
 > It declares **`quoted_output: None`**.
 
-> **Normative — the booking has a state change and it is durable.** A booking
-> **appends a record** to durable state the provider holds **under the deployment's
-> data directory**, carrying what it was asked and what it charged. **The provider
-> offers no operation that removes or amends one**, and the record **survives a
-> restart**. **Without that, `IRREVERSIBLE` would be a claim about nothing** — an
-> implementation returning configured JSON and changing no state would satisfy
-> every arm below while reproducing neither the double booking nor the failed
-> cancellation the walkthrough exists to demonstrate. This decision fixes **no
-> store, no schema and no file format**.
+> **Normative — the booking has a durable state change, and it is *two* things,
+> because one of them must be prunable and the other must not.** A booking commits,
+> to durable state the provider holds **under the deployment's data directory**:
+>
+> 1. a **booking record** carrying what it was asked and what it charged — the
+>    detail, which is the user's; and
+> 2. an advance of a **monotonic commit count**, a non-personal figure the provider
+>    increments on every committed booking and **never decrements**.
+>
+> Both **survive a restart**, and **the provider offers no operation that removes
+> or amends either**. **Without a durable effect, `IRREVERSIBLE` would be a claim
+> about nothing** — an implementation returning configured JSON and changing no
+> state would satisfy every arm below while reproducing neither the double booking
+> nor the failed cancellation the walkthrough exists to demonstrate. This decision
+> fixes **no store, no schema and no file format**, and the count is **a figure and
+> not a log**: it carries no identifier, no instant and nothing of what was booked.
 
 > **Normative — the append is failure-atomic and serialised.** A record is
 > **wholly present or wholly absent** after any interruption, and two appends in
@@ -238,20 +245,24 @@ act it stands in for; that they come out differently is the whole content of §2
 > silence on any of those as permission to omit them** — they are the lane's under
 > the rules that already govern every store here.
 
-> **Normative — no retention or pruning rule is imposed on this store, and the
-> ground is that ADR-0004 §6's retention sentence is not addressed to it.** That
-> sentence reads *"**Memory** supports retention rules (e.g. TTLs, size caps) so
-> data does not accumulate indefinitely; specifics are set per memory type when
-> `memory/` is designed"* — a rule about `memory/`, stated in `memory/`'s own
-> terms. **No store in this tree carries a corpus-imposed retention rule** — not
-> the audit trail, not the plan store, not the connection store, which ADR-0149 §3
-> makes append-only outright — and inventing one for this store alone would be a
-> regime nobody else follows, written into the ADR that can least justify it.
-> **And a pruning rule would take the declaration with it**: this provider's
-> booking *is* its record, so a rule that pruned records would be a rule that
-> undid bookings, which is `RECOVERABLE` and not what §2 declares. **A decision
-> that gives any store here a retention regime states how a pruned effect is
-> reconciled with its tool's `reversibility` in the same change**; §8 books it.
+> **Normative — the booking *record* is bounded, and ADR-0004 §6's retention limb
+> is why.** It **carries a bound on how many records it retains**, beyond which the
+> oldest are pruned, so the detail does not accumulate indefinitely. **This
+> decision states the requirement and not a figure**, which is the lane's. That the
+> limb reaches a store outside `memory/` is **ADR-0004's own reading of itself**:
+> its ADR-0268 scope note says of the goal authorization store that *"§6's
+> retention limb is reached by those rows before it is reached by the record"*, so
+> §6's retention obligation is not confined to `memory/` and **this decision
+> narrows it in no respect.**
+
+> **Normative — the commit count is not pruned, and it is what carries the act's
+> irreversibility past the record's retention.** Pruning the oldest booking
+> records removes **detail about** bookings; it does not remove the fact that they
+> happened, because the count stands. **No retention rule, no bound and no pruning
+> decrements it.** This is the whole reason the state is two things: a provider
+> whose only durable artifact were a prunable record would have an effect that
+> retention undoes, which is `RECOVERABLE`, and §2 would be declaring something
+> untrue as soon as the bound was crossed.
 
 > **Normative — and it claims no exemption from ADR-0004 §6.** A **per-subject**
 > view, export or deletion surface exists for **no** store in this tree —
@@ -261,12 +272,21 @@ act it stands in for; that they come out differently is the whole content of §2
 > a surface owes this store's rows in the same change**, as it owes every other
 > store's; §8 books it.
 
-> **Normative — and `IRREVERSIBLE` does not rest on the record being
+> **Normative — and `IRREVERSIBLE` does not rest on any artifact being
 > unpurgeable.** ADR-0016 §2's scale asks whether **the change the tool made can be
 > undone**, and the answer here is that **no operation of this provider, and none
-> in this system, undoes a booking**. **No lane reads a wholesale purge, a
-> retention rule or a deletion right as making a tool `RECOVERABLE`**, and the rule
-> is stated over every tool rather than over this one.
+> in this system, undoes a booking**: the count only rises.
+
+> **Normative — the non-recoverability rule is confined to the *wholesale*
+> installation purge, and selective removal is expressly a different question.**
+> **No lane reads `ai-assistant-purge` — which destroys the whole data directory —
+> as making a tool `RECOVERABLE`**, and that is stated over every tool rather than
+> over this one. **A rule that selectively removed or decremented this provider's
+> commit count would undo its bookings, and the decision that lands one re-declares
+> this tool's `reversibility` in the same change or preserves an irreversible
+> effect beside it.** Pruning **booking records** is neither: §2 keeps the count out
+> of the bound for exactly this reason, so the two rules are not in tension and no
+> later decision has to choose between them. §8 books the selective-removal case.
 
 **The reading is stated because a reviewer can reach the other one, and it is
 worth the paragraph.** ADR-0016 §2's `RECOVERABLE` examples are *"a file in the
@@ -653,12 +673,14 @@ clearance it was never granted.
   footing rather than claiming an exemption from it. **Fired by** ADR-0101 §7's
   own two conditions, and the lane that satisfies either owes this store's rows in
   the same change.
-- **A retention or pruning regime for any store in this tree.** **Not decided**
-  (§2), and declined for this store rather than deferred silently: ADR-0004 §6's
-  retention sentence is addressed to `memory/`, no other store here carries one,
-  and pruning this provider's records would undo its bookings and so change its
-  declared `reversibility`. **Fired by** a decision that gives the stores a
-  retention regime, which owes that reconciliation in the same change.
+- **Selective removal of this provider's commit count, and the retention figure
+  itself.** **Not decided** (§2). The bound's number is the lane's; what is
+  reserved here is a decision that would **decrement or selectively erase the
+  count**, because that would undo bookings and therefore change what §2 declares.
+  **Such a decision re-declares this tool's `reversibility` in the same change, or
+  preserves an irreversible effect beside the count.** **Fired by** a decision that
+  takes selective erasure — a per-subject deletion surface being the likeliest, and
+  the entry above being where it is already booked.
 - **A structured carrier for metadata on an unsuccessful outcome.** **Not
   decided** (§6). `ToolResult` refuses an `output` on a non-`SUCCEEDED` result and
   `ToolFailure` carries `kind` and `message` alone; adding one is a `core/types.py`
@@ -701,10 +723,11 @@ clauses more widely than it now holds?*
   same footing as every other, purged by the same act, and owed to the same
   deferred surface; it claims no exemption, so no sentence of any of them becomes
   false or over-wide. **A reader holding only ADR-0004 §6 is not misled**, because
-  §2 says in terms that it claims no exemption and §8 books the surface. **Its
-  retention sentence is read as written** — addressed to `memory/`, in `memory/`'s
-  own terms — which is not a narrowing: §2 imposes no rule that sentence does not
-  reach and claims no exemption from one it does.
+  §2 says in terms that it claims no exemption, bounds the record under §6's
+  retention limb, and books the deferred surface in §8. **That limb is read as
+  ADR-0004 itself reads it** — its ADR-0268 scope note applies it to the goal
+  authorization store's rows, a store outside `memory/` — so this decision widens
+  and narrows nothing about its reach.
 - **ADR-0016, ADR-0148 §6, ADR-0149 §4, ADR-0151 §18, ADR-0267 §3, ADR-0271 §2** —
   no. Each is a declaration, a condition or an open question this decision
   **satisfies** or **leaves open**; a new integration that declares honestly is
@@ -763,40 +786,52 @@ clauses more widely than it now holds?*
 >    disagrees, the last two independently configurable.
 > 8. **The effect key** — two dispatches of one intended action under one goal
 >    carry one derived `EffectKey`, and the second is not dispatched (ADR-0259 §2).
-> 9. **The durable record** — a booking appends one; the record is readable
->     **after a restart**; the provider exposes no operation that removes or
->     amends it; the store leaves **no artifact outside the configured data
->     directory**; and after `ai-assistant-purge` over that directory a reopened
->     store holds **no booking record** (§2).
-> 10. **Off-schema arguments** — a booking request carrying a field the
+> 9. **The durable state, both halves** — a booking appends a record **and**
+>     advances the commit count; both are readable **after a restart**; the
+>     provider exposes no operation that removes, amends or decrements either; the
+>     store leaves **no artifact outside the configured data directory**; and after
+>     `ai-assistant-purge` over that directory a reopened store holds **no booking
+>     record and no count** (§2).
+> 10. **The bound, and what survives it** — bookings past the configured bound
+>     prune the oldest **records**, the store stays readable and within its bound
+>     after a restart, and **the commit count still reports every booking made**
+>     (§2). This is the arm that shows retention removing detail and not the act.
+> 11. **Off-schema arguments** — a booking request carrying a field the
 >     declaration's `parameters_schema` does not name is refused, and **no record
 >     is appended** (§2).
-> 11. **A refused configuration** — a configured amount or currency outside the
+> 12. **A refused configuration** — a configured amount or currency outside the
 >     readers' accepted domains is refused when the configuration is read, one arm
 >     per refused shape (§5).
-> 12. **The provider deduplicates nothing, which is what `Idempotency.NONE`
+> 13. **The provider deduplicates nothing, which is what `Idempotency.NONE`
 >     declares** — **two separately authorised intended actions carrying identical
 >     booking arguments append two records**. Arm 8 shows the system's effect claim
 >     stopping a repeat; this arm shows that **nothing but that claim would have**,
 >     which is the ground §2 states for `NONE` and would otherwise go
 >     unestablished.
-> 13. **Two concurrent bookings** — two calls entering the provider at once leave
+> 14. **Two concurrent bookings** — two calls entering the provider at once leave
 >     **two whole records** and a store readable afterwards, which is §2's
 >     serialised, failure-atomic append with a subject.
-> 14. **The commit boundary, both sides** — a fault injected **before** the commit
+> 15. **The commit boundary, both sides** — a fault injected **before** the commit
 >     leaves **no** record and is reported as a certain failure; a fault injected
 >     **at or after** it raises
 >     `ClassifiedToolError(effect_may_have_committed=True)` and the step completes
 >     **`INDETERMINATE`**; and after an interruption at the commit boundary the
 >     store **reads back whole**, carrying every record that preceded it (§2).
-> 15. **The four conditions** — a binding whose connectability, endpoint,
+> 16. **The four conditions** — a binding whose connectability, endpoint,
 >     connection reference or recorded identity does not match refuses the call,
 >     **one arm per condition** (ADR-0148 §6).
-> 16. **No network** — the transport-confinement contract covers the new module and
+> 17. **No network** — the transport-confinement contract covers the new module and
 >     fails if the entry is removed.
-> 17. **The uncertain booking** — a configuration producing an `INDETERMINATE`
->     step, which stays `INDETERMINATE` and is not reconciled (§4).
-> 18. **The honesty statement** — the field on every successful output, and the
+> 18. **The uncertain booking, told truthfully** — the `INDETERMINATE` step §4
+>     requires is produced by a configuration that fails **at the commit boundary**,
+>     and the arm asserts the store afterwards: the flag the provider reported was
+>     **true of what it did**. A configuration that fails **before** any commit is
+>     a separate arm reporting `effect_may_have_committed=False`, leaving **no
+>     record and no count advance**, and completing `FAILED` rather than
+>     `INDETERMINATE`. **An arm reaching `INDETERMINATE` through a provider that
+>     could not have committed demonstrates a pessimistic misreport rather than an
+>     uncertain effect**, and is not an implementation of this arm.
+> 19. **The honesty statement** — the field on every successful output, and the
 >     statement in the `message` of a `ToolFailure` **this provider returns** (§6).
 
 > **Normative — arm 7 asserts the *reading* and not ADR-0271 §3's finding, because
