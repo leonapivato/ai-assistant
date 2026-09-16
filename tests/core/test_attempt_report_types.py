@@ -466,18 +466,41 @@ def test_the_type_refuses_no_member_including_the_one_no_limb_reaches(
     assert AttemptReport(outcome=member, continues=False).outcome is member
 
 
-def test_the_outcome_member_and_continues_are_independent_on_the_type() -> None:
-    """§6: ``continues`` is computed **from two facts** and one of them is not here.
+@pytest.mark.parametrize(
+    "member",
+    [AttemptOutcome.VERIFIED, AttemptOutcome.ANSWERED, AttemptOutcome.CONDITION_PREVENTED],
+)
+def test_an_outcome_six_fixes_at_false_cannot_carry_true(member: AttemptOutcome) -> None:
+    """§6: *"It is **``False``** on ``VERIFIED``, on ``ANSWERED`` and on
+    ``CONDITION_PREVENTED``"* — unconditionally, with no second fact consulted.
 
-    ``True`` exactly where the member is ``PARTIAL``, ``FAILED`` or ``UNCERTAIN``
-    **and the goal is open** (ADR-0250 §1). The goal's status is on no field of this
-    value, so the rule is not one the type can state — an ``UNCERTAIN`` report over a
-    goal a revision closed carries ``False`` and is well-formed. Making the type refuse
-    the combinations would encode half a rule and refuse the other half's true cases.
+    So the pairing is a value §6 makes impossible and the type refuses it, on the
+    corpus's own preference for making an unreachable shape unconstructible rather than
+    describing it. What it would buy a reader is a reply ending with an offer to take
+    further a goal the same report says was answered, verified or prevented — and the
+    composing stage's instruction *requires* that offer where ``continues`` is set, so
+    the impossible value would reach the user as prose.
     """
-    assert AttemptReport(outcome=AttemptOutcome.UNCERTAIN, continues=False).continues is False
-    assert AttemptReport(outcome=AttemptOutcome.VERIFIED, continues=False).continues is False
-    assert AttemptReport(outcome=AttemptOutcome.PARTIAL, continues=True).continues is True
+    with pytest.raises(ValidationError, match="nothing to continue"):
+        AttemptReport(outcome=member, continues=True)
+
+
+@pytest.mark.parametrize(
+    "member", [AttemptOutcome.PARTIAL, AttemptOutcome.FAILED, AttemptOutcome.UNCERTAIN]
+)
+@pytest.mark.parametrize("continues", [True, False])
+def test_the_other_three_take_either_value_because_the_goal_decides(
+    member: AttemptOutcome, continues: bool
+) -> None:
+    """§6's rule for these three reads a **second** fact this value does not carry.
+
+    ``True`` where the outcome is one of these **and** the goal is open (ADR-0250 §1's
+    ``ACTIVE`` or ``BLOCKED``) — so ``False`` beside any of them is the honest report
+    for a goal a revision closed. The validator above is deliberately one-sided for
+    exactly this reason: refusing these would encode half a rule and refuse the other
+    half's true cases, and the goal's status is on no field here for the type to read.
+    """
+    assert AttemptReport(outcome=member, continues=continues).continues is continues
 
 
 def test_a_turn_carries_no_report_unless_it_ended_an_attempt() -> None:

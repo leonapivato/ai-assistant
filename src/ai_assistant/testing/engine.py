@@ -956,11 +956,22 @@ class FakeAssistantEngine:
           undecided turn — and §6's rule is stated over a turn that *ended an attempt*
           under §4, whose first condition is a **completed reply** that such a pass did
           not compose.
-        * a pass that composed no reply carries none, for that same first condition.
+        * a pass that composed no reply, **or whose reply did not complete**, carries
+          none. §4's first ending condition is *"a ``ComposedReply`` carrying text and
+          **not degraded**"* (ADR-0173 §6), so a truncated or failed composition ends no
+          attempt however much text reached the user.
 
         **A fake that filled the member in anywhere else would hand back a shape no
         conforming engine produces**, which is the looseness ADR-0026 §7 forbids and
         which this method's caller already refuses one member over.
+
+        **And a report a caller scripted onto an ineligible outcome is refused rather
+        than dropped.** Dropping it would pass the arrangement mistake silently and
+        leave the consumer's test green against an outcome it believed it had built;
+        refusing says which of §6's shapes the outcome actually is. That is
+        :attr:`authorizations`'s *"a scripted outcome keeps what it carries"* held to
+        its own ground — it keeps what it carries on a pass that **could** carry it, and
+        this is not one.
 
         **And ``CANCELLED`` is refused outright rather than carried.** ADR-0262 §4 is
         explicit that it "is reached by no limb" of the comparison and that "**no lane
@@ -985,9 +996,24 @@ class FakeAssistantEngine:
         Raises:
             ValueError: If the report this pass would carry names ``CANCELLED``.
         """
-        eligible = outcome.turn is not None and outcome.reply is not None and outcome.routed is None
+        eligible = (
+            outcome.turn is not None
+            and outcome.reply is not None
+            and not outcome.reply_degraded
+            and outcome.routed is None
+        )
         reported = outcome.attempt_report or (self.attempt_report if eligible else None)
-        if reported is not None and reported.outcome is AttemptOutcome.CANCELLED:
+        if reported is None:
+            return None
+        if not eligible:
+            msg = (
+                "this pass ended no attempt, so it carries no report: a report is "
+                "non-None exactly on a turn that ended one, and §4's conditions for "
+                "that begin with a reply that **completed** on a pass that planned and "
+                "took no route (ADR-0262 §4, §6)"
+            )
+            raise ValueError(msg)
+        if reported.outcome is AttemptOutcome.CANCELLED:
             msg = (
                 "no attempt report names CANCELLED: that member is reached by no limb of "
                 "the comparison and no lane writes it from this phase, so a turn carrying "

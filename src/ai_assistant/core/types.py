@@ -8012,6 +8012,14 @@ class AttemptTransition(BaseModel):
     )
 
 
+#: The three members ADR-0262 §6 fixes :attr:`AttemptReport.continues` at ``False`` for,
+#: with no second fact consulted. The other three take either value, because §6's rule
+#: for them also reads the goal's status, which no field of that report carries.
+_NOTHING_TO_CONTINUE: Final[frozenset[AttemptOutcome]] = frozenset(
+    {AttemptOutcome.VERIFIED, AttemptOutcome.ANSWERED, AttemptOutcome.CONDITION_PREVENTED}
+)
+
+
 class AttemptReport(BaseModel):
     """What one turn's comparison produced, rendered beside the reply (ADR-0262 §6).
 
@@ -8070,6 +8078,38 @@ class AttemptReport(BaseModel):
             "Whether the goal's work is unfinished and the user may take it further (ADR-0262 §6)."
         )
     )
+
+    @model_validator(mode="after")
+    def _an_unfinishable_outcome_offers_nothing_to_continue(self) -> AttemptReport:
+        """Refuse the half of §6's rule the value itself already decides.
+
+        §6 fixes ``continues`` **``False``** on ``VERIFIED``, on ``ANSWERED`` and on
+        ``CONDITION_PREVENTED`` — unconditionally, with no second fact consulted — so a
+        report pairing one of those with ``True`` is a value that section makes
+        impossible, and *"a shape a caller cannot reach is better refused than
+        described"* (:meth:`StepOutcome._confirmation_matches_disposition`'s own
+        spirit). What it would buy a reader is an offer to take further a goal the same
+        report says was answered, verified or prevented.
+
+        **The other direction is deliberately not stated**, and that is the whole of why
+        this validator is one-sided. ``True`` on ``PARTIAL``, ``FAILED`` or
+        ``UNCERTAIN`` needs the goal to be **open** as well (ADR-0250 §1), and the
+        goal's status is on no field of this value — so ``False`` beside any of those
+        three is the honest report for a goal a revision closed, and refusing it here
+        would encode half a rule while refusing the other half's true cases.
+
+        Raises:
+            ValueError: If an outcome §6 fixes at ``False`` carries ``True``.
+        """
+        if self.continues and self.outcome in _NOTHING_TO_CONTINUE:
+            msg = (
+                f"an attempt reported {self.outcome.value} offers nothing to continue: "
+                f"continues is False on VERIFIED, ANSWERED and CONDITION_PREVENTED, "
+                f"and a reply ending with an offer to take further a goal the same "
+                f"report says was answered is the claim this refuses (ADR-0262 §6)"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class BriefElement(BaseModel):
@@ -27274,10 +27314,14 @@ class TurnOutcome(BaseModel):
             then true; **no lane re-renders the refused turn's statement, stores it for
             a later turn, retracts the reply or appends a second message.**
 
-            **A surface renders one fixed statement per** :class:`AttemptOutcome`
-            **member, beside the reply and never in place of it** (§6), and a surface
-            that renders no statement for a member it was given has not implemented
-            that section and is not permissibly degraded (ADR-0242 §9's bar). **The
+            **A surface renders one fixed statement for each of the six**
+            :class:`AttemptOutcome` **members ADR-0262 §4's limbs yield, beside the
+            reply and never in place of it** (§6), and a surface that renders no
+            statement for a member it was given has not implemented that section and is
+            not permissibly degraded (ADR-0242 §9's bar). **Six and not seven**:
+            ``CANCELLED`` *"is reached by no limb"* of that comparison — a cancelled
+            attempt is ADR-0261 §2's act — so no report a turn carries names it and no
+            surface owes prose for it. **The
             offer to continue is in the reply and not here**: the composing stage is
             given both of this value's fields and its instruction requires the answer
             to end with an offer where :attr:`AttemptReport.continues` is set, because
