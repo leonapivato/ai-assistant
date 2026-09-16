@@ -1442,7 +1442,7 @@ class FakePlanStore:
             self._refuse_a_closed_goal(stored, what="abandon")
             outstanding = self._outstanding_locked(goal_id)
             ended = [
-                self._cancelled(one, at=at)
+                self._cancelled_attempt(one, at=at)
                 for one in self._attempts.values()
                 if one.goal_id == goal_id and one.state not in TERMINAL_ATTEMPT_STATES
             ]
@@ -1537,12 +1537,17 @@ class FakePlanStore:
             return AttemptOutcome.FAILED
         return AttemptOutcome.CANCELLED
 
-    def _cancelled(self, attempt: GoalAttempt, *, at: UtcInstant) -> GoalAttempt:
+    def _cancelled_attempt(self, attempt: GoalAttempt, /, *, at: UtcInstant) -> GoalAttempt:
         """``attempt`` ended ``CANCELLED`` with §3's outcome, its version advanced.
 
         **The transition is stated whole, because a partial one is not a valid
         ``GoalAttempt``**: ADR-0249 §5's validator requires both an ``outcome`` and an
         ``ended_at`` on a terminal state.
+
+        **Every part of the act that can fail for this attempt happens here**, and the
+        whole set is computed before the first row is written — which is what makes
+        ADR-0261 §14 arm 6's injection limb hold of this fake: a failure part-way
+        through the set leaves nothing behind, because no write has happened yet.
 
         Args:
             attempt: The non-terminal attempt being ended.

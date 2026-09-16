@@ -123,6 +123,15 @@ _RELEASED_EARLY = (
 )
 
 
+class InjectedFaultError(Exception):
+    """The fault ADR-0261 §14 arm 6 injects into ``close_goal_abandoned``'s own writes.
+
+    Deliberately **not** a ``PlanningError``: the arm has to tell an injected failure
+    apart from every refusal the contract itself states, and a fault wearing the
+    contract's own class could be satisfied by a store that had merely refused.
+    """
+
+
 def _goal(goal_id: str = "g1", *, statement: str = "relocate to Lisbon") -> Goal:
     """A goal opened at revision 1, in the shape ADR-0249 §3 mints."""
     return Goal(
@@ -6145,6 +6154,112 @@ class PlanStoreContract:
         with pytest.raises(PlanningError):
             await store.close_goal_abandoned("g1", at=_WHEN, expected_version=goal.version)
         assert await store.has_outstanding_effect("g1") is False
+
+    # --- §14 arm 6: the injection limb ------------------------------------
+
+    def store_failing_mid_abandonment(self) -> AbstractAsyncContextManager[PlanStore]:
+        """Supply a store whose ``close_goal_abandoned`` fails **part-way through the set**.
+
+        Override on every subject. ADR-0261 §14 arm 6's injection limb is stated as an
+        **absence** — "no injection leaves an ``ACTIVE`` goal with a cancelled attempt
+        or an ``ABANDONED`` goal with a live one" — and an absence has nothing to be
+        observed under until something fails. Every other arm here drives a refusal the
+        member decides **before** it mutates anything (a stale ``expected_version``, a
+        closed goal, an unknown or deleted one), so a store that cancelled one attempt,
+        failed, and left the goal ``ACTIVE`` beneath a half-disposed set passes all of
+        them.
+
+        **The fault is raised the second time the act computes an attempt's ending**,
+        which on a goal holding two live attempts is after the act has begun disposing
+        of the set and before it has finished — the position at which a store writing
+        the set row by row has already written one. It fires **once**, so the retry the
+        case makes runs clean, and it raises :class:`InjectedFaultError`, which is no
+        ``PlanningError`` and so cannot be mistaken for a refusal the contract states.
+
+        **The injection goes into the store's own per-attempt seam, never into the
+        backend beneath it.** Instrumenting a ``sqlite3`` connection a worker thread is
+        concurrently using is not safe and segfaults the interpreter (#2441); a method
+        override on a subclass is plain Python on the thread the work already runs on,
+        and is the shape :meth:`store_suspended_mid_write`'s ``arm`` already takes.
+        """
+        raise NotImplementedError
+
+    async def test_an_abandonment_that_fails_part_way_writes_nothing_and_a_whole_retry_closes(
+        self,
+    ) -> None:
+        """§14 arm 6's injection limb: "the act has no window", asserted as an absence.
+
+        "A ``close_goal_abandoned`` that raises leaves the goal ``ACTIVE``, every
+        attempt in the state it was, ``Goal.version`` unadvanced and **nothing
+        written**; the act propagates rather than answering, and a **retry of the act
+        closes the goal and returns the answer**."
+
+        Driven over **two** live attempts, because one cannot state it: the fault lands
+        between the first attempt's disposal and the last, which is the only position at
+        which a partial set is reachable at all. Both attempts are asserted unmoved —
+        state, outcome, ``ended_at`` **and stored version** — so a store that wrote one
+        of them fails here whichever one the act reached first, and the goal is asserted
+        unmoved on the same three facts the act would have changed.
+
+        **And the retry is a whole one**, re-taken at the version the caller first read:
+        that it is still the current version is itself the assertion that the failed act
+        advanced nothing, and the answer it returns is the goal-wide one the act owed
+        all along.
+        """
+        async with self.store_failing_mid_abandonment() as store:
+            await self._with_steps(store, StepStatus.RUNNING)
+            await store.open_attempt(_attempt("a2"))
+            before_goal = await store.get_goal("g1")
+            before_first = await store.get_attempt("a1")
+            before_second = await store.get_attempt("a2")
+            assert before_goal is not None
+            assert before_first is not None
+            assert before_second is not None
+
+            with pytest.raises(InjectedFaultError):
+                await store.close_goal_abandoned(
+                    "g1", at=_WHEN, expected_version=before_goal.version
+                )
+
+            held = await store.get_goal("g1")
+            assert held is not None
+            assert held.status is GoalStatus.ACTIVE, "no status was written"
+            assert held.version == before_goal.version, "and Goal.version is unadvanced"
+            assert held.last_engaged_at == before_goal.last_engaged_at, "nor anything else"
+            assert held.revision == before_goal.revision
+            for stored, was in (
+                (await store.get_attempt("a1"), before_first),
+                (await store.get_attempt("a2"), before_second),
+            ):
+                assert stored is not None
+                assert (stored.state, stored.outcome, stored.ended_at) == (was.state, None, None)
+                assert stored.version == was.version, "every attempt is in the state it was"
+
+            answered = await store.close_goal_abandoned(
+                "g1", at=_WHEN, expected_version=before_goal.version
+            )
+
+            assert answered is True, "the goal-wide answer, the claimed step still standing"
+            closed = await store.get_goal("g1")
+            first = await store.get_attempt("a1")
+            second = await store.get_attempt("a2")
+            assert closed is not None
+            assert first is not None
+            assert second is not None
+            assert closed.status is GoalStatus.ABANDONED
+            assert closed.version == before_goal.version + 1
+            assert (first.state, first.outcome, first.ended_at) == (
+                AttemptState.CANCELLED,
+                AttemptOutcome.UNCERTAIN,
+                _WHEN,
+            )
+            assert (second.state, second.outcome, second.ended_at) == (
+                AttemptState.CANCELLED,
+                AttemptOutcome.CANCELLED,
+                _WHEN,
+            )
+            assert first.version == before_first.version + 1
+            assert second.version == before_second.version + 1
 
     async def test_set_goal_status_refuses_an_abandonment_over_a_live_attempt(
         self, store: PlanStore

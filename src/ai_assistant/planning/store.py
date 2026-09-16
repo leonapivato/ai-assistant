@@ -498,7 +498,7 @@ class InMemoryPlanStore:
         refuse_a_closed_goal(goal_id=goal_id, status=stored.status, what="abandon")
         outstanding = await self.has_outstanding_effect(goal_id)
         ended = [
-            cancelled(one, outcome=cancellation_outcome(self._step_statuses(one)), at=at)
+            self._cancelled_attempt(one, at=at)
             for one in self._attempts.values()
             if one.goal_id == goal_id and one.state not in TERMINAL_ATTEMPT_STATES
         ]
@@ -507,6 +507,23 @@ class InMemoryPlanStore:
         updated = _with_status(stored, status=GoalStatus.ABANDONED)
         self._goals[updated.id] = updated
         return outstanding
+
+    def _cancelled_attempt(self, attempt: GoalAttempt, /, *, at: UtcInstant) -> GoalAttempt:
+        """``attempt`` ended ``CANCELLED`` with the outcome its **own** steps yield (§3).
+
+        Every part of the act that can fail for this attempt happens here, and the
+        whole set is computed before the first row is written — which is what makes
+        ADR-0261 §14 arm 6's injection limb hold of this store: a failure part-way
+        through the set leaves nothing behind, because no write has happened yet.
+
+        Args:
+            attempt: The non-terminal attempt being ended.
+            at: The instant of the act, from the caller.
+
+        Returns:
+            The row as it stands after the closure.
+        """
+        return cancelled(attempt, outcome=cancellation_outcome(self._step_statuses(attempt)), at=at)
 
     async def has_outstanding_effect(self, goal_id: str, /) -> bool:
         """Whether any step of any execution of any attempt of ``goal_id`` is claimed.

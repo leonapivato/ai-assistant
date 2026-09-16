@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from plan_store_contract import (
+    InjectedFaultError,
     PlanStoreContract,
     _attempt,
     _claim,
@@ -82,11 +83,38 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.types import UtcInstant
     from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
+
+
+class _FailsMidAbandonment(SqlitePlanStore):
+    """This store with ADR-0261 §14 arm 6's fault in its own per-attempt seam.
+
+    The second ending the act computes raises, which on a goal holding two live
+    attempts is **after the first attempt's ``UPDATE`` has been issued** — so what the
+    arm observes here is the enclosing ``BEGIN IMMEDIATE`` rolling that row back rather
+    than an ordering the store happens to keep.
+
+    Overriding a method of the store, never instrumenting the connection: a
+    ``set_trace_callback`` on a connection this store's worker thread is concurrently
+    using segfaults the interpreter (#2441). This override runs on that same worker
+    thread, inside the transaction, which is exactly where the fault belongs.
+    """
+
+    _endings = 0
+
+    def _cancelled_attempt(
+        self, conn: sqlite3.Connection, attempt: GoalAttempt, /, *, at: UtcInstant
+    ) -> GoalAttempt:
+        """Raise on the second ending, once, then behave (ADR-0261 §14 arm 6)."""
+        self._endings += 1
+        if self._endings == 2:
+            raise InjectedFaultError("the second attempt's ending")
+        return super()._cancelled_attempt(conn, attempt, at=at)
 
 
 #: The instant a pre-ADR-0249 row this suite seeds was written at.
@@ -203,6 +231,15 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> Iterator[PlanStore]:
         realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
+        try:
+            yield realised
+        finally:
+            realised.close()
+
+    @contextlib.asynccontextmanager
+    async def store_failing_mid_abandonment(self) -> AsyncIterator[PlanStore]:
+        """A subclass carrying the fault, on its own connection, closed after the case."""
+        realised = _FailsMidAbandonment(path=":memory:", now=_fixed_now)
         try:
             yield realised
         finally:
