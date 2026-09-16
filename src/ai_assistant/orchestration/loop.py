@@ -77,6 +77,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     CurrentContext,
     FeedbackKind,
+    ForecastNotRead,
     Goal,
     GoalAttempt,
     GoalBrief,
@@ -103,6 +104,7 @@ from ai_assistant.orchestration.interpretation import (
     substituted_plan,
 )
 from ai_assistant.orchestration.reads import (
+    ForecastServicer,
     SearchFooting,
     SearchServicer,
     ServicedRead,
@@ -113,6 +115,7 @@ from ai_assistant.orchestration.reads import (
     TurnReadAudit,
     admitted_fourth_group,
     earliest,
+    earliest_not_read,
     folded_reach,
     service_read_request,
 )
@@ -445,6 +448,34 @@ class RespondedTurn:
             values rather than recomputing one. The turn's **statement** is not
             assembled here — the executed-egress classification is the engine's other
             input (§6), and this loop drives no step.
+        forecast_reach: ADR-0260 §10's carrier, folded over **this turn's** forecast
+            calls by the same rule and with the same ordering :attr:`outbound_reach` is
+            folded by — ``None`` where no servicing performed one at all, which is every
+            turn that did not fire, whose servicing was declined, and whose planner
+            asked for no forecast.
+
+            **A second carrier and not a widening of the first**, because ADR-0264 §4
+            names *each class* a turn contacted and the statement must be able to name
+            both: a single folded value would say a contact was established and could no
+            longer say **which** seam established it, which is the overwrite ADR-0260
+            §13's arm (l) exists to catch.
+        forecast_not_read: ADR-0260 §10's carrier: which **class of act** would have let
+            a forecast read this turn did not make happen, or ``None`` where every
+            servicing yielded, where the provider answered with nothing, and where the
+            turn asked for no forecast.
+
+            **At most one member per turn, and the one earliest in
+            ``ForecastNotRead``'s declared order** among the servicings that recorded a
+            disposition — §10 declares the members "in precedence order" and applies
+            ADR-0242 §7's rule at this seam unchanged. **A later read does not clear an
+            earlier one's member**: "a turn that was denied and then answered still
+            reports ``DECLINED``, because the user was told about a read this turn did
+            not make and a second read does not unmake it".
+
+            **Supplied and never inferred**, exactly as :attr:`search_not_serviced` is,
+            and **never read off** :attr:`forecast_reach` or the reverse (§10): that
+            fact's partition and this fold are two answers to two questions, and the
+            non-injective member cannot compute the contact.
         outbound_records: ADR-0264 §4's count, summed over this turn's servicings —
             "one population over the turn", which is why two servicings that both
             admitted records report the **sum** and not the later one's figure.
@@ -481,6 +512,8 @@ class RespondedTurn:
     raised: RaisedSubject | None = None
     evidence: tuple[GoalEvidence, ...] = ()
     outbound_reach: OutboundReach | None = None
+    forecast_reach: OutboundReach | None = None
+    forecast_not_read: ForecastNotRead | None = None
     outbound_records: int = 0
 
 
@@ -1606,6 +1639,7 @@ class LearningLoop:
         feedback: FeedbackProcessor,
         fetcher: Fetcher | None = None,
         search: SearchServicer | None = None,
+        forecast: ForecastServicer | None = None,
         footing: Callable[[str], SearchFooting] | None = None,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
@@ -1690,6 +1724,15 @@ class LearningLoop:
                 as a fault. It is the loop's only route to the search seam and the
                 seam's only caller — ADR-0231 §11's one-call-site clause, kept by
                 a wiring rather than by a type.
+            forecast: The four contracts a ``FORECAST_READ`` ask is serviced
+                against (ADR-0260 §6, §7), or ``None`` where this deployment
+                configured no forecast provider. **``None`` is the ordinary case
+                and never an error**, exactly as ``search``'s is, and ADR-0260 §8's
+                ``NOT_CONFIGURED`` records it as the provisioning fact it is. It is
+                the loop's only route to the forecast seam and that seam's only
+                caller — §7's "``app/composition.py`` wires the forecaster into
+                that one site and into nothing else, and no lane adds a second
+                caller", kept by a wiring rather than by a type.
             retrieval_limit: How many memories a turn retrieves. The **belief**
                 budget: it is never reduced, shared or made conditional by the
                 episodic supplement below (ADR-0158 §3).
@@ -1740,6 +1783,7 @@ class LearningLoop:
         self._feedback = feedback
         self._fetcher = fetcher
         self._search = search
+        self._forecast = forecast
         self._footing = footing
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
@@ -2437,6 +2481,8 @@ class LearningLoop:
         # folds to `NOT_REACHED` at the assembly point rather than here. **Accumulated
         # and never replaced** (§6).
         outbound_reach: OutboundReach | None = None
+        forecast_reach: OutboundReach | None = None
+        forecast_not_read: ForecastNotRead | None = None
         outbound_records = 0
         # ADR-0244 §1's carrier, ``None`` on every turn no servicing of which wrote a
         # park — which is every turn on a deployment that wired no ``ParkedReads``, and
@@ -2662,6 +2708,12 @@ class LearningLoop:
                 # the hop and the query are serviced by, and no other component
                 # holds it.
                 search=self._search,
+                # ADR-0260 §7: **one servicing site**, and this is still it — the
+                # forecast is a sixth kind of the same emission rather than a second
+                # seam, so the forecast servicer is handed to the same call the file,
+                # the search, the hop, the structured read and the query are serviced
+                # by, and no other component holds it.
+                forecast=self._forecast,
                 # ADR-0231 §3, §4: the turn's own words, **unrewritten**, which is
                 # the only value a `QueryComposer` is ever supplied. Not `memories`,
                 # not the tail, not the listing and not the plan's rationale — the
@@ -2742,6 +2794,12 @@ class LearningLoop:
                     records=one.records,
                     admitted=one.admitted,
                     read_at=read_at,
+                    # ADR-0252 §1's field as ADR-0260 §9 fills it — "the forecaster's
+                    # ``name``" — computed at the servicing site and carried here on the
+                    # same value the classification rides, so nothing composes a source
+                    # identity at this line. ``None`` on every other kind, whose
+                    # ``ReadKind`` member is the whole of its source identity (§1).
+                    source=one.source,
                 )
                 for one in carried.yields
             )
@@ -2763,11 +2821,26 @@ class LearningLoop:
             # send leaves that contact standing (§13 item 5). A servicing that performed
             # no call contributes `None` and clears nothing.
             outbound_reach = folded_reach(outbound_reach, carried.contact)
+            # ADR-0260 §10's two folds, beside ADR-0242 §7's and ADR-0264 §2's above and
+            # by the same rules: the member by the **declared** order and never the
+            # encounter order (§13's arm (h) requires both directions), and the contact
+            # by the least-claiming fold, which one servicing that reached the provider
+            # makes `REACHED` however many others did not. **A second carrier and not a
+            # widening of the first**: the statement below names *each class* contacted,
+            # so a turn that reached both seams must still be able to say which reached
+            # which — the overwrite arm (l) exists to catch.
+            forecast_not_read = earliest_not_read(forecast_not_read, carried.forecast_not_read)
+            forecast_reach = folded_reach(forecast_reach, carried.forecast_contact)
             # ADR-0264 §4: one population over the turn, so the two servicings of §13
             # item 5 report the **sum** of what they admitted. A failed servicing
             # contributes its own zero — ADR-0226 §5 left the supply as planning saw it
             # — without resetting what an earlier one admitted (§6).
             outbound_records += carried.contact_records
+            # ADR-0264 §4's **one population over the turn**, which is why the forecast's
+            # admissions are summed into the same figure rather than carried as a second
+            # count: the statement names a set of kinds and states one number. A failed
+            # servicing contributes its own zero here too (ADR-0226 §5).
+            outbound_records += carried.forecast_records
             # ADR-0244 §1, §3: **the first park a servicing of this turn wrote, kept.**
             # A second servicing's `park` cannot have answered `True` while this one
             # stands — one `OPEN` park per conversation is the store's own indivisible
@@ -3034,6 +3107,8 @@ class LearningLoop:
             # The **statement** is assembled by the engine, which is where this turn's
             # calls and its driven step's classification are brought together (§6).
             outbound_reach=outbound_reach,
+            forecast_reach=forecast_reach,
+            forecast_not_read=forecast_not_read,
             outbound_records=outbound_records,
         )
 

@@ -690,6 +690,17 @@ async def test_no_identifier_the_hop_carried_reaches_a_prompt_a_log_or_the_audit
         # provider message — which is why §9's no-copy rule admits it beside the
         # counts, and why this assertion still holds over the whole record.
         "disposition",
+        # ADR-0260 §7's **two** added fields, on identical terms — "the audit gains
+        # two fields on ADR-0226 §9's existing per-turn record and no second audit:
+        # whether the ask was serviced, and its `ForecastDisposition` where it has one".
+        # A boolean and a class: `forecast_serviced` is `False` on a servicing that
+        # carried no `FORECAST_READ` ask, and `forecast` is `None`, which is one of the
+        # two absences §8 enumerates. The pin stays closed over both because neither can
+        # carry a value the provider returned — no day, no place, no coordinate, no
+        # origin, no account and no `Settings` field name — and because §7 refuses a
+        # **count of dropped days** beside them in terms.
+        "forecast_serviced",
+        "forecast",
         # ADR-0240 §10's **two** added fields, on the same terms as the two above.
         # `structured_axes` is a tuple of closed-enumeration members — the classes of
         # the axes an ask applied, and never an instant, a person label, a topic label
