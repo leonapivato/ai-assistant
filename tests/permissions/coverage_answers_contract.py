@@ -4,7 +4,10 @@ Every :class:`~ai_assistant.core.protocols.CoverageAnswers` implementation must 
 :class:`CoverageAnswersContract`. A concrete test subclasses it and supplies two
 subjects: ``answers``, which answers **met** over :data:`MONEY_COVERAGE` for
 :data:`PRICED` carrying :data:`GOVERNING_QUOTE`; and ``unmet_answers``, which answers
-**not met** over that same pair.
+**not met** over that same pair. It also supplies :meth:`CoverageAnswersContract.displace`,
+which moves the governing quote **underneath** a subject without touching the
+arguments — the hook ADR-0270 §3's no-cached-verdict rule needs, because two identical
+calls over an unmoved source cannot tell a fresh answer from a replayed one.
 
 **This suite fixes a shape, not a verdict.** Condition 6 has *"One implementation, in
 ``permissions``"* (ADR-0266 §7), so a suite that re-derived which coverages are met
@@ -123,6 +126,15 @@ MONEY_COVERAGE: Final[tuple[CoverageMember, ...]] = (
     coverage_member(BoundKind.MONEY, bound=money_bound("150", currency="EUR")),
 )
 
+#: A **later** reading for the same act, over the same arguments, at a figure still
+#: inside the ceiling.
+#:
+#: ADR-0267 §2 makes a refresh a **position in the tuple**, so this is what a
+#: re-quote landing between two calls looks like — and under §7 it displaces
+#: :data:`GOVERNING_QUOTE` as the governing one. What it buys the suite is the one
+#: thing two identical calls cannot show: whether the second call actually **read**.
+DISPLACING_QUOTE: Final = GOVERNING_QUOTE.model_copy(update={"amount": Decimal("130")})
+
 #: One ``PERIOD`` member, met on the **argument** route alone and by no quote.
 PERIOD_COVERAGE: Final[tuple[CoverageMember, ...]] = (
     coverage_member(
@@ -233,23 +245,47 @@ class CoverageAnswersContract:
         assert answer.met is False
         assert answer.quoted is None
 
+    def displace(self, answers: CoverageAnswers) -> None:
+        """Make :data:`DISPLACING_QUOTE` the governing quote of the ``answers`` subject.
+
+        **Without touching either argument.** ADR-0270 §3 forbids a cached verdict,
+        and two identical calls over an unmoved source cannot tell a fresh answer
+        from a replayed one — an implementation that memoised by ``(request,
+        coverage)`` and handed back detached copies would pass. This hook is what
+        moves the source underneath, so the next call's answer says whether it read.
+
+        Args:
+            answers: The subject the ``answers`` fixture returned.
+
+        Raises:
+            NotImplementedError: If a subclass has not supplied one.
+        """
+        raise NotImplementedError
+
     async def test_asking_twice_asks_twice_and_nothing_is_memoised(
         self, answers: CoverageAnswers
     ) -> None:
         """§3: *"no answer is cached, carried to a dispatch or read by any later
         comparison"*, and ADR-0254 §13's *"no cached coverage verdict anywhere"*.
 
-        Two calls with equal arguments answer equally and the second is a fresh
-        answer, not a replay: an implementation that memoised would still pass this,
-        which is why the **seam-read** count is asserted against the one
-        implementation in its own module. What this closes is the cheaper failure —
-        a member that answered once and then answered something else, or that
-        accumulated state across calls.
+        Two identical calls answer equally; then the governing quote is displaced
+        **underneath** the subject and a third identical call answers with the new
+        one. That last step is the whole test: *"a proposal-time answer answers that
+        proposal"*, and an implementation memoising by ``(request, coverage)`` would
+        hand a path-(i) writer a figure a re-quote had already displaced — which is
+        the two-read window §2 closes, reopened from the other side. The first two
+        calls stay, because a member that answered twice differently over an unmoved
+        source is a separate failure. Adversarial review, round 5, ``major``.
         """
         first = await answers.coverage_met(PRICED, MONEY_COVERAGE)
         second = await answers.coverage_met(PRICED, MONEY_COVERAGE)
         assert first == second
         assert (await answers.coverage_met(BARE, ())).met is True
+
+        self.displace(answers)
+        third = await answers.coverage_met(PRICED, MONEY_COVERAGE)
+        assert third.met is True
+        assert third.quoted == DISPLACING_QUOTE, "the answer was replayed, not read"
 
     async def test_the_call_leaves_its_arguments_where_it_found_them(
         self, answers: CoverageAnswers
