@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     AttemptPhase,
     AttemptState,
     Disposition,
+    DriveWithheld,
     Goal,
     GoalAttempt,
     GoalInterpretation,
@@ -1186,11 +1187,21 @@ async def test_a_failed_boundary_write_leaves_the_attempt_paused_and_the_claim_r
 
     **§12's own guarantee still holds and is what separates the two failures.** The
     boundary is reported rather than raised, so the resumption does not fail *because
-    the bookkeeping did* — it fails at the claim, on the claim's own message. The
+    the bookkeeping did* — it ends at the claim, on the claim's own refusal. The
     residual is §3's, stated there and booked to A8: the resolving ruling **is**
     recorded, so the one answer ADR-0044 §2b admits is spent on a claim that never
     landed, and the step stands ``AWAITING_APPROVAL`` at its stored version with
     nothing invoked.
+
+    **Since ADR-0261 §7 the resumption *returns* rather than raising, and that is the
+    one thing this arm now pins differently.** The driver catches the ``ClaimRefused``
+    its own claim made, ends there, retries nothing and composes — *"a refused claim is
+    not a fault"* — and the outcome carries where the goal stands. ADR-0255 §3's *"a
+    resume that nevertheless finds the attempt paused is **refused** rather than
+    excused"* is untouched: it is about what the **store** does with the claim, and the
+    store still refuses it, nothing is invoked and the step keeps its entry status.
+    ``ATTEMPT_PAUSED`` is true of the record the read finds, which is what §7 makes the
+    field mean — *"where the goal stands, never why the step was not claimed"*.
     """
 
     class _FailingOnTheBoundary(_Recording):
@@ -1215,9 +1226,12 @@ async def test_a_failed_boundary_write_leaves_the_attempt_paused_and_the_claim_r
     assert parked.step.confirmation is not None
     (stored,) = plans.opened
 
-    with pytest.raises(PlanningError, match="no step is claimed under it"):
-        await harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+    withheld = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
 
+    assert withheld.drive_withheld is DriveWithheld.ATTEMPT_PAUSED, "where the goal stands"
+    assert withheld.step is None, "nothing was driven, so the outcome projects no step"
     assert plans.refused == 1, "the boundary's write really was refused"
     assert harness.invoker.invocations == [], "and nothing was invoked under a paused attempt"
     execution = await harness.plans.get_execution(parked.step.state.id)

@@ -503,6 +503,33 @@ def _egress_reach(request: ActionRequest, reach: CallableReach) -> OutboundReach
     return OutboundReach.INDETERMINATE
 
 
+@dataclass(slots=True)
+class OutboundObservation:
+    """ADR-0264 §2's egress contribution, carried out of a drive that **raised**.
+
+    :attr:`StepDisposition.outbound` carries it out of a drive that returned, and that is
+    still the ordinary route. What this is for is the one exit that returns no
+    disposition and is not a fault: ADR-0261 §7's refused claim, where the driver catches
+    the store's ``ClaimRefused``, ends the walk and **composes a turn anyway**. That turn
+    owes ADR-0264 §7's statement like any other, and a re-claim a retry spends can be
+    refused *after* the executor already reached the callable (ADR-0037 §6) — so a turn
+    that supplied nothing there would answer ``NOT_REACHED`` about a send that had gone,
+    which §3 forbids in terms: a send the executor *"reached the callable for, or cannot
+    say it did not"* is ``INDETERMINATE``.
+
+    **An observation and never an input**, which is :class:`CallableReach`'s own shape one
+    fold up: the caller creates it, hands it over and reads it afterwards, and a caller
+    that passes none changes nothing. It carries the classification rather than the raw
+    fact, because the fact it is derived from — the request's ``egress_binding`` — is the
+    runner's and reaches no caller.
+    """
+
+    #: What this drive established, as :func:`_egress_reach` classified it, or ``None``
+    #: where the drive contributed nothing — including where it never reached the stage
+    #: that observes.
+    reach: OutboundReach | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
     """What one pass of :class:`StepRunner` did with a step (ADR-0037 §4).
@@ -868,7 +895,7 @@ class StepRunner:
         self._id_factory = id_factory
         self._confirmation_ttl = confirmation_ttl
 
-    async def run(  # noqa: PLR0913, PLR0911 — one parameter per distinct fact about the act, and one return per way a step is disposed of before it dispatches; collapsing any pair would hide which stage declined
+    async def run(  # noqa: PLR0913, PLR0911 — one parameter per distinct fact about the act, ADR-0264 §2's outbound observation among them, and one return per way a step is disposed of before it dispatches; collapsing any pair would hide which stage declined
         self,
         state: ExecutionState,
         step_id: str,
@@ -877,6 +904,7 @@ class StepRunner:
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         origin: SelectionOrigin,
         on_ruled: Ruled | None = None,
+        outbound: OutboundObservation | None = None,
     ) -> StepDisposition:
         """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
@@ -934,6 +962,11 @@ class StepRunner:
                 and nothing has acted on it — before the step is claimed under an
                 ``ALLOW``, before it is queued under a ``CONFIRM``, before it is skipped
                 under a ``DENY`` (:data:`Ruled`). ``None``, the default, calls nothing.
+            outbound: The caller's :class:`OutboundObservation`, filled with ADR-0264
+                §2's egress contribution for this drive **on every exit, the exceptional
+                one included** — which is what carries it out of a claim ADR-0261 §7
+                refused, where there is no disposition to carry it. ``None``, the
+                default, observes nothing and changes no behaviour.
 
         Returns:
             What became of the step, and the durable state after it.
@@ -1031,7 +1064,13 @@ class StepRunner:
         await _recorded_ruling(on_ruled, decision)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(
-                state, planned, request, decision, attempt_id=attempt_id, timeout=timeout
+                state,
+                planned,
+                request,
+                decision,
+                attempt_id=attempt_id,
+                timeout=timeout,
+                outbound=outbound,
             )
 
         if decision.ruling.outcome is PermissionOutcome.CONFIRM:
@@ -1059,7 +1098,7 @@ class StepRunner:
         # `PENDING → SKIPPED`/`APPROVAL_DENIED`, naming the recorded `DENY`.
         return await self._deny(state, step, decision, tool)
 
-    async def resume(  # noqa: PLR0913 — the execution, the step, the confirmation, the answer, the budget, ADR-0235 §2's one instant and ADR-0249 §12's boundary; each is a distinct fact about the act
+    async def resume(  # noqa: PLR0913 — the execution, the step, the confirmation, the answer, the budget, ADR-0235 §2's one instant, ADR-0249 §12's boundary and ADR-0264 §2's outbound observation; each is a distinct fact about the act
         self,
         state: ExecutionState,
         step_id: str,
@@ -1070,6 +1109,7 @@ class StepRunner:
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
         remember_recipients_until: datetime | None = None,
         on_ruled: Ruled | None = None,
+        outbound: OutboundObservation | None = None,
     ) -> StepDisposition:
         """Answer a parked ``CONFIRM`` and continue the step (ADR-0037 §4).
 
@@ -1135,6 +1175,7 @@ class StepRunner:
                 where this method raises before a ruling is sought: a refused
                 establishing act (``UngrantableActError``) leaves the confirmation
                 pending (ADR-0235 §2), and nothing was answered.
+            outbound: As :meth:`run` (:class:`OutboundObservation`).
 
         Returns:
             ``EXECUTED`` or ``DENIED``, and the durable state after it. A
@@ -1290,7 +1331,13 @@ class StepRunner:
         await _reported_ruling(on_ruled, decision, step_id=step.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             disposition = await self._execute(
-                state, planned, request, decision, attempt_id=attempt_id, timeout=timeout
+                state,
+                planned,
+                request,
+                decision,
+                attempt_id=attempt_id,
+                timeout=timeout,
+                outbound=outbound,
             )
         else:
             disposition = await self._deny(state, step, decision, confirmed.tool)
@@ -2421,7 +2468,7 @@ class StepRunner:
 
     # --- the dispositions -----------------------------------------------
 
-    async def _execute(  # noqa: PLR0913 — the five values the executor's call is assembled from, plus the attempt it is claimed under (ADR-0255 §3)
+    async def _execute(  # noqa: PLR0913 — the five values the executor's call is assembled from, the attempt it is claimed under (ADR-0255 §3), and the caller's outbound observation; each is a distinct fact about the drive
         self,
         state: ExecutionState,
         planned: _Planned,
@@ -2430,6 +2477,7 @@ class StepRunner:
         *,
         attempt_id: str,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
+        outbound: OutboundObservation | None = None,
     ) -> StepDisposition:
         """Hand the executor an authorised call and report what it committed.
 
@@ -2500,14 +2548,26 @@ class StepRunner:
             goal=planned.goal_id,
         )
         reach = CallableReach()
-        drive = await self._executor.execute(
-            state,
-            step_id=planned.step.id,
-            call=call,
-            attempt_id=attempt_id,
-            timeout=timeout,
-            reach=reach,
-        )
+        try:
+            drive = await self._executor.execute(
+                state,
+                step_id=planned.step.id,
+                call=call,
+                attempt_id=attempt_id,
+                timeout=timeout,
+                reach=reach,
+            )
+        finally:
+            # **Published on every exit, including the exceptional one**
+            # (:class:`OutboundObservation`). ADR-0261 §7's refused claim leaves this
+            # stage by raising, so a classification computed only below would be lost —
+            # and a re-claim a retry spends can be refused *after* the callable was
+            # reached, which is the one case where losing it would have the composing
+            # turn answer ``NOT_REACHED`` about a send that had gone (ADR-0264 §3).
+            # The observer is the same object either way, so the value is the same value
+            # the disposition below carries.
+            if outbound is not None:
+                outbound.reach = _egress_reach(request, reach)
         if drive.refused is not None:
             # ADR-0259 §2's two refusals, reported as the stage's own disposition. Each
             # commits nothing, so the state handed back is the one this stage was given

@@ -23,7 +23,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
-from test_engine import AT, PATIENT, Harness, OneStepPlanner, tool
+from test_engine import (
+    AT,
+    EGRESS_SCHEMA,
+    PATIENT,
+    Harness,
+    OneStepPlanner,
+    bound_binder,
+    confirmable,
+    tool,
+)
 
 from ai_assistant.core.errors import ClaimRefused, ClassifiedToolError, PlanningError
 from ai_assistant.core.types import (
@@ -32,11 +41,13 @@ from ai_assistant.core.types import (
     AttemptTransition,
     Disposition,
     DriveWithheld,
+    GoalAbandonment,
     GoalAttempt,
     GoalInterpretation,
     GoalRevision,
     GoalStatus,
     Ground,
+    OutboundReach,
     StepStatus,
     ToolFailure,
     ToolFailureKind,
@@ -533,3 +544,110 @@ def test_the_goal_test_the_engine_does_not_name_is_exactly_achieved() -> None:
     unnamed = set(GoalStatus) - set(_GOAL_WITHHELD) - {GoalStatus.ACTIVE}
 
     assert unnamed == {GoalStatus.ACHIEVED}
+
+
+# --- ADR-0264 §2's contribution survives a drive that raised -------------------
+
+
+async def test_a_refused_re_claim_does_not_deny_a_send_the_callable_already_reached() -> None:
+    """ADR-0264 §3, over the one exit that returns no ``StepDisposition``.
+
+    A retry's first attempt reaches the callable, and the **re-claim** is then refused by
+    a user act (ADR-0037 §6, ADR-0261 §7). A turn that supplied nothing for the egress
+    fold there would answer ``NOT_REACHED`` about a send that had gone — and §3 is
+    explicit: a send the executor *"reached the callable for, or cannot say it did not"*
+    is ``INDETERMINATE``, *"because a turn that emailed somebody and was told it reached
+    nothing would be misled as badly"*.
+
+    The classification is carried out of the raising drive on the runner's
+    ``OutboundObservation``, which is the same value the disposition would have carried
+    had it returned — not a second computation at the fold.
+    """
+    definition = tool(parameters_schema=EGRESS_SCHEMA)
+    plans = _Interposing(now=lambda: AT)
+    plans.on_claim = 2
+    plans.before_claim = _cancelled
+    handler = _UnavailableOnce()
+    harness = Harness(
+        planner=_CountingPlanner(),
+        plans=plans,
+        tools=(definition,),
+        tool_handler=handler,
+        binder=bound_binder(definition),
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.drive_withheld is DriveWithheld.GOAL_CANCELLED
+    assert handler.calls == 1, "the callable was reached before the re-claim was refused"
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.INDETERMINATE
+    assert statement.destinations == (), "no class is named on a send's account (ADR-0264 §3)"
+
+
+async def test_a_first_claim_the_store_refused_reached_nothing_and_says_so() -> None:
+    """The other side of the same wire, so ``INDETERMINATE`` is not minted unconditionally.
+
+    A claim refused before anything was invoked reached no callable, so the drive
+    contributes nothing and the turn answers ``NOT_REACHED`` on its own account — which
+    is what a lane that folded ``INDETERMINATE`` in for every withheld drive would get
+    wrong.
+    """
+    definition = tool(parameters_schema=EGRESS_SCHEMA)
+    plans = _Interposing(now=lambda: AT)
+    plans.before_claim = _cancelled
+    harness = Harness(
+        planner=_CountingPlanner(),
+        plans=plans,
+        tools=(definition,),
+        binder=bound_binder(definition),
+    )
+
+    outcome = await harness.engine.converse(_ASKED, timeout=PATIENT)
+
+    assert outcome.drive_withheld is DriveWithheld.GOAL_CANCELLED
+    assert harness.invoker.invocations == []
+    statement = outcome.outbound_statement
+    assert statement is not None
+    assert statement.reach is OutboundReach.NOT_REACHED
+
+
+# --- §7 on the resumption, which is where a user is likeliest to meet it -------
+
+
+async def test_a_resumption_whose_claim_a_cancellation_refused_composes_and_returns() -> None:
+    """ADR-0261 §7 over ``StepRunner.resume``'s own claim.
+
+    A user parks a step for confirmation, gives the goal up, and then answers the
+    confirmation. The resolution's ``AWAITING_APPROVAL → RUNNING`` claim is the
+    ``commit_transition`` call *"its own claim made"*, so it is caught here too: the
+    resolution **returns** a composed outcome naming where the goal stands rather than
+    raising, nothing is dispatched, and the step keeps the status it was parked at.
+
+    **The park still stands**, which is ADR-0198 §1's own rule rather than a new one: a
+    settled record is installed *"only where the answer was recorded, the runner returned
+    and the park was evicted"*, and the runner did not return.
+    """
+    harness = Harness(tools=(confirmable(),))
+
+    parked = await harness.engine.converse(_ASKED, timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    assert parked.turn is not None
+    goal_id = parked.turn.goal.goal_id
+    assert await harness.engine.abandon_goal(goal_id) is GoalAbandonment.ABANDONED
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.drive_withheld is DriveWithheld.GOAL_CANCELLED
+    assert resumed.step is None, "nothing was driven, so the outcome projects no step"
+    assert resumed.reply is not None, "the turn composes without acting"
+    assert harness.invoker.invocations == []
+    execution = await harness.plans.get_execution(parked.step.state.id)
+    assert execution is not None
+    step = execution.step("step-1")
+    assert step is not None
+    assert step.status is StepStatus.AWAITING_APPROVAL, "the step is at its entry status"

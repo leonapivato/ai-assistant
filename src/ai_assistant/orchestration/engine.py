@@ -260,6 +260,7 @@ from ai_assistant.orchestration.routing import (
 from ai_assistant.orchestration.routing import (
     resolve as resolve_route,
 )
+from ai_assistant.orchestration.runner import OutboundObservation
 from ai_assistant.orchestration.speech import (
     DEFAULT_MAX_SPOKEN_AUDIO_BYTES,
     SPOKEN_PARK_SENTENCE,
@@ -2232,6 +2233,29 @@ class _Settled:
     step_id: str
     tool_id: str | None
     disposition: Disposition
+
+
+@dataclass(frozen=True, slots=True)
+class _WithheldResumption:
+    """A resolution whose claim a user act refused (ADR-0261 §7).
+
+    An `orchestration`-local carrier and **not** promoted surface: it travels between two
+    methods of this module, crosses no subsystem boundary and adds no member to any
+    Protocol. It exists so the resolution's critical section can say *"this ended at a
+    refused claim"* without threading a seventh optional value through a tuple every
+    other path fills.
+
+    **The park is not named as evicted, because it is not evicted**: ADR-0198 §1 installs
+    a settled record only where the runner returned, and this is the path where it did
+    not.
+    """
+
+    #: The park this token named, which still stands.
+    parked: _Parked
+    #: Where the goal stands, as §7's ordered read established it.
+    withheld: DriveWithheld
+    #: ADR-0264 §2's contribution from the drive that raised.
+    outbound: OutboundObservation
 
 
 def _paired_deliveries(
@@ -11833,6 +11857,9 @@ class Engine:
             # not landed carries no attempt that names it, so the claim is refused and
             # nothing is invoked.
             claiming = _driving(attempt, state)
+            # ADR-0264 §2's egress contribution, observed rather than returned, so the
+            # one exit that returns no disposition still carries it (below).
+            observed = OutboundObservation()
             try:
                 disposition = await self._runner.run(
                     state,
@@ -11841,6 +11868,7 @@ class Engine:
                     timeout=timeout,
                     origin=origin,
                     on_ruled=ruled,
+                    outbound=observed,
                 )
             except ClaimRefused:
                 # ADR-0261 §7: **a refused claim ends the walk**, and it is not a sixth
@@ -11896,10 +11924,16 @@ class Engine:
             outbound = outbound_statement(
                 search=searched_reach,
                 forecast=forecast_reach,
-                # The drive reached nothing: the claim never landed, so no callable was
-                # entered and this turn's egress contribution is `None` exactly as it is
-                # on the branch that drove no step at all (ADR-0264 §6).
-                egress=None,
+                # **What the drive established, and not `None`** (ADR-0264 §3). A first
+                # claim the store refused reached no callable and this is `None`, exactly
+                # as on the branch that drove no step at all. But a **re-claim** a retry
+                # spends can be refused after the executor already reached one
+                # (ADR-0037 §6), and there answering `NOT_REACHED` would deny a send that
+                # had gone — "a send the executor reached the callable for, or cannot say
+                # it did not" is `INDETERMINATE`. The observation carries that fact out
+                # of a drive that raised, and is the same value the disposition would
+                # have carried had it returned.
+                egress=observed.reach,
                 records=searched_records,
                 composes=True,
             )
@@ -13306,12 +13340,38 @@ class Engine:
         # is the ruling it was recorded under rather than the moved row — the finishing
         # commit reads the attempt itself, which is what lets it record the facts a
         # refused boundary write did not (:meth:`_finished_attempt`).
-        parked, step, establishing, allowed_by, egress, satisfied = await self._resolve_park(
+        resolution = await self._resolve_park(
             token,
             approved=approved,
             timeout=timeout,
             remember_recipients_until=remember_recipients_until,
         )
+        if isinstance(resolution, _WithheldResumption):
+            # ADR-0261 §7 on the resumption path: **the turn composes without acting**,
+            # returns rather than failing, and carries where the goal stands. It drives
+            # nothing further, retries nothing, plans nothing — a resume runs no planner
+            # at all — and writes nothing to the attempt, which a user act has just
+            # moved: on four of the seven members ADR-0249 §12's ``commit_attempt`` would
+            # refuse a write over it, and this pass claimed nothing to stamp a phase for.
+            # The park stands, so the answer the user gave is still the answer this token
+            # names (ADR-0198 §3, and :class:`_WithheldResumption`).
+            withheld_outbound = outbound_statement(
+                search=None,
+                egress=resolution.outbound.reach,
+                records=0,
+                composes=resolution.parked.turn is not None,
+            )
+            composed = await self._compose(
+                resolution.parked.turn, None, deliveries={}, outbound=withheld_outbound
+            )
+            return await self._capture_resumption(
+                resolution.parked,
+                None,
+                composed,
+                outbound_statement=withheld_outbound,
+                drive_withheld=resolution.withheld,
+            )
+        parked, step, establishing, allowed_by, egress, satisfied = resolution
         if parked is None:
             # A **restatement** (ADR-0198 §§1-3), and it ends here rather than
             # continuing down this method: it composes nothing — the answer was
@@ -13695,14 +13755,17 @@ class Engine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         remember_recipients_until: UtcInstant | None = None,
-    ) -> tuple[
-        _Parked | None,
-        StepOutcome,
-        EstablishingAnswer | None,
-        str | None,
-        OutboundReach | None,
-        str | None,
-    ]:
+    ) -> (
+        tuple[
+            _Parked | None,
+            StepOutcome,
+            EstablishingAnswer | None,
+            str | None,
+            OutboundReach | None,
+            str | None,
+        ]
+        | _WithheldResumption
+    ):
         """Record the answer and drive it, or restate an answer already recorded.
 
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
@@ -13753,6 +13816,18 @@ class Engine:
             The first is ``None`` beside the restated step where the token named a
             **settled** record, which is what tells :meth:`_resume` to stop: a
             restatement drives no runner, composes nothing and captures nothing.
+
+            Or a :class:`_WithheldResumption` where the resolution's own claim was
+            refused by a user act (ADR-0261 §7), which is a **different shape rather
+            than a seventh optional member** of the tuple: there is no disposition, no
+            establishing answer, no ruling and no satisfaction, and a tuple filled with
+            ``None`` at five positions would be read as a resolution that did those
+            things vacuously.
+
+        Raises:
+            ClaimRefused: Where the claim was refused and §7's post-refusal read
+                establishes none of its seven states, which is the case that decision
+                leaves propagating.
         """
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
@@ -13795,16 +13870,42 @@ class Engine:
                 allowed_by = decision.id
                 await self._authorized_attempt(resumed, decision.id)
 
-            disposition = await self._runner.resume(
-                state,
-                parked.step_id,
-                confirmation_id=parked.confirmation_id,
-                attempt_id=owner.id,
-                approved=approved,
-                timeout=timeout,
-                remember_recipients_until=remember_recipients_until,
-                on_ruled=ruled,
-            )
+            observed = OutboundObservation()
+            try:
+                disposition = await self._runner.resume(
+                    state,
+                    parked.step_id,
+                    confirmation_id=parked.confirmation_id,
+                    attempt_id=owner.id,
+                    approved=approved,
+                    timeout=timeout,
+                    remember_recipients_until=remember_recipients_until,
+                    on_ruled=ruled,
+                    outbound=observed,
+                )
+            except ClaimRefused:
+                # ADR-0261 §7 on the resumption, which is the case it is most likely to
+                # be met in: a user parks a step, changes their mind about the goal, and
+                # then answers the confirmation. This resolution's own
+                # ``AWAITING_APPROVAL → RUNNING`` claim is the ``commit_transition`` call
+                # *"its own claim made"*, and the two raisers of this class are liveness
+                # conjuncts the store evaluates on a ``→ RUNNING`` transition alone — so
+                # it is the only call under this ``await`` that can produce one.
+                #
+                # **What the park becomes is already decided and is not this decision's**
+                # (ADR-0198 §1, §3). The settled record is installed *"only where the
+                # answer was recorded, the runner returned and the park was evicted"*,
+                # and the runner did not return: so the park stands exactly where a
+                # resolution that raised leaves it, nothing is evicted and nothing is
+                # retained. What changes is only what the caller is **told** — a composed
+                # outcome naming where the goal stands, rather than an exception.
+                #
+                # **A refusal the read cannot explain propagates**, as does every other
+                # class, exactly as on the turn path.
+                withheld = await self._withheld_state(state, attempt_id=owner.id)
+                if withheld is None:
+                    raise
+                return _WithheldResumption(parked=parked, withheld=withheld, outbound=observed)
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
             step = await self._step_outcome(
@@ -13984,16 +14085,17 @@ class Engine:
             confirmation=None,
         )
 
-    async def _capture_resumption(  # noqa: PLR0913 — the park, what became of its step, the reply, and the four facts about the act the capture cannot re-derive — the recipient establishment, the outbound statement, what the step was satisfied from and ADR-0262 §6's report; each is a distinct fact about the resolution
+    async def _capture_resumption(  # noqa: PLR0913 — the park, what became of its step, the reply, and the five facts about the act the capture cannot re-derive — the recipient establishment, the outbound statement, what the step was satisfied from, ADR-0262 §6's report and ADR-0261 §7's withheld drive; each is a distinct fact about the resolution
         self,
         parked: _Parked,
-        step: StepOutcome,
+        step: StepOutcome | None,
         composed: ComposedReply | None,
         *,
         recipient_grant: RecipientGrantOutcome | None = None,
         outbound_statement: OutboundStatement | None = None,
         satisfied: str | None = None,
         attempt_report: AttemptReport | None = None,
+        drive_withheld: DriveWithheld | None = None,
     ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
@@ -14035,6 +14137,10 @@ class Engine:
                 # the attempt ended, and an episode that failed to write leaves that
                 # exactly as true as it was.
                 attempt_report=attempt_report,
+                # ADR-0261 §7's field, on the same terms: where the goal stands is a fact
+                # about what this resolution did, and a capture that could not be written
+                # leaves it exactly as true.
+                drive_withheld=drive_withheld,
             )
         return await self._capture(
             origin.conversation_id,
@@ -14042,6 +14148,9 @@ class Engine:
             step=step,
             resumed=True,
             composed=composed,
+            # ADR-0261 §7's field, carried by value from the resolution that met the
+            # refusal — `None` on every resolution that drove.
+            drive_withheld=drive_withheld,
             # **The act's outcome is carried, never re-derived** (ADR-0235 §6). It is
             # a fact about the act this pass performed and nothing about the capture
             # touches it: an episode that failed to write leaves the standing outcome
