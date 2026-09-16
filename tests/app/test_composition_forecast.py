@@ -16,6 +16,7 @@ names an ``.invalid`` origin (RFC 6761 §6.4).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
@@ -25,6 +26,7 @@ from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import CostBasis
+from ai_assistant.orchestration import ForecastServicer
 from ai_assistant.permissions import ConfiguredForecastDestination, ThresholdActionPolicy
 from ai_assistant.tools import ForecastIntegration, build_forecast_integration
 from ai_assistant.tools.egress import HttpsEgressTransport, StreamOutboundTransport
@@ -50,8 +52,20 @@ LONGITUDE: Final = -8.6291
 FIGURE: Final = Decimal("0.004")
 CODE: Final = "EUR"
 
+#: ADR-0241 §3's one call deadline, which ADR-0260 §11 forbids a second of. Distinctive
+#: rather than the shipped default, so an assertion that the servicing site carries it is
+#: an assertion about forwarding and not about two objects agreeing on 30 seconds.
+DEADLINE: Final = timedelta(seconds=17)
 
-def _settings(*, configured: bool, priced: bool = False) -> Settings:
+#: A fixed reading for the root's own clock, distinctive for the same reason: the seam
+#: wraps its clock in :func:`~ai_assistant.core.clock.checked_clock`, so the wiring can be
+#: asserted by what the wrapped clock *reads* but never by identity.
+INSTANT: Final = datetime(2026, 9, 16, 12, 34, 56, tzinfo=UTC)
+
+
+def _settings(
+    *, configured: bool, priced: bool = False, deadline: timedelta | None = None
+) -> Settings:
     """Settings for a deployment that has, or has not, configured a forecast provider.
 
     Args:
@@ -59,12 +73,17 @@ def _settings(*, configured: bool, priced: bool = False) -> Settings:
         priced: Whether to declare ADR-0236 §1's per-call figure as well. Neither cost
             field may be set without the provider configuration, so this is only
             meaningful beside ``configured``.
+        deadline: ADR-0241 §3's ``search_call_deadline``, where a case needs a
+            distinctive one. ``None`` leaves the shipped default, and the field is
+            independent of the forecast configuration — ADR-0260 §11 declines a figure
+            of its own, so this is the only one there is.
 
     Returns:
         The settings.
     """
+    bound: dict[str, Any] = {} if deadline is None else {"search_call_deadline": deadline}
     if not configured:
-        return Settings(embedder=EmbedderKind.HASHING)
+        return Settings(embedder=EmbedderKind.HASHING, **bound)
     cost: dict[str, Any] = (
         {"forecast_cost_per_call": FIGURE, "forecast_cost_currency": CODE} if priced else {}
     )
@@ -75,6 +94,7 @@ def _settings(*, configured: bool, priced: bool = False) -> Settings:
         forecast_latitude=LATITUDE,
         forecast_longitude=LONGITUDE,
         **cost,
+        **bound,
     )
 
 
@@ -188,6 +208,96 @@ async def test_a_configured_deployment_builds_one_forecaster_over_the_real_trans
         assert forecaster._latitude == pytest.approx(LATITUDE)
         assert forecaster._longitude == pytest.approx(LONGITUDE)
         assert forecaster.name
+    finally:
+        await engine.aclose()
+
+
+async def test_a_configured_root_installs_one_servicer_in_the_loop_over_the_built_forecaster(
+    tmp_path: Path,
+) -> None:
+    """ADR-0260 §7 and §12's L3: **the built forecaster reaches the servicing site.**
+
+    "``app/composition.py`` wires the forecaster into that one site and into nothing
+    else, and no lane adds a second caller." Every other case in this module stops at
+    construction and registration — they assert that a configured deployment *builds* a
+    forecaster and that the seam holds its registration, and every one of them would
+    stay green with ``forecast=None`` passed to :class:`LearningLoop` while every
+    configured deployment reported §8's ``NOT_CONFIGURED``. That is the wiring failure
+    §12 makes this root's own job, so it is asserted here, at the end of the wire.
+
+    **The servicer is counted, not merely found.** Constructing it through a counting
+    wrapper and then asserting the loop holds *that* object is what makes "one site"
+    a property of this root: a second servicer over the same seams would hold a second
+    forecaster reference, which is exactly what §7's "no lane adds a second caller"
+    forbids, and a root that built one and installed another would fail here.
+
+    **The seams are the root's own objects, by identity** (§6, §7): the same binder,
+    the same policy — so one deployment has one set of thresholds and one
+    configured-provider comparison rather than two that could disagree about which pair
+    a request was at — and the same trail the runner and the ledger hold (ADR-0192 §1).
+
+    **The clock and the id factory are asserted by reading rather than by identity**,
+    because the seam wraps its clock in
+    :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §4) and the wrapper is a
+    fresh closure. Patching the root's own ``_utcnow`` to a fixed instant makes the
+    reading itself the evidence: a site handed some other clock reads the wall clock and
+    fails.
+
+    **The deadline is the one figure and there is no second** (ADR-0241 §3, ADR-0260
+    §11): the distinctive ``search_call_deadline`` this deployment configured, which a
+    root that hard-coded 30 seconds or read a forecast-only field this decision declined
+    to add would not carry.
+    """
+    integrations: list[ForecastIntegration] = []
+    servicers: list[ForecastServicer] = []
+
+    def counted_integration(**arguments: Any) -> ForecastIntegration:
+        integration = build_forecast_integration(**arguments)
+        integrations.append(integration)
+        return integration
+
+    def counted_servicer(**arguments: Any) -> ForecastServicer:
+        servicer = ForecastServicer(**arguments)
+        servicers.append(servicer)
+        return servicer
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(composition_module, "build_forecast_integration", counted_integration)
+        patch.setattr(composition_module, "ForecastServicer", counted_servicer)
+        patch.setattr(composition_module, "_utcnow", lambda: INSTANT)
+        engine = build_engine(_settings(configured=True, deadline=DEADLINE), data_dir=tmp_path)
+
+    try:
+        (integration,) = integrations
+        assert len(servicers) == 1, "exactly one servicing site, never a second caller"
+        (servicer,) = servicers
+        assert engine._loop._forecast is servicer, "the one built is the one the loop holds"
+
+        assert servicer._forecaster is integration.forecaster, "the one the seam registered"
+        assert servicer._binder is engine._runner._binder
+        assert servicer._policy is engine._runner._policy
+        assert servicer._trail is engine._runner._trail
+        assert servicer._now() == INSTANT, "the root's own clock, read through the guard"
+        assert servicer._id_factory is composition_module._uuid
+        assert servicer._deadline == DEADLINE
+    finally:
+        await engine.aclose()
+
+
+async def test_a_deployment_that_configured_no_provider_installs_no_servicing_site(
+    tmp_path: Path,
+) -> None:
+    """ADR-0260 §8's ``NOT_CONFIGURED``, **stated by a caller rather than defaulted.**
+
+    "A deployment that configured none holds no instance at all, and
+    ``service_read_request`` is handed ``None``." Without this row the case above would
+    pass against a root that installed a servicer unconditionally — which would open an
+    exchange, and with it a transport, for a deployment that configured nothing, and
+    would make ``NOT_CONFIGURED`` a state no wiring could produce.
+    """
+    engine = build_engine(_settings(configured=False), data_dir=tmp_path)
+    try:
+        assert engine._loop._forecast is None
     finally:
         await engine.aclose()
 
