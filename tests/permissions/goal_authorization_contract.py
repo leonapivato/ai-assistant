@@ -1930,7 +1930,11 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
 
         **The instant is the call's own**, on every row it moved.
         """
-        lapsed_expiry = NOW + timedelta(minutes=1)
+        # **Strictly after ``proposed_at`` and strictly before the store's reading**,
+        # so *"a ``PROPOSED`` row already past its ``expires_at`` and unsettled"* is
+        # genuinely past it. An instant the clock has not reached would leave this
+        # arm asserting nothing about liveness at all.
+        lapsed_expiry = AT + timedelta(minutes=30)
         await store.record(established(id="live", tool=TOOL))
         await store.record(established(id="lapsed", tool=OTHER_TOOL, expires_at=lapsed_expiry))
         await store.record(authorization(id="unexpired", tool=THIRD_TOOL))
@@ -1953,8 +1957,13 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
             ), disposition
         before = {row.id: row for row in await store.export()}
 
-        # The clock is set past the two lapsed instants, so *"it evaluates no
-        # liveness"* is asked of a store that could tell the difference.
+        # The clock is set past **every** instant in play, so *"it evaluates no
+        # liveness"* is asked of a store that could tell the difference on either
+        # reading — the two rows whose ``expires_at`` the clock has passed, and the
+        # two it has now passed as well. **No read is taken in between**: a
+        # ``live_for`` here would settle the lapsed proposal ``EXPIRED`` itself
+        # (ADR-0254 §1's two settling operations), which is the state this arm exists
+        # to keep it out of.
         clock.set(EXPIRES + timedelta(days=1))
         assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 4
 
@@ -2013,6 +2022,36 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         held = await store.resolve("a1")
         assert held is not None
         assert (held.disposition, held.settled_at) == (AuthorizationDisposition.GOAL_CLOSED, NOW)
+
+    async def test_a_row_admitted_after_a_reopen_is_ended_by_a_call_at_that_same_version(
+        self, store: GoalAuthorizationStore
+    ) -> None:
+        """Arm 1: *"the version governs **staleness, never emptiness**"*.
+
+        ADR-0268 §1 is explicit that a repeated call answers ``0`` *"**but only
+        because the fence stood throughout**"* — and that *"where a reopen lifted it
+        and a row was admitted since, that call ends the row and counts it"*, raising
+        the record and standing the fence as the member's first clause says.
+
+        **This is the arm an implementation testing staleness with ``>=`` slips
+        past.** Every other case answers ``0`` at the standing version because there
+        is nothing left to move, so the two readings are indistinguishable there; here
+        there is something to move, and a store that discarded the call as stale would
+        leave a live row standing under a goal that has just closed.
+        """
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 0
+        assert await store.clear_closure(GOAL, goal_version=4) is True
+        await store.record(established(id="admitted"))
+
+        assert await store.end_for_goal(GOAL, at=NOW, goal_version=4) == 1
+
+        held = await store.resolve("admitted")
+        assert held is not None
+        assert (held.disposition, held.settled_at) == (
+            AuthorizationDisposition.GOAL_CLOSED,
+            NOW,
+        )
+        assert await self._fenced(store), "and the fence stands again"
 
     async def test_clear_closure_against_a_standing_fence_at_that_version_lifts_it(
         self, store: GoalAuthorizationStore

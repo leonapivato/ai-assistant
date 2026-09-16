@@ -1447,6 +1447,19 @@ class FakeGoalAuthorizationStore:
             error if error is not None else RuntimeError("fake: the store is unwritable")
         )
 
+    def stop_failing(self) -> None:
+        """Disarm every scripted fault, so the store serves normally again.
+
+        **Needed because ``fail_reads(None)`` and ``fail_writes(None)`` *arm* the
+        default fault rather than clearing one**, so there was no way back. ADR-0268
+        §9 arm 7 asks for the way back explicitly: *"a re-run performs the act
+        whole"* after a faulting ending, and *"the goal is recoverable"* after a
+        failed closing write — each of which is a second act against a store that
+        has to be healthy for it.
+        """
+        self._read_failure = None
+        self._write_failure = None
+
     def _refuse_read(self) -> None:
         """Raise the scripted read fault, if one is armed.
 
