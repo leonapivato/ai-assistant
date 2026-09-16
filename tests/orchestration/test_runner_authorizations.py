@@ -159,7 +159,14 @@ class Harness:
             id_factory=lambda: next(self.ids),
         )
 
-    async def an_execution(self, goal: Goal, *, act: str | None = None) -> ExecutionState:
+    async def an_execution(
+        self,
+        goal: Goal,
+        *,
+        act: str | None = None,
+        plan_id: str = "p-1",
+        rationale: str | None = None,
+    ) -> ExecutionState:
         """Store ``goal``, a one-step argument-free plan, and open an execution.
 
         ``act`` is the :class:`~ai_assistant.core.types.IntendedAction` the step is
@@ -167,6 +174,10 @@ class Harness:
         ``save_plan`` refuses a step naming an action the goal does not hold. The
         default is ``None``, which is a conforming plan rather than a degraded one
         and is what every case here that is not about the request builder wants.
+
+        ``plan_id`` and ``rationale`` are plan-level values that say **nothing**
+        about the goal, so a case asserting ADR-0266 §5's goal-only read can vary
+        the plan and not merely the declaration.
         """
         await self.plans.save_goal(goal)
         if act is not None:
@@ -179,7 +190,12 @@ class Harness:
             )
         step = PlanStep(id=STEP, intent="send the note", capability=CAPABILITY, intended_action=act)
         plan = ActionPlan(
-            id="p-1", goal_id=goal.id, steps=(step,), created_at=AT, targets_revision=1
+            id=plan_id,
+            goal_id=goal.id,
+            steps=(step,),
+            created_at=AT,
+            rationale=rationale,
+            targets_revision=1,
         )
         await self.plans.save_plan(plan)
         state = await self.plans.start_execution(plan.id)
@@ -202,9 +218,11 @@ def _appends_execution(execution_id: str) -> AttemptTransition:
     return AttemptTransition(attempt_id=ATTEMPT, expected_version=0, add_execution_id=execution_id)
 
 
-async def _parked(harness: Harness, goal: Goal, *, act: str | None = None) -> ExecutionState:
+async def _parked(
+    harness: Harness, goal: Goal, *, act: str | None = None, **plan: str
+) -> ExecutionState:
     """Drive the step to its `CONFIRM` park and return the execution."""
-    state = await harness.an_execution(goal, act=act)
+    state = await harness.an_execution(goal, act=act, **plan)
     result = await harness.runner.run(
         state, STEP, attempt_id=ATTEMPT, timeout=PATIENT, origin=NOTHING_EXTERNAL
     )
@@ -709,9 +727,11 @@ async def test_the_same_goal_mints_the_same_member_against_a_different_declarati
     """ADR-0266 §11 arm 7: *"two different requests, two different plans and two
     different declarations"*.
 
-    One declaring a bounded argument and one declaring nothing, over two plans and
-    two requests, leave byte-identical coverage — because §5's mint reads the goal
-    and none of the three.
+    One declaring a bounded argument and one declaring nothing, under two plans that
+    differ in their id and their rationale, over two requests that differ in their
+    declaration, leave byte-identical coverage — because §5's mint reads the goal
+    and none of the three. **The plans are asserted to differ**, so the arm cannot
+    pass by the two being the same value under two names.
     """
     goal = a_goal(deadline=AT + timedelta(hours=12), constraints=CEILING)
     declaring_nothing = Harness(answers=FakeCoverageAnswers(quote=QUOTED))
@@ -726,13 +746,18 @@ async def test_the_same_goal_mints_the_same_member_against_a_different_declarati
         answers=FakeCoverageAnswers(quote=QUOTED),
     )
 
-    await _parked(declaring_nothing, goal, act=ACT)
-    await _parked(declaring_a_period, goal, act=ACT)
+    await _parked(declaring_nothing, goal, act=ACT, plan_id="p-1", rationale="the first plan")
+    await _parked(declaring_a_period, goal, act=ACT, plan_id="p-2", rationale="a second plan")
 
     (bare,) = await declaring_nothing.rows()
     (declared,) = await declaring_a_period.rows()
-    assert bare.coverage == declared.coverage
+    first = await declaring_nothing.plans.get_plan("p-1")
+    second = await declaring_a_period.plans.get_plan("p-2")
+    assert first is not None
+    assert second is not None
+    assert first != second
     assert bare.tool.id != declared.tool.id
+    assert bare.coverage == declared.coverage
 
 
 async def test_the_request_carries_the_act_the_step_names() -> None:
