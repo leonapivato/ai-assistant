@@ -1168,6 +1168,74 @@ def test_every_panel_a_session_less_page_may_not_show_is_in_the_hide_sweep() -> 
     assert 'show("bootstrap", true);' in sweeping
 
 
+#: The acts that report what became of *themselves* after their session has ended, and
+#: are therefore outside #2404's guard — recorded here so the census states a decision
+#: rather than blessing whatever the script happens to do.
+#:
+#: A listing that outlives its session has nothing to say: its rows are the owner's and a
+#: page with no session may not be showing them. An act does: something may have been done
+#: to the owner's records, and the account of it is this page's own history, which outlives
+#: a session exactly as ``unresolved`` and ``ACCOUNTS`` do. What is *not* settled is
+#: whether the account may re-open its panel to be read — ``fault`` shows the panel it
+#: writes into — and that is a ruling about what a session-less page owes rather than an
+#: extension of this sweep. Filed as #2451, which names this set.
+_ACTS_THAT_ACCOUNT_FOR_THEMSELVES: Final = frozenset(
+    {
+        "resumeConversation",
+        "answerQuestion",
+        "withdrawClarification",
+        "abandonGoal",
+        "revokeAuthorization",
+        "dismissNotification",
+    }
+)
+
+
+def test_every_resumed_relay_that_displays_anything_compares_its_session() -> None:
+    """The rule over the whole script, and the exclusions named (#2404).
+
+    Three things a resumed continuation can put on the screen, and all three are display:
+    revealing a panel, putting a ``window.confirm`` in front of the owner with a record's
+    content in it, and writing a fault — which ``show``s the panel it writes into. So the
+    test is not "every listing" but "every function that awaits ``relay`` and then shows
+    the owner something", and what it asks of each is that the comparison comes first.
+
+    Adversarial review round 2 is why it is written this way round: the first version
+    selected functions carrying a literal ``show(..., true)``, which stepped straight past
+    ``forgetBelief`` and its three siblings — reads taken only to put a record in front of
+    the owner before destroying it, whose ``window.confirm`` carries a belief's content, a
+    conversation's turn count or a notification's summary onto a page that is asking for a
+    session.
+
+    The only functions outside it are the acts of :data:`_ACTS_THAT_ACCOUNT_FOR_THEMSELVES`
+    and those that display nothing at all, which need no guard and are selected out by the
+    same test that selects everything else in.
+    """
+    functions = _functions(_code("app.js"))
+    checked = []
+    for name, body in functions.items():
+        if "await relay(" not in body or name in _ACTS_THAT_ACCOUNT_FOR_THEMSELVES:
+            continue
+        resumed = body[body.index("await relay(") :]
+        displays = [
+            resumed.index(one) for one in ('show("', "window.confirm(", "fault(") if one in resumed
+        ]
+        if not displays:
+            continue
+        checked.append(name)
+        # Captured before the request goes out -- an era read on resumption is the value
+        # it is being compared against and would never differ from it.
+        assert body.index("const era = sessionEra;") < body.index("await relay("), name
+        assert "if (!sameSession(half, era)) {" in resumed, name
+        assert resumed.index("if (!sameSession(half, era)) {") < min(displays), name
+
+    assert {"readGoals", "forgetBelief", "forgetNotification", "listConnections"} <= set(checked)
+    # And the exclusions are real functions of this script rather than names that have
+    # gone stale: a set holding a function that no longer exists silently excuses nothing,
+    # which is exactly how a list like this rots into a permission.
+    assert set(functions) >= _ACTS_THAT_ACCOUNT_FOR_THEMSELVES
+
+
 def test_every_listing_that_resumes_asks_whether_its_session_still_stands() -> None:
     """#2404: the generation counters order two listings and say nothing about the
     session under them.

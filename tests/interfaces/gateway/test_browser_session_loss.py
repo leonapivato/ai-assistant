@@ -46,6 +46,8 @@ from browser_drive import DESKTOP, PHONE, driving
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import expect
 from test_browser_confirmations import _email, _read
+from test_browser_conversations import _open_listing
+from test_browser_conversations import _seed as _seed_conversation
 
 from ai_assistant.core.types import GoalStatus, GoalSummary
 
@@ -54,7 +56,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from browser_drive import Drive
-    from playwright.async_api import Browser, Route, ViewportSize
+    from playwright.async_api import Browser, Dialog, Route, ViewportSize
 
 pytestmark = [
     pytest.mark.integration,
@@ -511,3 +513,59 @@ async def test_a_cancellation_refused_at_the_door_after_re_entry_settles_nothing
 
         await expect(drive.page.locator("#cancellation-said")).to_be_hidden()
         assert "before this browser read a reply" not in await drive.page.inner_text("body")
+
+
+@pytest.mark.parametrize("viewport", [DESKTOP, PHONE], ids=["desktop", "phone"])
+async def test_a_record_read_to_be_confirmed_over_is_not_put_after_its_session_ends(
+    gateway_browser: Browser, tmp_path: Path, viewport: ViewportSize
+) -> None:
+    """A ``window.confirm`` is display, and adversarial review round 2 found it uncovered.
+
+    ``forgetConversation`` and its three siblings read the record they are about to
+    destroy so that what the owner confirms is something the page has just seen. The read
+    is the only thing that has happened when it resumes — nothing has been destroyed, so
+    there is nothing owed an account — and what it does with the answer is put the
+    record's content in front of the owner: a conversation's id and its recorded turn
+    count here, a belief's content and confidence one function over, a notification's
+    summary in a third.
+
+    So a read that outlives its session opens a modal over the bootstrap form quoting the
+    owner's records, and the first version of this sweep stepped past all four because it
+    selected functions carrying a literal ``show(..., true)``. What is asserted is that no
+    dialog is raised at all: a dismissed one has already been read.
+    """
+    loop = asyncio.get_running_loop()
+    release, hang = _held(loop)
+    raised: list[str] = []
+    # Held so a dismissal in flight is not garbage-collected, and held here rather than
+    # in a global so two cases cannot share it.
+    dismissing: list[asyncio.Task[None]] = []
+
+    async def dismiss(one: Dialog) -> None:
+        raised.append(one.message)
+        await one.dismiss()
+
+    async with driving(gateway_browser, tmp_path, viewport=viewport) as drive:
+        drive.page.on("dialog", lambda one: dismissing.append(loop.create_task(dismiss(one))))
+        _seed_conversation(drive, "c-1", turns=3)
+        await _open_listing(drive)
+
+        await drive.page.route("**/conversation", hang)
+        async with drive.page.expect_request("**/conversation"):
+            await (
+                drive.page.locator("#conversation-list .conversation-row")
+                .first.get_by_role("button", name="Forget")
+                .click()
+            )
+
+        await drive.page.route("**/sources", _ends_the_session)
+        await drive.page.click("#sources-button")
+        await drive.page.wait_for_selector("#bootstrap:not([hidden])")
+
+        async with drive.page.expect_response("**/conversation") as stale:
+            release.set_result(None)
+        await (await stale.value).finished()
+        await drive.admit()
+
+        assert raised == []
+        await expect(drive.page.locator("#conversations")).to_be_hidden()
