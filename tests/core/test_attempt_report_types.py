@@ -16,7 +16,7 @@ declaration, and arm 8's negative version. Each is named in the test that carrie
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import ValidationError
@@ -29,6 +29,7 @@ from ai_assistant.core.types import (
     AttemptTransition,
     CostBasis,
     CurrentContext,
+    ExecutionState,
     GoalBrief,
     GoalStatus,
     Ground,
@@ -46,6 +47,9 @@ from ai_assistant.core.types import (
     TurnResult,
     VerificationKind,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _AT: Final = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
 
@@ -292,6 +296,49 @@ def test_zero_is_admitted_because_it_is_the_version_a_fresh_execution_holds() ->
     assert _transition(execution_versions=(("exec-1", 0),)).execution_versions == (("exec-1", 0),)
 
 
+@pytest.mark.parametrize("version", [0, 1, 7, "1", 1.0, True, -1, 1.5, "one", None])
+def test_the_version_domain_is_exactly_the_one_it_mirrors(version: object) -> None:
+    """§4: the domain is *"``ExecutionState.version``'s own ``ge=0`` domain"*, and not a
+    domain of this decision's own.
+
+    Asserted as an **equality with that field** rather than as a list of refusals,
+    because a list is what drifts: this pair is *"the ``ExecutionState.version`` the
+    caller read"*, so a value that field accepts and this one refuses would refuse a
+    version an execution really holds, and a value this one accepts and that field
+    refuses would carry a figure no execution could be at. §4's *"No lane widens the
+    domain, coerces a value into it"* is a rule about **lanes** — nobody clamps a
+    negative to zero or substitutes a figure for an absent one — and the corpus reads
+    every other ``int`` in ``core`` under pydantic's ordinary lax validation, this
+    command's own ``expected_version`` and ``planner_calls`` included. Making this one
+    element strict would give it a **narrower** domain than the field §4 names, which is
+    the one thing that clause fixes.
+
+    Both directions are asserted over one input at a time, so a failure names the value
+    and which side took it.
+    """
+    mirrored = _accepts(
+        lambda: ExecutionState(
+            id="exec-1",
+            plan_id="p-1",
+            steps=(),
+            version=version,  # type: ignore[arg-type]  # the domain itself is under test
+            updated_at=_AT,
+        )
+    )
+    snapshot = _accepts(lambda: _transition(execution_versions=(("exec-1", version),)))
+
+    assert snapshot is mirrored, "the pair's domain is ExecutionState.version's own"
+
+
+def _accepts(build: Callable[[], object]) -> bool:
+    """Whether ``build`` constructs, for the domain comparison above."""
+    try:
+        build()
+    except ValidationError:
+        return False
+    return True
+
+
 def test_a_blank_execution_id_is_refused_because_the_pair_names_an_execution() -> None:
     """The id half is ``Identifier``, which is what every other id on this command is.
 
@@ -401,8 +448,17 @@ def test_the_type_refuses_no_member_including_the_one_no_limb_reaches(
     §4 is explicit that ``CANCELLED`` *"is reached by no limb"* of the comparison — a
     cancelled attempt is terminal and ADR-0261 §2's act is what produces it. That is a
     rule about **which member the comparison yields**, and this type is handed a member
-    rather than computing one, so a refusal here would be this decision policing a
-    value ADR-0261 owns.
+    rather than computing one, so a refusal here would be this decision policing a value
+    ADR-0261 §3 owns.
+
+    **This is not a licence for a seventh fixed statement, and the obligation is refused
+    where it could actually be acquired.** §6 fixes one statement per member and
+    enumerates **six**; the member a surface never sees is one no surface owes prose
+    for. What a consumer drives a surface from is the canonical fake, and that **refuses
+    the arrangement outright** —
+    ``tests/testing/test_fake_engine_attempt_report.py`` is the other side of this
+    split: the type stays as wide as the vocabulary it is typed by, and the phase's
+    stand-in stays as narrow as the phase.
 
     Asserted over every member rather than over that one, so the roster moving is what
     fails this test.

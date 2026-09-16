@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
     AnswerOutcome,
+    AttemptOutcome,
     AttemptReport,
     Attestation,
     Authorization,
@@ -921,11 +922,7 @@ class FakeAssistantEngine:
         """
         stated = outcome.outbound_statement
         announced = outcome.authorizations or self.authorizations
-        # ADR-0262 §6's report rides a pass that **composed a reply**, because §4's
-        # first ending condition is a completed one — so a reply-less outcome is left
-        # alone here as it is for §7's statement, and a scripted report is kept at its
-        # value for :attr:`authorizations`'s reason.
-        reported = outcome.attempt_report or (self.attempt_report if outcome.reply else None)
+        reported = self._reported(outcome)
         if (
             stated is None
             and outcome.reply is None
@@ -940,6 +937,64 @@ class FakeAssistantEngine:
             return TurnOutcome(**carried)
         statement = self._outbound() if stated is None else self._detached(stated)
         return TurnOutcome(**{**carried, "outbound_statement": statement})
+
+    def _reported(self, outcome: TurnOutcome) -> AttemptReport | None:
+        """ADR-0262 §6's report for the outcome a turn call is about to return.
+
+        **The lever reaches exactly the one shape a conforming engine puts a report
+        on**, and the enumeration is §6's own: the member is ``None`` on "a turn that
+        engaged no goal, a routed operation (ADR-0197 §7), ADR-0198 §1's restatement,
+        and every turn whose attempt stayed live". The last two are the caller's — the
+        default is ``None`` and a consumer sets the lever for the turn it means — and
+        the first two are shapes, so they are decided here:
+
+        * a **routed** pass carries none, whatever prose it has. It "mints no goal,
+          assembles no context and makes no plan" (ADR-0197 §8), so there is no attempt
+          for a report to be about; §6 names it in terms.
+        * a pass whose :attr:`TurnOutcome.turn` is ``None`` carries none. All three such
+          shapes made no ``Planner.plan`` call — a recovered park, a routed pass and an
+          undecided turn — and §6's rule is stated over a turn that *ended an attempt*
+          under §4, whose first condition is a **completed reply** that such a pass did
+          not compose.
+        * a pass that composed no reply carries none, for that same first condition.
+
+        **A fake that filled the member in anywhere else would hand back a shape no
+        conforming engine produces**, which is the looseness ADR-0026 §7 forbids and
+        which this method's caller already refuses one member over.
+
+        **And ``CANCELLED`` is refused outright rather than carried.** ADR-0262 §4 is
+        explicit that it "is reached by no limb" of the comparison and that "**no lane
+        writes ``AttemptOutcome.CANCELLED`` from this phase**" — a cancelled attempt is
+        ADR-0261 §2's act, and ADR-0249 §5's "no transition leaves a terminal member" is
+        what keeps it out of reach. So a report naming it is a state no engine reaches,
+        and a double that let a consumer arrange one would certify that consumer against
+        a seventh fixed statement §6 does not authorise. This is
+        :meth:`FakeToolRegistry.register`'s rule read one seam over: the single
+        arrangement mistake a consumer could plausibly make, refused rather than passed
+        silently. **The type still admits the member** — it is handed one rather than
+        computing one, and narrowing it here would be this fake policing a value
+        ADR-0261 owns — which is why the refusal is on the *arrangement* and not on
+        :class:`AttemptReport`.
+
+        Args:
+            outcome: The outcome this call is about to return.
+
+        Returns:
+            The report this pass carries, or ``None``.
+
+        Raises:
+            ValueError: If the report this pass would carry names ``CANCELLED``.
+        """
+        eligible = outcome.turn is not None and outcome.reply is not None and outcome.routed is None
+        reported = outcome.attempt_report or (self.attempt_report if eligible else None)
+        if reported is not None and reported.outcome is AttemptOutcome.CANCELLED:
+            msg = (
+                "no attempt report names CANCELLED: that member is reached by no limb of "
+                "the comparison and no lane writes it from this phase, so a turn carrying "
+                "one is a shape no conforming engine returns (ADR-0262 §4, §6)"
+            )
+            raise ValueError(msg)
+        return reported
 
     def _resolve(self, conversation_id: str | None) -> str:
         """Continue the conversation named, or start one where none was (ADR-0074 §1).
