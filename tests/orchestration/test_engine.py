@@ -109,6 +109,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     DestinationTrustOperations,
     Engine,
+    ForecastServicer,
     GrantOperations,
     HeldSource,
     IngestionStage,
@@ -656,6 +657,13 @@ class Harness:
         # every other case's deployment: no search account connected, so §13's
         # disposition for any `WEB_SEARCH` ask is `NOT_CONFIGURED`.
         search: SearchServicer | None = None,
+        # ADR-0260 §12's L3 seam, so an engine-level case can drive a turn that reads a
+        # **forecast** — which is what §13's arm (h) needs and what no loop-level case
+        # can reach: the field it asserts is on the `TurnOutcome`, and the statement
+        # beside it is assembled at the capture point. `None` is the default and is
+        # every other case's deployment: no forecast provider configured, so §8's
+        # disposition for any `FORECAST_READ` ask is `NOT_CONFIGURED`.
+        forecast: ForecastServicer | None = None,
         # ADR-0254 §20's Lane 1 and Lane 3 seams, wired **together or not at all**: the
         # writer that proposes a row (`StepRunner`) and the reader that renders it
         # (`AuthorizationOperations`) are given the **same** store, which is what makes
@@ -910,6 +918,10 @@ class Harness:
             registry=self.invoker,
             fetcher=fetcher,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
             search=search,
+            # ADR-0260 §7: the one servicing site, handed the one forecast servicer.
+            # The composition root wires it into that site and into nothing else, and
+            # this harness holds it nowhere else either.
+            forecast=forecast,
             # ADR-0247 §1: the registration fact wired into the one servicing path,
             # in place of the trust store ADR-0238 §14 put there — over the **same**
             # `ConversationStore` the capture stage holds, because §8 rests the
