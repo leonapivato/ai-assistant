@@ -58,6 +58,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import (
+    ActionQuote,
     ActionRequest,
     Authorization,
     AuthorizationDisposition,
@@ -265,9 +266,13 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     that rewrites what it was given moves nothing, and a holder that rewrites the
     caller's request — or a value *nested* inside it — moves nothing either, the
     copies being round-trips through a dump rather than new names for the same
-    objects. ``retention`` is a ``timedelta`` and ``proposed_at`` and ``confirmation``
-    are read off ``decision`` here, a value being fixed by being read where a model
-    is fixed only by being copied; ``standing`` is consumed before the await. **The
+    objects. **The quote crossing back is copied for the same reason and on the
+    same ground**: ``Authorization`` stores a model field by reference, so a
+    ``quoted`` the answerer retained would be a figure it could still move on a row
+    ADR-0267 §7 writes once and never edits. ``retention`` is a ``timedelta``, and
+    ``proposed_at`` and ``confirmation`` are read off ``decision`` here — a value is
+    fixed by being read where a model is fixed only by being copied — while
+    ``standing`` is consumed before the await. **The
     capability is removed rather than the reachability argued** — no holder on this
     tree races this function today, and the guarantee should not rest on that staying
     true.
@@ -331,6 +336,14 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
     answer = await answers.coverage_met(detached_request(request), _detached_coverage(coverage))
     if not answer.met:
         return None
+    # The one value that crosses back, and the answerer may still be holding it.
+    # `Authorization` stores a model field by reference — `row.quoted is answer.quoted`
+    # — so a quote the answerer retained and rewrote afterwards would move the figure
+    # on a row ADR-0267 §7 writes **once and never edits**, and the projection would
+    # render a price no proof was taken over.
+    quoted = (
+        None if answer.quoted is None else ActionQuote.model_validate(answer.quoted.model_dump())
+    )
     expires_at = horizon(proposed_at, goal=goal_read, retention=retention)
     if expires_at is None:
         return None
@@ -342,7 +355,7 @@ async def proposed_authorization(  # noqa: PLR0913 — one parameter per operand
         destinations=binding.canonical_destination_set,
         origin=AuthorizationOrigin.CONFIRMED,
         coverage=written,
-        quoted=answer.quoted,
+        quoted=quoted,
         proposed_at=proposed_at,
         expires_at=expires_at,
         confirmation=confirmation,
