@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pytest
 from authorization_builders import (
@@ -112,6 +112,11 @@ _RELEASED_EARLY = (
 #: every other member; what this decision adds is an obligation *"owed at every
 #: call of either store member"*, which is these.
 _ENDING_OPS: Final = ("end_for_goal", "clear_closure")
+
+#: The outermost versions a durable store can bind. Stated here so the boundary arms
+#: are over the real edge rather than over a figure retyped from the implementation.
+_MAX_INT64: Final = 2**63 - 1
+_MIN_INT64: Final = -(2**63)
 
 
 class _Deceptive(int):
@@ -2346,6 +2351,57 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
         assert [one.id for one in exported] == ["a1"]
         assert exported[0].disposition is AuthorizationDisposition.GOAL_CLOSED
 
+    @pytest.mark.parametrize("member_name", _ENDING_OPS)
+    @pytest.mark.parametrize(
+        "version",
+        [2**63, -(2**63) - 1, 2**64, True],
+        ids=["above_int64", "below_int64", "far_above", "a_bool"],
+    )
+    async def test_a_version_no_store_could_hold_is_refused_before_any_io(
+        self, store: GoalAuthorizationStore, member_name: str, version: object
+    ) -> None:
+        """A ``goal_version`` no implementation can hold is a ``ValueError``, not a fault.
+
+        A durable store binds the version as an integer parameter, and a Python
+        ``int`` has no width: outside the signed 64-bit range the driver raises
+        ``OverflowError``, which is neither a refusal nor an ``AuthorizationError``
+        and would leave that layer's boundary **through a hole** — the same defect
+        ``recent``'s ``limit`` clamp already exists for. **Clamping is refused here**
+        because a clamped watermark is a *different* watermark, and ADR-0268 §1 keys
+        the fence on the version the caller's own status write names.
+
+        **``True`` is in the table because it is an ``int``** and would otherwise be
+        taken silently as version one, which is ``recent``'s own reason for checking
+        the type as an allowlist of the exact ``int``.
+
+        **Refused before any I/O, so nothing is written**, and both implementations
+        answer identically — a fake accepting what the durable store refuses would
+        let a consumer's test pass against a double and fail in the deployment
+        (ADR-0084 §4). Adversarial review, round 1, ``major``.
+        """
+        await store.record(established(id="a1"))
+        before = await store.export()
+        with pytest.raises(ValueError, match="goal_version"):
+            await self._ending_call(store, member_name, GOAL, goal_version=version)
+        assert await store.export() == before
+        assert not await self._fenced(store), "and no fence was raised on the way out"
+
+    @pytest.mark.parametrize("member_name", _ENDING_OPS)
+    @pytest.mark.parametrize("version", [_MAX_INT64, _MIN_INT64, 0, -1], ids=str)
+    async def test_a_version_at_the_boundary_is_accepted(
+        self, store: GoalAuthorizationStore, member_name: str, version: int
+    ) -> None:
+        """The boundary itself is **inside**, and no floor rule is invented.
+
+        Stated beside the arm above because a guard written with ``<`` where ``<=``
+        was meant would pass that one and refuse the outermost version a store can
+        actually hold. **And nothing here refuses a zero or a negative version**:
+        ADR-0268 states no floor on the value, only that the record is a watermark
+        neither member lowers, so a store refusing one would be deciding a rule the
+        decision leaves to ``PlanStore``.
+        """
+        await self._ending_call(store, member_name, GOAL, goal_version=version)
+
     # --- ADR-0268 arm 7's cancellation shape, per member ----------------------
 
     def store_suspended_mid_write(
@@ -2367,12 +2423,21 @@ class GoalAuthorizationStoreContract(GoalAuthorizationsContract, AuthorizationRe
 
     @staticmethod
     def _ending_call(
-        store: GoalAuthorizationStore, member_name: str, goal: str
+        store: GoalAuthorizationStore,
+        member_name: str,
+        goal: str,
+        *,
+        goal_version: Any = 4,
     ) -> Coroutine[object, object, object]:
-        """One call of ``member_name`` against ``goal``, as the case drives it."""
+        """One call of ``member_name`` against ``goal``, as the case drives it.
+
+        ``goal_version`` is typed loosely on purpose: the guard arms drive values
+        ``mypy`` would refuse at a call site, which is exactly the caller a type
+        cannot reach and the reason the guard exists at all.
+        """
         if member_name == "end_for_goal":
-            return store.end_for_goal(goal, at=NOW, goal_version=4)
-        return store.clear_closure(goal, goal_version=4)
+            return store.end_for_goal(goal, at=NOW, goal_version=goal_version)
+        return store.clear_closure(goal, goal_version=goal_version)
 
     @pytest.mark.parametrize("member_name", _ENDING_OPS)
     async def test_a_cancelled_ending_call_holds_its_resource_until_the_work_finishes(

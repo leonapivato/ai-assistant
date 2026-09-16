@@ -463,6 +463,45 @@ _EDGES: Final[dict[AuthorizationDisposition, frozenset[AuthorizationDisposition]
 }
 
 
+#: The range a durable store can bind as an integer parameter. **Stated here too**,
+#: because ``testing/`` may not import ``permissions/`` (golden rule 1) and the two
+#: implementations must answer the same call the same way — a guard only one of them
+#: had would be the substitutability divergence ADR-0084 §4 names, and the
+#: conformance suite could not state the arm at all.
+_MAX_SQLITE_INT: Final = 2**63 - 1
+_MIN_SQLITE_INT: Final = -(2**63)
+
+
+def _checked_version(goal_version: int) -> None:
+    """Hold ``goal_version`` to a value a durable store can hold, before any I/O.
+
+    See
+    :func:`~ai_assistant.permissions.goal_authorizations._checked_version`, whose
+    reasoning this is: binding a wider value raises ``OverflowError``, which is
+    neither ``ValueError`` nor
+    :class:`~ai_assistant.core.errors.AuthorizationError` and would leave that
+    layer's boundary through a hole; clamping is wrong because a clamped watermark
+    is a **different** watermark; and ``True`` is an ``int``, so an unchecked
+    ``bool`` is silently version one.
+
+    **A fake that accepted what the durable store refuses is the defect**, not a
+    convenience: a consumer's own test would then pass against a double and fail in
+    the deployment.
+
+    Raises:
+        ValueError: If ``goal_version`` is not an exact ``int``, or is outside that
+            range.
+    """
+    if type(goal_version) is not int or not _MIN_SQLITE_INT <= goal_version <= _MAX_SQLITE_INT:
+        msg = (
+            f"goal_version must be an int a durable store can hold "
+            f"({_MIN_SQLITE_INT} to {_MAX_SQLITE_INT}), got "
+            f"{describe_untrusted(goal_version)}; the type is checked because a bool "
+            f"is an int and would be taken as version one (ADR-0268 §1)"
+        )
+        raise ValueError(msg)
+
+
 def _checked_target(to: AuthorizationDisposition) -> None:
     """Hold ``to`` to the exact member, as the durable store does and before it.
 
@@ -1539,10 +1578,15 @@ class FakeGoalAuthorizationStore:
         liveness**.
 
         Raises:
+            ValueError: If ``goal_version`` is not one a durable store could hold,
+                refused **before** any scripted fault — the durable store refuses
+                *"locally and before any I/O"*, so a double raising its own fault
+                first would report a different class for the same call.
             AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
                 The step is all-or-nothing, so nothing is settled and no record is
                 raised.
         """
+        _checked_version(goal_version)
         self._refuse_write()
         async with self._resource.held():
             return self._log.end_for_goal(goal, at, goal_version)
@@ -1553,8 +1597,12 @@ class FakeGoalAuthorizationStore:
         **Reads no clock, settles nothing and revives nothing.**
 
         Raises:
+            ValueError: If ``goal_version`` is not one a durable store could hold,
+                refused **before** any scripted fault, for :meth:`end_for_goal`'s
+                reason.
             AuthorizationError: If a store fault is scripted (:meth:`fail_writes`).
         """
+        _checked_version(goal_version)
         self._refuse_write()
         async with self._resource.held():
             return self._log.clear_closure(goal, goal_version)
