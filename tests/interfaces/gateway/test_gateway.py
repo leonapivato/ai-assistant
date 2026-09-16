@@ -964,6 +964,24 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
     ``OutboundDestination``'s new member, which is an ``assert_never`` this addition
     forces rather than a rendering decision.
 
+    **``satisfied_from_earlier`` is ADR-0259 §2's member, and the decision taken here is
+    "not rendered".** That is a decision rather than an omission, and §2 is where it is
+    made: "**The wording and the channel stay A9's**; what this decision fixes is the
+    field, its type, and that a silent reuse is not conforming." §11 cuts three lanes —
+    the contract and the store, the claim at dispatch, and the reconciliation pass — and
+    names ``interfaces/`` in none of them. So the member crosses the wire, because it is
+    on ``TurnOutcome`` and this page decodes the whole outcome, and no panel reads it.
+
+    **The cost in this lane is nil, and that is stated rather than hidden.** L1 lands the
+    contract and the store alone: nothing takes an effect claim at dispatch until L2, so
+    no step is satisfied and the member is ``None`` on every outcome this adapter can
+    see. What a surface owes when it does arrive is **not** ADR-0242 §9's
+    all-or-nothing rule — this is a tuple of step ids rather than a vocabulary of
+    statements — but §2 does make a silent reuse non-conforming, so a page that rendered
+    a satisfied turn as one that did nothing would be reporting work the assistant did
+    as work it did not do. That is the same gap ``recipient_grant``'s entry opened, and
+    it is A9's to close.
+
     **This assertion is the tripwire firing as designed**, which is what the test's own
     name says: a member reaching the page unnoticed is what it exists to prevent, and a
     lane that adds one names it here and states which way the decision went. Nothing
@@ -988,6 +1006,7 @@ def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> Non
         "outbound_statement",
         "forecast_not_read",
         "authorizations",
+        "satisfied_from_earlier",
     }
 
 
