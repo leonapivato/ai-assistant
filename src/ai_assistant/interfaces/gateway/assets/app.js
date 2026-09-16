@@ -1734,20 +1734,38 @@ const CLARIFICATION_WITHDRAWAL_WORDS = {
 // What an abandonment did (ADR-0250 §12).
 //
 // **It says what it did not touch, and that is the load-bearing half**: abandoning
-// "does not move the attempt's state, does not write an `AttemptOutcome`, does not end
-// an execution and does not cancel anything in flight — what becomes of an attempt on
-// an abandoned goal is A9's". A sentence promising everything stopped would be false on
-// a reachable state, and one promising work already done was undone would be false
-// always.
+// "does not end an execution and does not cancel anything in flight". A sentence
+// promising everything stopped would be false on a reachable state, and one promising
+// work already done was undone would be false always. ADR-0261 §2 is why the
+// *attempt* half of that sentence is gone: the act now ends every live attempt of the
+// goal in the step that closes it, so "nothing under way was cancelled" is said of
+// **executions** and of nothing else.
 //
 // **`already_closed` names no reason**, because the member carries none: §12 reaches it
 // from `achieved` and from `abandoned` alike, and guessing which would be a diagnosis a
 // member is not.
+//
+// **`abandoned_effect_in_flight` is ADR-0261 §6's fourth member, and this entry is the
+// minimum ADR-0250 §15's non-degradation clause requires** — "a surface that renders no
+// statement for a member it was given has not implemented this section; it is not
+// permissibly degraded" — landed here because the member itself lands in L1 while §13
+// books this surface on L3 (issue #2435). §6 fixes **which fact** it names and leaves
+// the wording to the lane: the goal was given up **and an action of it had been claimed
+// and may have been sent**, naming `assistant goals` as where that goal's state, and
+// any outcome since established, is read. **No statement says the action did not
+// happen, that it did, or that anything the user does will withdraw it**, and *in
+// flight* means the claim landed rather than that the call left. Producing the member
+// is L2's, so nothing on this page can receive one yet.
 const GOAL_ABANDONMENT_WORDS = {
   abandoned:
     "That goal is given up. I will not take it up again on my own and nothing more is " +
     "planned for it, and any question it had open is withdrawn. Nothing already done " +
     "for it was undone, reversed or replayed, and nothing under way was cancelled.",
+  abandoned_effect_in_flight:
+    "That goal is given up, and an action of it had already been claimed and may have " +
+    "been sent. I cannot tell you yet whether it happened. Nothing already done for it " +
+    "was undone, reversed or replayed by this. Open 'assistant goals' to see where that " +
+    "goal stands and any outcome since established.",
   already_closed:
     "That goal was already closed, so this moved nothing and recorded nothing. However " +
     "it was closed before is how it still reads.",
