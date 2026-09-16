@@ -15,6 +15,16 @@ be a second place the governing rule lives.
 seam** (§5) — but arming it here satisfies the limb by construction, so the shared
 conformance suite drives it against ``planning``'s durable store as well, which is where
 the failure actually comes from.
+
+**Every quote crosses this boundary detached, in both directions**, which is
+``GoalAuthorizations.live_for``'s own rule and the direction §5 says this seam takes:
+*"``frozen=True`` does not close the bypass: a caller could rewrite … through
+``__dict__`` on a shared object, which is a widening of what the user authorised,
+reached through the gate's own answer"*. Read onto a quote it is the same widening one
+record over — an amount rewritten through a returned object is a ceiling proved against
+a figure no provider ever quoted — and it matters **most** in the canonical fake,
+because the durable store decodes each quote from JSON and cannot alias, so a consumer
+testing against an aliasing fake would find the defect only in production.
 """
 
 from __future__ import annotations
@@ -50,7 +60,9 @@ class FakeGoalQuotes:
                 enough for a policy's question, which is about the one request it is
                 ruling on; :meth:`hold_for` adds a second where a suite needs one.
         """
-        self._quotes: dict[str, list[ActionQuote]] = {goal: list(quotes)}
+        self._quotes: dict[str, list[ActionQuote]] = {
+            goal: [one.model_copy(deep=True) for one in quotes]
+        }
         self._resource = SuspendableResource()
         self._failure: Exception | None = None
         self._calls = 0
@@ -71,9 +83,10 @@ class FakeGoalQuotes:
             goal: The goal to append to.
             quotes: The quotes, oldest first. **Appended and never sorted**: the order
                 this seam answers in is the order it was given, because the store's
-                order is the record's own.
+                order is the record's own. **Detached on the way in**, so a caller
+                that rewrites one afterwards cannot move what this seam holds.
         """
-        self._quotes.setdefault(goal, []).extend(quotes)
+        self._quotes.setdefault(goal, []).extend(one.model_copy(deep=True) for one in quotes)
 
     def fail_for_action(self, error: Exception | None = None) -> None:
         """Arm every subsequent :meth:`for_action` to raise a store fault.
@@ -93,8 +106,10 @@ class FakeGoalQuotes:
         """That goal's quotes naming that action, in the order it holds them.
 
         Returns:
-            The quotes, oldest first, possibly empty. **Empty means the goal holds none
-            for that action** and never that the store could not be read.
+            A **detached snapshot** of the quotes, oldest first, possibly empty —
+            ``GoalAuthorizations.live_for``'s own rule, which §5 gives this seam the
+            direction of. **Empty means the goal holds none for that action** and never
+            that the store could not be read.
 
         Raises:
             AuthorizationError: If a fault is armed (:meth:`fail_for_action`).
@@ -105,7 +120,7 @@ class FakeGoalQuotes:
             raise AuthorizationError(msg) from self._failure
         async with self._resource.held():
             return tuple(
-                quote
+                quote.model_copy(deep=True)
                 for quote in self._quotes.get(goal, ())
                 if quote.intended_action == intended_action
             )
