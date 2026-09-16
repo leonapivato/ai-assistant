@@ -286,6 +286,47 @@ class _Planned:
         return self.plan.goal_id
 
 
+@dataclass(frozen=True, slots=True)
+class _Quoting:
+    """The mint's whole input, taken before the executor is awaited (ADR-0267 §4).
+
+    **Every value ADR-0267 §4 has the mint read is a value some other holder can still
+    reach**, and the executor's call is the longest suspension this stage has. So the
+    four are snapshotted at the one instant they are known to describe the call being
+    dispatched, which is :func:`detached_request`'s own rule applied one seam later:
+    *"``frozen=True`` refuses ``request.tool = ...`` and does nothing about
+    ``request.__dict__``"* (ADR-0018 §3).
+
+    It is not a hypothetical reach in this tree. ``ToolRegistry.find`` is contracted to
+    hand back a snapshot but ``PlanStore`` is **not** (:class:`_Planned`), and a
+    conforming registry — ``FakeToolInvoker`` among them — may hand out the very
+    declaration it holds; a binder may keep the copy it derived. A
+    ``quoted_output.amount`` rewritten from ``"price"`` to ``"stars"`` while the tool
+    was running would mint ``4`` from ``{"price": "200", "stars": 4}`` and satisfy a
+    150 ceiling the act breaches — ADR-0267 §3's *"right **shape** in the wrong
+    **slot**"*, reached through the one window §3's writer clause does not close.
+    Adversarial review, round 2, ``blocker``.
+
+    The step needs no copy of its own, :meth:`StepRunner._planned` having already
+    detached it; the plan and the goal are ``str`` and are taken **by value**, which is
+    the whole of what they need.
+
+    Attributes:
+        request: A detached copy of the request the executor is about to run, for its
+            ``parameters_digest`` and for the declaration it was bound to. **Both come
+            from one object**, which is what makes ``arguments_digest`` the digest of
+            *"the ``ActionRequest`` whose output it was read from"* (§1).
+        step: The plan step the request serves, for its ``intended_action``.
+        plan: The plan it belongs to — carried because a step id alone names no place.
+        goal: The goal the quote is appended to.
+    """
+
+    request: ActionRequest
+    step: PlanStep
+    plan: str
+    goal: str
+
+
 def _requested(
     tool: ToolDefinition,
     step: PlanStep,
@@ -2397,6 +2438,15 @@ class StepRunner:
                 the minter could not record.
         """
         call = self._authorised(request, decision)
+        # **The mint's whole input is snapshotted here, before the seam is awaited**
+        # (:class:`_Quoting`). Every value it reads is otherwise one a holder can still
+        # reach across the longest suspension this stage has.
+        quoting = _Quoting(
+            request=detached_request(request),
+            step=planned.step,
+            plan=planned.plan.id,
+            goal=planned.goal_id,
+        )
         reach = CallableReach()
         ran = await self._executor.execute(
             state,
@@ -2413,12 +2463,10 @@ class StepRunner:
             call.decision.tool.id,
             outbound=_egress_reach(request, reach),
         )
-        await self._mint_quote(planned, request, ran)
+        await self._mint_quote(quoting, ran)
         return disposition
 
-    async def _mint_quote(
-        self, planned: _Planned, request: ActionRequest, ran: ExecutionState
-    ) -> None:
+    async def _mint_quote(self, quoting: _Quoting, ran: ExecutionState) -> None:
         """Read the price this step's output stated and record it (ADR-0267 §4).
 
         Total and silent on the reading — a step the executor did not finish
@@ -2427,18 +2475,21 @@ class StepRunner:
         shapes §4 admits: every one of them mints nothing, raises nothing, and reaches
         the store not at all, so the overwhelmingly common step costs no goal read.
 
-        The write is the only part that can raise, and §4 requires that it does rather
-        than swallowing a reading it could not record.
+        **The step's record is read with no ``await`` between the read and the
+        construction**, so the store's own object cannot move under it: ``quote_read``
+        is synchronous and ``ActionQuote`` copies every value it is given. The write is
+        the only part that can raise, and §4 requires that it does rather than
+        swallowing a reading it could not record.
         """
-        stored = ran.step(planned.step.id)
+        stored = ran.step(quoting.step.id)
         if stored is None:
             return
         quote = quote_read(
-            step=planned.step, recorded=stored, request=request, plan=planned.plan.id
+            step=quoting.step, recorded=stored, request=quoting.request, plan=quoting.plan
         )
         if quote is None:
             return
-        await mint_quote(self._plans, goal_id=planned.goal_id, quote=quote)
+        await mint_quote(self._plans, goal_id=quoting.goal, quote=quote)
 
     async def _deny(
         self,
