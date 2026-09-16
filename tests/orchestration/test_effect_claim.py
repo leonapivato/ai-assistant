@@ -234,7 +234,11 @@ def a_row(row_id: str, *, supported: EvidenceApplicability) -> GoalEvidence:
         attempt_id=f"{ATTEMPT}-p-1",
         basis=EvidenceBasis.READ_OUTCOME,
         read_kind=ReadKind.FORECAST_READ,
-        records=("r-1",),
+        # **A forecast row names no record and its count stands alone** (ADR-0260 §9,
+        # which §15 records as an amendment to ADR-0252 §1's ephemeral-kind list): its
+        # records are minted for one turn and resolve in no store, so `returned` and
+        # `admitted` below carry the figure on their own.
+        records=(),
         supported=(supported,),
         supported_elided=0,
         read_at=AT,
